@@ -32,6 +32,7 @@ fn failed_usage_event(category: &str, account_id: Option<&str>) -> UsageEvent {
         requested_reasoning_effort: None,
         effective_reasoning_effort: None,
         wire_api: WireApi::Responses,
+        transport: crate::UsageTransport::Http,
         service_tier: DefaultServiceTier::Standard,
         applied_service_tier: None,
         success: false,
@@ -159,6 +160,7 @@ fn reasoning_effort_diagnostics_keep_only_normalized_request_and_payload_values(
             "output_config": {"effort": " Low "}
         }),
         WireApi::Responses,
+        WireApi::Messages,
     );
     assert_eq!(bridge.requested.as_deref(), Some("max"));
     assert_eq!(bridge.effective.as_deref(), Some("low"));
@@ -167,6 +169,7 @@ fn reasoning_effort_diagnostics_keep_only_normalized_request_and_payload_values(
         &json!({"reasoning_effort": "high"}),
         &json!({"thinking": {"type": "enabled", "budget_tokens": 32_000}}),
         WireApi::ChatCompletions,
+        WireApi::Messages,
     );
     assert_eq!(budget.requested.as_deref(), Some("high"));
     assert_eq!(budget.effective.as_deref(), Some("max"));
@@ -175,8 +178,82 @@ fn reasoning_effort_diagnostics_keep_only_normalized_request_and_payload_values(
         &json!({"reasoning": {"effort": "untrusted value"}}),
         &json!({"thinking": {"budget_tokens": 123}}),
         WireApi::Responses,
+        WireApi::Messages,
     );
     assert_eq!(absent, ReasoningEffortDiagnostics::default());
+}
+
+#[test]
+fn reasoning_effort_diagnostics_read_messages_and_gemini_controls() {
+    for (wire_api, body) in [
+        (
+            WireApi::Messages,
+            json!({"output_config":{"effort":"Very high"}}),
+        ),
+        (
+            WireApi::Gemini,
+            json!({"generationConfig":{"thinkingConfig":{"thinkingLevel":"HIGH"}}}),
+        ),
+    ] {
+        let observed = ReasoningEffortDiagnostics::from_bodies(&body, &body, wire_api, wire_api);
+        let expected = if wire_api == WireApi::Messages {
+            "xhigh"
+        } else {
+            "high"
+        };
+        assert_eq!(observed.requested.as_deref(), Some(expected));
+        assert_eq!(observed.effective.as_deref(), Some(expected));
+    }
+}
+
+#[test]
+fn reasoning_effort_diagnostics_use_the_exact_upstream_contract() {
+    let body = json!({
+        "reasoning":{"effort":"low"},
+        "reasoning_effort":"medium",
+        "output_config":{"effort":"high"},
+        "generationConfig":{"thinkingConfig":{"thinkingLevel":"Very high"}}
+    });
+    for (wire_api, expected) in [
+        (WireApi::Responses, "low"),
+        (WireApi::ChatCompletions, "medium"),
+        (WireApi::Messages, "high"),
+        (WireApi::Gemini, "xhigh"),
+    ] {
+        let observed = ReasoningEffortDiagnostics::from_bodies(&body, &body, wire_api, wire_api);
+        assert_eq!(observed.requested.as_deref(), Some(expected));
+        assert_eq!(observed.effective.as_deref(), Some(expected));
+    }
+    let bps = ReasoningEffortDiagnostics::from_basis_points_bodies(
+        &json!({"reasoning":{"effort":"max"}}),
+        &json!({"reasoning_effort":"xhigh"}),
+        WireApi::Responses,
+    );
+    assert_eq!(bps.requested.as_deref(), Some("max"));
+    assert_eq!(bps.effective.as_deref(), Some("xhigh"));
+
+    for (wire_api, controls, expected) in [
+        (
+            WireApi::Messages,
+            json!({"thinking":{"type":"disabled"}}),
+            "none",
+        ),
+        (
+            WireApi::Gemini,
+            json!({"generationConfig":{"thinkingConfig":{"thinkingBudget":0}}}),
+            "none",
+        ),
+        (
+            WireApi::Gemini,
+            json!({"generationConfig":{"thinkingConfig":{"thinkingBudget":24_576}}}),
+            "xhigh",
+        ),
+    ] {
+        let observed =
+            ReasoningEffortDiagnostics::from_bodies(&controls, &controls, wire_api, wire_api);
+        assert_eq!(observed.requested.as_deref(), Some(expected));
+        assert_eq!(observed.effective.as_deref(), Some(expected));
+    }
 }
 
 #[test]
@@ -230,22 +307,22 @@ fn tool_diagnostics_marks_text_only_completion_when_tools_were_offered() {
 
 #[test]
 fn tool_policy_diagnostics_read_old_records_and_round_trip_without_false_availability() {
-    let mut old: ToolUseDiagnostics = serde_json::from_value(json!({
+    let mut legacy_diagnostics: ToolUseDiagnostics = serde_json::from_value(json!({
         "clientToolCount":73,"forwardedToolCount":0,"toolCallCount":0,"textOutput":true,"terminalOutput":"text"
     })).unwrap();
-    assert_eq!(old.client_schema_bytes, None);
-    assert_eq!(old.policy_mode, None);
-    assert_eq!(old.filtered_tool_count, 0);
-    assert!(!old.tools_were_available_but_not_called());
-    old.policy_mode = Some(crate::ToolPolicyMode::PassThrough);
-    old.policy_outcome = Some(crate::ToolPolicyOutcome::PassThrough);
-    old.client_schema_bytes = Some(12345);
-    old.forwarded_schema_bytes = Some(2);
-    old.filtered_tool_count = 73;
-    let json = serde_json::to_value(&old).unwrap();
+    assert_eq!(legacy_diagnostics.client_schema_bytes, None);
+    assert_eq!(legacy_diagnostics.policy_mode, None);
+    assert_eq!(legacy_diagnostics.filtered_tool_count, 0);
+    assert!(!legacy_diagnostics.tools_were_available_but_not_called());
+    legacy_diagnostics.policy_mode = Some(crate::ToolPolicyMode::PassThrough);
+    legacy_diagnostics.policy_outcome = Some(crate::ToolPolicyOutcome::PassThrough);
+    legacy_diagnostics.client_schema_bytes = Some(12345);
+    legacy_diagnostics.forwarded_schema_bytes = Some(2);
+    legacy_diagnostics.filtered_tool_count = 73;
+    let json = serde_json::to_value(&legacy_diagnostics).unwrap();
     assert_eq!(
         serde_json::from_value::<ToolUseDiagnostics>(json).unwrap(),
-        old
+        legacy_diagnostics
     );
     assert!(ToolUseDiagnostics {
         filtered_tool_count: 2,

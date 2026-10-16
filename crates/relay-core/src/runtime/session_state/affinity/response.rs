@@ -6,6 +6,47 @@ use sha2::{Digest, Sha256};
 const VOLATILE_RESPONSE_PREFIX: &str = "volatile-response:";
 
 impl GatewayRuntime {
+    pub(crate) fn load_adapter_continuation(
+        &self,
+        route: &crate::runtime::ExecutorRoute,
+        local_key_id: &str,
+        request: &Value,
+        now_ms: u64,
+    ) -> crate::AdapterResult<Option<crate::MessagesBridgeState>> {
+        self.validate_continuation_route(route, local_key_id, request, now_ms)?;
+        let Some(key) =
+            route
+                .adapter
+                .continuation_key(route.client_wire_api, request, &route.source_model)?
+        else {
+            return Ok(None);
+        };
+        match self.load_messages_bridge_state(local_key_id, &key, &route.candidate_id, now_ms) {
+            Ok(state)
+                if state.upstream_wire_api()
+                    == route
+                        .adapter
+                        .upstream_protocol(route.client_wire_api)
+                        .wire_api() =>
+            {
+                self.validate_adapter_history_route(route, &key, now_ms)?;
+                Ok(Some(state))
+            }
+            Ok(_) => Err(crate::AdapterError::continuation_mismatch()),
+            Err(error)
+                if (route.client_wire_api != crate::WireApi::Responses
+                    || request
+                        .get("previous_response_id")
+                        .and_then(Value::as_str)
+                        .is_none_or(|id| id.trim().is_empty()))
+                    && error == crate::AdapterError::continuation_missing() =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub(crate) fn load_messages_bridge_state(
         &self,
         local_key_id: &str,
@@ -28,9 +69,16 @@ impl GatewayRuntime {
         response: &crate::MessagesBridgeResponse,
         now_ms: u64,
     ) {
+        if !response.continuation.is_reusable()
+            || crate::protocol::completion::ResponseCompletion::from_body(&response.response_body)
+                != crate::protocol::completion::ResponseCompletion::Completed
+        {
+            return;
+        }
+        let storage_key = response.continuation.storage_key(&response.response_id);
         let stored = crate::poison::mutex(&self.messages_bridge_store).insert_if_stored(
             local_key_id,
-            &response.response_id,
+            storage_key,
             candidate_id,
             response.continuation.clone(),
             now_ms,
@@ -77,8 +125,8 @@ impl GatewayRuntime {
             .and_then(|response_id| {
                 self.load_native_responses_replay(local_key_id, response_id, candidate_id, now_ms)
             })
-            .and_then(|previous| {
-                previous
+            .and_then(|previous_response| {
+                previous_response
                     .replay_request(
                         request,
                         model,
@@ -291,8 +339,11 @@ impl GatewayRuntime {
         key.is_some_and(|key| {
             let invalidated = self.lock_scheduler().invalidate_response_affinity(key);
             if invalidated {
+                let route_key = format!("route:{key}");
+                crate::poison::mutex(&self.response_route_affinity).invalidate(&route_key);
                 if let Some(store) = self.response_affinity_store.as_ref() {
                     let _ = store.delete(key);
+                    let _ = store.delete(&route_key);
                 }
             }
             invalidated

@@ -401,19 +401,13 @@ async fn orphaned_http_tool_output_is_rejected_before_upstream_selection() {
 #[tokio::test]
 async fn compact_missing_owned_response_never_sends_opaque_id_to_another_account() {
     for saved_history in [false, true] {
-        let mut first_reply = success_reply("compact-owner");
-        if !saved_history {
-            if let Reply::Json(_, body) = &mut first_reply {
-                body.as_object_mut().unwrap().remove("output");
-            }
-        }
         let (owner, owner_state) = spawn_upstream(vec![
-            first_reply,
+            success_reply("compact-owner"),
             Reply::Json(
                 StatusCode::BAD_REQUEST,
                 json!({"error":{"code":"previous_response_not_found"}}),
             ),
-            success_reply("compact-recovered"),
+            compaction_reply("compact-recovered"),
         ])
         .await;
         let (backup, backup_state) = spawn_upstream(vec![success_reply("must-not-run")]).await;
@@ -434,7 +428,17 @@ async fn compact_missing_owned_response_never_sends_opaque_id_to_another_account
         .await;
         rotation_policy::set_order(&gateway, &["owner", "backup"]);
         let client = reqwest::Client::new();
-        let first = request(&gateway, false).await;
+        let mut first_request = json!({"model": MODEL, "input": "hello"});
+        if !saved_history {
+            first_request["conversation"] = json!("synthetic-conversation");
+        }
+        let first = client
+            .post(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .json(&first_request)
+            .send()
+            .await
+            .unwrap();
         assert_eq!(first.status(), StatusCode::OK);
         let first: Value = first.json().await.unwrap();
         let input = json!([{"role":"assistant","content":"synthetic answer"},

@@ -2,6 +2,71 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn nested_namespace_tools_roundtrip_across_all_responses_bridges() {
+    let request = json!({"input":"Find the file", "max_output_tokens":64,"tools":[{
+        "type":"namespace","name":"workspace","description":"Outer scope","tools":[{
+            "type":"namespace","name":"files","description":"Inner scope","tools":[
+                {"type":"function","name":"lookup","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}},
+                {"type":"custom","name":"patch","format":{"type":"grammar","syntax":"regex","definition":"[a-z]+"}}
+            ]
+        }]
+    }]});
+    for upstream in [WireApi::ChatCompletions, WireApi::Messages, WireApi::Gemini] {
+        let prepared = prepare(WireApi::Responses, upstream, &request, false);
+        let body = prepared.upstream_body();
+        let name = match upstream {
+            WireApi::ChatCompletions => &body["tools"][0]["function"]["name"],
+            WireApi::Messages => &body["tools"][0]["name"],
+            WireApi::Gemini => &body["tools"][0]["functionDeclarations"][0]["name"],
+            _ => unreachable!(),
+        }
+        .as_str()
+        .unwrap();
+        assert!(body.to_string().contains("Outer scope Inner scope"));
+        assert!(body.to_string().contains("[a-z]+"));
+        let response = match upstream {
+            WireApi::ChatCompletions => {
+                json!({"id":"chat_nested","choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_nested","type":"function","function":{"name":name,"arguments":"{\"path\":\"file.txt\"}"}}]},"finish_reason":"tool_calls"}]})
+            }
+            WireApi::Messages => {
+                json!({"id":"msg_nested","content":[{"type":"tool_use","id":"call_nested","name":name,"input":{"path":"file.txt"}}],"stop_reason":"tool_use"})
+            }
+            WireApi::Gemini => {
+                json!({"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"call_nested","name":name,"args":{"path":"file.txt"}}}]},"finishReason":"STOP"}]})
+            }
+            _ => unreachable!(),
+        };
+        let translated = prepared
+            .translate_response_bytes(&serde_json::to_vec(&response).unwrap())
+            .unwrap()
+            .unwrap();
+        let call = &translated.response_body()["output"][0];
+        assert_eq!(call["name"], "lookup");
+        assert_eq!(call["namespace"], "workspace.files");
+        let next = json!({"previous_response_id":translated.response_id(),"input":[{"type":"function_call_output","call_id":call["call_id"],"output":"found"}],"tools":request["tools"],"max_output_tokens":64});
+        let continuation = SourceAdapter::between(WireApi::Responses, upstream)
+            .unwrap()
+            .prepare_request(AdapterRequestContext {
+                client_wire_api: WireApi::Responses,
+                request: &next,
+                model: "test",
+                stream: false,
+                reasoning_mode: MessagesReasoningMode::Adaptive,
+                cache_write_ttl: CacheWriteTtl::Provider,
+                previous: Some(translated.continuation().unwrap().1.clone()),
+                response_scope: "source-test",
+                response_id_seed: "next",
+            })
+            .unwrap();
+        assert!(continuation.upstream_body().to_string().contains("found"));
+        continuation
+            .translate_response_bytes(&serde_json::to_vec(&output(upstream)).unwrap())
+            .unwrap()
+            .unwrap();
+    }
+}
+
+#[test]
 fn responses_bridges_reject_malformed_controls_and_unknown_tool_fields() {
     for upstream in [WireApi::Messages, WireApi::Gemini, WireApi::ChatCompletions] {
         for request in [
@@ -28,13 +93,18 @@ fn responses_bridges_reject_malformed_controls_and_unknown_tool_fields() {
     }
 }
 #[test]
-fn generic_messages_translation_rejects_provider_owned_and_unknown_fields() {
+fn generic_messages_translation_retains_signed_thinking_and_rejects_unknown_fields() {
     let response = json!({
         "id": "msg_invalid",
         "stop_reason": "end_turn",
         "content": [{"type": "thinking", "thinking": "plan", "signature": "opaque"}]
     });
-    assert!(response::decode(WireApi::Messages, &response, "seed").is_err());
+    let decoded = response::decode(WireApi::Messages, &response, "seed").unwrap();
+    assert_eq!(
+        decoded.native_output,
+        response["content"].as_array().unwrap().clone()
+    );
+    assert!(matches!(&decoded.blocks[0], Block::Reasoning(text) if text == "plan"));
 
     let mut bridge = prepare(
         WireApi::ChatCompletions,
@@ -196,4 +266,176 @@ fn chat_bridge_keeps_apply_patch_as_a_custom_tool_call() {
         .response_body()
         .to_string()
         .contains("function_call"));
+}
+#[test]
+fn chat_bridge_flattens_selected_codex_namespace_and_restores_it_on_output() {
+    let request = json!({
+        "model": "grok",
+        "input": [
+            {"type": "additional_tools", "tools": [{
+                "type": "namespace",
+                "name": "mcp__synthetic",
+                "description": "Synthetic server",
+                "tools": [{
+                    "type": "function",
+                    "name": "lookup",
+                    "description": "Look something up",
+                    "parameters": {"type": "object"},
+                    "defer_loading": true
+                }]
+            }]},
+            {"type": "message", "role": "user", "content": "go"}
+        ],
+        "tools": [
+            {
+                "type": "function",
+                "name": "shell",
+                "parameters": {"type": "object"},
+                "allowed_callers": ["direct"]
+            }
+        ],
+        "tool_choice": {"type": "function", "namespace": "mcp__synthetic", "name": "lookup"}
+    });
+    let prepared = prepare(
+        WireApi::Responses,
+        WireApi::ChatCompletions,
+        &request,
+        false,
+    );
+    let tools = prepared.upstream_body()["tools"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(tools.len(), 1);
+    let flattened = tools
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str())
+        .find(|name| name.starts_with("relay_ns_"))
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        prepared.upstream_body()["tool_choice"]["function"]["name"],
+        flattened.as_str()
+    );
+    let upstream = json!({
+        "id": "chat_test",
+        "object": "chat.completion",
+        "model": "test",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_ns",
+                    "type": "function",
+                    "function": {"name": flattened, "arguments": "{}"}
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    });
+    let translated = prepared
+        .translate_response_bytes(&serde_json::to_vec(&upstream).unwrap())
+        .unwrap()
+        .unwrap();
+    let item = &translated.response_body()["output"][0];
+    assert_eq!(item["type"], "function_call");
+    assert_eq!(item["name"], "lookup");
+    assert_eq!(item["namespace"], "mcp__synthetic");
+}
+
+fn custom_response_events() -> Vec<Value> {
+    let item = json!({"type":"custom_tool_call","id":"ctc_synthetic","call_id":"call_patch","name":"apply_patch","input":""});
+    let complete = json!({"type":"custom_tool_call","id":"ctc_synthetic","call_id":"call_patch","name":"apply_patch","input":"line one\nline two"});
+    vec![
+        json!({"type":"response.output_item.added","output_index":0,"item":item}),
+        json!({"type":"response.custom_tool_call_input.delta","output_index":0,"item_id":"ctc_synthetic","delta":"line one\n"}),
+        json!({"type":"response.custom_tool_call_input.delta","output_index":0,"item_id":"ctc_synthetic","delta":"line two"}),
+        json!({"type":"response.custom_tool_call_input.done","output_index":0,"item_id":"ctc_synthetic","input":"line one\nline two"}),
+        json!({"type":"response.output_item.done","output_index":0,"item":complete}),
+        json!({"type":"response.completed","response":{"status":"completed","output":[complete]}}),
+    ]
+}
+
+fn custom_chat_request() -> Value {
+    json!({"messages":[{"role":"user","content":"Apply the patch"}],
+        "tools":[{"type":"function","function":{"name":"apply_patch","parameters":{"type":"object","properties":{"input":{"type":"string"}}}}}]})
+}
+
+#[test]
+fn responses_custom_input_is_wrapped_once_in_json_and_fragmented_streams() {
+    let events = custom_response_events();
+    for stream in [false, true] {
+        let prepared = prepare(
+            WireApi::ChatCompletions,
+            WireApi::Responses,
+            &custom_chat_request(),
+            stream,
+        );
+        let body = if stream {
+            let mut bridge = prepared.into_stream_bridge().unwrap();
+            for event in &events {
+                for fragment in format!("data: {event}\n\n").as_bytes().chunks(3) {
+                    bridge.push(fragment);
+                }
+            }
+            bridge.finish();
+            bridge
+                .completed()
+                .expect("custom input stream completes")
+                .response_body
+                .clone()
+        } else {
+            prepared
+                .translate_response_bytes(
+                    &serde_json::to_vec(&events.last().unwrap()["response"]).unwrap(),
+                )
+                .unwrap()
+                .unwrap()
+                .response_body()
+                .clone()
+        };
+        let call = &body["choices"][0]["message"]["tool_calls"][0];
+        assert_eq!(call["id"], "call_patch");
+        assert_eq!(call["function"]["name"], "apply_patch");
+        let arguments: Value =
+            serde_json::from_str(call["function"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(arguments, json!({"input":"line one\nline two"}));
+        assert_eq!(body["choices"][0]["finish_reason"], "tool_calls");
+    }
+}
+
+#[test]
+fn responses_custom_input_rejects_conflicting_identity_done_and_terminal_data() {
+    for mutation in 0..5 {
+        let mut events = custom_response_events();
+        match mutation {
+            0 => events[2]["item_id"] = "different_item".into(),
+            1 => events[3]["input"] = "different input".into(),
+            2 => events[4]["item"]["call_id"] = "different_call".into(),
+            3 => events[5]["response"]["output"][0]["input"] = "different input".into(),
+            4 => events.insert(4, events[2].clone()),
+            _ => unreachable!(),
+        }
+        let mut bridge = prepare(
+            WireApi::ChatCompletions,
+            WireApi::Responses,
+            &custom_chat_request(),
+            true,
+        )
+        .into_stream_bridge()
+        .unwrap();
+        for event in events {
+            bridge.push(format!("data: {event}\n\n").as_bytes());
+        }
+        bridge.finish();
+        assert!(bridge.completed().is_none(), "mutation {mutation}");
+        let output = std::iter::from_fn(|| bridge.pop_output())
+            .flatten()
+            .collect::<Vec<_>>();
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("adapter_upstream_stream_invalid"));
+    }
 }

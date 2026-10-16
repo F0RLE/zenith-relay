@@ -1,12 +1,15 @@
 use crate::local_pool::{
-    accounts::proxy::common_proxy_available, error::CommandError, state::DesktopState,
+    accounts::proxy::{common_proxy_available, common_proxy_pool_id, ProxyPool},
+    error::CommandError,
+    state::DesktopState,
 };
 use crate::platform;
 use std::time::Instant;
 use zenith_relay_core::protocol::{
-    apply_model_display_order_with_catalog, apply_model_metadata, apply_pool_model_configuration,
-    pool_candidate_count, pool_model_summaries_with_pricing, pool_pricing_source_summary,
-    Capabilities, GatewaySummary, RuntimeStateSnapshot, RuntimeTargetSummary,
+    apply_model_display_order_with_catalog, apply_model_metadata,
+    apply_pool_model_configuration_with_context, pool_candidate_count,
+    pool_model_summaries_with_pricing, pool_pricing_source_summary, Capabilities, GatewaySummary,
+    PoolModelConfigurationInput, RuntimeStateSnapshot, RuntimeTargetSummary,
 };
 use zenith_relay_core::{unix_time_ms, PricingMetadata};
 
@@ -14,7 +17,7 @@ mod members;
 mod summary;
 use members::{
     append_missing_runtime_warnings, project_account_summaries, project_quota_window_usages,
-    project_source_summaries,
+    project_source_summaries, AccountProjectionContext,
 };
 #[cfg(test)]
 pub(super) use summary::oauth_account_runtime_available;
@@ -39,22 +42,32 @@ pub(crate) async fn build_local_runtime_state(
     let snapshot_at_ms = unix_time_ms();
     let catalog = state.pricing_catalog();
     let model_metadata = state.model_metadata_catalog();
-    let pricing = super::super::pricing_context(&inputs.gateway, &inputs.sources, &inputs.accounts);
+    let pricing = super::super::pricing_context(
+        &inputs.gateway,
+        &inputs.sources,
+        &inputs.accounts,
+        &model_metadata,
+    );
     let equivalents = state
         .telemetry
         .api_equivalents_with_pricing(&catalog, &pricing)?;
     let quota_window_usages =
         project_quota_window_usages(&inputs.accounts, &state.telemetry, &catalog, &pricing)?;
-    let mut source_summaries = project_source_summaries(&inputs, &routing_order, &equivalents)?;
-    let mut account_summaries = project_account_summaries(
+    // The pool stores the stable proxy identity separately from account credentials.
+    // Use it only for UI provenance; request dispatch still resolves the effective URL.
+    let proxy_pool = ProxyPool::load().unwrap_or_default();
+    let mut source_summaries =
+        project_source_summaries(&inputs, &routing_order, &equivalents, &model_metadata)?;
+    let mut account_summaries = project_account_summaries(AccountProjectionContext {
         state,
-        &inputs,
-        &routing_order,
-        &equivalents,
-        &quota_window_usages,
+        inputs: &inputs,
+        routing_order: &routing_order,
+        equivalents: &equivalents,
+        quota_window_usages: &quota_window_usages,
+        proxy_pool: &proxy_pool,
         common_proxy_available,
         snapshot_at_ms,
-    )?;
+    })?;
     let mut inputs = inputs;
     let mut warnings = std::mem::take(&mut inputs.warnings);
     append_missing_runtime_warnings(
@@ -71,14 +84,17 @@ pub(crate) async fn build_local_runtime_state(
         &pricing,
     );
     apply_model_metadata(&mut models, &model_metadata);
-    apply_pool_model_configuration(
+    apply_pool_model_configuration_with_context(
         &mut models,
-        &source_summaries,
-        &account_summaries,
-        &inputs.gateway.model_price_overrides,
-        &inputs.gateway.model_reasoning_allowed_levels,
-        &inputs.gateway.model_service_tier_overrides,
-        runtime.as_deref(),
+        PoolModelConfigurationInput {
+            sources: &source_summaries,
+            accounts: &account_summaries,
+            model_price_overrides: &inputs.gateway.model_price_overrides,
+            model_reasoning_allowed_levels: &inputs.gateway.model_reasoning_allowed_levels,
+            model_context_policies: &inputs.gateway.model_context_policies,
+            model_service_tier_overrides: &inputs.gateway.model_service_tier_overrides,
+            runtime: runtime.as_deref(),
+        },
     );
     apply_model_display_order_with_catalog(
         &mut models,
@@ -109,7 +125,7 @@ pub(crate) async fn build_local_runtime_state(
             .accounts
             .values()
             .chain(equivalents.sources.values())
-            .map(|value| value.unpriced_tokens)
+            .map(|equivalent_usage| equivalent_usage.unpriced_tokens)
             .sum(),
     );
     let response = RuntimeStateSnapshot {
@@ -127,7 +143,8 @@ pub(crate) async fn build_local_runtime_state(
         },
         gateway: GatewaySummary {
             tool_policy: inputs.gateway.tool_policy.clone(),
-            basis_points_enabled: inputs.gateway.basis_points_enabled,
+            request_timezone: inputs.gateway.request_timezone.clone(),
+            basis_points_enabled: false,
             pool_routing: Some(zenith_relay_core::protocol::pool_routing_summary(
                 inputs.gateway.pool_routing.as_ref(),
                 &source_summaries,
@@ -144,11 +161,12 @@ pub(crate) async fn build_local_runtime_state(
             model_catalog: zenith_relay_core::protocol::member_model_catalog(
                 &source_summaries,
                 &account_summaries,
+                &inputs.gateway.model_display_order,
                 &model_metadata,
             ),
             common_proxy_configured: inputs.gateway.common_proxy_configured,
             common_proxy_available,
-            common_proxy_id: None,
+            common_proxy_id: common_proxy_pool_id(&inputs.gateway, &proxy_pool),
             account_proxy_required: inputs.gateway.account_proxy_required,
             quota_request_timeout_seconds: inputs.gateway.quota_request_timeout_seconds,
             chatgpt_interface_quota_reserve_basis_points: Some(

@@ -1,6 +1,22 @@
 use super::*;
 
 #[test]
+fn invalid_body_422_does_not_retry_or_penalize_accounts_even_with_server_error_type() {
+    let body = br#"{"error":{"type":"server_error","message":"422: Invalid request body."}}"#;
+    let failure = AttemptFailure::status_with_body(StatusCode::UNPROCESSABLE_ENTITY, Some(body));
+    assert_eq!(failure.category, error_codes::UPSTREAM_INVALID_REQUEST);
+    assert!(!failure_category_requires_cooldown(failure.category));
+    assert!(!failure_category_affects_account_state(failure.category));
+    for has_previous_response_id in [false, true] {
+        assert!(!retryable_failure(
+            failure.status,
+            failure.category,
+            has_previous_response_id
+        ));
+    }
+}
+
+#[test]
 fn quota_rate_and_validation_failures_keep_distinct_effects() {
     for (code, category, cooldown) in [
         ("slow_down", "upstream_rate_limited", true),
@@ -78,6 +94,17 @@ fn retry_policy_matches_account_failover_and_official_transient_statuses() {
         false
     ));
     assert!(!retryable_failure(
+        StatusCode::TOO_MANY_REQUESTS,
+        error_codes::UPSTREAM_TURN_RATE_LIMITED,
+        false
+    ));
+    assert!(!failure_category_requires_cooldown(
+        error_codes::UPSTREAM_TURN_RATE_LIMITED
+    ));
+    assert!(!failure_category_affects_account_state(
+        error_codes::UPSTREAM_TURN_RATE_LIMITED
+    ));
+    assert!(!retryable_failure(
         StatusCode::FORBIDDEN,
         "upstream_content_policy",
         false
@@ -151,13 +178,96 @@ fn local_errors_use_openai_compatible_error_types() {
     assert_eq!(api_error_code("local_internal_code"), "local_internal_code");
 }
 
+#[test]
+fn retry_policy_requires_proven_rejection_and_preserves_connection_failover() {
+    for (status, category, expected) in [
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            error_codes::UPSTREAM_SERVER_ERROR,
+            false,
+        ),
+        (
+            StatusCode::BAD_GATEWAY,
+            error_codes::UPSTREAM_BAD_GATEWAY,
+            false,
+        ),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            error_codes::UPSTREAM_UNAVAILABLE,
+            false,
+        ),
+        (
+            StatusCode::GATEWAY_TIMEOUT,
+            error_codes::UPSTREAM_GATEWAY_TIMEOUT,
+            false,
+        ),
+        (
+            StatusCode::REQUEST_TIMEOUT,
+            error_codes::UPSTREAM_REQUEST_TIMEOUT,
+            false,
+        ),
+        (StatusCode::CONFLICT, error_codes::UPSTREAM_CONFLICT, false),
+        (
+            StatusCode::BAD_GATEWAY,
+            error_codes::UPSTREAM_TRANSPORT_CONNECT,
+            true,
+        ),
+        (
+            StatusCode::BAD_GATEWAY,
+            error_codes::UPSTREAM_TRANSPORT_TIMEOUT,
+            false,
+        ),
+        (
+            StatusCode::BAD_GATEWAY,
+            error_codes::UPSTREAM_TRANSPORT_BODY,
+            false,
+        ),
+        (
+            StatusCode::BAD_GATEWAY,
+            error_codes::UPSTREAM_TRANSPORT_REQUEST,
+            false,
+        ),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            error_codes::UPSTREAM_OVERLOADED,
+            true,
+        ),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            error_codes::UPSTREAM_MODEL_CAPACITY,
+            true,
+        ),
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            error_codes::UPSTREAM_RATE_LIMITED,
+            true,
+        ),
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            error_codes::UPSTREAM_TURN_RATE_LIMITED,
+            false,
+        ),
+    ] {
+        assert_eq!(
+            retryable_failure(status, category, false),
+            expected,
+            "{category}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn exhausted_quota_survives_the_cooldown_response_shape() {
     let failure = AttemptFailure::status_with_body(
         StatusCode::TOO_MANY_REQUESTS,
         Some(br#"{"error":{"type":"insufficient_quota"}}"#),
     );
-    let response = cooldown_error(now_ms().saturating_add(60_000), Some(&failure), true);
+    let response = cooldown_error(
+        now_ms().saturating_add(60_000),
+        Some(&failure),
+        true,
+        crate::ErrorOrigin::Relay,
+    );
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     assert!(response.headers().contains_key(RETRY_AFTER));
 
@@ -176,7 +286,12 @@ async fn transient_cooldown_is_not_reported_as_rate_limit() {
         StatusCode::BAD_GATEWAY,
         Some(br#"{"error":{"message":"upstream unavailable"}}"#),
     );
-    let response = cooldown_error(now_ms().saturating_add(60_000), Some(&failure), false);
+    let response = cooldown_error(
+        now_ms().saturating_add(60_000),
+        Some(&failure),
+        false,
+        crate::ErrorOrigin::Relay,
+    );
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(response.headers()[RETRY_AFTER], "60");
 
@@ -193,7 +308,12 @@ async fn transient_cooldown_is_not_reported_as_rate_limit() {
 #[tokio::test]
 async fn mixed_cooldowns_are_not_reported_as_rate_limit() {
     let failure = AttemptFailure::status_with_body(StatusCode::TOO_MANY_REQUESTS, None);
-    let response = cooldown_error(now_ms().saturating_add(60_000), Some(&failure), false);
+    let response = cooldown_error(
+        now_ms().saturating_add(60_000),
+        Some(&failure),
+        false,
+        crate::ErrorOrigin::Relay,
+    );
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 
     let body = axum::body::to_bytes(response.into_body(), 64 * 1024)

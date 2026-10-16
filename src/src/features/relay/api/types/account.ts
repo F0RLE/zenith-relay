@@ -6,12 +6,30 @@ import type {
 } from "./pricing";
 import type { RefreshStatus } from "./source";
 
+export type OAuthClientKind = "codex" | "excel_bps";
+
+export type TrashedAccountSummary = {
+  id: string;
+  label: string;
+  trashedAtMs: number;
+};
+
 export type AccountSummary = {
   id: string;
   label: string;
   identityHint: string;
+  /** Shared provider credit ledger; absent on older servers. */
+  creditBalanceKey?: string | null;
+  /** Older records and servers use the Codex client. */
+  oauthClientKind?: OAuthClientKind;
   basisPointsAvailable?: boolean;
   basisPointsEnabled?: boolean;
+  credentialDiagnostics?: {
+    status: "pending" | "not_expired" | "expired" | "revoked" | "auth_failed" | "unknown";
+    expiresAtMs: number | null;
+    hasRefreshToken: boolean;
+    recovery: "none" | "refresh_next_request" | "sign_in" | "retry_later";
+  } | null;
   enabled: boolean;
   inPool: boolean;
   draining: boolean;
@@ -40,14 +58,6 @@ export type AccountSummary = {
   lastErrorCode: string | null;
   clientAuthStatus?: "login_required" | "available" | null;
   lastClientLoginRedirectAtMs?: number | null;
-};
-
-export type CredentialRefreshResult = {
-  accountId: string;
-  status: "refreshed" | "retryable_failure" | "requires_reauth";
-  code: string;
-  expiresAtMs?: number | null;
-  generation?: number | null;
 };
 
 export type RevealedAccountIdentity = {
@@ -111,6 +121,7 @@ export type ImportSession = {
       label: string;
       identity: string;
       authMode: string;
+      oauthClientKind?: OAuthClientKind;
       sourceName: string;
       quotaStatus: string;
       status: string;
@@ -133,6 +144,8 @@ export type ConfirmAccountImportResponse = {
     itemId: string;
     status: "succeeded" | "failed";
     account?: { account: { id: string } };
+    accountId?: string;
+    source?: { id: string };
     error?: { code: string; message: string };
   }>;
 };
@@ -162,6 +175,7 @@ export type OAuthFlow = {
   expiresAtMs: number;
   status: OAuthFlowStatus;
   targetAccountId?: string;
+  clientKind?: OAuthClientKind;
 };
 
 export type OAuthFlowEvent = Pick<OAuthFlow, "loginId" | "status">;

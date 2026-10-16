@@ -7,30 +7,30 @@ const EMPTY_POLICY: PoolRoutingPolicy = { version: 2, mode: "automatic", members
 
 export function usePoolRoutingEditor(onClose: () => void) {
   const { mode, runtime, perform } = useRelayState();
-  const current = runtime?.gateway.poolRouting;
-  const base = useRef(current ?? EMPTY_POLICY);
+  const currentPolicy = runtime?.gateway.poolRouting;
+  const base = useRef(currentPolicy ?? EMPTY_POLICY);
   const pending = useRef<PoolRoutingEdit[]>([]);
   const task = useRef<Promise<boolean> | null>(null);
   const mounted = useRef(true);
   const [policy, setPolicy] = useState(base.current);
   const [saving, setSaving] = useState(false);
   const [errorKey, setErrorKey] = useState<string | null>(null);
-  const applyPending = (value: PoolRoutingSnapshot): PoolRoutingSnapshot => value.version === 2
-    ? applyPoolRoutingEdits(value, pending.current)
-    : value;
+  const applyPending = (snapshot: PoolRoutingSnapshot): PoolRoutingSnapshot => snapshot.version === 2
+    ? applyPoolRoutingEdits(snapshot, pending.current)
+    : snapshot;
   useEffect(() => {
     mounted.current = true;
     return () => { mounted.current = false; };
   }, []);
   useEffect(() => {
-    base.current = current ?? EMPTY_POLICY;
+    base.current = currentPolicy ?? EMPTY_POLICY;
     setPolicy(applyPending(base.current));
-  }, [current]);
+  }, [currentPolicy]);
 
   const edit = (change: PoolRoutingEdit) => {
-    if (!current || current.version !== 2 || !runtime?.capabilities.features.includes("rotation_v2")) return;
+    if (!currentPolicy || currentPolicy.version !== 2 || !runtime?.capabilities.features.includes("rotation_v2")) return;
     pending.current.push(change);
-    setPolicy((value) => value.version === 2 ? applyPoolRoutingEdits(value, [change]) : value);
+    setPolicy((draftPolicy) => draftPolicy.version === 2 ? applyPoolRoutingEdits(draftPolicy, [change]) : draftPolicy);
     setErrorKey(null);
     if (task.current) return;
     setSaving(true);
@@ -68,5 +68,5 @@ export function usePoolRoutingEditor(onClose: () => void) {
     const ok = await task.current;
     if (ok !== false && mounted.current) onClose();
   };
-  return { policy, edit, saving, errorKey, available: current?.version === 2 && Boolean(runtime?.capabilities.features.includes("rotation_v2")), close };
+  return { policy, edit, saving, errorKey, available: currentPolicy?.version === 2 && Boolean(runtime?.capabilities.features.includes("rotation_v2")), close };
 }

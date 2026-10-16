@@ -97,8 +97,10 @@ impl StoredCodexCredentials {
             self.plan_type.clone(),
             self.account_is_fedramp,
         )?
+        .with_oauth_client_kind(self.oauth_client_kind)
         .with_proxy_route(self.proxy_url.clone(), self.bypass_common_proxy)?;
         updated.agent_identity = self.agent_identity.clone();
+        updated.basis_points_headers = self.basis_points_headers.clone();
         updated.phone = self.phone.clone();
         updated.password = self.password.clone();
         updated.totp_secret = self.totp_secret.clone();

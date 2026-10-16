@@ -26,7 +26,9 @@ fn settings() -> ConfigurationPresetSettings {
         hidden_models: Vec::new(),
         model_price_overrides: Default::default(),
         model_reasoning_allowed_levels: Default::default(),
+        model_context_policies: Default::default(),
         model_reasoning_allowed_levels_present: true,
+        model_context_policies_present: true,
         model_service_tier_overrides: Default::default(),
         model_display_order: Vec::new(),
         model_service_tier_overrides_present: true,
@@ -77,13 +79,15 @@ fn preset_ignores_legacy_routing_settings() {
     preset = super::normalize_preset(imported).unwrap();
     assert_eq!(preset.settings.routing.max_retry_candidates, 3);
     let serialized = serde_json::to_value(preset).unwrap();
-    for old in [
+    for legacy_field in [
         "cooldownAfterFailures",
         "subscriptionPlanOrder",
         "routingStrategy",
         "keepLastCandidateAvailable",
     ] {
-        assert!(serialized["settings"]["routing"].get(old).is_none());
+        assert!(serialized["settings"]["routing"]
+            .get(legacy_field)
+            .is_none());
     }
 }
 

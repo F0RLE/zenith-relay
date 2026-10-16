@@ -129,15 +129,15 @@ mod tests {
 
     #[test]
     fn full_transition_and_fingerprint_survive_restart() {
-        let previous =
+        let prior_window =
             QuotaWindow::normalize(input(QuotaWindowKind::Primary, 40.0, 1_000), None).unwrap();
-        assert_eq!(previous.reset_at_ms, Some(61_000));
+        assert_eq!(prior_window.reset_at_ms, Some(61_000));
         let full = QuotaWindow::normalize(
             input(QuotaWindowKind::Primary, 99.5, 2_000),
-            Some(&previous),
+            Some(&prior_window),
         )
         .unwrap();
-        let transition = full.full_transition_from(Some(&previous)).unwrap();
+        let transition = full.full_transition_from(Some(&prior_window)).unwrap();
         assert_eq!(transition.window_kind, QuotaWindowKind::Primary);
 
         let serialized = serde_json::to_string(&full).unwrap();
@@ -192,9 +192,12 @@ mod tests {
         assert!(repeated
             .exhaustion_transition_from(Some(&exhausted))
             .is_none());
-        let current = repeated.exhaustion_transition().unwrap();
-        assert_eq!(current.fingerprint, transition.fingerprint);
-        assert_eq!(current.transitioned_at_ms, repeated.observed_at_ms);
+        let repeated_transition = repeated.exhaustion_transition().unwrap();
+        assert_eq!(repeated_transition.fingerprint, transition.fingerprint);
+        assert_eq!(
+            repeated_transition.transitioned_at_ms,
+            repeated.observed_at_ms
+        );
     }
 
     #[test]

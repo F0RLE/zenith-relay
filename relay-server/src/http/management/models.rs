@@ -5,13 +5,13 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
 use std::sync::Arc;
-use zenith_relay_core::error_codes;
 use zenith_relay_core::{
+    error_codes,
     protocol::{
         canonical_pool_model_id, complete_model_display_order, configured_source_model_ids,
         update_model_reasoning_policy, ModelPolicyError, RuntimeStateSnapshot,
-        SetModelEnabledInput, SetModelOrderInput, SetModelPriceInput, SetModelReasoningInput,
-        SetModelServiceTierInput,
+        SetModelContextInput, SetModelEnabledInput, SetModelOrderInput, SetModelPriceInput,
+        SetModelReasoningInput, SetModelServiceTierInput,
     },
     ApiModelPriceOverride, DefaultServiceTier,
 };
@@ -23,6 +23,7 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
         .route("/models/prices", post(set_model_price))
         .route("/models/reasoning", post(set_model_reasoning))
         .route("/models/service-tier", post(set_model_service_tier))
+        .route("/models/context", post(set_model_context))
         .route("/models/order", post(set_model_order))
 }
 
@@ -47,8 +48,8 @@ pub async fn models(
         .gateway
         .visible_model_ids
         .into_iter()
-        .map(|id| ModelItem {
-            id,
+        .map(|model_id| ModelItem {
+            id: model_id,
             object: "model",
             owned_by: "user",
         })
@@ -64,13 +65,13 @@ pub async fn set_model_enabled(
     let _build = state.lock_runtime_rebuild().await;
     let snapshot = state.snapshot().map_err(store_error)?;
     let canonical = canonical_model_id(&state, &snapshot, &input.model_id)?;
-    let old_hidden = state.store.hidden_models().map_err(store_error)?;
-    let mut hidden = old_hidden.clone();
+    let previous_hidden_models = state.store.hidden_models().map_err(store_error)?;
+    let mut hidden = previous_hidden_models.clone();
     hidden.retain(|model| !model.eq_ignore_ascii_case(&canonical));
     if !input.enabled {
         hidden.push(canonical);
     }
-    if hidden == old_hidden {
+    if hidden == previous_hidden_models {
         return Ok(Json(snapshot));
     }
     let runtime = state.runtime().map_err(runtime_error)?;
@@ -102,6 +103,9 @@ pub async fn set_model_price(
     let previous_overrides = state.store.model_price_overrides().map_err(store_error)?;
     let mut overrides = previous_overrides.clone();
     if let Some(price) = price {
+        let price = overrides
+            .get(&canonical)
+            .map_or(price, |previous| previous.with_base_prices(price));
         overrides.insert(canonical, price);
     } else {
         overrides.remove(&canonical);
@@ -119,6 +123,8 @@ pub async fn set_model_service_tier(
     State(state): State<Arc<AppState>>,
     Json(input): Json<SetModelServiceTierInput>,
 ) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
+    let _configuration = state.configuration_lock.lock().await;
+    let _build = state.lock_runtime_rebuild().await;
     let snapshot = state.snapshot().map_err(store_error)?;
     let canonical = canonical_model_id(&state, &snapshot, &input.model_id)?;
     let runtime = state.runtime().map_err(runtime_error)?;
@@ -130,28 +136,64 @@ pub async fn set_model_service_tier(
     {
         return Err(ManagementError::validation(
             error_codes::MODEL_SERVICE_TIER_UNSUPPORTED,
-            "requested service tier is not available under the Relay model-family policy",
+            "requested service tier is not supported by the model and configured routes",
         ));
     }
-    let previous = state
+    let previous_overrides = state
         .store
         .model_service_tier_overrides()
         .map_err(store_error)?;
-    let mut next = previous.clone();
+    let mut updated_overrides = previous_overrides.clone();
     let key = zenith_relay_core::model_id_key(&canonical);
-    next.insert(key, input.service_tier);
-    if next == previous {
+    updated_overrides.insert(key, input.service_tier);
+    if updated_overrides == previous_overrides {
         return Ok(Json(snapshot));
     }
     state
         .store
-        .set_model_service_tier_overrides(next.clone())
+        .set_model_service_tier_overrides(updated_overrides.clone())
         .map_err(store_error)?;
     if let Some(runtime) = runtime {
-        if let Err(error) = runtime.set_model_service_tier_overrides(next) {
+        if let Err(error) = runtime.set_model_service_tier_overrides(updated_overrides) {
             state
                 .store
-                .set_model_service_tier_overrides(previous)
+                .set_model_service_tier_overrides(previous_overrides)
+                .map_err(store_error)?;
+            return Err(runtime_error(error.to_string()));
+        }
+    }
+    state.snapshot().map(Json).map_err(store_error)
+}
+
+pub async fn set_model_context(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<SetModelContextInput>,
+) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
+    input.context_policy.validate().map_err(|message| {
+        ManagementError::validation(error_codes::MODEL_CONTEXT_UNSUPPORTED, message)
+    })?;
+    let _configuration = state.configuration_lock.lock().await;
+    let _build = state.lock_runtime_rebuild().await;
+    let snapshot = state.snapshot().map_err(store_error)?;
+    let canonical = canonical_model_id(&state, &snapshot, &input.model_id)?;
+    let previous = state.store.model_context_policies().map_err(store_error)?;
+    let mut updated = previous.clone();
+    updated.insert(
+        zenith_relay_core::model_id_key(&canonical),
+        input.context_policy,
+    );
+    if updated == previous {
+        return Ok(Json(snapshot));
+    }
+    state
+        .store
+        .set_model_context_policies(updated.clone())
+        .map_err(store_error)?;
+    if let Some(runtime) = state.runtime().map_err(runtime_error)? {
+        if let Err(error) = runtime.set_model_context_policies(updated) {
+            state
+                .store
+                .set_model_context_policies(previous)
                 .map_err(store_error)?;
             return Err(runtime_error(error.to_string()));
         }
@@ -167,7 +209,7 @@ pub async fn set_model_order(
     let snapshot = state.snapshot().map_err(store_error)?;
     let sources = state.store.sources().map_err(store_error)?;
     let accounts = state.store.accounts().map_err(store_error)?;
-    let previous = state.store.model_display_order().map_err(store_error)?;
+    let previous_model_order = state.store.model_display_order().map_err(store_error)?;
     let order = complete_model_display_order(
         snapshot
             .gateway
@@ -176,10 +218,10 @@ pub async fn set_model_order(
             .map(|model| &model.id)
             .chain(configured_pool_model_ids(&sources, &accounts)),
         &input.model_ids,
-        &previous,
+        &previous_model_order,
     )
     .map_err(model_policy_error)?;
-    if previous == order {
+    if previous_model_order == order {
         return Ok(Json(snapshot));
     }
     state
@@ -201,15 +243,15 @@ pub async fn set_model_reasoning(
         zenith_relay_core::model_id_key(&canonical_model_id(&state, &snapshot, &input.model_id)?);
     let runtime = state.runtime().map_err(runtime_error)?;
 
-    let previous = state
+    let previous_reasoning_levels = state
         .store
         .model_reasoning_allowed_levels()
         .map_err(store_error)?;
-    let mut configured = previous.clone();
+    let mut configured = previous_reasoning_levels.clone();
     update_model_reasoning_policy(&mut configured, &canonical, input.allowed_levels).map_err(
         |message| ManagementError::validation(error_codes::REASONING_LEVELS_INVALID, message),
     )?;
-    if configured == previous {
+    if configured == previous_reasoning_levels {
         return Ok(Json(snapshot));
     }
     state
@@ -220,7 +262,7 @@ pub async fn set_model_reasoning(
         if let Err(error) = runtime.set_model_reasoning_allowed_levels(configured) {
             state
                 .store
-                .set_model_reasoning_allowed_levels(previous)
+                .set_model_reasoning_allowed_levels(previous_reasoning_levels)
                 .map_err(|rollback| {
                     ManagementError::internal(
                         error_codes::MODEL_REASONING_RECOVERY_FAILED,

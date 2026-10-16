@@ -2,6 +2,7 @@ use super::*;
 use crate::sources::WireApi;
 use crate::CacheWriteTtl;
 use serde_json::{json, Value};
+mod history;
 mod message_bridge;
 mod native_request;
 mod replay;

@@ -113,8 +113,8 @@ async fn spawn_import_account_check_payload(
     let app = Router::new().route(
         "/accounts/check",
         get(move || {
-            let payload = payload.clone();
-            async move { Json(payload) }
+            let response_payload = payload.clone();
+            async move { Json(response_payload) }
         }),
     );
     let server = tokio::spawn(async move {

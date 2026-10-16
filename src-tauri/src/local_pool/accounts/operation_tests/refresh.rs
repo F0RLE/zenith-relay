@@ -40,14 +40,14 @@ fn imported_model_lists_are_trimmed_deduplicated_and_validated() {
 #[test]
 fn quota_refresh_preserves_a_failure_observed_while_it_was_in_flight() {
     let before_refresh = account_record("account-race");
-    let mut current = before_refresh.clone();
-    current.account.health = AccountHealthState::Degraded;
-    current.account.last_error_code = Some("upstream_rate_limited".into());
-    current.cooldowns.insert("*".into(), 500);
-    current.consecutive_failures = 2;
+    let mut latest_account = before_refresh.clone();
+    latest_account.account.health = AccountHealthState::Degraded;
+    latest_account.account.last_error_code = Some("upstream_rate_limited".into());
+    latest_account.cooldowns.insert("*".into(), 500);
+    latest_account.consecutive_failures = 2;
     let mut refreshed = before_refresh.clone();
 
-    preserve_newer_account_state(&mut refreshed, &before_refresh, &current);
+    preserve_newer_account_state(&mut refreshed, &before_refresh, &latest_account);
 
     assert!(refreshed.cooldowns.is_empty());
     assert_eq!(refreshed.consecutive_failures, 0);
@@ -60,15 +60,15 @@ fn quota_refresh_preserves_a_failure_observed_while_it_was_in_flight() {
 #[test]
 fn quota_refresh_merges_auth_and_probe_state_independently() {
     let before_refresh = account_record("account-auth-race");
-    let mut current = before_refresh.clone();
-    current.account.auth_state = AccountAuthState::RequiresReauth(
+    let mut latest_account = before_refresh.clone();
+    latest_account.account.auth_state = AccountAuthState::RequiresReauth(
         zenith_relay_core::accounts::ReauthReason::ReusedRefreshToken,
     );
     let mut refreshed = before_refresh.clone();
     refreshed.account.health = AccountHealthState::Unhealthy;
     refreshed.account.last_error_code = Some("token_invalidated".into());
 
-    preserve_newer_account_state(&mut refreshed, &before_refresh, &current);
+    preserve_newer_account_state(&mut refreshed, &before_refresh, &latest_account);
 
     assert!(matches!(
         refreshed.account.auth_state,

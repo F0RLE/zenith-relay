@@ -270,6 +270,7 @@ fn provider_price_override_is_separate_from_account_equivalent() {
         cache_write_5m_micro_usd_per_million: Some(1_875_000),
         cache_write_1h_micro_usd_per_million: Some(3_000_000),
         output_micro_usd_per_million: 2_500_000,
+        ..Default::default()
     };
     assert_eq!(
         estimate_api_equivalent_with_token_price(
@@ -300,6 +301,7 @@ fn anthropic_cache_write_is_priced_once_after_input_components_are_split() {
         cache_write_5m_micro_usd_per_million: Some(2_000_000),
         cache_write_1h_micro_usd_per_million: None,
         output_micro_usd_per_million: 3_000_000,
+        ..Default::default()
     };
 
     // Anthropic reports 100 uncached + 40 cache-read + 20 cache-write
@@ -333,6 +335,7 @@ fn source_price_provenance_is_provider_then_official_then_manual() {
         cache_write_5m_micro_usd_per_million: None,
         cache_write_1h_micro_usd_per_million: None,
         output_micro_usd_per_million: 2_000_000,
+        ..Default::default()
     };
     let manual = ApiModelPriceOverride {
         input_micro_usd_per_million: 9_000_000,
@@ -340,6 +343,7 @@ fn source_price_provenance_is_provider_then_official_then_manual() {
         cache_write_5m_micro_usd_per_million: None,
         cache_write_1h_micro_usd_per_million: None,
         output_micro_usd_per_million: 9_000_000,
+        ..Default::default()
     };
     let catalog = fixture_catalog();
     let usage = ApiEquivalentUsage {
@@ -403,6 +407,7 @@ fn candidate_pricing_keeps_account_and_source_rules_separate() {
         cache_write_5m_micro_usd_per_million: None,
         cache_write_1h_micro_usd_per_million: None,
         output_micro_usd_per_million: 2_000_000,
+        ..Default::default()
     };
     let manual = ApiModelPriceOverride {
         input_micro_usd_per_million: 9_000_000,
@@ -410,6 +415,7 @@ fn candidate_pricing_keeps_account_and_source_rules_separate() {
         cache_write_5m_micro_usd_per_million: None,
         cache_write_1h_micro_usd_per_million: None,
         output_micro_usd_per_million: 9_000_000,
+        ..Default::default()
     };
     let catalog = fixture_catalog();
     let context = PricingContext {
@@ -520,4 +526,287 @@ fn price_override_input_is_normalized_and_validated_once() {
         normalize_model_price_overrides(BTreeMap::from([(" Claude-Opus-4-8 ".to_string(), price)]))
             .unwrap();
     assert_eq!(normalized.get("claude-opus-4-8"), Some(&price));
+}
+
+#[test]
+fn flex_priority_and_long_context_use_published_components_only() {
+    use crate::pricing::{LongContextRates, TokenPrice, TokenRateSet};
+
+    let quote = TokenPrice {
+        input: 2_000_000,
+        cache_read: Some(100_000),
+        cache_write_5m: Some(2_500_000),
+        cache_write_1h: None,
+        output: 10_000_000,
+        flex: TokenRateSet {
+            input: Some(1_000_000),
+            output: Some(5_000_000),
+            ..TokenRateSet::EMPTY
+        },
+        priority: TokenRateSet {
+            input: Some(4_000_000),
+            output: Some(20_000_000),
+            ..TokenRateSet::EMPTY
+        },
+        above_200k: LongContextRates::default(),
+        above_272k: LongContextRates {
+            standard: TokenRateSet {
+                input: Some(4_000_000),
+                output: Some(15_000_000),
+                ..TokenRateSet::EMPTY
+            },
+            priority: TokenRateSet {
+                input: Some(8_000_000),
+                output: Some(30_000_000),
+                ..TokenRateSet::EMPTY
+            },
+            ..LongContextRates::default()
+        },
+        ..Default::default()
+    };
+    let usage = |tier: Option<&str>, input: u64| {
+        ApiEquivalentUsage {
+            input_tokens: Some(input),
+            cached_input_tokens: Some(0),
+            output_tokens: Some(10),
+            total_tokens: Some(input + 10),
+            ..Default::default()
+        }
+        .with_observed_rates(tier, Some(input))
+    };
+
+    assert_eq!(
+        estimate_api_equivalent_with_token_price(usage(None, 100), Some(quote)).micro_usd,
+        token_cost_fixture(100, 2_000_000) + token_cost_fixture(10, 10_000_000)
+    );
+    assert_eq!(
+        estimate_api_equivalent_with_token_price(usage(Some("flex"), 100), Some(quote)).micro_usd,
+        token_cost_fixture(100, 1_000_000) + token_cost_fixture(10, 5_000_000)
+    );
+    let priority = estimate_api_equivalent_with_token_price(usage(Some("fast"), 100), Some(quote));
+    assert_eq!(
+        priority.micro_usd,
+        token_cost_fixture(100, 4_000_000) + token_cost_fixture(10, 20_000_000)
+    );
+    assert_eq!(priority.unpriced_tokens, 0);
+
+    let missing_cache = estimate_api_equivalent_with_token_price(
+        ApiEquivalentUsage {
+            input_tokens: Some(100),
+            cached_input_tokens: Some(40),
+            output_tokens: Some(10),
+            total_tokens: Some(110),
+            ..Default::default()
+        }
+        .with_observed_rates(Some("priority"), Some(100)),
+        Some(quote),
+    );
+    assert_eq!(missing_cache.priced_tokens, 70);
+    assert_eq!(missing_cache.unpriced_tokens, 40);
+
+    let long =
+        estimate_api_equivalent_with_token_price(usage(Some("priority"), 300_000), Some(quote));
+    assert_eq!(
+        long.micro_usd,
+        token_cost_fixture(300_000, 8_000_000) + token_cost_fixture(10, 30_000_000)
+    );
+    let below_272k = estimate_api_equivalent_with_token_price(usage(None, 250_000), Some(quote));
+    assert_eq!(
+        below_272k.micro_usd,
+        token_cost_fixture(250_000, 2_000_000) + token_cost_fixture(10, 10_000_000)
+    );
+    let ultrafast =
+        estimate_api_equivalent_with_token_price(usage(Some("ultrafast"), 100), Some(quote));
+    assert_eq!(
+        (
+            ultrafast.micro_usd,
+            ultrafast.priced_tokens,
+            ultrafast.unpriced_tokens
+        ),
+        (0, 0, 110),
+    );
+}
+
+fn token_cost_fixture(tokens: u64, micro_usd_per_million: u64) -> u64 {
+    let numerator = u128::from(tokens) * u128::from(micro_usd_per_million) + 500_000;
+    u64::try_from(numerator / 1_000_000).unwrap()
+}
+
+#[test]
+fn every_context_boundary_roundtrips_and_uses_the_highest_published_schedule() {
+    use crate::pricing::TokenPrice;
+    use crate::usage::UsageContextBand;
+    let mut raw = serde_json::json!({
+        "inputMicroUsdPerMillion": 1_000_000,
+        "outputMicroUsdPerMillion": 2_000_000
+    });
+    for threshold in [100, 128, 200, 272, 512] {
+        raw[format!("above{threshold}k")] = serde_json::json!({
+            "standard": { "input": threshold * 1_000_000_u64 },
+            "flex": { "input": 0 }
+        });
+    }
+    let manual: ApiModelPriceOverride = serde_json::from_value(raw.clone()).unwrap();
+    let quote = TokenPrice::from(manual);
+    assert!(manual.is_valid());
+    assert_eq!(ApiModelPriceOverride::from(quote), manual);
+    assert_eq!(serde_json::to_value(manual).unwrap(), raw);
+    let estimate = |tokens, tier| {
+        estimate_api_equivalent_with_token_price(
+            ApiEquivalentUsage {
+                input_tokens: Some(tokens),
+                output_tokens: Some(10),
+                ..Default::default()
+            }
+            .with_observed_rates(tier, Some(tokens)),
+            Some(quote),
+        )
+    };
+    let mut previous_rate = 1_000_000;
+    for threshold in [100, 128, 200, 272, 512] {
+        let boundary = threshold * 1000;
+        assert_eq!(
+            estimate(boundary, None).micro_usd,
+            token_cost_fixture(boundary, previous_rate) + 20
+        );
+        let rate = threshold * 1_000_000;
+        assert_eq!(
+            estimate(boundary + 1, None).micro_usd,
+            token_cost_fixture(boundary + 1, rate) + 20
+        );
+        let band = UsageContextBand::from_input_tokens(Some(boundary + 1));
+        assert_eq!(UsageContextBand::from_label(band.as_label()), band);
+        let flex = estimate(boundary + 1, Some("flex"));
+        assert_eq!(flex.micro_usd, 0);
+        assert_eq!(flex.priced_tokens, boundary + 1);
+        assert_eq!(flex.unpriced_tokens, 10);
+        previous_rate = rate;
+    }
+    // A model that publishes only 128k keeps that schedule above every higher band.
+    let sparse: TokenPrice = serde_json::from_value(serde_json::json!({
+        "input": 1_000_000, "output": 2_000_000,
+        "above128k": { "standard": { "input": 3_000_000 } }
+    }))
+    .unwrap();
+    let usage = ApiEquivalentUsage {
+        input_tokens: Some(600_000),
+        ..Default::default()
+    }
+    .with_observed_rates(None, Some(600_000));
+    assert_eq!(
+        estimate_api_equivalent_with_token_price(usage, Some(sparse)).micro_usd,
+        1_800_000
+    );
+    raw["above512k"]["priority"] = serde_json::json!({
+        "input": crate::pricing::MAX_MODEL_PRICE_MICRO_USD_PER_MILLION + 1
+    });
+    assert!(!serde_json::from_value::<ApiModelPriceOverride>(raw)
+        .unwrap()
+        .is_valid());
+}
+
+#[test]
+fn stored_manual_schedules_survive_roundtrip_and_follow_exact_request_boundary() {
+    use crate::pricing::{LongContextRates, TokenPrice, TokenRateSet};
+    let manual = ApiModelPriceOverride {
+        input_micro_usd_per_million: 1_000_000,
+        output_micro_usd_per_million: 2_000_000,
+        above_272k: LongContextRates {
+            standard: TokenRateSet {
+                input: Some(2_000_000),
+                output: Some(4_000_000),
+                ..Default::default()
+            },
+            flex: TokenRateSet {
+                input: Some(500_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let restored: ApiModelPriceOverride =
+        serde_json::from_str(&serde_json::to_string(&manual).unwrap()).unwrap();
+    assert_eq!(restored, manual);
+    assert_eq!(
+        ApiModelPriceOverride::from(TokenPrice::from(restored)),
+        manual
+    );
+    let estimate = |input, tier| {
+        estimate_api_equivalent_with_token_price(
+            ApiEquivalentUsage {
+                input_tokens: Some(input),
+                output_tokens: Some(100),
+                total_tokens: Some(input + 100),
+                ..Default::default()
+            }
+            .with_observed_rates(tier, Some(input)),
+            Some(restored.into()),
+        )
+    };
+    assert_eq!(estimate(272_000, None).micro_usd, 272_200);
+    assert_eq!(estimate(272_001, None).micro_usd, 544_402);
+    let flex = estimate(300_000, Some("flex"));
+    assert_eq!(flex.micro_usd, 150_000);
+    assert_eq!(flex.unpriced_tokens, 100);
+    // Below the boundary no Flex rates are published.
+    let below_boundary = estimate(100_000, Some("flex"));
+    assert_eq!(
+        (
+            below_boundary.micro_usd,
+            below_boundary.priced_tokens,
+            below_boundary.unpriced_tokens
+        ),
+        (0, 0, 100_100)
+    );
+}
+
+#[test]
+fn legacy_base_price_update_preserves_separate_tariffs_and_context_bands() {
+    use crate::pricing::{LongContextRates, TokenRateSet};
+    let previous = ApiModelPriceOverride {
+        cached_input_micro_usd_per_million: Some(10),
+        flex: TokenRateSet {
+            input: Some(20),
+            ..Default::default()
+        },
+        priority: TokenRateSet {
+            output: Some(30),
+            ..Default::default()
+        },
+        above_200k: LongContextRates {
+            standard: TokenRateSet {
+                input: Some(40),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        above_272k: LongContextRates {
+            flex: TokenRateSet {
+                cache_read: Some(0),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let base = ApiModelPriceOverride::from_optional_fields(
+        Some(100),
+        None,
+        Some(200),
+        Some(300),
+        Some(400),
+    )
+    .unwrap()
+    .unwrap();
+    let updated = previous.with_base_prices(base);
+    assert_eq!(updated.input_micro_usd_per_million, 100);
+    assert_eq!(updated.cached_input_micro_usd_per_million, None);
+    assert_eq!(updated.cache_write_5m_micro_usd_per_million, Some(200));
+    assert_eq!(updated.cache_write_1h_micro_usd_per_million, Some(300));
+    assert_eq!(updated.output_micro_usd_per_million, 400);
+    assert_eq!(updated.flex, previous.flex);
+    assert_eq!(updated.priority, previous.priority);
+    assert_eq!(updated.above_200k, previous.above_200k);
+    assert_eq!(updated.above_272k, previous.above_272k);
 }

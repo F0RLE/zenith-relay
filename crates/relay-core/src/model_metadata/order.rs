@@ -1,459 +1,592 @@
-//! Presentation order for catalog models.
-//!
-//! Company and family ranking is display-only. It never rewrites a route id
-//! and never decides whether a model can be served.
+//! Shared presentation policy. Provider/family/class rules live in the public
+//! JSON catalog; the code only parses identities and compares numeric versions.
 
 use chrono::{Datelike, NaiveDate};
-use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use regex::{Regex, RegexSet};
+use serde::{Deserialize, Serialize};
+use std::{cmp::Ordering, collections::BTreeSet, sync::LazyLock};
 
-use super::{ModelMetadata, ModelMetadataCatalog};
+pub const MODEL_ORDER_JSON: &str = include_str!("../../../../catalog/model-order.json");
+const MODEL_ORDER_SCHEMA: &str = include_str!("../../../../catalog/model-order.schema.json");
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct FamilyOrder {
-    newest_release: Option<u32>,
-    catalog_release: Option<u32>,
-    generation: Option<ModelGeneration>,
+static POLICY: LazyLock<OrderPolicy> =
+    LazyLock::new(|| OrderPolicy::parse().expect("the bundled model order catalog must be valid"));
+static VERSION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[0-9]+(?:\.[0-9]+)*").expect("valid version pattern"));
+static SNAPSHOT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:[-@](?P<compact>[0-9]{8})|-(?P<iso>[0-9]{4}-[0-9]{2}-[0-9]{2}))$")
+        .expect("valid snapshot pattern")
+});
+
+/// Display classification only. It neither rewrites an upstream ID nor grants
+/// capabilities, account entitlement, or a route.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelDisplayIdentity {
+    pub provider: Option<String>,
+    pub family: String,
+    pub class: String,
+    pub version: Vec<u64>,
+    pub variant: String,
+    pub snapshot: Option<u32>,
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct ModelGeneration {
-    prefix: String,
-    version: Vec<u32>,
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OrderDocument {
+    #[serde(rename = "$schema")]
+    schema: String,
+    schema_version: u32,
+    revision: String,
+    ignored_suffixes: Vec<String>,
+    providers: Vec<ProviderRule>,
 }
 
-pub(super) fn family_order(
-    catalog: &ModelMetadataCatalog,
-    models: &[String],
-) -> BTreeMap<(String, String), FamilyOrder> {
-    let mut families = BTreeMap::new();
-    for id in models {
-        let Some(metadata) = catalog.resolve(id) else {
-            continue;
-        };
-        let Some(key) = provider_key(metadata) else {
-            continue;
-        };
-        let Some(family) = family_key(metadata) else {
-            continue;
-        };
-        let release = metadata.release_date.as_deref().and_then(date_key);
-        let generation = model_generation(id);
-        families
-            .entry((key, family))
-            .and_modify(|order: &mut FamilyOrder| {
-                order.newest_release = order.newest_release.max(release);
-                order.catalog_release = order.newest_release;
-                merge_generation(&mut order.generation, generation.clone());
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderRule {
+    id: String,
+    aliases: Vec<String>,
+    patterns: Vec<String>,
+    families: Vec<FamilyRule>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FamilyRule {
+    id: String,
+    patterns: Vec<String>,
+    classes: Vec<ClassRule>,
+    variants: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClassRule {
+    id: String,
+    aliases: Vec<String>,
+}
+
+struct OrderPolicy {
+    document: OrderDocument,
+    provider_patterns: Vec<RegexSet>,
+    family_patterns: Vec<Vec<Vec<Regex>>>,
+}
+
+impl OrderPolicy {
+    fn parse() -> Result<Self, String> {
+        let schema = serde_json::from_str(MODEL_ORDER_SCHEMA).map_err(|error| error.to_string())?;
+        let document = serde_json::from_str(MODEL_ORDER_JSON).map_err(|error| error.to_string())?;
+        jsonschema::options()
+            .offline()
+            .build(&schema)
+            .map_err(|error| error.to_string())?
+            .validate(&document)
+            .map_err(|error| error.to_string())?;
+        let document: OrderDocument =
+            serde_json::from_value(document).map_err(|error| error.to_string())?;
+        if document.schema != "model-order.schema.json" || document.schema_version != 1 {
+            return Err("unsupported model order schema".into());
+        }
+        let mut provider_ids = BTreeSet::new();
+        let mut provider_patterns = Vec::new();
+        let mut family_patterns = Vec::new();
+        for provider in &document.providers {
+            for id in std::iter::once(&provider.id).chain(&provider.aliases) {
+                if !provider_ids.insert(id) {
+                    return Err(format!("duplicate provider identity: {id}"));
+                }
+            }
+            let compiled = compile_patterns(&provider.patterns)?;
+            provider_patterns.push(
+                RegexSet::new(compiled.iter().map(Regex::as_str))
+                    .map_err(|error| error.to_string())?,
+            );
+            let mut family_ids = BTreeSet::new();
+            let mut compiled_families = Vec::new();
+            for family in &provider.families {
+                if !family_ids.insert(&family.id) {
+                    return Err(format!("duplicate family: {}", family.id));
+                }
+                let mut class_ids = BTreeSet::new();
+                let mut class_aliases = BTreeSet::new();
+                for class in &family.classes {
+                    if !class_ids.insert(&class.id)
+                        || class
+                            .aliases
+                            .iter()
+                            .any(|alias| !class_aliases.insert(alias))
+                    {
+                        return Err(format!("duplicate class identity: {}", family.id));
+                    }
+                }
+                if family
+                    .classes
+                    .iter()
+                    .filter(|class| class.aliases.is_empty())
+                    .count()
+                    > 1
+                {
+                    return Err(format!("multiple default classes: {}", family.id));
+                }
+                compiled_families.push(compile_patterns(&family.patterns)?);
+            }
+            family_patterns.push(compiled_families);
+        }
+        Ok(Self {
+            document,
+            provider_patterns,
+            family_patterns,
+        })
+    }
+
+    fn provider(&self, provider: &str) -> Option<(usize, &ProviderRule)> {
+        self.document
+            .providers
+            .iter()
+            .enumerate()
+            .find(|(_, rule)| {
+                rule.id == provider || rule.aliases.iter().any(|alias| alias == provider)
             })
-            .or_insert(FamilyOrder {
-                newest_release: release,
-                catalog_release: release,
-                generation,
-            });
     }
 
-    // Unknown sibling families that share one numbered generation form a
-    // catalog cohort. They keep that cohort's newest release, then sort by
-    // family ID. Canonical tiers such as Astra before Sol are not decided
-    // here; known_family_rank owns that order across versions.
-    let mut cohort_releases = BTreeMap::new();
-    for ((provider, _), order) in &families {
-        let Some(generation) = &order.generation else {
-            continue;
-        };
-        cohort_releases
-            .entry((provider.clone(), generation.clone()))
-            .and_modify(|release: &mut Option<u32>| {
-                *release = (*release).max(order.newest_release);
-            })
-            .or_insert(order.newest_release);
-    }
-    for ((provider, _), order) in &mut families {
-        if let Some(generation) = &order.generation {
-            order.catalog_release = cohort_releases
-                .get(&(provider.clone(), generation.clone()))
-                .copied()
-                .unwrap_or(order.newest_release);
-        }
-    }
-    families
-}
-
-pub(super) fn compare_metadata(
-    left_id: &str,
-    left: Option<&ModelMetadata>,
-    right_id: &str,
-    right: Option<&ModelMetadata>,
-    family_order: &BTreeMap<(String, String), FamilyOrder>,
-) -> Ordering {
-    let left_provider = presentation_provider(left_id, left);
-    let right_provider = presentation_provider(right_id, right);
-
-    match (left_provider.as_ref(), right_provider.as_ref()) {
-        (Some(left_key), Some(right_key)) if left_key == right_key => {
-            compare_output_kind(left_id, left, right_id, right)
-                .then_with(|| {
-                    artificial_analysis_rank(left_id).cmp(&artificial_analysis_rank(right_id))
-                })
-                .then_with(|| compare_families(left_key, left, right, family_order))
-                .then_with(|| compare_model_product_tiers(left_key, left_id, right_id))
-                .then_with(|| compare_model_dates(left, right))
-        }
-        (Some(left_key), Some(right_key)) => company_order(left_key)
-            .cmp(&company_order(right_key))
-            .then_with(|| left_key.cmp(right_key)),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => Ordering::Equal,
-    }
-}
-
-fn presentation_provider(id: &str, metadata: Option<&ModelMetadata>) -> Option<String> {
-    metadata
-        .and_then(provider_key)
-        .or_else(|| inferred_provider(id))
-}
-
-/// Display-only company for an id the metadata catalog does not know.
-/// ChatGPT account models such as `codex-auto-review` still belong with the
-/// other text models from that company, ahead of image generation.
-fn inferred_provider(id: &str) -> Option<String> {
-    let normalized = normalize(id);
-    let model = catalog_model_leaf(strip_reasoning_effort(&normalized));
-    let provider = if model.starts_with("gpt-")
-        || model.starts_with("chatgpt-")
-        || model.starts_with("codex-")
-        || model.starts_with("dall-e")
-    {
-        "openai"
-    } else if model.starts_with("claude-") {
-        "anthropic"
-    } else if model.starts_with("gemini-") {
-        "google"
-    } else if model.starts_with("grok-") {
-        "xai"
-    } else {
-        return None;
-    };
-    Some(provider.to_string())
-}
-
-fn company_order(provider: &str) -> usize {
-    match provider {
-        "openai" => 0,
-        "anthropic" => 1,
-        "google" => 2,
-        "xai" | "x-ai" => 3,
-        _ => 4,
-    }
-}
-
-fn family_key(metadata: &ModelMetadata) -> Option<String> {
-    metadata
-        .family
-        .as_deref()
-        .map(normalize)
-        .filter(|family| !family.is_empty())
-}
-
-fn compare_families(
-    provider: &str,
-    left: Option<&ModelMetadata>,
-    right: Option<&ModelMetadata>,
-    families: &BTreeMap<(String, String), FamilyOrder>,
-) -> Ordering {
-    match (left.and_then(family_key), right.and_then(family_key)) {
-        (Some(left), Some(right)) if left != right => {
-            let left_order = &families[&(provider.to_string(), left.clone())];
-            let right_order = &families[&(provider.to_string(), right.clone())];
-            // Release dates order versions inside one family. They do not
-            // rank sibling product families. OpenAI stays Astra, Sol, Terra,
-            // then Luna. Anthropic stays Fable, Opus, Sonnet, then Haiku,
-            // even when a lower tier ships later. Unknown families stay after
-            // the known lineup and use the date and family-name tie-breakers.
-            compare_known_family_order(provider, &left, &right)
-                .then_with(|| {
-                    compare_optional_date_desc(
-                        left_order.catalog_release,
-                        right_order.catalog_release,
-                    )
-                })
-                .then_with(|| left.cmp(&right))
-        }
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        _ => Ordering::Equal,
-    }
-}
-
-fn compare_known_family_order(provider: &str, left: &str, right: &str) -> Ordering {
-    let left_rank = known_family_rank(provider, left);
-    let right_rank = known_family_rank(provider, right);
-    match (left_rank, right_rank) {
-        (Some(left), Some(right)) => left.cmp(&right),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => Ordering::Equal,
-    }
-}
-
-/// Stable product-family precedence used only where the provider exposes a
-/// canonical tier order that release dates cannot represent. This deliberately
-/// ranks family labels, not individual model IDs, so a future version of the
-/// same catalog family inherits its place and unknown families stay after the
-/// known lineup.
-fn known_family_rank(provider: &str, family: &str) -> Option<u8> {
-    let normalized = normalize(family);
-    let stripped = match provider {
-        "anthropic" => normalized.strip_prefix("claude-").unwrap_or(&normalized),
-        "openai" => normalized.strip_prefix("gpt-").unwrap_or(&normalized),
-        _ => return None,
-    };
-    // Family labels are not always the bare tier. `gpt-5.6-sol` and a future
-    // `gpt-8-sol` are still Sol; a shared `gpt` family carries no tier.
-    tier_token_rank(provider, stripped).or_else(|| {
-        normalized
-            .split(|character: char| !character.is_ascii_alphanumeric())
-            .find_map(|token| tier_token_rank(provider, token))
-    })
-}
-
-fn tier_token_rank(provider: &str, token: &str) -> Option<u8> {
-    match provider {
-        "anthropic" => match token {
-            "fable" => Some(0),
-            "opus" => Some(1),
-            "sonnet" => Some(2),
-            "haiku" => Some(3),
-            _ => None,
-        },
-        "openai" => match token {
-            "astra" => Some(0),
-            "sol" => Some(1),
-            "terra" => Some(2),
-            "luna" => Some(3),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-/// Same-family and unlabeled rows still need the product tier. Alphabetical
-/// ids put Luna before Sol, and a newer release date would do the same.
-fn compare_model_product_tiers(provider: &str, left_id: &str, right_id: &str) -> Ordering {
-    let left = model_product_tier(provider, left_id);
-    let right = model_product_tier(provider, right_id);
-    match (left, right) {
-        (Some(left), Some(right)) => left.cmp(&right),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => Ordering::Equal,
-    }
-}
-
-fn model_product_tier(provider: &str, id: &str) -> Option<u8> {
-    let normalized = normalize(id);
-    let leaf = catalog_model_leaf(strip_reasoning_effort(&normalized));
-    known_family_rank(provider, leaf)
-}
-
-/// Image-generation models stay after every text model from the same company.
-/// A newer image release must not sit between chat families. Vision-capable
-/// chat models still output text, so they keep their normal family position.
-/// Known image lines follow the 2026-09-29 Text-to-Image Elo snapshot after a
-/// reasoning-effort suffix is removed. Text models compare as equal here:
-/// OpenAI and Anthropic product tiers come from `known_family_rank`, so a new
-/// version does not need its own ID in this list.
-fn artificial_analysis_rank(model: &str) -> u32 {
-    let model = catalog_model_leaf(strip_reasoning_effort(model));
-    if model.starts_with("gpt-image-") || model.starts_with("dall-e") {
-        return artificial_analysis_image_rank(model);
-    }
-    0
-}
-
-fn catalog_model_leaf(model: &str) -> &str {
-    model.rsplit(['/', ':']).next().unwrap_or(model)
-}
-
-fn strip_reasoning_effort(model: &str) -> &str {
-    const SUFFIXES: &[&str] = &[
-        "-non-reasoning",
-        "-xhigh",
-        "-minimal",
-        "-medium",
-        "-high",
-        "-low",
-        "-max",
-        "-none",
-    ];
-    for suffix in SUFFIXES {
-        if let Some(stripped) = model.strip_suffix(suffix) {
-            if !stripped.is_empty() && !stripped.ends_with('-') {
-                return stripped;
+    fn model_name(&self, model: &str) -> (String, Option<u32>, String) {
+        let normalized = normalize(model_leaf(model));
+        // Hosting modifiers such as `:batch` or `:thinking` describe a
+        // variant; they cannot turn Flash Lite into Flash or hide a snapshot.
+        let (name, modifiers) = normalized.split_once(':').unwrap_or((&normalized, ""));
+        let mut name = name.to_string();
+        let modifiers = modifiers.replace(':', "-");
+        for suffix in &self.document.ignored_suffixes {
+            if let Some(stripped) = name.strip_suffix(suffix) {
+                name = stripped.to_string();
+                break;
             }
         }
-    }
-    model
-}
-
-fn artificial_analysis_image_rank(model: &str) -> u32 {
-    match model {
-        "gpt-image-2.5-sunburst" => 0,
-        "gpt-image-2.5-flare" => 1,
-        "gpt-image-2" => 2,
-        _ => u32::MAX,
-    }
-}
-
-fn compare_output_kind(
-    left_id: &str,
-    left: Option<&ModelMetadata>,
-    right_id: &str,
-    right: Option<&ModelMetadata>,
-) -> Ordering {
-    image_generation(left_id, left).cmp(&image_generation(right_id, right))
-}
-
-fn image_generation(id: &str, metadata: Option<&ModelMetadata>) -> bool {
-    let Some(metadata) = metadata else {
-        return image_id(id);
-    };
-    let outputs_image = metadata
-        .capabilities
-        .output_modalities
-        .iter()
-        .any(|modality| modality.eq_ignore_ascii_case("image"));
-    let outputs_text = metadata
-        .capabilities
-        .output_modalities
-        .iter()
-        .any(|modality| modality.eq_ignore_ascii_case("text"));
-    if outputs_image && !outputs_text {
-        return true;
-    }
-    has_image_token(metadata.family.as_deref().unwrap_or(""))
-        || has_image_token(metadata.name.as_deref().unwrap_or(""))
-}
-
-fn image_id(id: &str) -> bool {
-    let normalized = normalize(id);
-    let model = catalog_model_leaf(strip_reasoning_effort(&normalized));
-    model.starts_with("gpt-image-") || model.starts_with("dall-e")
-}
-
-fn has_image_token(value: &str) -> bool {
-    normalize(value)
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .any(|token| matches!(token, "image" | "dalle" | "dall"))
-}
-
-fn merge_generation(current: &mut Option<ModelGeneration>, incoming: Option<ModelGeneration>) {
-    match (current.as_ref(), incoming) {
-        (Some(existing), Some(incoming)) if existing.prefix == incoming.prefix => {
-            if compare_generation_version(&incoming.version, &existing.version) == Ordering::Greater
-            {
-                *current = Some(incoming);
+        let Some(snapshot) = SNAPSHOT.captures(&name) else {
+            return (name, None, modifiers);
+        };
+        let date = snapshot
+            .name("iso")
+            .map(|date| date.as_str().to_string())
+            .or_else(|| {
+                let date = snapshot.name("compact")?.as_str();
+                Some(format!("{}-{}-{}", &date[..4], &date[4..6], &date[6..]))
+            })
+            .and_then(|date| date_key(&date));
+        match (snapshot.get(0), date) {
+            (Some(matched), Some(date)) => {
+                (name[..matched.start()].to_string(), Some(date), modifiers)
             }
+            _ => (name, None, modifiers),
         }
-        (None, None) => {}
-        _ => *current = None,
     }
 }
 
-fn model_generation(id: &str) -> Option<ModelGeneration> {
-    let normalized = normalize(id);
-    let leaf = model_leaf(&normalized);
-    let start = leaf.find(|character: char| character.is_ascii_digit())?;
-    let prefix = leaf[..start].trim_end_matches(['-', '_', '.']);
-    if prefix.is_empty() {
+fn compile_patterns(patterns: &[String]) -> Result<Vec<Regex>, String> {
+    patterns
+        .iter()
+        .map(|pattern| {
+            if !pattern.starts_with('^') || !pattern.ends_with('$') {
+                return Err(format!("unanchored model order pattern: {pattern}"));
+            }
+            Regex::new(pattern).map_err(|error| error.to_string())
+        })
+        .collect()
+}
+
+pub(super) fn canonical_namespace(model_id: &str) -> Option<String> {
+    let (namespace, model) = model_id.trim().split_once('/')?;
+    if model.is_empty() {
         return None;
     }
+    provider_key(namespace)
+}
 
-    let version_end = leaf[start..]
-        .char_indices()
-        .take_while(|(offset, character)| {
-            character.is_ascii_digit()
-                || (*character == '.'
-                    && leaf[start + offset + 1..]
-                        .chars()
-                        .next()
-                        .is_some_and(|next| next.is_ascii_digit()))
+pub fn model_order_revision() -> &'static str {
+    &POLICY.document.revision
+}
+
+/// Used by the exporter to report malformed policy as a normal error before
+/// constructing a reference catalog.
+pub fn validate_model_order_catalog() -> Result<(), String> {
+    OrderPolicy::parse().map(|_| ())
+}
+
+/// Only the bundled presentation rules infer a missing manufacturer. Trusted
+/// reference identity and ambiguous-leaf handling remain with the catalog.
+pub(super) fn inferred_provider(model_id: &str) -> Option<String> {
+    let (name, _, _) = POLICY.model_name(model_id);
+    POLICY
+        .document
+        .providers
+        .iter()
+        .enumerate()
+        .find_map(|(index, rule)| {
+            POLICY.provider_patterns[index]
+                .is_match(&name)
+                .then(|| rule.id.clone())
         })
-        .map(|(offset, character)| offset + character.len_utf8())
-        .last()?;
-    let version = leaf[start..start + version_end]
-        .split('.')
-        .map(str::parse::<u32>)
-        .collect::<Result<Vec<_>, _>>()
-        .ok()?;
-    (!version.is_empty()).then(|| ModelGeneration {
-        prefix: prefix.to_owned(),
-        version,
-    })
 }
 
-fn compare_generation_version(left: &[u32], right: &[u32]) -> Ordering {
-    let width = left.len().max(right.len());
-    (0..width)
-        .map(|index| {
-            left.get(index)
-                .copied()
-                .unwrap_or_default()
-                .cmp(&right.get(index).copied().unwrap_or_default())
-        })
-        .find(|ordering| *ordering != Ordering::Equal)
-        .unwrap_or(Ordering::Equal)
-}
-
-fn compare_model_dates(left: Option<&ModelMetadata>, right: Option<&ModelMetadata>) -> Ordering {
-    compare_optional_date_desc(
-        metadata_date(left, |metadata| metadata.release_date.as_deref()),
-        metadata_date(right, |metadata| metadata.release_date.as_deref()),
-    )
-    .then_with(|| {
-        compare_optional_date_desc(
-            metadata_date(left, |metadata| metadata.last_updated.as_deref()),
-            metadata_date(right, |metadata| metadata.last_updated.as_deref()),
-        )
-    })
-}
-
-fn compare_optional_date_desc(left: Option<u32>, right: Option<u32>) -> Ordering {
-    match (left, right) {
-        (Some(left), Some(right)) => right.cmp(&left),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => Ordering::Equal,
-    }
-}
-
-fn metadata_date(
-    metadata: Option<&ModelMetadata>,
-    field: impl FnOnce(&ModelMetadata) -> Option<&str>,
-) -> Option<u32> {
-    metadata.and_then(field).and_then(date_key)
-}
-
-fn provider_key(metadata: &ModelMetadata) -> Option<String> {
-    let provider = normalize(&metadata.provider);
+pub(super) fn provider_key(provider: &str) -> Option<String> {
+    let provider = normalize(provider);
+    let provider = POLICY
+        .provider(&provider)
+        .map_or(provider.clone(), |(_, rule)| rule.id.clone());
     (!provider.is_empty()).then_some(provider)
 }
 
-pub(super) fn normalize(value: &str) -> String {
-    value.trim().to_ascii_lowercase()
+pub(super) struct ModelOrderKey {
+    pub(super) identity: ModelDisplayIdentity,
+    provider_rank: usize,
+    family_rank: usize,
+    class_rank: usize,
+    variant_rank: usize,
+    parameter_count: Option<u64>,
+    id: String,
 }
 
-pub(super) fn model_leaf(value: &str) -> &str {
-    value.rsplit('/').next().unwrap_or(value)
+impl ModelOrderKey {
+    pub(super) fn new(
+        model: &str,
+        provider: Option<String>,
+        family_hint: Option<&str>,
+        reference_name: Option<&str>,
+        release_date: Option<&str>,
+    ) -> Self {
+        let (name, snapshot, modifiers) = POLICY.model_name(model);
+        let provider_rule = provider
+            .as_deref()
+            .and_then(|provider| POLICY.provider(provider));
+        if let Some((provider_rank, rule)) = provider_rule {
+            for (family_rank, family) in rule.families.iter().enumerate() {
+                for pattern in &POLICY.family_patterns[provider_rank][family_rank] {
+                    if let Some(captures) = pattern.captures(&name) {
+                        let Ok(captured_snapshot) = captured_snapshot(&captures, release_date)
+                        else {
+                            continue;
+                        };
+                        let snapshot = snapshot.or(captured_snapshot);
+                        let (class_rank, class, variant) =
+                            classify_variant(family, captured_variant(&captures));
+                        let version = captures
+                            .name("version")
+                            .map(|version| version_numbers(version.as_str()))
+                            .or_else(|| {
+                                version_from_reference_name(
+                                    family,
+                                    &POLICY.family_patterns[provider_rank][family_rank],
+                                    &class,
+                                    reference_name?,
+                                )
+                            })
+                            .unwrap_or_default();
+                        let variant = join_variants(&variant, &modifiers);
+                        return Self {
+                            provider_rank,
+                            family_rank,
+                            class_rank,
+                            variant_rank: variant_rank(&family.variants, &variant),
+                            parameter_count: captures
+                                .name("parameters")
+                                .and_then(|size| parameter_count(size.as_str())),
+                            identity: ModelDisplayIdentity {
+                                provider,
+                                family: family.id.clone(),
+                                class,
+                                version,
+                                variant,
+                                snapshot,
+                            },
+                            id: name,
+                        };
+                    }
+                }
+            }
+        }
+        // Unlisted families still get numeric version order, with no guessed
+        // capability rank. Metadata can group aliases of a new family.
+        let version = VERSION.find(&name);
+        let prefix = version.map_or(name.as_str(), |version| &name[..version.start()]);
+        let family = family_hint
+            .map(normalize)
+            .filter(|family| !family.is_empty())
+            .unwrap_or_else(|| prefix.trim_matches(['-', '_', '.']).to_string());
+        let variant = version
+            .map_or("", |version| &name[version.end()..])
+            .trim_matches('-');
+        Self {
+            provider_rank: provider_rule.map_or(POLICY.document.providers.len(), |(rank, _)| rank),
+            family_rank: provider_rule.map_or(0, |(_, rule)| rule.families.len()),
+            class_rank: 0,
+            variant_rank: 0,
+            parameter_count: None,
+            identity: ModelDisplayIdentity {
+                provider,
+                family,
+                class: prefix.trim_matches(['-', '_', '.']).to_string(),
+                version: version.map_or(Vec::new(), |version| version_numbers(version.as_str())),
+                variant: join_variants(variant, &modifiers),
+                snapshot,
+            },
+            id: name,
+        }
+    }
+
+    pub(super) fn compare(&self, other: &Self) -> Ordering {
+        self.provider_rank
+            .cmp(&other.provider_rank)
+            .then_with(|| {
+                self.identity
+                    .provider
+                    .is_none()
+                    .cmp(&other.identity.provider.is_none())
+            })
+            .then_with(|| self.identity.provider.cmp(&other.identity.provider))
+            .then_with(|| self.family_rank.cmp(&other.family_rank))
+            .then_with(|| natural_compare(&self.identity.family, &other.identity.family))
+            .then_with(|| self.class_rank.cmp(&other.class_rank))
+            .then_with(|| natural_compare(&self.identity.class, &other.identity.class))
+            .then_with(|| compare_versions(&other.identity.version, &self.identity.version))
+            .then_with(|| self.variant_rank.cmp(&other.variant_rank))
+            .then_with(|| compare_optional_descending(self.parameter_count, other.parameter_count))
+            .then_with(|| natural_compare(&self.identity.variant, &other.identity.variant))
+            .then_with(|| {
+                compare_optional_descending(self.identity.snapshot, other.identity.snapshot)
+            })
+            .then_with(|| natural_compare(&self.id, &other.id))
+    }
 }
 
-pub(super) fn date_key(value: &str) -> Option<u32> {
-    let date = NaiveDate::parse_from_str(value, "%Y-%m-%d")
+fn captured_variant(captures: &regex::Captures<'_>) -> String {
+    ["variant", "suffix"]
+        .into_iter()
+        .filter_map(|field| captures.name(field))
+        .map(|part| part.as_str().trim_matches('-'))
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// A dated or size-only ID may omit its generation. A reference name can fill
+/// that gap only when the same family rule and class recognize it.
+fn version_from_reference_name(
+    family: &FamilyRule,
+    patterns: &[Regex],
+    class: &str,
+    reference_name: &str,
+) -> Option<Vec<u64>> {
+    let name = reference_name.split('(').next()?.rsplit(':').next()?;
+    let name = name.split_whitespace().collect::<Vec<_>>().join("-");
+    let name = normalize(&name);
+    patterns.iter().find_map(|pattern| {
+        let captures = pattern.captures(&name)?;
+        let version = captures.name("version")?;
+        let (_, reference_class, _) = classify_variant(family, captured_variant(&captures));
+        (reference_class == class).then(|| version_numbers(version.as_str()))
+    })
+}
+
+/// Short release tags are opt-in family captures, never generic version
+/// guesses. A month/day without a reference year retains year zero.
+fn captured_snapshot(
+    captures: &regex::Captures<'_>,
+    release_date: Option<&str>,
+) -> Result<Option<u32>, ()> {
+    let date = if let Some(snapshot) = captures.name("snapshot") {
+        let date = snapshot.as_str();
+        match date.len() {
+            4 => format!("20{}-{}-01", &date[..2], &date[2..]),
+            6 => format!("20{}-{}-{}", &date[..2], &date[2..4], &date[4..]),
+            _ => return Err(()),
+        }
+    } else if let Some(snapshot) = captures.name("snapshot_month") {
+        let (month, year) = snapshot.as_str().split_once('-').ok_or(())?;
+        format!("{year}-{month}-01")
+    } else if let Some(snapshot) = captures.name("snapshot_day") {
+        let date = snapshot.as_str().replace('-', "");
+        if date.len() != 4 {
+            return Err(());
+        }
+        let year = release_date
+            .and_then(date_key)
+            .map_or(0, |date| date / 10_000);
+        format!("{year:04}-{}-{}", &date[..2], &date[2..])
+    } else {
+        return Ok(None);
+    };
+    date_key(&date).map(Some).ok_or(())
+}
+
+/// Parameter counts order sizes within one class, generation and variant.
+/// They are presentation data, not a capability or quality score.
+fn parameter_count(size: &str) -> Option<u64> {
+    let (number, unit) = size.split_at(size.len().checked_sub(1)?);
+    let unit = match unit {
+        "m" => 1_000_000_u64,
+        "b" => 1_000_000_000_u64,
+        "t" => 1_000_000_000_000_u64,
+        _ => return None,
+    };
+    let (experts, number) = number.split_once('x').unwrap_or(("1", number));
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+    let whole = whole.parse::<u64>().ok()?.checked_mul(unit)?;
+    let fraction = if fraction.is_empty() {
+        0
+    } else {
+        fraction
+            .parse::<u64>()
+            .ok()?
+            .checked_mul(unit)?
+            .checked_div(10_u64.checked_pow(fraction.len().try_into().ok()?)?)?
+    };
+    whole
+        .checked_add(fraction)?
+        .checked_mul(experts.parse().ok()?)
+}
+
+fn compare_optional_descending<T: Ord>(left: Option<T>, right: Option<T>) -> Ordering {
+    left.is_some()
+        .cmp(&right.is_some())
+        .then_with(|| right.cmp(&left))
+}
+
+fn join_variants(variant: &str, modifiers: &str) -> String {
+    [variant, modifiers]
+        .into_iter()
+        .map(|part| part.trim_matches('-'))
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+fn classify_variant(family: &FamilyRule, variant: String) -> (usize, String, String) {
+    let matched = family
+        .classes
+        .iter()
+        .enumerate()
+        .flat_map(|(rank, class)| {
+            let variant = variant.as_str();
+            class.aliases.iter().filter_map(move |alias| {
+                segment_position(variant, alias).map(|position| (rank, class, alias, position))
+            })
+        })
+        .max_by_key(|(_, _, alias, _)| alias.len());
+    if let Some((rank, class, alias, position)) = matched {
+        let remaining = [&variant[..position], &variant[position + alias.len()..]]
+            .into_iter()
+            .map(|part| part.trim_matches('-'))
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("-");
+        return (rank, class.id.clone(), remaining);
+    }
+    if family.classes.is_empty() {
+        return (0, "base".into(), variant);
+    }
+    if variant.is_empty() || variant_rank(&family.variants, &variant) < family.variants.len() {
+        if let Some((rank, class)) = family
+            .classes
+            .iter()
+            .enumerate()
+            .find(|(_, class)| class.aliases.is_empty())
+        {
+            return (rank, class.id.clone(), variant);
+        }
+    }
+    (family.classes.len(), variant, String::new())
+}
+
+fn segment_position(text: &str, segment: &str) -> Option<usize> {
+    if segment.is_empty() {
+        return None;
+    }
+    text.match_indices(segment).find_map(|(position, _)| {
+        let end = position + segment.len();
+        ((position == 0 || text.as_bytes()[position - 1] == b'-')
+            && (end == text.len() || text.as_bytes()[end] == b'-'))
+            .then_some(position)
+    })
+}
+
+fn variant_rank(variants: &[String], variant: &str) -> usize {
+    variants
+        .iter()
+        .enumerate()
+        .filter(|(_, known)| {
+            (known.is_empty() && variant.is_empty())
+                || (!known.is_empty() && segment_position(variant, known).is_some())
+        })
+        .max_by_key(|(_, known)| known.len())
+        .map_or(variants.len(), |(rank, _)| rank)
+}
+
+fn version_numbers(version: &str) -> Vec<u64> {
+    version
+        .split(['.', '-', '_'])
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .unwrap_or_default()
+}
+
+fn compare_versions(left: &[u64], right: &[u64]) -> Ordering {
+    (0..left.len().max(right.len()))
+        .map(|index| {
+            left.get(index)
+                .unwrap_or(&0)
+                .cmp(right.get(index).unwrap_or(&0))
+        })
+        .find(|order| *order != Ordering::Equal)
+        .unwrap_or(Ordering::Equal)
+}
+
+/// Compare digit runs numerically, including runs larger than u64. This also
+/// keeps unknown providers/families deterministic across source response orders.
+fn natural_compare(mut left: &str, mut right: &str) -> Ordering {
+    while !left.is_empty() && !right.is_empty() {
+        let left_number = left.as_bytes()[0].is_ascii_digit();
+        let right_number = right.as_bytes()[0].is_ascii_digit();
+        let end = |text: &str, number| {
+            text.find(|ch: char| ch.is_ascii_digit() != number)
+                .unwrap_or(text.len())
+        };
+        let left_end = end(left, left_number);
+        let right_end = end(right, right_number);
+        let left_part = &left[..left_end];
+        let right_part = &right[..right_end];
+        let order = if left_number && right_number {
+            let left_part = left_part.trim_start_matches('0');
+            let right_part = right_part.trim_start_matches('0');
+            left_part
+                .len()
+                .cmp(&right_part.len())
+                .then_with(|| left_part.cmp(right_part))
+        } else {
+            left_part.cmp(right_part)
+        };
+        if order != Ordering::Equal {
+            return order;
+        }
+        left = &left[left_end..];
+        right = &right[right_end..];
+    }
+    left.len().cmp(&right.len())
+}
+
+pub(super) fn normalize(provider_or_model: &str) -> String {
+    provider_or_model.trim().to_ascii_lowercase()
+}
+
+pub(super) fn model_leaf(model_id: &str) -> &str {
+    model_id.rsplit('/').next().unwrap_or(model_id)
+}
+
+pub(super) fn date_key(date_text: &str) -> Option<u32> {
+    let date = NaiveDate::parse_from_str(date_text, "%Y-%m-%d")
         .ok()
         .or_else(|| {
-            let (year, month) = value.split_once('-')?;
+            let (year, month) = date_text.split_once('-')?;
             if month.len() != 2 {
                 return None;
             }

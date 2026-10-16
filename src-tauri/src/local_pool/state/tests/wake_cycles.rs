@@ -41,6 +41,7 @@ fn usage_callback_persists_before_returning() {
             base_url: "https://example.test/v1".into(),
             secret_ref: "source:source_1".into(),
             pricing_provider: None,
+            proxy_id: None,
             official_provider_family: None,
             wire_api: WireApi::Responses,
             protocol_config: Default::default(),
@@ -88,6 +89,7 @@ fn usage_callback_persists_before_returning() {
         requested_reasoning_effort: None,
         effective_reasoning_effort: None,
         wire_api: WireApi::Responses,
+        transport: zenith_relay_core::UsageTransport::Http,
         service_tier: DefaultServiceTier::Standard,
         applied_service_tier: None,
         success: true,
@@ -160,9 +162,11 @@ async fn persisted_passive_quota_defers_the_desktop_poll_without_touching_models
             |_| {
                 Box::pin(async {
                     RefreshResult {
-                        value: Err(crate::local_pool::error::LocalPoolError::invalid_state(
-                            "synthetic read",
-                        )),
+                        refresh_value: Err(
+                            crate::local_pool::error::LocalPoolError::invalid_state(
+                                "synthetic read",
+                            ),
+                        ),
                         outcome: RefreshOutcome::Success,
                     }
                 })
@@ -173,6 +177,7 @@ async fn persisted_passive_quota_defers_the_desktop_poll_without_touching_models
     quota.primary.as_mut().unwrap().observed_at_ms = now;
     quota.primary.as_mut().unwrap().reset_at_ms = None;
     quota.updated_at_ms = Some(now);
+    quota.provider_credits_observed_at_ms = Some(now);
     let mut event = account_usage_event("req-passive", true);
     event.quota_snapshot = Some(quota.clone());
     (state.usage_callback())(event);
@@ -197,6 +202,33 @@ async fn persisted_passive_quota_defers_the_desktop_poll_without_touching_models
     state.refresh.shutdown().await;
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn queued_usage_never_rolls_back_a_newer_credit_read() {
+    let mut account = account_record("account-1");
+    account.account.quota.available_credits_micro_units = Some(20);
+    account.account.quota.provider_credits_available = true;
+    account.account.quota.provider_credits_observed_at_ms = Some(200);
+    account.account.quota.updated_at_ms = Some(200);
+    let mut event = account_usage_event("req-queued-ledger", true);
+    event.quota_snapshot = Some(zenith_relay_core::quota::QuotaSnapshot {
+        available_credits_micro_units: Some(100),
+        provider_credits_available: true,
+        provider_credits_observed_at_ms: Some(100),
+        updated_at_ms: Some(300),
+        ..Default::default()
+    });
+    apply_account_usage_state(&mut account, &event, 300, None, None, false);
+    assert_eq!(account.account.quota.updated_at_ms, Some(300));
+    assert_eq!(
+        account.account.quota.provider_credits_observed_at_ms,
+        Some(200)
+    );
+    assert_eq!(
+        account.account.quota.available_credits_micro_units,
+        Some(20)
+    );
 }
 #[test]
 fn quota_classification_queues_refresh_without_blocking_the_account() {

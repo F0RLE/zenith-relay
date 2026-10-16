@@ -107,12 +107,12 @@ pub async fn preview_remote_account_import_files(
     let Some(documents) = documents else {
         return Ok(None);
     };
-    let payload = serde_json::json!({ "documents": documents });
+    let import_request_payload = serde_json::json!({ "documents": documents });
     let preview = client
         .mutate(
             Method::POST,
             "/accounts/import/batch/preview",
-            Some(&payload),
+            Some(&import_request_payload),
         )
         .await
         .map_err(remote_error)?;

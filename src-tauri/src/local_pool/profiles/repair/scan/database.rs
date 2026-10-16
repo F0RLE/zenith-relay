@@ -11,9 +11,9 @@ pub(in crate::local_pool::profiles::repair) fn collect_history_databases(
     ];
     if sqlite_directory.is_dir() {
         let mut discovered = Vec::new();
-        for entry in fs::read_dir(&sqlite_directory).map_err(io_error)? {
-            let entry = entry.map_err(io_error)?;
-            let path = entry.path();
+        for directory_entry in fs::read_dir(&sqlite_directory).map_err(io_error)? {
+            let directory_entry = directory_entry.map_err(io_error)?;
+            let path = directory_entry.path();
             let metadata = fs::symlink_metadata(&path).map_err(io_error)?;
             if metadata.is_file()
                 && !metadata.file_type().is_symlink()
@@ -184,16 +184,16 @@ pub(in crate::local_pool::profiles::repair) fn scan_database(
     let mut hasher = Sha256::new();
     for (id, provider, rollout_path, _) in &rows {
         hasher.update(b"threads");
-        for value in [id, provider, rollout_path] {
-            hasher.update((value.len() as u64).to_le_bytes());
-            hasher.update(value.as_bytes());
+        for field_text in [id, provider, rollout_path] {
+            hasher.update((field_text.len() as u64).to_le_bytes());
+            hasher.update(field_text.as_bytes());
         }
     }
     for (host_id, thread_id, provider, missing_candidate) in &catalog_rows {
         hasher.update(b"local_thread_catalog");
-        for value in [host_id, thread_id, provider] {
-            hasher.update((value.len() as u64).to_le_bytes());
-            hasher.update(value.as_bytes());
+        for field_text in [host_id, thread_id, provider] {
+            hasher.update((field_text.len() as u64).to_le_bytes());
+            hasher.update(field_text.as_bytes());
         }
         hasher.update(missing_candidate.to_le_bytes());
     }

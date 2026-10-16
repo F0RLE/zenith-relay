@@ -31,6 +31,7 @@ pub enum RelayFolder {
     CrashLogs,
     OperationLogs,
     ProfileBackups,
+    ClaudeDesktopBackups,
     #[serde(rename = "opencode_backups")]
     OpenCodeBackups,
 }
@@ -46,6 +47,7 @@ pub struct UsageExportRow {
     #[serde(default)]
     pub(super) effective_reasoning_effort: Option<String>,
     pub(super) connection: String,
+    pub(super) transport: zenith_relay_core::UsageTransport,
     pub(super) latency_ms: u64,
     pub(super) ttft_ms: Option<u64>,
     pub(super) input_tokens: Option<u64>,
@@ -138,24 +140,26 @@ pub fn open_relay_folder(
     app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> Result<(), CommandError> {
-    let path = match folder {
+    let folder_path = match folder {
         RelayFolder::Data => state.data_root(),
         RelayFolder::Logs => state.logs_root(),
         RelayFolder::ErrorLogs => state.error_logs_root(),
         RelayFolder::CrashLogs => state.crash_logs_root(),
         RelayFolder::OperationLogs => state.operation_logs_root(),
         RelayFolder::ProfileBackups => state.profile_backup_root(),
+        RelayFolder::ClaudeDesktopBackups => state.claude_desktop_backup_root(),
         RelayFolder::OpenCodeBackups => state.opencode_backup_root(),
     };
-    fs::create_dir_all(&path).map_err(io_error)?;
+    fs::create_dir_all(&folder_path).map_err(io_error)?;
     app.opener()
-        .open_path(path.to_string_lossy(), None::<&str>)
+        .open_path(folder_path.to_string_lossy(), None::<&str>)
         .map_err(|error| io_error(error.to_string()))
 }
 
 #[tauri::command]
 pub async fn reset_local_pool_data(state: State<'_, DesktopState>) -> Result<(), CommandError> {
     let _mutation = state.setup_guard().await;
+    super::claude_desktop::restore_connection(&state)?;
     restore_managed_profiles_before_reset(&state).await?;
     state.gateway.stop().await;
     let (source_refs, account_ids, key_refs) = {
@@ -170,6 +174,12 @@ pub async fn reset_local_pool_data(state: State<'_, DesktopState>) -> Result<(),
                 .accounts()
                 .iter()
                 .map(|account| account.account.id.clone())
+                .chain(
+                    store
+                        .account_trash()
+                        .iter()
+                        .map(|entry| entry.record.account.id.clone()),
+                )
                 .collect::<Vec<_>>(),
             store
                 .keys()
@@ -257,6 +267,8 @@ mod tests {
     fn relay_folder_serializes_open_code_backup_directory_name() {
         let folder: RelayFolder = serde_json::from_str("\"opencode_backups\"").unwrap();
         assert!(matches!(folder, RelayFolder::OpenCodeBackups));
+        let folder: RelayFolder = serde_json::from_str("\"claude_desktop_backups\"").unwrap();
+        assert!(matches!(folder, RelayFolder::ClaudeDesktopBackups));
     }
 
     #[test]
@@ -288,6 +300,7 @@ mod tests {
             requested_reasoning_effort: Some("max".into()),
             effective_reasoning_effort: Some("low".into()),
             connection: "account".into(),
+            transport: zenith_relay_core::UsageTransport::Http,
             latency_ms: 1,
             ttft_ms: Some(1),
             input_tokens: Some(1),

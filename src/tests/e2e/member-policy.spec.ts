@@ -162,10 +162,12 @@ for (const [width, height] of [[1160, 760], [840, 560], [740, 760], [640, 720], 
           const rows = await dialog.locator(".source-price-row").evaluateAll((items) => items.map((item) => {
             const name = item.querySelector(".source-price-model")!.getBoundingClientRect();
             const fields = item.querySelector(".source-price-fields")!.getBoundingClientRect();
+            const tier = item.querySelector(".source-price-tier .relay-option-trigger")!.getBoundingClientRect();
             const inputs = [...item.querySelectorAll(".source-price-input")].map((input) => input.getBoundingClientRect());
             const headings = [...item.closest(".source-price-table")!.querySelectorAll(".member-price-grid-head > div > span")].map((heading) => heading.getBoundingClientRect());
             return {
               nameRight: name.right, fieldsLeft: fields.left,
+              tierRight: tier.right,
               centerDelta: Math.abs((name.top + name.bottom - fields.top - fields.bottom) / 2),
               inputTops: inputs.map((input) => input.top),
               inputLefts: inputs.map((input) => input.left),
@@ -174,6 +176,7 @@ for (const [width, height] of [[1160, 760], [840, 560], [740, 760], [640, 720], 
           }));
           for (const row of rows) {
             expect(row.nameRight).toBeLessThanOrEqual(row.fieldsLeft);
+            expect(row.tierRight).toBeLessThanOrEqual(row.fieldsLeft);
             expect(row.centerDelta).toBeLessThanOrEqual(1);
             if (width > 720) {
               expect(Math.max(...row.inputTops) - Math.min(...row.inputTops)).toBeLessThanOrEqual(1);

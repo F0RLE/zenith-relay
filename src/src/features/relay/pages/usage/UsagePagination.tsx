@@ -25,13 +25,13 @@ export function UsagePagination({ page, totalPages, loading, onPageChange }: Usa
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (loading) return;
-    const value = draft.trim();
-    const next = Number(value);
-    if (!/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(next) || next > totalPages) {
+    const trimmedPageDraft = draft.trim();
+    const nextPage = Number(trimmedPageDraft);
+    if (!/^[1-9]\d*$/.test(trimmedPageDraft) || !Number.isSafeInteger(nextPage) || nextPage > totalPages) {
       setInvalid(true);
       return;
     }
-    if (next !== page) onPageChange(next);
+    if (nextPage !== page) onPageChange(nextPage);
   };
 
   return <nav className="usage-pagination" aria-label={t("usage.pagination")}>

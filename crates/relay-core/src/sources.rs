@@ -3,6 +3,7 @@ mod connector;
 mod discovery;
 mod observations;
 mod probe;
+mod services;
 pub use observations::SourceRead;
 mod stats;
 
@@ -25,7 +26,9 @@ pub use discovery::{
     SourceCatalogRecord, SourceDiscovery,
 };
 pub use stats::{
-    fetch_source_provider_stats, read_source_provider_stats, read_source_provider_stats_with_scope,
+    fetch_source_provider_stats, fetch_source_provider_stats_with_proxy,
+    read_source_provider_stats, read_source_provider_stats_with_proxy,
+    read_source_provider_stats_with_scope, read_source_provider_stats_with_scope_and_proxy,
     SourceBalanceKind, SourceProviderStats, SourceStatsAmount, SourceStatsCurrency,
     SourceStatsProvider, SourceStatsStatus,
 };
@@ -66,6 +69,7 @@ pub struct SourceTransportIdentity<'a> {
     pub id: &'a str,
     pub base_url: &'a str,
     pub secret_ref: &'a str,
+    pub proxy_id: Option<&'a str>,
     pub wire_api: WireApi,
     pub protocol_bindings: &'a [SourceProtocolBinding],
     pub protocol_config: &'a SourceProtocolConfig,
@@ -85,14 +89,15 @@ impl SourceTransportRecord for SourceTransportIdentity<'_> {
 
 /// A hot policy update is safe only when every source keeps the same runtime.
 pub fn source_runtime_policy_compatible<T: SourceTransportRecord>(
-    previous: &[T],
-    next: &[T],
+    previous_sources: &[T],
+    updated_sources: &[T],
 ) -> bool {
-    previous.len() == next.len()
-        && previous.iter().all(|source| {
-            let source = source.transport_identity();
-            next.iter()
-                .any(|candidate| candidate.transport_identity() == source)
+    previous_sources.len() == updated_sources.len()
+        && previous_sources.iter().all(|source| {
+            let transport_identity = source.transport_identity();
+            updated_sources
+                .iter()
+                .any(|candidate| candidate.transport_identity() == transport_identity)
         })
 }
 

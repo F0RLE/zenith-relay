@@ -9,7 +9,7 @@ import { QuotaStack } from "./Ui";
 export function AccountQuotaPanel({ account, nowMs, onReauthenticate }: { account: AccountSummary; nowMs: number; onReauthenticate: (account: AccountSummary) => void }) {
   const { t } = useTranslation();
   const status = accountQuotaRefreshState(account);
-  const hasQuota = Boolean(account.quota.primary || account.quota.secondary || account.quota.supplemental?.some((item) => !isFastSupplementalQuota(item)));
+  const hasQuota = Boolean(account.quota.primary || account.quota.secondary || account.quota.supplemental?.some((supplementalQuota) => !isFastSupplementalQuota(supplementalQuota)));
 
   if (status === "requires_reauth") {
     return <button type="button" className="account-quota-refresh-state requires_reauth is-action" onClick={() => onReauthenticate(account)}><LogIn aria-hidden /><span>{t("accounts.quotaRefreshStatus.requires_reauth")}</span></button>;

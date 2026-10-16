@@ -8,9 +8,11 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+mod credential;
 mod quota;
 mod source;
 
+pub use credential::{CredentialDiagnostics, CredentialRecovery, CredentialStatus};
 pub use quota::{api_equivalent_projection_window, QuotaWindowUsage};
 pub use source::{SourceRefreshState, SourceSummary, SourceSummaryRecord};
 
@@ -57,18 +59,23 @@ pub struct RemoteAccountLocation {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountSummary {
+    #[serde(default)]
+    pub oauth_client_kind: crate::providers::chatgpt::OAuthClientKind,
     pub id: String,
     pub label: String,
     pub identity_hint: String,
+    /// Hashed provider ledger identity, independent of the issuing OAuth client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_balance_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_family: Option<String>,
-    /// The account can expose the explicit Excel/Basis Points transport in
-    /// addition to native Responses. This is presentation metadata and does
-    /// not create another scheduler candidate.
+    /// Basis Points is available only for an Excel/Basis Points OAuth connection.
     #[serde(default)]
     pub basis_points_available: bool,
     #[serde(default)]
     pub basis_points_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_diagnostics: Option<CredentialDiagnostics>,
     pub enabled: bool,
     #[serde(default)]
     pub in_pool: bool,
@@ -115,6 +122,7 @@ pub struct AccountSummary {
 pub fn model_has_native_account_route(accounts: &[AccountSummary], model: &str) -> bool {
     accounts.iter().any(|account| {
         account.in_pool
+            && account.oauth_client_kind == crate::providers::chatgpt::OAuthClientKind::Codex
             && account
                 .models
                 .iter()

@@ -85,11 +85,14 @@ fn native_catalog_test_runtime_with_accounts(
         account_ids
             .iter()
             .map(|account_id| RuntimeChatGptAccount {
+                oauth_client_kind: Default::default(),
                 id: (*account_id).into(),
                 source_id: "chatgpt".into(),
                 chatgpt_account_id: "chatgpt-account".into(),
+                chatgpt_user_id: None,
                 responses_url: "https://example.test/v1/responses".into(),
                 basis_points_enabled: false,
+                basis_points_headers: None,
                 models: models.iter().map(|model| (*model).into()).collect(),
                 enabled: true,
                 draining: false,
@@ -107,6 +110,7 @@ fn native_catalog_test_runtime_with_accounts(
                 cooldowns: Default::default(),
                 consecutive_failures: 0,
                 proxy: None,
+                proxy_timezone: None,
             })
             .collect(),
         vec![RuntimeMixedLocalKey {

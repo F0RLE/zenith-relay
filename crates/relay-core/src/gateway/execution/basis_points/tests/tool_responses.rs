@@ -2,6 +2,43 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn response_restores_client_metadata_instead_of_transport_metadata() {
+    for status in ["completed", "incomplete"] {
+        for metadata in [
+            None,
+            Some(json!({"user_id":"synthetic-user","request_kind":"synthetic"})),
+        ] {
+            let mut request = request_with_tool();
+            if let Some(metadata) = &metadata {
+                request["metadata"] = metadata.clone();
+            }
+            let response = json!({
+                "id":"resp_metadata",
+                "status":status,
+                "metadata":{"task_id":"transport-task","turn_id":"transport-turn","agent_iteration":"1"},
+                "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"OK","annotations":[]}]}]
+            });
+            let translated =
+                translate_response(&serde_json::to_vec(&response).unwrap(), &request).unwrap();
+            let translated_value: Value = serde_json::from_slice(&translated).unwrap();
+            let expected = metadata.unwrap_or_else(|| json!({}));
+            assert_eq!(translated_value["metadata"], expected);
+            let stream = String::from_utf8(synthetic_stream(&translated).unwrap()).unwrap();
+            let response_events = stream
+                .lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+                .filter_map(|event| event.get("response").cloned())
+                .collect::<Vec<_>>();
+            assert_eq!(response_events.len(), 3);
+            assert!(response_events
+                .iter()
+                .all(|event| event["metadata"] == expected));
+        }
+    }
+}
+
+#[test]
 fn response_translates_outer_call_to_client_tool_call() {
     let request = request_with_tool();
     let body = json!({
@@ -36,6 +73,162 @@ fn response_translates_v014_direct_reference_envelope() {
     let translated: Value = serde_json::from_slice(&translated).unwrap();
     assert_eq!(translated["output"][0]["name"], "exec_command");
     assert_eq!(translated["output"][0]["arguments"], "{\"cmd\":\"pwd\"}");
+}
+
+#[test]
+fn reference_envelope_preserves_json_escaping_and_distinguishes_argument_failures() {
+    let request = json!({
+        "model":"gpt-test","input":"Synthetic tool request",
+        "tools":[{"type":"function","name":"write_file","parameters":{
+            "type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},
+            "required":["path","content"],"additionalProperties":false
+        }}]
+    });
+    let envelope = |code: &str| {
+        serde_json::to_vec(&json!({
+            "id":"resp_synthetic","status":"completed","output":[{
+                "type":"function_call","id":"fc_outer","call_id":"call_synthetic","name":TRANSPORT_TOOL,
+                "arguments":json!({"references":["write_file"],"code":code}).to_string()
+            }]
+        }))
+        .unwrap()
+    };
+    let arguments = json!({"path":"C:\\synthetic\\quoted\"file.svg","content":"<svg>\n\t<text>\"test\" \\ &amp;</text>\r\n</svg>"});
+    let translated = translate_response(&envelope(&arguments.to_string()), &request).unwrap();
+    let translated: Value = serde_json::from_slice(&translated).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(translated["output"][0]["arguments"].as_str().unwrap())
+            .unwrap(),
+        arguments
+    );
+    for (code, parameter) in [
+        (
+            "{\"path\":\"synthetic-private",
+            "output.run_officejs.args.json",
+        ),
+        ("[\"synthetic-private\"]", "output.run_officejs.args.object"),
+        (
+            "{\"path\":\"synthetic-private\"}",
+            "output.run_officejs.args.schema",
+        ),
+        (
+            "{\"path\":\"synthetic-private\",\"content\":5}",
+            "output.run_officejs.args.schema",
+        ),
+    ] {
+        let error = translate_response(&envelope(code), &request).unwrap_err();
+        assert_eq!(error.parameter(), Some(parameter));
+        if parameter == "output.run_officejs.args.schema" {
+            assert!(error.message().contains("JSON Schema"));
+        }
+        assert!(!error.message().contains("synthetic-private"));
+    }
+}
+
+#[test]
+fn response_translates_direct_function_call() {
+    let request = request_with_tool();
+    let translated =
+        translate_response(&tool_response(r#"exec_command({"cmd":"pwd"})"#), &request).unwrap();
+    let translated: Value = serde_json::from_slice(&translated).unwrap();
+    assert_eq!(translated["output"][0]["name"], "exec_command");
+    assert_eq!(translated["output"][0]["arguments"], "{\"cmd\":\"pwd\"}");
+}
+
+#[test]
+fn response_translates_direct_function_call_with_return_await_prefix() {
+    let request = request_with_tool();
+    let translated = translate_response(
+        &tool_response(r#"return await exec_command({"cmd":"pwd"})"#),
+        &request,
+    )
+    .unwrap();
+    let translated: Value = serde_json::from_slice(&translated).unwrap();
+    assert_eq!(translated["output"][0]["name"], "exec_command");
+    assert_eq!(translated["output"][0]["arguments"], "{\"cmd\":\"pwd\"}");
+}
+
+#[test]
+fn response_translates_namespaced_direct_function_call() {
+    let request = json!({
+        "model": "gpt-6-astra",
+        "input": "Inspect the repo",
+        "tools": [{
+            "type": "namespace",
+            "name": "functions",
+            "tools": [{
+                "type": "function",
+                "name": "exec",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"cmd": {"type": "string"}},
+                    "required": ["cmd"]
+                }
+            }]
+        }]
+    });
+    let translated =
+        translate_response(&tool_response(r#"functions.exec({"cmd":"pwd"})"#), &request).unwrap();
+    let translated: Value = serde_json::from_slice(&translated).unwrap();
+    assert_eq!(translated["output"][0]["name"], "exec");
+    assert_eq!(translated["output"][0]["namespace"], "functions");
+    assert_eq!(translated["output"][0]["arguments"], "{\"cmd\":\"pwd\"}");
+}
+
+#[test]
+fn response_translates_direct_custom_call() {
+    let request = json!({
+        "model": "gpt-6-astra",
+        "input": "Apply the patch",
+        "tools": [{
+            "type": "custom",
+            "name": "apply_patch",
+            "description": "Apply a patch",
+            "format": {"type": "text"}
+        }]
+    });
+    let translated = translate_response(
+        &tool_response(r#"apply_patch("diff --git a/a b/a")"#),
+        &request,
+    )
+    .unwrap();
+    let translated: Value = serde_json::from_slice(&translated).unwrap();
+    assert_eq!(translated["output"][0]["type"], "custom_tool_call");
+    assert_eq!(translated["output"][0]["name"], "apply_patch");
+    assert_eq!(translated["output"][0]["input"], "diff --git a/a b/a");
+}
+
+#[test]
+fn direct_tool_call_must_be_a_single_complete_call() {
+    let request = request_with_tool();
+    for code in [
+        r#"functions.exec_command({"cmd":"pwd"}) trailing"#,
+        r#"functions.exec_command({"cmd":"pwd"}); functions.exec_command({"cmd":"ls"})"#,
+    ] {
+        let error = translate_response(&tool_response(code), &request).unwrap_err();
+        assert_eq!(error.parameter(), Some("output.run_officejs.code"));
+    }
+}
+
+#[test]
+fn direct_function_call_arguments_must_be_an_object() {
+    for code in [
+        r#"exec_command("pwd")"#,
+        r#"exec_command("{\"cmd\":\"pwd\"}")"#,
+    ] {
+        let error = translate_response(&tool_response(code), &request_with_tool()).unwrap_err();
+        assert_eq!(error.parameter(), Some("output.run_officejs.args.object"));
+    }
+}
+
+#[test]
+fn direct_unknown_tool_call_is_rejected_by_the_catalog() {
+    let error = translate_response(
+        &tool_response(r#"unknown_tool({"cmd":"pwd"})"#),
+        &request_with_tool(),
+    )
+    .unwrap_err();
+    assert_eq!(error.parameter(), Some("output.run_officejs.tool"));
 }
 
 #[test]
@@ -92,6 +285,47 @@ fn tool_response(code: &str) -> Vec<u8> {
 }
 
 #[test]
+fn incomplete_json_response_preserves_usage_but_never_releases_transport_tools() {
+    for tool_choice in [json!("auto"), json!("required")] {
+        let mut request = request_with_tool();
+        request["tool_choice"] = tool_choice;
+        let mut response: Value =
+            serde_json::from_slice(&tool_response("invalid-private-code")).unwrap();
+        response["status"] = json!("incomplete");
+        response["incomplete_details"] = json!({"reason":"max_output_tokens"});
+        response["usage"] = json!({"input_tokens":17,"output_tokens":4});
+        response["output"].as_array_mut().unwrap().insert(
+            0,
+            json!({
+                "type":"message","id":"msg_partial","role":"assistant",
+                "content":[{"type":"output_text","text":"Partial text"}]
+            }),
+        );
+        let translated =
+            translate_response(&serde_json::to_vec(&response).unwrap(), &request).unwrap();
+        let translated: Value = serde_json::from_slice(&translated).unwrap();
+        assert_eq!(translated["status"], "incomplete");
+        assert_eq!(translated["output"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            translated["output"][0]["content"][0]["text"],
+            "Partial text"
+        );
+        assert_eq!(translated["usage"], response["usage"]);
+        assert_eq!(
+            translated["incomplete_details"],
+            response["incomplete_details"]
+        );
+        let wire =
+            String::from_utf8(synthetic_stream(&serde_json::to_vec(&translated).unwrap()).unwrap())
+                .unwrap();
+        assert!(wire.contains("response.incomplete"));
+        assert!(!wire.contains("function_call"));
+        assert!(!wire.contains("run_officejs"));
+        assert!(!wire.contains("invalid-private-code"));
+    }
+}
+
+#[test]
 fn malformed_tool_code_is_classified_without_exposing_its_contents() {
     let code = r#"{"tool":"exec_command","args":{"cmd":"echo "private""}}"#;
     let error = translate_response(&tool_response(code), &request_with_tool()).unwrap_err();
@@ -104,7 +338,40 @@ fn malformed_tool_code_is_classified_without_exposing_its_contents() {
 fn function_tool_arguments_must_be_an_object() {
     let code = r#"{"tool":"exec_command","args":"pwd"}"#;
     let error = translate_response(&tool_response(code), &request_with_tool()).unwrap_err();
-    assert_eq!(error.parameter(), Some("output.run_officejs.args"));
+    assert_eq!(error.parameter(), Some("output.run_officejs.args.json"));
+}
+
+#[test]
+fn serial_tool_requests_do_not_return_multiple_client_tool_calls() {
+    let mut request = request_with_tool();
+    request["parallel_tool_calls"] = json!(false);
+    assert!(translate_response(
+        &tool_response(r#"{"tool":"exec_command","args":{"cmd":"pwd"}}"#),
+        &request
+    )
+    .is_ok());
+    let envelope = |call_id: &str, command: &str| {
+        json!({
+            "type": "function_call",
+            "id": format!("fc_{call_id}"),
+            "call_id": call_id,
+            "name": TRANSPORT_TOOL,
+            "arguments": json!({
+                "code": json!({"tool": "exec_command", "args": {"cmd": command}}).to_string()
+            }).to_string()
+        })
+    };
+    let body = serde_json::to_vec(&json!({
+        "id": "resp_1",
+        "status": "completed",
+        "output": [envelope("call_1", "pwd"), envelope("call_2", "ls")]
+    }))
+    .unwrap();
+    let error = translate_response(&body, &request).unwrap_err();
+    assert_eq!(
+        error.parameter(),
+        Some("output.run_officejs.parallel_tool_calls")
+    );
 }
 
 #[test]
@@ -130,18 +397,18 @@ fn ambiguous_namespace_tool_name_is_rejected() {
 }
 
 #[test]
-fn additional_tools_replace_earlier_definitions_and_keep_namespaces() {
+fn current_tools_override_history_and_keep_namespaces() {
     let request = json!({
         "model": "gpt-6-astra",
         "tools": [{"type":"namespace","name":"functions","tools":[
-            {"type":"function","name":"exec","description":"OLD_DEFINITION"}
+            {"type":"custom","name":"exec","description":"LATEST_DEFINITION","format":{"type":"text"}}
         ]}],
         "input": [
             {"type":"additional_tools","tools":[{"type":"namespace","name":"clock","tools":[
                 {"type":"function","name":"sleep"}
             ]}]},
             {"type":"additional_tools","tools":[{"type":"namespace","name":"functions","tools":[
-                {"type":"custom","name":"exec","description":"LATEST_DEFINITION","format":{"type":"text"}}
+                {"type":"function","name":"exec","description":"OLD_DEFINITION"}
             ]}]},
             {"role":"user","content":[{"type":"input_text","text":"Run a command"}]}
         ],
@@ -457,7 +724,7 @@ fn web_search_ids_keep_the_ws_prefix_when_history_is_shrunk() {
 }
 
 #[test]
-fn maximum_reasoning_stays_on_the_first_basis_points_attempt() {
+fn maximum_reasoning_and_ciphertext_stay_on_the_first_basis_points_attempt() {
     let request = json!({
         "model": "gpt-6-luna",
         "reasoning": {"effort": "max"},
@@ -485,16 +752,6 @@ fn maximum_reasoning_stays_on_the_first_basis_points_attempt() {
         reasoning["summary"][0]["text"],
         "Checked the previous result."
     );
-
-    let mut retry = request;
-    assert!(drop_foreign_encrypted_context(&mut retry));
-    let retried = prepare_request(&retry).unwrap();
-    assert_eq!(retried["reasoning_effort"], "xhigh");
-    assert!(retried["input"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|item| item["type"] != "reasoning"));
 }
 
 #[test]

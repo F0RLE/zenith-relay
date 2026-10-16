@@ -33,6 +33,9 @@ impl LocalPoolStore {
                 gateway.model_service_tier_overrides,
             )
             .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+        gateway.model_context_policies =
+            zenith_relay_core::normalize_model_context_policies(gateway.model_context_policies)
+                .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
         gateway.model_display_order =
             zenith_relay_core::normalize_model_ids(gateway.model_display_order);
         gateway.image_base_model = normalize_image_base_model(gateway.image_base_model)
@@ -46,14 +49,14 @@ impl LocalPoolStore {
         let revisions = self
             .refresh_revisions
             .with_gateway(&self.gateway, &gateway)?;
-        let mut values = vec![(STATE_GATEWAY, persistence::serialize_state(&gateway)?)];
+        let mut state_entries = vec![(STATE_GATEWAY, persistence::serialize_state(&gateway)?)];
         if revisions != self.refresh_revisions {
-            values.push((
+            state_entries.push((
                 STATE_REFRESH_REVISIONS,
                 persistence::serialize_state(&revisions)?,
             ));
         }
-        self.database.replace_state_json(&values)?;
+        self.database.replace_state_json(&state_entries)?;
         let refresh_changed = revisions != self.refresh_revisions;
         self.gateway = gateway;
         self.refresh_revisions = revisions;
@@ -99,6 +102,7 @@ impl LocalPoolStore {
         keys: Vec<LocalGatewayKeyRecord>,
         operation: Option<OwnershipOperationRecord>,
     ) -> Result<()> {
+        super::super::account_trash::validate_inventory(&accounts, &self.account_trash)?;
         if accounts.len() > MAX_LOCAL_ACCOUNTS {
             return Err(LocalPoolError::new(
                 ErrorCode::InvalidState,
@@ -137,12 +141,20 @@ impl LocalPoolStore {
     }
 
     pub fn set_gateway_enabled(&mut self, enabled: bool) -> Result<()> {
-        let mut next = self.gateway.clone();
-        next.enabled = enabled;
-        self.replace_gateway(next)
+        let mut updated_gateway = self.gateway.clone();
+        updated_gateway.enabled = enabled;
+        self.replace_gateway(updated_gateway)
     }
 
     pub fn reset_local_records(&mut self) -> Result<()> {
+        let trashed_ids = self
+            .account_trash
+            .iter()
+            .map(|entry| entry.record.account.id.clone())
+            .collect::<Vec<_>>();
+        if !trashed_ids.is_empty() {
+            self.purge_trashed_accounts(&trashed_ids)?;
+        }
         self.replace_gateway(GatewaySettings::default())?;
         self.replace_all_records(
             Vec::new(),

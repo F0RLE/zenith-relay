@@ -37,11 +37,11 @@ pub async fn profile_credential(
         })?;
     if !key.enabled {
         let build = state.lock_runtime_rebuild().await;
-        let old = key.clone();
+        let previous_key = key.clone();
         key.enabled = true;
         state.store.save_key(&key).map_err(store_error)?;
         build
-            .rebuild_or_rollback(&state, || state.store.save_key(&old))
+            .rebuild_or_rollback(&state, || state.store.save_key(&previous_key))
             .await
             .map_err(runtime_error)?;
     }
@@ -61,7 +61,7 @@ pub async fn prepare_profile_key_rotation(
     let _configuration = state.configuration_lock.lock().await;
     let build = state.lock_runtime_rebuild().await;
     let base_url = profile_gateway_base_url(&state)?;
-    let current = state
+    let current_gateway_key = state
         .store
         .keys()
         .map_err(store_error)?
@@ -79,18 +79,18 @@ pub async fn prepare_profile_key_rotation(
     );
     let secret_ref = format!("key:{rotation_id}");
     let secret = generate_pool_key();
-    let mut pending = current;
-    pending.id = rotation_id.clone();
-    pending.label = "ChatGPT pending rotation".to_string();
-    pending.enabled = true;
-    pending.secret_ref = secret_ref.clone();
-    pending.created_at_ms = now_ms();
-    pending.last_used_at_ms = None;
+    let mut pending_rotation_key = current_gateway_key;
+    pending_rotation_key.id = rotation_id.clone();
+    pending_rotation_key.label = "ChatGPT pending rotation".to_string();
+    pending_rotation_key.enabled = true;
+    pending_rotation_key.secret_ref = secret_ref.clone();
+    pending_rotation_key.created_at_ms = now_ms();
+    pending_rotation_key.last_used_at_ms = None;
     state
         .vault
         .save(&secret_ref, &secret)
         .map_err(vault_error)?;
-    if let Err(error) = state.store.save_key(&pending) {
+    if let Err(error) = state.store.save_key(&pending_rotation_key) {
         let _ = state.vault.delete(&secret_ref);
         return Err(store_error(error));
     }
@@ -123,7 +123,7 @@ pub async fn commit_profile_key_rotation(
     let _configuration = state.configuration_lock.lock().await;
     let build = state.lock_runtime_rebuild().await;
     let keys = state.store.keys().map_err(store_error)?;
-    let current = keys
+    let current_gateway_key = keys
         .iter()
         .find(|key| key.id == SYSTEM_GATEWAY_KEY_ID)
         .cloned()
@@ -151,9 +151,9 @@ pub async fn commit_profile_key_rotation(
                 "profile credential rotation was not found",
             )
         })?;
-    let old_secret = state
+    let previous_secret = state
         .vault
-        .load(&current.secret_ref)
+        .load(&current_gateway_key.secret_ref)
         .map_err(vault_error)?
         .ok_or_else(|| {
             ManagementError::internal(
@@ -165,10 +165,13 @@ pub async fn commit_profile_key_rotation(
     // runtime. Retire it before changing the vault so an already-admitted
     // request cannot dispatch under a revoked key during the rebuild window.
     state.replace_runtime(None).map_err(runtime_error)?;
-    if let Err(error) = state.vault.save(&current.secret_ref, &new_secret) {
+    if let Err(error) = state
+        .vault
+        .save(&current_gateway_key.secret_ref, &new_secret)
+    {
         build
             .rollback_and_rebuild(&state, || {
-                restore_profile_rotation(&state, &current, &old_secret, &rotations)
+                restore_profile_rotation(&state, &current_gateway_key, &previous_secret, &rotations)
             })
             .await
             .map_err(|restore| runtime_error(format!("{error}; {restore}")))?;
@@ -178,7 +181,12 @@ pub async fn commit_profile_key_rotation(
         if let Err(error) = state.store.delete_key(&key.id) {
             build
                 .rollback_and_rebuild(&state, || {
-                    restore_profile_rotation(&state, &current, &old_secret, &rotations)
+                    restore_profile_rotation(
+                        &state,
+                        &current_gateway_key,
+                        &previous_secret,
+                        &rotations,
+                    )
                 })
                 .await
                 .map_err(|restore| runtime_error(format!("{error}; {restore}")))?;
@@ -187,7 +195,12 @@ pub async fn commit_profile_key_rotation(
         if let Err(error) = state.vault.delete(&key.secret_ref) {
             build
                 .rollback_and_rebuild(&state, || {
-                    restore_profile_rotation(&state, &current, &old_secret, &rotations)
+                    restore_profile_rotation(
+                        &state,
+                        &current_gateway_key,
+                        &previous_secret,
+                        &rotations,
+                    )
                 })
                 .await
                 .map_err(|restore| runtime_error(format!("{error}; {restore}")))?;
@@ -196,7 +209,7 @@ pub async fn commit_profile_key_rotation(
     }
     build
         .rebuild_or_rollback(&state, || {
-            restore_profile_rotation(&state, &current, &old_secret, &rotations)
+            restore_profile_rotation(&state, &current_gateway_key, &previous_secret, &rotations)
         })
         .await
         .map_err(runtime_error)?;
@@ -265,10 +278,10 @@ fn profile_gateway_base_url(state: &AppState) -> Result<String, ManagementError>
     Ok(snapshot.gateway.base_url)
 }
 
-fn validate_profile_rotation_id(id: &str) -> Result<(), ManagementError> {
-    if id.len() <= PROFILE_KEY_ROTATION_PREFIX.len()
-        || !id.starts_with(PROFILE_KEY_ROTATION_PREFIX)
-        || !zenith_relay_core::is_ascii_token(id, 128)
+fn validate_profile_rotation_id(rotation_id: &str) -> Result<(), ManagementError> {
+    if rotation_id.len() <= PROFILE_KEY_ROTATION_PREFIX.len()
+        || !rotation_id.starts_with(PROFILE_KEY_ROTATION_PREFIX)
+        || !zenith_relay_core::is_ascii_token(rotation_id, 128)
     {
         return Err(ManagementError::validation(
             error_codes::PROFILE_ROTATION_INVALID,
@@ -279,11 +292,13 @@ fn validate_profile_rotation_id(id: &str) -> Result<(), ManagementError> {
 }
 fn restore_profile_rotation(
     state: &AppState,
-    current: &GatewayKeyRecord,
-    current_secret: &str,
+    original_key: &GatewayKeyRecord,
+    original_secret: &str,
     rotations: &[(GatewayKeyRecord, Option<String>)],
 ) -> Result<(), String> {
-    state.vault.save(&current.secret_ref, current_secret)?;
+    state
+        .vault
+        .save(&original_key.secret_ref, original_secret)?;
     for (key, secret) in rotations {
         if let Some(secret) = secret.as_deref() {
             state.vault.save(&key.secret_ref, secret)?;

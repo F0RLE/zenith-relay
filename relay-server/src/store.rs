@@ -1,3 +1,4 @@
+mod account_trash;
 mod affinity;
 mod automations;
 mod configuration;

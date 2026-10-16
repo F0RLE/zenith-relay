@@ -79,12 +79,12 @@ describe("automation model", () => {
     expect(availableAutomationModels(gateway, [first, second], "account_ids")).toEqual(["gpt-5.4"]);
   });
 
-  test("validates selector state and resolves a stale model to the first available one", () => {
+  test("validates selector state without replacing a saved unavailable model", () => {
     const pool = [account("one")];
     expect(automationAccountSelectionValid("all_eligible", pool, [], pool)).toBe(true);
     expect(automationAccountSelectionValid("account_ids", pool, ["one"], pool)).toBe(true);
     expect(automationAccountSelectionValid("account_ids", pool, ["missing"], [])).toBe(false);
-    expect(resolveAutomationModel(["gpt-5.4"], "removed")).toBe("gpt-5.4");
+    expect(resolveAutomationModel(["gpt-5.4"], "removed")).toBe("");
     expect(automationFormValid(" Name ", true, true, "gpt-5.4")).toBe(true);
     expect(automationFormValid("", true, false, "")).toBe(false);
     expect(automationFormValid("Countdown", true, automationType("quota_full").requiresModel, "")).toBe(false);
@@ -94,7 +94,7 @@ describe("automation model", () => {
   test("builds weekly reset payloads with automatic secondary execution", () => {
     const submission = buildAutomationSubmission({
       task: null,
-      name: "Weekly reset",
+      automationName: "Weekly reset",
       triggerKind: "weekly",
       selectorKind: "account_ids",
       accountIds: ["one"],
@@ -127,7 +127,7 @@ describe("automation model", () => {
       createdAtMs: 1,
       updatedAtMs: 2,
     };
-    const submission = buildAutomationSubmission({ task, name: "New", triggerKind: "quota_full", selectorKind: "all_eligible", accountIds: [], selectedModel: "gpt-5.4", nowMs: 5 });
+    const submission = buildAutomationSubmission({ task, automationName: "New", triggerKind: "quota_full", selectorKind: "all_eligible", accountIds: [], selectedModel: "gpt-5.4", nowMs: 5 });
     expect(submission.operationId).toBe("automation-update-task-1");
     expect(submission.base).toMatchObject({ name: "New", enabled: false, executionPolicy: "automatic", jitterSeconds: 4, maxAttemptsPerCycle: 3 });
     expect(submission.remoteInput).toMatchObject({ id: "task-1", createdAtMs: 1, updatedAtMs: 5 });

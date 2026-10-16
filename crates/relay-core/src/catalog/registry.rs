@@ -83,6 +83,12 @@ impl ModelRegistry {
             let Some(candidate) = scheduler.candidate(&registered.id) else {
                 continue;
             };
+            // A member outside this key's scope cannot establish the order of
+            // models later supplied by an accessible member. Keep the full
+            // source sequence below so protocol splitting does not reorder it.
+            if !candidate.is_discovery_visible(scope) {
+                continue;
+            }
             for model in &registered.models {
                 // Route grouping must not change the source catalog order.
                 let normalized = super::model_id_key(model);
@@ -114,6 +120,7 @@ mod tests {
             source_id: source_id.to_string(),
             account_id: None,
             protocol: WireApi::Responses,
+            model_protocols: BTreeMap::new(),
             enabled: true,
             draining: false,
             priority: 0,
@@ -124,6 +131,7 @@ mod tests {
             quota: CandidateQuota::Unknown,
             provider_credits_micro_units: None,
             provider_credits_unlimited: false,
+            provider_credits_observed_at_ms: None,
             quota_updated_at_ms: None,
             quota_reset_at_ms: None,
             cooldowns: BTreeMap::new(),

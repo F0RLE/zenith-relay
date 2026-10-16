@@ -4,14 +4,14 @@ use crate::local_pool::{
     error::{ErrorCode, LocalPoolError},
     state::DesktopState,
 };
-use tauri::State;
+use tauri::{AppHandle, State};
 use zenith_relay_core::{
     protocol::complete_model_display_order, ApiModelPriceOverride, DefaultServiceTier,
 };
 
 pub(super) use zenith_relay_core::protocol::{
-    SetModelEnabledInput, SetModelOrderInput as SetModelDisplayOrderInput, SetModelPriceInput,
-    SetModelServiceTierInput,
+    SetModelContextInput, SetModelEnabledInput, SetModelOrderInput as SetModelDisplayOrderInput,
+    SetModelPriceInput, SetModelServiceTierInput,
 };
 
 pub(super) async fn set_local_model_enabled(
@@ -21,14 +21,14 @@ pub(super) async fn set_local_model_enabled(
     let _mutation = state.setup_guard().await;
     let canonical = super::canonical_pool_model(&state, &input.model_id)?;
     let mut gateway = state.store()?.gateway().clone();
-    let previous = gateway.hidden_models.clone();
+    let previous_hidden_models = gateway.hidden_models.clone();
     gateway
         .hidden_models
         .retain(|model| !model.eq_ignore_ascii_case(&canonical));
     if !input.enabled {
         gateway.hidden_models.push(canonical);
     }
-    if gateway.hidden_models == previous {
+    if gateway.hidden_models == previous_hidden_models {
         return Ok(());
     }
     let hidden = gateway.hidden_models.clone();
@@ -57,6 +57,10 @@ pub(super) async fn set_local_model_price(
     let mut gateway = old_gateway.clone();
     let key = zenith_relay_core::model_id_key(&canonical);
     if let Some(price) = price {
+        let price = gateway
+            .model_price_overrides
+            .get(&key)
+            .map_or(price, |previous| previous.with_base_prices(price));
         gateway.model_price_overrides.insert(key, price);
     } else {
         gateway.model_price_overrides.remove(&key);
@@ -76,14 +80,19 @@ pub(super) async fn set_local_model_service_tier(
     let canonical = super::canonical_pool_model(&state, &input.model_id)?;
     let runtime = state.gateway.runtime().await;
     if input.service_tier != DefaultServiceTier::Standard
-        && !state
-            .model_metadata_catalog()
-            .service_tiers_for(&canonical)
-            .contains(&input.service_tier)
+        && !super::super::state::build_local_runtime_state(&state)
+            .await?
+            .gateway
+            .models
+            .iter()
+            .any(|model| {
+                model.id.eq_ignore_ascii_case(&canonical)
+                    && model.speed_tiers.contains(&input.service_tier)
+            })
     {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
-            "requested service tier is not available under the Relay model-family policy",
+            "requested service tier is not supported by the model and configured routes",
         )
         .into());
     }
@@ -105,6 +114,42 @@ pub(super) async fn set_local_model_service_tier(
             return Err(LocalPoolError::invalid_state(error).into());
         }
     }
+    Ok(())
+}
+
+pub(super) async fn set_local_model_context(
+    input: SetModelContextInput,
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> CommandResult<()> {
+    input
+        .context_policy
+        .validate()
+        .map_err(LocalPoolError::invalid_state)?;
+    let _mutation = state.setup_guard().await;
+    let canonical = super::canonical_pool_model(&state, &input.model_id)?;
+    let key = zenith_relay_core::model_id_key(&canonical);
+    let old_gateway = state.store()?.gateway().clone();
+    let mut gateway = old_gateway.clone();
+    gateway
+        .model_context_policies
+        .insert(key, input.context_policy);
+    if gateway != old_gateway {
+        state.store()?.replace_gateway(gateway.clone())?;
+        if let Some(runtime) = state.gateway.runtime().await {
+            if let Err(error) =
+                runtime.set_model_context_policies(gateway.model_context_policies.clone())
+            {
+                state.store()?.replace_gateway(old_gateway)?;
+                return Err(LocalPoolError::invalid_state(error).into());
+            }
+        }
+    }
+    drop(_mutation);
+
+    // Catalog-backed clients read context fields from their managed model list.
+    // Refresh that projection after the runtime accepts the new policy.
+    super::super::runtime::refresh_active_codex_catalog_in_background(app);
     Ok(())
 }
 

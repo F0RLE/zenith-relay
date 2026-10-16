@@ -10,15 +10,204 @@ info:
     production routing/business logic. Management snapshots, usage, source
     statistics, and diagnostics are redacted; raw credentials, cookies,
     authorization headers, prompts, and provider response bodies never appear
-    in those management responses. The /v1 data plane may carry the user's
+    in those management responses. Explicit account export is a separate
+    credential-bearing operation whose response uses Cache-Control no-store.
+    The /v1 data plane may carry the user's
     request and provider response as required by the selected API contract.
-    Runtime JSON generation and account compact/search bodies accept identity,
-    gzip or zstd Content-Encoding with 64 MiB limits on both wire and decoded
-    bodies. Stacked encodings are unsupported. This does not apply to multipart
-    image edits or management requests.
+    Relay does not reject JSON generation, image upload, or image edit for size.
+    The provider can still reject the payload. JSON generation and account
+    compact/search accept identity, gzip, or zstd. Stacked encodings are
+    unsupported, and the zstd window stays at 64 MiB. Management requests keep
+    their own body limit.
 servers:
   - url: https://relay.example.com
 paths:
+  /accounts:
+    get:
+      operationId: listAccounts
+      security: [{ managementToken: [] }]
+      responses:
+        "200":
+          description: Redacted saved account inventory. Codex and Excel OAuth connections are separate entries.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/AccountSummary" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /accounts/trash:
+    get:
+      operationId: listAccountTrash
+      summary: List retained accounts in trash without exposing credentials
+      responses:
+        "200":
+          description: Accounts in trash
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/TrashedAccountSummary" } }
+  /accounts/{id}/trash:
+    post:
+      operationId: trashAccount
+      summary: Move an account out of active inventory, retaining its credentials and usage
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: Account moved to trash and removed from routing and wake tasks }
+        "404": { description: Account not found }
+  /accounts/trash/{id}/restore:
+    post:
+      operationId: restoreTrashedAccount
+      summary: Restore an account disabled and outside the pool
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: Account restored without restarting requests }
+        "404": { description: Trashed account not found }
+  /accounts/trash/{id}:
+    delete:
+      operationId: purgeTrashedAccount
+      summary: Permanently remove a trashed account and its credentials and retained usage
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: Trashed account permanently deleted }
+        "404": { description: Trashed account not found }
+  /accounts/export:
+    post:
+      operationId: exportAccounts
+      security: [{ managementToken: [] }]
+      description: >
+        Explicit credential export. The content string contains sign-in material
+        and must not be logged or included in support bundles. Excel credentials
+        support only Zenith and Sub2API formats; both preserve the issuing OAuth
+        client. Other management reads remain redacted.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AccountExportRequest" }
+      responses:
+        "200":
+          description: Credential-bearing export document.
+          headers:
+            Cache-Control: { schema: { type: string }, description: "no-store, max-age=0" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccountExportDocument" }
+        "400": { description: Invalid selection, export options, or format for the selected OAuth clients. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Selected account not found. }
+  /accounts/import/preview:
+    post:
+      operationId: previewAccountImport
+      security: [{ managementToken: [] }]
+      description: >
+        Prepare one credential import in the encrypted vault. The response is
+        redacted. A duplicate requires the same issuing OAuth client, ChatGPT
+        account and principal. Known token-client hints must match oauthClientKind.
+        The pending session expires after 30 minutes and is not a pool member.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AccountImportInput" }
+      responses:
+        "201":
+          description: Redacted pending import.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccountImportPreview" }
+        "400": { description: Invalid or conflicting credential identity or OAuth client. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /accounts/import/confirm:
+    post:
+      operationId: confirmAccountImport
+      security: [{ managementToken: [] }]
+      description: >
+        Consume a pending single-account session. Revalidates its expiry and
+        duplicate identity under the credential lock. A changed target or a
+        connection imported after preview requires a new preview. Replacement
+        retains current account settings and omitted session material.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AccountImportConfirmInput" }
+      responses:
+        "200":
+          description: Saved redacted account.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccountSummary" }
+        "400": { description: Expired session or changed connection; prepare a new preview. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Pending import session not found. }
+  /accounts/import/batch/preview:
+    post:
+      operationId: previewAccountBatchImport
+      security: [{ managementToken: [] }]
+      description: >
+        Parse pasted content or file documents, including Zenith and Sub2API
+        exports. Preview rows contain redacted identity hints and independent
+        validation results. No credentials appear in the response.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                content: { type: [string, "null"], description: Pasted credential document; cannot be combined with documents. }
+                documents: { type: array, default: [], items: { type: string }, description: Credential documents; cannot be combined with nonblank content. }
+      responses:
+        "201":
+          description: Redacted batch preview with individually prepared rows.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BatchImportSession" }
+        "400": { description: Invalid or conflicting documents. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /accounts/import/batch/confirm:
+    post:
+      operationId: confirmAccountBatchImport
+      security: [{ managementToken: [] }]
+      description: >
+        Consume selected prepared rows, validating each as a single import.
+        Each result succeeds or fails independently. Duplicate selected IDs
+        are processed once. Synchronous metadata refresh runs only for a
+        selection of at most five rows.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - { $ref: "#/components/schemas/AccountImportConfirmInput" }
+                - type: object
+                  required: [selectedItemIds]
+                  properties:
+                    selectedItemIds: { type: array, minItems: 1, maxItems: 1024, items: { type: string } }
+      responses:
+        "200":
+          description: Redacted result for every processed row.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessionId, results]
+                properties:
+                  sessionId: { type: string }
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      required: [itemId, status, created]
+                      properties:
+                        itemId: { type: string }
+                        status: { type: string, enum: [succeeded, failed] }
+                        accountId: { type: string }
+                        created: { type: boolean }
+                        error: { $ref: "#/components/schemas/BatchImportIssue" }
+        "400": { description: Invalid batch session or selection. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
   /gateway/tool-policy:
     post:
       operationId: setToolPolicy
@@ -43,6 +232,45 @@ paths:
         "400": { description: Invalid policy. }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "409": { description: configuration_revision_stale; reload before saving. }
+  /gateway/request-timezone:
+    post:
+      operationId: setRequestTimezone
+      security: [{ managementToken: [] }]
+      description: >
+        Requires request_timezone_v1. Compare-and-set against expectedPolicy.
+        Applies to subsequent account Responses HTTP and WebSocket dispatches.
+        Disabled by default; disabled policies retain account choices.
+        Only existing user environment timezone tags and web-search location
+        timezone fields are rewritten. Dates and API-source requests are preserved.
+        Account identifiers belong to this host; this policy is not a portable preset.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [policy, expectedPolicy]
+              properties:
+                policy: { $ref: "#/components/schemas/RequestTimezonePolicy" }
+                expectedPolicy: { $ref: "#/components/schemas/RequestTimezonePolicy" }
+      responses:
+        "200": { description: Runtime snapshot with gateway.requestTimezone. }
+        "400": { description: Invalid account identifier or unknown IANA timezone. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { description: configuration_revision_stale; reload before saving. }
+  /gateway/request-timezone/catalog:
+    get:
+      operationId: getRequestTimezoneCatalog
+      security: [{ managementToken: [] }]
+      description: Backend IANA timezone catalog for request_timezone_v1.
+      responses:
+        "200":
+          description: Sorted valid timezone identifiers.
+          content:
+            application/json:
+              schema: { type: array, items: { type: string }, uniqueItems: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
   /models/order:
     post:
       security: [{ managementToken: [] }]
@@ -64,6 +292,32 @@ paths:
       responses:
         "200": { description: Updated runtime snapshot with the saved or default model order. }
         "400": { description: Invalid model order. }
+        "404": { description: Model is not part of the pool. }
+  /models/context:
+    post:
+      operationId: setModelContext
+      security: [{ managementToken: [] }]
+      description: >
+        Select the short or extended context preset for one model. The selector
+        is accepted only when the current pool has confirmed a larger context
+        window for that model; other models remain on their default short mode.
+        Automatic compaction starts at 97% of the selected window, lowered only
+        by the model's own known limits.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [modelId, contextPolicy]
+              properties:
+                modelId: { type: string }
+                contextPolicy: { $ref: "#/components/schemas/ModelContextPolicy" }
+      responses:
+        "200": { description: Updated runtime snapshot with the model context policy. }
+        "400": { description: Model context is unsupported or the model id is invalid. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { description: Model is not part of the pool. }
   /sources:
     get:
@@ -209,7 +463,12 @@ paths:
             Source/account cards include independent refreshState evidence for
             models and balance/quota; the account shape is AccountRefreshState.
             gateway.modelCatalog optionally maps member model IDs to advisory
-            catalogProvider and catalogFamily values, including excluded models.
+            catalogProvider, catalogFamily, and zero-based catalogOrder values,
+            including excluded, binding-only, and exact saved rule/price models.
+            catalogOrder applies the shared catalog or an explicit manual order
+            across the complete inventory. catalogProvider is the normalized
+            display group, preferring the canonical manufacturer, a unique primary
+            family owner, or an unambiguous leaf over the hosting namespace.
             This display metadata does not grant runtime eligibility.
           content:
             application/json:
@@ -224,6 +483,17 @@ paths:
         - { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 200 } }
         - { name: fromMs, in: query, schema: { type: integer, minimum: 0 } }
         - { name: toMs, in: query, schema: { type: integer, minimum: 0 } }
+        - name: requestId
+          in: query
+          schema: { type: string, maxLength: 256 }
+          description: >
+            Exact logical request ID. Events and pagination include its retained
+            attempt history; totals remain logical-request projections. Older
+            records may contain only the final attempt.
+        - name: requestIdQuery
+          in: query
+          schema: { type: string, maxLength: 256 }
+          description: Substring request ID filter for the ordinary report.
       responses:
         "200":
           description: >
@@ -231,9 +501,14 @@ paths:
             include raw credentials, cookies, authorization headers, prompts,
             response bodies, or provider session material.
             Failed events may include upstreamError with the original httpStatus,
-            code, errorType, and a bounded redacted message; redacted and truncated
+            code, errorType, an optional requestId for supported request ID formats,
+            and a bounded redacted message; redacted and truncated
             flags describe omissions. Missing details in older records are not
             reconstructed. Successful events omit upstreamError.
+            routing.attemptOutcome, when present, records an executor decision
+            such as retry_selection, retry_repair, retry_authorization, completed,
+            returned_failure, execution_uncertain, or client_disconnected.
+            It is not inferred from status and does not grant retry permission.
             toolUse may include policyMode, policyOutcome, policyFallback,
             deferredToolSearch, clientSchemaBytes and
             forwardedSchemaBytes. A true deferredToolSearch means a native
@@ -379,6 +654,201 @@ components:
         application/json:
           schema: { type: object }
   schemas:
+    OAuthClientKind:
+      type: string
+      enum: [codex, excel_bps]
+      default: codex
+      description: Issuing OAuth client. Missing legacy values mean Codex; excel is accepted as an input alias for excel_bps.
+    AccountAuthState:
+      type: object
+      required: [state]
+      properties:
+        state: { type: string, enum: [unknown, active, degraded_access_only, refreshing, error, requires_reauth] }
+        reason: { type: string, enum: [invalid_grant, reused_refresh_token, expired_refresh_token, invalidated_refresh_token, access_token_expired] }
+    BasisPointsCapturedHeaders:
+      type: object
+      required: [entries]
+      description: >
+        Validated allowlisted client headers, stored with credentials. Authorization,
+        account-binding and protocol headers are excluded. At most 64 normalized
+        entries, 32 KiB per value and 64 KiB of header data in total.
+      properties:
+        entries:
+          type: array
+          items:
+            type: object
+            required: [name, values]
+            properties:
+              name: { type: string }
+              values: { type: array, items: { type: string } }
+    TrashedAccountSummary:
+      type: object
+      required: [id, label, trashedAtMs]
+      properties:
+        id: { type: string }
+        label: { type: string }
+        trashedAtMs: { type: integer, minimum: 0 }
+    AccountSummary:
+      type: object
+      description: Redacted inventory and runtime projection; additional saved settings and aggregates may be present.
+      required: [id, label, identityHint, oauthClientKind, enabled, inPool, draining, authState, health, models, allowedModels, excludedModels, priority, weight, basisPointsAvailable, basisPointsEnabled]
+      properties:
+        id: { type: string }
+        label: { type: string }
+        identityHint: { type: string, description: Redacted provider account hint. }
+        creditBalanceKey: { type: string, description: Hashed provider credit ledger identity shared across OAuth clients. }
+        oauthClientKind: { $ref: "#/components/schemas/OAuthClientKind" }
+        basisPointsAvailable: { type: boolean, description: Available only for an Excel / Basis Points OAuth connection. }
+        basisPointsEnabled: { type: boolean, description: True only for an eligible Excel / Basis Points connection; ordinary ChatGPT connections remain native. }
+        enabled: { type: boolean }
+        inPool: { type: boolean, description: Pool membership for native ChatGPT and eligible Excel / Basis Points connections. Known Free plans are supported on the native transport only. }
+        draining: { type: boolean }
+        operationalStatus: { type: string, enum: [rotation, quotaWait, unavailable, disabled] }
+        authState: { $ref: "#/components/schemas/AccountAuthState" }
+        health: { type: string }
+        models: { type: array, items: { type: string } }
+        allowedModels: { type: array, items: { type: string } }
+        excludedModels: { type: array, items: { type: string } }
+        priority: { type: integer }
+        weight: { type: integer, minimum: 1 }
+        refreshState: { $ref: "#/components/schemas/AccountRefreshState" }
+        secretAvailable: { type: boolean }
+        credentialDiagnostics:
+          oneOf:
+            - { $ref: "#/components/schemas/CredentialDiagnostics" }
+            - { type: "null" }
+        lastErrorCode: { type: [string, "null"] }
+    CredentialDiagnostics:
+      type: object
+      required: [status, expiresAtMs, hasRefreshToken, recovery]
+      description: >
+        Safe local BPS credential evidence. not_expired only checks the local
+        expiry and does not prove upstream authentication. Recovery does not
+        enable a disabled connection, change pool membership, or clear draining.
+      properties:
+        status: { type: string, enum: [pending, not_expired, expired, revoked, auth_failed, unknown] }
+        expiresAtMs: { type: [integer, "null"], minimum: 0 }
+        hasRefreshToken: { type: boolean }
+        recovery: { type: string, enum: [none, refresh_next_request, sign_in, retry_later] }
+    AccountImportInput:
+      type: object
+      required: [label]
+      description: >
+        Credential-bearing request. Excel needs its own OAuth access token and
+        cannot use Agent Identity. Agent Identity needs agentPrivateKey and
+        agentRuntimeId together; other imports require a nonempty accessToken.
+      properties:
+        label: { type: string }
+        oauthClientKind: { $ref: "#/components/schemas/OAuthClientKind" }
+        chatgptUserId: { type: [string, "null"] }
+        basisPointsHeaders: { oneOf: [{ $ref: "#/components/schemas/BasisPointsCapturedHeaders" }, { type: "null" }] }
+        accessToken: { type: string, default: "", writeOnly: true }
+        refreshToken: { type: [string, "null"], writeOnly: true }
+        idToken: { type: [string, "null"], writeOnly: true }
+        agentPrivateKey: { type: [string, "null"], writeOnly: true }
+        agentRuntimeId: { type: [string, "null"], writeOnly: true }
+        agentTaskId: { type: [string, "null"], writeOnly: true }
+        expiresAtMs: { type: [integer, "null"], minimum: 0 }
+        planType: { type: [string, "null"] }
+        subscriptionActiveUntilMs: { type: [integer, "null"], minimum: 0 }
+        chatgptAccountId: { type: [string, "null"] }
+        responsesUrl: { type: [string, "null"], format: uri }
+        models: { type: array, default: [], items: { type: string } }
+        allowedModels: { type: array, default: [], items: { type: string } }
+        excludedModels: { type: array, default: [], items: { type: string } }
+        priority: { type: integer, default: 0, minimum: -2147483648, maximum: 2147483647 }
+        weight: { type: integer, default: 1, minimum: 1, maximum: 4294967295 }
+    AccountImportPreview:
+      type: object
+      required: [sessionId, oauthClientKind, accountId, duplicateAccountId, label, identityHint, models, authState, expiresAtMs, planType, subscriptionActiveUntilMs, allowedModels, excludedModels, priority, weight]
+      properties:
+        sessionId: { type: string }
+        oauthClientKind: { $ref: "#/components/schemas/OAuthClientKind" }
+        accountId: { type: string }
+        duplicateAccountId: { type: [string, "null"] }
+        label: { type: string }
+        identityHint: { type: string }
+        models: { type: array, items: { type: string } }
+        authState: { $ref: "#/components/schemas/AccountAuthState" }
+        expiresAtMs: { type: [integer, "null"], minimum: 0 }
+        planType: { type: [string, "null"] }
+        subscriptionActiveUntilMs: { type: [integer, "null"], minimum: 0 }
+        allowedModels: { type: array, items: { type: string } }
+        excludedModels: { type: array, items: { type: string } }
+        priority: { type: integer }
+        weight: { type: integer, minimum: 1 }
+        batchSessionId: { type: string }
+    AccountImportConfirmInput:
+      type: object
+      required: [sessionId]
+      properties:
+        sessionId: { type: string }
+        addToPool: { type: boolean, default: false, description: Add a native ChatGPT or eligible Excel / Basis Points connection to the pool; replacement retains its membership. Known Free plans are rejected for BPS even when this option is false. }
+        probeMetadata: { type: boolean, default: false }
+    BatchImportIssue:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string, description: Redacted validation error. }
+    BatchImportWarning:
+      type: object
+      required: [code]
+      properties:
+        code: { type: string }
+        count: { type: integer, minimum: 0 }
+    BatchImportSession:
+      type: object
+      required: [sessionId, prepared, preview]
+      properties:
+        sessionId: { type: string }
+        prepared: { type: boolean }
+        preview:
+          type: object
+          required: [format, rows, warnings]
+          properties:
+            format: { type: string }
+            description: { type: string }
+            warnings: { type: array, items: { $ref: "#/components/schemas/BatchImportWarning" } }
+            rows:
+              type: array
+              items:
+                type: object
+                required: [itemId, label, identity, authMode, sourceName, quotaStatus, status, plan, defaultSelected, selectable, existing, warnings, error]
+                properties:
+                  itemId: { type: string }
+                  label: { type: string }
+                  identity: { type: string }
+                  authMode: { type: string }
+                  oauthClientKind: { $ref: "#/components/schemas/OAuthClientKind" }
+                  sourceName: { type: string }
+                  quotaStatus: { type: string }
+                  status: { type: string }
+                  plan: { type: [string, "null"] }
+                  defaultSelected: { type: boolean }
+                  selectable: { type: boolean }
+                  existing: { type: boolean }
+                  warnings: { type: array, items: { $ref: "#/components/schemas/BatchImportWarning" } }
+                  error: { oneOf: [{ $ref: "#/components/schemas/BatchImportIssue" }, { type: "null" }] }
+    AccountExportFormat:
+      type: string
+      enum: [zenith, cpa, sub2api, cockpit, 9router, codex, axon_hub, codex_manager]
+    AccountExportRequest:
+      type: object
+      additionalProperties: false
+      required: [accountIds, format]
+      properties:
+        accountIds: { type: array, minItems: 1, maxItems: 256, uniqueItems: true, items: { type: string } }
+        format: { $ref: "#/components/schemas/AccountExportFormat" }
+        description: { type: [string, "null"], maxLength: 2000, description: Optional description for Zenith format only. }
+    AccountExportDocument:
+      type: object
+      required: [format, accountCount, fileName, content]
+      properties:
+        format: { $ref: "#/components/schemas/AccountExportFormat" }
+        accountCount: { type: integer, minimum: 1, maximum: 256 }
+        fileName: { type: string }
+        content: { type: string, description: Credential-bearing file contents. }
     WireApi:
       type: string
       enum: [responses, chat_completions, messages, gemini]
@@ -400,6 +870,10 @@ components:
         checkedAtMs: { type: integer, minimum: 0 }
         features: { $ref: "#/components/schemas/ProtocolFeatures" }
         reasoningEfforts: { type: array, items: { type: string } }
+        serviceTiers:
+          type: [array, "null"]
+          items: { $ref: "#/components/schemas/ServiceTier" }
+          description: Optional route restriction; omitted or null uses reference modes, and an empty list allows Standard only.
     SourceProtocolConfig:
       type: object
       properties:
@@ -424,6 +898,7 @@ components:
         name: { type: string }
         baseUrl: { type: string, format: uri }
         apiKey: { type: string, writeOnly: true }
+        proxyId: { type: string, nullable: true, description: "Stored proxy used for every request of this source (generation, discovery, probe, balance, refresh). Absent keeps the current value, null removes it. A missing or invalid proxy fails the route; it never falls back to a direct connection. The proxy URL is never exposed." }
         wireApi: { $ref: "#/components/schemas/WireApi" }
         protocolBindings: { type: array, items: { $ref: "#/components/schemas/SourceProtocolBinding" } }
         models: { type: array, items: { type: string } }
@@ -436,6 +911,7 @@ components:
       properties:
         id: { type: string }
         name: { type: string }
+        proxyId: { type: string, nullable: true, readOnly: true }
         refreshRevision: { type: integer, minimum: 1, readOnly: true, description: Non-secret source incarnation and configuration scope; changes on key replacement even if the URL is unchanged. }
         refreshState: { $ref: "#/components/schemas/SourceRefreshState", readOnly: true }
         providerStats: { $ref: "#/components/schemas/SourceProviderStats", readOnly: true, description: Optional runtime-only last observation; never initiates a provider request while reading a snapshot. }
@@ -443,6 +919,13 @@ components:
         protocolConfig: { $ref: "#/components/schemas/SourceProtocolConfig" }
         protocolBindings: { type: array, items: { $ref: "#/components/schemas/SourceProtocolBinding" } }
         resolvedProtocolBindings: { type: array, items: { $ref: "#/components/schemas/SourceProtocolBinding" }, readOnly: true }
+        detectedModelPrices:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/ApiModelPriceOverride" }
+          readOnly: true
+        modelPriceOverrides:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/ApiModelPriceOverride" }
     RefreshStatus:
       type: string
       enum: [unknown, fresh, stale, unsupported]
@@ -471,7 +954,98 @@ components:
       type: object
       properties:
         id: { type: string }
+        catalogContextLimit: { type: [integer, "null"], minimum: 0, readOnly: true }
+        contextPolicy: { $ref: "#/components/schemas/ModelContextPolicy" }
+        contextConfigurable: { type: boolean, readOnly: true }
         protocolRoutes: { type: array, items: { $ref: "#/components/schemas/ModelProtocolRoute" }, readOnly: true }
+        catalogCapabilities: { $ref: "#/components/schemas/ModelCapabilities", readOnly: true }
+        tokenPrice:
+          oneOf:
+            - { $ref: "#/components/schemas/TokenPrice" }
+            - { type: "null" }
+          readOnly: true
+        speedTiers: { type: array, items: { $ref: "#/components/schemas/ServiceTier" }, readOnly: true }
+        speedTier: { $ref: "#/components/schemas/ServiceTier" }
+        speedSupported: { type: boolean, readOnly: true }
+        speedConfigurable: { type: boolean, readOnly: true }
+    ServiceTier:
+      type: string
+      enum: [standard, fast, ultrafast]
+    ModelContextPolicy:
+      type: string
+      enum: [short, extended]
+    ModelCapabilities:
+      type: object
+      description: Normalized reference semantics; never grants model or route access.
+      properties:
+        reasoning: { type: [boolean, "null"] }
+        reasoningSource: { type: [string, "null"] }
+        reasoningMethod: { type: [string, "null"], enum: [effort, toggle, budget_tokens, adaptive, unknown, null] }
+        reasoningEffortLevels: { type: array, items: { type: string } }
+        defaultReasoningEffort: { type: [string, "null"] }
+        reasoningBudgetMinTokens: { type: [integer, "null"], minimum: 0 }
+        reasoningBudgetMaxTokens: { type: [integer, "null"], minimum: 0 }
+        reasoningBudgetDefaultTokens: { type: [integer, "null"], minimum: 0 }
+        reasoningModes: { type: array, items: { type: string, enum: [standard, pro] } }
+        toolCall: { type: [boolean, "null"] }
+        structuredOutput: { type: [boolean, "null"] }
+        attachment: { type: [boolean, "null"] }
+        openWeights: { type: [boolean, "null"] }
+        temperature: { type: [boolean, "null"] }
+        promptCaching: { type: [boolean, "null"] }
+        parallelToolCall: { type: [boolean, "null"] }
+        toolChoice: { type: [boolean, "null"] }
+        streaming: { type: [boolean, "null"] }
+        serviceTiers: { type: array, items: { $ref: "#/components/schemas/ServiceTier" } }
+        inputModalities: { type: array, items: { type: string } }
+        outputModalities: { type: array, items: { type: string } }
+        contextLimit: { type: [integer, "null"], minimum: 0 }
+        inputLimit: { type: [integer, "null"], minimum: 0 }
+        outputLimit: { type: [integer, "null"], minimum: 0 }
+    TokenRateSet:
+      type: object
+      description: Optional microUSD rates per million tokens. An absent component remains unknown; zero is an explicit free rate.
+      properties:
+        input: { type: integer, minimum: 0 }
+        cacheRead: { type: integer, minimum: 0 }
+        cacheWrite5m: { type: integer, minimum: 0 }
+        cacheWrite1h: { type: integer, minimum: 0 }
+        output: { type: integer, minimum: 0 }
+    LongContextRates:
+      type: object
+      properties:
+        standard: { $ref: "#/components/schemas/TokenRateSet" }
+        flex: { $ref: "#/components/schemas/TokenRateSet" }
+        priority: { $ref: "#/components/schemas/TokenRateSet", description: Fast schedule using the upstream priority name. }
+        ultrafast: { $ref: "#/components/schemas/TokenRateSet" }
+    TokenPriceSchedules:
+      type: object
+      description: Published tier and input-size schedules; prices never establish mode support or model access.
+      properties:
+        flex: { $ref: "#/components/schemas/TokenRateSet" }
+        priority: { $ref: "#/components/schemas/TokenRateSet" }
+        ultrafast: { $ref: "#/components/schemas/TokenRateSet" }
+        above100k: { $ref: "#/components/schemas/LongContextRates" }
+        above128k: { $ref: "#/components/schemas/LongContextRates" }
+        above200k: { $ref: "#/components/schemas/LongContextRates" }
+        above272k: { $ref: "#/components/schemas/LongContextRates" }
+        above512k: { $ref: "#/components/schemas/LongContextRates" }
+    TokenPrice:
+      allOf:
+        - { $ref: "#/components/schemas/TokenRateSet" }
+        - { $ref: "#/components/schemas/TokenPriceSchedules" }
+        - { type: object, required: [input, output] }
+    ApiModelPriceOverride:
+      allOf:
+        - { $ref: "#/components/schemas/TokenPriceSchedules" }
+        - type: object
+          required: [inputMicroUsdPerMillion, outputMicroUsdPerMillion]
+          properties:
+            inputMicroUsdPerMillion: { type: integer, minimum: 0 }
+            cachedInputMicroUsdPerMillion: { type: integer, minimum: 0 }
+            cacheWrite5mMicroUsdPerMillion: { type: integer, minimum: 0 }
+            cacheWrite1hMicroUsdPerMillion: { type: integer, minimum: 0 }
+            outputMicroUsdPerMillion: { type: integer, minimum: 0 }
     ConfigurationPreset:
       type: object
       additionalProperties: false
@@ -483,6 +1057,7 @@ components:
         pass_through policy resets it. Secrets and probe confirmations are not exported.
         Version-1 pool policies are converted automatically to version 2 after member-ID mapping.
         Missing pool policy preserves the destination policy. Import never grants additional permissions.
+        Request timezone bindings are host-specific and excluded; applying a preset preserves them.
       properties:
         format: { type: string, const: zenith-relay-configuration }
         schemaVersion: { type: integer, minimum: 2, maximum: 6 }
@@ -511,6 +1086,38 @@ components:
         size; it does not select or remove tools by name or infer relevance locally.
       properties:
         mode: { type: string, enum: [pass_through, automatic], default: pass_through }
+    RequestTimezonePolicy:
+      type: object
+      additionalProperties: false
+      description: >
+        Fixed IANA timezone per account, or an account-specific inheritance from
+        its assigned saved proxy. The fallback for an unconfigured account is
+        America/New_York. accountTimezoneBindings can explicitly enable or
+        disable handling for one account; missing entries inherit enabled.
+        This policy does not change the system timezone.
+      properties:
+        enabled: { type: boolean, default: false }
+        accountTimezones:
+          type: object
+          default: {}
+          maxProperties: 10000
+          propertyNames: { type: string, minLength: 1, maxLength: 256 }
+          additionalProperties: { type: string, description: Exact identifier from the backend IANA catalog. }
+        accountTimezoneBindings:
+          type: object
+          default: {}
+          maxProperties: 10000
+          propertyNames: { type: string, minLength: 1, maxLength: 256 }
+          additionalProperties: { type: boolean, description: Explicit per-account override; missing entries inherit enabled. }
+        accountTimezoneSources:
+          type: object
+          default: {}
+          maxProperties: 10000
+          propertyNames: { type: string, minLength: 1, maxLength: 256 }
+          additionalProperties:
+            type: string
+            enum: [account, proxy]
+            description: Account uses its saved timezone or the timezone of its assigned proxy.
     PoolRoutingPolicy:
       type: object
       additionalProperties: false
@@ -553,14 +1160,14 @@ components:
         serverId: { type: string, minLength: 1 }
         protocolMin: { type: integer, minimum: 1 }
         protocolMax: { type: integer, minimum: 1 }
-        features: { type: array, items: { type: string }, uniqueItems: true, description: "source_protocols_v1 enables endpoint evidence and automatic computed routes; the legacy diagnostic generation operation remains available explicitly for compatibility. route_recovery_v1 indicates that the existing recovery setting applies to all four text API inputs, unlike the older chatgpt_retry_until_available feature alone. tool_policy_v1 enables tool catalog policy and schema-5 presets; rotation_v2 is the compatibility token for the current pool rotation policy, automatic startup conversion and schema-6 presets." }
+        features: { type: array, items: { type: string }, uniqueItems: true, description: "source_protocols_v1 enables endpoint evidence and automatic computed routes; the legacy diagnostic generation operation remains available explicitly for compatibility. route_recovery_v1 indicates that the existing recovery setting applies to all four text API inputs, unlike the older chatgpt_retry_until_available feature alone. tool_policy_v1 enables tool catalog policy and schema-5 presets; rotation_v2 is the compatibility token for the current pool rotation policy, automatic startup conversion and schema-6 presets. request_timezone_v1 enables persisted account IANA timezone bindings, the backend catalog, and compare-and-set updates without rebuilding the runtime; portable presets exclude these host-specific bindings." }
     SourceProviderStats:
       type: object
       required: [provider, balanceMicroUsd, spentMicroUsd, requests, totalTokens]
       properties:
         provider:
           type: string
-          enum: [zenith, openrouter, sub2api, new_api, billing, deepseek, siliconflow, unsupported]
+          enum: [zenith, openrouter, sub2api, new_api, billing, deepseek, siliconflow, moonshot, unsupported]
         balanceMicroUsd: { type: [integer, "null"] }
         spentMicroUsd: { type: [integer, "null"] }
         requests: { type: [integer, "null"], minimum: 0 }

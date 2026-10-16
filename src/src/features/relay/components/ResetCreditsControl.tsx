@@ -22,8 +22,8 @@ export function ResetCreditsControl({ account, onCompleted }: ResetCreditsContro
     return error ? <span className="reset-credits-inline-error" role="alert">{error}</span> : null;
   }
 
-  const errorMessage = (value: unknown) => {
-    return sanitizeFeedbackError(value, "reset_credits_failed", t("accounts.resetCreditsLoadFailed")).message;
+  const errorMessage = (errorValue: unknown) => {
+    return sanitizeFeedbackError(errorValue, "reset_credits_failed", t("accounts.resetCreditsLoadFailed")).message;
   };
 
   const consume = async () => {
@@ -37,21 +37,21 @@ export function ResetCreditsControl({ account, onCompleted }: ResetCreditsContro
     setConsuming(true);
     setError(null);
     try {
-      const result = await relayCommands.consumeResetCredit(account.id);
+      const resetCreditResult = await relayCommands.consumeResetCredit(account.id);
       // Set the partial-success diagnostic before refreshing the account. The
       // refresh can consume the last available credit and temporarily remove
       // the button from the card; the error must survive that state change.
-      if (result.refreshError) {
-        setError(t("accounts.resetCreditsRefreshFailed", { error: errorMessage(result.refreshError) }));
+      if (resetCreditResult.refreshError) {
+        setError(t("accounts.resetCreditsRefreshFailed", { error: errorMessage(resetCreditResult.refreshError) }));
       }
       try {
         await onCompleted?.();
-      } catch (value) {
-        setError(t("accounts.resetCreditsRefreshFailed", { error: errorMessage(value) }));
+      } catch (refreshError) {
+        setError(t("accounts.resetCreditsRefreshFailed", { error: errorMessage(refreshError) }));
         return;
       }
-    } catch (value) {
-      setError(t("accounts.resetCreditsFailed", { error: errorMessage(value) }));
+    } catch (resetError) {
+      setError(t("accounts.resetCreditsFailed", { error: errorMessage(resetError) }));
     } finally {
       setConsuming(false);
     }

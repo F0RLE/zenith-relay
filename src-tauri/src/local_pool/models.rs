@@ -13,6 +13,7 @@ pub use ownership::{
 pub(crate) use participant::synthetic_responses_source;
 pub use participant::{
     AutomationRecords, LocalAccountRecord, LocalGatewayKeyRecord, ProviderSourceRecord,
+    TrashedLocalAccount,
 };
 pub use snapshot::{LocalPoolSnapshot, RuntimeTarget};
 

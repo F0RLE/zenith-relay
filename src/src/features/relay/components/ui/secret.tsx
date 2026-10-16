@@ -1,5 +1,5 @@
 import { useId, useState } from "react";
-import type { ReactNode } from "react";
+import type { FocusEventHandler, ReactNode } from "react";
 import { CheckCircle2, Copy, Eye, EyeOff } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useTransientFlag } from "../../hooks/useTransientFlag";
@@ -11,12 +11,16 @@ export function SecretField({
   onChange,
   placeholder,
   labelAction,
+  disabled = false,
+  onBlur,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
   labelAction?: ReactNode;
+  disabled?: boolean;
+  onBlur?: FocusEventHandler<HTMLInputElement>;
 }) {
   const { t } = useTranslation();
   const [visible, setVisible] = useState(false);
@@ -29,22 +33,41 @@ export function SecretField({
       </div>
       : <label htmlFor={inputId}>{label}</label>}
     <div className="secret-field">
-      <input id={inputId} type={visible ? "text" : "password"} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} autoComplete="off" spellCheck={false} />
-      <IconButton label={visible ? t("common.hide") : t("common.reveal")} icon={visible ? <EyeOff aria-hidden /> : <Eye aria-hidden />} onClick={() => setVisible((current) => !current)} type="button" />
+      <input
+        id={inputId}
+        type={visible ? "text" : "password"}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        onBlur={onBlur}
+        disabled={disabled}
+        placeholder={placeholder}
+        autoComplete="off"
+        autoCapitalize="none"
+        spellCheck={false}
+      />
+      <IconButton
+        label={`${visible ? t("common.hide") : t("common.reveal")}: ${label}`}
+        title={visible ? t("common.hide") : t("common.reveal")}
+        icon={visible ? <EyeOff aria-hidden /> : <Eye aria-hidden />}
+        onClick={() => setVisible((previousVisibility) => !previousVisibility)}
+        disabled={disabled}
+        aria-controls={inputId}
+        aria-pressed={visible}
+      />
     </div>
   </div>;
 }
 
-export async function copyText(value: string) {
-  await navigator.clipboard.writeText(value);
+export async function copyText(textToCopy: string) {
+  await navigator.clipboard.writeText(textToCopy);
 }
 
-export function CopyButton({ value, label, children }: { value: string; label: string; children?: ReactNode }) {
+export function CopyButton({ value: copyValue, label, children }: { value: string; label: string; children?: ReactNode }) {
   const { t } = useTranslation();
   const [copied, showCopied] = useTransientFlag(1_500);
   const accessibleLabel = copied ? `${label}: ${t("feedback.copied")}` : label;
   const icon = copied ? <CheckCircle2 aria-hidden /> : <Copy aria-hidden />;
-  const onClick = async () => { await copyText(value); showCopied(); };
+  const onClick = async () => { await copyText(copyValue); showCopied(); };
   return children !== undefined
     ? <Button aria-label={accessibleLabel} icon={icon} onClick={onClick}>{children}</Button>
     : <IconButton label={accessibleLabel} icon={icon} onClick={onClick} />;

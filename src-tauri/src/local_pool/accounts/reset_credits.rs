@@ -51,7 +51,7 @@ pub struct ConsumeResetCreditResponse {
 
 struct ResetHttpResponse {
     status: StatusCode,
-    body: Vec<u8>,
+    response_body: Vec<u8>,
 }
 
 #[tauri::command]
@@ -105,14 +105,14 @@ pub(crate) async fn consume_reset_credit_for_scope(
 
         state.store()?.ensure_account_refresh_current(fence)?;
         let redeem_request_id = Uuid::new_v4().to_string();
-        let response = post_reset_credit(&prepared, &redeem_request_id).await?;
-        if response.status == StatusCode::UNAUTHORIZED {
+        let reset_response = post_reset_credit(&prepared, &redeem_request_id).await?;
+        if reset_response.status == StatusCode::UNAUTHORIZED {
             prepared = retry_authorization(state, account_id, &prepared).await?;
             state.store()?.ensure_account_refresh_current(fence)?;
-            let retry = post_reset_credit(&prepared, &redeem_request_id).await?;
-            ensure_reset_success(retry)?;
+            let retry_response = post_reset_credit(&prepared, &redeem_request_id).await?;
+            ensure_reset_success(retry_response)?;
         } else {
-            ensure_reset_success(response)?;
+            ensure_reset_success(reset_response)?;
         }
     }
 
@@ -200,7 +200,10 @@ mod tests {
         let error = reset_http_error(StatusCode::FORBIDDEN);
         assert!(!error.message.contains("token"));
         assert_eq!(
-            error.diagnostic.as_deref().and_then(|value| value.status),
+            error
+                .diagnostic
+                .as_deref()
+                .and_then(|diagnostic| diagnostic.status),
             Some(403)
         );
     }

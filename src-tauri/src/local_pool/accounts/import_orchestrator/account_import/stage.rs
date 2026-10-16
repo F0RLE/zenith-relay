@@ -46,11 +46,11 @@ pub(crate) async fn stage_returned_remote_account(
             .and_then(parse_subscription_timestamp_ms),
     };
     let configured_models = existing_record.models.clone();
-    let item = parsed.items.remove(0);
+    let import_item = parsed.items.remove(0);
     let (account, _) = import_account_item(
         state,
         &credentials,
-        item,
+        import_item,
         &row_context,
         AccountImportOptions {
             add_to_pool: false,

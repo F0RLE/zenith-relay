@@ -3,20 +3,15 @@ use super::super::*;
 pub(super) async fn resolve_gateway_oauth_binding(
     state: &DesktopState,
     request: GatewayOAuthBindingRequest<'_>,
-    profile_dir: &std::path::Path,
 ) -> LocalResult<Option<(String, PreparedAccountCredentials)>> {
     if request == GatewayOAuthBindingRequest::Disabled {
         return Ok(None);
     }
     let requested_account_id = match request {
         GatewayOAuthBindingRequest::Account(account_id) => Some(account_id),
-        GatewayOAuthBindingRequest::Disabled | GatewayOAuthBindingRequest::Automatic => None,
+        GatewayOAuthBindingRequest::Disabled => None,
     };
-    let preferred_account_id = match requested_account_id {
-        Some(account_id) => Some(account_id.to_string()),
-        None => codex::active_managed_account_id(profile_dir, &state.profile_backup_root())?,
-    };
-    let automatic = requested_account_id.is_none();
+    let preferred_account_id = requested_account_id.map(str::to_owned);
     let mut candidates = {
         let store = state.store()?;
         let credentials = CredentialStore::from_backend(NativeSecretBackend);
@@ -24,7 +19,7 @@ pub(super) async fn resolve_gateway_oauth_binding(
         for account in store.accounts() {
             let explicitly_requested = requested_account_id == Some(account.account.id.as_str());
             if !account.account.enabled
-                || !account.account.in_pool
+                || account.remote_location.is_some()
                 || account.account.draining
                 || account.account.auth_state
                     != zenith_relay_core::accounts::AccountAuthState::Active
@@ -42,7 +37,10 @@ pub(super) async fn resolve_gateway_oauth_binding(
                 .map_err(|error| {
                     LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error.to_string())
                 })?
-                .is_some()
+                .is_some_and(|credentials| {
+                    credentials.oauth_client_kind()
+                        == zenith_relay_core::providers::chatgpt::OAuthClientKind::Codex
+                })
             {
                 let Some(remaining) = profile_quota_rank(
                     candidate_quota_with_stale_after(
@@ -59,7 +57,7 @@ pub(super) async fn resolve_gateway_oauth_binding(
         }
         candidates
     };
-    prioritize_account_candidates(&mut candidates, preferred_account_id.as_deref(), automatic);
+    prioritize_account_candidates(&mut candidates, preferred_account_id.as_deref());
     if requested_account_id.is_some()
         && candidates
             .first()
@@ -67,7 +65,7 @@ pub(super) async fn resolve_gateway_oauth_binding(
     {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
-            "selected OAuth account is not available to the local pool",
+            "selected account is not available to the ChatGPT application",
         ));
     }
 
@@ -75,7 +73,8 @@ pub(super) async fn resolve_gateway_oauth_binding(
     for (account_id, _) in candidates {
         match prepare_account_credentials(state, &account_id).await {
             Ok(prepared)
-                if prepared.tokens().refresh_token().is_some()
+                if prepared.supports_native_codex()
+                    && prepared.tokens().refresh_token().is_some()
                     && prepared.tokens().id_token().is_some() =>
             {
                 return Ok(Some((account_id, prepared)));

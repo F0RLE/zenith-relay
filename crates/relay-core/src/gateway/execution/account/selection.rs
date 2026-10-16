@@ -36,6 +36,7 @@ pub(super) struct AccountSelectionMissInput<'a> {
     pub(super) tried: &'a mut HashSet<String>,
     pub(super) retry_context: &'a CandidateRetryContext<'a>,
     pub(super) last_failure: &'a Option<AttemptFailure>,
+    pub(super) has_preparation_error: bool,
     pub(super) wait_for_candidate_availability: bool,
 }
 
@@ -59,6 +60,7 @@ pub(super) async fn handle_account_selection_miss(
         tried,
         retry_context,
         last_failure,
+        has_preparation_error,
         wait_for_candidate_availability,
     } = input;
     let model_switch_reset_attempted = &mut repairs.model_switch_reset;
@@ -120,7 +122,7 @@ pub(super) async fn handle_account_selection_miss(
     if should_wait_for_candidate_availability(
         wait_for_candidate_availability,
         last_failure,
-        false,
+        has_preparation_error,
         has_previous_response_id,
     ) {
         if !wait_for_candidate_retry(

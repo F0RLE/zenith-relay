@@ -81,21 +81,21 @@ pub async fn diagnose_local_gateway(
             "model diagnostic returned invalid JSON",
         )
     })?;
-    let model = models
+    let model_id = models
         .data
         .into_iter()
-        .map(|model| model.id)
-        .find(|model| is_valid_model_token(model))
+        .map(|model_entry| model_entry.id)
+        .find(|model_id| is_valid_model_token(model_id))
         .ok_or_else(|| {
             LocalPoolError::new(ErrorCode::Conflict, "local gateway exposes no usable model")
         })?;
 
     let started = Instant::now();
-    let response = client
+    let generation_response = client
         .post(format!("{base_url}/responses"))
         .bearer_auth(&secret)
         .json(&serde_json::json!({
-            "model": model,
+            "model": model_id,
             "input": "Reply with OK.",
             "stream": stream,
             "max_output_tokens": 8,
@@ -104,13 +104,13 @@ pub async fn diagnose_local_gateway(
         .send()
         .await
         .map_err(remote_error)?;
-    let status = response.status();
-    let body = read_limited(response).await?;
+    let status = generation_response.status();
+    let diagnostic_response_body = read_limited(generation_response).await?;
     if !status.is_success() {
         return Err(status_error("request diagnostic", status));
     }
     if stream {
-        let text = std::str::from_utf8(&body).map_err(|_| {
+        let text = std::str::from_utf8(&diagnostic_response_body).map_err(|_| {
             LocalPoolError::new(
                 ErrorCode::GatewayUnavailable,
                 "stream diagnostic returned invalid text",
@@ -123,7 +123,7 @@ pub async fn diagnose_local_gateway(
             )
             .into());
         }
-    } else if !valid_diagnostic_response(&body) {
+    } else if !valid_diagnostic_response(&diagnostic_response_body) {
         return Err(LocalPoolError::new(
             ErrorCode::GatewayUnavailable,
             "request diagnostic returned invalid JSON",
@@ -132,9 +132,9 @@ pub async fn diagnose_local_gateway(
     }
     Ok(GatewayDiagnostic {
         stream,
-        model,
+        model: model_id,
         latency_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        bytes_received: body.len(),
+        bytes_received: diagnostic_response_body.len(),
     })
 }
 
@@ -149,23 +149,26 @@ async fn read_limited(mut response: Response) -> Result<Vec<u8>, CommandError> {
         )
         .into());
     }
-    let mut body = Vec::new();
+    let mut response_bytes = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(remote_error)? {
-        if body.len().saturating_add(chunk.len()) > MAX_DIAGNOSTIC_BYTES {
+        if response_bytes.len().saturating_add(chunk.len()) > MAX_DIAGNOSTIC_BYTES {
             return Err(LocalPoolError::new(
                 ErrorCode::GatewayUnavailable,
                 "diagnostic response exceeds the size limit",
             )
             .into());
         }
-        body.extend_from_slice(&chunk);
+        response_bytes.extend_from_slice(&chunk);
     }
-    Ok(body)
+    Ok(response_bytes)
 }
 
-fn valid_diagnostic_response(body: &[u8]) -> bool {
-    serde_json::from_slice::<serde_json::Value>(body).is_ok_and(|value| {
-        value.is_object() && value.get("error").is_none_or(serde_json::Value::is_null)
+fn valid_diagnostic_response(response_body: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(response_body).is_ok_and(|diagnostic_payload| {
+        diagnostic_payload.is_object()
+            && diagnostic_payload
+                .get("error")
+                .is_none_or(serde_json::Value::is_null)
     })
 }
 

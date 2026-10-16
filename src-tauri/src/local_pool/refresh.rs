@@ -51,8 +51,8 @@ impl zenith_relay_core::scheduler::refresh::SourceStatsRead for RefreshRead {
 
 pub(crate) type RefreshReadResult = Result<RefreshRead>;
 
-pub(crate) fn cache_observation(value: &RefreshReadResult) -> bool {
-    matches!(value, Ok(read) if !matches!(read, RefreshRead::Authorization(_)))
+pub(crate) fn cache_observation(refresh_result: &RefreshReadResult) -> bool {
+    matches!(refresh_result, Ok(read) if !matches!(read, RefreshRead::Authorization(_)))
 }
 
 impl DesktopState {

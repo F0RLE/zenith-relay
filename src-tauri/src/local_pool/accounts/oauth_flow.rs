@@ -2,9 +2,7 @@ mod callback;
 mod snapshot;
 
 use super::import_session::SecretBackend;
-use super::oauth::{
-    CodexOAuthClient, OAuthCallback, OAuthPendingSession, CODEX_OAUTH_CALLBACK_PORTS,
-};
+use super::oauth::{CodexOAuthClient, OAuthCallback, OAuthClientKind, OAuthPendingSession};
 use callback::{bind_callback_listener, run_listener};
 use serde::{Deserialize, Serialize};
 pub(crate) use snapshot::callback_secret_ref;
@@ -23,7 +21,6 @@ use uuid::Uuid;
 use zenith_relay_core::poison::mutex as lock;
 
 const SNAPSHOT_VERSION: u32 = 1;
-const AUTHORIZATION_ENDPOINT: &str = "https://auth.openai.com/oauth/authorize";
 const CALLBACK_PATH: &str = "/auth/callback";
 
 pub trait OAuthFlowEventSink: Send + Sync + 'static {
@@ -66,6 +63,7 @@ pub struct OAuthFlowStart {
     pub redirect_uri: String,
     pub expires_at_ms: u64,
     pub status: OAuthFlowStatus,
+    pub client_kind: OAuthClientKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_account_id: Option<String>,
 }
@@ -79,6 +77,7 @@ impl fmt::Debug for OAuthFlowStart {
             .field("redirect_uri", &self.redirect_uri)
             .field("expires_at_ms", &self.expires_at_ms)
             .field("status", &self.status)
+            .field("client_kind", &self.client_kind)
             .finish()
     }
 }
@@ -290,6 +289,7 @@ impl PendingSnapshot {
             redirect_uri: self.pending.redirect_uri().to_string(),
             expires_at_ms: self.pending.expires_at_ms(),
             status: self.status,
+            client_kind: self.pending.client_kind(),
             target_account_id: self.target_account_id.clone(),
         }
     }

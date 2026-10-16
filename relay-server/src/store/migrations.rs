@@ -21,7 +21,7 @@ pub(super) fn read_schema_version(connection: &Connection) -> Result<u32, String
     if !has_metadata {
         return Ok(0);
     }
-    let value = connection
+    let schema_version_text = connection
         .query_row(
             "SELECT value FROM metadata WHERE key = 'schema_version'",
             [],
@@ -29,7 +29,7 @@ pub(super) fn read_schema_version(connection: &Connection) -> Result<u32, String
         )
         .optional()
         .map_err(db_error)?;
-    value
+    schema_version_text
         .as_deref()
         .unwrap_or("0")
         .parse::<u32>()
@@ -186,8 +186,8 @@ fn validate_database_file(path: &Path) -> Result<u32, String> {
 
 fn restore_database_file(source: &Path, target: &Path) -> Result<(), String> {
     let temporary = sibling_path(target, ".migration-restore.tmp");
-    let previous = sibling_path(target, ".failed-migration");
-    for path in [&temporary, &previous] {
+    let failed_migration_path = sibling_path(target, ".failed-migration");
+    for path in [&temporary, &failed_migration_path] {
         if path.exists() {
             fs::remove_file(path).map_err(io_error)?;
         }
@@ -206,16 +206,16 @@ fn restore_database_file(source: &Path, target: &Path) -> Result<(), String> {
         }
     }
     if target.exists() {
-        fs::rename(target, &previous).map_err(io_error)?;
+        fs::rename(target, &failed_migration_path).map_err(io_error)?;
     }
     if let Err(error) = fs::rename(&temporary, target) {
-        if previous.exists() {
-            let _ = fs::rename(&previous, target);
+        if failed_migration_path.exists() {
+            let _ = fs::rename(&failed_migration_path, target);
         }
         return Err(io_error(error));
     }
-    if previous.exists() {
-        fs::remove_file(previous).map_err(io_error)?;
+    if failed_migration_path.exists() {
+        fs::remove_file(failed_migration_path).map_err(io_error)?;
     }
     Ok(())
 }

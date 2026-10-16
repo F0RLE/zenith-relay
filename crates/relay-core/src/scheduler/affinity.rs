@@ -65,7 +65,9 @@ impl AffinityCache {
     ) -> bool {
         let key = key.into();
         match self.get(&key, now_ms) {
-            Some(current) if current == candidate_id => self.refresh(&key, now_ms),
+            Some(bound_candidate_id) if bound_candidate_id == candidate_id => {
+                self.refresh(&key, now_ms)
+            }
             Some(_) => false,
             None => {
                 self.bind(key, candidate_id.to_string(), now_ms);

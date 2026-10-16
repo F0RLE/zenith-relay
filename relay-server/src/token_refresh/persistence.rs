@@ -1,10 +1,13 @@
 use super::*;
 
 impl ServerTokenPersistence {
-    pub(crate) fn for_account(state: Arc<AppState>, record: &ServerAccountRecord) -> Self {
+    pub(crate) fn for_account(state: Arc<AppState>, account_record: &ServerAccountRecord) -> Self {
         Self {
             state,
-            secret_refs: HashMap::from([(record.id.clone(), record.secret_ref.clone())]),
+            secret_refs: HashMap::from([(
+                account_record.id.clone(),
+                account_record.secret_ref.clone(),
+            )]),
         }
     }
 
@@ -17,8 +20,8 @@ impl ServerTokenPersistence {
 
     fn current_ref(&self, account_id: &str) -> Result<&str, TokenPersistenceFailure> {
         let expected = self.expected_ref(account_id)?;
-        let record = find_account(&self.state, account_id).map_err(persistence_error)?;
-        if record.secret_ref != expected {
+        let account_record = find_account(&self.state, account_id).map_err(persistence_error)?;
+        if account_record.secret_ref != expected {
             return Err(TokenPersistenceFailure::new(
                 error_codes::PERSISTENCE_FAILED,
             ));
@@ -117,11 +120,11 @@ impl TokenPersistenceAdapter for ServerTokenPersistence {
             let expected = self.expected_ref(account_id)?;
             self.state
                 .store
-                .update_account(account_id, |record| {
-                    if record.secret_ref != expected {
+                .update_account(account_id, |account_record| {
+                    if account_record.secret_ref != expected {
                         return Err("account login changed during token refresh".into());
                     }
-                    record.auth_state = auth_state;
+                    account_record.auth_state = auth_state;
                     Ok(())
                 })
                 .map_err(persistence_error)?
@@ -153,7 +156,6 @@ impl TokenPersistenceAdapter for ServerTokenPersistence {
     }
 }
 
-fn persistence_error(error: String) -> TokenPersistenceFailure {
-    let _ = error;
+fn persistence_error(_error: String) -> TokenPersistenceFailure {
     TokenPersistenceFailure::new(error_codes::PERSISTENCE_FAILED)
 }

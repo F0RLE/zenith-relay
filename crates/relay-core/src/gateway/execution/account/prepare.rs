@@ -47,7 +47,7 @@ pub(super) struct AccountPrepareInput<'a> {
     pub(super) half_open_probe: bool,
     pub(super) diagnostics: RoutingDiagnostics,
     pub(super) client_context_id: &'a Option<String>,
-    pub(super) basis_points_relay_retry_parameter: Option<&'static str>,
+    pub(super) request_id: &'a str,
     pub(super) last_failure: &'a mut Option<AttemptFailure>,
     pub(super) last_adapter_error: &'a mut Option<crate::protocol::AdapterError>,
 }
@@ -55,7 +55,9 @@ pub(super) struct AccountPrepareInput<'a> {
 /// Turn one reserved account into a serialized upstream attempt. A route that
 /// cannot carry this endpoint continues the loop; a client-shaped body returns
 /// immediately.
-pub(super) fn prepare_account_attempt(input: AccountPrepareInput<'_>) -> AccountPrepare {
+pub(super) fn prepare_account_attempt(
+    account_prepare_input: AccountPrepareInput<'_>,
+) -> AccountPrepare {
     let AccountPrepareInput {
         runtime,
         key,
@@ -71,11 +73,11 @@ pub(super) fn prepare_account_attempt(input: AccountPrepareInput<'_>) -> Account
         half_open_probe,
         diagnostics,
         client_context_id,
-        basis_points_relay_retry_parameter,
+        request_id,
         last_failure,
         last_adapter_error,
         ..
-    } = input;
+    } = account_prepare_input;
     let Some(mut route) = runtime.executor_route(
         candidate_id,
         resolved_model,
@@ -88,7 +90,11 @@ pub(super) fn prepare_account_attempt(input: AccountPrepareInput<'_>) -> Account
     if route.account_id.is_none() {
         return AccountPrepare::Continue;
     }
-    let selected_service_tier = service_tier_policy.select_for_model(runtime, &route.source_model);
+    let selected_service_tier = service_tier_policy.selected_tier();
+    if !GatewayRuntime::route_supports_service_tier(&route, selected_service_tier) {
+        *last_adapter_error = Some(AdapterError::parameter_unsupported_for("service_tier"));
+        return AccountPrepare::Continue;
+    }
     service_tier_policy.prepare_for_candidate(
         request,
         selected_service_tier,
@@ -102,27 +108,34 @@ pub(super) fn prepare_account_attempt(input: AccountPrepareInput<'_>) -> Account
         selected_service_tier,
         crate::WireApi::Responses,
     );
-    runtime.use_native_responses_when_speed_requested(&mut route);
     let basis_points_route = route.account_transport == AccountTransport::ExcelBasisPoints;
     if basis_points_route {
         if let Some(step) = reject_account_basis_points(
             request,
             service_tier_policy,
             selected_service_tier,
-            responses_lite.is_some(),
             endpoint,
             last_adapter_error,
         ) {
             return step;
         }
     }
-    let route_responses_lite = super::super::responses_lite_header(
-        responses_lite,
-        automatic_responses_lite,
-        runtime,
-        resolved_model,
-        route.account_id.as_deref(),
-    );
+    // Basis Points does not receive the Responses Lite transport header, but
+    // its adapter translates the Lite item-level tool catalog. Keep that
+    // client-side contract active while preparing the body.
+    let route_responses_lite = if basis_points_route {
+        None
+    } else {
+        super::super::responses_lite_header(
+            responses_lite,
+            automatic_responses_lite,
+            runtime,
+            resolved_model,
+            route.account_id.as_deref(),
+        )
+    };
+    let normalize_responses_lite =
+        route_responses_lite.is_some() || (basis_points_route && responses_lite.is_some());
     let selected_error_origin = route_error_origin(&route);
     let Some(upstream_url) =
         account_upstream_url(&route, endpoint, basis_points_route, last_failure)
@@ -134,29 +147,38 @@ pub(super) fn prepare_account_attempt(input: AccountPrepareInput<'_>) -> Account
         &route.source_model,
         rewrite_model,
         endpoint,
-        route_responses_lite.is_some(),
+        normalize_responses_lite,
         basis_points_route,
     ) {
-        Ok(body) => body,
+        Ok(upstream_response_body) => upstream_response_body,
         Err(step) => return step,
     };
+    runtime.apply_request_timezone(candidate_id, &mut upstream_body);
     // Saved tool optimization is not applied. Wake, compact, and alpha/search
     // all keep the catalog the client sent.
     if let Some(step) = apply_account_tool_policy(tool_policy, &mut upstream_body) {
         return step;
     }
     if basis_points_route {
-        match rewrite_account_basis_points_body(
-            &upstream_body,
-            basis_points_relay_retry_parameter,
-            last_adapter_error,
-        ) {
+        match rewrite_account_basis_points_body(&upstream_body, request_id, last_adapter_error) {
             Ok(prepared) => upstream_body = prepared,
             Err(step) => return step,
         }
     }
-    let reasoning_effort =
-        ReasoningEffortDiagnostics::from_bodies(request, &upstream_body, crate::WireApi::Responses);
+    let reasoning_effort = if basis_points_route {
+        ReasoningEffortDiagnostics::from_basis_points_bodies(
+            request,
+            &upstream_body,
+            crate::WireApi::Responses,
+        )
+    } else {
+        ReasoningEffortDiagnostics::from_bodies(
+            request,
+            &upstream_body,
+            crate::WireApi::Responses,
+            crate::WireApi::Responses,
+        )
+    };
     let Ok(request_body) = serde_json::to_vec(&upstream_body) else {
         return AccountPrepare::Respond(api_error(
             StatusCode::BAD_REQUEST,
@@ -182,7 +204,6 @@ fn reject_account_basis_points(
     request: &Value,
     service_tier_policy: &ServiceTierPolicy,
     selected_service_tier: DefaultServiceTier,
-    responses_lite: bool,
     endpoint: AccountEndpoint,
     last_adapter_error: &mut Option<AdapterError>,
 ) -> Option<AccountPrepare> {
@@ -191,7 +212,6 @@ fn reject_account_basis_points(
         request.get("stream").and_then(Value::as_bool) == Some(true),
         service_tier_policy,
         selected_service_tier,
-        responses_lite,
         endpoint != AccountEndpoint::Wake,
     )?;
     *last_adapter_error = Some(error);
@@ -230,7 +250,7 @@ fn prepare_account_upstream_body(
             .unwrap()
             .insert("model".to_string(), Value::String(source_model.to_string()));
     }
-    if responses_lite && !basis_points_route {
+    if responses_lite {
         if let Some(object) = upstream_body.as_object_mut() {
             if !responses_lite_parallel_tool_calls_valid(object) {
                 return Err(AccountPrepare::Respond(api_error(
@@ -239,7 +259,9 @@ fn prepare_account_upstream_body(
                     error_codes::INVALID_REQUEST,
                 )));
             }
-            if endpoint == AccountEndpoint::Compact {
+            if basis_points_route {
+                crate::gateway::request::normalize_responses_lite_request(object);
+            } else if endpoint == AccountEndpoint::Compact {
                 crate::gateway::request::normalize_compact_account_request(object, true);
             } else {
                 crate::gateway::request::normalize_account_request(object, true);
@@ -270,17 +292,20 @@ fn apply_account_tool_policy(
 #[allow(clippy::result_large_err)]
 fn rewrite_account_basis_points_body(
     upstream_body: &Value,
-    retry_parameter: Option<&'static str>,
+    request_id: &str,
     last_adapter_error: &mut Option<AdapterError>,
 ) -> Result<Value, AccountPrepare> {
-    match super::super::basis_points::prepare_upstream(upstream_body, retry_parameter) {
+    match super::super::basis_points::prepare_request(upstream_body) {
         Ok(prepared) => Ok(prepared),
         Err(error) if error.is_route_incompatible() => {
             *last_adapter_error = Some(error);
             Err(AccountPrepare::Continue)
         }
         Err(error) => Err(AccountPrepare::Respond(
-            super::super::request::adapter_error_response(error),
+            super::super::request::adapter_error_response(error, Some(request_id)),
         )),
     }
 }
+
+#[cfg(test)]
+mod tests;

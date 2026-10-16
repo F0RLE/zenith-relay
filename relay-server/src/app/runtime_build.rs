@@ -1,5 +1,6 @@
 use super::{
-    account_runtime::{account_proxy_config, runtime_account, runtime_key, runtime_source},
+    account_runtime::{account_proxy_runtime, runtime_account, runtime_key, runtime_source},
+    runtime_records::source_proxy_url,
     AccountCredential, AppState,
 };
 use crate::{
@@ -31,7 +32,7 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
     let account_records = state.store.accounts()?;
     let account_secret_refs = account_records
         .iter()
-        .map(|record| (record.id.clone(), record.secret_ref.clone()))
+        .map(|account_record| (account_record.id.clone(), account_record.secret_ref.clone()))
         .collect();
     let key_records = state
         .store
@@ -42,6 +43,7 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
     let hidden_models = state.store.hidden_models()?;
     let model_reasoning_allowed_levels = state.store.model_reasoning_allowed_levels()?;
     let model_service_tier_overrides = state.store.model_service_tier_overrides()?;
+    let model_context_policies = state.store.model_context_policies()?;
     let model_display_order = state.store.model_display_order()?;
     let routing_policy = state.store.routing_policy()?;
     let pool_routing = resolve_pool_routing(&routing_policy, &source_records, &account_records);
@@ -57,13 +59,12 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
     }
 
     let sources = build_sources(state, source_records)?;
-    let basis_points_enabled = routing_policy.basis_points_enabled;
     let AccountRuntimeBuild {
         accounts,
         direct_refresh_accounts,
         refresh_clients,
         agent_identities,
-    } = build_accounts(state, account_records, basis_points_enabled).await?;
+    } = build_accounts(state, account_records).await?;
     if !has_active_candidate(&sources, &accounts) {
         return state.replace_runtime(None);
     }
@@ -102,6 +103,7 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
         },
         GatewayRuntimeOptions {
             tool_policy: routing_policy.tool_policy.unwrap_or_default(),
+            request_timezone: state.store.request_timezone()?,
             max_retry_candidates: usize::from(routing_policy.max_retry_candidates),
             pool_routing: Some(pool_routing),
             hidden_models,
@@ -111,6 +113,7 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
             image_pricing_catalog: Some(state.pricing_catalog()),
             model_metadata_catalog: Some(state.model_metadata_loader().catalog_handle()),
             model_reasoning_allowed_levels,
+            model_context_policies: model_context_policies.clone(),
             response_affinity_store: Some(state.store.clone()),
         },
         usage,
@@ -118,6 +121,9 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
     .map_err(|error| error.to_string())?;
     runtime
         .set_model_service_tier_overrides(model_service_tier_overrides)
+        .map_err(|error| error.to_string())?;
+    runtime
+        .set_model_context_policies(model_context_policies)
         .map_err(|error| error.to_string())?;
     runtime.set_model_display_order(model_display_order);
     runtime.set_codex_background_tasks_enabled(codex_background_tasks_enabled);
@@ -178,35 +184,37 @@ pub(super) fn pool_member_ids(
 ) -> (Vec<String>, Vec<String>) {
     let source_ids = sources
         .iter()
-        .filter(|record| record.in_pool && record.supports_any_wire_api().unwrap_or(false))
-        .map(|record| record.id.clone())
+        .filter(|source_record| {
+            source_record.in_pool && source_record.supports_any_wire_api().unwrap_or(false)
+        })
+        .map(|source_record| source_record.id.clone())
         .collect();
     let account_ids = accounts
         .iter()
-        .filter(|record| record.in_pool)
-        .map(|record| record.id.clone())
+        .filter(|account_record| account_record.in_pool)
+        .map(|account_record| account_record.id.clone())
         .collect();
     (source_ids, account_ids)
 }
 
 fn build_sources(
     state: &AppState,
-    records: Vec<SourceRecord>,
+    source_records: Vec<SourceRecord>,
 ) -> Result<Vec<RuntimeSource>, String> {
     let mut sources = Vec::new();
-    for record in records {
-        let Some(api_key) = state.vault.load(&record.secret_ref)? else {
+    for source_record in source_records {
+        let Some(api_key) = state.vault.load(&source_record.secret_ref)? else {
             continue;
         };
-        sources.push(runtime_source(record, api_key));
+        let proxy_url = source_proxy_url(state, &source_record)?;
+        sources.push(runtime_source(source_record, api_key, proxy_url));
     }
     Ok(sources)
 }
 
 async fn build_accounts(
     state: &Arc<AppState>,
-    records: Vec<ServerAccountRecord>,
-    basis_points_enabled: bool,
+    account_records: Vec<ServerAccountRecord>,
 ) -> Result<AccountRuntimeBuild, String> {
     let mut build = AccountRuntimeBuild {
         accounts: Vec::new(),
@@ -214,38 +222,53 @@ async fn build_accounts(
         refresh_clients: HashMap::new(),
         agent_identities: HashMap::new(),
     };
-    for record in records {
-        let Some(secret) = state.vault.load(&record.secret_ref)? else {
+    for account_record in account_records {
+        let Some(secret) = state.vault.load(&account_record.secret_ref)? else {
             continue;
         };
         let credential: AccountCredential = serde_json::from_str(&secret)
             .map_err(|_| "stored account credential is invalid".to_string())?;
-        let Ok(proxy) = account_proxy_config(state, &record, &credential) else {
+        let Ok(proxy_runtime) = account_proxy_runtime(state, &account_record, &credential) else {
             continue;
         };
+        let proxy = proxy_runtime.config;
         if let Some(agent) = credential.agent_identity()? {
-            build.agent_identities.insert(record.id.clone(), agent);
+            build
+                .agent_identities
+                .insert(account_record.id.clone(), agent);
         }
         if credential.has_oauth() {
             state
                 .token_authority
-                .register_if_not_stale(&record.id, credential.tokens()?, record.auth_state)
+                .register_if_not_stale(
+                    &account_record.id,
+                    credential.tokens()?,
+                    account_record.auth_state,
+                )
                 .await
                 .map_err(|error| error.to_string())?;
-            if proxy.is_some() {
+            if proxy.is_some()
+                || credential.oauth_client_kind
+                    == zenith_relay_core::providers::chatgpt::OAuthClientKind::ExcelBps
+            {
                 build.refresh_clients.insert(
-                    record.id.clone(),
-                    CodexRefreshClient::new_with_proxy(proxy.as_ref())?,
+                    account_record.id.clone(),
+                    CodexRefreshClient::new_with_proxy_for_kind(
+                        credential.oauth_client_kind,
+                        proxy.as_ref(),
+                    )?,
                 );
             } else {
-                build.direct_refresh_accounts.insert(record.id.clone());
+                build
+                    .direct_refresh_accounts
+                    .insert(account_record.id.clone());
             }
         }
         build.accounts.push(runtime_account(
-            record,
+            account_record,
             &credential,
             proxy,
-            basis_points_enabled,
+            proxy_runtime.timezone,
             QUOTA_STALE_AFTER_MS,
         ));
     }
@@ -272,31 +295,37 @@ fn retain_active_pool_members(
         .filter(|source| source.enabled && !source.draining)
         .map(|source| source.source.id.as_str())
         .collect::<HashSet<_>>();
-    source_ids.retain(|id| active_source_ids.contains(id.as_str()));
+    source_ids.retain(|source_id| active_source_ids.contains(source_id.as_str()));
     let active_account_ids = accounts
         .iter()
-        .filter(|account| account.enabled && !account.draining)
+        .filter(|account| {
+            account
+                .oauth_client_kind
+                .supports_pool(account.subscription_plan_type.as_deref())
+                && account.enabled
+                && !account.draining
+        })
         .map(|account| account.id.as_str())
         .collect::<HashSet<_>>();
-    account_ids.retain(|id| active_account_ids.contains(id.as_str()));
+    account_ids.retain(|account_id| active_account_ids.contains(account_id.as_str()));
 }
 
 fn build_keys(
     state: &AppState,
-    records: Vec<GatewayKeyRecord>,
+    key_records: Vec<GatewayKeyRecord>,
     pool_source_ids: &[String],
     pool_account_ids: &[String],
 ) -> Result<Vec<RuntimeMixedLocalKey>, String> {
     let mut keys = Vec::new();
-    for record in records {
-        let Some(secret) = state.vault.load(&record.secret_ref)? else {
+    for key_record in key_records {
+        let Some(secret) = state.vault.load(&key_record.secret_ref)? else {
             continue;
         };
         if pool_source_ids.is_empty() && pool_account_ids.is_empty() {
             continue;
         }
         keys.push(runtime_key(
-            record,
+            key_record,
             secret,
             pool_source_ids,
             pool_account_ids,

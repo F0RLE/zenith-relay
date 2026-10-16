@@ -13,7 +13,7 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
         Arc::new(PersistenceAdapter::default()),
         GatewayRuntimeOptions {
             default_service_tier: DefaultServiceTier::Fast,
-            ..GatewayRuntimeOptions::default()
+            ..reference_metadata_options()
         },
     )
     .await;
@@ -41,6 +41,8 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
     let upgraded = reqwest::Client::new()
         .get(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
+        .header("user-agent", "codex_test/1.0.0")
+        .header("version", "1.0.0")
         .header("originator", "codex_test")
         .header("openai-beta", "existing_feature=1")
         .header("x-openai-internal-codex-responses-lite", "true")
@@ -86,6 +88,11 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
             Some("provider-account")
         );
         assert_eq!(header(headers, "originator").as_deref(), Some("codex_test"));
+        assert_eq!(
+            header(headers, "user-agent").as_deref(),
+            Some("codex_test/1.0.0")
+        );
+        assert_eq!(header(headers, "version").as_deref(), Some("1.0.0"));
         assert_eq!(
             header(headers, "x-openai-internal-codex-responses-lite").as_deref(),
             Some("true")
@@ -324,6 +331,8 @@ async fn account_websocket_retries_foreign_message_item_id_after_native_rejectio
                     "type": "response.completed",
                     "response": {
                         "id": "ws-message-id-repaired",
+                        "status": "completed",
+                        "output": [],
                         "usage": {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4}
                     }
                 }),
@@ -394,8 +403,14 @@ async fn account_websocket_retries_foreign_message_item_id_after_native_rejectio
     drop(requests);
 
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 1);
-    assert!(events[0].success);
+    assert_eq!(events.len(), 2);
+    assert!(!events[0].success);
+    assert_eq!(
+        events[0].routing.as_ref().unwrap().attempt_outcome,
+        Some(zenith_relay_core::AttemptOutcome::RetryRepair)
+    );
+    assert!(events[1].success);
+    assert_eq!(events[0].request_id, events[1].request_id);
 }
 
 #[tokio::test]
@@ -408,6 +423,8 @@ async fn account_websocket_repairs_legacy_call_ids_on_a_later_request() {
                     "type": "response.completed",
                     "response": {
                         "id": "ws-first-call-id",
+                        "status": "completed",
+                        "output": [],
                         "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3}
                     }
                 }),
@@ -423,6 +440,8 @@ async fn account_websocket_repairs_legacy_call_ids_on_a_later_request() {
                     "type": "response.completed",
                     "response": {
                         "id": "ws-repaired-call-id",
+                        "status": "completed",
+                        "output": [],
                         "usage": {"input_tokens": 4, "output_tokens": 1, "total_tokens": 5}
                     }
                 }),
@@ -514,6 +533,7 @@ async fn account_websocket_keeps_connection_after_max_output_incomplete() {
                 "response": {
                     "id": "ws-incomplete",
                     "status": "incomplete",
+                    "output": [],
                     "incomplete_details": {"reason": "max_output_tokens"},
                     "usage": {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7}
                 }
@@ -525,6 +545,8 @@ async fn account_websocket_keeps_connection_after_max_output_incomplete() {
                 "type": "response.completed",
                 "response": {
                     "id": "ws-completed",
+                    "status": "completed",
+                    "output": [],
                     "usage": {"input_tokens": 5, "output_tokens": 6, "total_tokens": 11}
                 }
             }),

@@ -2,9 +2,8 @@ use super::events::{websocket_reset_delay_seconds, websocket_retry_headers};
 use super::{
     event_terminal, fallback_event_message, fallback_response_origin, incomplete_requires_cooldown,
     initial_payloads_are_empty_incomplete, semantic_output_payload, terminal_failure_status,
-    ClientRequest, EventTerminalOutcome, GatewayFailure, MAX_SSE_EVENT_BYTES,
-    MAX_WEBSOCKET_ERROR_BYTES, RELAY_ERROR_ORIGIN_HEADER, RELAY_UPSTREAM_ORIGIN_HEADER,
-    WEBSOCKET_PROTOCOLS,
+    ClientRequest, EventTerminalOutcome, GatewayFailure, RELAY_ERROR_ORIGIN_HEADER,
+    RELAY_UPSTREAM_ORIGIN_HEADER, WEBSOCKET_PROTOCOLS,
 };
 use crate::{
     ErrorOrigin, GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource,
@@ -27,6 +26,7 @@ fn runtime() -> GatewayRuntime {
             api_key: "upstream-secret".into(),
             wire_api: WireApi::Responses,
             models: vec!["upstream-model".into()],
+            proxy_url: None,
         })],
         vec![RuntimeLocalKey {
             key: LocalGatewayKey {

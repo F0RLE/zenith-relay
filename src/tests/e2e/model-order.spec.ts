@@ -58,7 +58,8 @@ for (const mode of ["local", "remote"] as const) {
 
     await page.screenshot({ path: `output/playwright/model-order-${mode}-desktop.png` });
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.getByRole("button", { name: "Collapse sidebar", exact: true }).click();
+    await expect(page.locator(".relay-shell")).toHaveClass(/sidebar-collapsed/);
+    await expect(page.getByRole("button", { name: "Expand sidebar", exact: true })).toBeVisible();
     await expect(reset).toBeVisible();
     const bounds = await reset.boundingBox();
     expect(bounds && bounds.x >= 0 && bounds.x + bounds.width <= 390).toBeTruthy();

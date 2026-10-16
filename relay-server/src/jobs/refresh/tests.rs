@@ -17,6 +17,9 @@ async fn changed_models_refresh_keeps_server_runtime_and_its_cooldown() {
     let mut record = account(true);
     record.in_pool = true;
     let credential = AccountCredential {
+        oauth_client_kind: Default::default(),
+        chatgpt_user_id: None,
+        basis_points_headers: None,
         access_token: "synthetic-access".into(),
         refresh_token: None,
         id_token: None,
@@ -216,6 +219,9 @@ async fn authorization_is_on_demand_transient_and_rejects_replaced_revision() {
     let record = account(false);
     state.store.save_account(&record).unwrap();
     let credential = crate::state::AccountCredential {
+        oauth_client_kind: Default::default(),
+        chatgpt_user_id: None,
+        basis_points_headers: None,
         access_token: "synthetic-access".into(),
         refresh_token: None,
         id_token: None,
@@ -284,6 +290,9 @@ async fn old_oauth_rejection_cannot_invalidate_a_newer_server_generation() {
     let record = account(false);
     state.store.save_account(&record).unwrap();
     let current = crate::state::AccountCredential {
+        oauth_client_kind: Default::default(),
+        chatgpt_user_id: None,
+        basis_points_headers: None,
         access_token: "synthetic-new-access".into(),
         refresh_token: Some("synthetic-refresh".into()),
         id_token: None,
@@ -351,6 +360,9 @@ async fn quota_and_unchanged_model_reads_keep_the_live_scheduler() {
     account.in_pool = true;
     state.store.save_account(&account).unwrap();
     let credential = crate::state::AccountCredential {
+        oauth_client_kind: Default::default(),
+        chatgpt_user_id: None,
+        basis_points_headers: None,
         access_token: "synthetic-access".into(),
         refresh_token: None,
         id_token: None,

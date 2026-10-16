@@ -9,17 +9,21 @@ import { copyText } from "./secret";
 
 export function Dialog({
   title,
+  subtitle,
   children,
   onClose,
   footer,
+  headerActions,
   wide = false,
   className = "",
   layer = "default",
 }: {
   title: string;
+  subtitle?: ReactNode;
   children: ReactNode;
   onClose: () => void;
   footer?: ReactNode;
+  headerActions?: ReactNode;
   wide?: boolean;
   className?: string;
   layer?: "default" | "top";
@@ -47,13 +51,19 @@ export function Dialog({
         "input",
         "select",
         "textarea",
+        "summary",
         "[contenteditable=\"true\"]",
         "[tabindex]",
       ].join(","))).filter((element) => {
         if (element.matches("input[type=\"hidden\"]") || element.hasAttribute("disabled")) return false;
         if (element.tabIndex < 0 || element.hidden || element.closest("[aria-hidden=\"true\"]")) return false;
+        // Closed details can retain layout boxes. Only their first summary
+        // remains focusable, including when disclosures are nested.
+        for (let ancestor = element.parentElement; ancestor && ancestor !== dialog; ancestor = ancestor.parentElement) {
+          if (ancestor.matches("details:not([open])") && !ancestor.querySelector(":scope > summary")?.contains(element)) return false;
+        }
         const style = window.getComputedStyle(element);
-        return style.display !== "none" && style.visibility !== "hidden";
+        return element.getClientRects().length > 0 && style.display !== "none" && style.visibility !== "hidden";
       });
     };
     const isTopmost = () => {
@@ -75,14 +85,14 @@ export function Dialog({
         return;
       }
       if (event.key !== "Tab") return;
-      const items = focusable();
-      if (!items.length) {
+      const focusableElements = focusable();
+      if (!focusableElements.length) {
         event.preventDefault();
         dialog.focus({ preventScroll: true });
         return;
       }
-      const first = items[0];
-      const last = items[items.length - 1];
+      const first = focusableElements[0];
+      const last = focusableElements[focusableElements.length - 1];
       if (!first || !last) return;
       const active = document.activeElement;
       if (active === dialog || !dialog.contains(active)) {
@@ -124,7 +134,13 @@ export function Dialog({
         tabIndex={-1}
       >
         <header>
-          <h2 id={titleId}>{title}</h2>
+          {subtitle ? (
+            <div className="relay-dialog-heading">
+              <h2 id={titleId}>{title}</h2>
+              {subtitle}
+            </div>
+          ) : <h2 id={titleId}>{title}</h2>}
+          {headerActions ? <div className="relay-dialog-header-actions">{headerActions}</div> : null}
           <IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={onClose} />
         </header>
         <div className="relay-dialog-body">{children}</div>
@@ -137,10 +153,10 @@ export function Dialog({
 export function ErrorDetailsDialog({ error, message, onClose }: { error: FeedbackError; message: string; onClose: () => void }) {
   const { t } = useTranslation();
   const [copied, showCopied, clearCopied] = useTransientFlag(1_500);
-  const details = JSON.stringify(error, null, 2);
+  const errorDetailsJson = JSON.stringify(error, null, 2);
   const copyError = async () => {
     try {
-      await copyText(details);
+      await copyText(errorDetailsJson);
       showCopied();
     } catch {
       clearCopied();
@@ -168,7 +184,7 @@ export function ErrorDetailsDialog({ error, message, onClose }: { error: Feedbac
     )}
   >
     <div className="global-feedback-dialog-summary"><CircleAlert aria-hidden /><div><strong>{message}</strong><code>{error.code}</code></div></div>
-    <div className="config-preview global-feedback-error-json"><pre><code>{details}</code></pre></div>
+    <div className="config-preview global-feedback-error-json"><pre><code>{errorDetailsJson}</code></pre></div>
     <p className="form-note">{t("feedback.detailsHint")}</p>
   </Dialog>;
 }

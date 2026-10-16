@@ -11,7 +11,10 @@ use zenith_relay_core::{
     CODEX_RELAY_CATALOG_HASH,
 };
 
-const MAX_MODEL_CATALOG_BYTES: usize = 512 * 1024;
+// Keep the desktop catalog bound aligned with the shared model-discovery
+// transport limit. Native ChatGPT catalogs can legitimately exceed 512 KiB
+// once capability metadata for the full visible inventory is included.
+const MAX_MODEL_CATALOG_BYTES: usize = 4 * 1024 * 1024;
 const DIRECT_SOURCE_FALLBACK_PRIORITY: u64 = 1_000;
 
 mod installed;
@@ -20,7 +23,6 @@ pub(super) use installed::bundled_codex_ultra_models;
 #[cfg(test)]
 use installed::{
     codex_cli_file_name, newest_installed_codex_executable, official_codex_ultra_rows,
-    read_cockpit_codex_catalog, ultra_rows_from_catalogs,
 };
 #[cfg(test)]
 use std::time::SystemTime;
@@ -48,20 +50,42 @@ mod ultra_tests {
     use super::*;
 
     #[test]
-    fn bundled_codex_metadata_uses_exact_models_and_only_orchestration_fields() {
+    fn bundled_codex_metadata_uses_exact_models_and_only_client_owned_fields() {
         let catalog = json!({"models": [
             {"slug": "gpt-future", "supported_reasoning_levels": [
                 {"effort": "max"}, {"effort": "ultra"}
             ], "multi_agent_version": "v2", "multi_agent_reasoning_effort": "xhigh",
-               "base_instructions": "not a Relay instruction"},
+               "base_instructions": "not a Relay instruction",
+               "context_window": 272000, "max_context_window": 872000,
+               "auto_compact_token_limit": 244800, "effective_context_window_percent": 95},
+            {"slug": "gpt-short", "context_window": 272000, "max_context_window": 872000,
+               "auto_compact_token_limit": 244800, "effective_context_window_percent": 95,
+               "supported_reasoning_levels": [{"effort": "max"}]},
             {"slug": "gpt-other", "supported_reasoning_levels": [{"effort": "max"}]}
         ]});
         let official = official_codex_ultra_rows(&catalog);
         assert!(official.contains_key("gpt-future"));
         assert!(!official.contains_key("gpt-other"));
+        assert!(!official.contains_key("gpt-short"));
+        for field in [
+            "context_window",
+            "max_context_window",
+            "auto_compact_token_limit",
+            "effective_context_window_percent",
+        ] {
+            assert!(official["gpt-future"].get(field).is_none(), "{field}");
+        }
         let mut relay = routed_codex_catalog_entry(None, "gpt-future", 1_000, None);
         relay["slug"] = json!("gpt-future");
-        relay["supported_reasoning_levels"] = json!([{"effort": "xhigh"}, {"effort": "max"}]);
+        relay["context_window"] = json!(500_000);
+        relay["max_context_window"] = json!(1_050_000);
+        relay["auto_compact_token_limit"] = json!(450_000);
+        relay["effective_context_window_percent"] = json!(100);
+        relay["supported_reasoning_levels"] = json!([
+            {"effort": "xhigh", "description": "Extra high"},
+            {"effort": "max", "description": "Maximum"}
+        ]);
+        assert!(codex_catalog_entry_is_compatible(&relay));
         let mut qualified = routed_codex_catalog_entry(None, "vendor/gpt-future", 1_001, None);
         qualified["supported_reasoning_levels"] = json!([{"effort": "xhigh"}, {"effort": "max"}]);
         let relay_catalog = json!({"models": [relay, qualified]});
@@ -80,6 +104,13 @@ mod ultra_tests {
             "ultra"
         );
         assert_eq!(managed["models"][0]["multi_agent_version"], "v2");
+        assert_eq!(managed["models"][0]["context_window"], 500_000);
+        assert_eq!(managed["models"][0]["max_context_window"], 1_050_000);
+        assert_eq!(managed["models"][0]["auto_compact_token_limit"], 450_000);
+        assert_eq!(
+            managed["models"][0]["effective_context_window_percent"],
+            100
+        );
         assert_eq!(
             managed["models"][0]["multi_agent_reasoning_effort"],
             "xhigh"
@@ -145,19 +176,11 @@ mod ultra_tests {
     }
 
     #[test]
-    fn cli_catalog_wins_and_a_failed_cli_can_use_the_cockpit_file() {
+    fn installed_codex_cli_is_the_only_external_ultra_metadata_source() {
         let cli = json!({"models": [{"slug": "gpt-6-sol", "supported_reasoning_levels": [
             {"effort": "max"}
         ]}]});
-        let cockpit = json!({"models": [{
-            "slug": "gpt-6-sol",
-            "supported_reasoning_levels": [{"effort": "ultra"}],
-            "multi_agent_version": "v2"
-        }]});
-        assert!(ultra_rows_from_catalogs(Some(&cli), Some(&cockpit)).is_empty());
-        let rows = ultra_rows_from_catalogs(None, Some(&cockpit));
-        assert_eq!(rows["gpt-6-sol"]["multi_agent_version"], "v2");
-        assert!(rows["gpt-6-sol"].get("base_instructions").is_none());
+        assert!(official_codex_ultra_rows(&cli).is_empty());
 
         let root = std::env::temp_dir().join(format!(
             "relay-codex-bin-{}-{}",
@@ -195,18 +218,19 @@ mod ultra_tests {
             Some(newer_cli.as_path())
         );
 
-        let home = root.join("home");
-        fs::create_dir_all(&home).unwrap();
-        fs::write(
-            home.join("cockpit-model-catalog.json"),
-            serde_json::to_vec(&cockpit).unwrap(),
-        )
-        .unwrap();
-        let from_file = read_cockpit_codex_catalog(&home).unwrap();
-        assert_eq!(
-            official_codex_ultra_rows(&from_file)["gpt-6-sol"]["multi_agent_version"],
-            "v2"
-        );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn accepts_chatgpt_catalogs_larger_than_legacy_512_kib_limit() {
+        let catalog = json!({
+            "models": [{
+                "slug": "gpt-large-catalog",
+                "description": "x".repeat(600 * 1024)
+            }]
+        });
+        let content = serde_json::to_vec(&catalog).unwrap();
+        assert!(content.len() > 512 * 1024);
+        assert_eq!(read_catalog_values(&content, false).unwrap().len(), 1);
     }
 }

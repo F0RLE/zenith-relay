@@ -230,13 +230,16 @@ async fn balance_reads_cache_last_good_until_forced_and_retain_a_stale_warning()
         good.as_of_ms
     );
     assert_eq!(reads.load(Ordering::SeqCst), 1);
-    let stale = request_stats(&state, "source", true).await.unwrap();
-    assert_eq!(stale.balance_micro_usd, good.balance_micro_usd);
-    assert!(stale.stale);
-    assert_eq!(stale.refresh_error, Some(SourceStatsStatus::RateLimited));
+    let stale_stats = request_stats(&state, "source", true).await.unwrap();
+    assert_eq!(stale_stats.balance_micro_usd, good.balance_micro_usd);
+    assert!(stale_stats.stale);
+    assert_eq!(
+        stale_stats.refresh_error,
+        Some(SourceStatsStatus::RateLimited)
+    );
     assert_eq!(
         state.snapshot().unwrap().sources[0].provider_stats,
-        Some(stale.clone())
+        Some(stale_stats.clone())
     );
     assert_eq!(
         state.snapshot().unwrap().sources[0].refresh_state.balance,
@@ -247,7 +250,7 @@ async fn balance_reads_cache_last_good_until_forced_and_retain_a_stale_warning()
             .await
             .unwrap()
             .refresh_error,
-        stale.refresh_error
+        stale_stats.refresh_error
     );
     assert_eq!(reads.load(Ordering::SeqCst), 2);
     state.store.invalidate_source_refresh("source").unwrap();

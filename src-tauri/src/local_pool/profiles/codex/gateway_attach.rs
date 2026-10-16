@@ -166,10 +166,14 @@ pub fn restore(codex_home: &Path, backup_root: &Path) -> Result<()> {
     let _profile_guard = lock_codex_profile();
     ensure_single_profile_backup(codex_home, backup_root)?;
     if account_backup_for_profile(codex_home, backup_root)?.is_some() {
-        account::restore_account_locked(codex_home, backup_root, &OsSecretBackend)?;
-        return Ok(());
+        let context_change =
+            context::sync_context_overrides_locked(codex_home, backup_root, false)?;
+        account::restore_account_locked(codex_home, backup_root, &OsSecretBackend)
+            .map(|_| ())
+            .map_err(|error| with_rollback(error, context_change.rollback_locked()))
+    } else {
+        local::restore_local_locked(codex_home, backup_root, &OsSecretBackend)
     }
-    local::restore_local_locked(codex_home, backup_root, &OsSecretBackend)
 }
 
 /// Updates the managed profile and returns the previous provider setting when
@@ -216,9 +220,9 @@ pub(super) fn set_local_gateway_websockets_with_backend(
         let Some(mut backup) = parse_backup_snapshot(&original_backup, &backup_path)? else {
             return Ok(None);
         };
-        if expected_credential_id.is_some_and(|id| {
+        if expected_credential_id.is_some_and(|credential_id| {
             backup.credential_kind() != ProfileCredentialKind::LocalGateway
-                || backup.managed_key_id != id
+                || backup.managed_key_id != credential_id
         }) {
             return Ok(None);
         }

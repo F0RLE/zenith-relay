@@ -27,8 +27,8 @@ impl<B: SecretBackend> CredentialStore<B> {
 
     pub fn save(&self, credentials: &StoredCodexCredentials) -> Result<(), CredentialError> {
         let secret_ref = credential_secret_ref(credentials.local_account_id())?;
-        let value = credentials.to_secret_json()?;
-        self.backend.save(&secret_ref, &value).map_err(|_| {
+        let secret_json = credentials.to_secret_json()?;
+        self.backend.save(&secret_ref, &secret_json).map_err(|_| {
             CredentialError::new(
                 CredentialErrorCode::SecretStoreUnavailable,
                 "failed to save ChatGPT credentials",
@@ -41,7 +41,7 @@ impl<B: SecretBackend> CredentialStore<B> {
         local_account_id: &str,
     ) -> Result<Option<StoredCodexCredentials>, CredentialError> {
         let secret_ref = credential_secret_ref(local_account_id)?;
-        let Some(value) = self.backend.load(&secret_ref).map_err(|_| {
+        let Some(secret_json) = self.backend.load(&secret_ref).map_err(|_| {
             CredentialError::new(
                 CredentialErrorCode::SecretStoreUnavailable,
                 "failed to load ChatGPT credentials",
@@ -50,7 +50,7 @@ impl<B: SecretBackend> CredentialStore<B> {
         else {
             return Ok(None);
         };
-        let credentials = StoredCodexCredentials::from_secret_json(&value)?;
+        let credentials = StoredCodexCredentials::from_secret_json(&secret_json)?;
         if credentials.local_account_id() != local_account_id {
             return Err(CredentialError::new(
                 CredentialErrorCode::InvalidIdentity,

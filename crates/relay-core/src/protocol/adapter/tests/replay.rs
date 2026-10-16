@@ -363,10 +363,13 @@ fn native_replay_requires_the_matching_tool_call_for_every_output() {
 fn continuation_stores_bound_entry_and_total_retained_bytes() {
     let mut oversized_state =
         MessagesBridgeState::new("claude-test", MessagesReasoningMode::Disabled);
-    oversized_state.messages.push(json!({
-        "role": "user",
-        "content": [{"type": "text", "text": "x".repeat(1_024)}],
-    }));
+    oversized_state.native_turns.insert(
+        0,
+        vec![json!({
+            "role": "user",
+            "content": [{"type": "text", "text": "x".repeat(1_024)}],
+        })],
+    );
     let mut bridge_store = MessagesBridgeStore::with_limits(4, 60_000, 256, 1_024);
     bridge_store.insert("key-a", "resp_oversized", "route-a", oversized_state, 100);
     assert_eq!(
@@ -379,10 +382,13 @@ fn continuation_stores_bound_entry_and_total_retained_bytes() {
 
     let state = |text: &str| {
         let mut state = MessagesBridgeState::new("claude-test", MessagesReasoningMode::Disabled);
-        state.messages.push(json!({
-            "role": "user",
-            "content": [{"type": "text", "text": text}],
-        }));
+        state.native_turns.insert(
+            0,
+            vec![json!({
+                "role": "user",
+                "content": [{"type": "text", "text": text}],
+            })],
+        );
         state
     };
     let mut total_bound_store = MessagesBridgeStore::with_limits(4, 60_000, 2_048, 1_000);

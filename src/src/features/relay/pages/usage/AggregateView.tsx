@@ -37,8 +37,8 @@ export function AggregateView({ rows, groups, field, empty }: { rows: UsageRow[]
   const aggregateRows = groups?.map(({ key, label, totals }) => aggregateRowFromTotals(label || key || t("common.unknown"), totals)) ?? aggregateRowsFromUsage(rows, field, t("common.unknown"));
   const defaults: readonly AggregateColumnId[] = field === "model" ? MODEL_COLUMN_IDS : CONNECTION_COLUMN_IDS;
   const [order, setOrder] = useStoredColumnOrder(`relay.usage.${field}ColumnOrder.v2`, defaults);
-  const moveColumn = (column: AggregateColumnId, target: AggregateColumnId, after: boolean) => setOrder((current) => reorderColumns(current, column, target, after));
-  const moveColumnBy = (column: AggregateColumnId, offset: number) => setOrder((current) => shiftColumn(current, column, offset));
+  const moveColumn = (column: AggregateColumnId, target: AggregateColumnId, after: boolean) => setOrder((previousOrder) => reorderColumns(previousOrder, column, target, after));
+  const moveColumnBy = (column: AggregateColumnId, offset: number) => setOrder((previousOrder) => shiftColumn(previousOrder, column, offset));
   const { bind, drag } = useColumnDrag(moveColumn, moveColumnBy);
   const columns: Record<AggregateColumnId, { label: string; cell: (group: AggregateRow) => ReactNode }> = {
     name: { label: field === "model" ? t("common.model") : t("usage.poolMember"), cell: (group) => <span className="usage-aggregate-name" data-relay-tooltip={group.name}>{group.name}</span> },
@@ -56,11 +56,11 @@ export function AggregateView({ rows, groups, field, empty }: { rows: UsageRow[]
   if (!aggregateRows.length) return <EmptyState title={t("usage.emptyTitle")} description={empty} />;
   return <div className="relay-table-wrap">
     <table className={`relay-table usage-aggregate-table usage-sortable-table ${field === "connection" ? "usage-connections-table" : "usage-models-table"}`}>
-      <colgroup>{order.map((id) => <col key={id} data-column={id} />)}</colgroup>
-      <thead><tr>{order.map((id) => <th key={id} data-column={id} data-dragging={drag?.column === id ? "true" : undefined} data-drop={drag?.target === id && drag.column !== id ? (drag.after ? "after" : "before") : undefined}>
-        <button type="button" className="usage-column-heading" aria-label={t("usage.moveColumn", { column: columns[id].label })} {...bind(id)}><span>{columns[id].label}</span></button>
+      <colgroup>{order.map((columnId) => <col key={columnId} data-column={columnId} />)}</colgroup>
+      <thead><tr>{order.map((columnId) => <th key={columnId} data-column={columnId} data-dragging={drag?.column === columnId ? "true" : undefined} data-drop={drag?.target === columnId && drag.column !== columnId ? (drag.after ? "after" : "before") : undefined}>
+        <button type="button" className="usage-column-heading" aria-label={t("usage.moveColumn", { column: columns[columnId].label })} {...bind(columnId)}><span>{columns[columnId].label}</span></button>
       </th>)}</tr></thead>
-      <tbody>{aggregateRows.map((group) => <tr key={group.name}>{order.map((id) => <td key={id} data-column={id} data-label={columns[id].label}>{columns[id].cell(group)}</td>)}</tr>)}</tbody>
+      <tbody>{aggregateRows.map((group) => <tr key={group.name}>{order.map((columnId) => <td key={columnId} data-column={columnId} data-label={columns[columnId].label}>{columns[columnId].cell(group)}</td>)}</tr>)}</tbody>
     </table>
   </div>;
 }

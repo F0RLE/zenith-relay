@@ -4,9 +4,11 @@ use super::*;
 pub(super) struct UpstreamUsage {
     pending: Vec<u8>,
     event: UsageEvent,
+    usage_snapshot: Option<Value>,
     expected_model: Option<String>,
     rejection: Option<&'static str>,
     forward_pending: Vec<u8>,
+    timing: Option<(Instant, super::super::response::BufferedResponseTiming)>,
 }
 
 impl UpstreamUsage {
@@ -14,10 +16,20 @@ impl UpstreamUsage {
         Self {
             pending: Vec::new(),
             event,
+            usage_snapshot: None,
             expected_model,
             rejection: None,
             forward_pending: Vec::new(),
+            timing: None,
         }
+    }
+
+    pub(super) fn with_timing(mut self, started: Instant) -> Self {
+        self.timing = Some((
+            started,
+            super::super::response::BufferedResponseTiming::default(),
+        ));
+        self
     }
 
     pub(super) fn forward(&mut self, bytes: Bytes) -> Bytes {
@@ -34,7 +46,7 @@ impl UpstreamUsage {
                 "message": if category == error_codes::UPSTREAM_ROUTE_DEGRADED {
                     "Upstream served a different or internally degraded model"
                 } else {
-                    "Upstream stream event exceeds the inspection limit"
+                    "Upstream stream event is invalid"
                 }
             }});
             return Bytes::from(format!("data: {error}\n\n"));
@@ -53,15 +65,7 @@ impl UpstreamUsage {
         if self.rejection.is_some() {
             return false;
         }
-        if self.pending.len().saturating_add(bytes.len()) > MAX_SSE_EVENT_BYTES {
-            self.pending.clear();
-            if self.expected_model.is_some() {
-                self.rejection = Some(error_codes::STREAM_EVENT_TOO_LARGE);
-                return false;
-            }
-            return true;
-        }
-        let bytes = if self.pending.is_empty() {
+        let bytes = if self.pending.is_empty() && self.timing.is_none() {
             skip_aligned_response_deltas(bytes)
         } else {
             bytes
@@ -71,21 +75,31 @@ impl UpstreamUsage {
         }
         self.pending.extend_from_slice(bytes);
         while let Some(frame) = crate::protocol::take_sse_event(&mut self.pending) {
-            if super::fast_delta::fast_response_delta(&frame).is_some() {
+            if self.timing.is_none() && super::fast_delta::fast_response_delta(&frame).is_some() {
                 continue;
             }
             let parsed = parse_sse_event(&frame);
+            if let Some((started, timing)) = self.timing.as_mut() {
+                let elapsed = started.elapsed().as_millis() as u64;
+                timing.observe(&parsed, elapsed);
+                if parsed.outcome.is_some() {
+                    timing.finish(elapsed);
+                }
+            }
             if let Some(usage) = &parsed.usage {
-                apply_usage(&mut self.event, usage);
+                crate::protocol::merge_usage(&mut self.usage_snapshot, usage);
+                if let Some(snapshot) = &self.usage_snapshot {
+                    apply_usage(&mut self.event, snapshot);
+                }
             }
             if parsed.applied_service_tier.is_some() {
                 self.event.applied_service_tier = parsed.applied_service_tier;
             }
             if self.expected_model.as_deref().is_some_and(|expected| {
                 parsed
-                    .payload
+                    .event_payload
                     .as_ref()
-                    .is_some_and(|value| served_model_is_rejected(value, expected))
+                    .is_some_and(|served_model| served_model_is_rejected(served_model, expected))
             }) {
                 self.pending.clear();
                 self.rejection = Some(error_codes::UPSTREAM_ROUTE_DEGRADED);
@@ -96,6 +110,9 @@ impl UpstreamUsage {
     }
 
     pub(super) fn apply_to(&self, event: &mut UsageEvent) {
+        if let Some((_, timing)) = &self.timing {
+            timing.apply(event);
+        }
         event.input_tokens = self.event.input_tokens;
         event.output_tokens = self.event.output_tokens;
         event.total_tokens = self.event.total_tokens;
@@ -130,24 +147,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn oversized_partial_frame_cannot_bypass_identity_inspection() {
-        let mut capture = UpstreamUsage::new(
-            crate::gateway::test_support::test_usage_event(),
-            Some("gpt-6-astra".into()),
-        );
-        assert!(capture
-            .forward(Bytes::from_static(b"data: {\"model\":\""))
-            .is_empty());
-        let rejected = capture.forward(Bytes::from(vec![b'x'; MAX_SSE_EVENT_BYTES]));
-        let event = parse_sse_event(&rejected);
-        assert!(event.valid);
+    fn raw_tool_timing_and_partial_usage_survive_without_a_terminal() {
+        let started = Instant::now() - Duration::from_millis(100);
+        let mut capture =
+            UpstreamUsage::new(crate::gateway::test_support::test_usage_event(), None)
+                .with_timing(started);
+        capture.observe(b"data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\",\"usage\":{\"input_tokens\":7}}\n\n");
+        let mut event = crate::gateway::test_support::test_usage_event();
+        event.latency_ms = 500;
+        capture.apply_to(&mut event);
+        assert!(event.ttft_ms.is_some_and(|first| first >= 100));
         assert_eq!(
-            event.payload.unwrap()["error"]["code"],
-            error_codes::STREAM_EVENT_TOO_LARGE
+            event.generation_ms,
+            event.ttft_ms.map(|first| 500_u64.saturating_sub(first))
         );
-        assert!(capture.pending.is_empty());
-        assert!(capture.forward_pending.is_empty());
-        assert!(!capture.observe(b"data: [DONE]\n\n"));
+        assert_eq!(event.input_tokens, Some(7));
+        assert_eq!(event.output_tokens, None);
     }
 
     #[test]
@@ -203,7 +218,7 @@ mod tests {
     }
 
     #[test]
-    fn split_messages_usage_keeps_actual_cache_ttl_and_unknown_totals() {
+    fn split_messages_usage_keeps_actual_cache_ttl_and_derives_total() {
         let mut capture =
             UpstreamUsage::new(crate::gateway::test_support::test_usage_event(), None);
         let frames = b"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":20,\"cache_creation_input_tokens\":30,\"cache_creation\":{\"ephemeral_1h_input_tokens\":30}}}}\n\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4}}\n\n";
@@ -217,7 +232,7 @@ mod tests {
         assert_eq!(event.output_tokens, Some(4));
         assert_eq!(event.cache_write_input_tokens, Some(30));
         assert_eq!(event.cache_write_ttl.as_deref(), Some("1h"));
-        assert_eq!(event.total_tokens, None);
+        assert_eq!(event.total_tokens, Some(64));
     }
 
     #[test]

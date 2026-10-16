@@ -79,14 +79,14 @@ impl PoolRoutingPolicy {
 
     pub fn validate_update(
         &self,
-        current: &Self,
+        existing_policy: &Self,
         expected: Option<&Self>,
     ) -> Result<(), &'static str> {
         self.validate()?;
-        if self.version != current.version {
+        if self.version != existing_policy.version {
             return Err("unsupported pool routing policy version for this runtime");
         }
-        if expected != Some(current) {
+        if expected != Some(existing_policy) {
             return Err("pool routing changed; reload the current policy before saving");
         }
         let identities = |policy: &Self| {
@@ -96,7 +96,7 @@ impl PoolRoutingPolicy {
                 .map(|m| (m.kind, m.id.clone()))
                 .collect::<BTreeSet<_>>()
         };
-        if identities(self) != identities(current) {
+        if identities(self) != identities(existing_policy) {
             return Err("pool membership changed; reload the current policy before saving");
         }
         Ok(())
@@ -134,21 +134,21 @@ impl PoolRoutingPolicy {
     /// members keep their position, while new members append exactly once.
     pub fn reconcile(&self, members: Vec<PoolRoutingMember>) -> Self {
         let known: BTreeSet<_> = members.iter().map(|m| (m.kind, m.id.as_str())).collect();
-        let mut result = self.clone();
-        result
+        let mut reconciled_policy = self.clone();
+        reconciled_policy
             .members
             .retain(|m| known.contains(&(m.kind, m.id.as_str())));
-        let existing: BTreeSet<_> = result
+        let existing: BTreeSet<_> = reconciled_policy
             .members
             .iter()
             .map(|m| (m.kind, m.id.clone()))
             .collect();
-        result.members.extend(
+        reconciled_policy.members.extend(
             members
                 .into_iter()
                 .filter(|m| !existing.contains(&(m.kind, m.id.clone()))),
         );
-        result
+        reconciled_policy
     }
 }
 

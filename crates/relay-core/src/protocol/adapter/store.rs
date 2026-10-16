@@ -138,10 +138,10 @@ impl<T> BoundedStateStore<T> {
 
     fn prune(&mut self, now_ms: u64) {
         let mut removed_bytes = 0_usize;
-        self.entries.retain(|_, entry| {
-            let retained = now_ms.saturating_sub(entry.observed_at_ms) <= self.ttl_ms;
+        self.entries.retain(|_, stored_state| {
+            let retained = now_ms.saturating_sub(stored_state.observed_at_ms) <= self.ttl_ms;
             if !retained {
-                removed_bytes = removed_bytes.saturating_add(entry.size_bytes);
+                removed_bytes = removed_bytes.saturating_add(stored_state.size_bytes);
             }
             retained
         });
@@ -152,13 +152,13 @@ impl<T> BoundedStateStore<T> {
         let Some(key) = self
             .entries
             .iter()
-            .min_by_key(|(_, entry)| entry.observed_at_ms)
+            .min_by_key(|(_, stored_state)| stored_state.observed_at_ms)
             .map(|(key, _)| key.clone())
         else {
             return false;
         };
-        if let Some(entry) = self.entries.remove(&key) {
-            self.total_bytes = self.total_bytes.saturating_sub(entry.size_bytes);
+        if let Some(stored_state) = self.entries.remove(&key) {
+            self.total_bytes = self.total_bytes.saturating_sub(stored_state.size_bytes);
         }
         true
     }
@@ -193,13 +193,33 @@ impl MessagesBridgeStore {
         candidate_id: &str,
         now_ms: u64,
     ) -> AdapterResult<MessagesBridgeState> {
-        let Some(entry) = self.store.get(local_key_id, response_id, now_ms) else {
-            return Err(AdapterError::continuation_missing());
+        self.store.prune(now_ms);
+        let stored_bridge_state = if let Some(stored) = self
+            .store
+            .entries
+            .get(&(local_key_id.to_owned(), response_id.to_owned()))
+        {
+            stored
+        } else {
+            // A full-history Responses client may omit the response ID. Keep
+            // one bounded snapshot and find its portable-history alias.
+            let mut matches = self.store.entries.iter().filter(|((key, _), stored)| {
+                key == local_key_id && stored.state.history_key() == Some(response_id)
+            });
+            let (_, first) = matches
+                .next()
+                .ok_or_else(AdapterError::continuation_missing)?;
+            if matches.any(|(_, other)| {
+                other.candidate_id != first.candidate_id || other.state != first.state
+            }) {
+                return Err(AdapterError::continuation_mismatch());
+            }
+            first
         };
-        if entry.candidate_id != candidate_id {
+        if stored_bridge_state.candidate_id != candidate_id {
             return Err(AdapterError::continuation_mismatch());
         }
-        Ok(entry.state.clone())
+        Ok(stored_bridge_state.state.clone())
     }
 
     pub fn insert(
@@ -207,10 +227,16 @@ impl MessagesBridgeStore {
         local_key_id: &str,
         response_id: &str,
         candidate_id: &str,
-        state: MessagesBridgeState,
+        bridge_state: MessagesBridgeState,
         now_ms: u64,
     ) {
-        let _ = self.insert_if_stored(local_key_id, response_id, candidate_id, state, now_ms);
+        let _ = self.insert_if_stored(
+            local_key_id,
+            response_id,
+            candidate_id,
+            bridge_state,
+            now_ms,
+        );
     }
 
     pub(crate) fn insert_if_stored(
@@ -218,11 +244,25 @@ impl MessagesBridgeStore {
         local_key_id: &str,
         response_id: &str,
         candidate_id: &str,
-        state: MessagesBridgeState,
+        bridge_state: MessagesBridgeState,
         now_ms: u64,
     ) -> bool {
-        self.store
-            .insert(local_key_id, response_id, candidate_id, state, now_ms)
+        if self
+            .store
+            .get(local_key_id, response_id, now_ms)
+            .is_some_and(|stored| {
+                stored.candidate_id != candidate_id || stored.state != bridge_state
+            })
+        {
+            return false;
+        }
+        self.store.insert(
+            local_key_id,
+            response_id,
+            candidate_id,
+            bridge_state,
+            now_ms,
+        )
     }
 }
 
@@ -256,8 +296,8 @@ impl NativeResponsesReplayStore {
     ) -> Option<NativeResponsesReplayState> {
         self.store
             .get(local_key_id, response_id, now_ms)
-            .filter(|entry| entry.candidate_id == candidate_id)
-            .map(|entry| entry.state.clone())
+            .filter(|stored_replay| stored_replay.candidate_id == candidate_id)
+            .map(|stored_replay| stored_replay.state.clone())
     }
 
     pub fn insert(
@@ -265,17 +305,21 @@ impl NativeResponsesReplayStore {
         local_key_id: &str,
         response_id: &str,
         candidate_id: &str,
-        state: NativeResponsesReplayState,
+        replay_state: NativeResponsesReplayState,
         now_ms: u64,
     ) {
-        let _ = self
-            .store
-            .insert(local_key_id, response_id, candidate_id, state, now_ms);
+        let _ = self.store.insert(
+            local_key_id,
+            response_id,
+            candidate_id,
+            replay_state,
+            now_ms,
+        );
     }
 }
 
-fn serialized_size_bytes(value: &impl Serialize) -> Option<usize> {
-    serde_json::to_vec(value)
+fn serialized_size_bytes(serializable: &impl Serialize) -> Option<usize> {
+    serde_json::to_vec(serializable)
         .ok()
         .map(|serialized| serialized.len())
 }

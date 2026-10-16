@@ -3,22 +3,25 @@ use super::super::*;
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 
+// Keep the projection shared by both readers in the order consumed by usage_log_from_row.
+const USAGE_LOG_COLUMNS: &str =
+    "id, strftime('%Y-%m-%dT%H:%M:%SZ', created_at), request_id, attempt,
+     local_key_id, source_id, candidate_id, account_id, requested_model,
+     resolved_model, wire_api, transport, success, http_status, error_category, latency_ms,
+     ttft_ms, generation_ms, input_tokens, cached_input_tokens,
+     cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens,
+     service_tier, applied_service_tier, routing_json, tool_use_json, error_origin,
+     requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl,
+     client_context_id, upstream_error_json";
+
 impl TelemetryDb {
     #[cfg(test)]
     pub fn list(&self, limit: u16) -> Result<Vec<UsageLog>> {
         let connection = self.lock_connection()?;
         let mut statement = connection
-            .prepare(
-                "SELECT id, strftime('%Y-%m-%dT%H:%M:%SZ', created_at), request_id, attempt,
-                    local_key_id, source_id, candidate_id, account_id, requested_model,
-                    resolved_model, wire_api, success, http_status, error_category, latency_ms,
-                    ttft_ms, generation_ms, input_tokens, cached_input_tokens,
-                    cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens,
-                    service_tier, applied_service_tier, routing_json, tool_use_json, error_origin,
-                    requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl,
-                    client_context_id, upstream_error_json
-                 FROM request_logs ORDER BY id DESC LIMIT ?1",
-            )
+            .prepare(&format!(
+                "SELECT {USAGE_LOG_COLUMNS} FROM request_logs ORDER BY id DESC LIMIT ?1"
+            ))
             .map_err(db_error)?;
         let logs = statement
             .query_map([limit.clamp(1, 500)], usage_log_from_row)
@@ -84,7 +87,7 @@ impl TelemetryDb {
                     && cached.windows == windows
             })
         {
-            return Ok(cached.value.clone());
+            return Ok(cached.equivalents_by_account.clone());
         }
         let aggregates = {
             let connection = self.lock_connection()?;
@@ -119,7 +122,7 @@ impl TelemetryDb {
                     usage_revision,
                     pricing_revision,
                     windows: windows.to_vec(),
-                    value: equivalents.clone(),
+                    equivalents_by_account: equivalents.clone(),
                 });
         }
         Ok(equivalents)
@@ -132,78 +135,86 @@ impl TelemetryDb {
     ) -> Result<LocalUsagePage> {
         let (page, page_size) = query.normalized_page();
         let connection = self.lock_connection()?;
-        let (where_sql, values) = usage_filter(query);
+        let (where_sql, query_parameters) = usage_filter(query);
         let use_all_time_rollups = is_unfiltered_all_time(query);
-        let mut totals = self.cached_usage_totals(&connection, query, &where_sql, &values)?;
-        let mut models = if query.includes_models() {
+        let mut totals =
+            self.cached_usage_totals(&connection, query, &where_sql, &query_parameters)?;
+        let mut model_groups = if query.includes_models() {
             usage_groups(
                 &connection,
                 &where_sql,
-                &values,
+                &query_parameters,
                 "COALESCE(resolved_model, requested_model, '')",
             )?
         } else {
             Vec::new()
         };
-        let (mut model_equivalents, pricing_sources) = usage_model_equivalents(
+        let (mut api_equivalents_by_model, pricing_sources) = usage_model_equivalents(
             &connection,
             &where_sql,
-            &values,
+            &query_parameters,
             resolver,
             use_all_time_rollups,
         )?;
         if query.includes_models() {
-            for group in &mut models {
-                group.totals.api_equivalent =
-                    model_equivalents.remove(&group.key).unwrap_or_default();
+            for group in &mut model_groups {
+                group.totals.api_equivalent = api_equivalents_by_model
+                    .remove(&group.key)
+                    .unwrap_or_default();
                 totals.api_equivalent.merge(group.totals.api_equivalent);
             }
-            // Rollups also contain retained history that is no longer present
-            // in the short-lived request log. Include those model totals in
-            // the all-time projection instead of dropping the unmatched keys.
-            for estimate in model_equivalents.values() {
-                totals.api_equivalent.merge(*estimate);
-            }
-        } else {
-            for estimate in model_equivalents.values() {
-                totals.api_equivalent.merge(*estimate);
-            }
+        }
+        // Include every estimate when groups are omitted, and unmatched rollups
+        // when retained history is no longer present in the request log.
+        for estimate in api_equivalents_by_model.values() {
+            totals.api_equivalent.merge(*estimate);
         }
         let pool_members = if query.includes_pool_members() {
             usage_groups(
                 &connection,
                 &where_sql,
-                &values,
+                &query_parameters,
                 "COALESCE(account_id, source_id, '')",
             )?
         } else {
             Vec::new()
         };
-        let buckets = usage_buckets(&connection, &where_sql, &values, query, resolver)?;
-        let total = totals.requests;
+        let buckets = usage_buckets(&connection, &where_sql, &query_parameters, query, resolver)?;
+        let usage_event_table = if query.request_id.is_some() {
+            "request_attempts"
+        } else {
+            "request_logs"
+        };
+        let total_event_count = if query.request_id.is_some() {
+            connection
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {usage_event_table}{where_sql}"),
+                    params_from_iter(query_parameters.iter()),
+                    |row| row.get::<_, i64>(0).map(|count| count.max(0) as u64),
+                )
+                .map_err(db_error)?
+        } else {
+            totals.requests
+        };
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
         let mut events = if query.includes_events() {
-            let sql = format!(
-                "SELECT id, strftime('%Y-%m-%dT%H:%M:%SZ', created_at), request_id, attempt,
-                    local_key_id, source_id, candidate_id, account_id, requested_model,
-                    resolved_model, wire_api, success, http_status, error_category, latency_ms,
-                    ttft_ms, generation_ms, input_tokens, cached_input_tokens,
-                    cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens,
-                    service_tier, applied_service_tier, routing_json, tool_use_json, error_origin,
-                    requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl,
-                    client_context_id, upstream_error_json
-                 FROM request_logs{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
+            let event_page_sql = format!(
+                "SELECT {USAGE_LOG_COLUMNS}
+                 FROM {usage_event_table}{where_sql} ORDER BY rowid DESC LIMIT ? OFFSET ?"
             );
-            let mut statement = connection.prepare(&sql).map_err(db_error)?;
-            let mut page_values = values;
-            page_values.push(SqlValue::Integer(i64::from(page_size)));
-            page_values.push(SqlValue::Integer(zenith_relay_core::usage::sql_u64(offset)));
-            let events = statement
-                .query_map(params_from_iter(page_values.iter()), usage_log_from_row)
-                .map_err(db_error)?
-                .collect::<std::result::Result<Vec<_>, _>>()
+            let mut statement = connection.prepare(&event_page_sql).map_err(db_error)?;
+            let mut event_parameters = query_parameters;
+            event_parameters.push(SqlValue::Integer(i64::from(page_size)));
+            event_parameters.push(SqlValue::Integer(zenith_relay_core::usage::sql_u64(offset)));
+            let page_events = statement
+                .query_map(
+                    params_from_iter(event_parameters.iter()),
+                    usage_log_from_row,
+                )
                 .map_err(db_error)?;
-            events
+            page_events
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(db_error)?
         } else {
             Vec::new()
         };
@@ -214,14 +225,14 @@ impl TelemetryDb {
                 "source"
             };
             let candidate_id = event.account_id.as_deref().unwrap_or(&event.source_id);
-            let model = event
+            let model_id = event
                 .resolved_model
                 .as_deref()
                 .or(event.requested_model.as_deref());
             event.api_equivalent = resolver.estimate(
                 candidate_kind,
                 candidate_id,
-                model,
+                model_id,
                 zenith_relay_core::ApiEquivalentUsage::from_reported_tokens(
                     event.input_tokens,
                     event.cached_input_tokens,
@@ -229,19 +240,20 @@ impl TelemetryDb {
                     event.cache_write_ttl.as_deref(),
                     event.output_tokens,
                     event.total_tokens,
-                ),
+                )
+                .with_observed_rates(event.applied_service_tier.as_deref(), event.input_tokens),
             );
         }
-        let total_pages = UsageQuery::page_count(total, page_size);
+        let total_pages = UsageQuery::page_count(total_event_count, page_size);
         let pricing_metadata = resolver.pricing_metadata(totals.api_equivalent, &pricing_sources);
         Ok(LocalUsagePage {
             events,
-            total,
+            total: total_event_count,
             page,
             page_size,
             total_pages,
             totals,
-            models,
+            models: model_groups,
             pool_members,
             buckets,
             pricing: pricing_metadata,

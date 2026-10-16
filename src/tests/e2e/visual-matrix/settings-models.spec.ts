@@ -29,8 +29,9 @@ for (const theme of ["light", "dark"] as const) {
       expect(pageBox).not.toBeNull();
       expect(headerBox).not.toBeNull();
       expect(groupsBox).not.toBeNull();
-      expect(Math.abs(groupsBox!.x + groupsBox!.width / 2 - (pageBox!.x + pageBox!.width / 2))).toBeLessThanOrEqual(2);
-      expect(groupsBox!.width).toBeGreaterThan(pageBox!.width - 80);
+      expect(Math.abs(groupsBox!.x - headerBox!.x)).toBeLessThanOrEqual(1);
+      expect(groupsBox!.width).toBeLessThanOrEqual(1040);
+      expect(Math.abs(groupsBox!.width - Math.min(1040, headerBox!.width))).toBeLessThanOrEqual(1);
       const topGap = groupsBox!.y - (headerBox!.y + headerBox!.height);
       expect(topGap).toBeGreaterThanOrEqual(-1);
       expect(topGap).toBeLessThanOrEqual(4);
@@ -123,9 +124,13 @@ test("sparse reference tables stay compact and centered in a wide window", async
 
   await page.getByRole("button", { name: "Подключения", exact: true }).click();
   await page.getByRole("tab", { name: "Источники API" }).click();
-  const sourceBoxes = await page.locator(".relay-page[data-view='sources'] > .relay-compact-content").evaluateAll((items) => items.map((item) => item.getBoundingClientRect().toJSON()));
-  expect(sourceBoxes).toHaveLength(2);
-  expect(sourceBoxes.every((box) => box.width <= 1080 && Math.abs(box.x + box.width / 2 - (pageBox!.x + pageBox!.width / 2)) <= 1)).toBe(true);
+  const sources = page.locator(".sources-workspace");
+  await expect(sources.locator(".source-card")).toHaveCount(1);
+  const sourceBox = await sources.boundingBox();
+  expect(sourceBox).not.toBeNull();
+  expect(sourceBox!.width).toBeLessThanOrEqual(pageBox!.width);
+  expect(Math.abs(sourceBox!.x + sourceBox!.width / 2 - (pageBox!.x + pageBox!.width / 2))).toBeLessThanOrEqual(1);
+  expect(await sources.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ path: "output/playwright/api-sources-centered-ru-dark-1648x1168.png" });
 });
 
@@ -145,7 +150,7 @@ test("source prices are grouped by provider and Messages models expose cache TTL
   await page.goto("/");
   await page.getByRole("button", { name: "Подключения", exact: true }).click();
   await page.getByRole("tab", { name: "Источники API" }).click();
-  await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Изменить" }).click();
+  await page.locator(".source-card").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Изменить" }).click();
   const dialog = page.getByRole("dialog", { name: "Изменить источник" });
   await dialog.getByRole("tab", { name: "Цены" }).click();
   await dialog.locator(".source-price-group > summary").filter({ hasText: "OpenAI" }).click();
@@ -177,7 +182,7 @@ test("source editor keeps discovery compact and routing controls internal", asyn
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("tab", { name: "Sources" }).click();
-  await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Edit" }).click();
+  await page.locator(".source-card").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Edit" }).click();
   const dialog = page.getByRole("dialog", { name: "Edit source" });
   await expect(dialog.locator('[role="tablist"]').first().getByRole("tab")).toHaveText(["General", "Pricing"]);
   await expect(dialog.getByLabel("Name", { exact: true })).toBeVisible();
@@ -215,7 +220,8 @@ test("reasoning modes stay balanced with the full backend level set", async ({ p
   const dialog = page.getByRole("dialog", { name: "Reasoning modes" });
   const options = dialog.locator(".model-reasoning-options button");
   await expect(options).toHaveCount(6);
-  expect(await options.evaluateAll((items) => new Set(items.map((item) => Math.round(item.getBoundingClientRect().top))).size)).toBe(1);
+  expect(await dialog.locator(".model-reasoning-options").evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(" ").length)).toBe(3);
+  expect(await options.evaluateAll((items) => new Set(items.map((item) => Math.round(item.getBoundingClientRect().top))).size)).toBe(2);
   expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ path: "output/playwright/model-reasoning-dialog-ru-dark-1160x760.png" });
 
@@ -246,7 +252,7 @@ test("prompt cache policy fits the Russian dark source editor", async ({ page })
   await page.goto("/");
   await page.getByRole("button", { name: "Подключения", exact: true }).click();
   await page.getByRole("tab", { name: "Источники API" }).click();
-  await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Изменить" }).click();
+  await page.locator(".source-card").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Изменить" }).click();
   const dialog = page.getByRole("dialog", { name: "Изменить источник" });
   await expect(dialog.locator(".source-add-adapters")).toHaveCount(0);
   expect(await dialog.evaluate((element) => {

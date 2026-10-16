@@ -15,23 +15,22 @@ pub async fn start_local_gateway(
     app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> Result<LocalPoolSnapshot, CommandError> {
-    let result = async {
+    let start_result = async {
         let _mutation = state.setup_guard().await;
         let runtime = runtime_from_store(&state).await?;
         let port = state.store()?.gateway().port;
         state.gateway.start(runtime, port).await?;
-        let result = super::super::profiles::refresh_active_client_catalogs(&state).await;
-        super::super::record_catalog_refresh_result(&state, &result);
         let enable_result = { state.store()?.set_gateway_enabled(true) };
         if let Err(error) = enable_result {
             state.gateway.stop().await;
             return Err(error.into());
         }
+        super::super::queue_active_client_catalog_refresh(&state);
         state.snapshot().await.map_err(Into::into)
     }
     .await;
     crate::tray::refresh_tray(&app).await;
-    result
+    start_result
 }
 
 #[tauri::command]
@@ -39,7 +38,7 @@ pub async fn stop_local_gateway(
     app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> Result<LocalPoolSnapshot, CommandError> {
-    let result = async {
+    let stop_result = async {
         let _mutation = state.setup_guard().await;
         state.store()?.set_gateway_enabled(false)?;
         state.gateway.stop().await;
@@ -47,7 +46,7 @@ pub async fn stop_local_gateway(
     }
     .await;
     crate::tray::refresh_tray(&app).await;
-    result
+    stop_result
 }
 
 #[tauri::command]
@@ -144,8 +143,7 @@ pub async fn start_if_enabled(state: &DesktopState) -> Result<(), LocalPoolError
         // scheduler exists so startup cannot strand fresh provider credits.
         super::super::sync_running_account_states(state).await?;
         if state.background_session_active() {
-            let result = super::super::profiles::refresh_active_client_catalogs(state).await;
-            super::super::record_catalog_refresh_result(state, &result);
+            super::super::queue_active_client_catalog_refresh(state);
         }
     }
     Ok(())
@@ -164,8 +162,8 @@ mod tests {
 
     #[tokio::test]
     async fn rotating_the_local_gateway_key_replaces_the_stored_secret() {
-        let id = uuid::Uuid::new_v4().simple().to_string();
-        let root = std::env::temp_dir().join(format!("zenith-relay-key-rotation-{id}"));
+        let temp_id = uuid::Uuid::new_v4().simple().to_string();
+        let root = std::env::temp_dir().join(format!("zenith-relay-key-rotation-{temp_id}"));
         let state = DesktopState::open(root.clone()).unwrap();
         let key = super::super::super::pool::ensure_system_gateway_key(&state).unwrap();
         let old_secret = super::super::super::pool::ensure_local_gateway_key_secret(&key).unwrap();

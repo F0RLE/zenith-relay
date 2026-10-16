@@ -68,7 +68,7 @@ fn tool_search_control_entry_is_not_counted_as_a_client_tool() {
 
 #[test]
 fn legacy_name_filtering_settings_are_read_as_standard_and_not_serialized() {
-    let old: ToolPolicy = serde_json::from_value(json!({
+    let legacy_policy: ToolPolicy = serde_json::from_value(json!({
         "mode": "allowlist",
         "enabledTools": ["read_file"],
         "disabledTools": ["delete_file"],
@@ -77,12 +77,12 @@ fn legacy_name_filtering_settings_are_read_as_standard_and_not_serialized() {
     }))
     .unwrap();
     assert_eq!(
-        old,
+        legacy_policy,
         ToolPolicy {
             mode: ToolPolicyMode::PassThrough
         }
     );
-    let encoded = serde_json::to_value(old).unwrap();
+    let encoded = serde_json::to_value(legacy_policy).unwrap();
     assert_eq!(encoded["mode"], "pass_through");
     assert!(encoded.get("enabledTools").is_none());
     assert!(encoded.get("disabledTools").is_none());

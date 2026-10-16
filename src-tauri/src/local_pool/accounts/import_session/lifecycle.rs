@@ -172,8 +172,8 @@ impl<B: SecretBackend> ImportSessionStore<B> {
         now_ms: u64,
     ) -> Result<usize, ImportSessionError> {
         let directory = self.root.join("imports");
-        let entries = match fs::read_dir(&directory) {
-            Ok(entries) => entries,
+        let directory_entries = match fs::read_dir(&directory) {
+            Ok(directory_entries) => directory_entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
             Err(_) => {
                 return Err(ImportSessionError::new(
@@ -183,14 +183,14 @@ impl<B: SecretBackend> ImportSessionStore<B> {
             }
         };
         let mut stale = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(|_| {
+        for directory_entry in directory_entries {
+            let directory_entry = directory_entry.map_err(|_| {
                 ImportSessionError::new(
                     ImportSessionErrorCode::SnapshotIo,
                     "failed to inspect import session directory",
                 )
             })?;
-            let file_type = entry.file_type().map_err(|_| {
+            let file_type = directory_entry.file_type().map_err(|_| {
                 ImportSessionError::new(
                     ImportSessionErrorCode::SnapshotIo,
                     "failed to inspect import session snapshot",
@@ -199,7 +199,7 @@ impl<B: SecretBackend> ImportSessionStore<B> {
             if !file_type.is_file() || file_type.is_symlink() {
                 continue;
             }
-            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            let Some(name) = directory_entry.file_name().to_str().map(str::to_string) else {
                 continue;
             };
             let Some(session_id) = name.strip_suffix(".json") else {

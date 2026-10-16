@@ -2,58 +2,53 @@ use super::contracts::MessagesBridgeResponse;
 use serde_json::Value;
 
 mod frame;
-mod gemini;
-mod messages;
 
-pub use gemini::GeminiStreamBridge;
-pub use messages::MessagesStreamBridge;
+pub(crate) use frame::merge_usage;
+pub type GeminiStreamBridge = super::translation::TranslationStream;
+pub type MessagesStreamBridge = super::translation::TranslationStream;
 
 pub enum AdapterStreamBridge {
-    Messages(Box<MessagesStreamBridge>),
-    Gemini(Box<GeminiStreamBridge>),
     Translated(Box<super::translation::TranslationStream>),
 }
 
 impl AdapterStreamBridge {
     pub fn push(&mut self, bytes: &[u8]) {
         match self {
-            Self::Messages(bridge) => bridge.push(bytes),
-            Self::Gemini(bridge) => bridge.push(bytes),
             Self::Translated(bridge) => bridge.push(bytes),
         }
     }
     pub fn finish(&mut self) {
         match self {
-            Self::Messages(bridge) => bridge.finish(),
-            Self::Gemini(bridge) => bridge.finish(),
             Self::Translated(bridge) => bridge.finish(),
+        }
+    }
+    pub(crate) fn awaiting_upstream_end(&self) -> bool {
+        match self {
+            Self::Translated(bridge) => bridge.awaiting_upstream_end(),
+        }
+    }
+    pub(crate) fn abort(&mut self) {
+        match self {
+            Self::Translated(bridge) => bridge.abort(),
         }
     }
     pub fn pop_output(&mut self) -> Option<Vec<u8>> {
         match self {
-            Self::Messages(bridge) => bridge.pop_output(),
-            Self::Gemini(bridge) => bridge.pop_output(),
             Self::Translated(bridge) => bridge.pop_output(),
         }
     }
     pub fn completed(&self) -> Option<&MessagesBridgeResponse> {
         match self {
-            Self::Messages(bridge) => bridge.completed(),
-            Self::Gemini(bridge) => bridge.completed(),
             Self::Translated(bridge) => bridge.completed(),
         }
     }
     pub fn is_terminal(&self) -> bool {
         match self {
-            Self::Messages(bridge) => bridge.is_terminal(),
-            Self::Gemini(bridge) => bridge.is_terminal(),
             Self::Translated(bridge) => bridge.is_terminal(),
         }
     }
     pub fn take_upstream_error(&mut self) -> Option<Value> {
         match self {
-            Self::Messages(bridge) => bridge.take_upstream_error(),
-            Self::Gemini(bridge) => bridge.take_upstream_error(),
             Self::Translated(bridge) => bridge.take_upstream_error(),
         }
     }
@@ -83,6 +78,8 @@ data: {"candidates":[{"content":{"parts":[{"text":"Hello world"}]},"finishReason
 
 "#,
         );
+        assert!(bridge.completed().is_none());
+        bridge.finish();
         let output = std::iter::from_fn(|| bridge.pop_output())
             .flat_map(|frame| {
                 String::from_utf8(frame)
@@ -120,6 +117,7 @@ data: {"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}],"usageMetad
 
 "#,
         );
+        bridge.finish();
         let output = std::iter::from_fn(|| bridge.pop_output())
             .map(|frame| String::from_utf8(frame).unwrap())
             .collect::<Vec<_>>()
@@ -131,7 +129,17 @@ data: {"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}],"usageMetad
             bridge.completed().unwrap().response_body["output"][0]["type"],
             "function_call"
         );
-        assert_eq!(bridge.completed().unwrap().continuation.messages.len(), 2);
+        assert_eq!(
+            bridge
+                .completed()
+                .unwrap()
+                .continuation
+                .portable_history
+                .as_ref()
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -159,10 +167,13 @@ data: {"candidates":[{"content":{"parts":[{"functionCall":{"partialArgs":[{"json
 
 data: {"candidates":[{"content":{"parts":[{"functionCall":{"partialArgs":[{"jsonPath":"$.unit","stringValue":"C","willContinue":true}],"willContinue":true}}]}}]}
 
+data: {"candidates":[{"content":{"parts":[{"functionCall":{"partialArgs":[{"jsonPath":"$.location"},{"jsonPath":"$.unit"}],"willContinue":true}}]}}]}
+
 data: {"candidates":[{"content":{"parts":[{"functionCall":{}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":3}}
 
 "#,
         );
+        bridge.finish();
         let output = std::iter::from_fn(|| bridge.pop_output())
             .map(|frame| String::from_utf8(frame).unwrap())
             .collect::<Vec<_>>()
@@ -178,9 +189,11 @@ data: {"candidates":[{"content":{"parts":[{"functionCall":{}}]},"finishReason":"
             completed.response_body["output"][0]["arguments"],
             r#"{"location":"Paris","unit":"C"}"#
         );
+        let native_tool_part = &completed.continuation.native_turns[&1][0];
+        assert_eq!(native_tool_part["thoughtSignature"], "sig");
         assert_eq!(
-            completed.continuation.messages[1]["parts"][0]["functionCall"]["thoughtSignature"],
-            "sig"
+            native_tool_part["functionCall"]["args"],
+            json!({"location": "Paris", "unit": "C"})
         );
     }
 }

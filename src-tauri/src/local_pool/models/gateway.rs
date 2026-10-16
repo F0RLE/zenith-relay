@@ -3,9 +3,10 @@ use super::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use zenith_relay_core::{
-    deserialize_model_reasoning_allowed_levels, normalize_model_ids,
-    normalize_model_reasoning_allowed_levels, normalize_model_service_tier_overrides,
-    ApiModelPriceOverride, DefaultServiceTier,
+    deserialize_model_reasoning_allowed_levels, normalize_model_context_policies,
+    normalize_model_ids, normalize_model_reasoning_allowed_levels,
+    normalize_model_service_tier_overrides, ApiModelPriceOverride, DefaultServiceTier,
+    ModelContextPolicy,
 };
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -19,10 +20,10 @@ pub enum BindScope {
 pub struct GatewaySettings {
     #[serde(default)]
     pub tool_policy: zenith_relay_core::ToolPolicy,
-    /// Use the explicitly labelled Excel/Basis Points route for compatible
-    /// OAuth accounts. The physical account candidate and its quota remain
-    /// shared with native Responses traffic.
     #[serde(default)]
+    pub request_timezone: zenith_relay_core::RequestTimezonePolicy,
+    /// Legacy preference, ignored. The OAuth client determines the transport.
+    #[serde(default, skip_serializing, skip_deserializing)]
     pub basis_points_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_routing: Option<zenith_relay_core::PoolRoutingPolicy>,
@@ -71,6 +72,8 @@ pub struct GatewaySettings {
     #[serde(default)]
     pub model_service_tier_overrides: BTreeMap<String, DefaultServiceTier>,
     #[serde(default)]
+    pub model_context_policies: BTreeMap<String, ModelContextPolicy>,
+    #[serde(default)]
     pub model_display_order: Vec<String>,
 }
 
@@ -78,6 +81,7 @@ impl Default for GatewaySettings {
     fn default() -> Self {
         Self {
             tool_policy: Default::default(),
+            request_timezone: Default::default(),
             basis_points_enabled: false,
             enabled: false,
             bind_scope: BindScope::Localhost,
@@ -102,6 +106,7 @@ impl Default for GatewaySettings {
             model_price_overrides: BTreeMap::new(),
             model_reasoning_allowed_levels: BTreeMap::new(),
             model_service_tier_overrides: BTreeMap::new(),
+            model_context_policies: BTreeMap::new(),
             model_display_order: Vec::new(),
         }
     }
@@ -139,6 +144,7 @@ impl GatewaySettings {
     }
 
     pub fn validate(&self) -> Result<(), &'static str> {
+        self.request_timezone.validate()?;
         if self.port < 1024 {
             return Err("gateway port must be between 1024 and 65535");
         }
@@ -174,6 +180,7 @@ impl GatewaySettings {
         validate_model_price_overrides(&self.model_price_overrides)?;
         normalize_model_reasoning_allowed_levels(self.model_reasoning_allowed_levels.clone())?;
         normalize_model_service_tier_overrides(self.model_service_tier_overrides.clone())?;
+        normalize_model_context_policies(self.model_context_policies.clone())?;
         if normalize_model_ids(self.model_display_order.iter()) != self.model_display_order {
             return Err("model display order is invalid");
         }

@@ -3,6 +3,7 @@ use serde::Serialize;
 use std::fs;
 use std::path::Path;
 
+mod account_trash;
 mod refresh;
 mod rotation_upgrade;
 mod source_refresh;
@@ -38,7 +39,7 @@ fn fresh_store_is_versioned_and_restart_safe() {
     let root = temp_root();
     let store = LocalPoolStore::open(root.clone()).unwrap();
     assert_eq!(store.gateway().port, 14998);
-    assert_eq!(store.database().state_count().unwrap(), 9);
+    assert_eq!(store.database().state_count().unwrap(), 10);
     assert!(root.join("data/database/relay.sqlite").exists());
     assert!(!root.join("data/metadata.json").exists());
     drop(store);
@@ -68,6 +69,7 @@ fn quota_and_routing_policy_survive_restart() {
             cache_write_5m_micro_usd_per_million: None,
             cache_write_1h_micro_usd_per_million: None,
             output_micro_usd_per_million: 7_500_000,
+            ..Default::default()
         },
     );
     store.replace_gateway(gateway).unwrap();
@@ -101,6 +103,7 @@ fn quota_and_routing_policy_survive_restart() {
             cache_write_5m_micro_usd_per_million: None,
             cache_write_1h_micro_usd_per_million: None,
             output_micro_usd_per_million: 7_500_000,
+            ..Default::default()
         })
     );
     drop(reopened);
@@ -322,6 +325,7 @@ fn source_and_key_records_survive_restart_without_secret_values() {
             base_url: "https://example.test/v1".into(),
             secret_ref: "source:source_1".into(),
             pricing_provider: None,
+            proxy_id: None,
             official_provider_family: None,
             wire_api: WireApi::Responses,
             protocol_config: Default::default(),
@@ -341,6 +345,7 @@ fn source_and_key_records_survive_restart_without_secret_values() {
                     cache_write_5m_micro_usd_per_million: None,
                     cache_write_1h_micro_usd_per_million: None,
                     output_micro_usd_per_million: 2_000_000,
+                    ..Default::default()
                 },
             )]),
             last_used_at: None,
@@ -372,6 +377,7 @@ fn source_and_key_records_survive_restart_without_secret_values() {
             cache_write_5m_micro_usd_per_million: None,
             cache_write_1h_micro_usd_per_million: None,
             output_micro_usd_per_million: 2_000_000,
+            ..Default::default()
         })
     );
     assert_eq!(reopened.keys()[0].secret_ref, "key:key_1");
@@ -398,6 +404,7 @@ fn failed_transaction_preserves_all_state_and_memory() {
         base_url: "https://example.test/v1".into(),
         secret_ref: "source:source_1".into(),
         pricing_provider: None,
+        proxy_id: None,
         official_provider_family: None,
         wire_api: WireApi::Responses,
         protocol_config: Default::default(),

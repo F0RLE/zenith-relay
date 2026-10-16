@@ -55,17 +55,17 @@ pub async fn update_wake_task(
     Json(mut task): Json<WakeTask>,
 ) -> Result<Json<WakeTask>, ManagementError> {
     let _guard = state.wake_lock.lock().await;
-    let current = state
+    let existing_task = state
         .store
         .wake_tasks()
         .map_err(store_error)?
         .into_iter()
-        .find(|value| value.id == id)
+        .find(|automation_task| automation_task.id == id)
         .ok_or_else(|| {
             ManagementError::not_found(error_codes::WAKE_TASK_NOT_FOUND, "wake task not found")
         })?;
     task.id = id;
-    task.created_at_ms = current.created_at_ms;
+    task.created_at_ms = existing_task.created_at_ms;
     task.updated_at_ms = now_ms();
     task.window_kinds = [QuotaWindowKind::Primary].into();
     task.validate()
@@ -121,7 +121,7 @@ pub async fn test_wake_task(
         .wake_tasks()
         .map_err(store_error)?
         .into_iter()
-        .find(|value| value.id == id)
+        .find(|automation_task| automation_task.id == id)
         .ok_or_else(|| {
             ManagementError::not_found(error_codes::WAKE_TASK_NOT_FOUND, "wake task not found")
         })?;

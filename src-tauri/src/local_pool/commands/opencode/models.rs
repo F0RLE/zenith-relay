@@ -21,35 +21,40 @@ pub(super) fn capability_config(
     capabilities: &ModelCapabilities,
     levels: &[String],
 ) -> Value {
-    let mut value = json!({
+    let mut capability_json = json!({
         "name": id,
         "attachment": capabilities.attachment.unwrap_or_else(|| capabilities.input_modalities.iter().any(|mode| mode != "text")),
         "reasoning": capabilities.reasoning == Some(true),
         "tool_call": capabilities.tool_call == Some(true),
         "modalities": {"input": capabilities.input_modalities, "output": capabilities.output_modalities}
     });
-    if let (Some(context), Some(output)) = (capabilities.context_limit, capabilities.output_limit) {
-        value["limit"] = json!({"context": context, "output": output});
+    if let Some(temperature) = capabilities.temperature {
+        capability_json["temperature"] = json!(temperature);
+    }
+    if let (Some(context_limit), Some(output_limit)) =
+        (capabilities.context_limit, capabilities.output_limit)
+    {
+        capability_json["limit"] = json!({"context": context_limit, "output": output_limit});
         if let Some(input) = capabilities.input_limit {
-            value["limit"]["input"] = json!(input);
+            capability_json["limit"]["input"] = json!(input.min(context_limit));
         }
     }
     if capabilities.reasoning == Some(true) && !levels.is_empty() {
-        value["variants"] = Value::Object(
+        capability_json["variants"] = Value::Object(
             levels
                 .iter()
                 .map(|level| (level.clone(), json!({"reasoningEffort": level})))
                 .collect(),
         );
     }
-    value
+    capability_json
 }
 
 pub(super) fn model_config(models: &[ModelSummary]) -> Map<String, Value> {
     models
         .iter()
         .map(|model| {
-            let capabilities =
+            let mut capabilities = model.catalog_capabilities.clone().unwrap_or_else(|| {
                 if model.catalog_input_modalities.is_empty() && model.catalog_provider.is_none() {
                     ModelCapabilities::unknown_model()
                 } else {
@@ -64,7 +69,20 @@ pub(super) fn model_config(models: &[ModelSummary]) -> Map<String, Value> {
                         output_limit: model.catalog_output_limit,
                         ..ModelCapabilities::default()
                     }
-                };
+                }
+            });
+            if model.context_configurable {
+                capabilities.context_limit =
+                    zenith_relay_core::catalog::context_policy::context_window_tokens(
+                        model.context_policy,
+                        model
+                            .context_windows
+                            .and_then(|windows| windows.default_tokens),
+                        model
+                            .context_windows
+                            .map_or(capabilities.context_limit, |windows| windows.maximum_tokens),
+                    );
+            }
             let supported_levels = if model.reasoning_supported_levels.is_empty() {
                 &model.catalog_reasoning_effort_levels
             } else {

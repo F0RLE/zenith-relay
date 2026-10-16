@@ -1,7 +1,5 @@
 # Zenith Relay Contributor Agreement
 
-Version 1.0 — 22 September 2026
-
 **This agreement includes a copyright assignment.** It is a condition for
 accepting contributions into Zenith Relay, not an additional condition for
 using, modifying, or distributing the project under its [AGPL-3.0-only
@@ -102,7 +100,7 @@ To agree, personally check the single Contributor Agreement checkbox in the PR
 template using your GitHub account. This confirms your agreement, copyright
 assignment, authority, and required disclosures together. You intend that
 action, together with your account identity, the PR, its submitted revisions,
-and this agreement version, to be your electronic signature to the extent
+and the agreement text, to be your electronic signature to the extent
 recognized by applicable law. Do not check the box on behalf of another person
 without authority.
 
@@ -112,9 +110,10 @@ An automated account cannot sign for a human rights holder. Maintainers must
 verify the consent and authority of all relevant contributors before acceptance;
 the metadata check only checks the PR text, not legal identity or ownership.
 
-Keep the agreement version, consent, accepted commit identifiers, and acceptance
-record together. Changes to these terms require a new version and fresh consent;
-they do not change an earlier assignment. Withdrawal of consent before
+Keep the agreement text, consent, accepted commit identifiers, and acceptance
+record together. Any change to these terms requires contributors on open PRs to
+read the updated agreement and give fresh consent before acceptance. A later
+change does not alter an earlier assignment. Withdrawal of consent before
 Acceptance must be made explicit in the PR, and the Contribution must not then
 be accepted under this agreement.
 

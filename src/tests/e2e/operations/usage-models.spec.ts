@@ -26,11 +26,32 @@ test("usage filters are named and stay scoped to the request report", async ({ p
   })).toMatchObject({ includeEvents: false, includeModels: true, includePoolMembers: false });
 });
 
+for (const mode of ["local", "remote"] as const) {
+  test(`${mode} clearing usage filters resets the date range`, async ({ page }) => {
+    await installTauriMock(page, { mode, locale: "en", populated: true });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Usage", exact: true }).click();
+    await chooseOption(page, page, "Range", "weekly");
+    const selectedRange = () => page.evaluate((command) => {
+      const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { range?: string } } }> }).__TAURI_TEST_INVOKES__;
+      return calls.findLast((call) => call.command === command)?.args.input?.range ?? null;
+    }, mode === "local" ? "get_local_usage_page" : "get_remote_server_usage");
+    await expect.poll(selectedRange).toBe("weekly");
+    await page.getByRole("button", { name: "Clear filters", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Range: All", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Clear filters", exact: true })).toHaveCount(0);
+    // The all-period report may already be cached. Refresh checks the reset
+    // query without requiring a duplicate request just to display that cache.
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await expect.poll(selectedRange).toBeNull();
+  });
+}
+
 test("account usage keeps API equivalent, payback, and provider quota windows separate", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, quotaAvailable: true, accountCount: 4 });
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
-  await chooseOption(page, page, "Account", "account_synthetic");
+  await chooseOption(page, page, "Pool member", "account_synthetic");
 
   const accountUsage = page.locator(".usage-account-value");
   await expect(accountUsage).toContainText("Personal Plus");
@@ -70,7 +91,8 @@ test("usage request columns reorder, resize, and open details only from the requ
   await requestLink.click();
   const details = page.getByRole("dialog", { name: "Request details" });
   await expect(details).toBeVisible();
-  await expect(details.getByRole("tab", { name: "Overview", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(details.getByRole("tab")).toHaveCount(0);
+  await expect(details.locator(".request-technical-details")).not.toHaveAttribute("open");
   await expect(details.getByText("Error origin", { exact: true })).toHaveCount(0);
   await expect(details.getByText("6.7 tok/s", { exact: true })).not.toHaveAttribute("data-tone");
   await page.locator(".relay-modal-backdrop").click({ position: { x: 2, y: 2 } });
@@ -106,7 +128,7 @@ test("usage request columns reorder, resize, and open details only from the requ
   expect(await page.locator(".usage-request-table").evaluate((element) => element.parentElement!.scrollWidth <= element.parentElement!.clientWidth)).toBe(true);
 });
 
-test("usage shows the request protocol and persists hidden summary metrics", async ({ page }) => {
+test("usage shows the request protocol and keeps aggregate summaries compact", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
@@ -114,23 +136,13 @@ test("usage shows the request protocol and persists hidden summary metrics", asy
   await expect(page.locator('.usage-request-table th[data-column="protocol"]')).toHaveText("Protocol");
   await expect(page.locator('.usage-request-table td[data-column="protocol"]')).toHaveText("Responses");
 
-  await page.locator(".usage-overflow summary").click();
-  await page.getByRole("menuitem", { name: "Customize summary" }).click();
-  const dialog = page.getByRole("dialog", { name: "Customize summary" });
-  await expect(dialog.getByRole("checkbox", { name: "Generation speed" })).toBeChecked();
-  await expect(dialog.getByRole("checkbox", { name: "E2E speed" })).toBeChecked();
-  await dialog.getByRole("checkbox", { name: "Generation speed" }).uncheck();
-  await dialog.getByRole("checkbox", { name: "Total tokens" }).uncheck();
-  await page.keyboard.press("Escape");
-
+  await expect(page.locator(".usage-overview .usage-metric")).toHaveCount(6);
+  await page.getByRole("tab", { name: "Models", exact: true }).click();
+  await expect(page.locator(".usage-overview .usage-metric")).toHaveCount(3);
+  await page.getByRole("tab", { name: "Errors", exact: true }).click();
+  await expect(page.locator(".usage-overview .usage-metric")).toHaveCount(3);
+  await expect(page.locator(".usage-overview").getByText("Success", { exact: true })).toHaveCount(0);
   await expect(page.locator(".usage-overview").getByText("Generation speed", { exact: true })).toHaveCount(0);
-  await expect(page.locator(".usage-overview").getByText("Total tokens", { exact: true })).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("relay.usageSummaryMetrics") ?? "null"))).toMatchObject({ generationSpeed: false, tokens: false });
-
-  await page.reload();
-  await page.getByRole("button", { name: "Usage", exact: true }).click();
-  await expect(page.locator(".usage-overview").getByText("Generation speed", { exact: true })).toHaveCount(0);
-  await expect(page.locator(".usage-overview").getByText("Total tokens", { exact: true })).toHaveCount(0);
 });
 
 test("usage details warn when forwarded tools yield a text-only response", async ({ page }) => {
@@ -140,12 +152,14 @@ test("usage details warn when forwarded tools yield a text-only response", async
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
 
   const dialog = page.getByRole("dialog", { name: "Request details" });
-  await dialog.getByRole("tab", { name: "Tools", exact: true }).click();
-  await expect(dialog.getByText("Tools received from client", { exact: true })).toBeVisible();
-  await expect(dialog.getByText("3 → 3", { exact: true })).toBeVisible();
-  await expect(dialog.getByText("Automatic", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Client tools", { exact: true })).toBeHidden();
+  await expect(dialog.getByText(/Relay forwarded 3 tool definitions/)).toBeHidden();
+  await expect(dialog.getByRole("button", { name: "Copy request ID" })).toBeHidden();
+  await dialog.locator(".request-technical-details > summary").click();
+  await expect(dialog.getByText("Client tools", { exact: true })).toBeVisible();
+  await expect(dialog.locator(".request-tool-details").getByText("3", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Tools sent", { exact: true })).toHaveCount(0);
   await expect(dialog.getByText("Text only", { exact: true })).toBeVisible();
-  await expect(dialog.getByRole("button", { name: "Copy request ID" })).toBeVisible();
   await expect(dialog.getByText(/Relay forwarded 3 tool definitions/)).toBeVisible();
 });
 
@@ -156,7 +170,7 @@ test("usage details do not blame the upstream when tools were not forwarded", as
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
 
   const dialog = page.getByRole("dialog", { name: "Request details" });
-  await dialog.getByRole("tab", { name: "Tools", exact: true }).click();
+  await dialog.locator(".request-technical-details > summary").click();
   await expect(dialog.getByText(/Relay forwarded \d+ tool definitions/)).toHaveCount(0);
 });
 
@@ -185,24 +199,26 @@ test("usage attributes API token totals to the selected account", async ({ page 
   const account = page.getByRole("row").filter({ hasText: "Personal Plus" });
   await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "In20Out8Cache ↓12Cache ↑4Reason5", "28", "≈$0.0001", "6.7 tok/s", "128 ms / 428 ms"]);
   await expect(account.locator(".usage-token-breakdown span")).toHaveText(["In20", "Out8", "Cache ↓12", "Cache ↑4", "Reason5"]);
-  await expect(page.locator(".usage-metrics")).toContainText("Generation speed6.7 tok/s");
-  await expect(page.locator(".usage-metrics")).toContainText("E2E speed18.7 tok/s");
+  await expect(page.locator(".usage-metrics > .usage-metric")).toHaveCount(3);
 
   await page.getByRole("tab", { name: "Requests" }).click();
+  await expect(page.locator(".usage-metrics")).toContainText("Generation speed6.7 tok/s");
+  await expect(page.locator(".usage-metrics")).toContainText("E2E speed18.7 tok/s");
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
   const details = page.getByRole("dialog", { name: "Request details" });
   await expect(details).toContainText("Generation speed6.7 tok/s");
-  await expect(details).toContainText("Total time428 ms");
-  await expect(details).toContainText("Visible output3");
-  await details.getByRole("tab", { name: "Tokens", exact: true }).click();
+  await expect(details).toContainText("Response time428 ms");
+  await expect(details.locator(".request-details-metrics > div")).toHaveCount(4);
+  await expect(details).toContainText("Request cost≈$0.0001");
+  await expect(details.getByText("Input tokens", { exact: true })).toBeVisible();
   await expect(details).toContainText("Input tokens20");
   await expect(details).toContainText("Output tokens8");
   await expect(details).toContainText("Cache reads12");
   await expect(details).toContainText("Cache writes4");
   await expect(details).toContainText("Reasoning tokens5");
   await expect(details).toContainText("Total tokens28");
-  await expect(details).toContainText("API equivalent≈$0.0001");
-  await details.getByRole("tab", { name: "Route", exact: true }).click();
+  await expect(details).toContainText("Request cost≈$0.0001");
+  await details.locator(".request-technical-details > summary").click();
   await expect(details).toContainText("Selection reasonGreatest quota remaining");
   await expect(details).toContainText("Eligible participants4");
   await expect(details).toContainText("Quota at selection63.00%");
@@ -316,6 +332,7 @@ for (const mode of ["local", "remote"] as const) {
       populated: true,
       mixedModels: true,
       modelSpeed: { "gpt-5.4": "standard" },
+      modelContext: { "gpt-5.4": { configurable: true } },
       modelReasoning: { "gpt-5.4": ["low", "medium", "high"] },
     });
     await page.goto("/");
@@ -329,9 +346,10 @@ for (const mode of ["local", "remote"] as const) {
     expect(await model.locator(".model-rule-actions > *").evaluateAll((controls) => controls.map((control) => {
       if (control.matches(".model-protocol-button")) return "protocol";
       if (control.matches(".model-toggle")) return "enabled";
-      if (control.matches(".model-speed-toggle")) return "speed";
+      if (control.matches(".model-speed-toggle") || control.querySelector(".model-speed-toggle")) return "speed";
+      if (control.matches(".model-context-toggle") || control.querySelector(".model-context-toggle")) return "context";
       return control.matches("[data-model-reasoning-edit]") || control.querySelector("[data-model-reasoning-edit]") ? "reasoning" : "unknown";
-    }))).toEqual(["speed", "reasoning", "enabled"]);
+    }))).toEqual(["speed", "context", "reasoning", "enabled"]);
     await expect(speed).toHaveAttribute("data-speed-tier", "standard");
     await expect(speed.getByRole("radio", { name: "Standard", exact: true })).toBeChecked();
     await speed.getByRole("radio", { name: "Fast", exact: true }).click();
@@ -438,6 +456,32 @@ test("every native pool model exposes backend reasoning settings", async ({ page
   });
 });
 
+test("very high is visible in Russian and saves the canonical ChatGPT effort", async ({ page }) => {
+  await installTauriMock(page, {
+    mode: "local",
+    locale: "ru",
+    populated: true,
+    serverModelOrder: [],
+    quotaAvailable: true,
+    modelReasoning: { "gpt-5.4": ["low", "medium", "high", "very_high", "xhigh"] },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Пул", exact: true }).click();
+  await page.getByRole("tab", { name: "Правила моделей", exact: true }).click();
+  const model = page.locator('.model-rules tbody tr[data-model-id="gpt-5.4"]');
+  await model.locator("[data-model-reasoning-edit]").click();
+  const dialog = page.getByRole("dialog", { name: "Режимы размышления" });
+  await expect(dialog.getByRole("checkbox")).toHaveText(["Низкое", "Среднее", "Высокое", "Очень высокое"]);
+  const veryHigh = dialog.getByRole("checkbox", { name: "Очень высокое", exact: true });
+  await expect(veryHigh).toHaveAttribute("aria-checked", "true");
+  await veryHigh.click();
+  await expect(veryHigh).toHaveAttribute("aria-checked", "false");
+  await veryHigh.click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "set_local_model_reasoning")?.args)).toEqual({
+    input: { modelId: "gpt-5.4", allowedLevels: ["low", "medium", "high", "xhigh"] },
+  });
+});
+
 test("normalized catalog levels expose the complete Fable reasoning enum", async ({ page }) => {
   await installTauriMock(page, {
     mode: "local",
@@ -455,7 +499,7 @@ test("normalized catalog levels expose the complete Fable reasoning enum", async
   const model = page.locator('.model-rules tbody tr[data-model-id="claude-fable-5-1"]');
   await model.getByRole("button", { name: "Set reasoning modes for claude-fable-5-1" }).click();
   const dialog = page.getByRole("dialog", { name: "Reasoning modes" });
-  await expect(dialog.getByRole("checkbox")).toHaveText(["Low", "Medium", "High", "Extra high", "Max"]);
+  await expect(dialog.getByRole("checkbox")).toHaveText(["Low", "Medium", "High", "Very high", "Max"]);
   await dialog.getByRole("checkbox", { name: "High", exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "set_local_model_reasoning")?.args)).toEqual({
     input: { modelId: "claude-fable-5-1", allowedLevels: ["low", "medium", "xhigh", "max"] },

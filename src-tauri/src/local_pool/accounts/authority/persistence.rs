@@ -65,17 +65,17 @@ where
             let _fence = revision
                 .map(|revision| revision.guard().ok_or_else(superseded_persistence))
                 .transpose()?;
-            let current = self
+            let stored_credentials = self
                 .credentials
                 .require(account_id)
                 .map_err(|_| TokenPersistenceFailure::new(error_codes::CREDENTIAL_LOAD_FAILED))?;
-            if current.generation() > tokens.generation()
-                || (current.generation() == tokens.generation()
-                    && current.issued_at_ms() >= tokens.issued_at_ms())
+            if stored_credentials.generation() > tokens.generation()
+                || (stored_credentials.generation() == tokens.generation()
+                    && stored_credentials.issued_at_ms() >= tokens.issued_at_ms())
             {
-                current
+                stored_credentials
             } else {
-                let updated = current
+                let updated = stored_credentials
                     .with_token_set(tokens)
                     .map_err(|_| TokenPersistenceFailure::new(error_codes::INVALID_TOKEN_SET))?;
                 self.credentials.save(&updated).map_err(|_| {
@@ -124,11 +124,11 @@ where
             .acquire(account_id)
             .await
             .map_err(persistence_lock_failure)?;
-        let current = self
+        let stored_credentials = self
             .credentials
             .require(account_id)
             .map_err(|_| TokenPersistenceFailure::new(error_codes::CREDENTIAL_LOAD_FAILED))?;
-        let agent = current
+        let agent = stored_credentials
             .agent_identity()
             .ok_or_else(superseded_persistence)?;
         if expected_identity.is_some_and(|expected| {
@@ -138,13 +138,13 @@ where
         }) {
             return Err(superseded_persistence());
         }
-        if let Some(current_task_id) = agent
+        if let Some(stored_task_id) = agent
             .task_id()
-            .filter(|current_task_id| Some(*current_task_id) != expected_task_id)
+            .filter(|stored_task_id| Some(*stored_task_id) != expected_task_id)
         {
-            return Ok(current_task_id.to_string());
+            return Ok(stored_task_id.to_string());
         }
-        let updated = current
+        let updated = stored_credentials
             .with_agent_task_id(task_id.to_string())
             .map_err(|_| TokenPersistenceFailure::new(error_codes::INVALID_AGENT_TASK_ID))?;
         self.credentials

@@ -21,8 +21,8 @@ pub struct RuntimeTargetSummary {
 
 /// Validates a server-generated identifier formatted as a fixed prefix plus
 /// the 32 hexadecimal characters emitted by `Uuid::simple()`.
-pub fn valid_generated_id(value: &str, prefix: &str) -> bool {
-    value.strip_prefix(prefix).is_some_and(|suffix| {
+pub fn valid_generated_id(generated_id: &str, prefix: &str) -> bool {
+    generated_id.strip_prefix(prefix).is_some_and(|suffix| {
         suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
     })
 }

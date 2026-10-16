@@ -46,11 +46,11 @@ impl RefreshCoordinator {
         if !self.entries.contains_key(&key) && self.entries.len() >= self.limits.max_entries {
             return false;
         }
-        let entry = self
+        let refresh_entry = self
             .entries
             .entry(key)
             .or_insert_with(|| RefreshEntry::new(origin, active));
-        entry.active = active;
+        refresh_entry.active = active;
         let due = if due_now {
             Some(now_ms)
         } else {
@@ -59,8 +59,8 @@ impl RefreshCoordinator {
         };
         // Registration is reconciliation, not an observation dirty event.
         // Repeated startup/manual registrations join existing work.
-        if entry.in_flight.is_none() {
-            entry.schedule(due);
+        if refresh_entry.in_flight.is_none() {
+            refresh_entry.schedule(due);
         }
         true
     }
@@ -81,50 +81,54 @@ impl RefreshCoordinator {
         {
             return false;
         }
-        let entry = self.entries.get_mut(&key).expect("registered refresh");
-        entry.active = active;
-        entry.schedule(Some(due_at_ms));
+        let refresh_entry = self.entries.get_mut(&key).expect("registered refresh");
+        refresh_entry.active = active;
+        refresh_entry.schedule(Some(due_at_ms));
         true
     }
 
     pub fn set_active(&mut self, identity: &RefreshIdentity, active: bool, now_ms: u64) -> bool {
         let mut changed = false;
-        for (key, entry) in self
+        for (key, refresh_entry) in self
             .entries
             .range_mut(RefreshKey::member_range(&identity.member_id))
         {
-            if &key.identity != identity || entry.active == active {
+            if &key.identity != identity || refresh_entry.active == active {
                 continue;
             }
-            if key.kind == RefreshKind::Quota && entry.automatic && !entry.unsupported {
-                if let Some((received_ms, age_ms)) = entry.passive_age_at_receive {
+            if key.kind == RefreshKind::Quota
+                && refresh_entry.automatic
+                && !refresh_entry.unsupported
+            {
+                if let Some((received_ms, age_ms)) = refresh_entry.passive_age_at_receive {
                     let age_ms = age_ms.saturating_add(now_ms.saturating_sub(received_ms));
                     let interval = RefreshKind::Quota
                         .interval_ms(active)
                         .expect("quota has a cadence");
                     let due_ms = now_ms.saturating_add(interval.saturating_sub(age_ms));
-                    entry.passive_fresh_until_ms = Some(due_ms);
-                    if entry.in_flight.is_some() {
-                        entry.passive_during_job_due_ms = Some(due_ms);
-                    } else if !entry.manual {
-                        entry.next_due_ms = earliest(entry.event_due_ms, Some(due_ms));
+                    refresh_entry.passive_fresh_until_ms = Some(due_ms);
+                    if refresh_entry.in_flight.is_some() {
+                        refresh_entry.passive_during_job_due_ms = Some(due_ms);
+                    } else if !refresh_entry.manual {
+                        refresh_entry.next_due_ms =
+                            earliest(refresh_entry.event_due_ms, Some(due_ms));
                     }
-                    entry.active = active;
+                    refresh_entry.active = active;
                     changed = true;
                     continue;
                 }
             }
             // Only the idle -> active transition can accelerate a periodic job.
-            if active && !entry.active && entry.automatic {
-                entry.schedule(key.kind.interval_ms(true).map(|i| {
-                    entry
+            if active && !refresh_entry.active && refresh_entry.automatic {
+                refresh_entry.schedule(key.kind.interval_ms(true).map(|i| {
+                    refresh_entry
                         .last_success_ms
                         .unwrap_or(now_ms)
                         .saturating_add(i)
                         .max(now_ms)
                 }));
             }
-            entry.active = active;
+            refresh_entry.active = active;
             changed = true;
         }
         changed
@@ -142,17 +146,17 @@ impl RefreshCoordinator {
             identity: identity.clone(),
             kind,
         };
-        let Some(entry) = self.entries.get_mut(&key) else {
+        let Some(refresh_entry) = self.entries.get_mut(&key) else {
             return false;
         };
-        if entry.unsupported || !entry.automatic {
+        if refresh_entry.unsupported || !refresh_entry.automatic {
             return false;
         }
-        if entry.in_flight.is_some() {
-            entry.dirty = true;
+        if refresh_entry.in_flight.is_some() {
+            refresh_entry.dirty = true;
         } else {
-            entry.event_due_ms = earliest(entry.event_due_ms, Some(now_ms));
-            entry.schedule(Some(now_ms));
+            refresh_entry.event_due_ms = earliest(refresh_entry.event_due_ms, Some(now_ms));
+            refresh_entry.schedule(Some(now_ms));
         }
         true
     }
@@ -167,36 +171,36 @@ impl RefreshCoordinator {
         age_ms: u64,
         observed_at_wall_ms: u64,
     ) -> bool {
-        let Some(entry) = self.entries.get_mut(&RefreshKey {
+        let Some(refresh_entry) = self.entries.get_mut(&RefreshKey {
             identity: identity.clone(),
             kind: RefreshKind::Quota,
         }) else {
             return false;
         };
         let interval = RefreshKind::Quota
-            .interval_ms(entry.active)
+            .interval_ms(refresh_entry.active)
             .expect("quota has a cadence");
-        if !entry.automatic || entry.unsupported || age_ms >= interval {
+        if !refresh_entry.automatic || refresh_entry.unsupported || age_ms >= interval {
             return false;
         }
-        if entry
+        if refresh_entry
             .passive_observation_wall_ms
-            .is_some_and(|previous| previous >= observed_at_wall_ms)
+            .is_some_and(|previous_observation_ms| previous_observation_ms >= observed_at_wall_ms)
         {
             return false;
         }
         // A service may have just started while the header was observed a few
         // minutes earlier. Do not saturate its due time to service-start + N.
         let due_ms = now_ms.saturating_add(interval.saturating_sub(age_ms));
-        entry.passive_observation_wall_ms = Some(observed_at_wall_ms);
-        entry.passive_age_at_receive = Some((now_ms, age_ms));
-        entry.passive_fresh_until_ms = Some(due_ms);
-        entry.last_success_ms = Some(now_ms.saturating_sub(age_ms));
-        entry.failed = false;
-        if entry.in_flight.is_some() {
-            entry.passive_during_job_due_ms = Some(due_ms);
-        } else if !entry.manual {
-            entry.next_due_ms = earliest(entry.event_due_ms, Some(due_ms));
+        refresh_entry.passive_observation_wall_ms = Some(observed_at_wall_ms);
+        refresh_entry.passive_age_at_receive = Some((now_ms, age_ms));
+        refresh_entry.passive_fresh_until_ms = Some(due_ms);
+        refresh_entry.last_success_ms = Some(now_ms.saturating_sub(age_ms));
+        refresh_entry.failed = false;
+        if refresh_entry.in_flight.is_some() {
+            refresh_entry.passive_during_job_due_ms = Some(due_ms);
+        } else if !refresh_entry.manual {
+            refresh_entry.next_due_ms = earliest(refresh_entry.event_due_ms, Some(due_ms));
         }
         true
     }
@@ -211,14 +215,14 @@ impl RefreshCoordinator {
             identity: identity.clone(),
             kind,
         };
-        let Some(entry) = self.entries.get_mut(&key) else {
+        let Some(refresh_entry) = self.entries.get_mut(&key) else {
             return false;
         };
         // Explicit manual recheck may retry an unsupported kind, never bypass a hint.
-        entry.unsupported = false;
-        if entry.in_flight.is_none() {
-            entry.manual = true;
-            entry.schedule(Some(now_ms));
+        refresh_entry.unsupported = false;
+        if refresh_entry.in_flight.is_none() {
+            refresh_entry.manual = true;
+            refresh_entry.schedule(Some(now_ms));
         }
         true
     }
@@ -226,11 +230,11 @@ impl RefreshCoordinator {
     /// Record the provider floor before host persistence/finalization, which
     /// can itself fail or be superseded by a newer passive observation.
     pub fn defer_until(&mut self, identity: &RefreshIdentity, kind: RefreshKind, until_ms: u64) {
-        if let Some(entry) = self.entries.get_mut(&RefreshKey {
+        if let Some(refresh_entry) = self.entries.get_mut(&RefreshKey {
             identity: identity.clone(),
             kind,
         }) {
-            entry.not_before_ms = entry.not_before_ms.max(until_ms);
+            refresh_entry.not_before_ms = refresh_entry.not_before_ms.max(until_ms);
         }
     }
 }

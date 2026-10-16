@@ -14,10 +14,10 @@ name = "Old"
 base_url = "https://old.example/v1"
 "#;
 
-    let next = upsert_zenith_provider(original).unwrap();
-    let parsed: toml_edit::DocumentMut = next.parse().unwrap();
+    let updated_config = upsert_zenith_provider(original).unwrap();
+    let parsed: toml_edit::DocumentMut = updated_config.parse().unwrap();
 
-    assert!(next.contains(r#"model_provider = "codex_local_access""#));
+    assert!(updated_config.contains(r#"model_provider = "codex_local_access""#));
     assert_eq!(
         parsed["model_providers"][PROVIDER_ID]["name"].as_str(),
         Some("Zenith")
@@ -26,11 +26,11 @@ base_url = "https://old.example/v1"
         parsed["model_providers"][PROVIDER_ID]["base_url"].as_str(),
         Some("https://api.zenithmarket.dev/v1")
     );
-    assert!(next.contains(r#"base_url = "https://api.zenithmarket.dev/v1""#));
-    assert!(next.contains("supports_websockets = true"));
-    assert!(next.contains("[profiles.default]"));
-    assert!(!next.contains("[model_providers.zenith]"));
-    assert!(!next.contains(r#"model_provider = "openai""#));
+    assert!(updated_config.contains(r#"base_url = "https://api.zenithmarket.dev/v1""#));
+    assert!(updated_config.contains("supports_websockets = true"));
+    assert!(updated_config.contains("[profiles.default]"));
+    assert!(!updated_config.contains("[model_providers.zenith]"));
+    assert!(!updated_config.contains(r#"model_provider = "openai""#));
 }
 
 #[test]
@@ -48,18 +48,18 @@ name = "OpenAI"
 base_url = "https://gateway.example/v1"
 "#;
 
-    let next = remove_zenith_provider(original).unwrap();
+    let updated_config = remove_zenith_provider(original).unwrap();
 
-    assert!(next.contains("[model_providers.openai]"));
-    assert!(next.contains(r#"base_url = "https://gateway.example/v1""#));
-    assert!(!next.contains("[model_providers.codex_local_access]"));
-    assert!(!next.contains(r#"model_provider = "codex_local_access""#));
-    assert!(!next.contains(r#"openai_base_url = "https://api.zenithmarket.dev/v1""#));
+    assert!(updated_config.contains("[model_providers.openai]"));
+    assert!(updated_config.contains(r#"base_url = "https://gateway.example/v1""#));
+    assert!(!updated_config.contains("[model_providers.codex_local_access]"));
+    assert!(!updated_config.contains(r#"model_provider = "codex_local_access""#));
+    assert!(!updated_config.contains(r#"openai_base_url = "https://api.zenithmarket.dev/v1""#));
 }
 
 #[test]
 fn with_model_provider_defaults_reset_to_openai_when_no_backup_exists() {
-    let next = with_model_provider(
+    let updated_config = with_model_provider(
         r#"
 [profiles.default]
 model = "gpt-5.5"
@@ -69,8 +69,8 @@ model = "gpt-5.5"
     )
     .unwrap();
 
-    assert!(next.starts_with(r#"model_provider = "openai""#));
-    assert!(next.contains("[profiles.default]"));
+    assert!(updated_config.starts_with(r#"model_provider = "openai""#));
+    assert!(updated_config.contains("[profiles.default]"));
 }
 
 #[test]
@@ -80,10 +80,10 @@ openai_base_url = "https://us.api.openai.com/v1"
 model = "gpt-5.5"
 "#;
 
-    let next = remove_zenith_openai_base_url_override(original).unwrap();
+    let updated_config = remove_zenith_openai_base_url_override(original).unwrap();
 
-    assert!(next.contains(r#"openai_base_url = "https://us.api.openai.com/v1""#));
-    assert!(next.contains(r#"model = "gpt-5.5""#));
+    assert!(updated_config.contains(r#"openai_base_url = "https://us.api.openai.com/v1""#));
+    assert!(updated_config.contains(r#"model = "gpt-5.5""#));
 }
 
 #[test]

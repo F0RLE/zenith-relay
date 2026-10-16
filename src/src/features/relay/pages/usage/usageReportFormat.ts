@@ -1,14 +1,23 @@
 import type { TFunction } from "i18next";
-import type { ErrorOrigin, ReasoningEffort, ToolUseDiagnostics, UsageTotals } from "../../api/types";
+import type { ErrorOrigin, ToolUseDiagnostics, UsageTotals } from "../../api/types";
 import { formatNumber } from "../../numberFormatting";
+import { normalizeReasoningEffort } from "../../poolFormatting";
 import { observedTokensPerSecond } from "../../usageSpeed";
 import { cacheLifetime } from "./cacheLifetime";
 import { normalizeObservedServiceTier, totalsFromRows } from "./usageData";
 import type { CodexRequestOrigin, UsageRow } from "./usageData";
 
 export function formatTiming(ttft: number | null, duration: number, locale: string, t: TFunction) {
-  return `${formatDurationMs(ttft, locale, t)} / ${formatDurationMs(duration, locale, t)}`;
+  const first = ttft == null ? "—" : formatDurationMs(ttft, locale, t);
+  return `${first} / ${formatDurationMs(duration, locale, t)}`;
 }
+
+export function compactRequestId(requestId: string | null): string {
+  if (!requestId) return "—";
+  return requestId.length > 20 ? `${requestId.slice(0, 6)}…${requestId.slice(-10)}` : requestId;
+}
+
+export { formatModelId } from "./usageModelIdentity";
 
 export type AggregateRow = {
   name: string;
@@ -29,10 +38,10 @@ export type AggregateRow = {
   apiEquivalent: UsageTotals["apiEquivalent"];
 };
 
-export function formatDurationMs(value: number | null, locale: string, t: TFunction): string {
-  if (value == null || !Number.isFinite(value)) return "—";
-  if (value >= 1000) return t("usage.durationSeconds", { value: formatNumber(value / 1000, locale, { maximumFractionDigits: 1 }) });
-  return t("usage.durationMilliseconds", { value: Math.round(value) });
+export function formatDurationMs(elapsedMs: number | null, locale: string, t: TFunction): string {
+  if (elapsedMs == null || !Number.isFinite(elapsedMs)) return "—";
+  if (elapsedMs >= 1000) return t("usage.durationSeconds", { value: formatNumber(elapsedMs / 1000, locale, { maximumFractionDigits: 1 }) });
+  return t("usage.durationMilliseconds", { value: Math.round(elapsedMs) });
 }
 
 export function requestStatusLabel(row: Pick<UsageRow, "success" | "requestOrigin">, t: TFunction): string {
@@ -46,12 +55,12 @@ export function formatRequestOrigin(origin: Exclude<CodexRequestOrigin, null>, t
   return t("codex.taskTitle");
 }
 
-export function formatReasoningEffort(effort: ReasoningEffort | null, t: TFunction): string {
-  return effort ? t(`usage.reasoningEfforts.${effort}`) : "-";
+export function formatReasoningEffort(effort: string | null, t: TFunction): string {
+  return effort ? t(`usage.reasoningEfforts.${normalizeReasoningEffort(effort)}`) : "-";
 }
 
 export function formatReasoningSummary(row: Pick<UsageRow, "requestedReasoningEffort" | "effectiveReasoningEffort">, t: TFunction): string {
-  if (row.requestedReasoningEffort && row.effectiveReasoningEffort && row.requestedReasoningEffort !== row.effectiveReasoningEffort) {
+  if (row.requestedReasoningEffort && row.effectiveReasoningEffort && normalizeReasoningEffort(row.requestedReasoningEffort) !== normalizeReasoningEffort(row.effectiveReasoningEffort)) {
     return t("usage.reasoningEffortChanged", { requested: formatReasoningEffort(row.requestedReasoningEffort, t), effective: formatReasoningEffort(row.effectiveReasoningEffort, t) });
   }
   return formatReasoningEffort(row.effectiveReasoningEffort ?? row.requestedReasoningEffort, t);
@@ -65,12 +74,18 @@ export function formatObservedServiceTier(row: Pick<UsageRow, "appliedServiceTie
   return normalizeObservedServiceTier(row.appliedServiceTier);
 }
 
-export function formatWireApi(value: string | null, t: TFunction): string {
-  if (value === "responses") return t("usage.protocols.responses");
-  if (value === "messages") return t("usage.protocols.messages");
-  if (value === "chat_completions") return t("usage.protocols.chatCompletions");
-  if (value === "gemini") return t("usage.protocols.gemini");
-  return value ?? "—";
+export function formatWireApi(wireApi: string | null, t: TFunction): string {
+  if (wireApi === "responses") return t("usage.protocols.responses");
+  if (wireApi === "messages") return t("usage.protocols.messages");
+  if (wireApi === "chat_completions") return t("usage.protocols.chatCompletions");
+  if (wireApi === "gemini") return t("usage.protocols.gemini");
+  return wireApi ?? "—";
+}
+
+export function formatTransport(transportKind: string | null | undefined, t: TFunction): string {
+  if (transportKind === "websocket") return t("usage.transports.websocket");
+  if (transportKind === "http") return t("usage.transports.http");
+  return transportKind ?? "—";
 }
 
 export function formatEndpointKind(value: string | null | undefined, wireApi: string | null, t: TFunction): string {
@@ -91,12 +106,19 @@ export function formatErrorOrigin(origin: ErrorOrigin | null, t: TFunction): str
   return origin ? t(`usage.errorOrigins.${origin}`) : t("common.unknown");
 }
 
+export function prefixErrorOrigin(origin: ErrorOrigin | null | undefined, message: string): string {
+  if (!origin) return message;
+  const label = origin === "account" ? "Account" : origin === "provider" ? "Provider" : "Relay";
+  const unprefixed = message.replace(/^(?:Account|Provider|Relay):\s*/i, "");
+  return `${label}: ${unprefixed}`;
+}
+
 export function formatToolChoice(choice: ToolUseDiagnostics["toolChoice"], t: TFunction): string {
   return t(`usage.toolChoices.${choice}`);
 }
 
-export function formatTerminalOutput(output: ToolUseDiagnostics["terminalOutput"], t: TFunction): string {
-  return t(`usage.terminalOutputs.${output}`);
+export function formatTerminalOutput(terminalOutput: ToolUseDiagnostics["terminalOutput"], t: TFunction): string {
+  return t(`usage.terminalOutputs.${terminalOutput}`);
 }
 
 export function aggregateRowsFromUsage(rows: UsageRow[], field: "model" | "connection", unknown: string): AggregateRow[] {
@@ -107,12 +129,12 @@ export function aggregateRowsFromUsage(rows: UsageRow[], field: "model" | "conne
     if (group) group.push(row);
     else groups.set(key, [row]);
   }
-  return [...groups.entries()].map(([name, groupRows]) => aggregateRowFromTotals(name, totalsFromRows(groupRows)));
+  return [...groups.entries()].map(([groupLabel, groupRows]) => aggregateRowFromTotals(groupLabel, totalsFromRows(groupRows)));
 }
 
-export function aggregateRowFromTotals(name: string, totals: UsageTotals): AggregateRow {
+export function aggregateRowFromTotals(rowLabel: string, totals: UsageTotals): AggregateRow {
   return {
-    name,
+    name: rowLabel,
     requests: totals.requests,
     success: totals.successfulRequests,
     inputTokens: totals.inputTokens,

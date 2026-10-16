@@ -8,6 +8,7 @@ mod membership;
 mod policy;
 mod read;
 mod refresh;
+mod trash;
 mod update;
 
 pub use delete::delete_account;
@@ -33,6 +34,13 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/accounts", get(list_accounts))
         .route("/accounts/export", post(export_accounts))
+        .route("/accounts/trash", get(trash::list_trash))
+        .route("/accounts/{id}/trash", post(trash::trash_account))
+        .route("/accounts/trash/{id}/restore", post(trash::restore_account))
+        .route(
+            "/accounts/trash/{id}",
+            axum::routing::delete(trash::purge_account),
+        )
         .route(
             "/accounts/{id}/identity/reveal",
             post(reveal_account_identity),

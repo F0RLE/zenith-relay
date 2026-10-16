@@ -207,6 +207,7 @@ fn failed_refresh_clears_the_source_catalog() {
         secret_ref: "source:source".to_string(),
         pricing_provider: None,
         official_provider_family: None,
+        proxy_id: None,
         wire_api: WireApi::Responses,
         protocol_config: Default::default(),
         protocol_bindings: vec![SourceProtocolBinding {
@@ -231,6 +232,7 @@ fn failed_refresh_clears_the_source_catalog() {
                 cache_write_5m_micro_usd_per_million: None,
                 cache_write_1h_micro_usd_per_million: None,
                 output_micro_usd_per_million: 1,
+                ..Default::default()
             },
         )]),
         last_error_code: None,
@@ -260,6 +262,7 @@ async fn source_stats_rejects_a_self_route_before_contacting_gateway() {
         secret_ref: "source:self-source".to_string(),
         pricing_provider: None,
         official_provider_family: None,
+        proxy_id: None,
         wire_api: WireApi::Responses,
         protocol_config: Default::default(),
         protocol_bindings: Vec::new(),

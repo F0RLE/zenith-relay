@@ -26,7 +26,7 @@ impl GatewayRuntime {
                     if let Some(account_id) = candidate
                         .account_id
                         .as_ref()
-                        .filter(|id| allowed_account_ids.contains(*id))
+                        .filter(|account_id| allowed_account_ids.contains(*account_id))
                     {
                         account_ids.insert(account_id.clone());
                     }

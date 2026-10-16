@@ -67,6 +67,27 @@ test("unlimited key is not an unlimited wallet", async ({ page }) => {
   await expect(balance).toContainText("No limit");
 });
 
+test("API source connection cards show model totals without pool activity", async ({ page }) => {
+  await installTauriMock(page, {
+    mode: "local",
+    locale: "en",
+    accountCount: 0,
+    sourceStats: [{ ...sub2api, spentMicroUsd: 3_210_000, requests: 27 }],
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("tab", { name: "Sources", exact: true }).click();
+
+  const card = page.locator(".source-card");
+  await expect(card.locator('[data-metric="balance"]')).toContainText("$12.34");
+  await expect(card.locator('[data-metric="spend"]')).toContainText("$3.21");
+  await expect(card.locator('[data-metric="requests"]')).toContainText("27");
+  await expect(card.locator('[data-metric="models"]')).toContainText("2");
+  await expect(card.locator(".pool-member-context")).toHaveCount(0);
+  await expect(card).not.toContainText("Active requests");
+  await expect(card).not.toContainText("Operation mode");
+});
+
 test("different sources retain their own amounts and currencies", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", sourceCount: 2, sourceStatsById: {
     source_synthetic: sub2api,

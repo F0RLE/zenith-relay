@@ -41,11 +41,14 @@ use catalog::{fetch_codex_model_catalog, load_direct_source_api_key, validate_di
 pub(in crate::local_pool) async fn refresh_active_client_catalogs(
     state: &DesktopState,
 ) -> LocalResult<CodexCatalogRefreshStatus> {
-    catalog::refresh_client_catalogs(
+    let claude = super::claude_desktop::refresh_catalog(state).await;
+    let other_clients = catalog::refresh_client_catalogs(
         super::opencode::refresh_active_opencode_catalog(state),
         catalog::refresh_active_codex_catalog(state),
     )
-    .await
+    .await;
+    claude?;
+    other_clients
 }
 pub(in crate::local_pool::commands) use actions::verify_remote_profile_binding;
 use actions::{
@@ -66,6 +69,23 @@ use process::{
     restart_codex_after_failed_change, restart_codex_after_restore, stop_codex_and_sync_account,
     stop_codex_and_sync_account_at, stop_codex_for_profile_change,
 };
+
+fn with_chatgpt_context<T>(
+    state: &DesktopState,
+    profile_dir: &Path,
+    operation: impl FnOnce() -> Result<T, CommandError>,
+) -> Result<T, CommandError> {
+    let change = codex::sync_context_policy(profile_dir, &state.profile_backup_root())?;
+    operation().map_err(|mut error| {
+        if let Err(rollback) = change.rollback() {
+            error.message = format!(
+                "{}; automatic ChatGPT context rollback failed: {}",
+                error.message, rollback.message
+            );
+        }
+        error
+    })
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

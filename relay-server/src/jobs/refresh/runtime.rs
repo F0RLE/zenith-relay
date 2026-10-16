@@ -18,8 +18,8 @@ pub(super) async fn synchronize(
     health_changed: bool,
 ) -> Result<(), String> {
     let _configuration = state.configuration_lock.lock().await;
-    let (account, current) = state.store.account_refresh_scope(&fence.account_id)?;
-    if &current != fence {
+    let (account, stored_fence) = state.store.account_refresh_scope(&fence.account_id)?;
+    if &stored_fence != fence {
         return Err("account changed during refresh".into());
     }
     let Some(runtime) = state.runtime()? else {
@@ -31,7 +31,9 @@ pub(super) async fn synchronize(
     let credential = state
         .vault
         .load(&account.secret_ref)?
-        .and_then(|value| serde_json::from_str::<AccountCredential>(&value).ok());
+        .and_then(|credential_json| {
+            serde_json::from_str::<AccountCredential>(&credential_json).ok()
+        });
     let secret_available = credential.is_some();
     let proxy_available = credential
         .as_ref()
@@ -44,7 +46,14 @@ pub(super) async fn synchronize(
         now,
         QUOTA_STALE_AFTER_MS,
     ));
-    let enabled = account_candidate_enabled(account.enabled, operational.routing_block_reason);
+    let enabled = account_candidate_enabled(account.enabled, operational.routing_block_reason)
+        && credential.as_ref().is_some_and(|credential| {
+            credential
+                .validate_plan(account.subscription.plan_type.as_deref())
+                .is_ok()
+        });
+    runtime
+        .update_account_subscription_plan(&account.id, account.subscription.plan_type.as_deref());
     let synced = if !health_changed {
         runtime.sync_account_refresh_availability_with_quota(
             &account.id,

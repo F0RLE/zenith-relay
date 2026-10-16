@@ -3,7 +3,7 @@
 /.github/CODEOWNERS @F0RLE
 /.github/PULL_REQUEST_TEMPLATE.md @F0RLE
 /.github/workflows/pr-metadata.yml @F0RLE
-/.github/tools/pr-metadata.* @F0RLE
+/scripts/check/pr-metadata.* @F0RLE
 /CONTRIBUTING.md @F0RLE
 /CONTRIBUTOR_LICENSE_AGREEMENT.md @F0RLE
 /LICENSE @F0RLE

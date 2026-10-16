@@ -1,4 +1,6 @@
+use crate::local_pool::accounts::{oauth::OAuthClientKind, oauth_flow::OAuthFlowStart};
 use crate::local_pool::error::{ErrorCode, LocalPoolError};
+use crate::local_pool::state::DesktopState;
 use crate::platform::ui_text;
 use sha2::{Digest, Sha256};
 #[cfg(not(target_os = "macos"))]
@@ -30,10 +32,14 @@ fn sign_in_session() -> std::sync::MutexGuard<'static, SignInSession> {
 pub(super) async fn open_sign_in_window(
     app: &AppHandle,
     authorization_url: &str,
-    account_id: Option<&str>,
+    start: &OAuthFlowStart,
     proxy_url: Option<&str>,
 ) -> Result<(), LocalPoolError> {
-    let profile = sign_in_profile(account_id);
+    let profile = sign_in_profile(start.target_account_id.as_deref());
+    let profile = match start.client_kind {
+        OAuthClientKind::Codex => profile,
+        OAuthClientKind::ExcelBps => format!("excel-bps-{profile}"),
+    };
     let (webview_proxy, bridge) = webview_proxy(proxy_url).await?;
     let generation = begin_sign_in_session();
     if let Some(window) = app.get_webview_window(SIGN_IN_WINDOW) {
@@ -46,7 +52,8 @@ pub(super) async fn open_sign_in_window(
     } else if !session_is_current(generation) {
         return Err(window_open_error());
     }
-    let window = match build_sign_in_window(app, authorization_url, &profile, webview_proxy) {
+    let window = match build_sign_in_window(app, authorization_url, start, &profile, webview_proxy)
+    {
         Ok(window) => window,
         Err(error) => {
             release_sign_in_session(generation);
@@ -104,6 +111,7 @@ fn release_sign_in_session(generation: u64) {
 fn build_sign_in_window(
     app: &AppHandle,
     authorization_url: &str,
+    start: &OAuthFlowStart,
     profile: &str,
     webview_proxy: Option<Url>,
 ) -> Result<tauri::WebviewWindow, LocalPoolError> {
@@ -119,6 +127,23 @@ fn build_sign_in_window(
             .enable_clipboard_access()
             .devtools(false)
             .on_new_window(|_url, _features| NewWindowResponse::Deny);
+    if start.client_kind == OAuthClientKind::ExcelBps {
+        let redirect = Url::parse(&start.redirect_uri).map_err(|_| window_open_error())?;
+        let flow = app.state::<DesktopState>().oauth_flow();
+        let login_id = start.login_id.clone();
+        builder = builder.on_navigation(move |url| {
+            if url.origin() != redirect.origin() || url.path() != redirect.path() {
+                return true;
+            }
+            let flow = flow.clone();
+            let login_id = login_id.clone();
+            let callback_url = url.to_string();
+            tauri::async_runtime::spawn(async move {
+                let _ = flow.submit_manual_callback(&login_id, &callback_url).await;
+            });
+            false
+        });
+    }
     if let Some(proxy) = webview_proxy {
         builder = builder.proxy_url(proxy);
     }
@@ -154,7 +179,10 @@ fn sign_in_profile_directory(app: &AppHandle, profile: &str) -> Result<PathBuf, 
 }
 
 fn sign_in_profile(account_id: Option<&str>) -> String {
-    let Some(account_id) = account_id.map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(account_id) = account_id
+        .map(str::trim)
+        .filter(|account_id_text| !account_id_text.is_empty())
+    else {
         return "new".to_string();
     };
     if (1..=80).contains(&account_id.len())

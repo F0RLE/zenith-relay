@@ -29,6 +29,8 @@ export type QuotaSnapshot = {
   /** Fresh positive or unlimited provider credits keep an exhausted account eligible. */
   providerCreditsAvailable?: boolean;
   providerCreditsUnlimited?: boolean;
+  /** Complete ledger observation; passive quota headers never advance it. */
+  providerCreditsObservedAtMs?: number | null;
   directBalanceMicroUsd?: number | null;
   updatedAtMs: number | null;
   error: { code: string; occurredAtMs: number } | null;
@@ -55,11 +57,6 @@ export type PricingSourceSummary =
 
 export type CatalogStatus = "current" | "stale" | "updating" | "unloaded" | "error";
 
-export type CatalogRefreshOutcome =
-  | { kind: "updated"; revision: string }
-  | { kind: "notModified"; revision: string }
-  | { kind: "skipped" };
-
 /** Freshness and provenance of the LiteLLM-backed API-equivalent estimate. */
 export type PricingMetadata = {
   catalogRevision?: string | null;
@@ -79,10 +76,47 @@ export type QuotaWindowUsage = {
   apiEquivalent: ApiEquivalentSummary;
 };
 
-export type ApiModelPriceOverride = {
+/** Published input-token price thresholds, independent of maximum context. */
+export const PRICE_CONTEXT_THRESHOLDS = {
+  above100k: 100_000,
+  above128k: 128_000,
+  above200k: 200_000,
+  above272k: 272_000,
+  above512k: 512_000,
+} as const;
+
+export type PriceContextBand = keyof typeof PRICE_CONTEXT_THRESHOLDS;
+
+export type PriceSchedules = {
+  flex?: TokenRateSet | undefined;
+  priority?: TokenRateSet | undefined;
+  ultrafast?: TokenRateSet | undefined;
+} & Partial<Record<PriceContextBand, LongContextRates | undefined>>;
+
+export type ApiModelPriceOverride = PriceSchedules & {
   inputMicroUsdPerMillion: number;
-  cachedInputMicroUsdPerMillion?: number | null;
-  cacheWrite5mMicroUsdPerMillion?: number | null;
-  cacheWrite1hMicroUsdPerMillion?: number | null;
+  cachedInputMicroUsdPerMillion?: number | null | undefined;
+  cacheWrite5mMicroUsdPerMillion?: number | null | undefined;
+  cacheWrite1hMicroUsdPerMillion?: number | null | undefined;
   outputMicroUsdPerMillion: number;
+};
+
+export type TokenRateSet = {
+  input?: number | undefined;
+  output?: number | undefined;
+  cacheRead?: number | undefined;
+  cacheWrite5m?: number | undefined;
+  cacheWrite1h?: number | undefined;
+};
+
+export type LongContextRates = {
+  standard?: TokenRateSet;
+  flex?: TokenRateSet;
+  priority?: TokenRateSet;
+  ultrafast?: TokenRateSet;
+};
+
+export type TokenPrice = TokenRateSet & PriceSchedules & {
+  input: number;
+  output: number;
 };

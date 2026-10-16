@@ -5,14 +5,14 @@ for (const width of [1160, 840, 720, 600, 390, 360]) {
   for (const theme of ["light", "dark"] as const) {
     test(`model actions form one aligned group in ${theme} at ${width}px`, async ({ page }, testInfo) => {
       await page.setViewportSize({ width, height: 844 });
-      await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true, mixedModels: true, modelSpeed: { "gpt-5.4": "ultrafast" }, modelReasoning: { "gpt-5.4": ["low", "medium", "high"] } });
+      await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true, mixedModels: true, modelSpeed: { "gpt-5.4": "ultrafast" }, modelReasoning: { "gpt-5.4": ["low", "medium", "high"] }, modelContext: { "gpt-5.4": { configurable: true, contextLimit: 1_050_000 } } });
       await page.goto("/");
       await page.getByRole("button", { name: "Пул", exact: true }).click();
       await page.getByRole("tab", { name: "Правила моделей", exact: true }).click();
       const row = page.locator('[data-model-id="gpt-5.4"]');
       const actions = row.locator('[data-column="actions"]');
       await expect(actions.getByRole("button")).toHaveCount(1);
-      await expect(actions.getByRole("radio")).toHaveCount(3);
+      await expect(actions.getByRole("radio")).toHaveCount(6);
       await expect(actions.getByRole("checkbox")).toBeChecked();
       await expect(row.locator(".model-rule-identity")).toBeInViewport();
       await expect(actions.getByRole("button")).toBeInViewport();
@@ -26,13 +26,20 @@ for (const width of [1160, 840, 720, 600, 390, 360]) {
         const equalIcons = widths.length === 3 && widths.every((width) => Math.abs(width - widths[0]!) < 1);
         return equalIcons && control.left >= cell.left - 1 && control.right <= cell.right + 1;
       })).toBe(true);
-      expect(await actions.evaluate((cell) => {
+      const layout = await actions.evaluate((cell) => {
         const rect = cell.getBoundingClientRect();
         const controls = [...cell.querySelectorAll(".model-rule-actions > *")].map((control) => control.getBoundingClientRect());
-        return controls.length === 3 && controls.every((control, i) => Math.abs(control.top + control.height / 2 - controls[0].top - controls[0].height / 2) < 1
-          && control.left >= rect.left - 1 && control.right <= rect.right + 1
-          && (i === 0 || Math.abs(control.left - controls[i - 1].right - 6) < 1));
-      })).toBe(true);
+        if (controls.length !== 4 || !controls.every((control) => control.left >= rect.left - 1 && control.right <= rect.right + 1)) return false;
+        const speed = cell.querySelector(".pool-speed-control")!.getBoundingClientRect();
+        const context = cell.querySelector(".pool-context-control")!.getBoundingClientRect();
+        const reasoning = controls[2];
+        const toggle = controls[3];
+        const sameRow = Math.abs(speed.top - context.top) < 1;
+        return { ok: Math.abs(reasoning.top + reasoning.height / 2 - toggle.top - toggle.height / 2) < 1
+          && (sameRow ? Math.abs(context.left - speed.right - 6) < 1
+            : Math.abs(context.left - speed.left) < 1 && context.top >= speed.bottom + 8), speed: speed.toJSON(), context: context.toJSON(), reasoning: reasoning.toJSON(), toggle: toggle.toJSON() };
+      });
+      expect(layout).toMatchObject({ ok: true });
       expect(await row.locator(".model-rule-identity").evaluate((identity) => identity.getBoundingClientRect().right <= identity.parentElement!.getBoundingClientRect().right)).toBe(true);
       await page.screenshot({ path: testInfo.outputPath("model-rules.png"), animations: "disabled" });
       await actions.locator("[data-model-reasoning-edit]").click();

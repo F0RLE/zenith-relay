@@ -44,9 +44,9 @@ pub fn delete_previous_codex_auth() -> Result<(), String> {
     delete_named_secret_result(PREVIOUS_AUTH_USER)
 }
 
-pub fn save_named_secret(user: &str, value: &str) -> Result<(), String> {
+pub fn save_named_secret(user: &str, secret_value: &str) -> Result<(), String> {
     let _guard = keyring_guard()?;
-    save_to_service(KEYRING_SERVICE, user, value)
+    save_to_service(KEYRING_SERVICE, user, secret_value)
 }
 
 pub fn load_named_secret(user: &str) -> Option<String> {
@@ -55,24 +55,24 @@ pub fn load_named_secret(user: &str) -> Option<String> {
 
 pub fn load_named_secret_result(user: &str) -> Result<Option<String>, String> {
     let _guard = keyring_guard()?;
-    if let Some(value) = load_secret_from_service(KEYRING_SERVICE, user)? {
-        return Ok(Some(value));
+    if let Some(secret_value) = load_secret_from_service(KEYRING_SERVICE, user)? {
+        return Ok(Some(secret_value));
     }
 
-    let Some(value) = load_secret_from_service(LEGACY_KEYRING_SERVICE, user)? else {
+    let Some(legacy_secret) = load_secret_from_service(LEGACY_KEYRING_SERVICE, user)? else {
         return Ok(None);
     };
-    if save_to_service(KEYRING_SERVICE, user, &value).is_ok() {
+    if save_to_service(KEYRING_SERVICE, user, &legacy_secret).is_ok() {
         let _ = delete_secret_from_service(LEGACY_KEYRING_SERVICE, user);
     }
-    Ok(Some(value))
+    Ok(Some(legacy_secret))
 }
 
 pub fn delete_named_secret_result(user: &str) -> Result<(), String> {
     let _guard = keyring_guard()?;
-    let current = delete_secret_from_service(KEYRING_SERVICE, user);
-    let legacy = delete_secret_from_service(LEGACY_KEYRING_SERVICE, user);
-    current.and(legacy)
+    let current_keyring_result = delete_secret_from_service(KEYRING_SERVICE, user);
+    let legacy_keyring_result = delete_secret_from_service(LEGACY_KEYRING_SERVICE, user);
+    current_keyring_result.and(legacy_keyring_result)
 }
 
 fn keyring_guard() -> Result<MutexGuard<'static, ()>, String> {
@@ -89,15 +89,15 @@ fn keyring_entry_for_service(service: &str, user: &str) -> Result<keyring::Entry
         .map_err(|error| format!("Не удалось открыть хранилище секретов ОС: {error}"))
 }
 
-fn save_to_service(service: &str, user: &str, value: &str) -> Result<(), String> {
+fn save_to_service(service: &str, user: &str, secret_value: &str) -> Result<(), String> {
     let previous_raw = load_raw_from_service(service, user)?;
     let previous_manifest = previous_raw
         .as_deref()
         .and_then(|stored| decode_manifest(stored).ok());
 
-    if value.encode_utf16().count() <= CHUNK_UTF16_UNITS {
-        set_password(service, user, value)?;
-        if let Err(error) = verify_saved_secret(service, user, value) {
+    if secret_value.encode_utf16().count() <= CHUNK_UTF16_UNITS {
+        set_password(service, user, secret_value)?;
+        if let Err(error) = verify_saved_secret(service, user, secret_value) {
             restore_raw_secret(service, user, previous_raw.as_deref())?;
             return Err(error);
         }
@@ -107,7 +107,7 @@ fn save_to_service(service: &str, user: &str, value: &str) -> Result<(), String>
         return Ok(());
     }
 
-    let chunks = split_secret(value);
+    let chunks = split_secret(secret_value);
     if chunks.len() > MAX_CHUNKS {
         return Err("Секрет слишком велик для защищённого хранилища ОС".to_string());
     }
@@ -129,7 +129,7 @@ fn save_to_service(service: &str, user: &str, value: &str) -> Result<(), String>
         version: MANIFEST_VERSION,
         generation,
         count: chunks.len(),
-        sha256: sha256_hex(value.as_bytes()),
+        sha256: sha256_hex(secret_value.as_bytes()),
     };
     let encoded = encode_manifest(&manifest)?;
     if let Err(error) = set_password(service, user, &encoded) {
@@ -138,15 +138,15 @@ fn save_to_service(service: &str, user: &str, value: &str) -> Result<(), String>
         }
         return Err(error);
     }
-    if let Err(error) = verify_saved_secret(service, user, value) {
+    if let Err(error) = verify_saved_secret(service, user, secret_value) {
         let restore = restore_raw_secret(service, user, previous_raw.as_deref());
         delete_manifest_chunks(service, user, &manifest);
         restore?;
         return Err(error);
     }
 
-    if let Some(previous) = previous_manifest {
-        delete_manifest_chunks(service, user, &previous);
+    if let Some(previous_manifest) = previous_manifest {
+        delete_manifest_chunks(service, user, &previous_manifest);
     }
     Ok(())
 }
@@ -158,7 +158,7 @@ fn verify_saved_secret(service: &str, user: &str, expected: &str) -> Result<(), 
             thread::sleep(READBACK_DELAY);
         }
         match load_secret_from_service(service, user) {
-            Ok(Some(value)) if value == expected => return Ok(()),
+            Ok(Some(stored_secret)) if stored_secret == expected => return Ok(()),
             Ok(_) => last_error = None,
             Err(error) => last_error = Some(error),
         }
@@ -167,9 +167,13 @@ fn verify_saved_secret(service: &str, user: &str, expected: &str) -> Result<(), 
         .unwrap_or_else(|| "Не удалось проверить сохранённый секрет в хранилище ОС".to_string()))
 }
 
-fn restore_raw_secret(service: &str, user: &str, previous: Option<&str>) -> Result<(), String> {
-    match previous {
-        Some(value) => set_password(service, user, value),
+fn restore_raw_secret(
+    service: &str,
+    user: &str,
+    previous_secret: Option<&str>,
+) -> Result<(), String> {
+    match previous_secret {
+        Some(previous_secret) => set_password(service, user, previous_secret),
         None => delete_from_service(service, user),
     }
 }
@@ -179,23 +183,23 @@ fn load_secret_from_service(service: &str, user: &str) -> Result<Option<String>,
         return Ok(None);
     };
     if !stored.starts_with(MANIFEST_PREFIX) {
-        let value = stored.trim().to_string();
-        return Ok((!value.is_empty()).then_some(value));
+        let secret_text = stored.trim().to_string();
+        return Ok((!secret_text.is_empty()).then_some(secret_text));
     }
 
     let manifest = decode_manifest(&stored)?;
-    let mut value = String::new();
+    let mut reassembled_secret = String::new();
     for index in 0..manifest.count {
         let chunk_user = chunk_user(user, &manifest.generation, index);
         let Some(chunk) = load_raw_from_service(service, &chunk_user)? else {
             return Err("Защищённый секрет повреждён: отсутствует фрагмент".to_string());
         };
-        value.push_str(&chunk);
+        reassembled_secret.push_str(&chunk);
     }
-    if sha256_hex(value.as_bytes()) != manifest.sha256 {
+    if sha256_hex(reassembled_secret.as_bytes()) != manifest.sha256 {
         return Err("Защищённый секрет повреждён: контрольная сумма не совпадает".to_string());
     }
-    Ok(Some(value))
+    Ok(Some(reassembled_secret))
 }
 
 fn delete_secret_from_service(service: &str, user: &str) -> Result<(), String> {
@@ -210,22 +214,25 @@ fn delete_secret_from_service(service: &str, user: &str) -> Result<(), String> {
 }
 
 #[cfg(not(test))]
-fn set_password(service: &str, user: &str, value: &str) -> Result<(), String> {
+fn set_password(service: &str, user: &str, secret_value: &str) -> Result<(), String> {
     keyring_entry_for_service(service, user)?
-        .set_password(value)
+        .set_password(secret_value)
         .map_err(|err| format!("Не удалось сохранить секрет в хранилище ОС: {err}"))
 }
 
 #[cfg(test)]
-fn set_password(service: &str, user: &str, value: &str) -> Result<(), String> {
-    test_keyring()?.insert((service.to_string(), user.to_string()), value.to_string());
+fn set_password(service: &str, user: &str, secret_value: &str) -> Result<(), String> {
+    test_keyring()?.insert(
+        (service.to_string(), user.to_string()),
+        secret_value.to_string(),
+    );
     Ok(())
 }
 
 #[cfg(not(test))]
 fn load_raw_from_service(service: &str, user: &str) -> Result<Option<String>, String> {
     match keyring_entry_for_service(service, user)?.get_password() {
-        Ok(value) => Ok(Some(value)),
+        Ok(secret_value) => Ok(Some(secret_value)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(error) => Err(format!(
             "Не удалось прочитать секрет из хранилища ОС: {error}"
@@ -271,10 +278,10 @@ mod tests {
 
     #[test]
     fn chunks_respect_utf16_limit_and_preserve_unicode() {
-        let value = format!("{}{}{}", "a".repeat(1023), "😀", "b".repeat(2048));
-        let chunks = split_secret(&value);
+        let secret_value = format!("{}{}{}", "a".repeat(1023), "😀", "b".repeat(2048));
+        let chunks = split_secret(&secret_value);
 
-        assert_eq!(chunks.concat(), value);
+        assert_eq!(chunks.concat(), secret_value);
         assert!(chunks
             .iter()
             .all(|chunk| chunk.encode_utf16().count() <= CHUNK_UTF16_UNITS));

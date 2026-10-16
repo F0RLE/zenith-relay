@@ -23,6 +23,8 @@ const MODEL: &str = "gpt-p2";
 #[path = "support/rotation_recovery.rs"]
 mod rotation_recovery;
 
+#[path = "support/claude_desktop_routes.rs"]
+mod claude_desktop_routes;
 #[path = "support/cooldown_budget.rs"]
 mod cooldown_budget;
 #[path = "support/model_visibility.rs"]
@@ -93,6 +95,7 @@ fn source(
             name: id.to_string(),
             base_url: format!("{}/v1", server.base_url),
             api_key: key.to_string(),
+            proxy_url: None,
             wire_api: WireApi::Responses,
             models: models.iter().map(|model| (*model).to_string()).collect(),
         },
@@ -153,6 +156,7 @@ async fn spawn_gateway(
             model_metadata_catalog: None,
             max_retry_candidates,
             tool_policy: Default::default(),
+            request_timezone: Default::default(),
             pool_routing: None,
             hidden_models: Vec::new(),
             default_service_tier: Default::default(),
@@ -160,6 +164,7 @@ async fn spawn_gateway(
             image_base_model: None,
             image_pricing_catalog: None,
             model_reasoning_allowed_levels: Default::default(),
+            model_context_policies: Default::default(),
             response_affinity_store: None,
         },
     )
@@ -214,7 +219,42 @@ async fn upstream(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
-    let parsed_body = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let parsed_body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let model = parsed_body
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(MODEL);
+    let default_response = match uri.path() {
+        "/v1/chat/completions" => json!({
+            "id": "default-response",
+            "object": "chat.completion",
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "synthetic reply"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        }),
+        "/v1/messages" => json!({
+            "id": "default-response",
+            "type": "message",
+            "role": "assistant",
+            "model": model,
+            "content": [{"type": "text", "text": "synthetic reply"}],
+            "stop_reason": "end_turn",
+            "stop_sequence": null,
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        }),
+        _ => json!({
+            "id": "default-response",
+            "object": "response",
+            "model": model,
+            "status": "completed",
+            "output": [],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+        }),
+    };
     state.requests.lock().unwrap().push(ObservedRequest {
         path: uri.path().to_string(),
         authorization: headers
@@ -263,7 +303,12 @@ async fn upstream(
         .lock()
         .unwrap()
         .pop_front()
-        .unwrap_or_else(|| response_reply("default-response", "default"));
+        .unwrap_or(Reply::Json {
+            status: StatusCode::OK,
+            body: default_response,
+            cache_control: "default",
+            retry_after: None,
+        });
     match reply {
         Reply::Json {
             status,

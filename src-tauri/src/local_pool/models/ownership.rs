@@ -55,26 +55,29 @@ pub struct OwnershipOperationRecord {
 
 impl OwnershipOperationRecord {
     pub fn validate(&self) -> Result<(), &'static str> {
-        let valid_id = |value: &str, prefix: &str| {
-            value.strip_prefix(prefix).is_some_and(|suffix| {
+        let has_prefixed_id = |candidate_id: &str, prefix: &str| {
+            candidate_id.strip_prefix(prefix).is_some_and(|suffix| {
                 suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
             })
         };
-        let valid_object_id = |value: &str| zenith_relay_core::is_ascii_token(value, 128);
-        if !valid_id(&self.id, "ownership_")
+        let valid_object_id = |object_id: &str| zenith_relay_core::is_ascii_token(object_id, 128);
+        if !has_prefixed_id(&self.id, "ownership_")
             || self.server_id.is_empty()
             || self.server_id.len() > 128
             || self.local_account_ids.is_empty()
             || self.local_account_ids.len() > 256
-            || self.local_account_ids.iter().any(|id| !valid_object_id(id))
+            || self
+                .local_account_ids
+                .iter()
+                .any(|account_id| !valid_object_id(account_id))
             || self
                 .remote_account_ids
                 .iter()
-                .any(|id| !valid_object_id(id))
+                .any(|account_id| !valid_object_id(account_id))
             || self
                 .created_remote_account_ids
                 .iter()
-                .any(|id| !valid_object_id(id))
+                .any(|account_id| !valid_object_id(account_id))
             || self.updated_at_ms < self.created_at_ms
         {
             return Err("remote ownership operation is invalid");
@@ -85,15 +88,15 @@ impl OwnershipOperationRecord {
         if self
             .local_account_ids
             .iter()
-            .any(|id| !local_ids.insert(id))
+            .any(|account_id| !local_ids.insert(account_id))
             || self
                 .remote_account_ids
                 .iter()
-                .any(|id| !remote_ids.insert(id))
+                .any(|account_id| !remote_ids.insert(account_id))
             || self
                 .created_remote_account_ids
                 .iter()
-                .any(|id| !created_ids.insert(id))
+                .any(|account_id| !created_ids.insert(account_id))
             || self.remote_account_ids.len() > self.local_account_ids.len()
             || self.created_remote_account_ids.len() > self.local_account_ids.len()
         {

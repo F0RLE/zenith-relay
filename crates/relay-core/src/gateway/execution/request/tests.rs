@@ -1,9 +1,15 @@
 use super::prelude::requested_reasoning_effort;
-use super::recovery::{adapter_error_response, should_wait_for_candidate_availability};
+use super::recovery::{
+    adapter_error_response, adapter_error_response_for_origin,
+    should_wait_for_candidate_availability,
+};
 use super::translate::translate_basis_points_completed;
 use crate::gateway::errors::AttemptFailure;
-use crate::{AdapterRequestContext, CacheWriteTtl, MessagesReasoningMode, SourceAdapter, WireApi};
-use axum::http::StatusCode;
+use crate::{
+    AdapterError, AdapterRequestContext, CacheWriteTtl, ErrorOrigin, MessagesReasoningMode,
+    SourceAdapter, WireApi,
+};
+use axum::{body::to_bytes, http::StatusCode};
 use serde_json::json;
 
 #[test]
@@ -139,17 +145,23 @@ fn basis_points_messages_tool_result_keeps_the_call_link() {
         ]
     });
     let prepared = SourceAdapter::MessagesToResponses
-        .prepare_request(AdapterRequestContext {
-            client_wire_api: WireApi::Messages,
-            request: &input,
-            model: "test",
-            stream: false,
-            reasoning_mode: MessagesReasoningMode::Adaptive,
-            cache_write_ttl: CacheWriteTtl::Provider,
-            previous: None,
-            response_scope: "test-account",
-            response_id_seed: "test-request",
-        })
+        .prepare_request_with_capabilities(
+            AdapterRequestContext {
+                client_wire_api: WireApi::Messages,
+                request: &input,
+                model: "test",
+                stream: false,
+                reasoning_mode: MessagesReasoningMode::Adaptive,
+                cache_write_ttl: CacheWriteTtl::Provider,
+                previous: None,
+                response_scope: "test-account",
+                response_id_seed: "test-request",
+            },
+            &crate::model_metadata::ModelCapabilities {
+                reasoning: Some(false),
+                ..Default::default()
+            },
+        )
         .unwrap();
     let basis_points =
         super::super::basis_points::prepare_request(prepared.upstream_body()).unwrap();
@@ -168,9 +180,10 @@ fn basis_points_messages_tool_result_keeps_the_call_link() {
 
 #[tokio::test]
 async fn adapter_error_response_exposes_safe_parameter_name() {
-    let response = adapter_error_response(crate::AdapterError::parameter_unsupported_for(
-        "text.verbosity",
-    ));
+    let response = adapter_error_response(
+        crate::AdapterError::parameter_unsupported_for("text.verbosity"),
+        Some("relay-request-123"),
+    );
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let bytes = axum::body::to_bytes(response.into_body(), 4096)
         .await
@@ -182,6 +195,44 @@ async fn adapter_error_response_exposes_safe_parameter_name() {
         .unwrap()
         .contains("text.verbosity"));
     assert_eq!(body["error"]["code"], "adapter_parameter_unsupported");
+    assert_eq!(
+        body["error"]["zenith_relay"]["request_id"],
+        "relay-request-123"
+    );
+}
+
+#[tokio::test]
+async fn local_adapter_errors_are_not_reported_as_provider_failures() {
+    let response = adapter_error_response_for_origin(
+        AdapterError::invalid_request().with_parameter("input.call_id"),
+        ErrorOrigin::Provider,
+        Some("relay-request-local"),
+    );
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(
+        body["error"]["message"],
+        "Relay: request cannot be represented by the selected source adapter (parameter: input.call_id)"
+    );
+    assert_eq!(body["error"]["zenith_relay"]["origin"], "relay");
+}
+
+#[tokio::test]
+async fn upstream_adapter_errors_keep_the_selected_route_origin() {
+    let response = adapter_error_response_for_origin(
+        AdapterError::upstream_response_invalid(),
+        ErrorOrigin::Provider,
+        Some("relay-request-upstream"),
+    );
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(
+        body["error"]["message"],
+        "Provider: the upstream response cannot be represented by the selected client protocol"
+    );
+    assert_eq!(body["error"]["zenith_relay"]["origin"], "provider");
 }
 
 #[test]
@@ -208,11 +259,25 @@ fn requested_reasoning_effort_uses_only_the_matching_client_contract() {
         ),
         None
     );
+    for alias in ["x_high", "extra-high", "very_high", "Very high"] {
+        assert_eq!(
+            requested_reasoning_effort(
+                &json!({"reasoning": {"effort": alias}}),
+                WireApi::Responses
+            ),
+            Some("xhigh".to_string())
+        );
+    }
 }
 
 #[test]
 fn retry_wait_is_opt_in_and_only_accepts_transient_failures() {
     let transient = Some(AttemptFailure::classified_with_hint(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "upstream_overloaded",
+        Default::default(),
+    ));
+    let unknown_execution = Some(AttemptFailure::classified_with_hint(
         StatusCode::SERVICE_UNAVAILABLE,
         "upstream_unavailable",
         Default::default(),
@@ -233,6 +298,12 @@ fn retry_wait_is_opt_in_and_only_accepts_transient_failures() {
     ));
     assert!(should_wait_for_candidate_availability(
         true, &transient, false, false
+    ));
+    assert!(!should_wait_for_candidate_availability(
+        true,
+        &unknown_execution,
+        false,
+        false
     ));
     assert!(!should_wait_for_candidate_availability(
         true, &auth, false, false

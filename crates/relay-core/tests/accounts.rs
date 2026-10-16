@@ -48,6 +48,7 @@ fn reference_metadata_options() -> GatewayRuntimeOptions {
                 "name": "Reference Model", "reasoning": true,
                 "reasoning_effort_levels": ["low", "high", "xhigh"],
                 "default_reasoning_effort": "high", "tool_call": true,
+                "supported_service_tiers": ["priority", "flex"],
                 "modalities": {"input": ["text", "image"], "output": ["text"]}
             }),
         );
@@ -67,6 +68,8 @@ mod client_compatibility;
 mod compaction;
 #[path = "support/long_requests.rs"]
 mod long_requests;
+#[path = "support/request_timezone.rs"]
+mod request_timezone;
 #[path = "support/rotation_policy.rs"]
 mod rotation_policy;
 
@@ -264,11 +267,14 @@ fn account(
     quota_remaining_basis_points: i32,
 ) -> RuntimeChatGptAccount {
     RuntimeChatGptAccount {
+        oauth_client_kind: Default::default(),
         id: id.to_string(),
         source_id: "openai-codex".to_string(),
         chatgpt_account_id: chatgpt_account_id.to_string(),
+        chatgpt_user_id: None,
         responses_url: format!("{}/v1/responses", server.base_url),
         basis_points_enabled: false,
+        basis_points_headers: None,
         models: vec![MODEL.to_string()],
         enabled: true,
         draining: false,
@@ -289,6 +295,7 @@ fn account(
         cooldowns: Default::default(),
         consecutive_failures: 0,
         proxy: None,
+        proxy_timezone: None,
     }
 }
 
@@ -299,6 +306,7 @@ fn source(id: &str, server: &TestServer, key: &str, priority: i32) -> RuntimeSou
             name: id.to_string(),
             base_url: format!("{}/v1", server.base_url),
             api_key: key.to_string(),
+            proxy_url: None,
             wire_api: WireApi::Responses,
             models: vec![MODEL.to_string()],
         },
@@ -547,6 +555,7 @@ async fn spawn_replayable_websocket_upstream() -> (TestServer, WebSocketUpstream
     spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![
         json!({"type":"response.completed","response":{
             "id":"replayable-ws-response",
+            "status":"completed",
             "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"synthetic answer"}]}]
         }}),
     ]))).await
@@ -659,6 +668,9 @@ async fn upstream(
         .unwrap()
         .pop_front()
         .unwrap_or_else(|| {
+            if uri.path() == "/v1/responses/compact" {
+                return compaction_reply("default-compaction");
+            }
             success_reply_for_model(
                 "default-response",
                 body_value["model"].as_str().unwrap_or(MODEL),
@@ -718,7 +730,7 @@ async fn upstream(
                     .status(StatusCode::OK)
                     .header(CONTENT_TYPE, "application/json")
                     .body(Body::from(
-                        json!({"type": "compaction", "items": []}).to_string(),
+                        compaction_body("transport-compaction").to_string(),
                     ))
                     .unwrap()
             }
@@ -776,6 +788,7 @@ async fn held_then_json_upstream(
                 json!({
                     "id": "queued-response",
                     "object": "response",
+                    "status": "completed",
                     "model": MODEL,
                     "output": [],
                     "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
@@ -796,7 +809,7 @@ fn held_stream_response(release: Arc<Notify>) -> Response<Body> {
                 ),
                 1 => {
                     release.notified().await;
-                    Bytes::from_static(b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"held-response\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+                    Bytes::from_static(b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"held-response\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
                 }
                 2 => Bytes::from_static(b"data: [DONE]\n\n"),
                 _ => return None,
@@ -839,6 +852,7 @@ async fn connection_affinity_upstream(
             json!({
                 "id": "isolated-response",
                 "object": "response",
+                "status": "completed",
                 "model": MODEL,
                 "output": [],
                 "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
@@ -905,6 +919,8 @@ async fn upstream_websocket(
                         "type": "response.completed",
                         "response": {
                             "id": "ws-response",
+                            "status": "completed",
+                            "output": [],
                             "usage": {
                                 "input_tokens": 11,
                                 "input_tokens_details": {"cached_tokens": 7},
@@ -921,6 +937,8 @@ async fn upstream_websocket(
                         "type": "response.completed",
                         "response": {
                             "id": "ws-response",
+                            "status": "completed",
+                            "output": [],
                             "usage": {
                                 "input_tokens": 11,
                                 "input_tokens_details": {"cached_tokens": 7},
@@ -955,6 +973,8 @@ async fn upstream_websocket(
                         "type": "response.completed",
                         "response": {
                             "id": "ws-held-response",
+                            "status": "completed",
+                            "output": [],
                             "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
                         }
                     })]
@@ -1015,9 +1035,8 @@ async fn receive_websocket_json_with_timeout(
     loop {
         let message = tokio::time::timeout(timeout_duration, socket.next())
             .await
-            .unwrap()
-            .unwrap()
             .unwrap();
+        let message = message.unwrap().unwrap();
         if let ClientWsMessage::Text(text) = message {
             return serde_json::from_str(&text).unwrap();
         }
@@ -1113,11 +1132,26 @@ fn success_reply_for_model(id: &str, model: &str) -> Reply {
         json!({
             "id": id,
             "object": "response",
+            "status": "completed",
             "model": model,
             "output": [],
             "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
         }),
     )
+}
+
+fn compaction_body(id: &str) -> Value {
+    json!({
+        "id": id,
+        "object": "response.compaction",
+        "created_at": 1,
+        "output": [{"type": "compaction", "encrypted_content": "synthetic-checkpoint"}],
+        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+    })
+}
+
+fn compaction_reply(id: &str) -> Reply {
+    Reply::Json(StatusCode::OK, compaction_body(id))
 }
 
 fn successful_sse_reply() -> Reply {
@@ -1126,7 +1160,7 @@ fn successful_sse_reply() -> Reply {
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n",
         ),
         StreamChunk::Data(
-            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
         ),
         StreamChunk::Data("data: [DONE]\n\n"),
     ])

@@ -83,6 +83,10 @@ pub(in crate::local_pool::accounts) fn validate_account_record(
     let credentials = CredentialStore::from_backend(NativeSecretBackend)
         .require(&account.account.id)
         .map_err(credential_local_error)?;
+    super::super::records::validate_account_plan(
+        &credentials,
+        account.account.subscription.plan_type.as_deref(),
+    )?;
     if credentials.provider_account_id().is_none() {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,

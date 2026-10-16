@@ -1,8 +1,10 @@
 use super::error::{OAuthError, OAuthErrorCode};
 use super::exchange::OAuthCallback;
 use super::parse::set_once;
-use super::{MAX_CALLBACK_URL_BYTES, MAX_TOKEN_BYTES, PENDING_TTL_MS};
+use super::{OAuthClientKind, MAX_CALLBACK_URL_BYTES, MAX_TOKEN_BYTES, PENDING_TTL_MS};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fmt;
 use url::Url;
 use zenith_relay_core::normalize_error_code;
@@ -11,6 +13,8 @@ use zenith_relay_core::url_has_userinfo;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OAuthPendingSession {
+    #[serde(default)]
+    pub(super) client_kind: OAuthClientKind,
     pub(super) redirect_uri: String,
     pub(super) state: String,
     pub(super) code_verifier: String,
@@ -18,6 +22,10 @@ pub struct OAuthPendingSession {
 }
 
 impl OAuthPendingSession {
+    pub fn client_kind(&self) -> OAuthClientKind {
+        self.client_kind
+    }
+
     pub fn redirect_uri(&self) -> &str {
         &self.redirect_uri
     }
@@ -28,6 +36,29 @@ impl OAuthPendingSession {
 
     pub fn expires_at_ms(&self) -> u64 {
         self.created_at_ms.saturating_add(PENDING_TTL_MS)
+    }
+
+    pub fn validate_authorization_url(&self, authorization_url: &str) -> Result<(), OAuthError> {
+        let authorization = super::validate_authorization_url(
+            self.client_kind,
+            authorization_url,
+            &self.redirect_uri,
+        )?;
+        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(self.code_verifier.as_bytes()));
+        if !(43..=128).contains(&self.code_verifier.len())
+            || !self.code_verifier.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
+            })
+            || !authorization
+                .query_pairs()
+                .any(|(key, value)| key == "state" && value == self.state)
+            || !authorization
+                .query_pairs()
+                .any(|(key, value)| key == "code_challenge" && value == challenge)
+        {
+            return Err(OAuthError::new(OAuthErrorCode::InvalidConfiguration, false));
+        }
+        Ok(())
     }
 
     pub fn parse_callback(
@@ -56,17 +87,17 @@ impl OAuthPendingSession {
         }
 
         let mut code = None;
-        let mut state = None;
+        let mut callback_state = None;
         let mut provider_error = None;
-        for (key, value) in callback_url.query_pairs() {
+        for (key, query_value) in callback_url.query_pairs() {
             match key.as_ref() {
-                "code" => set_once(&mut code, value.into_owned())?,
-                "state" => set_once(&mut state, value.into_owned())?,
-                "error" => set_once(&mut provider_error, value.into_owned())?,
+                "code" => set_once(&mut code, query_value.into_owned())?,
+                "state" => set_once(&mut callback_state, query_value.into_owned())?,
+                "error" => set_once(&mut provider_error, query_value.into_owned())?,
                 _ => {}
             }
         }
-        if state.as_deref() != Some(self.state.as_str()) {
+        if callback_state.as_deref() != Some(self.state.as_str()) {
             return Err(OAuthError::new(OAuthErrorCode::StateMismatch, false));
         }
         if let Some(provider_error) = provider_error {

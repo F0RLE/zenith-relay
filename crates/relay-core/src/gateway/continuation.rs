@@ -22,7 +22,28 @@ pub(super) fn previous_response_id(request: &Value) -> Option<&str> {
         .get("previous_response_id")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter(|response_id| !response_id.is_empty())
+}
+
+/// A paired tool history already carries its call and result, so its saved
+/// route is only a warm-cache preference. It needs no predecessor replay to
+/// yield to a healthier quota. Opaque references and unpaired results still
+/// require validated local replay before their owner can be released.
+pub(super) fn prepare_response_owner_change(
+    runtime: &GatewayRuntime,
+    local_key_id: &str,
+    request: &mut Value,
+    model: &str,
+    requires_affinity_owner: bool,
+    now_ms: u64,
+) -> bool {
+    if !requires_affinity_owner
+        && previous_response_id(request).is_none()
+        && unpaired_tool_output_ids(request).is_empty()
+    {
+        return true;
+    }
+    drop_materialized_previous_response_id(runtime, local_key_id, request, model, now_ms)
 }
 
 /// Drops the opaque continuation binding after its history has been materialized.
@@ -35,6 +56,16 @@ pub(super) fn clear_materialized_continuation(
     has_unpaired_tool_output: &mut bool,
 ) {
     *response_affinity_key = None;
+    *requires_affinity_owner = false;
+    *has_unpaired_tool_output = false;
+}
+
+/// Drops the opaque continuation requirement after replay while retaining the
+/// saved owner binding for one same-provider repair attempt.
+pub(super) fn retain_materialized_continuation_owner(
+    requires_affinity_owner: &mut bool,
+    has_unpaired_tool_output: &mut bool,
+) {
     *requires_affinity_owner = false;
     *has_unpaired_tool_output = false;
 }
@@ -110,16 +141,19 @@ pub(super) fn prepare_response_continuation(
         return Err(());
     }
 
+    // Keep the creating tool route as a soft preference so sequential tool
+    // turns stay warm on the same member. A complete call/output pair remains
+    // portable because `requires_affinity_owner` is false and route
+    // validation permits a compatible owner change. Only an actual previous
+    // response or an unpaired tool output requires that owner.
     let response_affinity_key = if response_binding_known {
         response_affinity_key
+    } else if has_unpaired_tool_output {
+        tool_affinity_key
     } else {
         tool_affinity_key.or(response_affinity_key)
     };
     Ok(ContinuationState {
-        // A complete tool call plus its matching output is self-contained:
-        // it can be sent to another compatible candidate without an opaque
-        // response reference. Only an actual previous response or an
-        // unpaired tool output still needs its creating owner.
         requires_affinity_owner: has_previous_response_id || has_unpaired_tool_output,
         response_affinity_key,
         has_unpaired_tool_output,

@@ -9,11 +9,13 @@ import type {
   RoutingDiagnostics,
   ToolUseDiagnostics,
   UpstreamErrorDetails,
+  UsageTransport,
   UsageTotals,
 } from "../../api/types";
 import type { TokenSpeedSample } from "../../usageSpeed";
 import { totalsFromUsageSamples, type UsageTotalsSample } from "../../usageTotals";
 import { documentedCacheRetentionMinimum } from "./cacheLifetime";
+import { modelIdForDisplay } from "./usageModelIdentity";
 
 export type CodexRequestOrigin =
   | "activity_summary"
@@ -34,6 +36,7 @@ export type UsageRow = {
   effectiveReasoningEffort: ReasoningEffort | null;
   connection: string;
   wireApi: string | null;
+  transport: UsageTransport;
   serviceTier: DefaultServiceTier | null;
   appliedServiceTier: ObservedServiceTier | null;
   ttft: number | null;
@@ -63,9 +66,9 @@ export type UsageRow = {
 };
 
 /** Retains a safe raw tier reported by an upstream response for diagnostics. */
-export function normalizeObservedServiceTier(value: unknown): ObservedServiceTier | null {
-  if (typeof value !== "string") return null;
-  const tier = value.trim().toLowerCase();
+export function normalizeObservedServiceTier(serviceTierValue: unknown): ObservedServiceTier | null {
+  if (typeof serviceTierValue !== "string") return null;
+  const tier = serviceTierValue.trim().toLowerCase();
   return /^[a-z0-9_-]{1,48}$/.test(tier) ? tier : null;
 }
 
@@ -109,13 +112,14 @@ function usageRowFromEvent(
     attempt: event.attempt,
     time,
     success: event.success,
-    model: event.resolvedModel ?? event.requestedModel,
+    model: modelIdForDisplay(event.resolvedModel ?? event.requestedModel),
     requestedModel: event.requestedModel,
     routedModel: event.resolvedModel,
     requestedReasoningEffort: event.requestedReasoningEffort ?? null,
     effectiveReasoningEffort: event.effectiveReasoningEffort ?? null,
     connection,
     wireApi: event.wireApi,
+    transport: event.transport ?? "http",
     serviceTier: event.serviceTier ?? null,
     appliedServiceTier: normalizeObservedServiceTier(event.appliedServiceTier),
     ttft: event.ttftMs ?? null,
@@ -197,6 +201,20 @@ export function usageRowsFromRemote(events: readonly RemoteUsage[], labels: Remo
       requestOrigin,
     );
   });
+}
+
+/** Reports show the latest result of each Relay request, never its intermediate failures. */
+export function logicalRequestRows(rows: readonly UsageRow[]): UsageRow[] {
+  const requests = new Map<string, UsageRow>();
+  for (const row of rows) {
+    const key = row.requestId ? `request:${row.requestId}` : `record:${row.id}`;
+    const previous = requests.get(key);
+    if (!previous || row.attempt > previous.attempt
+      || (row.attempt === previous.attempt && Date.parse(row.time) > Date.parse(previous.time))) {
+      requests.set(key, row);
+    }
+  }
+  return [...requests.values()].sort((left, right) => Date.parse(right.time) - Date.parse(left.time));
 }
 
 export function totalsFromRows(rows: UsageRow[]): UsageTotals {

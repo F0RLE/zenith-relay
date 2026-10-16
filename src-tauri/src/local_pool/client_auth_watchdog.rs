@@ -135,8 +135,8 @@ async fn run(app: AppHandle) {
 }
 
 #[cfg(test)]
-fn observation_write_completed<E>(result: &std::result::Result<bool, E>) -> bool {
-    result.is_ok()
+fn observation_write_completed<E>(write_result: &std::result::Result<bool, E>) -> bool {
+    write_result.is_ok()
 }
 
 #[cfg(test)]

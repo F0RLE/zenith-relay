@@ -76,8 +76,8 @@ impl fmt::Debug for Config {
     }
 }
 
-fn validate_public_base_url(value: &str) -> Result<Url, String> {
-    let mut url = Url::parse(value.trim())
+fn validate_public_base_url(base_url_text: &str) -> Result<Url, String> {
+    let mut url = Url::parse(base_url_text.trim())
         .map_err(|_| "ZENITH_RELAY_PUBLIC_BASE_URL is invalid".to_string())?;
     if !zenith_relay_core::is_http_endpoint(&url) {
         return Err("ZENITH_RELAY_PUBLIC_BASE_URL must use HTTP or HTTPS".to_string());
@@ -93,8 +93,9 @@ fn validate_public_base_url(value: &str) -> Result<Url, String> {
     Ok(url)
 }
 
-fn validate_management_token(value: &str) -> Result<(), String> {
-    if value.len() < MIN_MANAGEMENT_TOKEN_BYTES || value.bytes().any(|byte| byte.is_ascii_control())
+fn validate_management_token(token_value: &str) -> Result<(), String> {
+    if token_value.len() < MIN_MANAGEMENT_TOKEN_BYTES
+        || token_value.bytes().any(|byte| byte.is_ascii_control())
     {
         Err("ZENITH_RELAY_MANAGEMENT_TOKEN must be at least 24 printable bytes".to_string())
     } else {
@@ -102,9 +103,9 @@ fn validate_management_token(value: &str) -> Result<(), String> {
     }
 }
 
-fn decode_vault_key(value: &str) -> Result<[u8; 32], String> {
+fn decode_vault_key(encoded_key: &str) -> Result<[u8; 32], String> {
     let decoded = STANDARD
-        .decode(value.trim())
+        .decode(encoded_key.trim())
         .map_err(|_| "ZENITH_RELAY_VAULT_KEY must be base64".to_string())?;
     decoded
         .try_into()

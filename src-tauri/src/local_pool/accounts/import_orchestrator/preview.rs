@@ -1,15 +1,13 @@
 use super::{
-    build_import_credential_material, credential_local_error, existing_identity_index,
-    find_existing_account, find_existing_source, hinted_import_proxy, import_item_command_error,
+    account_import_proxy, build_import_credential_material, existing_identity_index,
+    find_existing_account, find_existing_source, import_item_command_error, import_proxy,
     import_session_error, masked_account_identity, normalize_import_input,
-    parse_subscription_timestamp_ms, parsed_item_value, parsed_item_value_from_material,
+    parse_subscription_timestamp_ms, parsed_item_json, parsed_item_json_with_material,
     provider_identity_key, timestamp_from_ms, ImportSessionResponse, StartAccountImportInput,
 };
 use crate::local_pool::accounts::credentials::CredentialStore;
 use crate::local_pool::accounts::import_session::{ImportSession, ImportSessionStore};
-use crate::local_pool::accounts::proxy::{
-    common_proxy_config, effective_proxy_config, ensure_account_proxy,
-};
+use crate::local_pool::accounts::proxy::ensure_account_proxy;
 use crate::local_pool::accounts::quota_refresh::QUOTA_COMMAND_TIMEOUT_OVERHEAD;
 use crate::local_pool::accounts::NativeSecretBackend;
 use crate::local_pool::commands::current_time_ms;
@@ -41,7 +39,7 @@ pub(super) async fn preview_account_import_documents(
         "document_preview_started",
         &[("documents", document_count.to_string())],
     );
-    let result = async {
+    let preview_result = async {
         let (content, _) = normalize_import_input(StartAccountImportInput {
             content: None,
             documents,
@@ -81,7 +79,7 @@ pub(super) async fn preview_account_import_documents(
         }
     }
     .await;
-    match result {
+    match preview_result {
         Ok((session, session_hash)) => {
             crate::diagnostics::record_operation(
                 "account-import",

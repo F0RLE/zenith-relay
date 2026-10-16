@@ -32,7 +32,7 @@ async fn models_union_respects_each_local_key_scope_without_upstream_calls() {
 
     assert_eq!(
         models(&gateway, LOCAL_KEY).await,
-        ["alpha", "shared", "beta"]
+        ["alpha", "beta", "shared"]
     );
     assert_eq!(models(&gateway, "scoped-key").await, ["alpha", "shared"]);
     assert!(models(&gateway, "empty-key").await.is_empty());
@@ -41,7 +41,7 @@ async fn models_union_respects_each_local_key_scope_without_upstream_calls() {
 }
 
 #[tokio::test]
-async fn public_models_preserve_the_provider_model_order() {
+async fn public_models_follow_shared_provider_and_family_order() {
     let (upstream, _) = spawn_upstream("source-key", Vec::new()).await;
     let (gateway, _) = spawn_gateway(
         vec![source(
@@ -70,16 +70,16 @@ async fn public_models_preserve_the_provider_model_order() {
     assert_eq!(
         models(&gateway, LOCAL_KEY).await,
         [
-            "private-second",
-            "vendor/grok-4.5",
-            "vendor/glm-4.7",
-            "vendor/gemini-3.6-flash-low",
-            "vendor/claude-haiku-4-5",
-            "gpt-image-2",
-            "gpt-5.4-mini",
             "gpt-5.6-sol",
+            "gpt-5.4-mini",
+            "gpt-image-2",
+            "vendor/claude-haiku-4-5",
+            "vendor/gemini-3.6-flash-low",
+            "vendor/grok-4.5",
             "vendor/glm-5.2",
+            "vendor/glm-4.7",
             "private-first",
+            "private-second",
         ]
     );
 }
@@ -142,6 +142,14 @@ async fn generic_client_keeps_tier_ownership_without_managed_codex_defaults() {
 
 #[tokio::test]
 async fn codex_catalog_exposes_api_speed_choices_and_honors_explicit_selection() {
+    use zenith_relay_core::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
+
+    let reference = ModelMetadataCatalogHandle::new(
+        ModelMetadataCatalog::from_models_dev_json(
+            &json!({(MODEL): {"service_tiers": ["priority", "ultrafast"]}}).to_string(),
+        )
+        .unwrap(),
+    );
     for default_tier in [DefaultServiceTier::Standard, DefaultServiceTier::Ultrafast] {
         let (upstream, state) = spawn_upstream("synthetic-speed-key", Vec::new()).await;
         let (gateway, _) = spawn_gateway_with_options(
@@ -154,6 +162,7 @@ async fn codex_catalog_exposes_api_speed_choices_and_honors_explicit_selection()
             )],
             vec![local_key("key", LOCAL_KEY, None)],
             GatewayRuntimeOptions {
+                model_metadata_catalog: Some(reference.clone()),
                 default_service_tier: default_tier,
                 ..GatewayRuntimeOptions::default()
             },

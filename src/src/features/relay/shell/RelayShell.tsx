@@ -1,4 +1,4 @@
-import { Activity, ArchiveRestore, Cable, Check, CheckCircle2, ChevronDown, CircleAlert, CircleHelp, Download, Gauge, Laptop, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Server, Settings, SlidersHorizontal, Upload, X } from "lucide-react";
+import { Activity, ArchiveRestore, Cable, Check, CheckCircle2, ChevronDown, CircleAlert, CircleHelp, Download, Gauge, Laptop, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Plug, Server, Settings, SlidersHorizontal, Upload, X } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ComponentType } from "react";
 import { useTranslation } from "react-i18next";
@@ -24,7 +24,7 @@ function lazyNamed<P>(load: () => Promise<ComponentType<P>>) {
 const connectionsPage = lazyNamed(async () => (await import("../pages/connections/ConnectionsPage")).ConnectionsPage);
 const importDialog = lazyNamed(async () => (await import("../pages/connections/ImportDialog")).ImportDialog);
 const poolPage = lazyNamed(async () => (await import("../pages/pool/PoolPage")).PoolPage);
-const gatewayPage = lazyNamed(async () => (await import("../pages/gateway/GatewayPage")).GatewayPage);
+const integrationsPage = lazyNamed(async () => (await import("../pages/integrations/IntegrationsPage")).IntegrationsPage);
 const usagePage = lazyNamed(async () => (await import("../pages/usage/UsagePage")).UsagePage);
 const profilesPage = lazyNamed(async () => (await import("../pages/profiles/ProfilesPage")).ProfilesPage);
 const settingsPage = lazyNamed(async () => (await import("../pages/settings/SettingsPage")).SettingsPage);
@@ -34,7 +34,7 @@ const pages: Array<{ id: PageId; icon: typeof LayoutDashboard }> = [
   { id: "overview", icon: LayoutDashboard },
   { id: "connections", icon: Cable },
   { id: "pool", icon: SlidersHorizontal },
-  { id: "gateway", icon: Gauge },
+  { id: "integrations", icon: Plug },
   { id: "usage", icon: Activity },
   { id: "profiles", icon: ArchiveRestore },
   { id: "settings", icon: Settings },
@@ -44,6 +44,12 @@ export function RelayShell() {
   const { t } = useTranslation();
   const { mode, setMode, page, setPage, feedback, clearFeedback, loading } = useRelayState();
   const [collapsed, setCollapsed] = useState(() => window.matchMedia?.("(max-width: 1023px)").matches ?? false);
+  useEffect(() => {
+    const compact = window.matchMedia?.("(max-width: 1023px)");
+    const collapseOnNarrowWindow = () => { if (compact?.matches) setCollapsed(true); };
+    compact?.addEventListener("change", collapseOnNarrowWindow);
+    return () => compact?.removeEventListener("change", collapseOnNarrowWindow);
+  }, []);
   const [modeOpen, setModeOpen] = useState(false);
   const [importRequest, setImportRequest] = useState<{ id: number; paths?: string[] } | null>(null);
   const [importDragActive, setImportDragActive] = useState(false);
@@ -63,7 +69,23 @@ export function RelayShell() {
     openUpdateDialog,
     closeUpdateDialog,
   } = useAppUpdates();
-  const visiblePages = pages.filter((item) => mode !== "zenith" || !(["pool", "gateway", "usage"] as PageId[]).includes(item.id));
+  const visiblePages = pages.filter((pageItem) => mode !== "zenith" || !(["pool", "integrations", "usage"] as PageId[]).includes(pageItem.id));
+  const mainPages = visiblePages.filter(({ id }) => id !== "profiles" && id !== "settings");
+  const utilityPages = visiblePages.filter(({ id }) => id === "profiles" || id === "settings");
+  const navigationButton = ({ id: pageId, icon: Icon }: (typeof pages)[number]) => (
+    <button
+      key={pageId}
+      type="button"
+      className={page === pageId ? "active" : ""}
+      aria-label={t(`nav.${pageId}`)}
+      aria-current={page === pageId ? "page" : undefined}
+      data-relay-tooltip={collapsed ? t(`nav.${pageId}`) : undefined}
+      onClick={() => setPage(pageId)}
+    >
+      <Icon aria-hidden />
+      <span>{t(`nav.${pageId}`)}</span>
+    </button>
+  );
   const focusModePicker = useCallback(() => {
     modePickerRef.current?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
   }, []);
@@ -77,7 +99,7 @@ export function RelayShell() {
       connectionsPage.preload();
       importDialog.preload();
       poolPage.preload();
-      gatewayPage.preload();
+      integrationsPage.preload();
       usagePage.preload();
       profilesPage.preload();
       settingsPage.preload();
@@ -149,7 +171,7 @@ export function RelayShell() {
             aria-label={`${t("common.mode")}: ${t(`modes.${mode}`)}`}
             aria-haspopup="menu"
             aria-expanded={modeOpen}
-            onClick={() => setModeOpen((value) => !value)}
+            onClick={() => setModeOpen((isOpen) => !isOpen)}
           >
             <ModeIcon mode={mode} />
             <span>{t(`modes.${mode}`)}</span>
@@ -157,40 +179,28 @@ export function RelayShell() {
           </button>
           {modeOpen ? (
             <div className="mode-menu relay-popover-panel" role="menu">
-              {(["local", "zenith", "remote"] as RelayMode[]).map((value) => (
+              {(["local", "zenith", "remote"] as RelayMode[]).map((modeOption) => (
                 <button
                   className="relay-popover-item"
                   role="menuitemradio"
-                  aria-checked={mode === value}
-                  key={value}
+                  aria-checked={mode === modeOption}
+                  key={modeOption}
                   type="button"
                   onClick={() => {
-                    setMode(value);
+                    setMode(modeOption);
                     setModeOpen(false);
                   }}
                 >
-                  <ModeIcon mode={value} />
-                  <span>{t(`modes.${value}`)}</span>
-                  {mode === value ? <Check className="mode-check" aria-hidden /> : null}
+                  <ModeIcon mode={modeOption} />
+                  <span>{t(`modes.${modeOption}`)}</span>
+                  {mode === modeOption ? <Check className="mode-check" aria-hidden /> : null}
                 </button>
               ))}
             </div>
           ) : null}
         </div>
-        <nav aria-label={t("nav.label")}>
-          {visiblePages.map(({ id, icon: Icon }) => (
-            <button
-              key={id}
-              type="button"
-              className={page === id ? "active" : ""}
-              aria-label={t(`nav.${id}`)}
-              aria-current={page === id ? "page" : undefined}
-              onClick={() => setPage(id)}
-            >
-              <Icon aria-hidden />
-              <span>{t(`nav.${id}`)}</span>
-            </button>
-          ))}
+        <nav className="sidebar-main-nav" aria-label={t("nav.label")}>
+          <div className="sidebar-nav-group">{mainPages.map(navigationButton)}</div>
         </nav>
         <div className="sidebar-bottom">
           {feedback ? <div className="sidebar-feedback"><GlobalFeedback feedback={feedback} clearFeedback={clearFeedback} focusAfterClose={focusModePicker} /></div> : null}
@@ -207,6 +217,9 @@ export function RelayShell() {
               </button>
             </div>
           ) : null}
+          <nav className="sidebar-nav-utilities" aria-label={t("nav.utilities")}>
+            {utilityPages.map(navigationButton)}
+          </nav>
           <div className="sidebar-footer">
             <div className="sidebar-footer-row">
               <button
@@ -222,7 +235,7 @@ export function RelayShell() {
               <IconButton
                 label={collapsed ? t("shell.expand") : t("shell.collapse")}
                 icon={collapsed ? <PanelLeftOpen aria-hidden /> : <PanelLeftClose aria-hidden />}
-                onClick={() => setCollapsed((value) => !value)}
+                onClick={() => setCollapsed((isCollapsed) => !isCollapsed)}
               />
             </div>
           </div>
@@ -325,7 +338,7 @@ function Page({ page, onImport, updateCheckState, updateVersion, onCheckUpdates 
   if (page === "overview") return <OverviewPage />;
   if (page === "connections") return <connectionsPage.Component onImport={onImport} />;
   if (page === "pool") return <poolPage.Component />;
-  if (page === "gateway") return <gatewayPage.Component />;
+  if (page === "integrations") return <integrationsPage.Component />;
   if (page === "usage") return <usagePage.Component />;
   if (page === "profiles") return <profilesPage.Component />;
   if (page === "help") return <helpCenter.Component />;

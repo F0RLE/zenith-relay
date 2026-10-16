@@ -7,6 +7,7 @@ import { isCodexOauthAccountEligible } from "../../accountStatus";
 import { ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, IconButton, PageHeader, Tabs } from "../../components/Ui";
 import { ApplicationPickerDialog } from "../../components/ApplicationPickerDialog";
 import { useOAuthSignIn } from "../../hooks/useOAuthSignIn";
+import { useClaudeDesktopLaunch } from "../../hooks/useClaudeDesktopLaunch";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { OAuthDialog } from "../connections/OAuthDialogs";
 import { SourceDialog } from "../connections/SourceDialog";
@@ -18,7 +19,7 @@ import { RoutingPolicyDialog } from "./RoutingPolicyDialog";
 type View = "members" | "models";
 export function PoolPage() {
   const { t } = useTranslation();
-  const { mode, runtime, activateCodexProfile, busy, perform, refresh, codexPoolOauthSelection } = useRelayState();
+  const { mode, runtime, activateCodexProfile, busy, perform, refresh, codexPoolOauthSelection, launchApplicationAfterConnect } = useRelayState();
   const [view, setView] = useState<View>("members");
   const [createSource, setCreateSource] = useState(false);
   const [addMembers, setAddMembers] = useState(false);
@@ -26,6 +27,7 @@ export function PoolPage() {
   const [routingPolicy, setRoutingPolicy] = useState(false);
   const [configurationPreview, setConfigurationPreview] = useState<ConfigurationPresetPreview | null>(null);
   const oauth = useOAuthSignIn(() => refresh());
+  const claudeDesktop = useClaudeDesktopLaunch();
   const supportsModels = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("models"));
   const supportsModelOrderReset = mode === "local" || Boolean(runtime?.capabilities.features.includes("model_order_reset"));
   const supportsMembers = mode !== "remote" || Boolean(runtime?.capabilities.features.some((feature) => feature === "accounts" || feature === "sources"));
@@ -36,19 +38,23 @@ export function PoolPage() {
   useEffect(() => {
     if (view === "models" && !supportsModels) setView("members");
   }, [view, supportsModels]);
-  const selectedOauthAccountId = codexPoolOauthSelection !== "none" && codexPoolOauthSelection !== "auto"
+  const selectedOauthAccountId = codexPoolOauthSelection !== "none"
     && runtime?.accounts.some((account) => account.id === codexPoolOauthSelection && isCodexOauthAccountEligible(account))
     ? codexPoolOauthSelection
     : null;
-  const switchCodexToPool = (launchAfterConnect: boolean) => activateCodexProfile(
+  const switchCodexToPool = () => activateCodexProfile(
     "pool-switch",
-    () => relayCommands.attachCodexGateway(selectedOauthAccountId, codexPoolOauthSelection === "none"),
-    launchAfterConnect,
+    () => relayCommands.attachCodexGateway(selectedOauthAccountId, selectedOauthAccountId === null),
+    launchApplicationAfterConnect,
   );
-  const connectOpenCode = async (launchAfterConnect: boolean) => {
-    const connected = await perform("opencode-connect", relayCommands.connectOpenCode, "feedback.saved", { backgroundRefresh: true });
-    if (connected && launchAfterConnect) await perform("opencode-launch", relayCommands.restartOpenCode, "feedback.launched", { backgroundRefresh: true });
-  };
+  const connectOpenCode = () => perform("opencode-connect", relayCommands.connectOpenCode, launchApplicationAfterConnect ? "feedback.launched" : "feedback.saved", {
+    backgroundRefresh: true,
+    ...(launchApplicationAfterConnect ? { afterWork: relayCommands.restartOpenCode } : {}),
+  });
+  const connectClaudeDesktop = () => perform("claude-desktop-connect", relayCommands.connectClaudeDesktop, launchApplicationAfterConnect ? "feedback.launched" : "feedback.saved", {
+    backgroundRefresh: true,
+    ...(launchApplicationAfterConnect ? { afterWork: claudeDesktop.launch } : {}),
+  });
   const running = Boolean(runtime?.gateway.running);
   const exportConfiguration = () => perform("configuration-preset-export", mode === "local" ? relayCommands.exportLocalConfigurationPreset : relayCommands.exportRemoteConfigurationPreset, undefined, { backgroundRefresh: true });
   const previewConfiguration = () => perform("configuration-preset-preview", async () => {
@@ -87,7 +93,7 @@ export function PoolPage() {
         variant="primary"
         icon={<Plug aria-hidden />}
         aria-label={t("pool.connect")}
-        busy={busy === "pool-switch"}
+        busy={busy === "pool-switch" || busy === "opencode-connect" || busy === "claude-desktop-connect"}
         disabled={!running}
         title={!running ? t("pool.start") : undefined}
         onClick={() => setConnectDialog(true)}
@@ -116,7 +122,7 @@ export function PoolPage() {
   </div>;
   const tabs = [{ id: "members", label: t("pool.members") }, ...(supportsModels ? [{ id: "models", label: t("pool.modelRules") }] : [])];
   return <section className="relay-page relay-workspace-page" data-view={view}>
-    <PageHeader title={t("nav.pool")} actions={action} navigation={<Tabs value={view} onChange={(id) => setView(id as View)} label={t("pool.views")} items={tabs} />} />
+    <PageHeader title={t("nav.pool")} actions={action} navigation={<Tabs value={view} onChange={(viewId) => setView(viewId as View)} label={t("pool.views")} items={tabs} />} />
     {view === "members" ? (
       <PoolMembersView
         onAdd={() => setAddMembers(true)}
@@ -130,8 +136,9 @@ export function PoolPage() {
     {connectDialog ? (
       <ApplicationPickerDialog
         onClose={() => setConnectDialog(false)}
-        onChatGPT={(launchAfterConnect) => void switchCodexToPool(launchAfterConnect)}
-        onOpenCode={(launchAfterConnect) => void connectOpenCode(launchAfterConnect)}
+        onChatGPT={() => void switchCodexToPool()}
+        onOpenCode={() => void connectOpenCode()}
+        onClaudeDesktop={() => void connectClaudeDesktop()}
       />
     ) : null}
     {createSource ? <SourceDialog source={null} addToPool onClose={() => setCreateSource(false)} /> : null}
@@ -143,7 +150,7 @@ export function PoolPage() {
         onClose={() => setConfigurationPreview(null)}
       />
     ) : null}
-    {oauth.flow ? <OAuthDialog flow={oauth.flow} onCancel={oauth.cancel} /> : null}
+    {oauth.flow ? <OAuthDialog flow={oauth.flow} starting={oauth.starting} onCancel={oauth.cancel} /> : null}
     {!runtime ? <span className="sr-only">{t("common.notConfigured")}</span> : null}
   </section>;
 }
@@ -203,7 +210,7 @@ function ConfigurationPresetDialog({ preview, mode, onClose }: { preview: Config
             </table>
           </div>
         ) : (
-          <EmptyState title={t("pool.configurationUnchanged")} description={t("pool.configurationUnchangedHint")} />
+          <EmptyState title={t("pool.configurationUnchanged")} />
         )}
       </div>
     </Dialog>
@@ -214,7 +221,7 @@ function formatConfigurationPath(path: string) {
   return path.split("/").filter(Boolean).join(" / ");
 }
 
-function formatConfigurationValue(value: unknown) {
-  if (typeof value === "string") return value;
-  return JSON.stringify(value) ?? String(value);
+function formatConfigurationValue(configurationValue: unknown) {
+  if (typeof configurationValue === "string") return configurationValue;
+  return JSON.stringify(configurationValue) ?? String(configurationValue);
 }

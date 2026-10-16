@@ -48,56 +48,60 @@ impl SourceRefreshRevisions {
         }
         Ok(())
     }
-    fn next(&mut self) -> Result<u64> {
+    fn allocate_revision(&mut self) -> Result<u64> {
         self.clock = self.clock.checked_add(1).ok_or_else(invalid)?;
         Ok(self.clock)
     }
     pub(super) fn with_sources(
         &self,
-        previous: &[ProviderSourceRecord],
+        previous_sources: &[ProviderSourceRecord],
         sources: &[ProviderSourceRecord],
     ) -> Result<Self> {
-        let previous = previous
+        let previous_sources_by_id = previous_sources
             .iter()
             .map(|source| (source.id.as_str(), source))
             .collect::<BTreeMap<_, _>>();
-        let mut next = self.clone();
-        next.sources.clear();
+        let mut updated_revisions = self.clone();
+        updated_revisions.sources.clear();
         for source in sources {
-            let revision = if previous
+            let revision = if previous_sources_by_id
                 .get(source.id.as_str())
-                .is_some_and(|old| same_scope(old, source))
+                .is_some_and(|previous_source| same_scope(previous_source, source))
             {
                 self.sources.get(&source.id).copied().ok_or_else(invalid)?
             } else {
-                next.next()?
+                updated_revisions.allocate_revision()?
             };
-            if next.sources.insert(source.id.clone(), revision).is_some() {
+            if updated_revisions
+                .sources
+                .insert(source.id.clone(), revision)
+                .is_some()
+            {
                 return Err(invalid());
             }
         }
-        Ok(next)
+        Ok(updated_revisions)
     }
 }
 impl LocalPoolStore {
     pub(crate) fn source_refresh_scope(
         &self,
-        id: &str,
+        source_id: &str,
     ) -> Result<(ProviderSourceRecord, SourceRefreshFence)> {
-        let source = self
-            .source(id)
+        let source_record = self
+            .source(source_id)
             .cloned()
             .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
         let revision = self
             .source_refresh_revisions
             .sources
-            .get(id)
+            .get(source_id)
             .copied()
             .ok_or_else(invalid)?;
         Ok((
-            source,
+            source_record,
             SourceRefreshFence {
-                source_id: id.into(),
+                source_id: source_id.into(),
                 revision,
             },
         ))
@@ -111,15 +115,17 @@ impl LocalPoolStore {
         }
         Ok(())
     }
-    pub(crate) fn invalidate_source_refresh(&mut self, id: &str) -> Result<()> {
-        let mut next = self.source_refresh_revisions.clone();
-        if next.sources.contains_key(id) {
-            let revision = next.next()?;
-            next.sources.insert(id.into(), revision);
+    pub(crate) fn invalidate_source_refresh(&mut self, source_id: &str) -> Result<()> {
+        let mut updated_revisions = self.source_refresh_revisions.clone();
+        if updated_revisions.sources.contains_key(source_id) {
+            let revision = updated_revisions.allocate_revision()?;
+            updated_revisions.sources.insert(source_id.into(), revision);
         }
-        self.database
-            .replace_state_json(&[(STATE_SOURCE_REVISIONS, serialize_state(&next)?)])?;
-        self.source_refresh_revisions = next;
+        self.database.replace_state_json(&[(
+            STATE_SOURCE_REVISIONS,
+            serialize_state(&updated_revisions)?,
+        )])?;
+        self.source_refresh_revisions = updated_revisions;
         self.notify_refresh_changed();
         Ok(())
     }
@@ -130,34 +136,37 @@ impl LocalPoolStore {
     ) -> Result<ProviderSourceRecord> {
         self.ensure_source_refresh_current(fence)?;
         let mut sources = self.sources.clone();
-        let record = sources
+        let source_record = sources
             .iter_mut()
             .find(|source| source.id == fence.source_id)
             .ok_or_else(invalid)?;
-        apply(record)?;
-        if record.id != fence.source_id {
+        apply(source_record)?;
+        if source_record.id != fence.source_id {
             return Err(invalid());
         }
-        let result = record.clone();
+        let refreshed_source = source_record.clone();
         // Only this observation owner bypasses configuration revision updates.
         // Normal/manual catalog edits still retire both source resource kinds.
         self.database
             .replace_state_json(&[(STATE_SOURCES, serialize_state(&sources)?)])?;
         self.sources = sources;
         self.notify_refresh_changed();
-        Ok(result)
+        Ok(refreshed_source)
     }
 }
-fn same_scope(old: &ProviderSourceRecord, new: &ProviderSourceRecord) -> bool {
-    old.enabled == new.enabled
-        && old.base_url == new.base_url
-        && old.secret_ref == new.secret_ref
-        && old.wire_api == new.wire_api
-        && old.protocol_bindings == new.protocol_bindings
-        && old.protocol_config == new.protocol_config
-        && old.models == new.models
-        && (old.last_test_status.as_deref() == Some("manual"))
-            == (new.last_test_status.as_deref() == Some("manual"))
+fn same_scope(
+    previous_source: &ProviderSourceRecord,
+    updated_source: &ProviderSourceRecord,
+) -> bool {
+    previous_source.enabled == updated_source.enabled
+        && previous_source.base_url == updated_source.base_url
+        && previous_source.secret_ref == updated_source.secret_ref
+        && previous_source.wire_api == updated_source.wire_api
+        && previous_source.protocol_bindings == updated_source.protocol_bindings
+        && previous_source.protocol_config == updated_source.protocol_config
+        && previous_source.models == updated_source.models
+        && (previous_source.last_test_status.as_deref() == Some("manual"))
+            == (updated_source.last_test_status.as_deref() == Some("manual"))
 }
 fn invalid() -> LocalPoolError {
     LocalPoolError::new(

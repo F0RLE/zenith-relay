@@ -2,7 +2,7 @@ use super::super::{
     apply_quota_outcome, credential_item_error, find_existing_account, proxy_item_error, ItemResult,
 };
 use crate::local_pool::accounts::credentials::{CredentialStore, StoredCodexCredentials};
-use crate::local_pool::accounts::proxy::effective_proxy_config;
+use crate::local_pool::accounts::proxy::{common_proxy_config, effective_proxy_config};
 use crate::local_pool::accounts::quota_refresh::{
     AccountQuotaOutcome, QUOTA_COMMAND_TIMEOUT_OVERHEAD,
 };
@@ -18,32 +18,44 @@ use zenith_relay_core::providers::chatgpt::{CodexQuotaClient, QuotaRefreshOutcom
 use zenith_relay_core::quota::QuotaRefreshFailure;
 use zenith_relay_core::ProxyConfig;
 
-pub(in crate::local_pool::accounts::import_orchestrator) fn hinted_import_proxy(
+pub(in crate::local_pool::accounts::import_orchestrator) fn import_proxy(
     state: &DesktopState,
     credential_store: &CredentialStore<NativeSecretBackend>,
     settings: &GatewaySettings,
-    item: &ParsedImportItem,
+    import_item: &ParsedImportItem,
 ) -> ItemResult<Option<ProxyConfig>> {
-    let Some(provider_account_id) = item.account_id.as_deref() else {
-        return Ok(None);
+    let existing = match import_item.account_id.as_deref() {
+        Some(provider_account_id) => find_existing_account(
+            state,
+            credential_store,
+            provider_account_id,
+            import_item.chatgpt_user_id.as_deref(),
+            import_item.email(),
+            import_item
+                .secrets()
+                .oauth_client_kind()
+                .unwrap_or_default(),
+        )?,
+        None => None,
     };
-    let Some(existing) = find_existing_account(
-        state,
-        credential_store,
-        provider_account_id,
-        item.chatgpt_user_id.as_deref(),
-        item.email(),
-    )?
-    else {
-        return Ok(None);
-    };
-    let Some(credentials) = credential_store
-        .load(&existing.account.id)
-        .map_err(credential_item_error)?
-    else {
-        return Ok(None);
-    };
-    effective_proxy_config(settings, &credentials).map_err(proxy_item_error)
+    account_import_proxy(credential_store, settings, existing.as_ref())
+}
+
+pub(in crate::local_pool::accounts::import_orchestrator) fn account_import_proxy(
+    credential_store: &CredentialStore<NativeSecretBackend>,
+    settings: &GatewaySettings,
+    existing: Option<&LocalAccountRecord>,
+) -> ItemResult<Option<ProxyConfig>> {
+    if let Some(existing) = existing {
+        if let Some(credentials) = credential_store
+            .load(&existing.account.id)
+            .map_err(credential_item_error)?
+        {
+            // None is the saved direct route, so it must not fall back to the common proxy.
+            return effective_proxy_config(settings, &credentials).map_err(proxy_item_error);
+        }
+    }
+    common_proxy_config(settings).map_err(proxy_item_error)
 }
 
 pub(super) async fn probe_import_quota(

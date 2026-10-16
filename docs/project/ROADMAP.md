@@ -1,218 +1,540 @@
 # Zenith Relay roadmap
 
-Remaining acceptance and future work only. Current contracts are in
-[PLANNING.md](PLANNING.md); release/check commands are in
-[CONTRIBUTING.md](../../CONTRIBUTING.md). Recheck source before implementing a
-backlog item. Live account operations remain deferred until explicitly resumed
-with permitted accounts. Test the local path before the user-managed server.
+This file lists unfinished product work. It is not a release checklist and does
+not claim that a feature exists. Implemented behavior is documented in
+[PLANNING.md](PLANNING.md); contributor and release checks are in
+[CONTRIBUTING.md](../../CONTRIBUTING.md).
 
-## Pool rotation — remaining acceptance gates
+Relay currently ships as a local-first, user-owned pool. The account connector
+has separate native ChatGPT and Excel / Basis Points sign-ins. Other providers
+can be configured as generic API sources when their API contract is known; a
+subscription connector needs its own authentication, refresh, entitlement,
+quota, usage, and recovery work.
 
-The shared admission/lease engine and request budgets are connected. This is
-not full acceptance of the replacement. Complete these gates before calling it
-ready. Keep the small old-format
-reader so existing saved data can upgrade without a separate prompt:
+## Hosted multi-user Relay
 
-- Finish installed-client acceptance of the automatic 1.1.3 startup upgrade.
-  Local/server conversion is idempotent and preserves enabled state and user
-  settings without a separate confirmation. An older executable/database
-  downgrade is not a supported migration operation.
-- Finish shared refresh host integration. Desktop/server account quota/models
-  use the common asynchronous service, join manual/background callers and
-  apply observations behind durable revisions. API-source models/stats also
-  share that owner; their old periodic workers are removed. The desktop queue,
-  separate single-flight lifecycle and account timers are removed; rollback
-  reconciles current registrations and future reset events accelerate quota
-  work. Persisted passive inference quota can defer automatic account polls;
-  both hosts have synthetic reset-due tests. Account quota/models and initial
-  reset-credit checks now join an on-demand, non-cached Auth prerequisite with
-  reserved capacity and the existing authority. Source/account snapshots expose
-  independent refresh evidence; saved observations are stale after restart.
-  Per-HTTP management sends, including Auth recovery, now share a process-local
-  gate with reserved Auth capacity and revision fences on account/source reads.
-  Finish installed-client quota/reset and refresh-reason acceptance, adapter
-  capability coverage, and sustained large-pool worker/HTTP traffic acceptance.
-  Source-statistics cache is runtime-only; restart loses the last value. Core
-  no-progress/unsupported state alone is not host acceptance.
-- Measure admission fairness and retained-memory bounds under sustained mixed
-  HTTP/SSE/WS/image load, including recovery-to-capacity handoff. Count/byte
-  limits, event-driven waits and accumulated wait budgets are connected; local
-  synthetic tests are not large-pool performance acceptance.
-- Complete the final-dispatch matrix for token/login, proxy/endpoint, owner,
-  policy and principal revisions, including delayed results after reconfigure
-  or restart. Server quota/model 401 and token/Agent-task persistence now fence
-  replaced credentials; import/delete also serialize runtime builds and fence
-  the old account before durable credential changes. Superseded
-  server runtimes and restarted desktop runtimes now reject new reservations and
-  final dispatches while allowing started attempts to settle. Existing
-  scope/quota/rate/circuit/runtime fences are not the entire permission/evidence
-  matrix. Prepared OAuth slot and Agent-task revisions now gate HTTP and
-  WebSocket payload dispatch within its budget debit; reused WebSocket
-  connections also require the same in-memory credential incarnation. Final
-  dispatch now also checks a bound response owner's revision,
-  principal scope and candidate permission revisions, Auth execution fences,
-  capability blocks and protected quota reserve without charging a rejected
-  send. Account model-inventory reads update the live runtime without dropping
-  leases or health. Internal desktop/server key scopes and pool policy now
-  update in one routing transaction. Server single-account policy edits fence
-  dispatch across durable save and hot apply/rebuild; a failed restore retires
-  stale runtime permissions. Server single-source updates/deletion fence every
-  protocol route; catalog refresh also holds the runtime-build lock and fences
-  changed source routes before applying its observation. Gateway stop retires
-  the live runtime before persisting the stopped state, and background rebuilds
-  cannot reopen it. Server profile-key commit/abort retire the old runtime
-  before changing vault keys; rotation operations serialize with runtime builds
-  and fail closed if restoration fails. Server batch membership fences changed
-  members across its durable commit and scope update. Server proxy edits fence
-  affected accounts across saved transport changes and replacement. Desktop membership,
-  account/source policy and proxy/endpoint edits now fence changed physical
-  candidates across save and hot apply/replacement; preset writes fence the
-  previous pool, including during local request-key rotation. Source generation
-  probes on both hosts reject late results from a deleted-and-readded source
-  even when its visible configuration is identical. Desktop re-import
-  and OAuth completion fence replaced account logins. Remote ownership transfer
-  now fences local candidates through import and verified cleanup; startup
-  excludes pending moves and remote-owned records. Reconciliation updates the
-  live scope and failure paths keep remote-owned local routes closed. Desktop
-  account deletion closes the gateway before releasing a fence if its rollback
-  fails. The core rejects a removed token slot after delayed refresh or
-  asynchronous persistence; the desktop refresh and persistence adapters now
-  fence their final writes and account deletion waits for the same credential
-  lock across delete and re-add. Finish remaining token, ownership and
-  delayed-result coverage,
-  including failed rollback and concurrent refresh cases. Ordinary server
-  quota reads also apply without replacing the runtime.
-- Verify real installed clients and permitted providers across local/server
-  HTTP, SSE, WebSocket, images and compaction; measure fairness, recovery,
-  management traffic and bounded memory. Local synthetic tests do not prove
-  live-provider behavior or performance.
+The primary direction is a hosted service with one Relay identity across the
+website, Telegram, and future entry channels. Users manage keys, grants,
+balance, and usage through the shared account API; compatible applications
+connect directly to the inference API. The desktop Relay is the operator's
+management client for pools, provider connections, models, user access, and
+activity.
 
-## P0 — Installed client and live-provider acceptance
+The target design, request lifecycle, ownership model, accounting rules,
+security boundaries, import flow, deployment shape, and acceptance criteria
+are specified in
+[HOSTED_RELAY_ARCHITECTURE.md](HOSTED_RELAY_ARCHITECTURE.md). That document is
+the architecture proposal, not a claim that hosted multi-user features exist.
 
-- Verify current clients' compressed requests, account compaction through both
-  legacy and Responses-trigger paths, retained-context continuation, and
-  turn-state ownership across OAuth refresh and AgentAssertion task replacement.
-  Include sparse terminal compaction events, ChatGPT routing-cookie expiry,
-  and credential replacement during a live WebSocket conversation.
+### Delivery stages
 
-- Exercise account streaming recovery: safe pre-output failure with complete
-  history can retry; opaque response ownership, unpaired tool outputs, and
-  already-forwarded output cannot silently move to a different owner.
-- Verify full account/source inventory independent of endpoint-support flags,
-  then verify executable client projections and explicit user filters. Newly
-  discovered IDs must survive refresh without a hardcoded allowlist.
-- Run Codex attach/refresh/disable/remove/restore, including IDs containing `/`,
-  native metadata preservation, image input, and a failed catalog refresh.
-  Previous verified config must remain usable; running-client deferrals and
-  background failures must be visible.
-- Test real Responses/Chat Completions/Messages/Gemini bindings per claimed provider: initial
-  function/namespace/custom call, actual tool execution, result continuation,
-  JSON/SSE, cache/reasoning usage, pre-output fallback, and fresh turn on restart.
-- Implement and accept Responses WebSocket multiplexing instead of the current
-  single in-flight response and single named lane: independent concurrent lanes,
-  FIFO within a lane, bounded queuing and named-lane limits, continuation forks,
-  scoped events/errors and per-lane ownership, retry, usage and disconnect
-  accounting. Exercise both native upstream WebSocket and HTTP/SSE fallback,
-  including malformed/opaque events and credential changes; compare the
-  implementation against the current official WebSocket mode contract.
-- Verify source prices, manual fallback, metadata provenance, and unknown cache
-  counters remain distinct through refresh. Catalog reachability does not prove
-  inference, and missing prices cannot suppress account inventory.
-- Verify key-balance adapters against permitted live Sub2API, New API, One API,
-  OpenRouter and DeepSeek sources, including dashboard restrictions, quota
-  conversion and subscription allowance. Track a future official SiliconFlow
-  account API before re-enabling its retired balance probe. Mocked format tests do not prove a
-  particular reseller has enabled the endpoint for its inference keys.
-- Verify OpenCode desktop/CLI reload, model/image/reasoning refresh, failed-write
-  rollback, and JSON/JSONC restore on supported platforms. Exercise all four SDK
-  groups, preserved model IDs, and Codex HTTP/SSE selection for converted routes.
-- Verify upgrades from legacy source records and older servers with installed
-  clients, catalog refresh and stale-result handling during key/address changes,
-  and preset rollback. Normal setup and refresh must remain generation-free.
-- Exercise two healthy permitted personal accounts, rotation, proxy, quota
-  refresh, cooldown/recovery, removed-member admission, and redacted usage.
+The implementation order is intentionally dependency-first:
 
-### User-managed server, after local acceptance
+1. **Relay-core foundation only:** take the local P0 work that the hosted
+   service requires: retain multiple upstream contracts for one source/model,
+   select the exact native upstream, and keep logical-request /
+   physical-attempt accounting and stream usage semantics consistent. These
+   are shared engine contracts, not a requirement to finish every local
+   connector.
+2. **Hosted foundation:** close the hosted product and threat-model decisions,
+   then build PostgreSQL identity, workspaces, roles, audit, vault references,
+   and device-paired Desktop Relay management. Include scoped request
+   idempotency, continuation ownership/checkpoint references, and the explicit
+   encrypted-state retention policy in the initial schema.
+3. **Hosted pool and catalog:** add versioned pool management, route and
+   capability validation, workspace grants, model/context projections,
+   ingress bridges, native-upstream enforcement, and OAuth `stage_and_drain`
+   transfer semantics.
+4. **Hosted accounting:** implement the append-only ledger, two-stage input /
+   output reservations, finite reconciliation TTL, settlement, refunds,
+   adjustments, and idempotent payment events. Use short `READ COMMITTED`
+   transactions with guarded wallet updates, reservation transitions, and
+   journal postings committed together. Preserve customer-estimate versus
+   provider-expense uncertainty, including hidden reasoning and cache usage.
+   Prove concurrent balance safety and crash recovery before paid traffic.
+5. **Hosted inference:** add inference-key auth, rate/concurrency admission,
+   route-scoped execution through `relay-core`, streaming, usage attribution,
+   and tenant-safe model and usage APIs. Add protocol-shaped duplicate errors
+   with explicit retry policy rather than empty success responses, and durable
+   completed-turn continuation recovery without replaying uncertain attempts.
+6. **Entry channels and transfer:** connect the website and existing Telegram
+   entry/payment flows to the same account APIs; add previewed local-to-hosted
+   and authorized hosted-to-local pool transfer.
+7. **Release operations:** complete Docker deployment, HTTPS, backups,
+   restore drills, migration recovery, security review, measured load limits,
+   and real-client/provider acceptance.
 
-1. Use HTTPS with distinct management and request credentials and vault key.
-2. Add/transfer only permitted user-owned connections and verify redacted state.
-3. Stream requests with the desktop open and closed; compare quota, usage, and
-   timings after reconnect.
-4. Prove restart, upgrade/interrupted migration, backup to a clean location,
-   restore, and a successful request from the restored runtime.
-5. Inspect management responses, diagnostics, usage, and ordinary exports for
-   secret/prompt/body leakage. Never use Zenith production inventory.
+Excel / Basis Points deep acceptance and rare connector conversions remain
+separately demand-gated. They must still be correct for local use, but
+subscription and BPS credentials are not assumed to be eligible for a shared
+paid Hosted pool. Their extended acceptance therefore does not block the
+first commercial Hosted release unless a specific permission review enables
+that credential class.
 
-## P1 — Measured performance and adaptive routing
+Do not expose paid inference until key isolation, model grants, bounded spend,
+settlement idempotency, usage attribution, and recovery pass their acceptance
+tests. Include real-PostgreSQL single-wallet contention/rollback tests, SDK
+duplicate-retry tests, estimated-usage uncertainty, and restart recovery of
+completed turns awaiting tools; detailed gates are in the
+[hosted acceptance contract](HOSTED_RELAY_ARCHITECTURE.md#delivery-and-acceptance).
+The first release does not require distributed multi-server scheduling.
+Provider sharing, fingerprint spoofing, account resale, and silent transfer of
+opaque provider conversations remain outside the product contract.
 
-- Tool-catalog optimization: verify installed clients and permitted providers
-  across native/converted JSON, SSE, WebSocket, continuation and policy changes.
-  Measure actual token usage, latency, prompt-cache reuse and tool-selection
-  quality; reduced catalog JSON bytes alone do not prove net savings.
-- Measure provider-native deferred tool search across permitted native
-  Responses providers, installed clients, SSE, continuation and policy changes.
-  Compare actual input tokens, latency, prompt-cache reuse and tool-selection
-  quality; reduced catalog JSON bytes alone do not prove net savings. A local
-  semantic search round-trip remains separate experimental work and must not
-  become the default without quality regression evidence.
+The P0/P1 work below tracks the existing local and single-owner server product.
+The selected Relay-core items in stage 1 above are a prerequisite for Hosted;
+the remaining local connector polish remains valid maintenance but is not a
+prerequisite sequence for the hosted delivery stages.
 
-Measure warm startup, page open, policy-save, local/remote pool switch, and
-disk/SQLite/history/rollout bytes with representative data before optimizing.
-Instrumentation alone is not a measured result. Prove policy-only hot updates
-preserve the listener, active leases, affinity, and runtime state. Add a focused
-regression check for a demonstrated bottleneck rather than speculative caches.
+## Local runtime P0 — finish and accept the current runtime
 
-### Rotation state persistence and measured refinements
+This track proves the existing local and user-managed server paths with
+permitted accounts and real installed clients.
 
-Current runtime behavior is in PLANNING; the unfinished rotation gates are above.
+### Model, provider, and harness compatibility
 
-- Persist bounded mandatory cooldown/health state with expiry and verify
-  restart recovery without restoring stale authority or unknown remote work.
-- Verify local/server policy changes during streaming, busy-limit waits,
-  automatic startup conversion and concurrent membership edits.
-- Keep the small old-format policy reader for upgrades/imports. Obsolete V1
-  scalar settings are discarded at startup/import, excluded from new snapshots
-  and presets, and ignored on old-client requests. Performance, quota and price
-  observations must not become undocumented automatic ranking inputs.
+Extend the existing four protocol implementations into a reliable path from
+each configured model source, through the pool, to clients that support
+Responses, Chat Completions, Messages, or Gemini. The first routing slice now
+retains multiple declared upstream contracts for one source/model and selects
+the model's native upstream independently of the harness while keeping one
+physical pool member.
+Complete the remaining stages below in order; the implemented contract is
+documented in [PLANNING.md](PLANNING.md).
 
-## P2 — Recovery and persistence acceptance
+The client chooses the protocol it actually sends. Validated model identity
+selects the native upstream: OpenAI Responses, Anthropic Messages, Google
+Gemini, and xAI/Z.ai Chat Completions. Source evidence must support that
+endpoint and the requested features. An incompatible source has no route.
+A native route still passes through pool admission, authorization, execution,
+stream validation, usage, and statistics. A converted route uses the existing
+typed adapters. Neither path may invent a model capability, substitute a
+different model, or silently discard a required feature to obtain success.
+HTTP, SSE, and WebSocket support are separate from the API protocol.
 
-- Update the desktop dependency chain when a compatible stable Tauri/GTK stack
-  removes the remaining RustSec warnings. The current GTK path requires
-  `glib` 0.18; RUSTSEC-2024-0429 is fixed in 0.20 and is not a drop-in lockfile
-  update. The same chain retains `proc-macro-error`, while `tauri-utils`
-  retains retired `unic-*` packages through `urlpattern`. Verify the complete
-  platform upgrade and Linux desktop behavior; keep advisories visible.
-- Validate the application-first recovery layout on upgraded installations,
-  both history-repair directions, Windows extended paths, partial failure, and
-  cleanup failure without losing the rollback handle.
-- Exercise transactional bulk account changes and concurrent reasoning-policy
-  edits through actual client flows; preserve canonical mutation ownership.
-- Maintain error-origin, cooldown, continuation, and redaction contracts during
-  future changes. Do not reopen completed ownership refactors for cosmetic moves.
+Codex's Responses input selects the bridge to the model's native upstream;
+it does not select a Responses endpoint for a foreign model. Choose from the
+exact source/model contracts; protocol age, an
+OpenAI-compatible label, or a model family is not proof of endpoint support.
+The existence of `/responses` alone does not establish support for provider
+response IDs, developer instructions, custom tools, or reasoning continuation.
+
+Before changing defaults, capture known working paths and reproducible adapter
+failures as synthetic regression cases. Compare native Responses with the
+corresponding Chat bridge where both are supported. Attribute failures to the
+actual stage and contract mismatch rather than assuming Chat itself is broken.
+
+#### Unified reference catalog and automatic refresh
+
+Build one generated Relay model catalog from independently refreshed public
+sources instead of maintaining provider/model rows by hand. The current
+loader already refreshes and validates `models_dev`, `models_dev_details`,
+OpenRouter, and LiteLLM, keeps source revisions and freshness, uses HTTP
+validators, retries failures, and reconstructs one in-memory catalog from the
+validated cache. Extend this pipeline rather than adding a second catalog
+format.
+
+- Normalize each source into a common record with a stable source ID,
+  canonical model identity, aliases, provider namespace, capabilities,
+  limits, pricing references, protocol recommendations, cache semantics, and
+  field-level provenance. Keep the raw source envelope separately for
+  diagnostics and refresh; the merged record is a derived view.
+- Use deterministic precedence per field, preserve explicit `false`, retain
+  conflicting values with provenance when they cannot be reconciled, and keep
+  missing or stale values unknown. A source outage must not erase the last
+  valid record; a replacement source must not silently change a canonical
+  identity.
+- Generate `model-catalog.json` and its schema atomically from the merged
+  catalog. Consumers read the generated file or the same validated snapshot;
+  no runtime code edits generated JSON. Versioned manual policy remains only
+  for presentation order, aliases, and reviewed corrections that no public
+  source can establish.
+- Keep provider inventory and route eligibility separate. A provider's
+  public model list, LiteLLM price row, or OpenRouter record can enrich the
+  reference catalog but cannot prove that a user's endpoint, credential,
+  protocol, tool set, or quota can execute that model.
+- Let configured provider sources contribute a scoped runtime overlay:
+  source/model/endpoint/protocol/features, evidence status, credential
+  revision, and observation time. Merge it with the public catalog for route
+  selection without writing private inventory, credentials, or usage into the
+  public model JSON.
+- Expose per-source status, revision, fetched time, stale state, and rejected
+  update reason. On refresh failure continue from the last validated snapshot;
+  only a first-load failure with no valid snapshot should leave the catalog
+  unavailable.
+
+Acceptance: a scheduled refresh adds a new model, enriches an existing model,
+and updates a changed price or capability without manual edits; a malformed or
+stale source is isolated while other sources remain usable; aliases merge to
+one canonical record; a source endpoint can be unavailable without removing
+its model from the reference catalog or making that model routable.
+
+#### 1. Preserve the available routes for each source and model
+
+- Retain multiple declared upstream protocols for a source/model instead of
+  collapsing them to one before projecting client APIs. Keep endpoint support,
+  model access, and individual features distinct, including their origin and
+  source configuration/credential revision.
+- Add optional ordered protocol preferences to the shared reference metadata
+  and its versioned public catalog. These are recommendations, never source
+  endpoint declarations. Reuse one policy for runtime and export, with its
+  provenance and revision; update the schema and consumers together. Keep
+  display ordering separate, and author policy before export instead of
+  manually editing the generated catalog.
+- Keep supported cache controls and documented cache scope on the exact
+  service/model/endpoint profile. Actual cache hits, latency, failures, and
+  account availability remain local observations, not public model metadata.
+- Describe Responses variants explicitly: full-history input versus
+  provider-owned response IDs, role semantics, function/custom/hosted tools,
+  reasoning replay, stream completion, and reported usage. A declaration of
+  endpoint support must not grant every feature of the OpenAI implementation.
+- Preserve explicit endpoint pins and unsupported declarations. Existing
+  single-endpoint sources must retain their behavior. Unknown generic services
+  keep their configured fallback; model names, prices, model-list entries, and
+  a successful text probe do not imply support for every endpoint or feature.
+- Extend the current route identity where necessary to distinguish upstream
+  protocol, endpoint, and adapter while retaining the physical pool member.
+  Additional protocol routes must not multiply its weight, quota, credits,
+  concurrency allowance, or share of rotation.
+- Start in `sources/capabilities/config.rs`, `sources/binding.rs`,
+  `sources/connector.rs`, and `runtime/build/sources.rs` under
+  `crates/relay-core/src`. Extend the existing types and stores.
+
+Acceptance: one synthetic model declared on two endpoints retains both;
+unsupported and pinned combinations remain excluded; legacy configuration and
+inventory survive normalization, persistence, and reload without duplication.
+
+#### 2. Select a compatible route for each request
+
+- Filter routes by the incoming protocol, requested operations/features, exact
+  model, pool membership, and continuation ownership before dispatch. Require
+  the validated native upstream within the selected member, then choose native
+  forwarding or a supported conversion from the client's protocol. Preserve
+  compatible explicit pins and the configured pool selection policy,
+  including manual order.
+- Make route selection deterministic and expose the client protocol, upstream
+  protocol, native/conversion mode, and safe reason for that decision.
+  Unrepresentable required input must fail before a generation is sent.
+- Keep the same common execution and accounting path for native and converted
+  requests. Native payloads and extensions must avoid a lossy round trip through
+  the internal conversion representation. Validate required semantics on
+  matching-protocol routes too; a partial Responses implementation may require
+  explicit compatibility handling or rejection before dispatch.
+- Pin an active response/tool continuation to its source, upstream model,
+  protocol, and provider-owned state. A new independent request can select
+  another route; a full history alone does not authorize replay after uncertain
+  execution. Reuse the existing retry budget and ownership rules.
+- Apply configuration revisions to new requests without changing an in-flight
+  stream or reusing stale route evidence. If a continuation owner disappears,
+  report the existing continuation error; do not silently restart its work.
+- Reuse existing soft session affinity to improve cache reuse within the
+  configured pool policy; do not override manual order, capacity, health, or
+  continuation ownership for a hoped-for cache hit. Keep protocol selection
+  stable for related requests. Do not infer a shared cache between accounts,
+  endpoints, or providers from a shared model name.
+- Preserve reusable prompt and tool prefixes when forwarding or converting;
+  avoid gratuitous reordering or per-request additions. Apply only supported
+  cache controls without changing instruction meaning. Cache preference must
+  never make an otherwise incompatible route eligible.
+
+Acceptance: every supported client reaches the same model through its native
+upstream; matching clients use native forwarding and others use a bridge.
+Both enter usage exactly once. Mixed routes
+retain pool fairness, shared member limits, cancellation, safe retry budgets,
+and continuation ownership during configuration changes. A Responses source
+that only accepts full history cannot silently receive an unresolved
+`previous_response_id`; working native Chat routes retain their behavior.
+
+#### 3. Strengthen conversion and provider compatibility
+
+- Validate the shared codec architecture defined in
+  [PLANNING.md](PLANNING.md#shared-conversion-architecture) against installed
+  clients and real providers in all twelve conversion directions. Keep the
+  four native routes outside the representation; extend existing codecs,
+  not pair-specific runtime engines.
+- Extend the existing normalized types and adapter events only for concrete
+  missing semantics. Cover complete JSON and streaming paths separately:
+  function/custom tools, namespaces, deferred tool declarations, call/result
+  pairing, parallel calls, fragmented arguments, signed reasoning, citations,
+  structured output, supported media, errors, and terminal outcomes.
+- Add narrowly scoped provider rules for schema dialects and model parameters.
+  Keep original tool constraints; any relaxation needs explicit diagnostics
+  and validation against the original contract. Preserve unknown extensions
+  on native routes and reject unrepresentable required fields on bridges.
+- Port deterministic custom-tool representation repairs only for declared
+  tools and unambiguous inputs. Preserve tool identity, arguments, and intended
+  operation; malformed output must not trigger an extra hidden generation.
+- Advertise supported client tool modes accurately. Keep unavailable hosted
+  tools fail-closed; any future equivalent needs an explicit capability
+  contract and provider acceptance, not silent omission.
+- Keep provider rules scoped to the configured service/endpoint and credential
+  family. A generic compatible endpoint must not inherit unrelated provider
+  quirks merely because a model name matches.
+
+Acceptance: synthetic regressions exercise each adopted rule, ambiguous
+inputs, unsupported features, and stream interruption. All four native routes
+and twelve conversion directions retain their established supported behavior.
+
+#### 4. Make accounting and failure explanations consistent
+
+- Inspect upstream usage before output conversion and retain reported partial
+  usage on failure, cancellation, or truncation. Preserve unknown counters and
+  costs; do not fill them with zero or estimate tokens from response text.
+- Reuse one logical request identity with separate physical-attempt history.
+  Protocol alternatives and compatibility repairs must not duplicate request
+  totals, cost rollups, quota consumption records, or health observations.
+  Retain reported usage and cost for every actually executed attempt, including
+  failed attempts; deduplicating the logical request must not erase real spend.
+- Select API-equivalent pricing from the actual upstream model, service tier,
+  request usage, and applicable published context/cache bands. Keep this
+  estimate distinct from observed provider spend and subscription quota.
+- Validate protocol recommendations using comparable workloads and reported
+  cache-read/write counters, latency, errors, and applicable cost estimates.
+  Missing counters remain unknown; cache-hit rate is not a model-quality
+  score. Keep these measurements diagnostic in the first release, preserving
+  the existing rule that API-equivalent estimates do not rank pool members.
+  Do not automatically rewrite shared preferences from recent traffic.
+- Extend existing redacted diagnostics to identify the failing stage: route
+  selection, request conversion, provider rejection, stream validation,
+  response conversion, or continuation. Do not retain raw bodies or prompts.
+
+Acceptance: native and converted versions of equivalent synthetic usage
+produce consistent statistics; incomplete and missing usage remain visible;
+retries and alternate protocols do not inflate totals. Desktop and server
+produce the same core result.
+
+#### 5. Connect harnesses with accurate profiles
+
+- Build on existing application integrations. A profile records protocols,
+  transports, endpoint/auth configuration, and required features supported by
+  that client version. A generic API client can use the public protocol
+  endpoints without a named harness integration.
+- For a client with one protocol, configure that endpoint and let Relay choose
+  the upstream path. For a client with multiple protocols, prefer a compatible
+  native path through a supported client configuration mechanism.
+- Treat automatic protocol choice as a decision before a new request/session.
+  Do not change the protocol inside an open stream, assume a universal
+  negotiation mechanism, or move opaque reasoning/tool state between routes.
+- Default new setup to automatic compatible routing while preserving explicit
+  pins. Show understandable availability and failure reasons; keep protocol
+  overrides in advanced configuration. Capability presentation must reflect
+  the selected source and route rather than a union no single route supports.
+
+Acceptance: two real harnesses using different protocols can share the same
+pool and model. Switching supported client configuration preserves saved
+settings, statistics, and unrelated conversations; incompatible continuations
+fail explicitly.
+
+#### 6. Qualify provider families and release incrementally
+
+- Expand by protocol family: Responses/Chat services, Messages services, and
+  Gemini services, followed by compatible aggregators and local endpoints.
+  Add provider-specific exceptions only with an official contract and a
+  reproducible case. Subscription authentication remains separate connector
+  work.
+- For each advertised combination, verify the exact source, model, client
+  version, protocol, and transport. Run text and a full tool round trip, then
+  the supported reasoning, structured output, media, cache, and continuation
+  cases. Check interrupted streams, rate limits, authorization changes,
+  member disable, and restart recovery.
+- Use synthetic data for regression fixtures. Live qualification requires
+  permitted accounts and scoped authorization; automatic discovery must not
+  generate paid test traffic across an entire catalog.
+- Complete the affected contributor checks and both localized Help updates
+  before exposing new controls or compatibility claims. Migrations must keep
+  old source settings readable and preserve explicit route choices.
+
+Acceptance: publish support claims only for qualified combinations; distinguish
+protocol implementation, local regression coverage, and real-client/provider
+acceptance. Begin implementation with stages 1 and 2 as one bounded slice,
+including their accounting and continuation regressions, before widening
+provider coverage.
+
+Implementation references: follow the
+[API and protocol reference workflow](../../CONTRIBUTING.md#api-and-protocol-references).
+Use the [official endpoint contracts](../../.agents/skills/relay-protocol-adapters/references/contracts.md)
+as the specification. Optional implementation comparisons include
+[New API RelayKit](https://github.com/QuantumNous/new-api/tree/42e694eb60fe3191795c00d416571ced716eb9c4/relaykit)
+for conversion structure and diagnostics,
+[OpenCodex schema compatibility](https://github.com/lidge-jun/opencodex/blob/33b321853aff76045617824793cc7cbc1d4084e7/src/adapters/openai-chat/tool-schema.ts)
+and [custom-tool representation handling](https://github.com/lidge-jun/opencodex/blob/33b321853aff76045617824793cc7cbc1d4084e7/src/responses/apply-patch-envelope.ts)
+for targeted provider/client cases, and
+[CLIProxyAPI translators](https://github.com/router-for-me/CLIProxyAPI/tree/091ff27f31285ec4fd1dd5823b44f7f51fb8f48b/internal/translator)
+as a second comparison. Port relevant behavior and regression cases into the
+existing Rust owners, retain required attribution, and check each change
+against the provider contract rather than importing an entire proxy runtime.
+Check the [OpenAI Responses migration contract](https://developers.openai.com/api/docs/guides/migrate-to-responses),
+[DeepSeek Responses compatibility tables](https://api-docs.deepseek.com/guides/responses_api/),
+and [Groq Responses guide](https://console.groq.com/docs/responses-api)
+when defining endpoint features; matching API names do not guarantee identical
+continuation or tool behavior.
+
+### Client and provider acceptance
+
+- Verify the new provider presets with permitted live keys, including Moonshot
+  USD/CNY balances, regional key mismatches, and Kimi Code discovery and tools.
+  Add Kimi Code subscription and MiniMax M Plan quota readers only after
+  verifying their cloud endpoint, credential scope, units, and reset semantics.
+  A local Kimi CLI usage endpoint is not a cloud quota contract.
+- Exercise native ChatGPT connections, Excel / Basis Points pool connections,
+  and generic API sources through add, refresh, disable, remove, restore,
+  model refresh, failed-write rollback, and configuration recovery.
+- Verify Responses, Chat Completions, Anthropic Messages, and Gemini requests
+  for every advertised source, including JSON, streaming, tools, reasoning,
+  cache usage, safe pre-output retry, and a fresh turn after restart.
+- Cover completed, incomplete, refusal, malformed terminal, interrupted stream,
+  and late-usage outcomes separately. Check health, affinity, retry, and
+  continuation state as well as the client-visible result.
+- Verify parallel tools, fragmented arguments, optional Gemini call IDs, and
+  signed reasoning on the next turn. Exercise both retained local state and
+  missing state after restart. Unsupported meaningful extensions must fail
+  conversion explicitly while native routes preserve them.
+- Verify compressed requests, compaction, retained-context continuation, OAuth
+  refresh, credential replacement, routing-cookie expiry, and client recovery.
+- Exercise `turn_rate_limit_exceeded` in HTTP errors and stream/WebSocket events.
+  Check retry delays, unchanged account availability, and no rotation or
+  automatic history repair.
+- Replace a native ChatGPT login with the same visible token and generation.
+  Verify that old turn state and WebSocket capability observations cannot cross
+  the authorization incarnation. Cover headers, bodies, metadata, 401 refresh,
+  and a subsequent turn on an existing socket.
+- Compare HTTP SSE and reusable native WebSocket on the same permitted account,
+  model, input, and settings: first-output latency, cache usage, errors, and
+  reported usage. Follow the
+  [OpenAI WebSocket continuation contract](https://developers.openai.com/api/docs/guides/websocket-mode)
+  for socket loss, `store=false`, and full-history recovery. Evaluate an optional
+  HTTP-to-upstream-WebSocket path after these checks; transport choice alone
+  does not establish better response quality.
+- Exercise native fidelity with real clients: ordered tool-schema properties,
+  annotated choices, precise extension numbers, repeated protocol headers,
+  and opaque reasoning/tool state. Compare root and child-thread routing with
+  and without explicit cache keys. Local fixtures do not prove provider
+  acceptance, cache-hit improvements, or reduced model-quality degradation.
+- Keep the complete source inventory separate from endpoint support. A model
+  returned by a source must not disappear only because a route is unavailable.
+- Use two permitted BPS connections to check rotation, proxy, quota refresh,
+  cooldown/recovery, member removal, and redacted usage.
+
+### Excel / Basis Points acceptance
+
+- Exercise Excel PKCE sign-in and automatic callback validation in the Relay
+  window, cancellation, proxies, token rotation, and targeted reauthentication
+  with permitted live accounts. Check client selection and contextual Help
+  without losing the pending flow.
+- Verify separate Codex and Excel connections for the same principal through
+  import, export, server transfer, and concurrent credential replacement.
+- Check actual model entitlements, reasoning, tools, image input, usage,
+  streaming, and continuation on the Excel route.
+- Exercise tool-result images (inline upload and file IDs), multiple image/text
+  parts, and collaboration history in installed clients. Check that attribution
+  cannot become developer authority and attachments do not change turn identity.
+- Verify early streamed text, atomic terminal tool release, cancellation,
+  heartbeat-only timeout, malformed/absent completion, and first/last-output
+  timing on real Excel streams through all supported client protocols.
+- Check explicit Responses `relay_bps_output_validation` with valid/invalid
+  schema output, tool turns, refusals, and streamed clients. No invalid answer
+  may escape before validation; native strict must remain rejected.
+- Verify generation 401 recovery on the next request with a retained Excel
+  refresh token, simultaneous refresh and delayed 401, a new login during
+  `invalid_grant`, and operator disable/draining preserved throughout recovery.
+  Check that model permission refusals pause only the canonical model for
+  30 minutes and that aliases share the pause without replaying generation.
+- Exercise optional request timezone binding through native HTTP, WebSocket,
+  Excel, compaction, remote persistence, and restart with installed clients.
+  Check existing environment and web-search timezone fields while dates,
+  ordinary text, and API-source requests remain intact. These observations
+  do not establish response quality.
+- Verify mixed pools of native ChatGPT, paid Excel / Basis Points, and API
+  sources after import, restart, and server transfer. Native Free accounts
+  remain eligible; Free BPS imports, discovery, and generation stay blocked,
+  including after a live plan downgrade. Excel refusals
+  must never authorize an unsafe replay or change another connection's transport.
+- Compare quality under controlled conditions. A separate Excel OAuth client
+  does not establish that account degradation has been eliminated.
+  Use manual bounded probes only with authorized accounts and isolated routing;
+  retain inconclusive samples separately and compare matched model/effort/tasks.
+  Local solver tests are not live quality or account acceptance evidence.
+
+### Concurrency and load
+
+- Finish Responses WebSocket multiplexing: independent lanes, FIFO per lane,
+  bounded queues, scoped errors, ownership, retry accounting, continuation
+  forks, usage, and disconnect handling.
+- Measure admission fairness and retained memory under mixed HTTP, SSE,
+  WebSocket, and image traffic. Use measurements before adding caches or new
+  limits.
+- Complete the token-ownership, delayed-result, rollback, and concurrent-refresh
+  matrix for desktop and server.
+
+### Server acceptance
+
+1. Pair over HTTPS with separate management and request credentials and a vault
+   key.
+2. Add or transfer only permitted user-owned connections and inspect redacted
+   state.
+3. Compare requests, quota, usage, and timing with the desktop open and closed.
+4. Verify restart, upgrade, interrupted migration, backup, restore, and a
+   request from the restored runtime.
+5. Check management snapshots, diagnostics, usage, and support exports for
+   secrets, prompts, response bodies, and authorization headers. Explicit
+   account exports contain credentials and must use a no-store response.
+
+## Local server P1 — make server publication explicit
+
+The desktop and server already have separate configuration, credential, and
+account-transfer operations. Finish a single documented workflow that:
+
+- builds a desired-state revision and shows a diff before applying it;
+- validates sources, models, protocols, capabilities, policies, and references;
+- reports the active revision, validation failures, health, and rollback handle;
+- distinguishes portable settings from local state, secrets, leases, and
+  server-owned changes;
+- requires explicit confirmation for credential or account transfer;
+- never performs implicit two-way synchronization that can overwrite newer
+  changes.
+
+The workflow must remain recoverable across desktop/server restarts, interrupted
+migration, a failed runtime rebuild, and a lost management connection.
+
+## P1 — measured routing and performance work
+
+Only optimize after measuring the affected path:
+
+- tool catalogs across native and converted routes, JSON, SSE, WebSocket,
+  continuation, and policy changes;
+- policy-only updates without losing listeners, leases, affinity, or runtime
+  state;
+- bounded cooldown and health persistence across restart;
+- startup, page open, policy save, remote pool switch, history size, latency,
+  token usage, cache reuse, and tool-selection quality.
+
+## Maintenance
+
+Revisit these only when the affected platform or recovery path changes:
+
+- upgrade the Tauri/GTK dependency chain as one tested platform change;
+- verify application-first recovery, history repair, Windows extended paths,
+  partial failure, and cleanup failure;
+- test transactional bulk account changes and concurrent reasoning-policy edits
+  through real client flows.
+
+## Future connectors
+
+Add subscription providers one at a time. Each connector needs permitted live
+accounts and evidence for authentication, refresh, revocation, vault storage,
+entitlements, quota units, usage, models, execution, and recovery. Do not mark
+a provider as supported because a generic protocol adapter can format its
+request.
 
 ## Demand-gated future work
 
-- **Subscription connectors:** only on explicit demand with permitted live
-  accounts. Prove auth/refresh/revocation, vault storage, native entitlement/
-  reset/usage units, models, execution, and recovery. Keep entitlement, observed
-  usage, API-equivalent, and actual API spend separate; never infer a monetary
-  entitlement from a quota percentage or copy another provider's counters.
-- **Server scale:** require demonstrated need before distributed state,
-  candidate leases, shared affinity, and cross-node storm coordination.
-- **Named profiles:** extend existing preset preview/CAS/rebuild/rollback.
-  Keep immutable secret-free revisions, local active state, and each server's
-  publication independent. Validate target references/capabilities before apply;
-  secret transfer remains separate. No implicit bidirectional synchronization.
-- **Model aliases and groups:** explicit source/binding-scoped identities,
-  collision/cycle checks, and independent display order, enablement, and price
-  fields. Presentation grouping never implies protocol or scheduler policy.
-  Existing metadata sorting is not a complete alias/profile contract.
-- **Zenith convergence:** deferred until P0–P2 and platform correctness are
-  proven and separately requested. Follow the workspace
-  [convergence gates](../../../ROADMAP.md#optional-relay-runtime-convergence);
-  Control retains customer/money authority and rollback remains available.
-
-For a release, apply the existing localized Help, screenshot, changelog,
-packaging, and live-acceptance requirements in `CONTRIBUTING.md`; do not keep
-test counts, review diaries, or completed checklists in this roadmap.
+- Add distributed server scheduling only after measured demand requires shared
+  state, candidate leases, affinity, or cross-node coordination.
+- Add named profiles, aliases, and groups with source-scoped identities,
+  collision checks, independent ordering, enablement, and price fields.
+  Presentation grouping must not change protocol or scheduler policy.
+- Keep any future Zenith integration separately requested and separately
+  designed. Hosted Relay owns its own identities, tariffs, wallets, payments,
+  accounting, and route policy; it must not import Zenith production
+  credentials, customer data, inventory, or internal Gateway/Control business
+  logic.

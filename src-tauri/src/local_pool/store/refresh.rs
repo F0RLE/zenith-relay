@@ -29,9 +29,9 @@ impl AccountRefreshFence {
 }
 
 pub(crate) struct AppliedAccountRefresh<T> {
-    pub previous: LocalAccountRecord,
+    pub previous_account: LocalAccountRecord,
     pub account: LocalAccountRecord,
-    pub value: T,
+    pub refresh_result: T,
 }
 
 #[derive(Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -67,55 +67,60 @@ impl RefreshRevisions {
         Ok(())
     }
 
-    fn next(&mut self) -> Result<u64> {
+    fn allocate_revision(&mut self) -> Result<u64> {
         self.clock = self.clock.checked_add(1).ok_or_else(invalid_revisions)?;
         Ok(self.clock)
     }
 
     pub(super) fn with_accounts(
         &self,
-        previous: &[LocalAccountRecord],
+        previous_accounts: &[LocalAccountRecord],
         accounts: &[LocalAccountRecord],
     ) -> Result<Self> {
-        let previous = previous
+        let previous_accounts_by_id = previous_accounts
             .iter()
             .map(|account| (account.account.id.as_str(), account))
             .collect::<BTreeMap<_, _>>();
-        let mut next = self.clone();
-        next.accounts.clear();
+        let mut updated_revisions = self.clone();
+        updated_revisions.accounts.clear();
         for account in accounts {
-            let id = &account.account.id;
-            let revision = if previous
-                .get(id.as_str())
-                .is_some_and(|old| same_account_scope(old, account))
+            let account_id = &account.account.id;
+            let revision = if previous_accounts_by_id
+                .get(account_id.as_str())
+                .is_some_and(|previous_account| same_account_scope(previous_account, account))
             {
                 self.accounts
-                    .get(id)
+                    .get(account_id)
                     .copied()
                     .ok_or_else(invalid_revisions)?
             } else {
-                next.next()?
+                updated_revisions.allocate_revision()?
             };
-            if next.accounts.insert(id.clone(), revision).is_some() {
+            if updated_revisions
+                .accounts
+                .insert(account_id.clone(), revision)
+                .is_some()
+            {
                 return Err(invalid_revisions());
             }
         }
-        Ok(next)
+        Ok(updated_revisions)
     }
 
     pub(super) fn with_gateway(
         &self,
-        previous: &GatewaySettings,
+        previous_gateway: &GatewaySettings,
         gateway: &GatewaySettings,
     ) -> Result<Self> {
-        let mut next = self.clone();
-        if previous.common_proxy_configured != gateway.common_proxy_configured
-            || previous.account_proxy_required != gateway.account_proxy_required
-            || previous.quota_request_timeout_seconds != gateway.quota_request_timeout_seconds
+        let mut updated_revisions = self.clone();
+        if previous_gateway.common_proxy_configured != gateway.common_proxy_configured
+            || previous_gateway.account_proxy_required != gateway.account_proxy_required
+            || previous_gateway.quota_request_timeout_seconds
+                != gateway.quota_request_timeout_seconds
         {
-            next.configuration = next.next()?;
+            updated_revisions.configuration = updated_revisions.allocate_revision()?;
         }
-        Ok(next)
+        Ok(updated_revisions)
     }
 }
 
@@ -126,7 +131,7 @@ impl LocalPoolStore {
 
     pub(crate) fn notify_refresh_changed(&self) {
         self.refresh_changed
-            .send_modify(|value| *value = value.wrapping_add(1));
+            .send_modify(|refresh_revision| *refresh_revision = refresh_revision.wrapping_add(1));
     }
 
     pub(super) fn refresh_registration_changed(
@@ -140,11 +145,19 @@ impl LocalPoolStore {
         // Usage/quota/model observations do not trigger inventory-wide scans.
         // Fresh-login eligibility may change without an identity revision.
         self.accounts.len() != accounts.len()
-            || self.accounts.iter().zip(accounts).any(|(old, new)| {
-                old.account.id != new.account.id
-                    || old.account.is_automatic_quota_monitoring_eligible()
-                        != new.account.is_automatic_quota_monitoring_eligible()
-            })
+            || self
+                .accounts
+                .iter()
+                .zip(accounts)
+                .any(|(previous_account, current_account)| {
+                    previous_account.account.id != current_account.account.id
+                        || previous_account
+                            .account
+                            .is_automatic_quota_monitoring_eligible()
+                            != current_account
+                                .account
+                                .is_automatic_quota_monitoring_eligible()
+                })
     }
 
     pub(crate) fn account_refresh_scope(
@@ -194,22 +207,24 @@ impl LocalPoolStore {
         apply: impl FnOnce(&mut LocalAccountRecord) -> Result<T>,
     ) -> Result<AppliedAccountRefresh<T>> {
         self.ensure_account_refresh_current(expected)?;
-        let previous = self
+        let previous_account = self
             .account(&expected.account_id)
             .cloned()
             .ok_or_else(invalid_revisions)?;
-        let mut account = previous.clone();
-        let value = apply(&mut account)?;
-        if account.account.id != previous.account.id || !same_account_scope(&previous, &account) {
+        let mut account = previous_account.clone();
+        let refresh_result = apply(&mut account)?;
+        if account.account.id != previous_account.account.id
+            || !same_account_scope(&previous_account, &account)
+        {
             return Err(LocalPoolError::invalid_state(
                 "refresh cannot change account configuration",
             ));
         }
         self.upsert_account(account.clone())?;
         Ok(AppliedAccountRefresh {
-            previous,
+            previous_account,
             account,
-            value,
+            refresh_result,
         })
     }
 
@@ -217,43 +232,47 @@ impl LocalPoolStore {
     /// change. Even failed/rolled-back mutations retire pre-existing reads.
     /// Ordinary TokenAuthority generation updates do not call this method.
     pub(crate) fn invalidate_account_refresh(&mut self, account_ids: &[&str]) -> Result<()> {
-        let mut next = self.refresh_revisions.clone();
-        for id in account_ids {
-            if next.accounts.contains_key(*id) {
-                let revision = next.next()?;
-                next.accounts.insert((*id).into(), revision);
+        let mut updated_revisions = self.refresh_revisions.clone();
+        for account_id in account_ids {
+            if updated_revisions.accounts.contains_key(*account_id) {
+                let revision = updated_revisions.allocate_revision()?;
+                updated_revisions
+                    .accounts
+                    .insert((*account_id).into(), revision);
             }
         }
-        self.persist_refresh_revisions(next)
+        self.persist_refresh_revisions(updated_revisions)
     }
 
     /// The common proxy URL is secret-backed, so changing one configured URL
     /// to another must invalidate reads even when the settings boolean is equal.
     pub(crate) fn invalidate_refresh_configuration(&mut self) -> Result<()> {
-        let mut next = self.refresh_revisions.clone();
-        next.configuration = next.next()?;
-        self.persist_refresh_revisions(next)
+        let mut updated_revisions = self.refresh_revisions.clone();
+        updated_revisions.configuration = updated_revisions.allocate_revision()?;
+        self.persist_refresh_revisions(updated_revisions)
     }
 
-    fn persist_refresh_revisions(&mut self, next: RefreshRevisions) -> Result<()> {
-        if next != self.refresh_revisions {
-            self.database
-                .replace_state_json(&[(STATE_REFRESH_REVISIONS, serialize_state(&next)?)])?;
-            self.refresh_revisions = next;
+    fn persist_refresh_revisions(&mut self, updated_revisions: RefreshRevisions) -> Result<()> {
+        if updated_revisions != self.refresh_revisions {
+            self.database.replace_state_json(&[(
+                STATE_REFRESH_REVISIONS,
+                serialize_state(&updated_revisions)?,
+            )])?;
+            self.refresh_revisions = updated_revisions;
             self.notify_refresh_changed();
         }
         Ok(())
     }
 }
 
-fn same_account_scope(previous: &LocalAccountRecord, account: &LocalAccountRecord) -> bool {
-    previous.account.identity == account.account.identity
-        && previous.account.auth_mode == account.account.auth_mode
-        && previous.account.source_id == account.account.source_id
-        && previous.account.secret_refs == account.account.secret_refs
-        && previous.account.created_at_ms == account.account.created_at_ms
-        && previous.account.enabled == account.account.enabled
-        && previous.remote_location == account.remote_location
+fn same_account_scope(previous_account: &LocalAccountRecord, account: &LocalAccountRecord) -> bool {
+    previous_account.account.identity == account.account.identity
+        && previous_account.account.auth_mode == account.account.auth_mode
+        && previous_account.account.source_id == account.account.source_id
+        && previous_account.account.secret_refs == account.account.secret_refs
+        && previous_account.account.created_at_ms == account.account.created_at_ms
+        && previous_account.account.enabled == account.account.enabled
+        && previous_account.remote_location == account.remote_location
 }
 
 fn invalid_revisions() -> LocalPoolError {

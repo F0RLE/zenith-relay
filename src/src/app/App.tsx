@@ -12,8 +12,8 @@ export function App() {
   useLayoutEffect(() => {
     const preventChromeSelectAll = (event: KeyboardEvent) => {
       if (event.key.toLowerCase() !== "a" || (!event.ctrlKey && !event.metaKey)) return;
-      const target = event.target;
-      if (target instanceof HTMLElement && target.closest("input, textarea, select, [contenteditable=\"true\"]")) return;
+      const eventTarget = event.target;
+      if (eventTarget instanceof HTMLElement && eventTarget.closest("input, textarea, select, [contenteditable=\"true\"]")) return;
       event.preventDefault();
       window.getSelection()?.removeAllRanges();
     };

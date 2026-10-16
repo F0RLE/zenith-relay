@@ -89,11 +89,11 @@ impl Store {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
-        let (mut account, current) = read_scope(&transaction, &expected.account_id)?;
-        if &current != expected {
+        let (mut account, stored_fence) = read_scope(&transaction, &expected.account_id)?;
+        if &stored_fence != expected {
             return Err("account changed during refresh".into());
         }
-        let result = apply(&mut account)?;
+        let refresh_result = apply(&mut account)?;
         transaction
             .execute(
                 "UPDATE accounts SET data_json = ?1 WHERE id = ?2",
@@ -103,7 +103,7 @@ impl Store {
         transaction.commit().map_err(db_error)?;
         drop(connection);
         self.notify_refresh_changed();
-        Ok(result)
+        Ok(refresh_result)
     }
 }
 

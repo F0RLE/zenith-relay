@@ -26,11 +26,11 @@ impl Store {
         Ok(())
     }
 
-    pub fn pending_import(&self, id: &str) -> Result<Option<PendingImport>, String> {
+    pub fn pending_import(&self, import_id: &str) -> Result<Option<PendingImport>, String> {
         self.lock()?
             .query_row(
                 "SELECT id, preview_json, secret_ref, created_at_ms FROM pending_imports WHERE id = ?1",
-                [id],
+                [import_id],
                 |row| {
                     Ok(PendingImport {
                         id: row.get(0)?,
@@ -44,10 +44,10 @@ impl Store {
             .map_err(db_error)
     }
 
-    pub fn delete_pending_import(&self, id: &str) -> Result<bool, String> {
+    pub fn delete_pending_import(&self, import_id: &str) -> Result<bool, String> {
         Ok(self
             .lock()?
-            .execute("DELETE FROM pending_imports WHERE id = ?1", [id])
+            .execute("DELETE FROM pending_imports WHERE id = ?1", [import_id])
             .map_err(db_error)?
             > 0)
     }

@@ -6,7 +6,7 @@ fn multiline_json_keeps_data_lines_with_all_sse_line_endings() {
         let frame = format!("event: response.output_text.delta{ending}data: {{\"type\":{ending}data: \"response.output_text.delta\",{ending}data: \"delta\":\"synthetic\"}}{ending}{ending}");
         let event = parse_sse_event(frame.as_bytes());
         assert!(event.has_data && event.valid && event.semantic_output);
-        assert_eq!(event.payload.unwrap()["delta"], "synthetic");
+        assert_eq!(event.event_payload.unwrap()["delta"], "synthetic");
     }
 }
 
@@ -21,7 +21,7 @@ fn repeated_events_with_mixed_cr_separators_are_not_one_json_payload() {
     while let Some(frame) = crate::protocol::take_sse_event(&mut bytes) {
         let event = parse_sse_event(&frame);
         assert!(event.valid);
-        assert_eq!(event.payload.unwrap()["sequence_number"], count);
+        assert_eq!(event.event_payload.unwrap()["sequence_number"], count);
         count += 1;
     }
     assert_eq!(count, 5);
@@ -53,7 +53,10 @@ fn json_responses_compaction_data_keeps_the_original_bytes() {
         Some(b"{ \"type\": \"response.compaction.delta\", \"opaque\": true }".as_slice())
     );
     assert_eq!(
-        event.payload.as_ref().and_then(|value| value.get("opaque")),
+        event
+            .event_payload
+            .as_ref()
+            .and_then(|value| value.get("opaque")),
         Some(&Value::Bool(true))
     );
 }
@@ -167,15 +170,34 @@ fn empty_incomplete_requires_explicit_zero_tokens_and_no_output() {
         "type": "response.incomplete",
         "response": {"output": [], "usage": {"output_tokens": 0}}
     });
-    assert!(is_empty_responses_incomplete(&empty, false, 0));
+    assert!(is_empty_responses_terminal(&empty, false, 0));
 
     let decimal_zero = serde_json::json!({
         "type": "response.incomplete",
         "response": {"output": [], "usage": {"output_tokens": 0.0}}
     });
-    assert!(!is_empty_responses_incomplete(&decimal_zero, false, 0));
-    assert!(!is_empty_responses_incomplete(&empty, true, 0));
-    assert!(!is_empty_responses_incomplete(&empty, false, 1));
+    assert!(!is_empty_responses_terminal(&decimal_zero, false, 0));
+    assert!(!is_empty_responses_terminal(&empty, true, 0));
+    assert!(!is_empty_responses_terminal(&empty, false, 1));
+}
+
+#[test]
+fn empty_completed_also_detected_as_silent_failure() {
+    let empty_completed = serde_json::json!({
+        "type": "response.completed",
+        "response": {"output": [], "usage": {"output_tokens": 0}}
+    });
+    assert!(is_empty_responses_terminal(&empty_completed, false, 0));
+    // If output was seen during streaming, it is not a silent failure.
+    assert!(!is_empty_responses_terminal(&empty_completed, true, 0));
+    // If output items were completed, it is not a silent failure.
+    assert!(!is_empty_responses_terminal(&empty_completed, false, 1));
+    // Non-zero tokens mean the model did generate something.
+    let nonzero = serde_json::json!({
+        "type": "response.completed",
+        "response": {"output": [], "usage": {"output_tokens": 5}}
+    });
+    assert!(!is_empty_responses_terminal(&nonzero, false, 0));
 }
 
 #[test]

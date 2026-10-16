@@ -28,13 +28,16 @@ export function readRelayPreference(
 
 export function writeRelayPreference(
   key: string,
-  value: string,
+  preferenceValue: string,
   storage: RelayStorage | undefined = browserStorage(),
-) {
+): boolean {
   try {
-    storage?.setItem(key, value);
+    if (!storage) return false;
+    storage.setItem(key, preferenceValue);
+    return true;
   } catch {
     // Preferences are optional; a restricted browser storage must not block the app.
+    return false;
   }
 }
 
@@ -50,35 +53,89 @@ export function removeRelayPreference(
 }
 
 export function readCodexPoolOauthSelection(storage: RelayStorage | undefined = browserStorage()) {
-  const selection = readRelayPreference(RELAY_STORAGE_KEYS.codexPoolOauthSelection, "", storage)
-    || readRelayPreference(RELAY_STORAGE_KEYS.legacyCodexPoolOauthSelection, "", storage)
-    || "auto";
-  writeRelayPreference(RELAY_STORAGE_KEYS.codexPoolOauthSelection, selection, storage);
-  removeRelayPreference(RELAY_STORAGE_KEYS.legacyCodexPoolOauthSelection, storage);
+  const selection = readMigratedRelayPreference(
+    RELAY_STORAGE_KEYS.codexPoolOauthSelection,
+    RELAY_STORAGE_KEYS.legacyCodexPoolOauthSelection,
+    "none",
+    storage,
+  );
+  if (selection === "auto") {
+    writeMigratedRelayPreference(
+      RELAY_STORAGE_KEYS.codexPoolOauthSelection,
+      RELAY_STORAGE_KEYS.legacyCodexPoolOauthSelection,
+      "none",
+      storage,
+    );
+    return "none";
+  }
   return selection;
 }
 
+export function writeCodexPoolOauthSelection(
+  selection: string,
+  storage: RelayStorage | undefined = browserStorage(),
+) {
+  writeMigratedRelayPreference(
+    RELAY_STORAGE_KEYS.codexPoolOauthSelection,
+    RELAY_STORAGE_KEYS.legacyCodexPoolOauthSelection,
+    selection,
+    storage,
+  );
+}
+
 export function readAccountValueVisibility(storage: RelayStorage | undefined = browserStorage()) {
-  const value = readRelayPreference(RELAY_STORAGE_KEYS.accountValueVisible, "", storage)
-    || readRelayPreference(RELAY_STORAGE_KEYS.legacyPoolEconomicsVisible, "", storage)
-    || "true";
-  writeRelayPreference(RELAY_STORAGE_KEYS.accountValueVisible, value, storage);
-  removeRelayPreference(RELAY_STORAGE_KEYS.legacyPoolEconomicsVisible, storage);
-  return value !== "false";
+  const visibilityValue = readMigratedRelayPreference(
+    RELAY_STORAGE_KEYS.accountValueVisible,
+    RELAY_STORAGE_KEYS.legacyPoolEconomicsVisible,
+    "true",
+    storage,
+  );
+  return visibilityValue !== "false";
 }
 
 export function writeAccountValueVisibility(
   visible: boolean,
   storage: RelayStorage | undefined = browserStorage(),
 ) {
-  writeRelayPreference(RELAY_STORAGE_KEYS.accountValueVisible, String(visible), storage);
-  removeRelayPreference(RELAY_STORAGE_KEYS.legacyPoolEconomicsVisible, storage);
+  writeMigratedRelayPreference(
+    RELAY_STORAGE_KEYS.accountValueVisible,
+    RELAY_STORAGE_KEYS.legacyPoolEconomicsVisible,
+    String(visible),
+    storage,
+  );
+}
+
+function readMigratedRelayPreference(
+  currentKey: string,
+  legacyKey: string,
+  fallback: string,
+  storage: RelayStorage | undefined,
+) {
+  try {
+    const preferenceValue = storage?.getItem(currentKey) || storage?.getItem(legacyKey) || fallback;
+    writeMigratedRelayPreference(currentKey, legacyKey, preferenceValue, storage);
+    return preferenceValue;
+  } catch {
+    // A failed read must not replace unread preferences with a default.
+    return fallback;
+  }
+}
+
+function writeMigratedRelayPreference(
+  currentKey: string,
+  legacyKey: string,
+  preferenceValue: string,
+  storage: RelayStorage | undefined,
+) {
+  if (writeRelayPreference(currentKey, preferenceValue, storage)) {
+    removeRelayPreference(legacyKey, storage);
+  }
 }
 
 export function readLaunchApplicationAfterConnect(
   storage: RelayStorage | undefined = browserStorage(),
 ) {
-  return readRelayPreference(RELAY_STORAGE_KEYS.launchApplicationAfterConnect, "0", storage) === "1";
+  return readRelayPreference(RELAY_STORAGE_KEYS.launchApplicationAfterConnect, "1", storage) === "1";
 }
 
 export function writeLaunchApplicationAfterConnect(

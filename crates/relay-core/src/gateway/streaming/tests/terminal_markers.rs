@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn response_incomplete_is_a_terminal_non_failure_outcome() {
     let event = parse_sse_event(
-        br#"data: {"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}
+        br#"data: {"type":"response.incomplete","response":{"status":"incomplete","output":[],"incomplete_details":{"reason":"max_output_tokens"}}}
 
 "#,
     );
@@ -70,6 +70,95 @@ fn native_gemini_test_stream() -> (EmptyGeminiUsageStream, Arc<Mutex<Vec<UsageEv
 }
 
 #[tokio::test]
+async fn native_streams_forward_provider_extensions_without_using_them_as_completion() {
+    for (protocol, frames) in [
+        (
+            WireApi::Messages,
+            concat!(
+                "data: {\"type\":\"message_start\",\"message\":{\"id\":\"synthetic-message\",\"content\":[]}}\n\n",
+                "data: {\"type\":\"vendor_progress\",\"vendor_extension\":{\"step\":1}}\n\n",
+                "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"answer\"}}\n\n",
+                "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+                "data: {\"type\":\"message_stop\"}\n\n",
+            ),
+        ),
+        (
+            WireApi::Gemini,
+            concat!(
+                "data: {\"type\":\"vendor_progress\",\"vendor_extension\":{\"step\":1}}\n\n",
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"answer\",\"vendor_extension\":true}]},\"finishReason\":\"STOP\"}]}\n\n",
+            ),
+        ),
+    ] {
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let capture = recorded.clone();
+        let mut event = test_usage_event();
+        event.wire_api = protocol;
+        let input = stream::iter([Ok::<_, Infallible>(Bytes::from_static(frames.as_bytes()))]);
+        let mut stream = UsageStream::new(
+            input,
+            Arc::new(move |event| capture.lock().unwrap().push(event)),
+            event,
+            Instant::now(),
+            Arc::new(|_, _, _| {}),
+        );
+        let mut output = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            output.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(output, frames.as_bytes(), "{protocol:?}");
+        let recorded = recorded.lock().unwrap();
+        assert_eq!(recorded.len(), 1, "{protocol:?}");
+        assert!(recorded[0].success, "{protocol:?}");
+    }
+}
+
+#[tokio::test]
+async fn native_responses_sse_keeps_wire_bytes_across_chunk_boundaries() {
+    let frames = concat!(
+        ": synthetic heartbeat\r\n\r\n",
+        "id: synthetic-1\r\nretry: 1500\r\nevent: response.created\r\n",
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"synthetic-response\"}}\r\n\r\n",
+        "event: vendor_extension\r\ndata: {\"type\":\"vendor_extension\",\"z\":1e3,\"a\":123456789012345678901234567890,\"p\":0.12345678901234567890123456789}\r\n\r\n",
+        "event: response.output_text.delta\r\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"ответ\"}\r\n\r\n",
+        "event: response.completed\r\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"synthetic-response\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":4,\"output_tokens\":2}}}\r\n\r\n",
+    );
+    // Responses stops at the protocol terminal event, not transport EOF or
+    // [DONE]. A CR already terminates the blank line; an optional LF in the
+    // next chunk is outside the completed event and is not awaited.
+    let input_frames = format!("{frames}data: [DONE]\r\n\r\ndata: ignored\n\n");
+    for chunk_size in [1, 7, frames.len()] {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let input = stream::iter(
+            input_frames
+                .as_bytes()
+                .chunks(chunk_size)
+                .map(|chunk| Ok::<_, Infallible>(Bytes::copy_from_slice(chunk)))
+                .collect::<Vec<_>>(),
+        );
+        let mut stream = usage_stream_with_events(input, events.clone());
+        let mut output = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            output.extend_from_slice(&chunk.unwrap());
+        }
+        let terminal_end = if (frames.len() - 1).is_multiple_of(chunk_size) {
+            frames.len() - 1
+        } else {
+            frames.len()
+        };
+        assert_eq!(
+            output,
+            &frames.as_bytes()[..terminal_end],
+            "chunk size {chunk_size}"
+        );
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].success);
+    }
+}
+
+#[tokio::test]
 async fn native_responses_done_marker_without_terminal_is_not_success() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let input = stream::iter([Ok::<_, Infallible>(Bytes::from_static(b"data: [DONE]\n\n"))]);
@@ -78,7 +167,7 @@ async fn native_responses_done_marker_without_terminal_is_not_success() {
     let terminal = parse_sse_event(&failure);
     assert_eq!(terminal.outcome, Some(TerminalOutcome::Failure));
     assert_eq!(
-        terminal.payload.as_ref().unwrap()["response"]["error"]["code"],
+        terminal.event_payload.as_ref().unwrap()["response"]["error"]["code"],
         error_codes::STREAM_INCOMPLETE
     );
     assert!(stream.next().await.is_none());
@@ -126,7 +215,7 @@ async fn foreign_protocol_terminal_markers_never_complete_a_stream() {
         assert!(!events[0].success, "{wire_api:?}");
         assert_eq!(
             events[0].error_category.as_deref(),
-            Some(error_codes::STREAM_INCOMPLETE),
+            Some(error_codes::STREAM_INVALID),
             "{wire_api:?}"
         );
     }
@@ -168,22 +257,22 @@ async fn native_gemini_rejects_malformed_frame_after_valid_output() {
 
 #[tokio::test]
 async fn native_gemini_foreign_terminal_markers_do_not_complete_generation() {
-    for marker in [
-        b"data: [DONE]\n\n".as_slice(),
-        b"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+    for (marker, category) in [
+        (b"data: [DONE]\n\n".as_slice(), "stream_incomplete"),
+        (b"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n".as_slice(), "stream_invalid"),
     ] {
         let (mut stream, recorded) = native_gemini_test_stream();
         assert!(stream.ingest_native_gemini(
             b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}\n\n"
         ));
-        assert!(stream.ingest_native_gemini(marker));
+        assert!(!stream.ingest_native_gemini(marker));
         assert!(stream.next().await.is_none());
         let events = recorded.lock().unwrap();
         assert_eq!(events.len(), 1);
         assert!(!events[0].success);
         assert_eq!(
             events[0].error_category.as_deref(),
-            Some("stream_incomplete")
+            Some(category)
         );
     }
 }

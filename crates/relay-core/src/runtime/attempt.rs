@@ -85,31 +85,9 @@ impl GatewayRuntime {
         candidate_id: &str,
         request: CooldownRequest<'_>,
     ) -> bool {
-        let applied = scheduler.set_cooldown_with_reason_for_model_at(candidate_id, request);
-        if applied {
-            if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
-                let resource_failure = request.reason
-                    == crate::scheduler::CooldownReason::RateLimit
-                    || (request.scope == "*"
-                        && request.reason == crate::scheduler::CooldownReason::Mandatory);
-                let upstream = binding.adapter.upstream_protocol(binding.wire_api);
-                for (id, sibling) in &self.source_candidate_bindings {
-                    if id != candidate_id
-                        && sibling.source_id == binding.source_id
-                        && (resource_failure
-                            || sibling.adapter.upstream_protocol(sibling.wire_api) == upstream)
-                    {
-                        scheduler.set_cooldown_with_reason(
-                            id,
-                            request.scope,
-                            request.retry_at_ms,
-                            request.reason,
-                        );
-                    }
-                }
-            }
-        }
-        applied
+        // All source protocol routes share the candidate's physical quota,
+        // activity and cooldown. No sibling candidate needs synchronization.
+        scheduler.set_cooldown_with_reason_for_model_at(candidate_id, request)
     }
 
     pub(crate) fn failure_state_for(

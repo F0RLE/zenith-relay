@@ -14,7 +14,11 @@ pub async fn execute_remote_server_action(
     state: State<'_, DesktopState>,
 ) -> Result<serde_json::Value, CommandError> {
     let _mutation = state.setup_guard().await;
-    if let RemoteServerAction::DeleteAccount { id } = &input.action {
+    if let RemoteServerAction::DeleteAccount { id }
+    | RemoteServerAction::TrashAccount { id }
+    | RemoteServerAction::RestoreTrashedAccount { id }
+    | RemoteServerAction::PurgeTrashedAccount { id } = &input.action
+    {
         if state
             .store()?
             .ownership_operation()
@@ -42,7 +46,7 @@ pub async fn execute_remote_server_action(
         && input
             .payload
             .as_ref()
-            .and_then(|payload| payload.pointer("/poolRouting/version"))
+            .and_then(|request_payload| request_payload.pointer("/poolRouting/version"))
             .and_then(serde_json::Value::as_u64)
             .is_some_and(|version| version >= 2);
     if needs_rotation
@@ -58,25 +62,42 @@ pub async fn execute_remote_server_action(
         )
         .into());
     }
-    if matches!(input.action, RemoteServerAction::SetToolPolicy)
-        && !client
+    let policy_feature = match input.action {
+        RemoteServerAction::ListAccountTrash
+        | RemoteServerAction::TrashAccount { .. }
+        | RemoteServerAction::RestoreTrashedAccount { .. }
+        | RemoteServerAction::PurgeTrashedAccount { .. } => {
+            Some(zenith_relay_core::protocol::Feature::AccountTrash)
+        }
+        RemoteServerAction::SetToolPolicy => Some(zenith_relay_core::protocol::Feature::ToolPolicy),
+        RemoteServerAction::SetRequestTimezone | RemoteServerAction::RequestTimezoneCatalog => {
+            Some(zenith_relay_core::protocol::Feature::RequestTimezone)
+        }
+        RemoteServerAction::SetProxyTimezone { .. } => {
+            Some(zenith_relay_core::protocol::Feature::RequestTimezone)
+        }
+        _ => None,
+    };
+    if let Some(feature) = policy_feature {
+        if !client
             .capabilities()
             .await
             .map_err(remote_error)?
-            .supports(zenith_relay_core::protocol::Feature::ToolPolicy)
-    {
-        return Err(LocalPoolError::new(
-            ErrorCode::UnsupportedSchema,
-            "server does not support tool catalog policy",
-        )
-        .into());
+            .supports(feature)
+        {
+            return Err(LocalPoolError::new(
+                ErrorCode::UnsupportedSchema,
+                "server does not support this operation",
+            )
+            .into());
+        }
     }
     let uses_protocol_contract = matches!(&input.action, RemoteServerAction::ProbeSource { .. })
         || (matches!(
             &input.action,
             RemoteServerAction::CreateSource | RemoteServerAction::UpdateSource { .. }
-        ) && input.payload.as_ref().is_some_and(|payload| {
-            payload
+        ) && input.payload.as_ref().is_some_and(|request_payload| {
+            request_payload
                 .get("protocolBindings")
                 .and_then(serde_json::Value::as_array)
                 .is_some_and(|bindings| {
@@ -165,6 +186,20 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
         RemoteServerAction::DeleteAccount { id } => {
             (Method::DELETE, object_path("accounts", id)?, false)
         }
+        RemoteServerAction::ListAccountTrash => (Method::GET, "/accounts/trash".to_string(), false),
+        RemoteServerAction::TrashAccount { id } => (
+            Method::POST,
+            format!("{}/trash", object_path("accounts", id)?),
+            false,
+        ),
+        RemoteServerAction::RestoreTrashedAccount { id } => (
+            Method::POST,
+            format!("{}/restore", object_path("accounts/trash", id)?),
+            false,
+        ),
+        RemoteServerAction::PurgeTrashedAccount { id } => {
+            (Method::DELETE, object_path("accounts/trash", id)?, false)
+        }
         RemoteServerAction::SetCommonProxy => (Method::POST, "/proxies/common".to_string(), true),
         RemoteServerAction::SetAccountProxyRequired => {
             (Method::POST, "/proxies/policy".to_string(), true)
@@ -177,6 +212,11 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
         RemoteServerAction::AssignAccountProxies => {
             (Method::POST, "/accounts/proxies/assign".to_string(), true)
         }
+        RemoteServerAction::SetProxyTimezone { id } => (
+            Method::POST,
+            format!("{}/timezone", object_path("proxies", id)?),
+            true,
+        ),
         RemoteServerAction::SetPoolMembership => (Method::POST, "/pool/members".to_string(), true),
         RemoteServerAction::SetQuotaPolicy => (Method::POST, "/quota/settings".to_string(), true),
         RemoteServerAction::SetRoutingPolicy => {
@@ -196,6 +236,7 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
         RemoteServerAction::SetModelServiceTier => {
             (Method::POST, "/models/service-tier".to_string(), true)
         }
+        RemoteServerAction::SetModelContext => (Method::POST, "/models/context".to_string(), true),
         RemoteServerAction::SetModelOrder => (Method::POST, "/models/order".to_string(), true),
         RemoteServerAction::StartGateway => (Method::POST, "/gateway/start".to_string(), false),
         RemoteServerAction::StopGateway => (Method::POST, "/gateway/stop".to_string(), false),
@@ -207,6 +248,14 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
         RemoteServerAction::SetToolPolicy => {
             (Method::POST, "/gateway/tool-policy".to_string(), true)
         }
+        RemoteServerAction::SetRequestTimezone => {
+            (Method::POST, "/gateway/request-timezone".to_string(), true)
+        }
+        RemoteServerAction::RequestTimezoneCatalog => (
+            Method::GET,
+            "/gateway/request-timezone/catalog".to_string(),
+            false,
+        ),
         RemoteServerAction::SetChatgptRetryUntilAvailable => (
             Method::POST,
             "/gateway/chatgpt-retry-until-available".to_string(),
@@ -237,13 +286,13 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
     Ok(request)
 }
 
-pub(super) fn object_path(collection: &str, id: &str) -> Result<String, CommandError> {
-    if !zenith_relay_core::is_ascii_token(id, 128) {
+pub(super) fn object_path(collection: &str, object_id: &str) -> Result<String, CommandError> {
+    if !zenith_relay_core::is_ascii_token(object_id, 128) {
         return Err(
             LocalPoolError::new(ErrorCode::InvalidState, "remote object id is invalid").into(),
         );
     }
-    Ok(format!("/{collection}/{id}"))
+    Ok(format!("/{collection}/{object_id}"))
 }
 
 fn remote_action_error(error: RemoteClientError) -> CommandError {
@@ -267,5 +316,61 @@ mod tests {
         assert_eq!(method, Method::POST);
         assert_eq!(path, "/pricing/refresh");
         assert!(!requires_payload);
+    }
+
+    #[test]
+    fn account_trash_requests_use_separate_validated_paths() {
+        for (action, expected_method, expected_path) in [
+            (
+                RemoteServerAction::ListAccountTrash,
+                Method::GET,
+                "/accounts/trash",
+            ),
+            (
+                RemoteServerAction::TrashAccount {
+                    id: "synthetic".into(),
+                },
+                Method::POST,
+                "/accounts/synthetic/trash",
+            ),
+            (
+                RemoteServerAction::RestoreTrashedAccount {
+                    id: "synthetic".into(),
+                },
+                Method::POST,
+                "/accounts/trash/synthetic/restore",
+            ),
+            (
+                RemoteServerAction::PurgeTrashedAccount {
+                    id: "synthetic".into(),
+                },
+                Method::DELETE,
+                "/accounts/trash/synthetic",
+            ),
+        ] {
+            let (method, path, needs_payload) = action_request(&action).unwrap();
+            assert_eq!(method, expected_method);
+            assert_eq!(path, expected_path);
+            assert!(!needs_payload);
+        }
+        assert!(action_request(&RemoteServerAction::PurgeTrashedAccount {
+            id: "../other".into()
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn proxy_timezone_request_posts_a_payload_to_the_proxy_path() {
+        let (method, path, needs_payload) = action_request(&RemoteServerAction::SetProxyTimezone {
+            id: "proxy_synthetic".into(),
+        })
+        .unwrap();
+        assert_eq!(method, Method::POST);
+        assert_eq!(path, "/proxies/proxy_synthetic/timezone");
+        assert!(needs_payload);
+        assert!(action_request(&RemoteServerAction::SetProxyTimezone {
+            id: "../other".into()
+        })
+        .is_err());
     }
 }

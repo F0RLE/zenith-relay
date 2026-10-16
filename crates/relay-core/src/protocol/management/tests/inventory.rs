@@ -13,6 +13,7 @@ fn model_summaries_keep_member_exclusions_and_apply_pool_hidden_state() {
         base_url: "https://example.test/v1".into(),
         pricing_provider: None,
         official_provider_family: None,
+        proxy_id: None,
         wire_api: WireApi::Responses,
         protocol_bindings: Vec::new(),
         protocol_config: crate::SourceProtocolConfig::default(),
@@ -97,6 +98,7 @@ fn pool_inventory_enriches_unavailable_models_without_creating_routes() {
                 cache_write_5m_micro_usd_per_million: None,
                 cache_write_1h_micro_usd_per_million: None,
                 output_micro_usd_per_million: 34,
+                ..Default::default()
             },
         )]),
         &BTreeMap::from([("future".into(), vec!["high".into()])]),
@@ -105,7 +107,14 @@ fn pool_inventory_enriches_unavailable_models_without_creating_routes() {
     );
     apply_model_display_order_with_catalog(&mut models, &[], &metadata);
     assert_eq!(models.len(), 5);
-    let future = models.iter().find(|model| model.id == "future").unwrap();
+    let future = models
+        .iter()
+        .find(|model| model.id.eq_ignore_ascii_case("future"))
+        .unwrap();
+    assert_eq!(
+        future.id, "FUTURE",
+        "native account inventory owns shared IDs"
+    );
     assert_eq!(future.member_count, 2);
     assert!(!future.enabled);
     assert_eq!(future.catalog_name.as_deref(), Some("Future Model"));
@@ -119,7 +128,10 @@ fn pool_inventory_enriches_unavailable_models_without_creating_routes() {
         .iter()
         .all(|model| model.protocol_routes.is_empty() && !model.codex_visible));
     assert!(
-        models.iter().position(|m| m.id == "future") < models.iter().position(|m| m.id == "older")
+        models
+            .iter()
+            .position(|m| m.id.eq_ignore_ascii_case("future"))
+            < models.iter().position(|m| m.id == "older")
     );
     assert!(models
         .iter()
@@ -185,11 +197,15 @@ fn member_model_order_uses_complete_inventory_independently_of_rules() {
     expected_account.models = expected_source.models.clone();
     assert_eq!(sources[0], expected_source);
     assert_eq!(accounts[0], expected_account);
-    let identities = member_model_catalog(&sources, &accounts, &metadata);
-    assert_eq!(identities.len(), 2);
+    let identities = member_model_catalog(&sources, &accounts, &[], &metadata);
+    assert_eq!(identities.len(), 4);
     assert_eq!(identities["newer"].catalog_provider, "test");
     assert_eq!(identities["older"].catalog_provider, "test");
-    assert!(!identities.contains_key("unknown-z"));
+    assert_eq!(identities["unknown-z"].catalog_provider, "other");
+    assert_eq!(identities["newer"].catalog_order, Some(0));
+    assert_eq!(identities["older"].catalog_order, Some(1));
+    assert_eq!(identities["unknown-a"].catalog_order, Some(2));
+    assert_eq!(identities["unknown-z"].catalog_order, Some(3));
     assert!(!identities.contains_key("catalog-only"));
 
     sources[0].excluded_models.clear();
@@ -237,6 +253,10 @@ fn advisory_metadata_changes_only_presentation_fields_and_order() {
                     "reasoning":true,
                     "reasoning_effort_levels":["low","high"],
                     "default_reasoning_effort":"low",
+                    "reasoning_method":"budget_tokens",
+                    "reasoning_budget_min_tokens":1024,
+                    "reasoning_budget_max_tokens":32000,
+                    "reasoning_budget_default_tokens":8192,
                     "tool_call":true,
                     "structured_output":true,
                     "attachment":true,
@@ -259,22 +279,26 @@ fn advisory_metadata_changes_only_presentation_fields_and_order() {
             .collect::<Vec<_>>(),
         ["newer", "older"]
     );
-    assert_eq!(models[0].catalog_name.as_deref(), Some("Newer"));
-    assert_eq!(models[0].catalog_reasoning, Some(true));
-    assert_eq!(models[0].catalog_reasoning_effort_levels, ["low", "high"]);
+    let newer = models.iter().find(|model| model.id == "newer").unwrap();
+    assert_eq!(newer.catalog_name.as_deref(), Some("Newer"));
+    assert_eq!(newer.catalog_reasoning, Some(true));
+    assert_eq!(newer.catalog_reasoning_effort_levels, ["low", "high"]);
     assert_eq!(
-        models[0].catalog_default_reasoning_effort.as_deref(),
+        newer.catalog_default_reasoning_effort.as_deref(),
         Some("low")
     );
-    assert_eq!(models[0].catalog_tool_call, Some(true));
-    assert_eq!(models[0].catalog_structured_output, Some(true));
-    assert_eq!(models[0].catalog_attachment, Some(true));
-    assert_eq!(models[0].catalog_open_weights, Some(false));
-    assert_eq!(models[0].catalog_input_modalities, ["text", "image"]);
-    assert_eq!(models[0].catalog_output_modalities, ["text"]);
-    assert_eq!(models[0].catalog_context_limit, Some(128_000));
-    assert_eq!(models[0].catalog_input_limit, Some(120_000));
-    assert_eq!(models[0].catalog_output_limit, Some(8_000));
+    assert_eq!(newer.catalog_reasoning_budget_min_tokens, Some(1024));
+    assert_eq!(newer.catalog_reasoning_budget_max_tokens, Some(32_000));
+    assert_eq!(newer.catalog_reasoning_budget_default_tokens, Some(8_192));
+    assert_eq!(newer.catalog_tool_call, Some(true));
+    assert_eq!(newer.catalog_structured_output, Some(true));
+    assert_eq!(newer.catalog_attachment, Some(true));
+    assert_eq!(newer.catalog_open_weights, Some(false));
+    assert_eq!(newer.catalog_input_modalities, ["text", "image"]);
+    assert_eq!(newer.catalog_output_modalities, ["text"]);
+    assert_eq!(newer.catalog_context_limit, Some(128_000));
+    assert_eq!(newer.catalog_input_limit, Some(120_000));
+    assert_eq!(newer.catalog_output_limit, Some(8_000));
     assert_eq!(
         models
             .iter()
@@ -330,6 +354,7 @@ fn source_summary_projects_every_catalog_model_to_all_client_protocols() {
         base_url: "https://example.test/v1".into(),
         pricing_provider: None,
         official_provider_family: None,
+        proxy_id: None,
         wire_api: WireApi::Responses,
         protocol_bindings: Vec::new(),
         protocol_config: crate::SourceProtocolConfig::default(),

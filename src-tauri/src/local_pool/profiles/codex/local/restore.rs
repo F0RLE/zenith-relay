@@ -6,6 +6,16 @@ pub(in crate::local_pool::profiles::codex) fn restore_local_locked(
     backup_root: &Path,
     secrets: &impl SecretBackend,
 ) -> Result<()> {
+    let context_change = context::sync_context_overrides_locked(codex_home, backup_root, false)?;
+    restore_local_profile_locked(codex_home, backup_root, secrets)
+        .map_err(|error| with_rollback(error, context_change.rollback_locked()))
+}
+
+fn restore_local_profile_locked(
+    codex_home: &Path,
+    backup_root: &Path,
+    secrets: &impl SecretBackend,
+) -> Result<()> {
     let _ = local_backup(codex_home, backup_root)?;
     let backup_path = backup_path(backup_root);
     // Codex can refresh auth/config immediately after its process is stopped.
@@ -155,14 +165,14 @@ pub(in crate::local_pool::profiles::codex) fn restore_local_locked(
 /// the first rename. Treat that short write window as transient rather than
 /// turning it into `profile_restore_blocked`.
 fn read_stable_optional_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
-    let mut previous = read_optional_bytes(path)?;
+    let mut previous_bytes = read_optional_bytes(path)?;
     for _ in 0..3 {
         thread::sleep(Duration::from_millis(20));
-        let current = read_optional_bytes(path)?;
-        if current == previous {
-            return Ok(current);
+        let candidate_bytes = read_optional_bytes(path)?;
+        if candidate_bytes == previous_bytes {
+            return Ok(candidate_bytes);
         }
-        previous = current;
+        previous_bytes = candidate_bytes;
     }
-    Ok(previous)
+    Ok(previous_bytes)
 }

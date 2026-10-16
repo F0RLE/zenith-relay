@@ -17,13 +17,13 @@ pub fn token_refresh_failure_kind(code: &str) -> TokenRefreshFailureKind {
     }
 }
 
-pub fn token_refresh_provider_error_code(body: &[u8]) -> Option<String> {
-    let value: Value = serde_json::from_slice(body).ok()?;
+pub fn token_refresh_provider_error_code(response_body: &[u8]) -> Option<String> {
+    let error_payload: Value = serde_json::from_slice(response_body).ok()?;
     let code = [
-        value.pointer("/error/code").and_then(Value::as_str),
-        value.get("code").and_then(Value::as_str),
-        value.get("error").and_then(Value::as_str),
-        value.pointer("/error/type").and_then(Value::as_str),
+        error_payload.pointer("/error/code").and_then(Value::as_str),
+        error_payload.get("code").and_then(Value::as_str),
+        error_payload.get("error").and_then(Value::as_str),
+        error_payload.pointer("/error/type").and_then(Value::as_str),
     ]
     .into_iter()
     .flatten()

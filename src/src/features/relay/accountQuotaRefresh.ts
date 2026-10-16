@@ -46,13 +46,13 @@ export async function refreshAllAccountQuotas(
   executor: AccountQuotaRefreshExecutor = relayAccountQuotaRefreshExecutor,
 ): Promise<AccountQuotaRefreshReport> {
   if (mode === "local") {
-    const results = await executor.refreshAllLocal();
+    const localRefreshResults = await executor.refreshAllLocal();
     return {
-      succeeded: results.filter((result) => result.status === "succeeded").length,
-      failed: results.filter((result) => result.status === "failed").length,
+      succeeded: localRefreshResults.filter((refreshResult) => refreshResult.status === "succeeded").length,
+      failed: localRefreshResults.filter((refreshResult) => refreshResult.status === "failed").length,
     };
   }
 
-  const result = await executor.refreshAllRemote();
-  return { succeeded: result.refreshed ?? 0, failed: result.failed ?? 0 };
+  const remoteRefreshResult = await executor.refreshAllRemote();
+  return { succeeded: remoteRefreshResult.refreshed ?? 0, failed: remoteRefreshResult.failed ?? 0 };
 }

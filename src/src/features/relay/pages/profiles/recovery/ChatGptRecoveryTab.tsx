@@ -24,9 +24,9 @@ export function ChatGptRecoveryTab() {
 
   const loadSnapshots = useCallback(() => {
     setLoadFailed(false);
-    void relayCommands.profileSnapshots().then((result) => {
-      setSnapshots(result.snapshots);
-      setLoadFailed(result.invalidCount > 0);
+    void relayCommands.profileSnapshots().then((snapshotResult) => {
+      setSnapshots(snapshotResult.snapshots);
+      setLoadFailed(snapshotResult.invalidCount > 0);
     }).catch(() => {
       setSnapshots([]);
       setLoadFailed(true);
@@ -36,8 +36,8 @@ export function ChatGptRecoveryTab() {
   useEffect(loadSnapshots, [loadSnapshots]);
 
   const createSnapshot = async () => {
-    const name = snapshotName.trim();
-    if (name && await perform("profile-snapshot-create", () => relayCommands.createProfileSnapshot(name), "feedback.snapshotCreated", { backgroundRefresh: true })) {
+    const normalizedSnapshotName = snapshotName.trim();
+    if (normalizedSnapshotName && await perform("profile-snapshot-create", () => relayCommands.createProfileSnapshot(normalizedSnapshotName), "feedback.snapshotCreated", { backgroundRefresh: true })) {
       setSnapshotName("");
       loadSnapshots();
     }
@@ -59,8 +59,8 @@ export function ChatGptRecoveryTab() {
     }
   };
 
-  const snapshotDate = (value: number) => new Intl.DateTimeFormat(i18n.language, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
-  const displayPath = (value: string) => value.startsWith("\\\\?\\") ? value.slice(4) : value;
+  const snapshotDate = (createdAtMs: number) => new Intl.DateTimeFormat(i18n.language, { dateStyle: "medium", timeStyle: "short" }).format(new Date(createdAtMs));
+  const displayPath = (profilePath: string) => profilePath.startsWith("\\\\?\\") ? profilePath.slice(4) : profilePath;
   const rows: RecoverySnapshotRow[] = snapshots.map((snapshot) => ({
     id: snapshot.id,
     name: snapshot.name,

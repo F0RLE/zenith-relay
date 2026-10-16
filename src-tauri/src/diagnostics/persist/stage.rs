@@ -10,15 +10,15 @@ use super::layout::{ensure_layout, ensure_real_directory, prune_files, root_path
 /// Keep one small, redacted stage marker on disk. Unlike the in-memory
 /// breadcrumb, this survives a hard process termination and is consumed on
 /// the next launch when `session.active` indicates an interrupted run.
-pub(in crate::diagnostics) fn persist_last_stage(value: &Breadcrumb) {
+pub(in crate::diagnostics) fn persist_last_stage(breadcrumb: &Breadcrumb) {
     let state = state();
     let _guard = zenith_relay_core::poison::mutex(&state.write_lock);
     let root = root_path();
-    persist_last_stage_at(&root, value);
+    persist_last_stage_at(&root, breadcrumb);
 }
 
-pub(in crate::diagnostics) fn persist_last_stage_at(root: &Path, value: &Breadcrumb) {
-    let Ok(mut line) = serde_json::to_vec(value) else {
+pub(in crate::diagnostics) fn persist_last_stage_at(root: &Path, breadcrumb: &Breadcrumb) {
+    let Ok(mut line) = serde_json::to_vec(breadcrumb) else {
         return;
     };
     line.push(b'\n');
@@ -54,13 +54,15 @@ pub(in crate::diagnostics) fn read_latest_stage(root: &Path) -> Option<Breadcrum
         .flatten()
         .filter_map(|entry| {
             let path = entry.path();
-            let name = path.file_name()?.to_str()?;
+            let file_name = path.file_name()?.to_str()?;
             let metadata = entry.file_type().ok()?;
-            if !metadata.is_file() || metadata.is_symlink() || !name.starts_with(LAST_STAGE_PREFIX)
+            if !metadata.is_file()
+                || metadata.is_symlink()
+                || !file_name.starts_with(LAST_STAGE_PREFIX)
             {
                 return None;
             }
-            Some((name.to_string(), path))
+            Some((file_name.to_string(), path))
         })
         .collect::<Vec<_>>();
     paths.sort_by(|left, right| left.0.cmp(&right.0));
@@ -73,27 +75,27 @@ pub(in crate::diagnostics) fn read_latest_stage(root: &Path) -> Option<Breadcrum
         return None;
     }
     let bytes = fs::read(path).ok()?;
-    let value = serde_json::from_slice::<Breadcrumb>(&bytes).ok()?;
-    sanitize_breadcrumb(value)
+    let breadcrumb = serde_json::from_slice::<Breadcrumb>(&bytes).ok()?;
+    sanitize_breadcrumb(breadcrumb)
 }
 
-fn sanitize_breadcrumb(mut value: Breadcrumb) -> Option<Breadcrumb> {
-    if value.timestamp.len() > 64 {
+fn sanitize_breadcrumb(mut breadcrumb: Breadcrumb) -> Option<Breadcrumb> {
+    if breadcrumb.timestamp.len() > 64 {
         return None;
     }
-    value.timestamp = safe_text(&value.timestamp, 64);
-    value.operation = safe_text(&value.operation, 120);
-    value.stage = safe_text(&value.stage, 120);
-    if value.operation.is_empty() || value.stage.is_empty() {
+    breadcrumb.timestamp = safe_text(&breadcrumb.timestamp, 64);
+    breadcrumb.operation = safe_text(&breadcrumb.operation, 120);
+    breadcrumb.stage = safe_text(&breadcrumb.stage, 120);
+    if breadcrumb.operation.is_empty() || breadcrumb.stage.is_empty() {
         return None;
     }
-    value.details = value
+    breadcrumb.details = breadcrumb
         .details
         .into_iter()
         .take(64)
         .map(|(key, detail)| (safe_text(&key, 120), safe_detail(&detail)))
         .collect();
-    Some(value)
+    Some(breadcrumb)
 }
 
 pub(in crate::diagnostics) fn clear_last_stages(root: &Path) {
@@ -103,13 +105,14 @@ pub(in crate::diagnostics) fn clear_last_stages(root: &Path) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        let Some(file_name) = path.file_name().and_then(|file_name| file_name.to_str()) else {
             continue;
         };
         let Ok(metadata) = entry.file_type() else {
             continue;
         };
-        if metadata.is_file() && !metadata.is_symlink() && name.starts_with(LAST_STAGE_PREFIX) {
+        if metadata.is_file() && !metadata.is_symlink() && file_name.starts_with(LAST_STAGE_PREFIX)
+        {
             let _ = fs::remove_file(path);
         }
     }

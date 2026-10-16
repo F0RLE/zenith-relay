@@ -43,12 +43,15 @@ fn runtime_candidate(
 
 fn account_summary(in_pool: bool, models: &[&str]) -> AccountSummary {
     AccountSummary {
+        credit_balance_key: None,
+        oauth_client_kind: Default::default(),
         id: "account".into(),
         label: "Account".into(),
         identity_hint: "account".into(),
         provider_family: None,
         basis_points_available: false,
         basis_points_enabled: false,
+        credential_diagnostics: None,
         enabled: true,
         in_pool,
         draining: false,
@@ -91,6 +94,7 @@ fn source_summary(id: &str, models: &[&str]) -> SourceSummary {
         base_url: "https://example.test/v1".into(),
         pricing_provider: None,
         official_provider_family: None,
+        proxy_id: None,
         wire_api: WireApi::Responses,
         protocol_bindings: Vec::new(),
         protocol_config: crate::SourceProtocolConfig::default(),
@@ -118,6 +122,11 @@ fn test_token_price(input: u64, output: u64) -> TokenPrice {
         cache_write_5m: None,
         cache_write_1h: None,
         output,
+        flex: crate::pricing::TokenRateSet::EMPTY,
+        priority: crate::pricing::TokenRateSet::EMPTY,
+        above_200k: crate::pricing::LongContextRates::EMPTY,
+        above_272k: crate::pricing::LongContextRates::EMPTY,
+        ..Default::default()
     }
 }
 

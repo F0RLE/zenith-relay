@@ -1,0 +1,180 @@
+.relay-dialog.account-timezone-dialog {
+  width: min(580px, 100%);
+}
+
+.account-timezone-dialog .relay-dialog-heading {
+  min-width: 0;
+}
+
+.account-timezone-identity {
+  display: block;
+  margin-top: 4px;
+  color: var(--relay-muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-timezone-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: 14px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.account-timezone-dialog .relay-dialog-body { display: flex; }
+.account-timezone-content > * { flex-shrink: 0; }
+.account-timezone-content > .form-note { margin: 0; font-size: 12px; line-height: 1.5; }
+
+.account-timezone-current {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 16px;
+  border-radius: 12px;
+  background: var(--relay-subtle);
+}
+
+.account-timezone-globe {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  color: var(--relay-accent);
+  background: var(--relay-accent-soft);
+}
+
+.account-timezone-globe svg { width: 20px; height: 20px; }
+.account-timezone-current > div { display: grid; gap: 4px; min-width: 0; }
+.account-timezone-current strong { font-size: 15px; font-weight: 600; line-height: 21px; overflow-wrap: anywhere; }
+.account-timezone-current small { color: var(--relay-muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.account-timezone-eyebrow { color: var(--relay-muted); font-size: 11px; }
+.account-timezone-current code { color: var(--relay-secondary); font-size: 11px; overflow-wrap: anywhere; }
+.account-timezone-offset { color: var(--relay-muted); font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.account-timezone-current > .account-timezone-offset { color: var(--relay-accent); font-size: 12px; }
+
+.account-timezone-picker { display: flex; flex-direction: column; min-height: 0; gap: 12px; }
+.account-timezone-content > .account-timezone-picker { flex: 0 1 320px; }
+.account-timezone-search { position: relative; flex: 1; min-width: 0; }
+.account-timezone-search > svg { position: absolute; left: 12px; top: 13px; width: 16px; height: 16px; color: var(--relay-muted); pointer-events: none; }
+.account-timezone-dialog .account-timezone-search > input { padding-left: 36px; font-size: 12px; }
+.account-timezone-picker > .account-timezone-search { flex: 0 0 auto; }
+
+.account-timezone-modes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+  padding: 4px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--relay-subtle);
+}
+
+.account-timezone-modes label {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  min-height: 36px;
+  padding: 6px 10px;
+  border-radius: 7px;
+  color: var(--relay-muted);
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: center;
+  cursor: pointer;
+}
+
+.account-timezone-modes input {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: inherit;
+}
+
+.account-timezone-modes label:hover,
+.account-timezone-modes label:has(input:focus-visible) { color: var(--relay-text); background: var(--relay-surface); }
+.account-timezone-modes label[data-selected="true"] { color: var(--relay-accent-hover); background: var(--relay-accent-soft); }
+.account-timezone-modes label:has(input:disabled) { cursor: default; opacity: 0.65; }
+.account-timezone-source { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.account-timezone-source > span { color: var(--relay-muted); font-size: 12px; }
+.account-timezone-reset { align-self: flex-start; font-size: 12px; }
+
+.account-timezone-list {
+  display: grid;
+  flex: 1;
+  align-content: start;
+  gap: 4px;
+  min-height: 100px;
+  max-height: 286px;
+  padding-right: 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.account-timezone-option {
+  position: relative;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 54px;
+  padding: 9px 12px;
+  border-radius: 9px;
+  cursor: pointer;
+}
+
+.account-timezone-option:hover,
+.account-timezone-option:has(input:focus-visible) { background: var(--relay-subtle); }
+.account-timezone-option[data-selected="true"] { background: var(--relay-accent-soft); }
+.account-timezone-option:has(input:disabled) { cursor: default; opacity: 0.65; }
+.account-timezone-option-name { display: grid; gap: 4px; min-width: 0; }
+.account-timezone-option-name strong { font-size: 12px; font-weight: 500; line-height: 16px; overflow-wrap: anywhere; }
+.account-timezone-option-name code { color: var(--relay-muted); font-size: 10px; line-height: 14px; overflow-wrap: anywhere; }
+
+.account-timezone-check {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  background: var(--relay-subtle);
+  border-radius: 50%;
+}
+
+.account-timezone-check svg { width: 12px; height: 12px; visibility: hidden; }
+.account-timezone-option[data-selected="true"] .account-timezone-check { background: var(--relay-accent); color: var(--relay-on-accent); }
+.account-timezone-option[data-selected="true"] .account-timezone-check svg { visibility: visible; }
+.account-timezone-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; min-height: 120px; color: var(--relay-muted); text-align: center; font-size: 12px; }
+.account-timezone-empty p { margin: 0; line-height: 20px; }
+.account-timezone-empty > svg { width: 20px; height: 20px; }
+.account-timezone-error { margin: 0; color: var(--relay-error); font-size: 12px; line-height: 18px; }
+
+@media (max-width: 560px) {
+  .account-timezone-dialog > header,
+  .account-timezone-dialog > footer { padding-left: 18px; }
+  .account-timezone-dialog > footer { padding-right: 18px; }
+  .account-timezone-dialog .relay-dialog-body { padding-inline: 18px; }
+  .account-timezone-current { gap: 10px; padding: 12px; grid-template-columns: 36px minmax(0, 1fr) auto; }
+  .account-timezone-globe { width: 36px; height: 36px; }
+  .account-timezone-modes label { padding-inline: 5px; font-size: 11px; }
+}
+
+.relay-dialog.proxy-timezone-dialog {
+  width: min(560px, 100%);
+}
+
+.proxy-timezone-dialog .account-timezone-content {
+  gap: 12px;
+}

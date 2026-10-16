@@ -98,11 +98,11 @@ export async function captureOperationResult<T>(
   run: (work: () => Promise<unknown>) => Promise<boolean>,
   work: () => Promise<T>,
 ): Promise<{ ok: boolean; value: T | undefined }> {
-  let value: T | undefined;
+  let operationResult: T | undefined;
   let captured = false;
   const ok = await run(async () => {
-    value = await work();
+    operationResult = await work();
     captured = true;
   });
-  return { ok, value: captured ? value : undefined };
+  return { ok, value: captured ? operationResult : undefined };
 }

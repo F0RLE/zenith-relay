@@ -7,6 +7,67 @@ use url::Url;
 use uuid::Uuid;
 
 #[tokio::test]
+async fn authenticated_free_plan_rejects_bps_preview_but_keeps_native_import() {
+    let root = std::env::temp_dir().join(format!(
+        "zenith-relay-import-free-bps-{}",
+        Uuid::new_v4().simple()
+    ));
+    let mut state = DesktopState::open(root.clone()).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new().route(
+        "/accounts/check",
+        get(|| async {
+            Json(serde_json::json!({
+                "accounts": [{
+                    "account": {"id": "synthetic-free", "plan_type": "free"}
+                }]
+            }))
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    state.set_account_check_url_for_test(
+        Url::parse(&format!("http://{address}/accounts/check")).unwrap(),
+    );
+    let sessions = ImportSessionStore::new(state.transient_root(), NativeSecretBackend);
+    let session = sessions
+        .start(
+            r#"[
+                {"oauth_client_kind":"excel_bps","access_token":"synthetic-bps-unknown"},
+                {"oauth_client_kind":"excel_bps","account_id":"synthetic-free","access_token":"synthetic-bps-paid","plan_type":"plus"},
+                {"oauth_client_kind":"codex","account_id":"synthetic-free","access_token":"synthetic-native","plan_type":"plus"}
+            ]"#,
+            None,
+            &[],
+        )
+        .unwrap();
+    let session_id = session.session_id.clone();
+    let credentials = CredentialStore::from_backend(NativeSecretBackend);
+    let (content, preview) = prepare_import_preview(&state, &credentials, session, false)
+        .await
+        .unwrap();
+    assert_eq!(preview.rows.len(), 3);
+    for row in &preview.rows[..2] {
+        assert!(!row.selectable);
+        assert_eq!(
+            row.error.as_ref().map(|error| error.code),
+            Some(ImportIssueCode::BasisPointsFreeAccountUnsupported)
+        );
+    }
+    assert!(preview.rows[2].selectable);
+    assert_eq!(preview.rows[2].plan.as_deref(), Some("free"));
+    let prepared = sessions
+        .prepare(&session_id, content.as_deref(), preview, &[])
+        .unwrap();
+    assert_eq!(prepared.items.len(), 1);
+    assert!(state.store().unwrap().accounts().is_empty());
+    sessions.cancel(&session_id).unwrap();
+    server.abort();
+    drop(state);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn preparation_persists_only_credentials_for_selectable_rows() {
     let root = std::env::temp_dir().join(format!(
         "zenith-relay-import-preview-{}",

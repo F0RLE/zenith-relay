@@ -1,5 +1,7 @@
 use super::super::{
-    authority::CodexRefreshClient, credentials::CredentialRefresh, oauth::CodexOAuthClient,
+    authority::CodexRefreshClient,
+    credentials::CredentialRefresh,
+    oauth::{CodexOAuthClient, OAuthClientKind},
 };
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
 use std::{
@@ -59,6 +61,7 @@ impl CodexRefreshClient for ProxyRefreshClient {
         _provider_account_id: Option<&'a str>,
         refresh_token: &'a str,
         now_ms: u64,
+        kind: OAuthClientKind,
     ) -> Pin<
         Box<
             dyn Future<Output = std::result::Result<CredentialRefresh, TokenRefreshFailure>>
@@ -77,7 +80,10 @@ impl CodexRefreshClient for ProxyRefreshClient {
                     ))
                 }
             };
-            let tokens = client.exchange_refresh_token(refresh_token, now_ms).await?;
+            let tokens = client
+                .for_kind(kind)
+                .exchange_refresh_token(refresh_token, now_ms)
+                .await?;
             CredentialRefresh::from_oauth(tokens).map_err(|_| {
                 TokenRefreshFailure::new(
                     TokenRefreshFailureKind::Transient,

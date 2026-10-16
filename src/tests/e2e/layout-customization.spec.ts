@@ -71,9 +71,8 @@ test("account grouping is explicit and saved on connections", async ({ page }) =
   await expect(grouping).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator(".account-list .account-plan-group-heading")).toHaveCount(4);
   expect(await page.locator(".account-plan-group-heading + .account-card").evaluateAll((cards) => cards.every((card) => {
-    const grid = card.parentElement!.getBoundingClientRect();
     const rect = card.getBoundingClientRect();
-    return rect.width >= grid.width * 0.64;
+    return rect.width >= 280 && rect.width <= 340 && getComputedStyle(card).gridColumnStart === "auto";
   }))).toBe(true);
   await page.setViewportSize({ width: 600, height: 760 });
   expect(await page.locator(".account-plan-group-heading + .account-card").evaluateAll((cards) => cards.every((card) => {
@@ -88,9 +87,10 @@ test("account grouping is explicit and saved on connections", async ({ page }) =
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await expect(page.getByRole("button", { name: "Group by plan" })).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("tab", { name: "Sources" }).click();
-  const sourceTable = page.locator(".source-table");
-  expect(await sourceTable.locator("th:not(:last-child), td:not(:last-child)").evaluateAll((cells) => cells.every((cell) => getComputedStyle(cell).textAlign === "left"))).toBe(true);
-  await page.screenshot({ path: "output/playwright/source-table-aligned-en-600x760.png" });
+  const sourceCards = page.locator(".source-card");
+  await expect(sourceCards).toHaveCount(1);
+  expect(await sourceCards.evaluateAll((cards) => cards.every((card) => card.scrollWidth <= card.clientWidth))).toBe(true);
+  await page.screenshot({ path: "output/playwright/source-cards-en-600x760.png" });
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await expect(page.getByRole("button", { name: "Group by plan" })).toHaveCount(0);
   await expect(page.locator(".pool-member-list .account-plan-group-heading")).toHaveCount(0);

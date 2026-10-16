@@ -18,8 +18,8 @@ async fn update(
         .expected_policy
         .normalized()
         .map_err(validation_error)?;
-    let previous = state.store.routing_policy().map_err(store_error)?;
-    if previous.tool_policy.clone().unwrap_or_default() != expected {
+    let previous_policy = state.store.routing_policy().map_err(store_error)?;
+    if previous_policy.tool_policy.clone().unwrap_or_default() != expected {
         return Err(ManagementError::new(
             StatusCode::CONFLICT,
             error_codes::CONFIGURATION_REVISION_STALE,
@@ -28,14 +28,17 @@ async fn update(
             false,
         ));
     }
-    let mut next = previous.clone();
-    next.tool_policy = Some(policy.clone());
-    state.store.set_routing_policy(&next).map_err(store_error)?;
+    let mut updated_policy = previous_policy.clone();
+    updated_policy.tool_policy = Some(policy.clone());
+    state
+        .store
+        .set_routing_policy(&updated_policy)
+        .map_err(store_error)?;
     if let Some(runtime) = state.runtime().map_err(runtime_error)? {
         if let Err(error) = runtime.set_tool_policy(policy) {
             state
                 .store
-                .set_routing_policy(&previous)
+                .set_routing_policy(&previous_policy)
                 .map_err(store_error)?;
             return Err(runtime_error(error.to_string()));
         }

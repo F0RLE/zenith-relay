@@ -10,12 +10,34 @@ import type {
 } from "./activity";
 import type { PoolRoutingSnapshot } from "./pool";
 
+export type AccountTimezoneSource = "account" | "proxy";
+
+export type RequestTimezonePolicy = {
+  enabled: boolean;
+  accountTimezones: Record<string, string>;
+  /** Missing entries inherit the global setting. */
+  accountTimezoneBindings: Record<string, boolean>;
+  /** Missing entries preserve legacy account timezone behavior. */
+  accountTimezoneSources: Record<string, AccountTimezoneSource>;
+};
+
+export type RequestTimezoneUpdate = {
+  policy: RequestTimezonePolicy;
+  expectedPolicy: RequestTimezonePolicy;
+};
+
+export type ModelCatalogIdentity = Pick<ModelSummary, "catalogProvider" | "catalogFamily"> & {
+  /** Position across complete member inventories, including saved rules and prices. */
+  catalogOrder?: number | null;
+};
+
 export type RuntimeSnapshot = {
   schemaVersion: number;
   configurationRevision?: string | null;
   runtimeTarget: { kind: "local" | "remote"; connected: boolean; origin: string | null; serverId: string | null; version: string | null };
   gateway: {
     toolPolicy?: ToolPolicy;
+    requestTimezone?: RequestTimezonePolicy;
     basisPointsEnabled?: boolean;
     poolRouting?: PoolRoutingSnapshot;
     running: boolean;
@@ -26,7 +48,7 @@ export type RuntimeSnapshot = {
     defaultServiceTier: DefaultServiceTier;
     models?: ModelSummary[];
     /** Display metadata for the complete inventory, independent of routing rules. */
-    modelCatalog?: Record<string, Pick<ModelSummary, "catalogProvider" | "catalogFamily">>;
+    modelCatalog?: Record<string, ModelCatalogIdentity>;
     commonProxyConfigured?: boolean;
     commonProxyAvailable?: boolean;
     commonProxyId?: string | null;

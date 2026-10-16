@@ -8,7 +8,7 @@ impl GatewayRuntime {
         authorization: Option<&HeaderValue>,
     ) -> Option<AuthenticatedKey> {
         let secret = authorization
-            .and_then(|value| value.to_str().ok())
+            .and_then(|authorization_header| authorization_header.to_str().ok())
             .and_then(parse_bearer)?;
         self.authenticate_secret(secret)
     }

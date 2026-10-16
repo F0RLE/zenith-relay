@@ -33,8 +33,17 @@ mod protocol_matrix;
 #[path = "support/native_admission.rs"]
 mod native_admission;
 
+#[path = "support/native_fidelity.rs"]
+mod native_fidelity;
+
+#[path = "support/cache_context.rs"]
+mod cache_context;
+
 #[path = "support/tool_policy.rs"]
 mod tool_policy;
+
+#[path = "support/parallel_tools_admission.rs"]
+mod parallel_tools_admission;
 
 #[path = "support/error_recording.rs"]
 mod error_recording;
@@ -98,6 +107,7 @@ async fn spawn_gateway(
             name: "Synthetic upstream".to_string(),
             base_url: format!("{upstream_base_url}/v1"),
             api_key: SOURCE_KEY.to_string(),
+            proxy_url: None,
             wire_api: WireApi::Responses,
             models: models.into_iter().map(str::to_string).collect(),
         },
@@ -136,10 +146,26 @@ async fn spawn_messages_bridge_gateway(
         name: "Synthetic Messages source".to_string(),
         base_url: format!("{upstream_base_url}/v1"),
         api_key: SOURCE_KEY.to_string(),
+        proxy_url: None,
         wire_api: WireApi::Messages,
         models: vec!["claude-test".to_string()],
     };
-    let mut options = GatewayRuntimeOptions::default();
+    let mut options = GatewayRuntimeOptions {
+        model_metadata_catalog: Some(
+            zenith_relay_core::model_metadata::ModelMetadataCatalogHandle::new(
+                zenith_relay_core::model_metadata::ModelMetadataCatalog::from_models_dev_json(
+                    &json!({
+                        "anthropic/claude-test": {
+                            "reasoning": {"supported": true, "type": "adaptive", "efforts": ["high"]}
+                        }
+                    })
+                    .to_string(),
+                )
+                .unwrap(),
+            ),
+        ),
+        ..GatewayRuntimeOptions::default()
+    };
     if reasoning_mode != MessagesReasoningMode::Disabled {
         options
             .model_reasoning_allowed_levels
@@ -193,6 +219,7 @@ async fn spawn_mixed_responses_gateway(
         name: "Synthetic mixed source".to_string(),
         base_url: format!("{upstream_base_url}/v1"),
         api_key: SOURCE_KEY.to_string(),
+        proxy_url: None,
         wire_api: WireApi::Responses,
         models: vec!["gpt-test".to_string(), "claude-test".to_string()],
     };
@@ -209,6 +236,7 @@ async fn spawn_mixed_responses_gateway(
                         checked_at_ms: 1,
                         features: Default::default(),
                         reasoning_efforts: Vec::new(),
+                        service_tiers: None,
                     },
                     ModelEndpointCapability {
                         model_id: "claude-test".to_string(),
@@ -218,6 +246,7 @@ async fn spawn_mixed_responses_gateway(
                         checked_at_ms: 1,
                         features: Default::default(),
                         reasoning_efforts: Vec::new(),
+                        service_tiers: None,
                     },
                 ],
                 endpoint_hint: None,
@@ -296,6 +325,7 @@ async fn spawn_gemini_bridge_gateway(
                 name: "Synthetic Gemini source".to_string(),
                 base_url: format!("{upstream_base_url}/v1"),
                 api_key: SOURCE_KEY.to_string(),
+                proxy_url: None,
                 wire_api: WireApi::Gemini,
                 models: vec!["gemini-test".to_string()],
             },
@@ -342,6 +372,7 @@ async fn spawn_native_gemini_gateway(
                 name: "Synthetic native Gemini source".to_string(),
                 base_url: format!("{upstream_base_url}/v1"),
                 api_key: SOURCE_KEY.to_string(),
+                proxy_url: None,
                 wire_api: WireApi::Gemini,
                 models: vec!["gemini-test".to_string()],
             },
@@ -549,6 +580,8 @@ async fn upstream_responses(
         return Json(json!({
             "id": "resp_test",
             "object": "response",
+            "status": "completed",
+            "output": [],
             "model": request["model"],
             "usage": {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7}
         }))
@@ -618,7 +651,7 @@ async fn upstream_responses(
             match step {
                 0 => Some((
                     Ok::<_, Infallible>(Bytes::from_static(
-                        b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":2,",
+                        b"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"fragmented\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":2,",
                     )),
                     1,
                 )),
@@ -658,9 +691,9 @@ async fn upstream_responses(
             .as_bytes(),
         );
         let terminal_and_tail = Bytes::from_static(concat!(
-            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_once\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1,\"total_tokens\":3}}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_once\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"once\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":2,\"output_tokens\":1,\"total_tokens\":3}}}\n\n",
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"duplicate\"}\n\n",
-            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_once\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_once\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"once\",\"annotations\":[]}]}]}}\n\n",
         ).as_bytes());
         let chunks = if input == Some("coalesced-terminal") {
             vec![Ok::<_, Infallible>(Bytes::from(
@@ -698,7 +731,7 @@ async fn upstream_responses(
                 }
                 2 => Some((
                     Ok::<_, Infallible>(Bytes::from_static(
-                        b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"status\":\"completed\"}}\n\n",
+                        b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\",\"annotations\":[]}]}]}}\n\n",
                     )),
                     3,
                 )),
@@ -839,7 +872,7 @@ async fn native_replay_upstream_responses(
                 b"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_native_tool\",\"name\":\"run_command\",\"arguments\":\"{\\\"command\\\":\\\"pwd\\\"}\"}}\n\n",
             )),
             Ok::<_, Infallible>(Bytes::from_static(
-                b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_native_tool\",\"status\":\"completed\"}}\n\n",
+                b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_native_tool\",\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_native_tool\",\"name\":\"run_command\",\"arguments\":\"{\\\"command\\\":\\\"pwd\\\"}\"}]}}\n\n",
             )),
         ]);
         return Response::builder()
@@ -852,6 +885,7 @@ async fn native_replay_upstream_responses(
     Json(json!({
         "id": "resp_native_tool",
         "object": "response",
+        "status": "completed",
         "model": request["model"],
         "output": [{
             "type": "function_call",
@@ -896,6 +930,7 @@ async fn strict_function_item_id_upstream_responses(
     Json(json!({
         "id": "resp_strict_function_id",
         "object": "response",
+        "status": "completed",
         "model": request["model"],
         "output": [{
             "type": "message",
@@ -939,6 +974,7 @@ async fn strict_custom_tool_item_id_upstream_responses(
     Json(json!({
         "id": "resp_strict_custom_id",
         "object": "response",
+        "status": "completed",
         "model": request["model"],
         "output": [{
             "type": "message",
@@ -982,6 +1018,7 @@ async fn strict_message_item_id_upstream_responses(
     Json(json!({
         "id": "resp_strict_message_id",
         "object": "response",
+        "status": "completed",
         "model": request["model"],
         "output": [{
             "type": "message",
@@ -1081,7 +1118,7 @@ async fn strict_missing_call_id_upstream_responses(
                 b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"History accepted\"}\n\n",
             )),
             Ok::<_, Infallible>(Bytes::from_static(
-                b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_strict_call_id\",\"status\":\"completed\"}}\n\n",
+                b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_strict_call_id\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"History accepted\",\"annotations\":[]}]}]}}\n\n",
             )),
         ]);
         return Response::builder()
@@ -1093,6 +1130,7 @@ async fn strict_missing_call_id_upstream_responses(
     Json(json!({
         "id": "resp_strict_call_id",
         "object": "response",
+        "status": "completed",
         "model": request["model"],
         "output": [{
             "type": "message",
@@ -1108,6 +1146,7 @@ fn native_replay_final_response(streaming: bool, response_id: &str) -> Response<
         return Json(json!({
             "id": response_id,
             "object": "response",
+            "status": "completed",
             "output": [{
                 "type": "message",
                 "role": "assistant",
@@ -1118,7 +1157,7 @@ fn native_replay_final_response(streaming: bool, response_id: &str) -> Response<
     }
 
     let completed = format!(
-        "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"{response_id}\",\"status\":\"completed\"}}}}\n\n"
+        "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"{response_id}\",\"status\":\"completed\",\"output\":[{{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"Tool result received\",\"annotations\":[]}}]}}]}}}}\n\n"
     );
     let chunks = stream::iter([
         Ok::<_, Infallible>(Bytes::from_static(
@@ -1246,6 +1285,7 @@ async fn upstream_messages(
         return Json(json!({
             "id": "msg_malformed",
             "type": "message",
+            "stop_reason": "end_turn",
             "content": [{"type": "provider-private-body"}],
             "usage": {"input_tokens": 1, "output_tokens": 1}
         }))
@@ -1328,7 +1368,7 @@ async fn upstream_gemini_generate_content(
     };
     state.bodies.lock().unwrap().push(request);
     Json(json!({
-        "candidates": [{"content": {"parts": [{"text": "Native Gemini response"}]}}],
+        "candidates": [{"content": {"parts": [{"text": "Native Gemini response"}]}, "finishReason": "STOP"}],
         "usageMetadata": {
             "promptTokenCount": 2,
             "candidatesTokenCount": 3,

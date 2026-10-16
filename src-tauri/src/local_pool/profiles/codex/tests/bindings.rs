@@ -21,12 +21,32 @@ fn profile_bindings_reports_orphaned_managed_provider_without_blocking_inventory
 #[test]
 fn oauth_account_attach_reuses_one_profile_binding_and_restores_previous_login() {
     let (root, home, backups) = profile_dirs("oauth-account");
-    let previous_config = r#"model_provider = "custom"
+    let previous_config = r#"model_provider = "codex_local_access"
+model = "relay-model"
+review_model = "relay-review-model"
+model_catalog_json = "relay-catalog.json"
+chatgpt_base_url = "https://relay.example.com/v1"
 openai_base_url = "https://stale.example.com/v1"
+model_reasoning_effort = "ultra"
 
+[model_providers.zenith_relay_local]
+name = "Zenith Relay Local"
+[model_providers.codex_local_access]
+name = "Codex API Service"
+[model_providers.zenith]
+name = "Zenith"
 [model_providers.custom]
 name = "Custom"
 base_url = "https://custom.example.com/v1"
+
+[profiles.work]
+model = "profile-relay-model"
+model_provider = "codex_local_access"
+model_catalog_json = "profile-relay-catalog.json"
+openai_base_url = "https://profile-relay.example.com/v1"
+[profiles.native]
+model_provider = "openai"
+model = "gpt-native"
 "#;
     fs::write(home.join(CONFIG_FILE), previous_config).unwrap();
     fs::write(
@@ -59,15 +79,24 @@ base_url = "https://custom.example.com/v1"
     assert_eq!(stored_bindings[0].credential_id, binding.credential_id);
     assert!(profile_bindings(&home, &backups).unwrap()[0].active);
     let account_config = fs::read_to_string(home.join(CONFIG_FILE)).unwrap();
-    assert!(!account_config.contains("model_provider ="));
+    assert!(!account_config.starts_with("model_provider ="));
+    assert!(!account_config.contains("model ="));
+    assert!(!account_config.contains("review_model"));
+    assert!(!account_config.contains("model_catalog_json"));
+    assert!(!account_config.contains("chatgpt_base_url"));
     assert!(!account_config.contains("openai_base_url"));
     assert!(!account_config.contains("[model_providers.zenith_relay_local]"));
+    assert!(!account_config.contains("[model_providers.codex_local_access]"));
+    assert!(!account_config.contains("[model_providers.zenith]"));
+    assert!(!account_config.contains("profile-relay-model"));
+    assert!(!account_config.contains("profile-relay-catalog.json"));
+    assert!(account_config.contains("[profiles.native]"));
     assert!(account_config.contains("[model_providers.custom]"));
     let account_auth: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(home.join(AUTH_FILE)).unwrap()).unwrap();
     assert_eq!(account_auth["OPENAI_API_KEY"], serde_json::Value::Null);
     assert_eq!(account_auth["tokens"]["refresh_token"], "refresh-secret");
-    assert!(account_auth.get("auth_mode").is_none());
+    assert_eq!(account_auth["auth_mode"], "chatgpt");
 
     let canonical_home = canonical_profile_dir(&home).unwrap();
     let backup_path = account_backup_path(&backups, &canonical_home);
@@ -130,6 +159,57 @@ base_url = "https://custom.example.com/v1"
     assert!(account_bindings(&backups).unwrap().is_empty());
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn account_attach_deactivates_external_provider_but_keeps_its_definition() {
+    let (root, home, backups) = profile_dirs("oauth-account-external-provider");
+    let previous_config = r#"model_provider = "external_provider"
+model = "external-model"
+model_catalog_json = "external-catalog.json"
+
+[model_providers.external_provider]
+name = "External Provider"
+base_url = "https://provider.example.com/v1"
+
+[model_providers.custom]
+name = "Custom"
+base_url = "https://custom.example.com/v1"
+"#;
+    fs::write(home.join(CONFIG_FILE), previous_config).unwrap();
+    let secrets = MemorySecrets::default();
+    let tokens = TokenSet::new(
+        "account-access",
+        Some("account-refresh".into()),
+        None,
+        None,
+        1,
+        1,
+    )
+    .unwrap();
+
+    attach_account_with(
+        &home,
+        &backups,
+        "account-external-provider",
+        &tokens,
+        "provider-external",
+        &secrets,
+    )
+    .unwrap();
+
+    let attached = fs::read_to_string(home.join(CONFIG_FILE)).unwrap();
+    assert!(!attached.contains("model_provider = \"external_provider\""));
+    assert!(attached.contains("[model_providers.external_provider]"));
+    assert!(attached.contains("[model_providers.custom]"));
+
+    restore_account_with(&home, &backups, &secrets).unwrap();
+    assert_eq!(
+        fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
+        previous_config
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn managed_profile_rotation_is_adopted_only_for_the_same_account() {
     let (root, home, backups) = profile_dirs("managed-token-adoption");
@@ -427,7 +507,7 @@ fn switching_external_account_takeover_to_local_rebases_the_latest_profile() {
     )
     .unwrap();
 
-    let external_config = "model_provider = \"codex_local_access\"\n\n[model_providers.codex_local_access]\nname = \"Codex API Service\"\nbase_url = \"http://127.0.0.1:49976/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n";
+    let external_config = "model_provider = \"external_provider\"\n\n[model_providers.external_provider]\nname = \"External Provider\"\nbase_url = \"http://127.0.0.1:49976/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n";
     let external_auth = "{\"tokens\":{\"access_token\":\"external\"}}";
     fs::write(home.join(CONFIG_FILE), external_config).unwrap();
     fs::write(home.join(AUTH_FILE), external_auth).unwrap();
@@ -516,7 +596,7 @@ fn local_gateway_projects_and_syncs_a_bound_oauth_profile() {
     assert!(!projected.contains("zlr_key"));
     let projected_value = serde_json::from_str::<serde_json::Value>(&projected).unwrap();
     assert!(projected_value["OPENAI_API_KEY"].is_null());
-    assert!(projected_value.get("auth_mode").is_none());
+    assert_eq!(projected_value["auth_mode"], "chatgpt");
     assert_eq!(projected_value["tokens"]["account_id"], "provider-account");
     DateTime::parse_from_rfc3339(projected_value["last_refresh"].as_str().unwrap()).unwrap();
 
@@ -751,7 +831,7 @@ fn oauth_account_restore_preserves_a_fresh_manual_login() {
     .unwrap();
     let auth: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(home.join(AUTH_FILE)).unwrap()).unwrap();
-    assert_eq!(auth["tokens"]["refresh_token"], "");
+    assert!(auth["tokens"].get("refresh_token").is_none());
     fs::write(
         home.join(AUTH_FILE),
         "{\"auth_mode\":\"chatgpt\",\"tokens\":{\"access_token\":\"fresh\"}}",

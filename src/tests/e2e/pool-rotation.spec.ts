@@ -9,21 +9,19 @@ test("rotation modes apply keyboard selection immediately", async ({ page }) => 
   await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Pool rotation", exact: true });
   const automatic = dialog.getByRole("radio", { name: "Automatic", exact: true });
-  const inOrder = dialog.getByRole("radio", { name: "In order", exact: true });
-  const roundRobin = dialog.getByRole("radio", { name: "Round robin", exact: true });
+  const manual = dialog.getByRole("radio", { name: "Manual", exact: true });
   await automatic.focus();
   await page.keyboard.press("ArrowRight");
-  await expect(inOrder).toBeFocused();
-  await expect(inOrder).toHaveAttribute("aria-checked", "true");
+  await expect(manual).toBeFocused();
+  await expect(manual).toHaveAttribute("aria-checked", "true");
   await expect(dialog.getByLabel("Request share: Example compatible API", { exact: true })).toHaveCount(0);
   await page.keyboard.press("End");
-  await expect(roundRobin).toBeFocused();
-  await expect(roundRobin).toHaveAttribute("aria-checked", "true");
-  await expect(dialog.getByLabel("Request share: Example compatible API", { exact: true })).toBeEnabled();
+  await expect(manual).toBeFocused();
+  await expect(manual).toHaveAttribute("aria-checked", "true");
   await page.keyboard.press("ArrowRight");
   await expect(automatic).toBeFocused();
   await page.keyboard.press("ArrowLeft");
-  await expect(roundRobin).toBeFocused();
+  await expect(manual).toBeFocused();
   await page.keyboard.press("Home");
   await expect(automatic).toBeFocused();
   await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
@@ -44,7 +42,7 @@ for (const [width, height] of [[1160, 844], [1160, 540], [600, 844], [390, 844],
       await page.getByRole("button", { name: "Настройки ротации пула", exact: true }).click();
       const dialog = page.getByRole("dialog", { name: "Ротация пула", exact: true });
       await expect(dialog.getByRole("listitem")).toHaveCount(8);
-      await expect(dialog.getByRole("radio")).toHaveCount(3);
+      await expect(dialog.getByRole("radio")).toHaveCount(2);
       expect(await dialog.evaluate((element) => {
         const rect = element.getBoundingClientRect();
         return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight
@@ -64,7 +62,7 @@ for (const [width, height] of [[1160, 844], [1160, 540], [600, 844], [390, 844],
       expect(scrollContainers.length).toBeLessThanOrEqual(1);
       expect(scrollContainers.every((name) => name === "relay-dialog-body")).toBe(true);
       if (width <= 600 || height <= 540) expect(scrollContainers).toEqual(["relay-dialog-body"]);
-      await dialog.getByRole("radio", { name: "По порядку", exact: true }).click();
+      await dialog.getByRole("radio", { name: "Вручную", exact: true }).click();
       expect(await dialog.getByRole("listitem").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth + 1))).toBe(true);
       await page.screenshot({ path: testInfo.outputPath("rotation-manual.png"), animations: "disabled" });
     });
@@ -96,7 +94,7 @@ for (const mode of ["local", "remote"] as const) {
     await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
     const dialog = page.getByRole("dialog", { name: "Pool rotation", exact: true });
     const rows = dialog.getByRole("listitem");
-    for (const name of ["Automatic", "Round robin"]) {
+    for (const name of ["Automatic"]) {
       await dialog.getByRole("radio", { name, exact: true }).click();
       await expect(dialog.getByRole("button", { name: /^Reorder / })).toHaveCount(0);
       expect(await rows.evaluateAll((items) => items.map((item) => item.getAttribute("data-status"))))
@@ -112,7 +110,7 @@ for (const mode of ["local", "remote"] as const) {
     await expect(edited.getByRole("spinbutton").last()).toHaveValue("1");
     await edited.getByRole("spinbutton").first().fill("7");
     await edited.getByRole("spinbutton").last().fill("2");
-    await dialog.getByRole("radio", { name: "In order", exact: true }).click();
+    await dialog.getByRole("radio", { name: "Manual", exact: true }).click();
     expect(await rows.evaluateAll((items) => items.map((item) => item.getAttribute("data-member-id"))))
       .toEqual(initial.members.map((member) => `${member.kind}:${member.id}`));
     await dialog.getByRole("radio", { name: "Automatic", exact: true }).click();
@@ -121,7 +119,7 @@ for (const mode of ["local", "remote"] as const) {
     await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
     await expect(edited.getByRole("spinbutton").first()).toHaveValue("7");
     await expect(edited.getByRole("spinbutton").last()).toHaveValue("2");
-    await dialog.getByRole("radio", { name: "In order", exact: true }).click();
+    await dialog.getByRole("radio", { name: "Manual", exact: true }).click();
     expect(await rows.evaluateAll((items) => items.map((item) => item.getAttribute("data-member-id"))))
       .toEqual(initial.members.map((member) => `${member.kind}:${member.id}`));
     await edited.getByRole("spinbutton").fill("");
@@ -146,7 +144,7 @@ test("rotation refreshes concurrent membership changes without blocking edits", 
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Pool rotation", exact: true });
-  await dialog.getByRole("radio", { name: "In order", exact: true }).click();
+  await dialog.getByRole("radio", { name: "Manual", exact: true }).click();
   await expect(dialog.locator(".pool-routing-editor")).toHaveAttribute("aria-busy", "false");
   await page.evaluate(async () => {
     const invoke = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__.invoke;
@@ -154,7 +152,7 @@ test("rotation refreshes concurrent membership changes without blocking edits", 
   });
   await emitTauriEvent(page, "zenith-state-changed", null);
   await expect(dialog.locator('[data-member-id="account:account_synthetic"]')).toHaveCount(0);
-  await dialog.getByRole("radio", { name: "Round robin", exact: true }).click();
+  await dialog.getByRole("radio", { name: "Automatic", exact: true }).click();
   await expect(dialog.locator(".pool-routing-editor")).toHaveAttribute("aria-busy", "false");
   await expect(dialog.getByRole("alert")).toHaveCount(0);
   await expect(dialog.getByRole("listitem")).toHaveCount(1);

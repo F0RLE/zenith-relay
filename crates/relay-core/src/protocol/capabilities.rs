@@ -7,6 +7,7 @@ pub const CURRENT_PROTOCOL_VERSION: u16 = 2;
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Feature {
     Accounts,
+    AccountTrash,
     AccountBatchImport,
     AccountBatchImportCreationStatus,
     AccountImportToPool,
@@ -35,12 +36,14 @@ pub enum Feature {
     RouteRecovery,
     BlockDegradedRoutes,
     ToolPolicy,
+    RequestTimezone,
     Images,
 }
 
 impl Feature {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::AccountTrash => "account_trash_v1",
             Self::Accounts => "accounts",
             Self::AccountBatchImport => "account_batch_import",
             Self::AccountBatchImportCreationStatus => "account_batch_import_creation_status",
@@ -72,6 +75,7 @@ impl Feature {
             Self::RouteRecovery => "route_recovery_v1",
             Self::BlockDegradedRoutes => "block_degraded_routes",
             Self::ToolPolicy => "tool_policy_v1",
+            Self::RequestTimezone => "request_timezone_v1",
             Self::Images => "images",
         }
     }
@@ -115,6 +119,7 @@ impl Capabilities {
     ) -> Self {
         let features = [
             Feature::Accounts,
+            Feature::AccountTrash,
             Feature::AccountBatchImport,
             Feature::AccountBatchImportCreationStatus,
             Feature::AccountImportToPool,
@@ -143,6 +148,7 @@ impl Capabilities {
             Feature::RouteRecovery,
             Feature::BlockDegradedRoutes,
             Feature::ToolPolicy,
+            Feature::RequestTimezone,
             Feature::Images,
         ]
         .into_iter()

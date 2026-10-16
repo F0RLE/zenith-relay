@@ -17,6 +17,7 @@ fn runtime() -> GatewayRuntime {
                     api_key: "synthetic".into(),
                     wire_api: WireApi::Responses,
                     models: vec!["model".into()],
+                    proxy_url: None,
                 })
             })
             .collect(),
@@ -75,6 +76,59 @@ fn a_paired_historic_call_cannot_own_an_unknown_tool_output() {
         {"type":"function_call_output", "call_id":"unknown", "output":"new result"}
     ]});
     assert!(prepare_response_continuation(&runtime, "key", &mut request, 10, None).is_err());
+}
+
+#[test]
+fn owner_change_releases_paired_history_without_rewriting_it() {
+    let runtime = runtime();
+    for (call_kind, output_kind) in [
+        ("function_call", "function_call_output"),
+        ("custom_tool_call", "custom_tool_call_output"),
+    ] {
+        runtime.bind_tool_call_affinity("key", "paired", "source", 10);
+        let mut request = json!({"model":"model", "input":[
+            {"type":call_kind, "call_id":"paired", "name":"lookup", "arguments":"{}", "input":"query"},
+            {"type":output_kind, "call_id":"paired", "output":"synthetic result"}
+        ]});
+        let original = request.clone();
+        let state = prepare_response_continuation(&runtime, "key", &mut request, 10, None).unwrap();
+        assert!(state.response_affinity_key.is_some());
+        assert!(!state.requires_affinity_owner);
+        assert!(prepare_response_owner_change(
+            &runtime,
+            "key",
+            &mut request,
+            "model",
+            state.requires_affinity_owner,
+            10,
+        ));
+        assert_eq!(request, original);
+    }
+}
+
+#[test]
+fn owner_change_cannot_release_opaque_or_unpaired_state_even_with_a_soft_flag() {
+    let runtime = runtime();
+    runtime.bind_response_affinity(Some("resp_opaque"), "source", 10);
+    runtime.bind_tool_call_affinity("key", "unpaired", "source", 10);
+    for requires_owner in [true, false] {
+        for mut request in [
+            json!({"previous_response_id":"resp_opaque", "input":"continue"}),
+            json!({"input":[{"type":"function_call_output", "call_id":"unpaired", "output":"result"}]}),
+            json!({"input":[{"type":"custom_tool_call_output", "call_id":"unpaired", "output":"result"}]}),
+        ] {
+            let original = request.clone();
+            assert!(!prepare_response_owner_change(
+                &runtime,
+                "key",
+                &mut request,
+                "model",
+                requires_owner,
+                10,
+            ));
+            assert_eq!(request, original);
+        }
+    }
 }
 
 #[test]

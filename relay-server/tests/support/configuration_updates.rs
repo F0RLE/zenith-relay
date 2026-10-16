@@ -1,6 +1,64 @@
 use super::*;
 
 #[tokio::test]
+async fn model_context_updates_preserve_other_models_without_rebuilding_runtime() {
+    let root = TempDir::new().unwrap();
+    let server = spawn_server(root.path()).await;
+    add_rebuild_failing_source(&server.state);
+    let mut source = server.state.store.sources().unwrap().remove(0);
+    source.weight = 1;
+    source.models = vec!["alpha-model".into(), "beta-model".into()];
+    server.state.store.save_source(&source).unwrap();
+    server.state.rebuild_runtime().await.unwrap();
+    let runtime = server.state.runtime().unwrap().unwrap();
+    let client = reqwest::Client::new();
+    let update = |model: &str, tokens: u64| {
+        client
+            .post(format!("{}/models/context", server.origin))
+            .bearer_auth("synthetic-management-token-value")
+            .json(&json!({
+                "modelId": model,
+                "contextPolicy": { "mode": "custom", "tokens": tokens }
+            }))
+            .send()
+    };
+    let (alpha, beta) = tokio::join!(update("alpha-model", 64_000), update("beta-model", 96_000));
+    assert_eq!(alpha.unwrap().status(), StatusCode::OK);
+    assert_eq!(beta.unwrap().status(), StatusCode::OK);
+    let saved = server.state.store.model_context_policies().unwrap();
+    assert_eq!(
+        saved,
+        BTreeMap::from([
+            (
+                "alpha-model".into(),
+                zenith_relay_core::ModelContextPolicy::Custom { tokens: 64_000 }
+            ),
+            (
+                "beta-model".into(),
+                zenith_relay_core::ModelContextPolicy::Custom { tokens: 96_000 }
+            ),
+        ])
+    );
+    assert!(Arc::ptr_eq(
+        &runtime,
+        &server.state.runtime().unwrap().unwrap()
+    ));
+    assert_eq!(
+        update("alpha-model", 100).await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(server.state.store.model_context_policies().unwrap(), saved);
+    server.task.abort();
+    drop(server);
+    let reopened = spawn_server(root.path()).await;
+    assert_eq!(
+        reopened.state.store.model_context_policies().unwrap(),
+        saved
+    );
+    reopened.task.abort();
+}
+
+#[tokio::test]
 async fn model_order_reset_clears_persisted_override_and_survives_restart() {
     let root = TempDir::new().unwrap();
     let server = spawn_server(root.path()).await;
@@ -183,52 +241,41 @@ async fn routing_policy_hot_update_does_not_rebuild_unrelated_invalid_source() {
 }
 
 #[tokio::test]
-async fn basis_points_switch_updates_running_server_account_without_rebuild() {
+async fn legacy_basis_points_switch_keeps_each_connections_native_transport() {
     let root = TempDir::new().unwrap();
     let (upstream, upstream_task) = spawn_upstream().await;
     let server = spawn_server(root.path()).await;
     let client = reqwest::Client::new();
     let management_key = "synthetic-management-token-value";
-    let preview: Value = client
-        .post(format!("{}/accounts/import/preview", server.origin))
-        .bearer_auth(management_key)
-        .json(&json!({
-            "label": "OAuth account",
-            "accessToken": "synthetic-access-token",
-            "refreshToken": "synthetic-refresh-token",
-            "expiresAtMs": 4_000_000_000_000_u64,
-            "chatgptAccountId": "synthetic-chatgpt-account-id",
-            "responsesUrl": format!("{upstream}/account/responses"),
-            "models": ["gpt-test"]
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let account: Value = client
-        .post(format!("{}/accounts/import/confirm", server.origin))
-        .bearer_auth(management_key)
-        .json(&json!({"sessionId": preview["sessionId"]}))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let account_id = account["id"].as_str().unwrap();
-    assert_eq!(
-        client
-            .post(format!("{}/pool/members", server.origin))
+    let mut connections = Vec::new();
+    for (kind, basis_points) in [("codex", false), ("excel_bps", true)] {
+        let response = client
+            .post(format!("{}/accounts/import/preview", server.origin))
             .bearer_auth(management_key)
-            .json(&json!({"accountIds": [account_id], "inPool": true}))
+            .json(&json!({
+                "label": "OAuth account", "oauthClientKind": kind,
+                "accessToken": "synthetic-access-token", "refreshToken": "synthetic-refresh-token",
+                "expiresAtMs": 4_000_000_000_000_u64,
+                "chatgptAccountId": "synthetic-chatgpt-account-id",
+                "responsesUrl": format!("{upstream}/account/responses"), "models": ["gpt-test"]
+            }))
             .send()
             .await
-            .unwrap()
-            .status(),
-        StatusCode::OK
-    );
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let preview: Value = response.json().await.unwrap();
+        let response = client
+            .post(format!("{}/accounts/import/confirm", server.origin))
+            .bearer_auth(management_key)
+            .json(&json!({"sessionId": preview["sessionId"], "addToPool": true}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let account: Value = response.json().await.unwrap();
+        connections.push((account["id"].as_str().unwrap().to_owned(), basis_points));
+    }
+    assert_ne!(connections[0].0, connections[1].0);
     let runtime = server.state.runtime().unwrap().unwrap();
     for enabled in [true, false] {
         let response = client
@@ -240,16 +287,17 @@ async fn basis_points_switch_updates_running_server_account_without_rebuild() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let snapshot: Value = response.json().await.unwrap();
-        assert_eq!(snapshot["gateway"]["basisPointsEnabled"], enabled);
-        assert_eq!(
-            snapshot["accounts"]
+        assert_eq!(snapshot["gateway"]["basisPointsEnabled"], false);
+        for (account_id, basis_points) in &connections {
+            let account = snapshot["accounts"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .find(|account| account["id"] == account_id)
-                .unwrap()["basisPointsEnabled"],
-            enabled
-        );
+                .find(|account| account["id"].as_str() == Some(account_id.as_str()))
+                .unwrap();
+            assert_eq!(account["basisPointsAvailable"], *basis_points);
+            assert_eq!(account["basisPointsEnabled"], *basis_points);
+        }
         assert!(Arc::ptr_eq(
             &runtime,
             &server.state.runtime().unwrap().unwrap()

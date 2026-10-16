@@ -1,5 +1,6 @@
 use super::super::*;
 use super::ConfigurationPreset;
+use crate::ModelContextPolicy;
 
 impl ConfigurationPresetSettings {
     pub fn resolved_pool_routing(&self) -> crate::PoolRoutingPolicy {
@@ -37,6 +38,7 @@ pub struct ConfigurationPresetSettings {
     pub hidden_models: Vec<String>,
     pub model_price_overrides: BTreeMap<String, ApiModelPriceOverride>,
     pub model_reasoning_allowed_levels: BTreeMap<String, Vec<String>>,
+    pub model_context_policies: BTreeMap<String, ModelContextPolicy>,
     pub model_service_tier_overrides: BTreeMap<String, DefaultServiceTier>,
     pub model_display_order: Vec<String>,
     /// Whether the preset explicitly supplied `modelReasoningAllowedLevels`.
@@ -44,6 +46,7 @@ pub struct ConfigurationPresetSettings {
     /// Resolved configuration settings always set this to `true`; it is false
     /// only while importing a backward-compatible sparse preset.
     pub model_reasoning_allowed_levels_present: bool,
+    pub model_context_policies_present: bool,
     pub model_service_tier_overrides_present: bool,
     pub model_display_order_present: bool,
 }
@@ -57,6 +60,8 @@ struct ConfigurationPresetSettingsWire {
     quota: PresetQuotaPolicy,
     hidden_models: Vec<String>,
     model_price_overrides: BTreeMap<String, ApiModelPriceOverride>,
+    #[serde(default)]
+    model_context_policies: Option<BTreeMap<String, ModelContextPolicy>>,
     #[serde(default)]
     model_service_tier_overrides: Option<BTreeMap<String, DefaultServiceTier>>,
     #[serde(default)]
@@ -85,6 +90,7 @@ impl<'de> Deserialize<'de> for ConfigurationPresetSettings {
     {
         let wire = ConfigurationPresetSettingsWire::deserialize(deserializer)?;
         let model_reasoning_allowed_levels_present = wire.model_reasoning_allowed_levels.is_some();
+        let model_context_policies_present = wire.model_context_policies.is_some();
         let model_service_tier_overrides_present = wire.model_service_tier_overrides.is_some();
         let model_display_order_present = wire.model_display_order.is_some();
         Ok(Self {
@@ -94,10 +100,12 @@ impl<'de> Deserialize<'de> for ConfigurationPresetSettings {
             quota: wire.quota,
             hidden_models: wire.hidden_models,
             model_price_overrides: wire.model_price_overrides,
+            model_context_policies: wire.model_context_policies.unwrap_or_default(),
             model_service_tier_overrides: wire.model_service_tier_overrides.unwrap_or_default(),
             model_display_order: wire.model_display_order.unwrap_or_default(),
             model_reasoning_allowed_levels: wire.model_reasoning_allowed_levels.unwrap_or_default(),
             model_reasoning_allowed_levels_present,
+            model_context_policies_present,
             model_service_tier_overrides_present,
             model_display_order_present,
         })
@@ -109,34 +117,39 @@ impl Serialize for ConfigurationPresetSettings {
     where
         S: Serializer,
     {
-        let mut state = serializer.serialize_struct(
+        let mut serialized_preset = serializer.serialize_struct(
             "ConfigurationPresetSettings",
             6 + usize::from(self.model_reasoning_allowed_levels_present)
+                + usize::from(self.model_context_policies_present)
                 + usize::from(self.model_service_tier_overrides_present)
                 + usize::from(self.model_display_order_present),
         )?;
-        state.serialize_field("sources", &self.sources)?;
-        state.serialize_field("accounts", &self.accounts)?;
-        state.serialize_field("routing", &self.routing)?;
-        state.serialize_field("quota", &self.quota)?;
-        state.serialize_field("hiddenModels", &self.hidden_models)?;
-        state.serialize_field("modelPriceOverrides", &self.model_price_overrides)?;
+        serialized_preset.serialize_field("sources", &self.sources)?;
+        serialized_preset.serialize_field("accounts", &self.accounts)?;
+        serialized_preset.serialize_field("routing", &self.routing)?;
+        serialized_preset.serialize_field("quota", &self.quota)?;
+        serialized_preset.serialize_field("hiddenModels", &self.hidden_models)?;
+        serialized_preset.serialize_field("modelPriceOverrides", &self.model_price_overrides)?;
+        if self.model_context_policies_present {
+            serialized_preset
+                .serialize_field("modelContextPolicies", &self.model_context_policies)?;
+        }
         if self.model_service_tier_overrides_present {
-            state.serialize_field(
+            serialized_preset.serialize_field(
                 "modelServiceTierOverrides",
                 &self.model_service_tier_overrides,
             )?;
         }
         if self.model_display_order_present {
-            state.serialize_field("modelDisplayOrder", &self.model_display_order)?;
+            serialized_preset.serialize_field("modelDisplayOrder", &self.model_display_order)?;
         }
         if self.model_reasoning_allowed_levels_present {
-            state.serialize_field(
+            serialized_preset.serialize_field(
                 "modelReasoningAllowedLevels",
                 &self.model_reasoning_allowed_levels,
             )?;
         }
-        state.end()
+        serialized_preset.end()
     }
 }
 
@@ -150,6 +163,10 @@ pub struct SourcePresetRule {
     pub pricing_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub official_provider_family: Option<String>,
+    /// Stored proxy of the source. Only the identifier is exported; the proxy
+    /// URL and its credentials never leave the proxy pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_id: Option<String>,
     pub wire_api: WireApi,
     /// Accepted only so presets exported by pre-1.1.3 builds remain readable.
     /// Routing is always automatic and the legacy field is never exported.
@@ -167,6 +184,21 @@ pub struct SourcePresetRule {
     pub recovery_delay_seconds: u64,
     #[serde(default)]
     pub model_price_overrides: BTreeMap<String, ApiModelPriceOverride>,
+}
+
+impl SourcePresetRule {
+    pub fn apply_resolved_identity(
+        &mut self,
+        source_id: &str,
+        source_name: &str,
+        base_url: &str,
+        wire_api: WireApi,
+    ) {
+        self.id = source_id.to_owned();
+        self.name = source_name.to_owned();
+        self.base_url = base_url.trim_end_matches('/').to_owned();
+        self.wire_api = wire_api;
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -193,9 +225,8 @@ pub struct PresetRoutingPolicy {
     pub tool_policy: Option<crate::ToolPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_routing: Option<crate::PoolRoutingPolicy>,
-    /// Use the explicitly labelled Excel/Basis Points route for compatible
-    /// OAuth accounts. This is a route preference, not a second pool member.
-    #[serde(default)]
+    /// Legacy storage field, ignored and omitted from portable presets.
+    #[serde(skip_serializing)]
     pub basis_points_enabled: bool,
     pub max_retry_candidates: u8,
     pub default_service_tier: DefaultServiceTier,

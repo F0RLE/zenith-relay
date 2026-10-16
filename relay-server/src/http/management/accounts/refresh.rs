@@ -13,8 +13,8 @@ pub(super) async fn refresh_account(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<AccountSummary>, ManagementError> {
-    let record = find_account(&state, &id)?;
-    let updated = jobs::refresh_account_quota_now(&state, record)
+    let account_record = find_account(&state, &id)?;
+    let updated = jobs::refresh_account_quota_now(&state, account_record)
         .await
         .map_err(|_| {
             ManagementError::new(

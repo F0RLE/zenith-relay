@@ -12,6 +12,7 @@ fn runtime(recovery_delay_seconds: u64) -> GatewayRuntime {
         api_key: "test-source-key".into(),
         wire_api: WireApi::Responses,
         models: vec!["model-a".into(), "model-b".into()],
+        proxy_url: None,
     });
     source.recovery_delay_seconds = recovery_delay_seconds;
     GatewayRuntime::from_pool(

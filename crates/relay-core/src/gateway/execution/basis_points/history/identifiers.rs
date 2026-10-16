@@ -10,18 +10,18 @@ const RESPONSES_ID_LIMIT: usize = 64;
 /// A known namespace prefix stays intact. The remainder is a stable hash of
 /// the original value, so a historic call and its output still match after a
 /// model switch replaces a long foreign identifier.
-pub(in crate::gateway::execution::basis_points) fn fit_responses_id(id: &str) -> String {
-    if id.chars().count() <= RESPONSES_ID_LIMIT {
-        return id.to_string();
+pub(in crate::gateway::execution::basis_points) fn fit_responses_id(identifier: &str) -> String {
+    if identifier.chars().count() <= RESPONSES_ID_LIMIT {
+        return identifier.to_string();
     }
     // Longer prefixes first so `ctc_` is not mistaken for a shorter token.
     let prefix = [
         "ctc_", "call_", "cmp_", "mcp_", "msg_", "fc_", "fs_", "rs_", "ws_", "ci_", "cu_", "ig_",
     ]
     .into_iter()
-    .find(|prefix| id.starts_with(prefix))
+    .find(|prefix| identifier.starts_with(prefix))
     .unwrap_or("");
-    let digest = hex::encode(Sha256::digest(id.as_bytes()));
+    let digest = hex::encode(Sha256::digest(identifier.as_bytes()));
     let take = (RESPONSES_ID_LIMIT - prefix.chars().count()).min(32);
     let mut fitted = String::with_capacity(prefix.len() + take);
     fitted.push_str(prefix);
@@ -30,36 +30,49 @@ pub(in crate::gateway::execution::basis_points) fn fit_responses_id(id: &str) ->
 }
 
 pub(in crate::gateway::execution::basis_points) fn limit_responses_identifiers(
-    items: &mut [Value],
+    input_items: &mut [Value],
 ) {
-    for item in items {
-        let Some(object) = item.as_object_mut() else {
+    for input_item in input_items {
+        let Some(input_object) = input_item.as_object_mut() else {
             continue;
         };
-        shrink_field(object, "call_id", "");
-        if has_item_ciphertext(object.get("encrypted_content")) {
+        shrink_field(input_object, "call_id", "");
+        if has_item_ciphertext(input_object.get("encrypted_content")) {
             continue;
         }
-        let kind = object.get("type").and_then(Value::as_str).unwrap_or("");
+        let kind = input_object
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let prefix = item_id_prefix(kind);
-        shrink_field(object, "id", prefix);
+        shrink_field(input_object, "id", prefix);
     }
 }
 
-fn shrink_field(object: &mut serde_json::Map<String, Value>, field: &str, required_prefix: &str) {
-    let Some(current) = object.get(field).and_then(Value::as_str).map(str::to_owned) else {
+fn shrink_field(
+    object_fields: &mut serde_json::Map<String, Value>,
+    field: &str,
+    required_prefix: &str,
+) {
+    let Some(existing_identifier) = object_fields
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
         return;
     };
-    let normalized = if required_prefix.is_empty() || current.starts_with(required_prefix) {
-        current.clone()
-    } else if current.chars().count() > RESPONSES_ID_LIMIT || required_prefix == "ws_" {
-        format!("{required_prefix}{current}")
+    let normalized = if required_prefix.is_empty()
+        || existing_identifier.starts_with(required_prefix)
+    {
+        existing_identifier.clone()
+    } else if existing_identifier.chars().count() > RESPONSES_ID_LIMIT || required_prefix == "ws_" {
+        format!("{required_prefix}{existing_identifier}")
     } else {
         return;
     };
     let fitted = fit_responses_id(&normalized);
-    if fitted != current {
-        object.insert(field.to_string(), Value::String(fitted));
+    if fitted != existing_identifier {
+        object_fields.insert(field.to_string(), Value::String(fitted));
     }
 }
 

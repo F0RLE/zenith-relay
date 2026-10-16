@@ -1,93 +1,159 @@
-use super::super::prepare::should_retry_tool_relay;
 use super::*;
-use crate::protocol::AdapterError;
 use serde_json::json;
 
 #[test]
-fn malformed_tool_relay_is_retryable_once_but_incomplete_is_not() {
-    let error =
-        AdapterError::upstream_response_invalid().with_parameter("output.run_officejs.references");
-    let completed = json!({"status": "completed", "output": []});
-    assert!(should_retry_tool_relay(
-        error,
-        &serde_json::to_vec(&completed).unwrap()
-    ));
-
-    let incomplete = json!({"status": "incomplete", "output": []});
-    assert!(!should_retry_tool_relay(
-        error,
-        &serde_json::to_vec(&incomplete).unwrap()
-    ));
-    assert!(!should_retry_tool_relay(
-        AdapterError::upstream_response_invalid().with_parameter("response.output"),
-        &serde_json::to_vec(&completed).unwrap()
-    ));
-    assert!(!should_retry_tool_relay(
-        error,
-        &serde_json::to_vec(&json!({"output": []})).unwrap()
-    ));
-    assert!(!should_retry_tool_relay(error, b"not-json"));
+fn tool_prompt_and_validation_use_the_same_json_schema() {
+    let schema = json!({"type":"object","properties":{
+        "path":{"type":"string","description":"File path","minLength":1},
+        "limit":{"type":"integer","minimum":1,"maximum":100},
+        "options":{"type":"object","properties":{"enabled":{"type":"boolean"}},"required":["enabled"],"additionalProperties":false}
+    },"required":["path","options"],"additionalProperties":false});
+    let request = json!({"model":"gpt-test","input":"Find a file","tools":[{"type":"function","name":"lookup","parameters":schema}]});
+    let original = request.clone();
+    let prepared = prepare_request(&request).unwrap();
+    let instructions = prepared["input"][0]["content"][0]["text"].as_str().unwrap();
+    assert!(instructions.contains("matching this JSON Schema:"));
+    assert!(instructions.contains(&schema.to_string()));
+    assert_eq!(request, original);
 }
 
 #[test]
-fn tool_relay_retry_claim_is_one_shot_and_keeps_only_the_safe_parameter() {
-    let error =
-        AdapterError::upstream_response_invalid().with_parameter("output.run_officejs.code");
-    let body = serde_json::to_vec(&json!({"status": "completed", "output": []})).unwrap();
-    let mut attempted = false;
-    let mut parameter = None;
-
-    assert!(take_tool_relay_retry(
-        error,
-        &body,
-        &mut attempted,
-        &mut parameter
-    ));
-    assert_eq!(parameter, Some("output.run_officejs.code"));
-    assert!(!take_tool_relay_retry(
-        error,
-        &body,
-        &mut attempted,
-        &mut parameter
-    ));
+fn preparation_expands_compact_responses_messages_without_losing_content_or_extensions() {
+    let request = json!({
+        "model":"gpt-test",
+        "input":[
+            {"role":"system","content":"Synthetic instructions"},
+            {"role":"user","content":[{"type":"input_text","text":"Hello"},{"type":"input_image","image_url":"https://example.test/image.png"}]},
+            {"role":"assistant","content":"Ready","phase":"final_answer"},
+            {"type":"message","role":"user","content":"Continue"}
+        ]
+    });
+    let before = request.clone();
+    let prepared = prepare_request(&request).unwrap();
+    let history = &prepared["input"].as_array().unwrap()[1..];
+    assert!(history.iter().all(|item| item["type"] == "message"));
+    assert_eq!(
+        history[0]["content"],
+        json!([{"type":"input_text","text":"Synthetic instructions"}])
+    );
+    assert_eq!(history[1]["content"], request["input"][1]["content"]);
+    assert_eq!(
+        history[2]["content"],
+        json!([{"type":"output_text","text":"Ready"}])
+    );
+    assert_eq!(history[2]["phase"], "final_answer");
+    assert_eq!(
+        history[3]["content"],
+        json!([{"type":"input_text","text":"Continue"}])
+    );
+    assert_eq!(request, before);
 }
 
 #[test]
-fn tool_relay_retry_hint_follows_prepared_input_without_provider_data() {
-    let mut body = prepare_request(&request_with_tool()).unwrap();
-    let prepared_len = body["input"].as_array().unwrap().len();
-    assert!(add_tool_relay_retry_hint(
-        &mut body,
-        Some("output.run_officejs.code")
-    ));
-    let input = body["input"].as_array().unwrap();
-    assert_eq!(input.len(), prepared_len + 1);
-    let hint = input.last().unwrap()["content"][0]["text"]
-        .as_str()
-        .unwrap();
-    assert!(hint.contains("previous run_officejs relay was malformed"));
-    assert!(hint.contains("output.run_officejs.code"));
-    assert!(hint.contains("two distinct JSON layers"));
-    assert!(!hint.contains("private"));
-    assert!(!input[0]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("previous run_officejs relay was malformed"));
+fn preparation_normalizes_messages_bridge_history_before_basis_points_dispatch() {
+    use crate::protocol::{AdapterRequestContext, MessagesReasoningMode, SourceAdapter};
+    use crate::{CacheWriteTtl, WireApi};
 
-    body["input"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!({"type": "compaction_trigger"}));
-    assert!(add_tool_relay_retry_hint(
-        &mut body,
-        Some("output.run_officejs.code")
-    ));
-    let input = body["input"].as_array().unwrap();
-    assert_eq!(input.last().unwrap()["type"], "compaction_trigger");
-    assert!(input[input.len() - 2]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("output.run_officejs.code"));
+    for stream in [false, true] {
+        let request = json!({
+            "model":"gpt-test","max_tokens":128,"stream":stream,
+            "metadata":{"user_id":"synthetic-user"},
+            "system":[{"type":"text","text":"Synthetic instructions","cache_control":{"type":"ephemeral"}}],
+            "messages":[
+                {"role":"user","content":"Hello"},
+                {"role":"assistant","content":"Ready"},
+                {"role":"user","content":"Continue"}
+            ]
+        });
+        let bridged = SourceAdapter::MessagesToResponses
+            .prepare_request(AdapterRequestContext {
+                client_wire_api: WireApi::Messages,
+                request: &request,
+                model: "gpt-test",
+                stream,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: CacheWriteTtl::Provider,
+                previous: None,
+                response_scope: "synthetic-source",
+                response_id_seed: "synthetic-request",
+            })
+            .unwrap();
+        let prepared = prepare_request(bridged.upstream_body()).unwrap();
+        let items = prepared["input"].as_array().unwrap();
+        assert!(items.iter().all(|item| item["type"] == "message"));
+        assert_eq!(
+            items.iter().filter(|item| item["role"] == "user").count(),
+            2
+        );
+        assert_eq!(
+            items
+                .iter()
+                .find(|item| item["role"] == "assistant")
+                .unwrap()["content"],
+            json!([{"type":"output_text","text":"Ready"}])
+        );
+        assert!(prepared["metadata"].get("user_id").is_none());
+        assert_eq!(prepared["metadata"].as_object().unwrap().len(), 3);
+        assert_eq!(request["metadata"]["user_id"], "synthetic-user");
+        assert_eq!(prepared["stream"], stream);
+    }
+}
+
+#[test]
+fn encrypted_agent_assignment_is_rejected_before_technical_history_is_removed() {
+    for input in [
+        json!({"type":"agent_message","encrypted_content":"synthetic-ciphertext","content":[]}),
+        json!([
+            {"type":"agent_message","encrypted_content":"synthetic-ciphertext"},
+            {"type":"tool_search_output","tools":[]},
+            {"type":"additional_tools","tools":[]},
+            {"type":"compaction_trigger"}
+        ]),
+        json!([
+            {"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"synthetic-ciphertext"}]},
+            {"role":"user","content":"next"}
+        ]),
+    ] {
+        let request = json!({"model":"gpt-test","input":input});
+        assert_eq!(
+            prepare_request(&request).unwrap_err().parameter(),
+            Some("input.agent_message.encrypted_content")
+        );
+    }
+}
+
+#[test]
+fn latest_historical_search_catalog_keeps_nested_namespaces_and_original_schema() {
+    let request = json!({
+        "model":"gpt-test",
+        "input":[
+            {"type":"additional_tools","tools":[{"type":"namespace","name":"mcp","tools":[
+                {"type":"namespace","name":"repo","tools":[{"type":"function","name":"read","description":"old"}]}
+            ]}]},
+            {"type":"tool_search_output","tools":[{"type":"namespace","name":"mcp","tools":[
+                {"type":"namespace","name":"repo","tools":[{"type":"function","name":"read","description":"latest","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}}]}
+            ]}]},
+            {"role":"user","content":"Read a file"}
+        ],
+        "parallel_tool_calls": false,
+        "tool_choice":{"type":"function","namespace":"mcp.repo","name":"read"}
+    });
+    let before = request.clone();
+    let prepared = prepare_request(&request).unwrap();
+    let instructions = prepared["input"][0]["content"][0]["text"].as_str().unwrap();
+    assert!(instructions.contains("mcp.repo.read (function): latest"));
+    assert!(!instructions.contains("mcp.repo.read (function): old"));
+    assert!(instructions.contains("Invoke at most one client tool in this response."));
+    assert_eq!(request, before);
+    assert_eq!(prepared["input"].as_array().unwrap().len(), 2);
+    let response = serde_json::to_vec(&json!({"status":"completed","output":[{
+        "type":"function_call","name":"run_officejs","call_id":"call_fixture",
+        "arguments":json!({"references":["mcp.repo.read"],"code":r#"{"path":"src/main.rs"}"#}).to_string()
+    }]})).unwrap();
+    let translated: Value =
+        serde_json::from_slice(&translate_response(&response, &request).unwrap()).unwrap();
+    assert_eq!(translated["output"][0]["namespace"], "mcp.repo");
+    assert_eq!(translated["output"][0]["name"], "read");
 }
 
 #[test]
@@ -96,7 +162,7 @@ fn preparation_wraps_tools_and_omits_empty_context() {
     request["context_management"] = json!([]);
     let prepared = prepare_request(&request).unwrap();
     assert_eq!(prepared["stream"], false);
-    assert_eq!(prepared["reasoning_effort"], "medium");
+    assert!(prepared.get("reasoning_effort").is_none());
     assert!(prepared.get("context_management").is_none());
     assert!(prepared.get("tools").is_none());
     assert!(prepared.get("tool_choice").is_none());
@@ -111,7 +177,7 @@ fn tool_examples_follow_the_declared_tool_instead_of_a_fixed_patch() {
     let prepared = prepare_request(&request_with_tool()).unwrap();
     let instructions = prepared["input"][0]["content"][0]["text"].as_str().unwrap();
     assert!(instructions.contains("Example outer arguments for exec_command (function)"));
-    assert!(instructions.contains("cmd (required)"));
+    assert!(instructions.contains("\"cmd\":{\"type\":\"string\"}"));
     assert!(!instructions.contains("Example outer arguments for apply_patch"));
     assert!(!instructions.contains("*** Begin Patch"));
 
@@ -221,7 +287,7 @@ fn tool_catalog_is_one_message_and_examples_follow_the_bare_name() {
 }
 
 #[test]
-fn non_object_property_schema_matches_only_when_additional_properties_are_open() {
+fn boolean_property_schema_is_valid_with_closed_additional_properties() {
     let open = json!({
         "model": "gpt-6-astra",
         "input": "edit",
@@ -259,7 +325,7 @@ fn non_object_property_schema_matches_only_when_additional_properties_are_open()
         .as_str()
         .unwrap()
         .to_string();
-    assert!(!closed_instructions.contains("Example outer arguments"));
+    assert!(closed_instructions.contains("Example outer arguments"));
 }
 
 #[test]
@@ -296,6 +362,45 @@ fn structured_text_format_is_rejected_instead_of_dropped() {
 }
 
 #[test]
+fn encrypted_agent_message_is_rejected_for_single_item_input_too() {
+    let request = json!({
+        "model": "gpt-6-astra",
+        "input": {
+            "type": "agent_message",
+            "content": [{"type": "encrypted_content", "data": "synthetic-ciphertext"}]
+        }
+    });
+    let error = prepare_request(&request).unwrap_err();
+    assert_eq!(
+        error.parameter(),
+        Some("input.agent_message.encrypted_content")
+    );
+}
+
+#[test]
+fn client_tool_cannot_collide_with_the_basis_points_transport_name() {
+    let request = json!({
+        "model": "gpt-6-astra",
+        "input": "hello",
+        "tools": [{"type": "function", "name": "run_officejs"}]
+    });
+    let error = prepare_request(&request).unwrap_err();
+    assert_eq!(error.parameter(), Some("tools"));
+
+    let namespaced = json!({
+        "model": "gpt-6-astra",
+        "input": "hello",
+        "tools": [{"type": "namespace", "name": "functions", "tools": [
+            {"type": "function", "name": "run_officejs"}
+        ]}]
+    });
+    assert_eq!(
+        prepare_request(&namespaced).unwrap_err().parameter(),
+        Some("tools")
+    );
+}
+
+#[test]
 fn preparation_preserves_stream_flag_without_forwarding_tool_schema() {
     let mut request = request_with_tool();
     request["stream"] = json!(true);
@@ -321,7 +426,7 @@ fn preparation_normalizes_max_effort_and_drops_strictly_unsupported_fields() {
     assert!(prepared.get("max_output_tokens").is_none());
     assert!(prepared.get("parallel_tool_calls").is_none());
     assert!(prepared.get("temperature").is_none());
-    assert_eq!(prepared["metadata"]["request_kind"], "codex");
+    assert!(prepared["metadata"].get("request_kind").is_none());
     assert!(prepared["metadata"].get("nested").is_none());
 }
 
@@ -344,8 +449,30 @@ fn preparation_adds_stable_basis_points_turn_metadata() {
     assert!(first["metadata"]["task_id"].as_str().unwrap().contains('-'));
     assert!(first["metadata"]["turn_id"].as_str().unwrap().contains('-'));
     assert_eq!(first["metadata"]["agent_iteration"], "2");
-    assert_eq!(first["metadata"]["request_kind"], "codex");
+    assert!(first["metadata"].get("request_kind").is_none());
     assert!(first["metadata"].get("nested").is_none());
+}
+
+#[test]
+fn preparation_keeps_client_metadata_out_of_the_strict_transport_contract() {
+    let mut request = request_with_tool();
+    request["metadata"] = json!({
+        "user_id":"synthetic-user",
+        "request_kind":"synthetic",
+        "task_id":"client-task",
+        "turn_id":"client-turn",
+        "agent_iteration":"999",
+        "bps_tools_version_id":"client-version",
+        "bps_prompt_base_override":"client-override"
+    });
+    let before = request.clone();
+    let prepared = prepare_request(&request).unwrap();
+    let mut without_metadata = request.clone();
+    without_metadata.as_object_mut().unwrap().remove("metadata");
+    let baseline = prepare_request(&without_metadata).unwrap();
+    assert_eq!(prepared["metadata"], baseline["metadata"]);
+    assert_eq!(prepared["metadata"].as_object().unwrap().len(), 3);
+    assert_eq!(request, before);
 }
 
 #[test]
@@ -357,8 +484,8 @@ fn unsupported_opaque_continuation_is_not_silently_dropped() {
 }
 
 #[test]
-fn foreign_encrypted_context_is_kept_until_the_provider_rejects_it() {
-    let mut request = json!({
+fn basis_points_forwards_encrypted_history_on_the_first_attempt() {
+    let request = json!({
         "model": "gpt-6-luna",
         "input": [
             {"id":"rs_foreign","type":"reasoning","encrypted_content":"foreign-reasoning","summary":[{"type":"summary_text","text":"old"}]},
@@ -386,26 +513,4 @@ fn foreign_encrypted_context_is_kept_until_the_provider_rejects_it() {
     assert!(first.contains("pelican"));
     assert!(first.contains("input_image"));
     assert!(first.contains("exec_command"));
-
-    assert!(drop_foreign_encrypted_context(&mut request));
-    assert!(!drop_foreign_encrypted_context(&mut request));
-    let kept = request["input"].as_array().unwrap();
-    assert!(kept.iter().any(|item| item["id"] == "cmp_plain"));
-    assert!(kept.iter().any(|item| item["id"] == "rs_empty"));
-    assert!(kept.iter().all(|item| {
-        item.get("encrypted_content")
-            .and_then(|value| value.as_str())
-            .is_none_or(|value| value.trim().is_empty())
-    }));
-
-    let second = prepare_request(&request).unwrap().to_string();
-    assert!(!second.contains("foreign-reasoning"));
-    assert!(!second.contains("foreign-compaction"));
-    assert!(!second.contains("foreign-summary"));
-    assert!(!second.contains("foreign-nested"));
-    assert!(second.contains("cmp_plain"));
-    assert!(second.contains("previous answer"));
-    assert!(second.contains("pelican"));
-    assert!(second.contains("input_image"));
-    assert!(second.contains("exec_command"));
 }

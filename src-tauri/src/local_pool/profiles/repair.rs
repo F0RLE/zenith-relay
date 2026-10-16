@@ -88,7 +88,7 @@ fn preview_with_rewrite_budget(
         let profile_history_rollouts = collected_rollouts.history;
         let eligible_rollout_paths = profile_history_rollouts
             .iter()
-            .map(|item| item.path.clone())
+            .map(|rollout_file| rollout_file.path.clone())
             .collect::<HashSet<_>>();
         let mut eligible_thread_ids =
             scan::session_ids_from_rollouts(profile_history_rollouts.iter());
@@ -160,14 +160,15 @@ pub fn apply(
         .chain(snapshot.history_rollouts.iter())
         .collect::<Vec<_>>();
     for expected in &history_rollouts {
-        let current = scan::scan_rollout(Path::new(&expected.path), &snapshot.target_provider)?;
-        if current.hash != expected.hash || current.records != expected.records {
+        let scanned_rollout =
+            scan::scan_rollout(Path::new(&expected.path), &snapshot.target_provider)?;
+        if scanned_rollout.hash != expected.hash || scanned_rollout.records != expected.records {
             return Err("ChatGPT rollout files changed after repair preview".to_string());
         }
     }
     let eligible_rollout_paths = history_rollouts
         .iter()
-        .map(|item| item.path.clone())
+        .map(|rollout_file| rollout_file.path.clone())
         .collect::<HashSet<_>>();
     let mut eligible_thread_ids = scan::session_ids_from_rollouts(history_rollouts.iter().copied());
     for database in &snapshot.databases {
@@ -176,14 +177,14 @@ pub fn apply(
     for expected in &snapshot.databases {
         let profile_root =
             scan::profile_root_for_path(&snapshot.profile_roots, Path::new(&expected.path))?;
-        let current = scan::scan_database(
+        let scanned_database = scan::scan_database(
             &profile_root,
             Path::new(&expected.path),
             &snapshot.target_provider,
             &eligible_rollout_paths,
             &eligible_thread_ids,
         )?;
-        if current.hash != expected.hash || current.rows != expected.rows {
+        if scanned_database.hash != expected.hash || scanned_database.rows != expected.rows {
             return Err("ChatGPT history database changed after repair preview".to_string());
         }
     }
@@ -192,8 +193,8 @@ pub fn apply(
     let directory = backup_root.join(&backup_id);
     fs::create_dir_all(&directory).map_err(io_error)?;
     let manifest = snapshot::create_backup(&directory, &backup_id, &snapshot)?;
-    let result = snapshot::apply_snapshot(&snapshot);
-    if let Err(error) = result {
+    let apply_result = snapshot::apply_snapshot(&snapshot);
+    if let Err(error) = apply_result {
         let rollback = snapshot::restore_manifest(&manifest, &directory);
         return Err(match rollback {
             Ok(_) => error,
@@ -206,8 +207,16 @@ pub fn apply(
     Ok(RepairResult {
         backup_id,
         backup_path: path_string(&directory),
-        rollout_records_changed: snapshot.rollout_files.iter().map(|item| item.records).sum(),
-        sqlite_rows_changed: snapshot.databases.iter().map(|item| item.rows).sum(),
+        rollout_records_changed: snapshot
+            .rollout_files
+            .iter()
+            .map(|rollout_file| rollout_file.records)
+            .sum(),
+        sqlite_rows_changed: snapshot
+            .databases
+            .iter()
+            .map(|database_snapshot| database_snapshot.rows)
+            .sum(),
     })
 }
 

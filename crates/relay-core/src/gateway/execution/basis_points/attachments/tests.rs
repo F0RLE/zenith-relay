@@ -89,7 +89,7 @@ fn image_url_object_and_supported_signatures_decode() {
     };
     assert_eq!(image.media_type, "image/png");
     assert_eq!(image.filename, "image.png");
-    assert_eq!(image.data, png);
+    assert_eq!(image.bytes, png);
 
     let jpeg = expect_image(decode_inline_image("data:image/jpg;base64,/9j/AA=="));
     assert_eq!(jpeg.filename, "image.jpeg");
@@ -99,6 +99,34 @@ fn image_url_object_and_supported_signatures_decode() {
         "data:image/webp;base64,UklGRgAAAABXRUJQ",
     ));
     assert_eq!(webp.media_type, "image/webp");
+}
+
+#[test]
+fn tool_result_images_use_the_existing_attachment_validation() {
+    use super::super::history::separate_tool_images;
+    for output_kind in ["function_call_output", "custom_tool_call_output"] {
+        let items = separate_tool_images(vec![
+            json!({"type":output_kind,"call_id":"call_test","output":[
+                {"type":"input_image","image_url":data_url(&png_bytes())},
+                {"type":"input_image","file_id":"file-synthetic"}
+            ]}),
+        ]);
+        let mut body = json!({"input":items});
+        let jobs = expect_jobs(stage_input_images(&body));
+        assert_eq!(jobs.len(), 2);
+        assert!(matches!(jobs[0].job, ImageJob::Upload(_)));
+        assert!(matches!(&jobs[1].job, ImageJob::File(id) if id == "file-synthetic"));
+        body["input"][1]["content"][2]["image_url"] = json!("https://example.invalid/tool.png");
+        assert!(matches!(
+            stage_input_images(&body),
+            Err(AttachmentFailure::Reject(_))
+        ));
+        body["input"][1]["content"][2]["image_url"] = json!("data:image/png;base64,not-an-image");
+        assert!(matches!(
+            stage_input_images(&body),
+            Err(AttachmentFailure::Reject(_))
+        ));
+    }
 }
 
 #[test]
@@ -186,6 +214,7 @@ fn attachment_cache_reuses_the_file_id_without_storing_bytes() {
     let key = attachment_key(
         "https://bps.openai.com/attachments",
         "account",
+        &[0; 32],
         "image/png",
         b"png-bytes",
     );

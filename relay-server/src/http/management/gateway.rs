@@ -53,8 +53,8 @@ mod tests {
             .save(&source.secret_ref, "synthetic-key")
             .unwrap();
         state.rebuild_runtime().await.unwrap();
-        let old = state.runtime().unwrap().unwrap();
-        assert!(old
+        let stopped_runtime = state.runtime().unwrap().unwrap();
+        assert!(stopped_runtime
             .candidate_runtime_order()
             .iter()
             .any(|candidate| candidate.available));
@@ -62,7 +62,7 @@ mod tests {
         let _ = stop_gateway(State(state.clone())).await.unwrap();
         assert!(!state.store.gateway_enabled().unwrap());
         assert!(state.runtime().unwrap().is_none());
-        assert!(old
+        assert!(stopped_runtime
             .candidate_runtime_order()
             .iter()
             .all(|candidate| !candidate.available));
@@ -72,13 +72,13 @@ mod tests {
         assert!(state.runtime().unwrap().is_none());
 
         let _ = start_gateway(State(state.clone())).await.unwrap();
-        let current = state.runtime().unwrap().unwrap();
-        assert!(!Arc::ptr_eq(&old, &current));
-        assert!(current
+        let restarted_runtime = state.runtime().unwrap().unwrap();
+        assert!(!Arc::ptr_eq(&stopped_runtime, &restarted_runtime));
+        assert!(restarted_runtime
             .candidate_runtime_order()
             .iter()
             .any(|candidate| candidate.available));
-        assert!(old
+        assert!(stopped_runtime
             .candidate_runtime_order()
             .iter()
             .all(|candidate| !candidate.available));

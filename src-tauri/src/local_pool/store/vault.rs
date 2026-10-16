@@ -16,18 +16,19 @@ const MAGIC: &[u8; 4] = b"ZDV1";
 const NONCE_BYTES: usize = 12;
 const MAX_SECRET_BYTES: usize = 4 * 1024 * 1024;
 const MAX_VAULT_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_VALUES: usize = 8_192;
+const MAX_SECRET_REFS: usize = 8_192;
 
 #[derive(Default, Deserialize, Serialize)]
 struct VaultData {
-    values: BTreeMap<String, String>,
+    #[serde(rename = "values")]
+    secrets_by_ref: BTreeMap<String, String>,
 }
 
 pub struct Vault {
     path: PathBuf,
     backup_path: PathBuf,
     key: [u8; 32],
-    data: Mutex<VaultData>,
+    vault_data: Mutex<VaultData>,
 }
 
 impl Vault {
@@ -42,39 +43,43 @@ impl Vault {
         if !path.exists() && backup_path.exists() {
             fs::rename(&backup_path, &path).map_err(io_error)?;
         }
-        let data = if path.exists() {
+        let vault_data = if path.exists() {
             decrypt_file(&path, &key)?
         } else {
             VaultData::default()
         };
-        validate_data(&data)?;
+        validate_data(&vault_data)?;
         Ok(Self {
             path,
             backup_path,
             key,
-            data: Mutex::new(data),
+            vault_data: Mutex::new(vault_data),
         })
     }
 
-    pub fn save(&self, secret_ref: &str, value: &str) -> Result<(), String> {
+    pub fn save(&self, secret_ref: &str, secret_value: &str) -> Result<(), String> {
         validate_ref(secret_ref)?;
-        if value.is_empty() || value.len() > MAX_SECRET_BYTES {
+        if secret_value.is_empty() || secret_value.len() > MAX_SECRET_BYTES {
             return Err("secret value is empty or too large".to_string());
         }
-        let mut data = self.lock()?;
-        if !data.values.contains_key(secret_ref) && data.values.len() >= MAX_VALUES {
+        let mut vault_data = self.lock()?;
+        if !vault_data.secrets_by_ref.contains_key(secret_ref)
+            && vault_data.secrets_by_ref.len() >= MAX_SECRET_REFS
+        {
             return Err("secret vault entry limit is reached".to_string());
         }
-        let previous = data
-            .values
-            .insert(secret_ref.to_string(), value.to_string());
-        if let Err(error) = self.persist(&data) {
-            match previous {
-                Some(value) => {
-                    data.values.insert(secret_ref.to_string(), value);
+        let previous_secret = vault_data
+            .secrets_by_ref
+            .insert(secret_ref.to_string(), secret_value.to_string());
+        if let Err(error) = self.persist(&vault_data) {
+            match previous_secret {
+                Some(previous_secret) => {
+                    vault_data
+                        .secrets_by_ref
+                        .insert(secret_ref.to_string(), previous_secret);
                 }
                 None => {
-                    data.values.remove(secret_ref);
+                    vault_data.secrets_by_ref.remove(secret_ref);
                 }
             }
             return Err(error);
@@ -84,34 +89,37 @@ impl Vault {
 
     pub fn load(&self, secret_ref: &str) -> Result<Option<String>, String> {
         validate_ref(secret_ref)?;
-        Ok(self.lock()?.values.get(secret_ref).cloned())
+        Ok(self.lock()?.secrets_by_ref.get(secret_ref).cloned())
     }
 
     pub fn contains(&self, secret_ref: &str) -> Result<bool, String> {
         validate_ref(secret_ref)?;
-        Ok(self.lock()?.values.contains_key(secret_ref))
+        Ok(self.lock()?.secrets_by_ref.contains_key(secret_ref))
     }
 
     pub fn secret_refs(&self) -> Result<Vec<String>, String> {
-        Ok(self.lock()?.values.keys().cloned().collect())
+        Ok(self.lock()?.secrets_by_ref.keys().cloned().collect())
     }
 
     pub fn delete(&self, secret_ref: &str) -> Result<bool, String> {
         validate_ref(secret_ref)?;
-        let mut data = self.lock()?;
-        let Some(previous) = data.values.remove(secret_ref) else {
+        let mut vault_data = self.lock()?;
+        let Some(previous_secret) = vault_data.secrets_by_ref.remove(secret_ref) else {
             return Ok(false);
         };
-        if let Err(error) = self.persist(&data) {
-            data.values.insert(secret_ref.to_string(), previous);
+        if let Err(error) = self.persist(&vault_data) {
+            vault_data
+                .secrets_by_ref
+                .insert(secret_ref.to_string(), previous_secret);
             return Err(error);
         }
         Ok(true)
     }
 
-    fn persist(&self, data: &VaultData) -> Result<(), String> {
-        let plaintext = serde_json::to_vec(data).map_err(|_| "vault serialization failed")?;
-        if plaintext.len() as u64 > MAX_VAULT_BYTES {
+    fn persist(&self, vault_data: &VaultData) -> Result<(), String> {
+        let plaintext_json =
+            serde_json::to_vec(vault_data).map_err(|_| "vault serialization failed")?;
+        if plaintext_json.len() as u64 > MAX_VAULT_BYTES {
             return Err("secret vault size limit is reached".to_string());
         }
         let cipher = ChaCha20Poly1305::new((&self.key).into());
@@ -119,7 +127,7 @@ impl Vault {
         rand::rng().fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from(nonce_bytes);
         let ciphertext = cipher
-            .encrypt(&nonce, plaintext.as_ref())
+            .encrypt(&nonce, plaintext_json.as_ref())
             .map_err(|_| "vault encryption failed")?;
         let mut bytes = Vec::with_capacity(MAGIC.len() + NONCE_BYTES + ciphertext.len());
         bytes.extend_from_slice(MAGIC);
@@ -129,7 +137,7 @@ impl Vault {
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, VaultData>, String> {
-        self.data
+        self.vault_data
             .lock()
             .map_err(|_| "secret vault lock is unavailable".to_string())
     }
@@ -154,13 +162,13 @@ fn decrypt_file(path: &Path, key: &[u8; 32]) -> Result<VaultData, String> {
     serde_json::from_slice(&plaintext).map_err(|_| "secret vault payload is invalid".to_string())
 }
 
-fn validate_data(data: &VaultData) -> Result<(), String> {
-    if data.values.len() > MAX_VALUES {
+fn validate_data(vault_data: &VaultData) -> Result<(), String> {
+    if vault_data.secrets_by_ref.len() > MAX_SECRET_REFS {
         return Err("secret vault entry limit is exceeded".to_string());
     }
-    for (secret_ref, value) in &data.values {
+    for (secret_ref, secret_value) in &vault_data.secrets_by_ref {
         validate_ref(secret_ref)?;
-        if value.is_empty() || value.len() > MAX_SECRET_BYTES {
+        if secret_value.is_empty() || secret_value.len() > MAX_SECRET_BYTES {
             return Err("secret vault contains an invalid value".to_string());
         }
     }
@@ -172,7 +180,7 @@ fn atomic_replace(path: &Path, backup: &Path, bytes: &[u8]) -> Result<(), String
         .parent()
         .ok_or_else(|| "secret vault path has no parent".to_string())?;
     let temporary = parent.join(format!(".secrets-{}.tmp", uuid::Uuid::new_v4().simple()));
-    let result = (|| {
+    let replace_result = (|| {
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -199,10 +207,10 @@ fn atomic_replace(path: &Path, backup: &Path, bytes: &[u8]) -> Result<(), String
         let _ = fs::remove_file(backup);
         Ok(())
     })();
-    if result.is_err() {
+    if replace_result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
-    result
+    replace_result
 }
 
 fn ensure_directory(path: &Path) -> Result<(), String> {
@@ -219,8 +227,8 @@ fn ensure_directory(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_ref(value: &str) -> Result<(), String> {
-    if !zenith_relay_core::is_ascii_ref(value, 128) {
+fn validate_ref(secret_ref: &str) -> Result<(), String> {
+    if !zenith_relay_core::is_ascii_ref(secret_ref, 128) {
         Err("secret reference is invalid".to_string())
     } else {
         Ok(())

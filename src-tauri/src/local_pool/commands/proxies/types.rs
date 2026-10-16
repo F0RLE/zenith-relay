@@ -23,6 +23,13 @@ pub struct SetStoredProxyAccountsInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetStoredProxyTimezoneInput {
+    pub(super) proxy_id: String,
+    pub(super) timezone: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeleteStoredProxiesInput {
     pub(super) proxy_ids: Vec<String>,
 }

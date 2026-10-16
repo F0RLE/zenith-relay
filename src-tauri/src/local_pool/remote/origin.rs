@@ -30,8 +30,8 @@ impl fmt::Display for OriginError {
 impl std::error::Error for OriginError {}
 
 impl PinnedOrigin {
-    pub fn parse(value: &str, allow_insecure_http: bool) -> Result<Self, OriginError> {
-        let mut base = Url::parse(value.trim()).map_err(|_| OriginError::Invalid)?;
+    pub fn parse(origin_url: &str, allow_insecure_http: bool) -> Result<Self, OriginError> {
+        let mut base = Url::parse(origin_url.trim()).map_err(|_| OriginError::Invalid)?;
         if !is_http_endpoint(&base) {
             return Err(OriginError::Invalid);
         }

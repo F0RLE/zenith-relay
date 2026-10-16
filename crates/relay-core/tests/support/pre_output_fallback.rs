@@ -97,9 +97,11 @@ async fn assert_tool_output_owner_after_failure(complete_tool_turn: bool) {
                     "id": "resp-tool-owner",
                     "object": "response",
                     "model": MODEL,
+                    "status": "completed",
                     "output": [{
                         "type": "function_call",
                         "id": "fc_stateful_01",
+                        "status": "completed",
                         "call_id": call_id,
                         "name": "run_command",
                         "arguments": "{\"command\":\"pwd\"}"

@@ -81,14 +81,14 @@ fn login_disable_proxy_and_remove_readd_fence_delayed_observations_including_aba
                 }
             }
             _ => {
-                let mut next = original.clone();
+                let mut updated_account = original.clone();
                 match mutation {
-                    "login" => next.secret_ref = "account:synthetic:login2".into(),
-                    "enabled" | "aba" => next.enabled = false,
-                    "proxy" => next.proxy_id = Some("proxy:new".into()),
+                    "login" => updated_account.secret_ref = "account:synthetic:login2".into(),
+                    "enabled" | "aba" => updated_account.enabled = false,
+                    "proxy" => updated_account.proxy_id = Some("proxy:new".into()),
                     _ => unreachable!(),
                 }
-                store.save_account(&next).unwrap();
+                store.save_account(&updated_account).unwrap();
                 if mutation == "aba" {
                     store.save_account(&original).unwrap();
                 }

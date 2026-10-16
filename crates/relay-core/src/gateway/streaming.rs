@@ -16,8 +16,8 @@ use crate::error_codes;
 use crate::runtime::{CandidateLease, ExecutorRoute};
 use crate::usage::ReasoningEffortDiagnostics;
 use crate::{
-    AdapterStreamBridge, GatewayRuntime, MessagesBridgeResponse, MessagesStreamBridge,
-    PreparedAdapterRequest, ToolUseDiagnostics, UsageEvent, WireApi,
+    GatewayRuntime, MessagesBridgeResponse, PreparedAdapterRequest, ToolUseDiagnostics, UsageEvent,
+    WireApi,
 };
 use axum::body::{Body, Bytes};
 use axum::http::{Response, StatusCode};
@@ -31,14 +31,13 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::time::{sleep, Instant as TokioInstant, Sleep};
 
-pub(super) const MAX_SSE_EVENT_BYTES: usize = 16 * 1024 * 1024;
-
 const SSE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 
 const SSE_HEARTBEAT: &[u8] = b": keep-alive\n\n";
 
 pub(super) type UpstreamStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
 
+mod basis_points;
 mod bridge;
 mod completion;
 mod diagnostics;
@@ -49,12 +48,12 @@ mod upstream_usage;
 
 pub(in crate::gateway) use fast_delta::{fast_response_delta_json, FastResponseDelta};
 
-use bridge::{bridge_adapter_stream, bridge_gemini_stream, bridge_messages_stream};
+use bridge::bridge_adapter_stream;
 
 pub(super) use replay::NativeReplayCapture;
 
 pub(super) use events::{
-    has_output_delta, has_semantic_output, is_compaction_payload, is_empty_responses_incomplete,
+    has_output_delta, has_semantic_output, is_compaction_payload, is_empty_responses_terminal,
     is_known_non_output_event, is_responses_output_delta_type, parse_sse_event,
     preserved_stream_error, rewrite_bridge_failure, served_model_is_rejected, TerminalEvent,
     TerminalOutcome,
@@ -62,7 +61,8 @@ pub(super) use events::{
 
 mod bootstrap;
 pub(super) use bootstrap::{
-    bootstrap_stream, degraded_route_stream_failure, StreamBootstrapFailure,
+    bootstrap_basis_points_stream, bootstrap_stream, degraded_route_stream_failure,
+    StreamBootstrapFailure,
 };
 
 /// Owns the work after an upstream stream has emitted client-visible output.
@@ -78,7 +78,7 @@ pub(in crate::gateway) struct StreamExecution {
     pub(in crate::gateway) requested_model: String,
     pub(in crate::gateway) source_model: String,
     pub(in crate::gateway) prompt_affinity_key: Option<String>,
-    pub(in crate::gateway) wire_api: WireApi,
+    pub(in crate::gateway) client_wire_api: WireApi,
     pub(in crate::gateway) reasoning_effort: ReasoningEffortDiagnostics,
     pub(in crate::gateway) tool_use: ToolUseDiagnostics,
     pub(in crate::gateway) attempt: u16,
@@ -93,6 +93,17 @@ impl StreamExecution {
         first: Bytes,
         remaining: UpstreamStream,
     ) -> Response<Body> {
+        self.into_response_with_basis_points(status, headers, first, remaining, None)
+    }
+
+    pub(in crate::gateway) fn into_response_with_basis_points(
+        self,
+        status: StatusCode,
+        headers: reqwest::header::HeaderMap,
+        first: Bytes,
+        remaining: UpstreamStream,
+        basis_points_request: Option<Value>,
+    ) -> Response<Body> {
         let Self {
             runtime,
             route,
@@ -104,7 +115,7 @@ impl StreamExecution {
             requested_model,
             source_model,
             prompt_affinity_key,
-            wire_api,
+            client_wire_api,
             reasoning_effort,
             tool_use,
             attempt,
@@ -130,12 +141,18 @@ impl StreamExecution {
             0,
         );
         let mut first = first;
-        let upstream_usage = (!adapter_is_passthrough).then(|| {
-            let mut capture =
-                upstream_usage::UpstreamUsage::new(initial_event.clone(), expected_model.clone());
-            first = capture.forward(std::mem::take(&mut first));
-            Arc::new(Mutex::new(capture))
-        });
+        let upstream_usage =
+            (!adapter_is_passthrough || basis_points_request.is_some()).then(|| {
+                let mut capture = upstream_usage::UpstreamUsage::new(
+                    initial_event.clone(),
+                    expected_model.clone(),
+                );
+                if basis_points_request.is_some() {
+                    capture = capture.with_timing(started);
+                }
+                first = capture.forward(std::mem::take(&mut first));
+                Arc::new(Mutex::new(capture))
+            });
         let capture_stream = upstream_usage.clone();
         let remaining: UpstreamStream =
             Box::pin(remaining.map(move |chunk| match (&capture_stream, chunk) {
@@ -143,50 +160,55 @@ impl StreamExecution {
                 (_, chunk) => chunk,
             }));
         let completion_runtime = runtime.clone();
-        let completion_source = route.candidate_id.clone();
+        let completion_candidate_id = route.candidate_id.clone();
         let completion_model = source_model.clone();
         let completion_prompt_affinity = prompt_affinity_key.clone();
         let completion_headers = headers.clone();
-        let completion_uses_response_affinity = wire_api == WireApi::Responses;
+        let completion_uses_response_affinity = client_wire_api == WireApi::Responses;
         let completion_bridge_state = adapter_request
             .uses_messages_continuation()
             .then(|| Arc::new(Mutex::new(None::<MessagesBridgeResponse>)));
         let completion_bridge_state_for_callback = completion_bridge_state.clone();
-        let completion_native_response = (wire_api == WireApi::Responses && adapter_is_passthrough)
+        let completion_native_response = (client_wire_api == WireApi::Responses
+            && adapter_is_passthrough)
             .then(|| Arc::new(Mutex::new(None::<Value>)));
         let completion_native_response_for_callback = completion_native_response.clone();
+        let tool_call_capture = Arc::new(Mutex::new(
+            crate::gateway::request::ToolCallCapture::default(),
+        ));
         let completion_native_template = request;
         let completion_local_key = local_key_id.clone();
         let completion_settlement = completion::StreamCompletionSettlement {
+            route: route.clone(),
+            _cache_context_observation: route.cache_context_observation.clone(),
             upstream_usage,
             lease,
             runtime: completion_runtime,
-            source: completion_source,
+            candidate_id: completion_candidate_id,
             model: completion_model,
             headers: completion_headers,
             prompt_affinity: completion_prompt_affinity,
             uses_response_affinity: completion_uses_response_affinity,
             bridge_state: completion_bridge_state_for_callback,
             native_response: completion_native_response_for_callback,
+            tool_call_capture: tool_call_capture.clone(),
             native_template: completion_native_template,
             local_key: completion_local_key,
         };
         let completion: CompletionCallback = Arc::new(move |event, response_id, hint| {
             completion_settlement.settle(event, response_id, hint);
         });
+        let (first, remaining) = if let Some(request) = basis_points_request {
+            (
+                Bytes::new(),
+                basis_points::translate_stream(first, remaining, request),
+            )
+        } else {
+            (first, remaining)
+        };
         let combined: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>> =
             match adapter_request.into_stream_bridge() {
-                Some(AdapterStreamBridge::Messages(bridge)) => {
-                    let completed = completion_bridge_state
-                        .expect("message bridge state is configured for message routes");
-                    Box::pin(bridge_messages_stream(first, remaining, *bridge, completed))
-                }
-                Some(AdapterStreamBridge::Gemini(bridge)) => {
-                    let completed = completion_bridge_state
-                        .expect("Gemini bridge state is configured for Gemini routes");
-                    Box::pin(bridge_gemini_stream(first, remaining, *bridge, completed))
-                }
-                Some(bridge @ AdapterStreamBridge::Translated(_)) => {
+                Some(bridge) => {
                     let completed = completion_bridge_state
                         .expect("translation completion state is configured");
                     Box::pin(bridge_adapter_stream(first, remaining, bridge, completed))
@@ -203,11 +225,13 @@ impl StreamExecution {
             completion,
             completion_native_response,
         );
+        usage_stream.tool_call_capture = Some(tool_call_capture);
         usage_stream.expected_model = adapter_is_passthrough.then_some(expected_model).flatten();
         let origin = route_error_origin(&route);
-        let mut response = proxy_sse_response(status, &headers, Body::from_stream(usage_stream));
-        attach_stream_diagnostics(&mut response, origin, &request_id);
-        response
+        let mut streamed_response =
+            proxy_sse_response(status, &headers, Body::from_stream(usage_stream));
+        attach_stream_diagnostics(&mut streamed_response, origin, &request_id);
+        streamed_response
     }
 }
 

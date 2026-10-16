@@ -6,7 +6,7 @@ async fn failed_initial_websocket_response_with_output_is_not_retried() {
         "type": "response.failed",
         "response": {
             "status": "failed",
-            "error": {"code": "insufficient_quota", "message": "quota exhausted"},
+            "error": {"code": "insufficient_quota", "message": "Account: quota exhausted"},
             "output": [{"type": "message", "content": [{"type": "output_text", "text": "already generated"}]}]
         }
     });
@@ -18,7 +18,7 @@ async fn failed_initial_websocket_response_with_output_is_not_retried() {
     let (second, second_state) =
         spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![json!({
             "type": "response.completed",
-            "response": {"id": "must-not-replay", "model": MODEL, "output": []}
+            "response": {"id": "must-not-replay", "status": "completed", "model": MODEL, "output": []}
         })])))
         .await;
     let authority = ready_authority("first", "synthetic-first").await;
@@ -164,9 +164,9 @@ async fn websocket_discards_late_response_frames_after_terminal() {
     let (upstream, state) =
         spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![
             json!({"type":"response.output_text.delta","delta":"once"}),
-            json!({"type":"response.completed","response":{"id":"ws-once"}}),
+            json!({"type":"response.completed","response":{"id":"ws-once","status":"completed","output":[]}}),
             json!({"type":"response.output_text.delta","delta":"duplicate"}),
-            json!({"type":"response.completed","response":{"id":"ws-once"}}),
+            json!({"type":"response.completed","response":{"id":"ws-once","status":"completed","output":[]}}),
         ])))
         .await;
     let authority = ready_authority("once-account", "once-access").await;
@@ -540,16 +540,18 @@ async fn account_websocket_does_not_commit_on_a_setup_frame_before_disconnect() 
     let authority = Arc::new(TokenAuthority::new(4).unwrap());
     register_ready(&authority, "setup-primary", "setup-primary-access").await;
     register_ready(&authority, "setup-reserve", "setup-reserve-access").await;
+    let mut reserve = account(
+        "setup-reserve",
+        "provider-setup-reserve",
+        &reserve_upstream,
+        100,
+    );
+    reserve.models = vec!["reserve-only-model".to_string()];
     let (gateway, events, _, _) = spawn_mixed_gateway(
         Vec::new(),
         vec![
             account("setup-primary", "provider-setup-primary", &upstream, 200),
-            account(
-                "setup-reserve",
-                "provider-setup-reserve",
-                &reserve_upstream,
-                100,
-            ),
+            reserve,
         ],
         vec![mixed_key(None, None)],
         authority,

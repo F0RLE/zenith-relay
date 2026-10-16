@@ -29,15 +29,15 @@ pub(super) async fn handle_downstream_message(
             return start_next_request(downstream, upstream, runtime, key, headers, state, &bytes)
                 .await;
         }
-        Message::Ping(payload) => {
+        Message::Ping(ping_payload) => {
             upstream
-                .send(UpstreamMessage::Ping(payload))
+                .send(UpstreamMessage::Ping(ping_payload))
                 .await
                 .map_err(|_| GatewayFailure::transport(state.upstream_origin))?;
         }
-        Message::Pong(payload) => {
+        Message::Pong(pong_payload) => {
             upstream
-                .send(UpstreamMessage::Pong(payload))
+                .send(UpstreamMessage::Pong(pong_payload))
                 .await
                 .map_err(|_| GatewayFailure::transport(state.upstream_origin))?;
         }
@@ -66,24 +66,24 @@ async fn start_next_request(
     key: &AuthenticatedKey,
     headers: &HeaderMap,
     state: &mut BridgeState,
-    payload: &[u8],
+    request_bytes: &[u8],
 ) -> Result<bool, GatewayFailure> {
     if state.in_flight.is_some() {
         return Err(GatewayFailure::invalid_request(
             "a response is already in progress",
         ));
     }
-    let mut request = ClientRequest::parse_on_connection(
+    let mut client_request = ClientRequest::parse_on_connection(
         runtime,
         key,
         headers,
-        payload,
+        request_bytes,
         state
             .last_response_id
             .as_deref()
             .zip(state.transient_response_affinity_key.as_deref()),
     )?;
-    if let Some(stream_id) = request.stream_id.as_deref() {
+    if let Some(stream_id) = client_request.stream_id.as_deref() {
         if let Some(active_stream_id) = state.stream_id.as_deref() {
             if active_stream_id != stream_id {
                 return Err(GatewayFailure::invalid_request(
@@ -94,40 +94,40 @@ async fn start_next_request(
             state.stream_id = Some(stream_id.to_string());
         }
     }
-    let same_response_id = request
+    let same_response_id = client_request
         .previous_response_id()
         .is_some_and(|response_id| Some(response_id) == state.last_response_id.as_deref());
-    let response_affinity_key = request.response_affinity_key.clone();
+    let response_affinity_key = client_request.response_affinity_key.clone();
     let model_switch_reset = same_response_id
-        && !request.has_unpaired_tool_output()
+        && !client_request.has_unpaired_tool_output()
         && response_affinity_key.as_deref().and_then(|affinity_key| {
             runtime.response_affinity_owner_supports_route(
                 key,
                 affinity_key,
-                &request.resolved_model,
+                &client_request.resolved_model,
                 WEBSOCKET_PROTOCOLS,
                 now_ms(),
             )
         }) == Some(false)
-        && request.drop_previous_response_id(runtime, &key.id);
+        && client_request.drop_previous_response_id(runtime, &key.id);
     if model_switch_reset {
         clear_transient_response_affinity(runtime, state);
         state.last_response_id = None;
     }
     if same_response_id && !model_switch_reset {
-        let tried = HashSet::new();
+        let (tried, mut admitted) = client_request.compatible_routes(runtime, key)?;
         let selected = runtime
             .select_and_reserve_with_budget(
                 key,
-                &request.resolved_model,
+                &client_request.resolved_model,
                 WEBSOCKET_PROTOCOLS,
                 &tried,
                 (
-                    request.response_affinity_key.as_deref(),
-                    request.prompt_affinity_key.as_deref(),
+                    client_request.response_affinity_key.as_deref(),
+                    client_request.prompt_affinity_key.as_deref(),
                 ),
                 now_ms(),
-                &request.budget,
+                &client_request.budget,
             )
             .await;
         let Some((selected, lease)) = selected else {
@@ -137,9 +137,15 @@ async fn start_next_request(
             // the normal bounded replay path. That path materializes the local
             // Responses history and removes the opaque owner reference before
             // choosing a compatible account or API source.
-            if request.has_previous_response_id() && request.requires_affinity_owner {
+            if client_request.has_previous_response_id() && client_request.requires_affinity_owner {
                 let connected = connect_upstream_while_client_connected(
-                    downstream, runtime, key, headers, request, false, 0,
+                    downstream,
+                    runtime,
+                    key,
+                    headers,
+                    client_request,
+                    false,
+                    0,
                 )
                 .await?;
                 return Ok(
@@ -148,10 +154,10 @@ async fn start_next_request(
             }
             if let Some(retry_at_ms) = runtime.earliest_retry_at(
                 key,
-                &request.resolved_model,
+                &client_request.resolved_model,
                 WEBSOCKET_PROTOCOLS,
                 &tried,
-                request.response_affinity_key.as_deref(),
+                client_request.response_affinity_key.as_deref(),
                 now_ms(),
                 crate::scheduler::rotation::RotationOperation::Text,
             ) {
@@ -162,44 +168,67 @@ async fn start_next_request(
         if selected.candidate_id != state.upstream_candidate_id {
             return Err(GatewayFailure::unavailable());
         }
-        let prepared = runtime
-            .prepare_authorization(&selected.candidate_id, now_ms())
-            .await
-            .map_err(|error| GatewayFailure::prepare(error, state.upstream_origin))?;
-        if prepared.credential_fingerprint() != state.credential_fingerprint
-            || prepared.incarnation() != state.authorization_incarnation
+        let mut route = admitted
+            .remove(&selected.candidate_id)
+            .ok_or_else(GatewayFailure::unavailable)?;
+        runtime.set_route_streaming(&mut route, false);
+        if route.binding_key() != state.upstream_route.binding_key()
+            || route.source_model != state.upstream_route.source_model
+            || route.upstream_url != state.upstream_route.upstream_url
+            || route.upstream_headers != state.upstream_route.upstream_headers
         {
             drop(lease);
-            if !request.drop_previous_response_id(runtime, &key.id) {
-                return Err(GatewayFailure::continuation_unavailable());
-            }
             let connected = connect_upstream_while_client_connected(
-                downstream, runtime, key, headers, request, true, 0,
+                downstream,
+                runtime,
+                key,
+                headers,
+                client_request,
+                false,
+                0,
             )
             .await?;
             return Ok(
                 install_connected(downstream, upstream, runtime, key, state, connected).await,
             );
         }
-        let mut route = runtime
-            .executor_route(
-                &selected.candidate_id,
-                &request.resolved_model,
-                &key.scope_snapshot(),
-                WEBSOCKET_PROTOCOLS,
-                false,
+        let prepared = runtime
+            .prepare_route_authorization(&route, now_ms())
+            .await
+            .map_err(|error| GatewayFailure::prepare(error, state.upstream_origin))?;
+        if prepared.credential_fingerprint() != state.credential_fingerprint
+            || prepared.incarnation() != state.authorization_incarnation
+        {
+            drop(lease);
+            if !client_request.drop_previous_response_id(runtime, &key.id) {
+                return Err(GatewayFailure::continuation_unavailable());
+            }
+            let connected = connect_upstream_while_client_connected(
+                downstream,
+                runtime,
+                key,
+                headers,
+                client_request,
+                true,
+                0,
             )
-            .ok_or_else(GatewayFailure::unavailable)?;
+            .await?;
+            return Ok(
+                install_connected(downstream, upstream, runtime, key, state, connected).await,
+            );
+        }
+        route.client_transport = crate::UsageTransport::Websocket;
         route.half_open_probe = selected.half_open_probe;
         route.account_token_generation = prepared.token_generation;
         route.routing = Some(selected.diagnostics);
-        route.client_context_id = client_context_fingerprint(headers);
-        request.apply_service_tier_for_route(runtime, &route);
-        route.service_tier = request.service_tier(runtime, &route);
+        route.client_context_id = client_request.client_context_id.clone();
+        client_request.apply_service_tier();
+        route.service_tier = client_request.service_tier();
         let started = Instant::now();
         let upstream_origin = route_error_origin(&route);
-        let payload = request.payload_for(&route)?;
-        request.budget.configure_retry_window(
+        let request_payload =
+            client_request.observed_payload_for(runtime, &mut route, headers, &prepared)?;
+        client_request.budget.configure_retry_window(
             runtime.route_recovery_window_ms(),
             runtime.route_recovery_enabled(),
         );
@@ -209,16 +238,16 @@ async fn start_next_request(
         let attempt = u16::try_from(dispatch.0).unwrap_or(u16::MAX);
         // A failed WebSocket flush does not prove that remote execution never
         // started. Do not convert it into a health vote or retry.
-        send_request(upstream, payload, upstream_origin).await?;
+        send_request(upstream, request_payload, upstream_origin).await?;
         let event = usage_event(
             UsageAttempt {
-                request_id: &request.request_id,
+                request_id: &client_request.request_id,
                 attempt,
                 local_key_id: &key.id,
                 route: &route,
-                reasoning_effort: Some(&request.reasoning_effort_for(&route)),
-                requested_model: &request.requested_model,
-                tool_use: request.tool_use_for(&route),
+                reasoning_effort: Some(&client_request.reasoning_effort_for(&route)),
+                requested_model: &client_request.requested_model,
+                tool_use: client_request.tool_use_for(&route),
             },
             true,
             StatusCode::OK.as_u16(),
@@ -228,12 +257,13 @@ async fn start_next_request(
         state.lease = Some(lease);
         state.upstream_origin = upstream_origin;
         state.in_flight = Some(InFlight {
-            request: request.clone(),
+            request: client_request.clone(),
             route: route.clone(),
             event,
+            usage_snapshot: None,
             started,
             response_id: None,
-            prompt_affinity_key: request.prompt_affinity_key,
+            prompt_affinity_key: client_request.prompt_affinity_key,
             client_visible_output: false,
             legacy_call_id_repair_attempted: false,
             native_replay_capture: NativeReplayCapture::default(),
@@ -241,7 +271,13 @@ async fn start_next_request(
         return Ok(true);
     }
     let connected = connect_upstream_while_client_connected(
-        downstream, runtime, key, headers, request, true, 0,
+        downstream,
+        runtime,
+        key,
+        headers,
+        client_request,
+        true,
+        0,
     )
     .await?;
     Ok(install_connected(downstream, upstream, runtime, key, state, connected).await)

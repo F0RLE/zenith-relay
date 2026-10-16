@@ -50,7 +50,7 @@ pub(super) async fn stop_codex_and_sync_account_at(
     profile_dir: &std::path::Path,
 ) -> Result<bool, CommandError> {
     let stopped = stop_codex_for_profile_change()?;
-    let result: Result<(), CommandError> = async {
+    let synchronization_result: Result<(), CommandError> = async {
         if let Some(account_id) =
             codex::active_managed_account_id(profile_dir, &state.profile_backup_root())?
         {
@@ -61,16 +61,16 @@ pub(super) async fn stop_codex_and_sync_account_at(
         Ok(())
     }
     .await;
-    restart_codex_after_failed_change(stopped, result, launch_codex_with_profile)?;
+    restart_codex_after_failed_change(stopped, synchronization_result, launch_codex_with_profile)?;
     Ok(stopped)
 }
 
 pub(super) fn restart_codex_after_failed_change<T>(
     stopped: bool,
-    result: Result<T, CommandError>,
+    operation_result: Result<T, CommandError>,
     launch: impl FnOnce() -> Result<(), String>,
 ) -> Result<T, CommandError> {
-    match result {
+    match operation_result {
         Err(mut error) if stopped => {
             if let Err(launch_error) = launch() {
                 error.message = format!(
@@ -80,24 +80,24 @@ pub(super) fn restart_codex_after_failed_change<T>(
             }
             Err(error)
         }
-        result => result,
+        unchanged_result => unchanged_result,
     }
 }
 
 pub(super) fn restart_codex_after_restore<T>(
     stopped: bool,
-    result: Result<T, CommandError>,
+    restore_result: Result<T, CommandError>,
     launch: impl FnOnce() -> Result<(), String>,
 ) -> Result<T, CommandError> {
-    match result {
-        Ok(value) if stopped => launch().map(|()| value).map_err(|error| {
+    match restore_result {
+        Ok(restored_value) if stopped => launch().map(|()| restored_value).map_err(|error| {
             LocalPoolError::new(
                 ErrorCode::Io,
                 format!("profile restored, but ChatGPT failed to restart: {error}"),
             )
             .into()
         }),
-        result => restart_codex_after_failed_change(stopped, result, launch),
+        unchanged_result => restart_codex_after_failed_change(stopped, unchanged_result, launch),
     }
 }
 
@@ -117,8 +117,8 @@ mod tests {
                 events.borrow_mut().push("catalog");
                 Ok(())
             },
-            |result| {
-                assert!(result.is_ok());
+            |refresh_result| {
+                assert!(refresh_result.is_ok());
                 events.borrow_mut().push("report");
             },
             || {
@@ -143,7 +143,7 @@ mod tests {
                     "synthetic failure",
                 ))
             },
-            |result| reported.set(result.is_err()),
+            |refresh_result| reported.set(refresh_result.is_err()),
             || {
                 assert!(reported.get());
                 launched.set(true);

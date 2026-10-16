@@ -5,8 +5,8 @@ async fn cooldown_is_visible_to_release_observers_and_revokes_pending_dispatch()
     let runtime = runtime();
     let first_budget = SharedRequestBudget::for_incoming_request(3);
     let pending_budget = SharedRequestBudget::for_incoming_request(3);
-    let first = reserve(&runtime, &first_budget, WireApi::Responses).await;
-    let pending = reserve(&runtime, &pending_budget, WireApi::Responses).await;
+    let first = reserve_from(&runtime, &first_budget, WireApi::Responses, "source-a").await;
+    let pending = reserve_from(&runtime, &pending_budget, WireApi::Responses, "source-a").await;
     assert_eq!(first.candidate_id(), pending.candidate_id());
     first.begin_rotation_dispatch().unwrap();
     let deadline = crate::unix_time_ms() + 60_000;
@@ -87,12 +87,12 @@ async fn a_new_driver_keeps_physical_attempt_history_but_explicit_repair_can_ret
         .settle_rotation(rejected(), crate::unix_time_ms())
         .unwrap();
     let handoff = budget.clone();
-    let next = reserve(&runtime, &handoff, WireApi::ChatCompletions).await;
+    let handoff_attempt = reserve(&runtime, &handoff, WireApi::ChatCompletions).await;
     assert_eq!(
-        next.member_key, "source:source-b",
+        handoff_attempt.member_key, "source:source-b",
         "an alias of A is not an untried source"
     );
-    drop(next);
+    drop(handoff_attempt);
     first.allow_rotation_repair();
     assert_eq!(handoff.dispatches(), 1, "repair never refunds a dispatch");
     let repair = reserve(&runtime, &handoff, WireApi::Responses).await;
@@ -128,7 +128,13 @@ async fn local_route_incompatibility_does_not_visit_or_exclude_its_member() {
         .await
         .unwrap();
     assert!(!incompatible.contains(&selection.candidate_id));
-    assert_eq!(alias.member_key, "source:source-a");
+    assert_eq!(alias.member_key, "source:source-b");
     assert_eq!(budget.dispatches(), 0);
     assert!(budget.attempted_members().is_empty());
+    drop(alias);
+    let fresh = reserve(&runtime, &budget, WireApi::Responses).await;
+    assert_eq!(
+        fresh.member_key, "source:source-a",
+        "a local rejection must not spend the member's rotation credit"
+    );
 }

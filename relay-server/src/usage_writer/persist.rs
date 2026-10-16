@@ -6,11 +6,11 @@ pub(super) fn persist_usage_batch(
     batch: &[QueuedUsage],
     runtime: &tokio::runtime::Handle,
 ) {
-    let records = batch
+    let usage_records = batch
         .iter()
         .map(|queued| (&queued.event, queued.observed_at_ms))
         .collect::<Vec<_>>();
-    if state.store.record_usage_batch(&records).is_err() {
+    if state.store.record_usage_batch(&usage_records).is_err() {
         state
             .failed_usage_writes
             .fetch_add(batch.len() as u64, Ordering::Relaxed);
@@ -18,6 +18,15 @@ pub(super) fn persist_usage_batch(
 
     let mut account_events = BTreeMap::<String, Vec<&QueuedUsage>>::new();
     for queued in batch {
+        if queued
+            .event
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.attempt_outcome)
+            == Some(zenith_relay_core::AttemptOutcome::RetryAuthorization)
+        {
+            continue;
+        }
         if let Some(account_id) = queued.event.account_id.as_ref() {
             account_events
                 .entry(account_id.clone())
@@ -32,7 +41,7 @@ pub(super) fn persist_usage_batch(
             .update_account_with_refresh_identity(&account_id, |account| {
                 apply_queued_account_usage(state, &account_id, account, &events)
             }) {
-            Ok(Some(value)) => value,
+            Ok(Some(account_usage_hints)) => account_usage_hints,
             Ok(None) => continue,
             Err(_) => {
                 state.failed_usage_writes.fetch_add(1, Ordering::Relaxed);
@@ -76,18 +85,21 @@ fn apply_queued_account_usage(
         .load(&account.secret_ref)
         .ok()
         .flatten()
-        .and_then(|value| serde_json::from_str::<AccountCredential>(&value).ok());
-    let access_state = credential
-        .as_ref()
-        .map_or(AccountAccessState::Failed, |value| {
-            if value.refresh_token.is_some() {
-                AccountAccessState::Refreshable
-            } else {
-                AccountAccessState::AccessOnly
-            }
+        .and_then(|credential_json| {
+            serde_json::from_str::<AccountCredential>(&credential_json).ok()
         });
-    let successful_auth_state = credential.as_ref().map(|value| {
-        if value.refresh_token.is_some() {
+    let access_state =
+        credential
+            .as_ref()
+            .map_or(AccountAccessState::Failed, |account_credential| {
+                if account_credential.refresh_token.is_some() {
+                    AccountAccessState::Refreshable
+                } else {
+                    AccountAccessState::AccessOnly
+                }
+            });
+    let successful_auth_state = credential.as_ref().map(|account_credential| {
+        if account_credential.refresh_token.is_some() {
             AccountAuthState::Active
         } else {
             AccountAuthState::DegradedAccessOnly
@@ -100,11 +112,8 @@ fn apply_queued_account_usage(
     for queued in events {
         let event = &queued.event;
         let previous_quota = account.quota.clone();
-        if let Some(snapshot) = event.quota_snapshot.as_ref().filter(|snapshot| {
-            snapshot.updated_at_ms.unwrap_or_default()
-                >= account.quota.updated_at_ms.unwrap_or_default()
-        }) {
-            account.quota = snapshot.clone();
+        if let Some(snapshot) = event.quota_snapshot.as_ref() {
+            account.quota.merge_observation(snapshot);
         }
         new_passive |= event.success
             && event.quota_snapshot.as_ref().is_some_and(|snapshot| {
@@ -146,7 +155,7 @@ fn apply_queued_account_usage(
             account.cooldowns.clear();
             account.consecutive_failures = 0;
         }
-        if event.success {
+        if event.is_natural_account_use() {
             natural_use_at_ms = Some(queued.observed_at_ms);
         }
     }

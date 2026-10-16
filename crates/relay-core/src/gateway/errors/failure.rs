@@ -1,11 +1,10 @@
 use super::*;
 use crate::error_codes;
 use crate::scheduler::rotation::{AttemptObservation, ExecutionObservation, HealthObservation};
+use reqwest::header::HeaderMap;
 
 mod response;
 
-#[cfg(test)]
-pub(super) use response::responses_call_id_is_missing;
 pub(super) use response::responses_call_id_is_missing_text;
 pub(crate) use response::{
     previous_response_not_found, previous_response_not_found_value,
@@ -13,11 +12,15 @@ pub(crate) use response::{
     recoverable_response_affinity_miss, recoverable_response_model_switch,
     responses_custom_tool_item_id_requires_ctc_prefix,
     responses_function_call_output_has_invalid_call_id,
+    responses_function_call_output_has_invalid_call_id_value,
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
     responses_tool_call_is_missing_output, responses_tool_call_is_missing_output_message,
     responses_tool_call_links_rejected, responses_tool_call_links_rejected_value,
-    zenith_gateway_invalid_request, zenith_gateway_invalid_request_value,
+    zenith_gateway_invalid_request_value,
 };
+
+#[cfg(test)]
+pub(super) use response::{responses_call_id_is_missing, zenith_gateway_invalid_request};
 
 impl AttemptFailure {
     /// Explicit provider rejections and connection failures have different
@@ -75,8 +78,47 @@ impl AttemptFailure {
         match error {
             AuthorizedRequestError::Prepare(error) => Self::prepare(error),
             AuthorizedRequestError::Transport(error) => Self::transport(&error),
-            AuthorizedRequestError::NotReplayable => Self::body(),
+            AuthorizedRequestError::NotReplayable => Self::upstream_response_body_failure(),
             AuthorizedRequestError::DispatchBudgetExhausted => Self::no_candidate(),
+            AuthorizedRequestError::ModelAccess(failure) => {
+                let rate_limited = failure.code
+                    == crate::providers::chatgpt::ModelDiscoveryFailureCode::RateLimited;
+                Self {
+                    execution: ExecutionObservation::not_sent(),
+                    status: if rate_limited {
+                        StatusCode::TOO_MANY_REQUESTS
+                    } else {
+                        StatusCode::BAD_GATEWAY
+                    },
+                    category: failure.code.management_code(),
+                    message: if rate_limited {
+                        "Basis Points access check is rate limited; retry after the cooldown"
+                    } else {
+                        "Basis Points model access could not be verified"
+                    },
+                    cooldown_hint: RateLimitBodyHint {
+                        retry_after_ms: failure.retry_after_ms,
+                        global: rate_limited,
+                    },
+                }
+            }
+            AuthorizedRequestError::ModelUnavailable => Self {
+                execution: ExecutionObservation::not_sent(),
+                status: StatusCode::NOT_ACCEPTABLE,
+                category: error_codes::UPSTREAM_MODEL_UNSUPPORTED,
+                message: "Basis Points access does not include this model",
+                cooldown_hint: Default::default(),
+            },
+            AuthorizedRequestError::ReasoningUnavailable => Self {
+                execution: ExecutionObservation::not_sent(),
+                status: StatusCode::BAD_REQUEST,
+                category: error_codes::ADAPTER_REASONING_UNSUPPORTED,
+                message: "Basis Points access does not include this reasoning level",
+                cooldown_hint: Default::default(),
+            },
+            AuthorizedRequestError::ProgressTimeout => {
+                Self::stream(error_codes::STREAM_IDLE_TIMEOUT)
+            }
         }
     }
 
@@ -117,7 +159,7 @@ impl AttemptFailure {
         }
     }
 
-    pub(crate) fn body() -> Self {
+    pub(crate) fn upstream_response_body_failure() -> Self {
         Self {
             execution: ExecutionObservation::unknown(),
             status: StatusCode::BAD_GATEWAY,
@@ -141,14 +183,14 @@ impl AttemptFailure {
         }
     }
 
-    pub(crate) fn status_with_body(status: StatusCode, body: Option<&[u8]>) -> Self {
-        let classification = classify_upstream_error(status, body);
+    pub(crate) fn status_with_body(status: StatusCode, response_body: Option<&[u8]>) -> Self {
+        let classification = classify_upstream_error(status, response_body);
         Self {
             execution: rejection_execution(status, classification.category),
             status: canonical_upstream_status(status, classification.category),
             category: classification.category,
             message: classification.message,
-            cooldown_hint: body.map(rate_limit_body_hint).unwrap_or_default(),
+            cooldown_hint: response_body.map(rate_limit_body_hint).unwrap_or_default(),
         }
     }
 
@@ -166,14 +208,25 @@ impl AttemptFailure {
         }
     }
 
+    pub(crate) fn with_retry_headers(mut self, headers: &HeaderMap) -> Self {
+        let header_delay = super::cooldown::retry_after_ms(headers, std::time::SystemTime::now());
+        self.cooldown_hint.retry_after_ms = header_delay
+            .into_iter()
+            .chain(self.cooldown_hint.retry_after_ms)
+            .max();
+        self
+    }
+
     pub(crate) fn stream(category: &'static str) -> Self {
         Self {
             execution: ExecutionObservation::unknown(),
             status: StatusCode::BAD_GATEWAY,
             category,
             message: match category {
-                error_codes::UPSTREAM_BODY_TOO_LARGE => "upstream response is too large",
                 error_codes::UPSTREAM_BODY => "upstream response failed",
+                error_codes::STREAM_IDLE_TIMEOUT => {
+                    "Basis Points response stopped making progress; the request was not repeated"
+                }
                 _ => "upstream stream failed before client output",
             },
             cooldown_hint: RateLimitBodyHint::default(),
@@ -246,6 +299,9 @@ fn rejection_execution(status: StatusCode, category: &str) -> ExecutionObservati
             | error_codes::UPSTREAM_REQUEST_TIMEOUT
             | error_codes::UPSTREAM_CONFLICT
             | error_codes::UPSTREAM_TRANSPORT
+            | error_codes::UPSTREAM_TRANSPORT_TIMEOUT
+            | error_codes::UPSTREAM_TRANSPORT_BODY
+            | error_codes::UPSTREAM_TRANSPORT_REQUEST
             | error_codes::UPSTREAM_GATEWAY_TIMEOUT
     ) {
         return ExecutionObservation::unknown();
@@ -254,8 +310,20 @@ fn rejection_execution(status: StatusCode, category: &str) -> ExecutionObservati
         || matches!(
             category,
             error_codes::UPSTREAM_OVERLOADED
+                | error_codes::UPSTREAM_TRANSPORT_CONNECT
+                | error_codes::UPSTREAM_USAGE_NOT_INCLUDED
+                | error_codes::UPSTREAM_MODEL_UNAVAILABLE
+                | error_codes::UPSTREAM_MODEL_UNSUPPORTED
+                | error_codes::UPSTREAM_MODEL_NOT_FOUND
+                | error_codes::UPSTREAM_UNAUTHORIZED
+                | error_codes::UPSTREAM_FORBIDDEN
+                | error_codes::UPSTREAM_ACCOUNT_DISABLED
+                | error_codes::UPSTREAM_ACCOUNT_VERIFICATION_REQUIRED
+                | error_codes::UPSTREAM_REGION_UNSUPPORTED
+                | error_codes::UPSTREAM_REFRESH_TOKEN_REUSED
                 | error_codes::UPSTREAM_MODEL_CAPACITY
                 | error_codes::UPSTREAM_RATE_LIMITED
+                | error_codes::UPSTREAM_TURN_RATE_LIMITED
                 | error_codes::UPSTREAM_QUOTA_EXHAUSTED
                 | error_codes::UPSTREAM_WEBSOCKET_CONNECTION_LIMIT
                 | error_codes::UPSTREAM_PREVIOUS_RESPONSE_NOT_FOUND
@@ -272,5 +340,8 @@ mod policy;
 
 pub(crate) use policy::{
     failure_category_affects_account_state, failure_category_is_request_terminal,
-    failure_category_requires_cooldown, retryable_failure, retryable_status,
+    failure_category_requires_cooldown, retryable_failure,
 };
+
+#[cfg(test)]
+pub(super) use policy::retryable_status;

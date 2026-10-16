@@ -1,4 +1,5 @@
 mod adapters;
+mod catalog_refresh;
 mod catalog_warning;
 mod coordination;
 mod paths;
@@ -75,6 +76,7 @@ pub struct DesktopStateOwner {
     failed_usage_writes: Arc<AtomicU64>,
     failed_affinity_writes: Arc<AtomicU64>,
     catalog_refresh_error: Arc<Mutex<Option<String>>>,
+    pub(in crate::local_pool) client_catalog_refresh: catalog_refresh::CatalogRefreshQueue,
     background_session_active: watch::Sender<bool>,
     quota_account_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
     subscription_refresh_lock: AsyncMutex<()>,
@@ -120,6 +122,20 @@ impl DesktopState {
                 }
             });
         let mut store = LocalPoolStore::open(root.clone())?;
+        let mut accounts = store.accounts().to_vec();
+        let mut membership_changed = false;
+        for account in &mut accounts {
+            if account.account.in_pool
+                && super::accounts::records::can_account_join_pool(account)
+                    .is_ok_and(|eligible| !eligible)
+            {
+                account.account.in_pool = false;
+                membership_changed = true;
+            }
+        }
+        if membership_changed {
+            store.replace_accounts_and_keys(accounts, store.keys().to_vec())?;
+        }
         let telemetry = store.database();
         let pricing = Arc::new(
             PricingCatalogLoader::open(paths.pricing_catalog_file())
@@ -174,6 +190,7 @@ impl DesktopState {
                 failed_usage_writes,
                 failed_affinity_writes,
                 catalog_refresh_error,
+                client_catalog_refresh: catalog_refresh::CatalogRefreshQueue::default(),
                 background_session_active,
                 quota_account_locks: Arc::new(Mutex::new(HashMap::new())),
                 subscription_refresh_lock: AsyncMutex::new(()),
@@ -232,10 +249,10 @@ impl DesktopState {
         context: Option<&str>,
     ) {
         let telemetry = self.telemetry.clone();
-        let name = name.to_string();
+        let operation_name = name.to_string();
         let context = context.map(str::to_owned);
         tauri::async_runtime::spawn_blocking(move || {
-            let _ = telemetry.record_performance(&name, duration_ms, context.as_deref());
+            let _ = telemetry.record_performance(&operation_name, duration_ms, context.as_deref());
         });
     }
 

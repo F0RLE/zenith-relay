@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   CircleAlert,
@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
+import { accountPlanOption } from "../../accountPlans";
 import type { AccountSummary, AccountTransferProgress, CandidateRuntimeSnapshot, ProfileBinding } from "../../api/types";
 import {
   refreshAllAccountQuotas,
@@ -36,18 +37,18 @@ import {
   EmptyState,
   IconButton,
   OptionMenu,
-  accountPlanOption,
   useConfirm,
   AccountPlanBadge,
 } from "../../components/Ui";
 import { formatNumber } from "../../numberFormatting";
 import { providerCreditsSummary } from "../../providerCredits";
 import { routingOrderPositions, runtimeCandidateForMember } from "../../routingOrder";
-import { updatePoolMembership } from "../../poolMembership";
+import { canAccountJoinPool, updatePoolMembership } from "../../poolMembership";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { NoResults } from "./connectionHelpers";
 import { AccountErrorDialog } from "./AccountErrorDialog";
 import { AccountCard } from "./AccountCard";
+import { useConnectionAccountRemoval } from "./accountRemoval";
 import {
   accountCounts,
   accountPlanOptions,
@@ -76,7 +77,7 @@ export function AccountsTable({
   onExport,
 }: {
   query: string;
-  onQuery: (value: string) => void;
+  onQuery: (queryText: string) => void;
   canImport: boolean;
   canManageProxies: boolean;
   canExport: boolean;
@@ -88,6 +89,7 @@ export function AccountsTable({
   onExport: (accountIds: string[]) => void;
 }) {
   const { t, i18n } = useTranslation();
+  const membershipPending = useRef(false);
   const {
     mode,
     runtime,
@@ -103,6 +105,7 @@ export function AccountsTable({
     setAccountValueVisible,
   } = useRelayState();
   const confirm = useConfirm();
+  const { canTrash, remove, openDeleteMenu, permanentDeleteMenu } = useConnectionAccountRemoval();
   const [selected, setSelected] = useState<string[]>([]);
   const [transfer, setTransfer] = useState<{ accountIds: string[]; progress: AccountTransferProgress } | null>(null);
   const [planFilter, setPlanFilter] = useState("all");
@@ -114,9 +117,10 @@ export function AccountsTable({
   const runtimeOrder = runtime?.gateway.routingOrder ?? EMPTY_RUNTIME_ORDER;
   const accountTimestamps = useMemo(() => allAccounts.flatMap((account) => [
     account.subscription.activeUntilMs,
+    account.oauthClientKind === "excel_bps" && !account.remoteLocation ? account.credentialDiagnostics?.expiresAtMs : null,
     account.quota.primary?.resetAtMs,
     account.quota.secondary?.resetAtMs,
-    ...(account.quota.supplemental ?? []).map((item) => item.window.resetAtMs),
+    ...(account.quota.supplemental ?? []).map((quotaWindow) => quotaWindow.window.resetAtMs),
     ...(account.inPool
       ? (runtimeCandidateForMember(account.id, "oauth_account", runtimeOrder)?.modelRetries ?? []).map((retry) => retry.retryAtMs)
       : []),
@@ -137,12 +141,12 @@ export function AccountsTable({
     account.inPool ? runtimeCandidateForMember(account.id, "oauth_account", runtimeOrder) : undefined,
   ])), [allAccounts, runtimeOrder]);
   const activePlan = useMemo(() => activeAccountPlan(planFilter, plans, errorCount), [errorCount, planFilter, plans]);
-  useEffect(() => setSelected((current) => current.filter((id) => allAccounts.some((account) => account.id === id))), [runtime?.accounts]);
+  useEffect(() => setSelected((previousSelectedAccountIds) => previousSelectedAccountIds.filter((accountId) => allAccounts.some((account) => account.id === accountId))), [runtime?.accounts]);
   useEffect(() => { setSelected([]); setPlanFilter("all"); setParticipationFilter("all"); }, [mode]);
   useEffect(() => {
     let disposed = false;
     let stop: (() => void) | undefined;
-    void relayCommands.onAccountTransferProgress((progress) => setTransfer((current) => current ? { ...current, progress } : null)).then((unlisten) => {
+  void relayCommands.onAccountTransferProgress((progress) => setTransfer((previousTransfer) => previousTransfer ? { ...previousTransfer, progress } : null)).then((unlisten) => {
       if (disposed) unlisten();
       else stop = unlisten;
     }).catch(() => undefined);
@@ -176,10 +180,10 @@ export function AccountsTable({
     allSelected,
   } = useMemo(() => accountSelectionState(allAccounts, accounts, selected), [accounts, allAccounts, selected]);
   const visiblePlanCounts = useMemo(() => buildVisiblePlanCounts(accounts, unknownPlanLabel), [accounts, unknownPlanLabel]);
-  const participationOptions = useMemo(() => (["all", "included", "excluded"] as const).map((value) => {
-    const count = value === "all" ? allAccounts.length : allAccounts.filter((account) => accountParticipates(account) === (value === "included")).length;
-    const state = t(`accounts.participation.${value}`);
-    return { value, label: t("accounts.participationFilterOption", { state, count }), shortLabel: `${t("accounts.poolParticipation")}: ${state}` };
+  const participationOptions = useMemo(() => (["all", "included", "excluded"] as const).map((participationFilterValue) => {
+    const count = participationFilterValue === "all" ? allAccounts.length : allAccounts.filter((account) => accountParticipates(account) === (participationFilterValue === "included")).length;
+    const participationLabel = t(`accounts.participation.${participationFilterValue}`);
+    return { value: participationFilterValue, label: t("accounts.participationFilterOption", { state: participationLabel, count }), shortLabel: `${t("accounts.poolParticipation")}: ${participationLabel}` };
   }), [allAccounts, t]);
   const planFilterOptions = useMemo(() => [
     { value: "all", label: t("accounts.planFilterOption", { plan: t("accounts.allPlans"), count: allAccounts.length }), shortLabel: `${t("accounts.plan")}: ${t("accounts.allPlans")}` },
@@ -207,45 +211,37 @@ export function AccountsTable({
       />
     );
   }
-  const toggleSelected = (accountId: string) => setSelected((current) => current.includes(accountId) ? current.filter((id) => id !== accountId) : [...current, accountId]);
+  const toggleSelected = (accountId: string) => setSelected((previousSelectedAccountIds) => previousSelectedAccountIds.includes(accountId) ? previousSelectedAccountIds.filter((selectedAccountId) => selectedAccountId !== accountId) : [...previousSelectedAccountIds, accountId]);
   const toggleAllVisible = (checked: boolean) => setSelected(checked ? accounts.map((account) => account.id) : []);
-  const togglePlanGrouping = () => setGroupByPlan((current) => {
-    localStorage.setItem("relay.accountsGroupByPlan", String(!current));
-    return !current;
+  const togglePlanGrouping = () => setGroupByPlan((previousGroupByPlan) => {
+    localStorage.setItem("relay.accountsGroupByPlan", String(!previousGroupByPlan));
+    return !previousGroupByPlan;
   });
   const updateSelectedParticipation = async (participate: boolean) => {
-    const ok = await perform("pool-membership-bulk", async () => {
-      const accountIds = selectedAccounts.map((account) => account.id);
-      await updatePoolMembership(mode, { accountIds, sourceIds: [], inPool: participate });
-    }, "feedback.saved", { backgroundRefresh: true });
-    if (ok) setSelected([]);
+    if (membershipPending.current) return;
+    membershipPending.current = true;
+    const accountsToUpdate = [...selectedAccounts];
+    try {
+      const accountIds = accountsToUpdate
+        .filter((account) => (!participate || canAccountJoinPool(account)) && account.inPool !== participate)
+        .map((account) => account.id);
+      if (!accountIds.length) return;
+      const ok = await perform("pool-membership-bulk", () => updatePoolMembership(mode, { accountIds, sourceIds: [], inPool: participate }), "feedback.saved", { backgroundRefresh: true });
+      if (ok) setSelected((previous) => previous.filter((id) => !accountIds.includes(id)));
+    } finally {
+      membershipPending.current = false;
+    }
   };
-  const deleteAccounts = async (accountIds: string[], operation: string) => {
-    const ok = await perform(operation, async () => {
-      if (mode === "local") {
-        if (accountIds.length === 1) {
-          const accountId = accountIds[0];
-          if (accountId) await relayCommands.deleteAccount(accountId);
-        }
-        else await relayCommands.deleteAccounts(accountIds);
-      } else {
-        for (const accountId of accountIds) await relayCommands.remoteAction({ type: "delete_account", id: accountId });
-      }
-    }, "feedback.deleted", { backgroundRefresh: true });
+  const deleteAccounts = async (accountIds: string[], operation: string, permanently: boolean) => {
+    const ok = await remove(accountIds, permanently, operation, Boolean(selectedOnServer));
     if (!ok) await refresh().catch(() => undefined);
-    if (ok) setSelected((current) => current.filter((id) => !accountIds.includes(id)));
+    if (ok) setSelected((previousSelectedAccountIds) => previousSelectedAccountIds.filter((accountId) => !accountIds.includes(accountId)));
     return ok;
   };
-  const deleteSelected = async () => {
+  const deleteSelected = async (permanently = false) => {
     const accountIds = selectedAccounts.map((account) => account.id);
-    const message = mode === "remote"
-      ? t("accounts.deleteRemoteSelectedConfirm", { count: accountIds.length })
-      : selectedOnServer
-        ? t("accounts.deleteSelectedRecoveryConfirm", { count: accountIds.length })
-        : t("accounts.deleteSelectedConfirm", { count: accountIds.length });
-    if (accountIds.length && await confirm(message, { danger: true })) {
-      await deleteAccounts(accountIds, "delete-selected-accounts");
-    }
+    if (!accountIds.length) return;
+    await deleteAccounts(accountIds, "delete-selected-accounts", permanently);
   };
   const moveSelectedToRemote = async () => {
     if (!await confirm(t("accounts.moveToServerConfirm", { count: selectedCount }), {
@@ -331,9 +327,9 @@ export function AccountsTable({
               label={t("accounts.filterByParticipation")}
               value={participationFilter}
               options={participationOptions}
-              onChange={(value) => {
+              onChange={(participationValue) => {
                 setSelected([]);
-                setParticipationFilter(value as ParticipationFilter);
+                setParticipationFilter(participationValue as ParticipationFilter);
               }}
             />
             {plans.length > 1 ? (
@@ -342,9 +338,9 @@ export function AccountsTable({
                 label={t("accounts.filterByPlan")}
                 value={activePlan}
                 options={planFilterOptions}
-                onChange={(value) => {
+                onChange={(planId) => {
                   setSelected([]);
-                  setPlanFilter(value);
+                  setPlanFilter(planId);
                 }}
               />
             ) : null}
@@ -401,10 +397,13 @@ export function AccountsTable({
             />
             <IconButton
               className="danger"
+              data-relay-context-action
               label={t("accounts.deleteSelected")}
               icon={busy === "delete-selected-accounts" ? <Loader2 className="spin" aria-hidden /> : <Trash2 aria-hidden />}
-              disabled={busy === "delete-selected-accounts"}
-              onClick={deleteSelected}
+              disabled={Boolean(busy)}
+              title={t(canTrash ? "trash.deleteHint" : "trash.serverUpdateRequired")}
+              onClick={() => void deleteSelected()}
+              onContextMenu={(event) => openDeleteMenu(event, () => void deleteSelected(true))}
             />
             <IconButton label={t("accounts.clearSelection")} icon={<X aria-hidden />} onClick={() => setSelected([])} />
           </> : <>
@@ -485,6 +484,7 @@ export function AccountsTable({
         onReauthenticate={onReauthenticate}
       />
     ) : <NoResults />}
+    {permanentDeleteMenu}
     {errorDetails ? <AccountErrorDialog account={errorDetails} onClose={() => setErrorDetails(null)} /> : null}
     </>
   );
@@ -524,7 +524,7 @@ function AccountMoveProgress({
       <progress max={Math.max(1, transfer.progress.total)} value={transfer.progress.completed} />
       <ul>
         {transfer.accountIds.map((accountId, index) => {
-          const account = accounts.find((item) => item.id === accountId);
+          const account = accounts.find((candidateAccount) => candidateAccount.id === accountId);
           const status = index < transfer.progress.completed ? "validated" : index === transfer.progress.completed ? "current" : "pending";
           return (
             <li key={accountId} data-transfer-state={status}>

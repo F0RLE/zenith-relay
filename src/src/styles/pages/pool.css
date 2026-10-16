@@ -76,50 +76,48 @@
   color: var(--relay-text);
 }
 
-.pool-speed-control {
-  --pool-speed-color: var(--relay-text);
+.pool-model-control {
   position: relative;
-  width: 200px;
   min-width: 0;
   max-width: 100%;
   height: 34px;
-  flex: 0 0 200px;
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 3px;
   padding: 3px;
-  border: 1px solid var(--relay-border);
-  border-radius: 6px;
+  border: 0;
+  border-radius: 8px;
   background: var(--relay-subtle);
   color: var(--relay-muted);
   user-select: none;
 }
 
-.pool-speed-control:has(button:disabled) {
+.pool-model-control:has(button:disabled) {
   cursor: not-allowed;
   opacity: 0.65;
 }
 
-.pool-speed-control[data-speed-tier="fast"] {
-  --pool-speed-color: var(--relay-accent-hover);
+.pool-speed-control {
+  width: 200px;
+  flex: 0 0 200px;
 }
 
 .pool-speed-control[data-speed-tier="ultrafast"] {
   --pool-speed-color: var(--relay-warning);
 }
 
-.pool-speed-control button {
+.pool-model-control button {
   flex: 0 0 28px;
   width: 28px;
   min-width: 0;
-  height: 100%;
+  height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 5px;
   padding: 0;
   border: 0;
-  border-radius: 4px;
+  border-radius: 5px;
   background: transparent;
   color: var(--relay-muted);
   font-size: 12px;
@@ -129,13 +127,13 @@
   transition: background-color 120ms ease, color 120ms ease;
 }
 
-.pool-speed-control button svg {
+.pool-model-control button svg {
   width: 14px;
   height: 14px;
   flex: 0 0 14px;
 }
 
-.pool-speed-control button:hover:not(:disabled, .active) {
+.pool-model-control button:hover:not(:disabled, .active) {
   background: color-mix(in srgb, var(--relay-surface) 70%, transparent);
   color: var(--relay-text);
 }
@@ -145,9 +143,7 @@
   width: auto;
   min-width: 0;
   padding: 0 6px;
-  background: var(--relay-surface);
-  color: var(--pool-speed-color);
-  box-shadow: var(--relay-shadow-soft);
+  box-shadow: none;
 }
 
 .pool-speed-control button.active span {
@@ -157,12 +153,8 @@
   white-space: nowrap;
 }
 
-.pool-speed-control button:disabled {
+.pool-model-control button:disabled {
   cursor: not-allowed;
-}
-
-.pool-speed-control[data-speed-tier="fast"] button.active {
-  background: var(--relay-accent-soft);
 }
 
 .pool-speed-control[data-speed-tier="ultrafast"] button.active {
@@ -179,6 +171,93 @@
   flex: 0 0 28px;
   width: 28px;
   padding: 0;
+}
+
+.pool-context-control {
+  width: 202px;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.pool-context-options {
+  display: flex;
+  align-self: stretch;
+  align-items: center;
+  gap: 2px;
+}
+
+.pool-context-budget {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: center;
+  padding-left: 6px;
+  border-left: 1px solid var(--relay-border);
+  text-align: right;
+}
+
+.pool-context-token-input,
+.pool-context-token-value {
+  grid-area: 1 / 1;
+  display: block;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 28px;
+  margin: 0;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--relay-text);
+  font-family: var(--relay-font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  font-weight: 550;
+  line-height: 28px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.pool-context-token-input {
+  appearance: textfield;
+  outline-offset: -2px;
+  transition: background-color 120ms ease;
+}
+
+.pool-context-token-input:hover:not(:disabled):not([aria-invalid="true"]),
+.pool-context-token-input:focus:not([aria-invalid="true"]) {
+  background: var(--relay-surface);
+}
+
+.pool-context-token-input:not(:focus):not([aria-invalid="true"]) {
+  color: transparent;
+}
+
+.pool-context-token-preview {
+  pointer-events: none;
+}
+
+.pool-context-token-input:focus + .pool-context-token-preview {
+  visibility: hidden;
+}
+
+.pool-context-token-input::-webkit-inner-spin-button,
+.pool-context-token-input::-webkit-outer-spin-button { appearance: none; margin: 0; }
+
+.pool-context-token-input[aria-invalid="true"] {
+  background: var(--relay-error-soft);
+  color: var(--relay-error);
+}
+
+.pool-model-control button.active {
+  background: var(--relay-accent-soft);
+  color: var(--pool-speed-color, var(--relay-accent-hover));
+}
+
+.pool-model-control button:focus-visible {
+  outline: 2px solid var(--relay-accent);
+  outline-offset: 1px;
 }
 
 .pool-runtime-strip {
@@ -264,7 +343,7 @@
   gap: 9px;
   margin: -4px 0 12px;
   padding: 9px 11px;
-  border: 1px solid color-mix(in srgb, var(--relay-danger) 36%, var(--relay-border));
+  border: 1px solid transparent;
   border-radius: 7px;
   background: color-mix(in srgb, var(--relay-danger) 8%, var(--relay-surface));
   color: var(--relay-danger);
@@ -301,13 +380,13 @@
 
 .pool-member-list {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   align-items: stretch;
   gap: 10px;
 }
 
 .account-calculation-toggle[aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--relay-accent) 45%, var(--relay-border));
+  border-color: transparent;
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
 }
@@ -318,7 +397,7 @@
   overflow: hidden;
   display: grid;
   grid-template-rows: auto minmax(82px, 1fr) auto auto auto;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   border-radius: 7px;
   background: var(--relay-surface);
   box-shadow: var(--relay-shadow-soft);
@@ -330,58 +409,27 @@
   flex-direction: column;
 }
 
-@media (max-width: 900px) {
-  .pool-member-list {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@media (min-width: 901px) and (max-width: 1600px) {
-  .pool-member-list {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-}
-
-@media (min-width: 901px) and (max-width: 1250px) {
-  .pool-member-list {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 700px) {
-  .pool-member-list {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
 .pool-member-card:hover {
-  border-color: var(--relay-border-strong);
+  border-color: transparent;
 }
 
 .pool-member-card.selected {
-  border-color: var(--relay-accent);
+  border-color: transparent;
+  background: color-mix(in srgb, var(--relay-accent-soft) 55%, var(--relay-surface));
 }
 
 .pool-member-card.current {
-  border-color: color-mix(in srgb, var(--relay-accent) 55%, var(--relay-border));
+  border-color: transparent;
   background: color-mix(in srgb, var(--relay-accent) 4%, var(--relay-surface));
   box-shadow: var(--relay-shadow-soft);
 }
 
 .pool-member-card.last-used:not(.current) {
-  border-color: color-mix(in srgb, var(--relay-accent) 28%, var(--relay-border));
+  border-color: transparent;
 }
 
 .pool-member-card.current::before {
-  position: absolute;
-  z-index: 2;
-  top: 0;
-  right: 0;
-  left: 0;
-  height: 3px;
-  background: var(--relay-accent);
-  pointer-events: none;
-  content: "";
+  display: none;
 }
 
 .pool-member-card.next:not(.current)::before {
@@ -420,7 +468,7 @@
   white-space: nowrap;
 }
 
-.pool-member-meta .account-plan-badge {
+.pool-member-meta .account-badges {
   flex: 0 0 auto;
 }
 
@@ -798,109 +846,12 @@
 .pool-member-card-footer[data-kind="source"] .pool-member-actions > :not(:first-child).relay-disabled-tooltip-anchor > .relay-icon-button {
   border-left: 1px solid var(--relay-border);
 }
-.relay-dialog.pool-connection-picker {
-  width: min(536px, 100%);
-}
-
-.pool-connection-picker .relay-dialog-body {
-  padding: 18px;
-}
-
-.pool-connection-options {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.pool-connection-option {
-  min-height: 126px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 14px 12px;
-  border: 1px solid color-mix(in srgb, var(--relay-border) 86%, var(--relay-text));
-  border-radius: 8px;
-  background: var(--relay-surface);
-  color: var(--relay-text);
-  cursor: pointer;
-  transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
-}
-
-.pool-connection-option:hover:not(:disabled),
-.pool-connection-option:focus-visible:not(:disabled) {
-  border-color: var(--relay-accent);
-  background: color-mix(in srgb, var(--relay-accent-soft) 45%, var(--relay-surface));
-  box-shadow: 0 6px 16px rgb(0 0 0 / 10%);
-  outline: none;
-}
-
-.pool-connection-option:disabled {
-  cursor: not-allowed;
-  opacity: 0.8;
-}
-
-.pool-connection-option-icon {
-  width: 52px;
-  height: 52px;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--relay-border);
-  border-radius: 10px;
-  background: var(--relay-bg);
-  color: var(--relay-text);
-}
-
-.pool-connection-option-icon img {
-  width: 34px;
-  height: 34px;
-  object-fit: contain;
-}
-
-/* Keep the two product marks balanced on the light surface: the ChatGPT
-   mark needs a readable mid-tone while OpenCode's official black mark gets
-   a little more breathing room inside its tile. */
-:root:not([data-theme="dark"]) .pool-connection-option-icon img[src*="opencode"] {
-  width: 32px;
-  height: 32px;
-}
-
-.pool-connection-option strong {
-  font-size: 13px;
-  line-height: 17px;
-}
-
-.pool-connection-launch-toggle {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 42px;
-  margin-top: 14px;
-  padding: 9px 11px;
-  border: 1px solid var(--relay-border);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--relay-subtle) 55%, var(--relay-surface));
-  color: var(--relay-text);
-  cursor: pointer;
-  font-size: 12px;
-}
-
-@media (max-width: 520px) {
-  .pool-connection-options {
-    grid-template-columns: 1fr;
-  }
-
-  .pool-connection-option {
-    min-height: 118px;
-  }
-}
 .relay-dialog.wide.pool-routing-dialog { width: min(800px, 100%); }
 .pool-routing-editor { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
-.pool-routing-modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.pool-routing-modes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .pool-routing-modes button { display: flex; align-items: center; justify-content: center; gap: 8px; min-width: 0; min-height: 40px; padding: 8px; border: 1px solid transparent; border-radius: 6px; color: var(--relay-muted); background: transparent; font: inherit; font-size: 13px; cursor: pointer; }
 .pool-routing-modes button[aria-checked="false"]:hover:not(:disabled) { color: var(--relay-text); background: var(--relay-subtle); }
-.pool-routing-modes button[aria-checked="true"] { color: var(--relay-accent); background: var(--relay-accent-soft); border-color: var(--relay-accent); }
+.pool-routing-modes button[aria-checked="true"] { color: var(--relay-accent); background: var(--relay-accent-soft); border-color: transparent; }
 .pool-routing-modes button:disabled { cursor: not-allowed; opacity: .5; }
 .pool-routing-modes svg { width: 16px; height: 16px; flex-shrink: 0; }
 .pool-routing-columns, .pool-routing-member { display: grid; grid-template-columns: minmax(0, 1fr) 104px 156px; gap: 12px; align-items: center; }
@@ -911,7 +862,7 @@
 .pool-routing-member { min-width: 0; padding: 12px 8px; border-bottom: 1px solid var(--relay-border); }
 .pool-routing-member:first-child { border-top: 1px solid var(--relay-border); }
 .pool-routing-member[data-dragging] { background: var(--relay-accent-soft); }
-.pool-routing-member[data-drop-target] { outline: 2px solid var(--relay-accent); outline-offset: -2px; }
+.pool-routing-member[data-drop-target] { outline: none; background: var(--relay-accent-soft); }
 .pool-routing-identity { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .pool-routing-identity > svg { width: 18px; height: 18px; flex-shrink: 0; color: var(--relay-muted); }
 .pool-routing-handle { display: grid; place-items: center; width: 24px; height: 32px; flex-shrink: 0; padding: 0; border: 0; background: transparent; color: var(--relay-muted); cursor: grab; touch-action: none; user-select: none; }
@@ -1092,7 +1043,7 @@
   align-items: center;
   gap: 6px;
   padding: 3px 8px;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   border-radius: 5px;
   background: var(--relay-surface);
   color: var(--relay-muted);
@@ -1101,36 +1052,36 @@
 }
 
 .pool-picker-health button:hover {
-  border-color: var(--relay-border-strong);
+  border-color: transparent;
   color: var(--relay-text);
 }
 
 .pool-picker-health button[aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--relay-accent) 60%, var(--relay-border));
+  border-color: transparent;
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
 }
 
 .pool-picker-health button[data-health="cooldown"][aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--relay-warning) 55%, var(--relay-border));
+  border-color: transparent;
   background: color-mix(in srgb, var(--relay-warning) 10%, var(--relay-surface));
   color: var(--relay-warning);
 }
 
 .pool-picker-health button[data-health="error"][aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--relay-error) 55%, var(--relay-border));
+  border-color: transparent;
   background: color-mix(in srgb, var(--relay-error) 9%, var(--relay-surface));
   color: var(--relay-error);
 }
 
 .pool-picker-health button[data-health="disabled"][aria-pressed="true"] {
-  border-color: var(--relay-border-strong);
+  border-color: transparent;
   background: var(--relay-subtle);
   color: var(--relay-text);
 }
 
 .pool-picker-health button[data-health="info"][aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--relay-info) 55%, var(--relay-border));
+  border-color: transparent;
   background: color-mix(in srgb, var(--relay-info) 10%, var(--relay-surface));
   color: var(--relay-info);
 }
@@ -1283,7 +1234,7 @@
   margin: 0;
 }
 
-.pool-picker-option > .account-plan-badge {
+.pool-picker-option .account-badges > span {
   padding-inline: 6px;
 }
 

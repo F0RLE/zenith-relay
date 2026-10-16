@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "../bun-playwright";
 import { emitTauriEvent, installTauriMock } from "./tauri-mock";
+import { chooseOption } from "./operations/helpers";
 
 async function expectSetupFrame(page: Page) {
   await expect(page.locator("#splash-screen")).toHaveCount(0);
@@ -14,6 +15,28 @@ async function expectSetupFrame(page: Page) {
   }
 }
 
+for (const kind of ["codex", "excel_bps"] as const) {
+  test(`quick setup can sign in a pool account through ${kind}`, async ({ page }) => {
+    await installTauriMock(page, { onboarding: false, locale: "en", populated: true });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Get started" }).click();
+    await page.getByRole("button", { name: "Continue" }).click();
+    await expect(page.getByRole("button", { name: "Sign-in method: ChatGPT", exact: true })).toBeVisible();
+    if (kind === "excel_bps") await chooseOption(page, page, "Sign-in method", kind);
+    await page.getByRole("button", { name: /^Sign in / }).click();
+    await expect.poll(() => page.evaluate(() => (window as unknown as {
+      __TAURI_TEST_INVOKES__: Array<{ command: string; args: { clientKind?: string } }>;
+    }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "start_codex_oauth")?.args.clientKind)).toBe(kind);
+    await emitTauriEvent(page, "relay-oauth-status", { loginId: "oauth_synthetic", status: "callback_received" });
+    await expect(page.getByRole("button", { name: "Continue", exact: true })).toBeEnabled();
+    await expect(page.getByRole("dialog", { name: "Add a regular account to the pool?", exact: true })).toHaveCount(0);
+    const membership = await page.evaluate(() => (window as unknown as {
+      __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }>;
+    }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "set_local_pool_membership"));
+    expect(membership?.args.input).toEqual({ accountIds: ["account_synthetic"], sourceIds: [], inPool: true });
+  });
+}
+
 test("quick setup chooses where the shared pool runs", async ({ page }) => {
   await installTauriMock(page, { onboarding: false, locale: "en", populated: true });
   await page.goto("/");
@@ -25,7 +48,7 @@ test("quick setup chooses where the shared pool runs", async ({ page }) => {
   await page.getByRole("button", { name: /On your server/ }).click();
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByLabel("Server address").fill("https://relay.example.invalid");
-  await page.getByLabel("Management token").fill("synthetic-management-token-000000");
+  await page.getByLabel("Management token", { exact: true }).fill("synthetic-management-token-000000");
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByRole("heading", { name: "What should use your pool?" })).toBeVisible();
   await page.screenshot({ path: "output/playwright/onboarding-server-1160x760.png" });
@@ -75,6 +98,47 @@ test("local quick setup verifies runtime and applies ChatGPT only after explicit
   expect(calls.map((call) => call.command)).not.toContain("launch_managed_codex_profile");
 });
 
+test("local quick setup offers Claude Desktop second and connects it without launching", async ({ page }) => {
+  await installTauriMock(page, { onboarding: false, locale: "en", populated: true });
+  await page.goto("/");
+  await expect(page.locator(".intro-flow-harnesses .intro-flow-node")).toHaveText(["ChatGPT", "Claude Desktop", "OpenCode"]);
+  await page.getByRole("button", { name: "Get started" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.locator(".client-options button")).toHaveText([
+    "ChatGPTChats and coding tasks in the ChatGPT application.",
+    "Claude DesktopUse local pool models in Claude Desktop.",
+    "OpenCodeA coding assistant in your terminal.",
+    "Configure laterChoose and connect an application after setup.",
+  ]);
+  await page.getByRole("button", { name: "Claude Desktop", exact: true }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByRole("heading", { name: "Relay is ready" })).toBeVisible();
+  const commands = await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string }>;
+  }).__TAURI_TEST_INVOKES__.map((call) => call.command));
+  expect(commands).toContain("connect_claude_desktop");
+  expect(commands).not.toContain("launch_claude_desktop");
+  expect(commands).not.toContain("connect_opencode_to_local_gateway");
+});
+
+test("remote quick setup keeps the local Desktop integration unavailable", async ({ page }) => {
+  await installTauriMock(page, { onboarding: false, locale: "en", mode: "remote", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Get started" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByLabel("Server address").fill("https://relay.example.invalid");
+  await page.getByLabel("Management token", { exact: true }).fill("synthetic-management-token-000000");
+  await page.getByRole("button", { name: "Continue" }).click();
+  const claude = page.getByRole("button", { name: "Claude Desktop", exact: true });
+  await expect(claude).toBeDisabled();
+  await expect(claude).toHaveAccessibleDescription("Claude Desktop integration is available with the local pool only.");
+  const commands = await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string }>;
+  }).__TAURI_TEST_INVOKES__.map((call) => call.command));
+  expect(commands.filter((command) => command.includes("claude_desktop"))).toEqual([]);
+});
+
 test("local quick setup connects OpenCode to the pool without launching a client", async ({ page }) => {
   await installTauriMock(page, { onboarding: false, locale: "en", populated: true });
   await page.goto("/");
@@ -101,77 +165,85 @@ test("local quick setup imports through the unified dialog and selects pool memb
   await dialog.getByRole("button", { name: /Choose account files/ }).click();
   await expect(dialog.getByLabel("Add selected to pool after import")).toBeChecked();
   await dialog.getByRole("button", { name: /Import 2 account/ }).click();
+  await expect(page.getByRole("dialog", { name: "Add a regular account to the pool?", exact: true })).toHaveCount(0);
   await expect(dialog).not.toBeVisible();
   const call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "confirm_local_account_import"));
   expect(call?.args.input).toMatchObject({ addToPool: true });
 });
 
-test("local quick setup imports the current ChatGPT profile and allows adding an API before continuing", async ({ page }) => {
-  await installTauriMock(page, { onboarding: false, locale: "en", populated: true, gatewayRunning: false, importConfirmDelayMs: 250 });
+test("local quick setup imports account files and allows adding an API before continuing", async ({ page }) => {
+  await installTauriMock(page, { onboarding: false, locale: "en", populated: true, gatewayRunning: false, importConfirmDelayMs: 1_000 });
   await page.goto("/");
   await page.getByRole("button", { name: "Get started" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
-  await expect(page.getByRole("button", { name: /Import current profile/ })).toBeVisible();
-  await page.getByRole("button", { name: /Import current profile/ }).click();
-  const status = page.locator(".setup-current-profile-status");
-  await expect(status).toContainText("Importing current profile");
-  await expect(page.getByRole("dialog", { name: "Import accounts" })).toHaveCount(0);
-  await expect(status).toContainText("Profile imported");
-  await expect(page.getByRole("button", { name: "Add API source" })).toBeVisible();
+  await page.getByRole("button", { name: /Import accounts/ }).click();
+  const dialog = page.getByRole("dialog", { name: "Import accounts" });
+  await dialog.getByRole("button", { name: /Choose account files/ }).click();
+  await dialog.getByRole("button", { name: /Import 2 account/ }).click();
+  await expect(dialog.getByRole("status")).toContainText("Importing");
+  await expect(dialog).toBeHidden();
+  const ready = page.locator(".setup-pool-ready");
+  await expect(ready).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Add API source/ })).toBeVisible();
   await expect(page.getByRole("button", { name: "Continue" })).toBeEnabled();
-  expect(await status.evaluate((element) => {
-    const rect = element.getBoundingClientRect();
-    return rect.left >= 0 && rect.right <= innerWidth && element.scrollWidth <= element.clientWidth;
-  })).toBe(true);
-  await page.screenshot({ path: "output/playwright/onboarding-current-profile-success-1160x760.png" });
+  await expectSetupFrame(page);
+  await page.screenshot({ path: "output/playwright/onboarding-import-success-1160x760.png" });
   await page.setViewportSize({ width: 840, height: 560 });
-  await expect(status).toBeVisible();
-  expect(await status.evaluate((element) => {
-    const rect = element.getBoundingClientRect();
-    return rect.left >= 0 && rect.right <= innerWidth && element.scrollWidth <= element.clientWidth;
-  })).toBe(true);
-  await page.screenshot({ path: "output/playwright/onboarding-current-profile-success-840x560.png" });
+  await expect(ready).toBeVisible();
+  await expectSetupFrame(page);
+  await page.screenshot({ path: "output/playwright/onboarding-import-success-840x560.png" });
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.map((call) => call.command)).toEqual(expect.arrayContaining(["preview_current_codex_account_import", "confirm_local_account_import", "get_local_runtime_state", "start_local_gateway"]));
+  expect(calls.map((call) => call.command)).toEqual(expect.arrayContaining(["preview_local_account_import_files", "confirm_local_account_import"]));
+  expect(calls.map((call) => call.command)).not.toContain("preview_current_codex_account_import");
   expect(calls.find((call) => call.command === "confirm_local_account_import")?.args.input).toMatchObject({
-    sessionId: "current_codex_profile",
+    sessionId: "11111111-2222-4333-8444-555555555555",
     addToPool: true,
   });
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByRole("heading", { name: "What should use your pool?" })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "start_local_gateway"))).toBe(true);
 });
 
-test("current profile import keeps setup on the connection step when an item fails", async ({ page }) => {
+test("failed account import keeps setup on the connection step and permits retry", async ({ page }) => {
   await installTauriMock(page, { onboarding: false, locale: "en", populated: true, importResult: "item_failure" });
   await page.goto("/");
   await page.getByRole("button", { name: "Get started" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
-  await page.getByRole("button", { name: /Import current profile/ }).click();
-  await expect(page.locator(".setup-current-profile-status.failed")).toContainText("Could not import the current profile");
-  await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
-  await expectSetupFrame(page);
+  await page.getByRole("button", { name: /Import accounts/ }).click();
+  const dialog = page.getByRole("dialog", { name: "Import accounts" });
+  await dialog.getByRole("button", { name: /Choose account files/ }).click();
+  await dialog.getByRole("button", { name: /Import 2 account/ }).click();
+  await expect(dialog.getByRole("alert")).toContainText("Some accounts were not imported");
+  await expect(dialog.getByRole("button", { name: "Retry failed" })).toBeVisible();
   await page.screenshot({ path: "output/playwright/onboarding-import-error-1160x760.png" });
   await expect(page.getByRole("heading", { name: "What should use your pool?" })).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
+  await expect(dialog).toBeHidden();
+  await expectSetupFrame(page);
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__);
   expect(calls.map((call) => call.command)).toContain("cancel_local_account_import");
 });
 
-test("leaving the local connection step cancels a delayed current-profile preview before confirmation", async ({ page }) => {
-  await installTauriMock(page, { onboarding: false, locale: "en", populated: true, importPreviewDelayMs: 1_000 });
+test("closing the account preview cancels its session before leaving setup", async ({ page }) => {
+  await installTauriMock(page, { onboarding: false, locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Get started" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
-  await page.getByRole("button", { name: /Import current profile/ }).click();
-  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "preview_current_codex_account_import"))).toBe(true);
+  await page.getByRole("button", { name: /Import accounts/ }).click();
+  const dialog = page.getByRole("dialog", { name: "Import accounts" });
+  await dialog.getByRole("button", { name: /Choose account files/ }).click();
+  await expect(dialog.getByRole("button", { name: /Import 2 account/ })).toBeVisible();
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(dialog).toBeHidden();
   await page.getByRole("button", { name: "Back" }).click();
   await expect(page.getByRole("heading", { name: "Where should Zenith Relay run?" })).toBeVisible();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "cancel_local_account_import"))).toBe(true);
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.map((call) => call.command)).toEqual(expect.arrayContaining(["preview_current_codex_account_import", "cancel_local_account_import"]));
+  expect(calls.map((call) => call.command)).toEqual(expect.arrayContaining(["preview_local_account_import_files", "cancel_local_account_import"]));
   expect(calls.map((call) => call.command)).not.toContain("confirm_local_account_import");
 });
 
-test("current profile action stays hidden when no usable ChatGPT profile exists", async ({ page }) => {
+test("setup offers explicit connections without importing the active ChatGPT profile", async ({ page }) => {
   await installTauriMock(page, { onboarding: false, locale: "ru", theme: "dark", populated: true, currentProfileAvailable: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Приступить" }).click();
@@ -191,12 +263,16 @@ test("all onboarding steps keep progress and actions in one bounded workspace", 
   await expectSetupFrame(page);
   await page.screenshot({ path: "output/playwright/onboarding-step-1-mode-ru-dark-1160x760.png" });
   await page.getByRole("button", { name: "Продолжить" }).click();
-  await expect(page.getByRole("button", { name: /Импортировать текущий профиль/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Импортировать учётные записи/ })).toBeVisible();
   await expectSetupFrame(page);
   await page.screenshot({ path: "output/playwright/onboarding-step-2-connection-ru-dark-1160x760.png" });
 
-  await page.getByRole("button", { name: /Импортировать текущий профиль/ }).click();
-  await expect(page.locator(".setup-current-profile-status.complete")).toBeVisible();
+  await page.getByRole("button", { name: /Импортировать учётные записи/ }).click();
+  const dialog = page.getByRole("dialog", { name: "Импортировать учётные записи" });
+  await dialog.getByRole("button", { name: /Выбрать файлы/ }).click();
+  await dialog.getByRole("button", { name: "Импортировать: 2" }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.locator(".setup-pool-ready")).toBeVisible();
   await page.getByRole("button", { name: "Продолжить" }).click();
   await expect(page.locator(".client-options")).toBeVisible();
   await expectSetupFrame(page);
@@ -211,15 +287,19 @@ test("local quick setup combines an account and an OpenRouter source in the pool
   await page.goto("/");
   await page.getByRole("button", { name: "Get started" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
-  await page.getByRole("button", { name: /Import current profile/ }).click();
-  await expect(page.locator(".setup-current-profile-status.complete")).toBeVisible();
-  await page.getByRole("button", { name: "Add API source" }).click();
+  await page.getByRole("button", { name: /Import accounts/ }).click();
+  const importDialog = page.getByRole("dialog", { name: "Import accounts" });
+  await importDialog.getByRole("button", { name: /Choose account files/ }).click();
+  await importDialog.getByRole("button", { name: /Import 2 account/ }).click();
+  await expect(importDialog).toBeHidden();
+  await expect(page.locator(".setup-pool-ready")).toBeVisible();
+  await page.getByRole("button", { name: /^Add API source/ }).click();
   const dialog = page.getByRole("dialog", { name: "Add API source" });
   await dialog.getByRole("radio", { name: /OpenRouter/ }).click();
-  await dialog.getByLabel("Upstream API key").fill("sk-or-synthetic");
-  await dialog.getByRole("button", { name: "Save" }).click();
+  await dialog.getByLabel("Upstream API key", { exact: true }).fill("sk-or-synthetic");
+  await dialog.getByRole("button", { name: "Add source", exact: true }).click();
   await expect(dialog).toHaveCount(0);
-  await expect(page.locator(".setup-current-profile-status.complete")).toBeVisible();
+  await expect(page.locator(".setup-pool-ready")).toBeVisible();
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByRole("heading", { name: "What should use your pool?" })).toBeVisible();
   await page.getByRole("button", { name: "ChatGPT", exact: true }).click();
@@ -243,11 +323,11 @@ test("repeated quick setup adds a custom API to the local pool from a previous d
   await page.getByRole("button", { name: "Add API source" }).click();
   const dialog = page.getByRole("dialog", { name: "Add API source" });
   await dialog.getByRole("radio", { name: /Custom API/ }).click();
-  await dialog.getByLabel("Upstream API key").fill("synthetic-custom-api-key");
-  await expect(dialog.getByRole("button", { name: "Save" })).toBeDisabled();
+  await dialog.getByLabel("Upstream API key", { exact: true }).fill("synthetic-custom-api-key");
+  await expect(dialog.getByRole("button", { name: "Add source", exact: true })).toBeDisabled();
   await dialog.getByLabel("API address").fill("https://api.example.invalid/v1");
   await dialog.getByLabel("Name").fill("My API");
-  await dialog.getByRole("button", { name: "Save" }).click();
+  await dialog.getByRole("button", { name: "Add source", exact: true }).click();
   await expect(dialog).toHaveCount(0);
   const calls = await page.evaluate(() => (window as unknown as {
     __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }>;
@@ -268,7 +348,7 @@ test("remote quick setup requires explicit consent for plain HTTP", async ({ pag
   await page.getByRole("button", { name: /On your server/ }).click();
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByLabel("Server address").fill("http://127.0.0.1:14999");
-  await page.getByLabel("Management token").fill("synthetic-management-token-000000");
+  await page.getByLabel("Management token", { exact: true }).fill("synthetic-management-token-000000");
   await expect(page.getByRole("button", { name: "Continue" })).toBeDisabled();
   await page.getByLabel("Allow this unencrypted HTTP server connection.").check();
   await expect(page.getByRole("button", { name: "Continue" })).toBeEnabled();
@@ -310,7 +390,7 @@ for (const theme of ["light", "dark"] as const) {
       }))).toBe(true);
       await page.screenshot({ path: `output/playwright/onboarding-mode-ru-${theme}-${viewport.width}x${viewport.height}.png` });
       await page.getByRole("button", { name: "Продолжить" }).click();
-      await expect(page.getByRole("button", { name: /Импортировать текущий профиль/ })).toBeVisible();
+      await expect(page.getByRole("button", { name: /Импортировать учётные записи/ })).toBeVisible();
       await expectSetupFrame(page);
       expect(await page.locator(".setup-connect-options button").evaluateAll((buttons) => buttons.every((button) => button.scrollWidth <= button.clientWidth))).toBe(true);
       await page.screenshot({ path: `output/playwright/onboarding-local-ru-${theme}-${viewport.width}x${viewport.height}.png` });
@@ -323,10 +403,10 @@ for (const theme of ["light", "dark"] as const) {
       await dialog.getByLabel("Ключ внешнего API", { exact: true }).fill("synthetic-preview-key");
       await dialog.getByLabel("Адрес API", { exact: true }).fill("https://api.example.invalid/v1");
       await dialog.getByLabel("Название", { exact: true }).fill("Рабочий API");
-      await expect(dialog.getByRole("button", { name: "Сохранить" })).toBeEnabled();
+      await expect(dialog.getByRole("button", { name: "Добавить источник", exact: true })).toBeEnabled();
       await expectSetupFrame(page);
       await page.screenshot({ path: `output/playwright/onboarding-pool-api-custom-ru-${theme}-${viewport.width}x${viewport.height}.png`, animations: "disabled" });
-      await dialog.getByRole("button", { name: "Сохранить" }).click();
+      await dialog.getByRole("button", { name: "Добавить источник", exact: true }).click();
       await expect(dialog).toHaveCount(0);
       await page.getByRole("button", { name: "Продолжить" }).click();
       await expect(page.locator(".client-options")).toBeVisible();

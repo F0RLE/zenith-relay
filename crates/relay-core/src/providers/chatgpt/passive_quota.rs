@@ -4,18 +4,30 @@ use reqwest::header::HeaderMap;
 const RESET_CYCLE_SKEW_MS: u64 = 60_000;
 
 pub fn merge_codex_quota_headers(
-    previous: &QuotaSnapshot,
+    previous_snapshot: &QuotaSnapshot,
     headers: &HeaderMap,
     observed_at_ms: u64,
 ) -> Option<QuotaSnapshot> {
-    let primary = parse_window(headers, "primary", QuotaWindowKind::Primary, observed_at_ms);
+    let primary = parse_window(headers, "primary", QuotaWindowKind::Primary, observed_at_ms)
+        .filter(|observed| {
+            previous_snapshot
+                .primary
+                .as_ref()
+                .is_none_or(|previous| observed.observed_at_ms >= previous.observed_at_ms)
+        });
     let secondary = parse_window(
         headers,
         "secondary",
         QuotaWindowKind::Secondary,
         observed_at_ms,
-    );
-    let mut merged = previous.clone();
+    )
+    .filter(|observed| {
+        previous_snapshot
+            .secondary
+            .as_ref()
+            .is_none_or(|previous| observed.observed_at_ms >= previous.observed_at_ms)
+    });
+    let mut merged = previous_snapshot.clone();
     let removed_placeholder = merged
         .secondary
         .as_ref()
@@ -28,25 +40,25 @@ pub fn merge_codex_quota_headers(
     }
     let new_cycle = primary
         .as_ref()
-        .is_some_and(|observed| is_new_cycle(previous.primary.as_ref(), observed))
+        .is_some_and(|observed| is_new_cycle(previous_snapshot.primary.as_ref(), observed))
         || secondary
             .as_ref()
-            .is_some_and(|observed| is_new_cycle(previous.secondary.as_ref(), observed));
+            .is_some_and(|observed| is_new_cycle(previous_snapshot.secondary.as_ref(), observed));
 
     if let Some(window) = primary {
-        merged.primary = merge_window(previous.primary.as_ref(), window);
+        merged.primary = merge_window(previous_snapshot.primary.as_ref(), window);
     }
     if let Some(window) = secondary {
-        merged.secondary = merge_window(previous.secondary.as_ref(), window);
+        merged.secondary = merge_window(previous_snapshot.secondary.as_ref(), window);
     }
     let observed_limit = merged
         .primary
         .iter()
         .chain(merged.secondary.iter())
         .any(|window| window.available_basis_points == Some(0));
-    merged.limit_reached = observed_limit || (previous.limit_reached && !new_cycle);
+    merged.limit_reached = observed_limit || (previous_snapshot.limit_reached && !new_cycle);
     merged.updated_at_ms = Some(
-        previous
+        previous_snapshot
             .updated_at_ms
             .unwrap_or_default()
             .max(observed_at_ms),
@@ -61,18 +73,18 @@ fn parse_window(
     kind: QuotaWindowKind,
     observed_at_ms: u64,
 ) -> Option<QuotaWindow> {
-    let used = header_number(headers, &format!("x-codex-{name}-used-percent"))
-        .filter(|value| (0.0..=100.0).contains(value));
+    let used_percent = header_number(headers, &format!("x-codex-{name}-used-percent"))
+        .filter(|used_percent| (0.0..=100.0).contains(used_percent));
     let reset_seconds = header_u64(headers, &format!("x-codex-{name}-reset-after-seconds"));
     let window_minutes = header_u64(headers, &format!("x-codex-{name}-window-minutes"))
-        .and_then(|value| u32::try_from(value).ok());
-    if used.is_none() && reset_seconds.is_none() && window_minutes.is_none() {
+        .and_then(|window_minutes_value| u32::try_from(window_minutes_value).ok());
+    if used_percent.is_none() && reset_seconds.is_none() && window_minutes.is_none() {
         return None;
     }
     QuotaWindow::normalize(
         QuotaWindowInput {
             kind,
-            available_percent: used.map(|used| 100.0 - used),
+            available_percent: used_percent.map(|used_percent| 100.0 - used_percent),
             explicitly_full: None,
             reset: reset_seconds.map(ResetTime::RelativeSeconds),
             window_minutes,
@@ -85,59 +97,117 @@ fn parse_window(
     .filter(|window| !window.is_empty_provider_placeholder())
 }
 
-fn merge_window(previous: Option<&QuotaWindow>, mut observed: QuotaWindow) -> Option<QuotaWindow> {
-    let Some(previous) = previous else {
+fn merge_window(
+    previous_window: Option<&QuotaWindow>,
+    mut observed: QuotaWindow,
+) -> Option<QuotaWindow> {
+    let Some(previous_window) = previous_window else {
         return Some(observed);
     };
-    if observed.observed_at_ms < previous.observed_at_ms {
-        return Some(previous.clone());
-    }
-    let new_cycle = is_new_cycle(Some(previous), &observed);
+    let new_cycle = is_new_cycle(Some(previous_window), &observed);
     if !new_cycle {
         observed.available_basis_points = match (
-            previous.available_basis_points,
+            previous_window.available_basis_points,
             observed.available_basis_points,
         ) {
-            (Some(previous), Some(observed)) => Some(previous.min(observed)),
-            (previous, None) => previous,
-            (None, observed) => observed,
+            (Some(previous_available), Some(observed_available)) => {
+                Some(previous_available.min(observed_available))
+            }
+            (previous_available, None) => {
+                // Timer-only headers do not re-observe the carried remainder.
+                observed.observed_at_ms = previous_window.observed_at_ms;
+                previous_available
+            }
+            (None, observed_available) => observed_available,
         };
     }
-    observed.reset_at_ms = observed.reset_at_ms.or(previous.reset_at_ms);
-    observed.window_minutes = observed.window_minutes.or(previous.window_minutes);
+    observed.reset_at_ms = observed.reset_at_ms.or(previous_window.reset_at_ms);
+    observed.window_minutes = observed.window_minutes.or(previous_window.window_minutes);
     Some(observed)
 }
 
-fn is_new_cycle(previous: Option<&QuotaWindow>, observed: &QuotaWindow) -> bool {
-    previous
+fn is_new_cycle(previous_window: Option<&QuotaWindow>, observed: &QuotaWindow) -> bool {
+    previous_window
         .and_then(|window| window.reset_at_ms)
-        .is_some_and(|previous_reset| {
-            previous_reset <= observed.observed_at_ms
-                || observed
-                    .reset_at_ms
-                    .is_some_and(|reset| reset > previous_reset.saturating_add(RESET_CYCLE_SKEW_MS))
+        .is_some_and(|previous_reset_at_ms| {
+            previous_reset_at_ms <= observed.observed_at_ms
+                || observed.reset_at_ms.is_some_and(|reset_at_ms| {
+                    reset_at_ms > previous_reset_at_ms.saturating_add(RESET_CYCLE_SKEW_MS)
+                })
         })
 }
 
-fn header_number(headers: &HeaderMap, name: &str) -> Option<f64> {
+fn header_number(headers: &HeaderMap, header_name: &str) -> Option<f64> {
     headers
-        .get(name)?
+        .get(header_name)?
         .to_str()
         .ok()?
         .trim()
         .parse::<f64>()
         .ok()
-        .filter(|value| value.is_finite())
+        .filter(|parsed_number| parsed_number.is_finite())
 }
 
-fn header_u64(headers: &HeaderMap, name: &str) -> Option<u64> {
-    headers.get(name)?.to_str().ok()?.trim().parse().ok()
+fn header_u64(headers: &HeaderMap, header_name: &str) -> Option<u64> {
+    headers.get(header_name)?.to_str().ok()?.trim().parse().ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use reqwest::header::HeaderValue;
+
+    #[test]
+    fn older_headers_cannot_clear_an_explicit_limit_or_a_newer_refresh_error() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-codex-primary-used-percent",
+            HeaderValue::from_static("20"),
+        );
+        headers.insert(
+            "x-codex-primary-reset-after-seconds",
+            HeaderValue::from_static("10"),
+        );
+        let mut current =
+            merge_codex_quota_headers(&QuotaSnapshot::default(), &headers, 2_000).unwrap();
+        current.limit_reached = true;
+        current.error = Some(crate::quota::QuotaErrorState::new("quota_transport", 2_000));
+        headers.insert(
+            "x-codex-primary-reset-after-seconds",
+            HeaderValue::from_static("600"),
+        );
+        assert!(merge_codex_quota_headers(&current, &headers, 1_000).is_none());
+    }
+
+    #[test]
+    fn reset_only_headers_do_not_renew_remainder_or_ledger_evidence() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-codex-primary-used-percent",
+            HeaderValue::from_static("20"),
+        );
+        headers.insert(
+            "x-codex-primary-reset-after-seconds",
+            HeaderValue::from_static("600"),
+        );
+        let mut first =
+            merge_codex_quota_headers(&QuotaSnapshot::default(), &headers, 1_000).unwrap();
+        first.provider_credits_observed_at_ms = Some(500);
+        let mut timer = HeaderMap::new();
+        timer.insert(
+            "x-codex-primary-reset-after-seconds",
+            HeaderValue::from_static("599"),
+        );
+        let merged = merge_codex_quota_headers(&first, &timer, 2_000).unwrap();
+        assert_eq!(
+            merged.primary.as_ref().unwrap().available_basis_points,
+            Some(8_000)
+        );
+        assert_eq!(merged.primary.as_ref().unwrap().observed_at_ms, 1_000);
+        assert_eq!(merged.quota_observed_at_ms(), Some(1_000));
+        assert_eq!(merged.provider_credits_observed_at_ms, Some(500));
+        assert_eq!(merged.updated_at_ms, Some(2_000));
+    }
 
     #[test]
     fn partial_headers_merge_without_increasing_a_live_cycle() {
@@ -204,7 +274,7 @@ mod tests {
 
     #[test]
     fn partial_headers_do_not_clear_an_explicit_limit_without_a_known_new_cycle() {
-        let previous = QuotaSnapshot {
+        let prior_quota = QuotaSnapshot {
             limit_reached: true,
             updated_at_ms: Some(1_000),
             ..QuotaSnapshot::default()
@@ -215,7 +285,7 @@ mod tests {
             HeaderValue::from_static("600"),
         );
 
-        let merged = merge_codex_quota_headers(&previous, &headers, 2_000).unwrap();
+        let merged = merge_codex_quota_headers(&prior_quota, &headers, 2_000).unwrap();
         assert!(merged.limit_reached);
     }
 
@@ -233,7 +303,7 @@ mod tests {
             full_transition_fingerprint: None,
             exhaustion_transition_fingerprint: None,
         };
-        let previous = QuotaSnapshot {
+        let prior_quota = QuotaSnapshot {
             secondary: Some(placeholder),
             ..QuotaSnapshot::default()
         };
@@ -251,7 +321,7 @@ mod tests {
             HeaderValue::from_static("0"),
         );
 
-        let merged = merge_codex_quota_headers(&previous, &headers, 2_000).unwrap();
+        let merged = merge_codex_quota_headers(&prior_quota, &headers, 2_000).unwrap();
         assert!(merged.secondary.is_none());
     }
 }

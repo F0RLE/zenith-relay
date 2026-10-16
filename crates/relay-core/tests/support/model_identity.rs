@@ -60,7 +60,7 @@ async fn model_identity_websocket_rotates_before_output_and_rejects_reused_socke
         ])))
         .await;
     let (second, second_state) = spawn_websocket_upstream_with_behavior(WebSocketBehavior::Sequence(Arc::new(Mutex::new(VecDeque::from([
-        vec![json!({"type": "response.completed", "response": {"id": "correct-response", "model": MODEL, "output": []}})],
+        vec![json!({"type": "response.completed", "response": {"id": "correct-response","status":"completed", "model": MODEL, "output": []}})],
         vec![json!({"type": "response.created", "response": {"model": "different-model", "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}}})],
     ]))))).await;
     let authority = ready_authority("first", "synthetic-first").await;

@@ -19,6 +19,33 @@ async fn register_if_absent_never_overwrites_newer_tokens() {
 }
 
 #[tokio::test]
+async fn register_if_absent_does_not_wait_for_an_owned_slot() {
+    let authority = TokenAuthority::new(1).unwrap();
+    let current = TokenSet::new(
+        "current-access",
+        Some("current-refresh".into()),
+        None,
+        None,
+        2,
+        2,
+    )
+    .unwrap();
+    assert!(authority
+        .register_if_absent("account", current.clone(), AccountAuthState::Active)
+        .unwrap());
+    let slot = { lock(&authority.slots).get("account").cloned().unwrap() };
+    // An OAuth refresh holds this guard while waiting on the provider. A
+    // runtime rebuild must finish without waiting for that unrelated I/O.
+    let refresh_guard = slot.lock().await;
+    let snapshot =
+        TokenSet::new("disk-access", Some("disk-refresh".into()), None, None, 3, 3).unwrap();
+    assert!(!authority
+        .register_if_absent("account", snapshot, AccountAuthState::Active)
+        .unwrap());
+    assert_eq!(refresh_guard.tokens, current);
+}
+
+#[tokio::test]
 async fn conditional_registration_never_replaces_a_newer_refresh_generation() {
     let authority = TokenAuthority::new(1).unwrap();
     authority

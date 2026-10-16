@@ -16,7 +16,9 @@ use zenith_relay_core::{
 };
 
 const ZENITH_API_HOST: &str = "api.zenithmarket.dev";
-const MAX_CODEX_MODEL_CATALOG_BYTES: usize = 512 * 1024;
+// Keep this bound aligned with the shared model-discovery transport limit and
+// the profile catalog parser. Full ChatGPT inventories may exceed 512 KiB.
+const MAX_CODEX_MODEL_CATALOG_BYTES: usize = 4 * 1024 * 1024;
 
 pub(super) async fn fetch_codex_model_catalog(
     base_url: &str,
@@ -62,23 +64,24 @@ pub(super) async fn fetch_codex_model_catalog(
         )
         .into());
     }
-    let body = collect_limited(response, MAX_CODEX_MODEL_CATALOG_BYTES)
+    let catalog_response_body = collect_limited(response, MAX_CODEX_MODEL_CATALOG_BYTES)
         .await
         .map_err(|error| {
             LocalPoolError::new(
                 ErrorCode::GatewayUnavailable,
                 match error {
-                    LimitedBodyError::TooLarge => "pool model catalog is too large",
+                    LimitedBodyError::TooLarge => "pool model catalog exceeds 4 MiB",
                     LimitedBodyError::Transport => "pool model catalog could not be read",
                 },
             )
         })?;
-    let catalog: serde_json::Value = serde_json::from_slice(&body).map_err(|_| {
-        LocalPoolError::new(
-            ErrorCode::GatewayUnavailable,
-            "pool returned an invalid model catalog",
-        )
-    })?;
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&catalog_response_body).map_err(|_| {
+            LocalPoolError::new(
+                ErrorCode::GatewayUnavailable,
+                "pool returned an invalid model catalog",
+            )
+        })?;
     if catalog
         .get("models")
         .and_then(serde_json::Value::as_array)
@@ -86,7 +89,7 @@ pub(super) async fn fetch_codex_model_catalog(
     {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
-            "pool has no Codex-compatible models",
+            "pool has no ChatGPT-compatible models",
         )
         .into());
     }
@@ -143,9 +146,7 @@ pub(super) fn active_catalog_refresh_target(
 pub(in crate::local_pool) async fn refresh_active_codex_catalog(
     state: &DesktopState,
 ) -> LocalResult<CodexCatalogRefreshStatus> {
-    if is_codex_running() {
-        return Ok(CodexCatalogRefreshStatus::Deferred);
-    }
+    let client_running = is_codex_running();
     let profile_dir = default_codex_home();
     let backup_root = state.profile_backup_root();
     let Some(binding) = codex::profile_bindings(&profile_dir, &backup_root)?
@@ -204,6 +205,16 @@ pub(in crate::local_pool) async fn refresh_active_codex_catalog(
             catalog
         }
     };
+    let catalog = context_catalog(state, &catalog)?;
+    // The managed catalog has its own ownership checks and atomic replacement.
+    // Updating it does not require stopping the client or changing its profile.
+    if client_running {
+        codex::refresh_managed_model_catalog(&profile_dir, &backup_root, &catalog, Some(&binding))?;
+        // The managed catalog is updated, but context policy and websocket
+        // transport changes are deferred until the client is restarted.
+        // Recording Deferred persists a warning so the UI can prompt for a restart.
+        return Ok(CodexCatalogRefreshStatus::Deferred);
+    }
     let previous_transport = supports_websockets
         .map(|enabled| {
             codex::set_local_gateway_websockets_with_previous(
@@ -215,20 +226,65 @@ pub(in crate::local_pool) async fn refresh_active_codex_catalog(
         })
         .transpose()?
         .flatten();
+    let context_change = match codex::sync_context_policy(&profile_dir, &backup_root) {
+        Ok(change) => change,
+        Err(error) => {
+            if let Some(previous_transport_config) = previous_transport {
+                codex::set_local_gateway_websockets_with_previous(
+                    &profile_dir,
+                    &backup_root,
+                    previous_transport_config,
+                    Some(&binding.credential_id),
+                )?;
+            }
+            return Err(error);
+        }
+    };
     if let Err(error) =
         codex::refresh_managed_model_catalog(&profile_dir, &backup_root, &catalog, Some(&binding))
     {
-        if let Some(previous) = previous_transport {
+        let context_rollback = context_change.rollback();
+        if let Some(previous_transport_config) = previous_transport {
             codex::set_local_gateway_websockets_with_previous(
                 &profile_dir,
                 &backup_root,
-                previous,
+                previous_transport_config,
                 Some(&binding.credential_id),
             )?;
         }
-        return Err(error);
+        return Err(context_rollback.err().unwrap_or(error));
     }
     Ok(CodexCatalogRefreshStatus::Updated)
+}
+
+pub(super) fn context_catalog(state: &DesktopState, catalog: &str) -> LocalResult<String> {
+    use serde_json::{json, Value};
+    let model_policies = state.store()?.gateway().model_context_policies.clone();
+    let mut document: Value =
+        serde_json::from_str(catalog).map_err(LocalPoolError::invalid_state)?;
+    let metadata = state.model_metadata_catalog();
+    let mut limits = serde_json::Map::new();
+    if let Some(models) = document.get("models").and_then(Value::as_array) {
+        for row in models {
+            let Some(slug) = row.get("slug").and_then(Value::as_str) else {
+                continue;
+            };
+            let model = zenith_relay_core::decode_codex_model_alias(slug)
+                .unwrap_or_else(|| slug.to_owned());
+            let reference = metadata.resolve(&model);
+            limits.insert(
+                zenith_relay_core::model_id_key(&model),
+                json!({
+                    "context": row.get("max_context_window").and_then(Value::as_u64),
+                    "input": reference.and_then(|row| row.capabilities.input_limit),
+                    "output": reference.and_then(|row| row.capabilities.output_limit),
+                }),
+            );
+        }
+    }
+    document["relay_model_context_policies"] = json!(model_policies);
+    document["relay_context_limits"] = Value::Object(limits);
+    serde_json::to_string(&document).map_err(LocalPoolError::invalid_state)
 }
 
 pub(super) fn direct_source_response_models(
@@ -305,7 +361,7 @@ mod tests {
     #[tokio::test]
     async fn opencode_failure_does_not_prevent_codex_catalog_refresh() {
         let refreshed = Cell::new(false);
-        let result = refresh_client_catalogs(
+        let catalog_refresh_result = refresh_client_catalogs(
             async {
                 Err(LocalPoolError::new(
                     ErrorCode::InvalidState,
@@ -319,6 +375,9 @@ mod tests {
         )
         .await;
         assert!(refreshed.get());
-        assert!(matches!(result.unwrap_err().code, ErrorCode::InvalidState));
+        assert!(matches!(
+            catalog_refresh_result.unwrap_err().code,
+            ErrorCode::InvalidState
+        ));
     }
 }

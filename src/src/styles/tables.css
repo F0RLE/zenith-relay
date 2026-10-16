@@ -62,50 +62,6 @@
   background: var(--relay-subtle);
 }
 
-.source-table th:not(:last-child),
-.source-table td:not(:last-child) {
-  text-align: center;
-}
-
-.source-sort-button {
-  width: 100%;
-  min-height: 28px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  padding: 2px 4px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  font: inherit;
-  line-height: 15px;
-  text-align: center;
-}
-
-.source-sort-button svg {
-  width: 13px;
-  height: 13px;
-  flex: 0 0 13px;
-  opacity: 0.62;
-}
-
-.source-sort-button:hover,
-.source-sort-button:focus-visible {
-  color: var(--relay-text);
-}
-
-.source-sort-button:hover svg,
-.source-sort-button:focus-visible svg {
-  opacity: 1;
-}
-
-.source-table td:not(:last-child) > .relay-status {
-  margin-inline: auto;
-}
-
 .relay-table td small,
 .remote-status small {
   display: block;
@@ -234,7 +190,7 @@
   justify-content: center;
   margin-top: 8px;
   padding: 6px 8px;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   border-radius: 4px;
   background: transparent;
   color: var(--relay-text);
@@ -256,7 +212,7 @@
 
 .reset-credits-control:hover:not(:disabled),
 .reset-credits-control:focus-visible {
-  border-color: color-mix(in srgb, var(--relay-accent) 35%, var(--relay-border));
+  border-color: transparent;
   background: color-mix(in srgb, var(--relay-accent) 6%, var(--relay-surface));
 }
 
@@ -311,7 +267,7 @@
   display: block;
   margin-top: 10px;
   padding: 8px 9px;
-  border: 1px solid color-mix(in srgb, var(--relay-error) 42%, var(--relay-border));
+  border: 1px solid transparent;
   border-radius: 5px;
   background: color-mix(in srgb, var(--relay-error) 8%, var(--relay-surface));
   color: var(--relay-error);

@@ -1,36 +1,24 @@
 use super::{
-    preserved_stream_error, rewrite_bridge_failure, AdapterStreamBridge, MessagesBridgeResponse,
-    MessagesStreamBridge, PreservedUpstreamError, UpstreamStream,
+    preserved_stream_error, rewrite_bridge_failure, MessagesBridgeResponse, PreservedUpstreamError,
+    UpstreamStream,
 };
+use crate::AdapterStreamBridge;
 use axum::body::Bytes;
 use futures_util::{stream, Stream, StreamExt};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::time::Instant;
+
+const UPSTREAM_END_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct AdapterBridgeStreamState {
     inner: UpstreamStream,
     bridge: AdapterStreamBridge,
     pending: VecDeque<Bytes>,
     finished: bool,
+    end_deadline: Option<Instant>,
     completed: Arc<Mutex<Option<MessagesBridgeResponse>>>,
-}
-
-/// Translates a native Messages SSE stream into the client-facing Responses
-/// SSE contract. The completed bridge response is published before the
-/// `response.completed` frame is yielded so the usage callback can persist the
-/// continuation without exposing native content outside the local bridge.
-pub(super) fn bridge_messages_stream(
-    first: Bytes,
-    remaining: UpstreamStream,
-    bridge: MessagesStreamBridge,
-    completed: Arc<Mutex<Option<MessagesBridgeResponse>>>,
-) -> impl Stream<Item = Result<Bytes, reqwest::Error>> + Send {
-    bridge_adapter_stream(
-        first,
-        remaining,
-        AdapterStreamBridge::Messages(Box::new(bridge)),
-        completed,
-    )
 }
 
 pub(super) fn bridge_adapter_stream(
@@ -46,59 +34,62 @@ pub(super) fn bridge_adapter_stream(
             bridge,
             pending: VecDeque::new(),
             finished: false,
+            end_deadline: None,
             completed,
         },
-        |mut state| async move {
+        |mut stream_state| async move {
             loop {
-                if let Some(bytes) = state.pending.pop_front() {
-                    return Some((Ok(bytes), state));
+                if let Some(bytes) = stream_state.pending.pop_front() {
+                    return Some((Ok(bytes), stream_state));
                 }
-                if state.finished {
+                if stream_state.finished {
                     return None;
                 }
 
                 let mut preserved_error = None;
-                match state.inner.next().await {
-                    Some(Ok(bytes)) => {
-                        state.bridge.push(&bytes);
-                        preserved_error = state
+                // Once Gemini declares its finish reason, drain late usage until
+                // EOF. This deadline does not limit active model generation.
+                if stream_state.bridge.awaiting_upstream_end()
+                    && stream_state.end_deadline.is_none()
+                {
+                    stream_state.end_deadline = Some(Instant::now() + UPSTREAM_END_TIMEOUT);
+                }
+                let next = if let Some(deadline) = stream_state.end_deadline {
+                    tokio::time::timeout_at(deadline, stream_state.inner.next()).await
+                } else {
+                    Ok(stream_state.inner.next().await)
+                };
+                match next {
+                    Ok(Some(Ok(bytes))) => {
+                        stream_state.bridge.push(&bytes);
+                        preserved_error = stream_state
                             .bridge
                             .take_upstream_error()
                             .and_then(|error| preserved_stream_error(&error));
                     }
-                    Some(Err(_)) | None => {
-                        state.bridge.finish();
-                        state.finished = true;
+                    Ok(None) => {
+                        stream_state.bridge.finish();
+                        stream_state.finished = true;
+                    }
+                    Ok(Some(Err(_))) | Err(_) => {
+                        stream_state.bridge.abort();
+                        stream_state.finished = true;
                     }
                 }
 
                 queue_bridge_output(
-                    &mut state.pending,
-                    || state.bridge.pop_output(),
+                    &mut stream_state.pending,
+                    || stream_state.bridge.pop_output(),
                     preserved_error.as_ref(),
                 );
-                if let Some(response) = state.bridge.completed().cloned() {
-                    *crate::poison::mutex(&state.completed) = Some(response);
+                if let Some(response) = stream_state.bridge.completed().cloned() {
+                    *crate::poison::mutex(&stream_state.completed) = Some(response);
                 }
-                if state.bridge.is_terminal() {
-                    state.finished = true;
+                if stream_state.bridge.is_terminal() {
+                    stream_state.finished = true;
                 }
             }
         },
-    )
-}
-
-pub(super) fn bridge_gemini_stream(
-    first: Bytes,
-    remaining: UpstreamStream,
-    bridge: crate::GeminiStreamBridge,
-    completed: Arc<Mutex<Option<MessagesBridgeResponse>>>,
-) -> impl Stream<Item = Result<Bytes, reqwest::Error>> + Send {
-    bridge_adapter_stream(
-        first,
-        remaining,
-        AdapterStreamBridge::Gemini(Box::new(bridge)),
-        completed,
     )
 }
 

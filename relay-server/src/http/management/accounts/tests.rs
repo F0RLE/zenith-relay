@@ -45,6 +45,9 @@ fn test_account(id: &str) -> ServerAccountRecord {
 
 fn test_credential() -> AccountCredential {
     AccountCredential {
+        oauth_client_kind: Default::default(),
+        chatgpt_user_id: None,
+        basis_points_headers: None,
         access_token: "synthetic-access".into(),
         refresh_token: None,
         id_token: None,
@@ -58,6 +61,146 @@ fn test_credential() -> AccountCredential {
         agent_runtime_id: None,
         agent_task_id: None,
     }
+}
+
+#[tokio::test]
+async fn account_trash_preserves_credentials_and_restores_without_automatic_dispatch() {
+    let root = TempDir::new().unwrap();
+    let state = test_state(&root);
+    let record = test_account("synthetic-trash");
+    let secret = serde_json::to_string(&test_credential()).unwrap();
+    state.store.save_account(&record).unwrap();
+    state.vault.save(&record.secret_ref, &secret).unwrap();
+    state.rebuild_runtime().await.unwrap();
+    let runtime = state.runtime().unwrap().unwrap();
+    trash::trash_account(State(state.clone()), Path(record.id.clone()))
+        .await
+        .unwrap();
+    assert!(state.store.account(&record.id).unwrap().is_none());
+    assert_eq!(
+        state.vault.load(&record.secret_ref).unwrap().as_deref(),
+        Some(secret.as_str())
+    );
+    assert!(runtime
+        .candidate_runtime_order()
+        .iter()
+        .all(|candidate| candidate.candidate_id != record.id || !candidate.available));
+    let reopened = crate::store::Store::open(root.path().join("relay.sqlite")).unwrap();
+    assert_eq!(reopened.account_trash().unwrap()[0].id, record.id);
+    assert!(reopened.save_account(&record).is_err());
+    trash::restore_account(State(state.clone()), Path(record.id.clone()))
+        .await
+        .unwrap();
+    assert!(state.store.account_trash().unwrap().is_empty());
+    let restored = state.store.account(&record.id).unwrap().unwrap();
+    assert!(!restored.enabled);
+    assert!(!restored.in_pool);
+    assert_eq!(restored.secret_ref, record.secret_ref);
+    assert_eq!(
+        state.vault.load(&record.secret_ref).unwrap().as_deref(),
+        Some(secret.as_str())
+    );
+    state.shutdown_runtime().await.unwrap();
+}
+
+#[tokio::test]
+async fn account_trash_purge_removes_retained_credentials() {
+    let root = TempDir::new().unwrap();
+    let state = test_state(&root);
+    let record = test_account("synthetic-trash-purge");
+    let secret = serde_json::to_string(&test_credential()).unwrap();
+    state.store.save_account(&record).unwrap();
+    state.vault.save(&record.secret_ref, &secret).unwrap();
+    trash::trash_account(State(state.clone()), Path(record.id.clone()))
+        .await
+        .unwrap();
+    trash::purge_account(State(state.clone()), Path(record.id.clone()))
+        .await
+        .unwrap();
+    assert!(state.store.account_trash().unwrap().is_empty());
+    assert!(state.store.account(&record.id).unwrap().is_none());
+    assert!(state.vault.load(&record.secret_ref).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn failed_account_trash_write_keeps_account_and_wake_selectors() {
+    use zenith_relay_core::automations::AccountSelector;
+    let root = TempDir::new().unwrap();
+    let state = test_state(&root);
+    let record = test_account("synthetic-trash-rollback");
+    state.store.save_account(&record).unwrap();
+    let mut task = crate::test_fixtures::wake_task();
+    task.account_selector = AccountSelector::AccountIds([record.id.clone()].into());
+    state.store.save_wake_task(&task).unwrap();
+    let connection = rusqlite::Connection::open(root.path().join("relay.sqlite")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_trash_write BEFORE INSERT ON account_trash
+         BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END;",
+        )
+        .unwrap();
+    assert!(
+        trash::trash_account(State(state.clone()), Path(record.id.clone()))
+            .await
+            .is_err()
+    );
+    assert!(state.store.account(&record.id).unwrap().is_some());
+    assert!(state.store.account_trash().unwrap().is_empty());
+    assert_eq!(state.store.wake_tasks().unwrap().len(), 1);
+    connection
+        .execute_batch("DROP TRIGGER reject_trash_write")
+        .unwrap();
+    trash::trash_account(State(state.clone()), Path(record.id.clone()))
+        .await
+        .unwrap();
+    assert!(state.store.wake_tasks().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn failed_account_trash_purge_keeps_a_restorable_record_and_secret() {
+    let root = TempDir::new().unwrap();
+    let state = test_state(&root);
+    let record = test_account("synthetic-trash-vault-failure");
+    let secret = serde_json::to_string(&test_credential()).unwrap();
+    state.store.save_account(&record).unwrap();
+    state.vault.save(&record.secret_ref, &secret).unwrap();
+    trash::trash_account(State(state.clone()), Path(record.id.clone()))
+        .await
+        .unwrap();
+    let backup = root.path().join("vault/secrets.enc.bak");
+    if backup.is_file() {
+        std::fs::remove_file(&backup).unwrap();
+    }
+    std::fs::create_dir(&backup).unwrap();
+    assert!(
+        trash::purge_account(State(state.clone()), Path(record.id.clone()))
+            .await
+            .is_err()
+    );
+    assert_eq!(state.store.account_trash().unwrap()[0].id, record.id);
+    assert_eq!(
+        state.vault.load(&record.secret_ref).unwrap().as_deref(),
+        Some(secret.as_str())
+    );
+    std::fs::remove_dir(&backup).unwrap();
+}
+
+#[test]
+fn stored_credentials_reject_mismatched_issuing_client_before_use() {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use zenith_relay_core::providers::chatgpt::OAuthClientKind;
+    let mut credential = test_credential();
+    let payload = serde_json::json!({"client_id": OAuthClientKind::ExcelBps.client_id()});
+    credential.access_token = format!(
+        "synthetic.{}.synthetic",
+        URL_SAFE_NO_PAD.encode(payload.to_string()),
+    );
+    assert!(credential.tokens().is_err());
+    assert!(credential.agent_identity().is_err());
+    credential.oauth_client_kind = OAuthClientKind::ExcelBps;
+    assert!(credential.tokens().is_ok());
+    credential.agent_runtime_id = Some("synthetic-agent".into());
+    assert!(credential.tokens().is_err());
 }
 
 #[tokio::test]
@@ -178,13 +321,13 @@ async fn mixed_membership_batch_updates_scopes_without_replacing_the_runtime() {
         .unwrap();
     state.rebuild_runtime().await.unwrap();
     let runtime = state.runtime().unwrap().unwrap();
-    let next = || {
+    let has_next_candidate = || {
         runtime
             .candidate_runtime_order_for_key(crate::state::SYSTEM_GATEWAY_KEY_ID)
             .into_iter()
             .any(|candidate| candidate.next_for_new_request)
     };
-    assert!(next());
+    assert!(has_next_candidate());
 
     // Validation must happen before any candidate is fenced or any durable
     // member is changed, even when another id in the same batch exists.
@@ -198,7 +341,7 @@ async fn mixed_membership_batch_updates_scopes_without_replacing_the_runtime() {
     )
     .await;
     assert!(missing.is_err());
-    assert!(next());
+    assert!(has_next_candidate());
     assert!(state.store.account(&account.id).unwrap().unwrap().in_pool);
 
     let membership = |in_pool| PoolMembershipInput {
@@ -211,7 +354,7 @@ async fn mixed_membership_batch_updates_scopes_without_replacing_the_runtime() {
         .unwrap();
     assert!(removed.accounts.iter().all(|account| !account.in_pool));
     assert!(removed.sources.iter().all(|source| !source.in_pool));
-    assert!(!next());
+    assert!(!has_next_candidate());
     assert!(Arc::ptr_eq(&runtime, &state.runtime().unwrap().unwrap()));
 
     let Json(joined) = set_pool_membership(State(state.clone()), Json(membership(true)))
@@ -219,7 +362,7 @@ async fn mixed_membership_batch_updates_scopes_without_replacing_the_runtime() {
         .unwrap();
     assert!(joined.accounts.iter().all(|account| account.in_pool));
     assert!(joined.sources.iter().all(|source| source.in_pool));
-    assert!(next());
+    assert!(has_next_candidate());
     assert!(Arc::ptr_eq(&runtime, &state.runtime().unwrap().unwrap()));
     state.shutdown_runtime().await.unwrap();
 }

@@ -15,9 +15,10 @@ use zenith_relay_core::{
     pricing::{PricingCatalog, PricingContext, PricingMetadata},
     protocol::{
         apply_model_display_order_with_catalog, apply_model_metadata,
-        apply_pool_model_configuration, pool_candidate_count, pool_model_summaries_with_pricing,
-        pool_pricing_source_summary, pooled_source_runtime_available, source_runtime_available,
-        AccountRefreshState, AccountSummary, GatewaySummary, ProxyMode, QuotaWindowUsage,
+        apply_pool_model_configuration_with_context, pool_candidate_count,
+        pool_model_summaries_with_pricing, pool_pricing_source_summary,
+        pooled_source_runtime_available, source_runtime_available, AccountRefreshState,
+        AccountSummary, GatewaySummary, PoolModelConfigurationInput, ProxyMode, QuotaWindowUsage,
         RefreshStatus, RuntimeStateSnapshot, RuntimeTargetSummary, SourceRefreshState,
         SourceSummary,
     },
@@ -37,7 +38,6 @@ struct AccountSnapshotInputs<'a> {
     equivalents: &'a HashMap<String, ApiEquivalentSummary>,
     pricing_catalog: &'a PricingCatalog,
     pricing_context: &'a PricingContext,
-    basis_points_enabled: bool,
 }
 
 pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
@@ -58,6 +58,7 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
     let model_price_overrides = state.store.model_price_overrides()?;
     let model_reasoning_allowed_levels = state.store.model_reasoning_allowed_levels()?;
     let model_service_tier_overrides = state.store.model_service_tier_overrides()?;
+    let model_context_policies = state.store.model_context_policies()?;
     let model_display_order = state.store.model_display_order()?;
     let configuration_revision = configuration_revision(&state.store.configuration_settings()?)?;
     let pricing_catalog = state.pricing_catalog();
@@ -83,6 +84,7 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
         running,
         &routing_order,
         &equivalents,
+        &model_metadata,
         &mut warnings,
     )?;
     let mut account_summaries = accounts::account_summaries(
@@ -93,7 +95,6 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
             equivalents: &equivalents,
             pricing_catalog: &pricing_catalog,
             pricing_context: &pricing_context,
-            basis_points_enabled: routing_policy.basis_points_enabled,
         },
         &mut warnings,
     )?;
@@ -115,14 +116,17 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
         &pricing_context,
     );
     apply_model_metadata(&mut models, &model_metadata);
-    apply_pool_model_configuration(
+    apply_pool_model_configuration_with_context(
         &mut models,
-        &source_summaries,
-        &account_summaries,
-        &model_price_overrides,
-        &model_reasoning_allowed_levels,
-        &model_service_tier_overrides,
-        runtime.as_deref(),
+        PoolModelConfigurationInput {
+            sources: &source_summaries,
+            accounts: &account_summaries,
+            model_price_overrides: &model_price_overrides,
+            model_reasoning_allowed_levels: &model_reasoning_allowed_levels,
+            model_context_policies: &model_context_policies,
+            model_service_tier_overrides: &model_service_tier_overrides,
+            runtime: runtime.as_deref(),
+        },
     );
     apply_model_display_order_with_catalog(&mut models, &model_display_order, &model_metadata);
     zenith_relay_core::protocol::apply_member_model_display_order(
@@ -147,7 +151,7 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
         ),
         equivalents
             .values()
-            .map(|value| value.unpriced_tokens)
+            .map(|equivalent_summary| equivalent_summary.unpriced_tokens)
             .sum(),
     );
 
@@ -163,7 +167,8 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
         },
         gateway: GatewaySummary {
             tool_policy: routing_policy.tool_policy.unwrap_or_default(),
-            basis_points_enabled: routing_policy.basis_points_enabled,
+            request_timezone: state.store.request_timezone()?,
+            basis_points_enabled: false,
             pool_routing: Some(zenith_relay_core::protocol::pool_routing_summary(
                 routing_policy.pool_routing.as_ref(),
                 &source_summaries,
@@ -183,6 +188,7 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
             model_catalog: zenith_relay_core::protocol::member_model_catalog(
                 &source_summaries,
                 &account_summaries,
+                &model_display_order,
                 &model_metadata,
             ),
             common_proxy_configured: proxy_settings.common_configured,
@@ -229,30 +235,32 @@ fn source_summaries(
     running: bool,
     routing_order: &[CandidateRuntimeSnapshot],
     equivalents: &HashMap<String, ApiEquivalentSummary>,
+    model_metadata: &zenith_relay_core::model_metadata::ModelMetadataCatalog,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<SourceSummary>, String> {
     records
         .iter()
-        .map(|(record, fence)| {
-            let secret_available = state.vault.load(&record.secret_ref)?.is_some();
+        .map(|(source_record, fence)| {
+            let secret_available = state.vault.load(&source_record.secret_ref)?.is_some();
             if !secret_available {
-                warnings.push(format!("source_secret_missing:{}", record.id));
+                warnings.push(format!("source_secret_missing:{}", source_record.id));
             }
-            let runtime_available = (running && record.enabled).then(|| {
-                if record.in_pool {
-                    pooled_source_runtime_available(routing_order, &record.id)
+            let runtime_available = (running && source_record.enabled).then(|| {
+                if source_record.in_pool {
+                    pooled_source_runtime_available(routing_order, &source_record.id)
                 } else {
-                    source_runtime_available(routing_order, &record.id)
+                    source_runtime_available(routing_order, &source_record.id)
                 }
             });
             let mut summary = source_summary(
-                record,
+                source_record,
                 secret_available,
                 runtime_available,
                 equivalents
-                    .get(&identity_hint(&record.id))
+                    .get(&identity_hint(&source_record.id))
                     .copied()
                     .unwrap_or_default(),
+                model_metadata,
             );
             summary.refresh_revision = Some(fence.revision());
             summary.refresh_state = SourceRefreshState {
@@ -260,7 +268,7 @@ fn source_summaries(
                     state
                         .refresh
                         .freshness(&fence.identity(), RefreshKind::Models),
-                    !record.models.is_empty(),
+                    !source_record.models.is_empty(),
                 ),
                 balance: RefreshStatus::from_evidence(
                     state
@@ -271,7 +279,7 @@ fn source_summaries(
             };
             if secret_available {
                 summary.provider_stats =
-                    crate::jobs::cached_source_stats(state, fence, &record.base_url);
+                    crate::jobs::cached_source_stats(state, fence, &source_record.base_url);
             }
             Ok(summary)
         })

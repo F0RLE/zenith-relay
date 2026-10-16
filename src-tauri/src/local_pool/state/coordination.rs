@@ -92,14 +92,14 @@ impl DesktopState {
 
     pub(crate) fn restore_wake(
         &self,
-        previous: WakeCoordinator,
+        previous_coordinator: WakeCoordinator,
         mut automations: AutomationRecords,
     ) -> Result<()> {
         let mut store = self.store()?;
         let mut coordinator = self.wake_coordinator_lock()?;
-        automations.state = previous.state().clone();
+        automations.state = previous_coordinator.state().clone();
         store.replace_automations(automations)?;
-        *coordinator = previous;
+        *coordinator = previous_coordinator;
         drop(coordinator);
         drop(store);
         self.wake_notify.notify_one();
@@ -128,13 +128,13 @@ impl DesktopState {
     fn update_wake<T>(&self, update: impl FnOnce(&mut WakeCoordinator) -> T) -> Result<T> {
         let mut store = self.store()?;
         let mut coordinator = self.wake_coordinator_lock()?;
-        let mut next = coordinator.clone();
-        let output = update(&mut next);
+        let mut updated_coordinator = coordinator.clone();
+        let update_result = update(&mut updated_coordinator);
         let mut automations = store.automations().clone();
-        automations.state = next.state().clone();
+        automations.state = updated_coordinator.state().clone();
         store.replace_automations(automations)?;
-        *coordinator = next;
-        Ok(output)
+        *coordinator = updated_coordinator;
+        Ok(update_result)
     }
 
     fn wake_coordinator_lock(&self) -> Result<MutexGuard<'_, WakeCoordinator>> {

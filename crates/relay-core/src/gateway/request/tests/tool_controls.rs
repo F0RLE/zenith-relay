@@ -28,11 +28,11 @@ fn tool_policy_snapshot_survives_hot_updates_and_retry_clones() {
             Some(crate::ToolPolicyOutcome::PassThrough)
         );
     }
-    let mut next = original.clone();
+    let mut normalized_body = original.clone();
     RequestToolPolicy::new(&runtime, &original)
-        .apply(&mut next)
+        .apply(&mut normalized_body)
         .unwrap();
-    assert_eq!(next, original);
+    assert_eq!(normalized_body, original);
 }
 #[test]
 fn saved_automatic_policy_does_not_defer_native_responses() {

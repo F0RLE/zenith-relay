@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Zenith Relay public model catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schemaVersion", "orderRevision", "metadataRevision", "fetchedAtMs", "stale", "sources", "models"],
+  "properties": {
+    "$schema": {"const": "model-catalog.schema.json"},
+    "schemaVersion": {"const": 1},
+    "orderRevision": {"type": "string", "minLength": 1},
+    "metadataRevision": {"type": ["string", "null"]},
+    "fetchedAtMs": {"type": ["integer", "null"], "minimum": 0},
+    "stale": {"type": "boolean"},
+    "sources": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["revision", "fetchedAtMs", "stale"],
+        "properties": {
+          "revision": {"type": ["string", "null"]},
+          "fetchedAtMs": {"type": ["integer", "null"], "minimum": 0},
+          "stale": {"type": "boolean"}
+        }
+      }
+    },
+    "models": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "position", "identity", "metadata"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "position": {"type": "integer", "minimum": 0},
+          "identity": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["provider", "family", "class", "version", "variant", "snapshot"],
+            "properties": {
+              "provider": {"type": ["string", "null"]},
+              "family": {"type": "string"},
+              "class": {"type": "string"},
+              "version": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+              "variant": {"type": "string"},
+              "snapshot": {"type": ["integer", "null"], "minimum": 0}
+            }
+          },
+          "metadata": {
+            "type": "object",
+            "required": ["sourceModelId", "provider", "capabilities"],
+            "properties": {
+              "sourceModelId": {"type": "string"},
+              "provider": {"type": "string"},
+              "canonicalModelId": {"type": "string"},
+              "aliases": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+              "protocolPreferences": {
+                "type": "array", "uniqueItems": true,
+                "items": {"enum": ["responses", "chat_completions", "messages", "gemini"]}
+              },
+              "fieldProvenance": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["source", "revision"],
+                  "properties": {
+                    "source": {"type": "string", "minLength": 1},
+                    "revision": {"type": ["string", "null"]},
+                    "conflicts": {
+                      "type": "array", "maxItems": 4,
+                      "items": {
+                        "type": "object", "additionalProperties": false,
+                        "required": ["source", "revision", "value"],
+                        "properties": {
+                          "source": {"type": "string", "minLength": 1},
+                          "revision": {"type": ["string", "null"]},
+                          "value": {}
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "family": {"type": ["string", "null"]},
+              "name": {"type": ["string", "null"]},
+              "releaseDate": {"type": ["string", "null"]},
+              "lastUpdated": {"type": ["string", "null"]},
+              "status": {"type": ["string", "null"]},
+              "knowledge": {"type": ["string", "null"]},
+              "capabilities": {"type": "object"}
+            }
+          }
+        }
+      }
+    }
+  }
+}

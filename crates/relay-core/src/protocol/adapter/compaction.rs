@@ -10,14 +10,19 @@ const SUMMARY_INSTRUCTION: &str = "Summarize this conversation so a later turn c
 #[derive(Debug)]
 pub(crate) enum BridgedCompaction {
     Unchanged,
-    Rewritten { request: Value, summarize: bool },
+    Rewritten {
+        rewritten_request: Value,
+        summarize: bool,
+    },
 }
 
 impl BridgedCompaction {
     pub(crate) fn request<'a>(&'a self, original: &'a Value) -> &'a Value {
         match self {
             Self::Unchanged => original,
-            Self::Rewritten { request, .. } => request,
+            Self::Rewritten {
+                rewritten_request, ..
+            } => rewritten_request,
         }
     }
 
@@ -33,118 +38,120 @@ impl BridgedCompaction {
 }
 
 /// Adds Codex compaction trigger once. An existing trigger keeps its position.
-pub(crate) fn ensure_compaction_trigger(input: &mut Vec<Value>) {
-    if !input
-        .iter()
-        .any(|item| item.get("type").and_then(Value::as_str) == Some("compaction_trigger"))
-    {
-        input.push(json!({"type": "compaction_trigger"}));
+pub(crate) fn ensure_compaction_trigger(input_items: &mut Vec<Value>) {
+    if !input_items.iter().any(|input_item| {
+        input_item.get("type").and_then(Value::as_str) == Some("compaction_trigger")
+    }) {
+        input_items.push(json!({"type": "compaction_trigger"}));
     }
 }
 
 /// Turns Codex auto-compact into an ordinary text request for every non-native
 /// route. A Relay checkpoint becomes normal text. Another provider's encrypted
 /// checkpoint stays an explicit incompatibility.
-pub(crate) fn prepare_bridged_compaction(request: &Value) -> AdapterResult<BridgedCompaction> {
-    let Some(items) = compaction_items(request.get("input")) else {
+pub(crate) fn prepare_bridged_compaction(request_body: &Value) -> AdapterResult<BridgedCompaction> {
+    let Some(input_items) = compaction_items(request_body.get("input")) else {
         return Ok(BridgedCompaction::Unchanged);
     };
-    if !items.iter().any(is_compaction_item) {
+    if !input_items.iter().any(is_compaction_item) {
         return Ok(BridgedCompaction::Unchanged);
     }
     let mut summarize = false;
-    let mut rewritten = Vec::with_capacity(items.len());
-    for item in items {
-        match item.get("type").and_then(Value::as_str) {
+    let mut rewritten_input = Vec::with_capacity(input_items.len());
+    for input_item in input_items {
+        match input_item.get("type").and_then(Value::as_str) {
             Some("compaction_trigger") => summarize = true,
             Some("compaction" | "compaction_summary") => {
-                let encrypted = item
+                let encrypted = input_item
                     .get("encrypted_content")
                     .and_then(Value::as_str)
                     .ok_or_else(AdapterError::compaction_unsupported)?;
                 match decode_summary(encrypted)? {
-                    Some(summary) => rewritten.push(summary_message(&summary)),
+                    Some(summary) => rewritten_input.push(summary_message(&summary)),
                     None => return Err(AdapterError::compaction_unsupported()),
                 }
             }
-            _ => rewritten.push(item.clone()),
+            _ => rewritten_input.push(input_item.clone()),
         }
     }
     if summarize {
-        rewritten.push(json!({
+        rewritten_input.push(json!({
             "type": "message",
             "role": "user",
             "content": [{"type": "input_text", "text": SUMMARY_INSTRUCTION}]
         }));
     }
-    let mut request = request.clone();
-    let object = request
+    let mut rewritten_request = request_body.clone();
+    let request_object = rewritten_request
         .as_object_mut()
         .ok_or_else(AdapterError::invalid_request)?;
-    object.insert("input".into(), Value::Array(rewritten));
+    request_object.insert("input".into(), Value::Array(rewritten_input));
     // Server-side context management has no equivalent on a bridged route.
     // Removing it does not invent a provider checkpoint.
-    object.remove("context_management");
+    request_object.remove("context_management");
     if summarize {
-        object.remove("tools");
-        object.remove("tool_choice");
-        object.remove("parallel_tool_calls");
+        request_object.remove("tools");
+        request_object.remove("tool_choice");
+        request_object.remove("parallel_tool_calls");
     }
-    Ok(BridgedCompaction::Rewritten { request, summarize })
+    Ok(BridgedCompaction::Rewritten {
+        rewritten_request,
+        summarize,
+    })
 }
 
 pub(crate) fn wrap_compaction_response_bytes(bytes: &mut Vec<u8>) -> AdapterResult<()> {
-    let mut response: Value =
+    let mut upstream_response: Value =
         serde_json::from_slice(bytes).map_err(|_| AdapterError::upstream_response_invalid())?;
-    wrap_compaction_response(&mut response)?;
-    *bytes =
-        serde_json::to_vec(&response).map_err(|_| AdapterError::upstream_response_invalid())?;
+    wrap_compaction_response(&mut upstream_response)?;
+    *bytes = serde_json::to_vec(&upstream_response)
+        .map_err(|_| AdapterError::upstream_response_invalid())?;
     Ok(())
 }
 
-pub(crate) fn wrap_compaction_response(response: &mut Value) -> AdapterResult<()> {
-    let response_id = response
+pub(crate) fn wrap_compaction_response(upstream_response: &mut Value) -> AdapterResult<()> {
+    let response_id = upstream_response
         .get("id")
         .and_then(Value::as_str)
         .unwrap_or("resp_compact")
         .to_string();
-    let output = response
+    let response_items = upstream_response
         .get_mut("output")
         .and_then(Value::as_array_mut)
         .ok_or_else(AdapterError::upstream_response_invalid)?;
-    let mut summary = String::new();
-    for item in output.iter() {
-        if item.get("type").and_then(Value::as_str) != Some("message") {
+    let mut summary_text = String::new();
+    for output_item in response_items.iter() {
+        if output_item.get("type").and_then(Value::as_str) != Some("message") {
             continue;
         }
-        let Some(content) = item.get("content").and_then(Value::as_array) else {
+        let Some(content_blocks) = output_item.get("content").and_then(Value::as_array) else {
             continue;
         };
-        for part in content {
-            if part.get("type").and_then(Value::as_str) != Some("output_text") {
+        for content_part in content_blocks {
+            if content_part.get("type").and_then(Value::as_str) != Some("output_text") {
                 continue;
             }
-            if let Some(text) = part.get("text").and_then(Value::as_str) {
-                summary.push_str(text);
+            if let Some(text) = content_part.get("text").and_then(Value::as_str) {
+                summary_text.push_str(text);
             }
         }
     }
-    let summary = summary.trim();
-    if summary.is_empty() {
+    let summary_text = summary_text.trim();
+    if summary_text.is_empty() {
         return Err(AdapterError::upstream_response_invalid());
     }
-    *output = vec![json!({
+    *response_items = vec![json!({
         "id": format!("cmp_{response_id}"),
         "type": "compaction",
-        "encrypted_content": encode_summary(summary),
+        "encrypted_content": encode_summary(summary_text),
     })];
     Ok(())
 }
 
-fn compaction_items(input: Option<&Value>) -> Option<Vec<Value>> {
-    match input? {
+fn compaction_items(input_value: Option<&Value>) -> Option<Vec<Value>> {
+    match input_value? {
         Value::Array(items) => Some(items.clone()),
-        Value::Object(_) => Some(vec![input?.clone()]),
+        Value::Object(_) => Some(vec![input_value?.clone()]),
         _ => None,
     }
 }
@@ -154,8 +161,8 @@ pub(crate) fn is_compaction_checkpoint_type(item_type: &str) -> bool {
     matches!(item_type, "compaction" | "compaction_summary")
 }
 
-pub(super) fn is_compaction_item(item: &Value) -> bool {
-    match item.get("type").and_then(Value::as_str) {
+pub(super) fn is_compaction_item(input_item: &Value) -> bool {
+    match input_item.get("type").and_then(Value::as_str) {
         Some("compaction_trigger") => true,
         Some(item_type) => is_compaction_checkpoint_type(item_type),
         None => false,
@@ -171,15 +178,15 @@ fn summary_message(summary: &str) -> Value {
 }
 
 fn encode_summary(summary: &str) -> String {
-    let payload = serde_json::to_vec(&json!({"summary": summary})).unwrap_or_default();
+    let summary_payload = serde_json::to_vec(&json!({"summary": summary})).unwrap_or_default();
     format!(
         "{PREFIX}{}",
-        base64::engine::general_purpose::STANDARD.encode(payload)
+        base64::engine::general_purpose::STANDARD.encode(summary_payload)
     )
 }
 
-fn decode_summary(value: &str) -> AdapterResult<Option<String>> {
-    let Some(encoded) = value.strip_prefix(PREFIX) else {
+fn decode_summary(encoded_summary: &str) -> AdapterResult<Option<String>> {
+    let Some(encoded) = encoded_summary.strip_prefix(PREFIX) else {
         return Ok(None);
     };
     let bytes = base64::engine::general_purpose::STANDARD
@@ -219,7 +226,7 @@ mod tests {
         assert_eq!(request, original);
         assert!(matches!(prepared, BridgedCompaction::Rewritten { .. }));
         let BridgedCompaction::Rewritten {
-            request: rewritten,
+            rewritten_request: rewritten,
             summarize,
         } = prepared
         else {
@@ -231,9 +238,9 @@ mod tests {
         assert!(rewritten.get("context_management").is_none());
         let input = rewritten["input"].as_array().unwrap();
         assert_eq!(input.len(), 2);
-        assert!(input
-            .iter()
-            .all(|item| item.get("type").and_then(Value::as_str) != Some("compaction_trigger")));
+        assert!(input.iter().all(|input_item| {
+            input_item.get("type").and_then(Value::as_str) != Some("compaction_trigger")
+        }));
         assert!(rewritten.to_string().contains("Keep src/main.rs"));
         assert!(rewritten
             .to_string()
@@ -263,7 +270,7 @@ mod tests {
             BridgedCompaction::Rewritten { .. }
         ));
         let BridgedCompaction::Rewritten {
-            request: continued,
+            rewritten_request: continued,
             summarize,
         } = prepared_checkpoint
         else {
@@ -276,7 +283,9 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .all(|item| item.get("type").and_then(Value::as_str) != Some("compaction")));
+            .all(|input_item| {
+                input_item.get("type").and_then(Value::as_str) != Some("compaction")
+            }));
     }
 
     #[test]

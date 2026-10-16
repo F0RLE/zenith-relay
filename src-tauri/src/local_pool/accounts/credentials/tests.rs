@@ -16,11 +16,11 @@ const PROXY: &str = "http://proxy-user:proxy-pass@proxy.example:8080/";
 struct MemorySecrets(Mutex<HashMap<String, String>>);
 
 impl SecretBackend for MemorySecrets {
-    fn save(&self, secret_ref: &str, value: &str) -> Result<(), SecretBackendError> {
+    fn save(&self, secret_ref: &str, secret_value: &str) -> Result<(), SecretBackendError> {
         self.0
             .lock()
             .unwrap()
-            .insert(secret_ref.into(), value.into());
+            .insert(secret_ref.into(), secret_value.into());
         Ok(())
     }
 
@@ -238,4 +238,35 @@ fn login_notes_round_trip_survive_refresh_and_stay_out_of_debug() {
     assert_eq!(legacy.password(), None);
     assert_eq!(legacy.phone(), None);
     assert_eq!(legacy.totp_secret(), None);
+}
+
+#[test]
+fn oauth_reauth_preserves_local_login_notes_when_provider_email_changes() {
+    let previous = fixture().apply_stored_login_material(
+        Some("950000000".into()),
+        Some("synthetic-password".into()),
+        Some("GEZDGNBVGY3TQOJQ".into()),
+    );
+    let replacement = StoredCodexCredentials::new(
+        "relay_account_1",
+        "replacement-access".into(),
+        Some("replacement-refresh".into()),
+        Some("replacement-id".into()),
+        Some(10_000),
+        9_000,
+        8,
+        Some("new-provider@example.test".into()),
+        Some(PROVIDER_ACCOUNT.into()),
+        None,
+        None,
+        Some("plus".into()),
+        false,
+    )
+    .unwrap();
+
+    let merged = replacement.fill_missing_login_from(&previous);
+    assert_eq!(merged.email(), Some("new-provider@example.test"));
+    assert_eq!(merged.phone(), Some("950000000"));
+    assert_eq!(merged.password(), Some("synthetic-password"));
+    assert_eq!(merged.totp_secret(), Some("GEZDGNBVGY3TQOJQ"));
 }

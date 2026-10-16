@@ -29,6 +29,7 @@ fn runtime() -> GatewayRuntime {
                     } else {
                         vec![format!("model-{id}")]
                     },
+                    proxy_url: None,
                 })
             })
             .into(),

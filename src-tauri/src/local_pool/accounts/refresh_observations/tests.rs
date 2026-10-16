@@ -43,9 +43,9 @@ fn with_store(test: impl FnOnce(&mut LocalPoolStore, &AccountRefreshScope)) {
     ));
     let mut store = LocalPoolStore::open(root.clone()).unwrap();
     store.upsert_account(account()).unwrap();
-    let (before, fence) = store.account_refresh_scope("test-account").unwrap();
+    let (initial_account, fence) = store.account_refresh_scope("test-account").unwrap();
     let scope = AccountRefreshScope {
-        before,
+        initial_account,
         fence,
         started_at_ms: 100,
     };
@@ -100,20 +100,21 @@ fn models_failure() -> std::result::Result<Vec<String>, ModelDiscoveryFailure> {
 fn late_quota_success_failure_and_preparation_error_preserve_newer_passive_quota() {
     for observed_at in [50, 100, 200] {
         with_store(|store, scope| {
-            let mut current = scope.before.clone();
+            let mut current = scope.initial_account.clone();
             let QuotaRefreshOutcome::Updated(data) = quota(45.0, observed_at) else {
                 unreachable!()
             };
             super::super::quota_service::apply_quota_success(&mut current, *data).unwrap();
+            current.account.quota.provider_credits_observed_at_ms = Some(200);
             store.upsert_account(current.clone()).unwrap();
             for late in [quota(0.0, 100), quota(100.0, 100), quota_failure()] {
                 let applied =
                     apply_quota_read(store, scope, late, Subscription::default(), None).unwrap();
                 assert!(matches!(
-                    applied.value.outcome,
+                    applied.refresh_result.outcome,
                     AccountQuotaOutcome::Skipped
                 ));
-                assert!(applied.value.exhaustion_transitions.is_empty());
+                assert!(applied.refresh_result.exhaustion_transitions.is_empty());
                 assert_eq!(applied.account, current);
             }
             apply_read_error(
@@ -131,7 +132,7 @@ fn late_quota_success_failure_and_preparation_error_preserve_newer_passive_quota
 #[test]
 fn newer_subscription_and_health_win_while_quota_and_inventory_can_update() {
     with_store(|store, scope| {
-        let mut current = scope.before.clone();
+        let mut current = scope.initial_account.clone();
         current.account.subscription.plan_type = Some("pro".into());
         current.account.subscription.updated_at_ms = Some(200);
         current.account.health = AccountHealthState::Blocked;
@@ -149,10 +150,10 @@ fn newer_subscription_and_health_win_while_quota_and_inventory_can_update() {
         )
         .unwrap();
         assert!(matches!(
-            applied.value.outcome,
+            applied.refresh_result.outcome,
             AccountQuotaOutcome::Updated { .. }
         ));
-        assert!(applied.value.models_changed);
+        assert!(applied.refresh_result.models_changed);
         assert_eq!(
             applied.account.account.subscription,
             current.account.subscription
@@ -176,21 +177,77 @@ fn newer_subscription_and_health_win_while_quota_and_inventory_can_update() {
 fn models_and_quota_modify_only_their_own_observations() {
     with_store(|store, scope| {
         let models = apply_models_read(store, scope, Ok(vec!["gpt-new".into()])).unwrap();
-        assert!(models.value);
-        assert_eq!(models.account.account.quota, scope.before.account.quota);
+        assert!(models.refresh_result);
+        assert_eq!(
+            models.account.account.quota,
+            scope.initial_account.account.quota
+        );
         let quota = apply_quota_read(
             store,
             scope,
             quota(70.0, 100),
-            scope.before.account.subscription.clone(),
+            scope.initial_account.account.subscription.clone(),
             None,
         )
         .unwrap();
         assert_eq!(quota.account.effective_models(), ["gpt-new"]);
         let failed = apply_models_read(store, scope, models_failure()).unwrap();
-        assert!(!failed.value);
+        assert!(!failed.refresh_result);
         assert_eq!(failed.account.effective_models(), ["gpt-new"]);
         assert_eq!(failed.account.account.quota, quota.account.account.quota);
+    });
+}
+
+#[test]
+fn model_timeout_preserves_inventory_and_recovers_without_reauthentication() {
+    with_store(|store, scope| {
+        let initial = store.account("test-account").unwrap().clone();
+        let failed = apply_models_read(
+            store,
+            scope,
+            Err(ModelDiscoveryFailure {
+                code: ModelDiscoveryFailureCode::Timeout,
+                retryable: true,
+                http_status: None,
+                retry_after_ms: None,
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            failed.account.effective_models(),
+            initial.effective_models()
+        );
+        assert_eq!(
+            failed.account.account.auth_state,
+            initial.account.auth_state
+        );
+        assert_eq!(failed.account.account.health, AccountHealthState::Degraded);
+        assert_eq!(
+            failed.account.account.last_error_code.as_deref(),
+            Some("models_timeout")
+        );
+        let (initial_account, fence) = store.account_refresh_scope("test-account").unwrap();
+        let retry_scope = AccountRefreshScope {
+            initial_account,
+            fence,
+            started_at_ms: 200,
+        };
+        let recovered =
+            apply_models_read(store, &retry_scope, Ok(initial.effective_models().to_vec()))
+                .unwrap();
+        assert!(!recovered.refresh_result);
+        assert_eq!(
+            recovered.account.account.auth_state,
+            initial.account.auth_state
+        );
+        assert_eq!(
+            recovered.account.account.health,
+            AccountHealthState::Healthy
+        );
+        assert!(recovered.account.account.last_error_code.is_none());
+        assert_eq!(recovered.account.account.quota, initial.account.quota);
+        assert_eq!(recovered.account.account.in_pool, initial.account.in_pool);
+        assert_eq!(recovered.account.account.enabled, initial.account.enabled);
     });
 }
 
@@ -223,7 +280,7 @@ fn rejected_revision_never_applies_success_or_failure_for_either_kind() {
 #[test]
 fn model_failure_does_not_overwrite_a_newer_authentication_failure() {
     with_store(|store, scope| {
-        let mut current = scope.before.clone();
+        let mut current = scope.initial_account.clone();
         current.account.health = AccountHealthState::Unhealthy;
         current.account.last_error_code = Some("token_invalidated".into());
         store.upsert_account(current.clone()).unwrap();
@@ -250,7 +307,7 @@ fn model_failure_does_not_overwrite_a_newer_authentication_failure() {
 #[test]
 fn timer_only_quota_movement_keeps_the_complete_refresh() {
     with_store(|store, scope| {
-        let mut baseline = scope.before.clone();
+        let mut baseline = scope.initial_account.clone();
         baseline.account.quota.primary = Some(
             QuotaWindow::normalize(
                 QuotaWindowInput {
@@ -279,7 +336,7 @@ fn timer_only_quota_movement_keeps_the_complete_refresh() {
             .observed_at_ms = 80;
         store.upsert_account(current).unwrap();
         let shifted = AccountRefreshScope {
-            before: baseline,
+            initial_account: baseline,
             fence: scope.fence.clone(),
             started_at_ms: scope.started_at_ms,
         };
@@ -292,10 +349,10 @@ fn timer_only_quota_movement_keeps_the_complete_refresh() {
         )
         .unwrap();
         assert!(matches!(
-            applied.value.outcome,
+            applied.refresh_result.outcome,
             AccountQuotaOutcome::Updated { .. }
         ));
-        assert!(applied.value.exhaustion_transitions.is_empty());
+        assert!(applied.refresh_result.exhaustion_transitions.is_empty());
         assert_eq!(
             applied
                 .account
@@ -312,9 +369,10 @@ fn timer_only_quota_movement_keeps_the_complete_refresh() {
 #[test]
 fn superseded_quota_does_not_prevent_an_independent_model_result() {
     with_store(|store, scope| {
-        let mut current = scope.before.clone();
+        let mut current = scope.initial_account.clone();
         current.account.quota.limit_reached = true;
         current.account.quota.updated_at_ms = Some(200);
+        current.account.quota.provider_credits_observed_at_ms = Some(200);
         store.upsert_account(current.clone()).unwrap();
         let applied = apply_quota_read(
             store,
@@ -325,12 +383,49 @@ fn superseded_quota_does_not_prevent_an_independent_model_result() {
         )
         .unwrap();
         assert!(matches!(
-            applied.value.outcome,
+            applied.refresh_result.outcome,
             AccountQuotaOutcome::Skipped
         ));
-        assert!(applied.value.models_changed);
+        assert!(applied.refresh_result.models_changed);
         assert_eq!(applied.account.account.quota, current.account.quota);
         assert_eq!(applied.account.effective_models(), ["gpt-new"]);
+    });
+}
+
+#[test]
+fn newer_passive_windows_do_not_starve_an_independent_ledger_refresh() {
+    with_store(|store, scope| {
+        let mut current = scope.initial_account.clone();
+        let QuotaRefreshOutcome::Updated(data) = quota(45.0, 200) else {
+            unreachable!()
+        };
+        super::super::quota_service::apply_quota_success(&mut current, *data).unwrap();
+        current.account.quota.provider_credits_observed_at_ms = Some(50);
+        store.upsert_account(current.clone()).unwrap();
+        let QuotaRefreshOutcome::Updated(mut data) = quota(0.0, 100) else {
+            unreachable!()
+        };
+        data.quota.available_credits_micro_units = Some(9_000_000);
+        data.quota.provider_credits_available = true;
+        let applied = apply_quota_read(
+            store,
+            scope,
+            QuotaRefreshOutcome::Updated(data),
+            Subscription::default(),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(
+            applied.refresh_result.outcome,
+            AccountQuotaOutcome::Updated { .. }
+        ));
+        assert!(applied.refresh_result.exhaustion_transitions.is_empty());
+        let actual = applied.account.account.quota;
+        assert_eq!(actual.primary, current.account.quota.primary);
+        assert_eq!(actual.limit_reached, current.account.quota.limit_reached);
+        assert_eq!(actual.updated_at_ms, Some(200));
+        assert_eq!(actual.available_credits_micro_units, Some(9_000_000));
+        assert_eq!(actual.provider_credits_observed_at_ms, Some(100));
     });
 }
 
@@ -371,7 +466,7 @@ async fn scope_capture_waits_for_setup_transaction_and_late_errors_are_discarded
     }
     assert_eq!(
         state.store().unwrap().account("test-account"),
-        Some(&current.before)
+        Some(&current.initial_account)
     );
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
@@ -380,7 +475,7 @@ async fn scope_capture_waits_for_setup_transaction_and_late_errors_are_discarded
 #[test]
 fn local_model_refresh_failure_keeps_a_provider_catalog_error() {
     with_store(|store, scope| {
-        let mut current = scope.before.clone();
+        let mut current = scope.initial_account.clone();
         current.account.health = AccountHealthState::Degraded;
         current.account.last_error_code = Some("models_transport".into());
         store.upsert_account(current.clone()).unwrap();

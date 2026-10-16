@@ -27,7 +27,7 @@ test("unconfigured API empty state uses the available page center", async ({ pag
   await installTauriMock(page, { locale: "ru", mode: "remote", theme: "dark", populated: true, remoteConnected: false });
   await page.setViewportSize({ width: 1160, height: 760 });
   await page.goto("/");
-  await page.getByRole("button", { name: "API", exact: true }).click();
+  await page.getByRole("button", { name: "Доступ", exact: true }).click();
   await expect(page.getByText("API не настроен", { exact: true })).toBeVisible();
   await expectTopLevelEmptyCentered(page);
   await page.screenshot({ path: "output/playwright/gateway-empty-centered-ru-dark-1160x760.png" });
@@ -137,7 +137,7 @@ test("ru compact disclosure labels stay readable", async ({ page }) => {
 
   await page.locator(".relay-sidebar nav button").nth(1).click();
   await page.getByRole("tab", { name: "Источники API" }).click();
-  await page.locator(".relay-table .row-actions summary").click();
+  await page.locator(".source-card .account-row-menu summary").click();
   let menu = page.getByRole("menu");
   expect(await menu.locator("span").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
   await page.screenshot({ path: "output/playwright/source-actions-ru-840x560.png" });
@@ -155,12 +155,12 @@ test("ru compact disclosure labels stay readable", async ({ page }) => {
   await page.screenshot({ path: "output/playwright/pool-member-dialog-ru-840x560.png" });
   await dialog.getByRole("button", { name: "Закрыть" }).first().click();
 
-  await page.locator(".relay-sidebar nav button").nth(4).click();
+  await page.getByRole("button", { name: "Использование", exact: true }).click();
   await page.getByRole("button", { name: "Сведения о запросе: req_synthetic_local" }).click();
   dialog = page.getByRole("dialog", { name: "Сведения о запросе" });
+  await expect(dialog).toContainText("РазмышлениеМаксимальное→Низкое");
+  await dialog.locator(".request-technical-details > summary").click();
   await expect(dialog).toContainText("req_synthetic_local");
-  await expect(dialog).toContainText("РазмышлениеЗапрошено: Максимальное, передано: Низкое");
-  await dialog.getByRole("tab", { name: "Маршрут", exact: true }).click();
   await expect(dialog).toContainText("Причина выбораНаибольший остаток квоты");
   await expect(dialog).toContainText("Доступных участников4");
   await expect(dialog).toContainText("Квота при выборе63.00%");
@@ -177,11 +177,28 @@ for (const scenario of [
   { locale: "en" as const, theme: "light" as const, width: 1160, label: "First / total", file: "usage-timing-en-light-1160x760.png" },
   { locale: "ru" as const, theme: "dark" as const, width: 840, label: "Первый / всего", file: "usage-timing-ru-dark-840x560.png" },
 ]) {
+  test(`usage timing unknown first ${scenario.locale} ${scenario.theme} ${scenario.width}`, async ({ page }) => {
+    await installTauriMock(page, {
+      locale: scenario.locale, mode: "local", theme: scenario.theme, populated: true,
+      accountOAuthClientKind: "excel_bps",
+      usageTiming: { latencyMs: 20_900, ttftMs: null, generationMs: null },
+    });
+    await page.setViewportSize({ width: scenario.width, height: scenario.width === 840 ? 560 : 760 });
+    await page.goto("/");
+    await page.getByRole("button", { name: scenario.locale === "ru" ? "Использование" : "Usage", exact: true }).click();
+    await expect(page.getByRole("columnheader", { name: scenario.label })).toBeVisible();
+    const timing = page.getByRole("row").filter({ hasText: "req_synthetic_local" }).locator('td[data-column="timing"]');
+    await expect(timing).toHaveText(scenario.locale === "ru" ? "— / 20,9 с" : "— / 20.9 s");
+    expect(await timing.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await timing.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `output/playwright/unknown-first-${scenario.file}` });
+  });
+
   test(`usage timing ${scenario.locale} ${scenario.theme} ${scenario.width}`, async ({ page }) => {
     await installTauriMock(page, { locale: scenario.locale, mode: "local", theme: scenario.theme, populated: true });
     await page.setViewportSize({ width: scenario.width, height: scenario.width === 840 ? 560 : 760 });
     await page.goto("/");
-    await page.locator(".relay-sidebar nav button").nth(4).click();
+    await page.getByRole("button", { name: scenario.locale === "ru" ? "Использование" : "Usage", exact: true }).click();
 
     if (scenario.width === 840) {
       await page.locator(".usage-metrics > div").nth(2).evaluate((card) => {
@@ -221,22 +238,23 @@ for (const viewport of viewports) {
     await page.getByRole("button", { name: "Использование", exact: true }).click();
 
     const filters = page.locator(".usage-filter-panel");
+    const scope = page.locator(".usage-scope-controls");
     await expect(page.locator(".usage-range-menu").getByRole("button", { name: /^Период:/ })).toBeVisible();
-    await expect(filters.getByRole("button", { name: /^Модель:/ })).toBeVisible();
-    await expect(filters.getByRole("button", { name: /^Участник пула:/ })).toBeVisible();
+    await expect(scope.getByRole("button", { name: /^Модель:/ })).toBeVisible();
+    await expect(scope.getByRole("button", { name: /^Участник пула:/ })).toBeVisible();
     await expect(filters.getByLabel("Локальный ключ")).toHaveCount(0);
-    await filters.getByRole("button", { name: "Другие фильтры" }).click();
+    await scope.getByRole("button", { name: "Другие фильтры" }).click();
     await expect(filters.getByLabel("Локальный ключ")).toHaveCount(0);
     await expect(filters.getByRole("button", { name: /^Категория ошибки:/ })).toBeVisible();
     const protocol = filters.getByRole("button", { name: /^Протокол:/ });
     await protocol.click();
     await expect(protocol).toHaveAttribute("aria-expanded", "true");
     await page.getByRole("option", { name: "Responses", exact: true }).click();
-    await expect(filters.locator(".usage-filter-toggle-wrap small")).toHaveText("1");
-    await expect(filters.getByRole("button", { name: "Сбросить фильтры" })).toBeVisible();
-    await filters.getByRole("button", { name: "Сбросить фильтры" }).click();
+    await expect(scope.locator(".usage-filter-toggle-wrap small")).toHaveText("1");
+    await expect(scope.getByRole("button", { name: "Сбросить фильтры" })).toBeVisible();
+    await scope.getByRole("button", { name: "Сбросить фильтры" }).click();
     await expect(filters.getByRole("button", { name: "Протокол: Любой протокол" })).toBeVisible();
-    await expect(filters.getByRole("button", { name: "Сбросить фильтры" })).toHaveCount(0);
+    await expect(scope.getByRole("button", { name: "Сбросить фильтры" })).toHaveCount(0);
     await page.screenshot({ path: `output/playwright/usage-filters-open-ru-dark-${viewport.width}x${viewport.height}.png` });
 
     await page.getByRole("tab", { name: "Модели" }).click();

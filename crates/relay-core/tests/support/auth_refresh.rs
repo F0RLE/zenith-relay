@@ -155,8 +155,16 @@ async fn chatgpt_account_retries_foreign_message_item_id_after_native_rejection(
     drop(requests);
 
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 1);
-    assert!(events[0].success);
+    assert_eq!(events.len(), 2);
+    assert!(!events[0].success);
+    assert_eq!(events[0].http_status, 400);
+    assert_eq!(
+        events[0].routing.as_ref().unwrap().attempt_outcome,
+        Some(zenith_relay_core::AttemptOutcome::RetryRepair)
+    );
+    assert!(events[1].success);
+    assert_eq!(events[0].request_id, events[1].request_id);
+    assert_eq!((events[0].attempt, events[1].attempt), (1, 2));
 }
 
 #[tokio::test]
@@ -225,8 +233,16 @@ async fn unauthorized_account_request_refreshes_once_and_retries_the_same_accoun
     }
     {
         let recorded = events.lock().unwrap();
-        assert_eq!(recorded.len(), 1);
-        assert!(recorded[0].success);
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(recorded[0].attempt, 1);
+        assert_eq!(recorded[0].http_status, 401);
+        assert_eq!(
+            recorded[0].routing.as_ref().unwrap().attempt_outcome,
+            Some(zenith_relay_core::AttemptOutcome::RetryAuthorization)
+        );
+        assert_eq!(recorded[1].attempt, 2);
+        assert!(recorded[1].success);
+        assert_eq!(recorded[0].request_id, recorded[1].request_id);
     }
 
     assert_eq!(
@@ -243,8 +259,8 @@ async fn unauthorized_account_request_refreshes_once_and_retries_the_same_accoun
     );
     drop(requests);
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 2);
-    assert!(events[1].success);
+    assert_eq!(events.len(), 3);
+    assert!(events[2].success);
 }
 
 #[tokio::test]
@@ -257,7 +273,7 @@ async fn unauthorized_sse_refreshes_before_output_and_emits_one_completion() {
         Reply::Stream(vec![
             StreamChunk::Data("data: {\"type\":\"response.created\",\"response\":{\"id\":\"refreshed\"}}\n\n"),
             StreamChunk::Data("data: {\"type\":\"response.output_text.delta\",\"delta\":\"once\"}\n\n"),
-            StreamChunk::Data("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"refreshed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"),
+            StreamChunk::Data("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"refreshed\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"),
         ]),
     ])
     .await;
@@ -322,9 +338,14 @@ async fn unauthorized_sse_refreshes_before_output_and_emits_one_completion() {
     );
     drop(requests);
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 1);
-    assert!(events[0].success);
-    assert_eq!(events[0].total_tokens, Some(2));
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        events[0].routing.as_ref().unwrap().attempt_outcome,
+        Some(zenith_relay_core::AttemptOutcome::RetryAuthorization)
+    );
+    assert!(!events[0].success);
+    assert!(events[1].success);
+    assert_eq!(events[1].total_tokens, Some(2));
 }
 
 #[tokio::test]
@@ -405,6 +426,7 @@ async fn passive_quota_headers_update_the_active_runtime_before_persistence() {
         json!({
             "id":"quota-response",
             "object":"response",
+            "status":"completed",
             "model":MODEL,
             "output":[],
             "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}

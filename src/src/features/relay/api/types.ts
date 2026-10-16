@@ -1,4 +1,11 @@
 export type {
+  RequestTimezonePolicy,
+  RequestTimezoneUpdate,
+  AccountTimezoneSource,
+  ModelCatalogIdentity,
+} from "./types/runtime";
+
+export type {
   RelayMode,
   PageId,
   DefaultServiceTier,
@@ -17,7 +24,6 @@ export type {
   ApiEquivalentSummary,
   PricingSourceSummary,
   CatalogStatus,
-  CatalogRefreshOutcome,
   PricingMetadata,
   QuotaWindowUsage,
   ApiModelPriceOverride,
@@ -33,7 +39,6 @@ export type {
   ModelEndpointCapability,
   SourceProtocolConfig,
   SourceProbeInput,
-  SourceProbeResult,
   MessagesReasoningMode,
   CacheWriteTtl,
   DocumentedCacheRetentionMinimum,
@@ -45,8 +50,8 @@ export type {
 } from "./types/source";
 
 export type {
+  TrashedAccountSummary,
   AccountSummary,
-  CredentialRefreshResult,
   RevealedAccountIdentity,
   AccountLoginDetails,
   AccountLoginUpdate,
@@ -60,12 +65,14 @@ export type {
   AccountImportProgress,
   AccountTransferProgress,
   OAuthFlowStatus,
+  OAuthClientKind,
   OAuthFlow,
   OAuthFlowEvent,
   OAuthCompletion,
 } from "./types/account";
 
 export type {
+  ModelContextPolicy,
   ModelSummary,
   ImageRequestPrice,
 } from "./types/model";
@@ -97,6 +104,10 @@ export type {
 } from "./types/proxy";
 
 export type {
+  LaunchApplication,
+  LaunchPathSetting,
+  ClaudeDesktopStatus,
+  ClaudeDesktopConnection,
   OpenCodeConfigStatus,
   ProfileSnapshot,
   ProfileSnapshotList,
@@ -115,9 +126,13 @@ export type {
 } from "./types/runtime";
 
 export type {
+  CacheContextDiagnostics,
+  CacheContextSection,
+  CacheHistoryDiagnostics,
   RoutingDiagnostics,
   ToolUseDiagnostics,
   ErrorOrigin,
+  UsageTransport,
   UpstreamErrorDetails,
   ReasoningEffort,
   LocalUsage,
@@ -127,7 +142,6 @@ export type {
   CacheSessionRecord,
   LocalUsagePage,
   UsageExportRow,
-  SupportExportContext,
   RemoteUsage,
   RemoteUsageQuery,
   RemoteUsagePage,
@@ -135,8 +149,6 @@ export type {
 
 export type {
   RemoteTarget,
-  SupportBundlePreview,
   RelayStorageInfo,
-  DiagnosticPaths,
   DiagnosticSettings,
 } from "./types/diagnostics";

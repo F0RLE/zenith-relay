@@ -65,7 +65,8 @@ async fn startup_reconciles_quota_persisted_before_listener_creation() {
         limit_reached: true,
         available_credits_micro_units: Some(123),
         provider_credits_available: true,
-        updated_at_ms: Some(now_ms.saturating_add(1)),
+        provider_credits_observed_at_ms: Some(now_ms),
+        updated_at_ms: Some(now_ms),
         ..Default::default()
     };
     state.store().unwrap().upsert_account(account).unwrap();

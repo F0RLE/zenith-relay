@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn cooldowns_follow_upstream_scope_and_shared_member_resources() {
+fn cooldowns_share_one_upstream_across_client_bindings() {
     use crate::scheduler::CooldownReason;
     let mut configured = RuntimeSource::unrestricted(source("multi", "synthetic", &["test"]));
     configured.protocol_config.capabilities = vec![
@@ -13,6 +13,7 @@ fn cooldowns_follow_upstream_scope_and_shared_member_resources() {
             checked_at_ms: 1,
             features: BTreeMap::new(),
             reasoning_efforts: Vec::new(),
+            service_tiers: None,
         },
         ModelEndpointCapability {
             model_id: "test".into(),
@@ -22,6 +23,7 @@ fn cooldowns_follow_upstream_scope_and_shared_member_resources() {
             checked_at_ms: 1,
             features: BTreeMap::new(),
             reasoning_efforts: Vec::new(),
+            service_tiers: None,
         },
     ];
     let runtime = GatewayRuntime::from_pool(
@@ -31,33 +33,22 @@ fn cooldowns_follow_upstream_scope_and_shared_member_resources() {
         Arc::new(|_| {}),
     )
     .unwrap();
-    let route_upstreams = runtime
-        .source_candidate_bindings
+    assert_eq!(runtime.source_candidate_bindings.len(), 1);
+    let binding = &runtime.source_candidate_bindings["multi"];
+    assert_eq!(binding.routes.len(), WireApi::ALL.len() * 2);
+    let protocols = binding
+        .routes
         .iter()
-        .filter(|(_, binding)| binding.source_id == "multi")
-        .map(|(id, binding)| {
-            (
-                id.clone(),
-                binding.adapter.upstream_protocol(binding.wire_api),
-            )
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(route_upstreams.len(), WireApi::ALL.len());
-    let seed_upstream = route_upstreams
-        .iter()
-        .find(|(id, _)| id == "multi")
-        .map(|(_, upstream)| *upstream)
-        .unwrap();
-    assert!(route_upstreams
-        .iter()
-        .any(|(id, upstream)| id != "multi" && *upstream == seed_upstream));
-    assert!(route_upstreams
-        .iter()
-        .any(|(_, upstream)| *upstream != seed_upstream));
-    for (reason, scope, shared) in [
-        (CooldownReason::Mandatory, "test", false),
-        (CooldownReason::RateLimit, "test", true),
-        (CooldownReason::Mandatory, "*", true),
+        .map(|route| route.adapter.upstream_protocol(route.wire_api).wire_api())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        protocols,
+        BTreeSet::from([WireApi::Responses, WireApi::Messages])
+    );
+    for (reason, scope) in [
+        (CooldownReason::Mandatory, "test"),
+        (CooldownReason::RateLimit, "test"),
+        (CooldownReason::Mandatory, "*"),
     ] {
         assert!(runtime.set_cooldown_with_reason_for_model_at(
             "multi",
@@ -69,15 +60,12 @@ fn cooldowns_follow_upstream_scope_and_shared_member_resources() {
             }
         ));
         let mut scheduler = runtime.lock_scheduler();
-        for (id, upstream) in &route_upstreams {
-            let cooled = scheduler
-                .candidate(id)
-                .unwrap()
-                .cooldowns
-                .contains_key(scope);
-            assert_eq!(cooled, shared || *upstream == seed_upstream, "{id}");
-            scheduler.clear_cooldown(id, scope);
-        }
+        assert!(scheduler
+            .candidate("multi")
+            .unwrap()
+            .cooldowns
+            .contains_key(scope));
+        scheduler.clear_cooldown("multi", scope);
     }
 }
 #[tokio::test]
@@ -244,6 +232,7 @@ async fn source_activity_reports_its_physical_member_on_admission_and_release() 
         checked_at_ms: 1,
         features: BTreeMap::new(),
         reasoning_efforts: Vec::new(),
+        service_tiers: None,
     }];
     let runtime = GatewayRuntime::from_pool(
         vec![configured],
@@ -269,7 +258,7 @@ async fn source_activity_reports_its_physical_member_on_admission_and_release() 
         )
         .await
         .unwrap();
-    assert!(selection.candidate_id.starts_with("source-1::"));
+    assert_eq!(selection.candidate_id, "source-1");
     assert_eq!(
         runtime.active_member_keys(current_time_ms(), 0),
         BTreeSet::from(["source:source-1".into()])
@@ -407,6 +396,7 @@ fn passive_quota_exhaustion_and_recovery_are_persisted_without_waiting_for_the_d
 fn refreshed_quota_snapshot_replaces_passive_state_before_header_merges() {
     let initial = QuotaSnapshot {
         available_credits_micro_units: Some(100),
+        provider_credits_observed_at_ms: Some(1_000),
         provider_credits_available: true,
         updated_at_ms: Some(1_000),
         ..QuotaSnapshot::default()
@@ -414,6 +404,7 @@ fn refreshed_quota_snapshot_replaces_passive_state_before_header_merges() {
     let runtime = quota_runtime(initial);
     let refreshed = QuotaSnapshot {
         available_credits_micro_units: Some(200),
+        provider_credits_observed_at_ms: Some(2_000),
         provider_credits_available: true,
         updated_at_ms: Some(2_000),
         ..QuotaSnapshot::default()
@@ -440,6 +431,85 @@ fn refreshed_quota_snapshot_replaces_passive_state_before_header_merges() {
         .expect("header merge should become persistable");
     assert_eq!(merged.available_credits_micro_units, Some(200));
     assert!(merged.provider_credits_available);
+    assert_eq!(merged.provider_credits_observed_at_ms, Some(2_000));
+    let scheduler = runtime.lock_scheduler();
+    let candidate = scheduler.candidate("account-1").unwrap();
+    assert_eq!(candidate.quota_updated_at_ms, Some(3_000));
+    assert_eq!(candidate.provider_credits_observed_at_ms, Some(2_000));
+}
+
+#[test]
+fn fresh_window_headers_do_not_revive_an_expired_credit_ledger() {
+    let runtime = quota_runtime(QuotaSnapshot {
+        limit_reached: true,
+        provider_credits_available: true,
+        available_credits_micro_units: Some(200_000_000),
+        provider_credits_observed_at_ms: Some(1_000),
+        updated_at_ms: Some(1_000),
+        ..Default::default()
+    });
+    let now_ms = QUOTA_STALE_AFTER_MS + 2_000;
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "x-codex-primary-used-percent",
+        reqwest::header::HeaderValue::from_static("100"),
+    );
+    assert!(runtime.observe_codex_quota_headers(
+        "account-1",
+        reqwest::StatusCode::OK,
+        &headers,
+        now_ms,
+    ));
+    let scheduler = runtime.lock_scheduler();
+    let candidate = scheduler.candidate("account-1").unwrap();
+    assert_eq!(candidate.quota, CandidateQuota::Exhausted);
+    assert_eq!(candidate.provider_credits_observed_at_ms, Some(1_000));
+    assert_eq!(candidate.provider_credits_micro_units, Some(200_000_000));
+}
+
+#[test]
+fn complete_ledger_refresh_can_follow_newer_passive_windows_without_replacing_them() {
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "x-codex-primary-used-percent",
+        reqwest::header::HeaderValue::from_static("75"),
+    );
+    assert!(runtime.observe_codex_quota_headers(
+        "account-1",
+        reqwest::StatusCode::OK,
+        &headers,
+        3_000
+    ));
+    assert!(runtime.sync_account_quota_snapshot(
+        "account-1",
+        &QuotaSnapshot {
+            available_credits_micro_units: Some(200),
+            provider_credits_available: true,
+            provider_credits_observed_at_ms: Some(2_000),
+            updated_at_ms: Some(2_000),
+            ..Default::default()
+        },
+        4_000
+    ));
+    let merged = runtime
+        .take_passive_quota_snapshot("account-1", 8_000)
+        .unwrap();
+    assert_eq!(merged.updated_at_ms, Some(3_000));
+    assert_eq!(
+        merged.primary.as_ref().unwrap().available_basis_points,
+        Some(2_500)
+    );
+    assert_eq!(merged.available_credits_micro_units, Some(200));
+    assert_eq!(merged.provider_credits_observed_at_ms, Some(2_000));
+    assert_eq!(
+        runtime
+            .lock_scheduler()
+            .candidate("account-1")
+            .unwrap()
+            .provider_credits_observed_at_ms,
+        Some(2_000)
+    );
 }
 #[test]
 fn quota_429_does_not_turn_a_slot_into_permanent_exhaustion() {
@@ -460,6 +530,7 @@ fn quota_429_does_not_turn_a_slot_into_permanent_exhaustion() {
             requested_reasoning_effort: None,
             effective_reasoning_effort: None,
             wire_api: WireApi::Responses,
+            transport: crate::UsageTransport::Http,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,
             success: false,
@@ -532,6 +603,7 @@ fn reported_quota_exhaustion_zeroes_an_open_primary_window_without_inventing_a_l
             requested_reasoning_effort: None,
             effective_reasoning_effort: None,
             wire_api: WireApi::Responses,
+            transport: crate::UsageTransport::Http,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,
             success: false,

@@ -1,6 +1,34 @@
 use super::*;
 use serde_json::json;
 
+pub(super) fn prepare_portable_tool_history(
+    client: WireApi,
+    upstream: WireApi,
+    stream: bool,
+) -> crate::PreparedAdapterRequest {
+    let capabilities = crate::model_metadata::ModelCapabilities {
+        reasoning: Some(false),
+        ..Default::default()
+    };
+    SourceAdapter::between(client, upstream)
+        .unwrap()
+        .prepare_request_with_capabilities(
+            AdapterRequestContext {
+                client_wire_api: client,
+                request: &tool_history(client),
+                model: "test",
+                stream,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: CacheWriteTtl::Provider,
+                previous: None,
+                response_scope: "source-test",
+                response_id_seed: "request-test",
+            },
+            &capabilities,
+        )
+        .unwrap_or_else(|error| panic!("{client:?} -> {upstream:?}: {error}"))
+}
+
 #[test]
 fn all_sixteen_request_and_json_contracts() {
     for client in WireApi::ALL {
@@ -183,7 +211,7 @@ fn every_stream_conversion_keeps_tool_ids_order_arguments_and_actual_usage() {
     for client in WireApi::ALL {
         for upstream in WireApi::ALL {
             let Some(mut bridge) =
-                prepare(client, upstream, &tool_history(client), true).into_stream_bridge()
+                prepare_portable_tool_history(client, upstream, true).into_stream_bridge()
             else {
                 continue;
             };
@@ -260,6 +288,7 @@ fn unsupported_parameters_fail_before_transport_but_native_extensions_survive() 
                     response_id_seed: "request",
                 },
                 upstream,
+                None,
             )
             .unwrap_err();
             assert_eq!(
@@ -288,7 +317,7 @@ fn absent_usage_remains_unknown() {
 fn all_sixteen_paths_preserve_multi_turn_tool_history_and_instructions() {
     for client in WireApi::ALL {
         for upstream in WireApi::ALL {
-            let prepared = prepare(client, upstream, &tool_history(client), false);
+            let prepared = prepare_portable_tool_history(client, upstream, false);
             let mut request = decode::request(upstream, prepared.upstream_body())
                 .unwrap_or_else(|error| panic!("{client:?} -> {upstream:?}: {error}"));
             decode::resolve_tool_history(&mut request.messages).unwrap();

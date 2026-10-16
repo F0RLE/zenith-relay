@@ -8,19 +8,22 @@ pub(crate) struct RateLimitBodyHint {
     pub(crate) global: bool,
 }
 
-pub(crate) fn rate_limit_body_hint(body: &[u8]) -> RateLimitBodyHint {
-    rate_limit_body_hint_at(body, SystemTime::now())
+pub(crate) fn rate_limit_body_hint(response_body: &[u8]) -> RateLimitBodyHint {
+    rate_limit_body_hint_at(response_body, SystemTime::now())
 }
 
-pub(crate) fn rate_limit_body_hint_at(body: &[u8], now: SystemTime) -> RateLimitBodyHint {
-    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+pub(crate) fn rate_limit_body_hint_at(response_body: &[u8], now: SystemTime) -> RateLimitBodyHint {
+    let Ok(rate_limit_payload) = serde_json::from_slice::<Value>(response_body) else {
         return RateLimitBodyHint::default();
     };
-    rate_limit_body_hint_value(&value, now)
+    rate_limit_body_hint_value(&rate_limit_payload, now)
 }
 
-pub(crate) fn rate_limit_body_hint_value(value: &Value, now: SystemTime) -> RateLimitBodyHint {
-    let retry_after_ms = rate_limit_reset_delay_ms(value, now)
+pub(crate) fn rate_limit_body_hint_value(
+    rate_limit_payload: &Value,
+    now: SystemTime,
+) -> RateLimitBodyHint {
+    let retry_after_ms = rate_limit_reset_delay_ms(rate_limit_payload, now)
         .or_else(|| {
             [
                 "/resets_in_seconds",
@@ -29,7 +32,11 @@ pub(crate) fn rate_limit_body_hint_value(value: &Value, now: SystemTime) -> Rate
                 "/response/error/resets_in_seconds",
             ]
             .into_iter()
-            .find_map(|path| value.pointer(path).and_then(json_seconds_to_ms))
+            .find_map(|path| {
+                rate_limit_payload
+                    .pointer(path)
+                    .and_then(json_seconds_to_ms)
+            })
         })
         .or_else(|| {
             [
@@ -39,9 +46,13 @@ pub(crate) fn rate_limit_body_hint_value(value: &Value, now: SystemTime) -> Rate
                 "/response/error/retry_after",
             ]
             .into_iter()
-            .find_map(|path| value.pointer(path).and_then(json_seconds_to_ms))
+            .find_map(|path| {
+                rate_limit_payload
+                    .pointer(path)
+                    .and_then(json_seconds_to_ms)
+            })
         })
-        .or_else(|| retry_delay_from_text(&upstream_error_text(value)));
+        .or_else(|| retry_delay_from_text(&upstream_error_text(rate_limit_payload)));
     let global = [
         "/type",
         "/code",
@@ -53,7 +64,7 @@ pub(crate) fn rate_limit_body_hint_value(value: &Value, now: SystemTime) -> Rate
         "/response/error/code",
     ]
     .into_iter()
-    .filter_map(|path| value.pointer(path).and_then(Value::as_str))
+    .filter_map(|path| rate_limit_payload.pointer(path).and_then(Value::as_str))
     .map(str::to_ascii_lowercase)
     .any(|kind| {
         kind.contains("usage_limit")
@@ -71,7 +82,7 @@ pub(crate) fn rate_limit_body_hint_value(value: &Value, now: SystemTime) -> Rate
     }
 }
 
-fn rate_limit_reset_delay_ms(value: &Value, now: SystemTime) -> Option<u64> {
+fn rate_limit_reset_delay_ms(rate_limit_payload: &Value, now: SystemTime) -> Option<u64> {
     let reset_at = [
         "/resets_at",
         "/error/resets_at",
@@ -79,7 +90,7 @@ fn rate_limit_reset_delay_ms(value: &Value, now: SystemTime) -> Option<u64> {
         "/response/error/resets_at",
     ]
     .into_iter()
-    .find_map(|path| value.pointer(path).and_then(json_u64))?;
+    .find_map(|path| rate_limit_payload.pointer(path).and_then(json_u64))?;
     let reset_seconds = if reset_at > 10_000_000_000 {
         reset_at / 1_000
     } else {
@@ -93,16 +104,20 @@ fn rate_limit_reset_delay_ms(value: &Value, now: SystemTime) -> Option<u64> {
         .map(|duration_ms| duration_ms.min(MAX_RATE_LIMIT_RETRY_HINT_MS))
 }
 
-fn json_u64(value: &Value) -> Option<u64> {
-    value
-        .as_u64()
-        .or_else(|| value.as_str().and_then(|value| value.trim().parse().ok()))
+fn json_u64(json_value: &Value) -> Option<u64> {
+    json_value.as_u64().or_else(|| {
+        json_value
+            .as_str()
+            .and_then(|text| text.trim().parse().ok())
+    })
 }
 
-fn json_seconds_to_ms(value: &Value) -> Option<u64> {
-    let seconds = value
-        .as_f64()
-        .or_else(|| value.as_str().and_then(|value| value.trim().parse().ok()))?;
+fn json_seconds_to_ms(duration_value: &Value) -> Option<u64> {
+    let seconds = duration_value.as_f64().or_else(|| {
+        duration_value
+            .as_str()
+            .and_then(|text| text.trim().parse().ok())
+    })?;
     if !seconds.is_finite() || seconds <= 0.0 {
         return None;
     }
@@ -137,8 +152,16 @@ fn retry_delay_from_text(text: &str) -> Option<u64> {
     )
 }
 
-pub(crate) fn retry_delay_ms(header: Option<u64>, body: Option<u64>, fallback: u64) -> u64 {
-    header.into_iter().chain(body).max().unwrap_or(fallback)
+pub(crate) fn retry_delay_ms(
+    header_retry_after_ms: Option<u64>,
+    body_retry_after_ms: Option<u64>,
+    fallback_ms: u64,
+) -> u64 {
+    header_retry_after_ms
+        .into_iter()
+        .chain(body_retry_after_ms)
+        .max()
+        .unwrap_or(fallback_ms)
 }
 
 pub(crate) fn retry_after_ms(headers: &reqwest::header::HeaderMap, now: SystemTime) -> Option<u64> {

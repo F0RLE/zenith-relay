@@ -7,6 +7,35 @@ use zenith_relay_core::protocol::PresetRoutingPolicy;
 use zenith_relay_core::{ApiModelPriceOverride, ApiModelPriceSources, DefaultServiceTier};
 
 #[test]
+fn request_timezone_rejects_invalid_zones_and_persists_disabled_choices() {
+    let root = test_root("request-timezone");
+    let path = root.join("relay.sqlite");
+    let store = Store::open(path.clone()).unwrap();
+    assert_eq!(
+        store.request_timezone().unwrap(),
+        zenith_relay_core::RequestTimezonePolicy::default()
+    );
+    let mut policy = zenith_relay_core::RequestTimezonePolicy {
+        enabled: false,
+        account_timezones: BTreeMap::from([("synthetic".into(), "Etc/GMT-3".into())]),
+        account_timezone_bindings: BTreeMap::new(),
+        account_timezone_sources: BTreeMap::new(),
+    };
+    store.set_request_timezone(&policy).unwrap();
+    policy
+        .account_timezones
+        .insert("synthetic".into(), "Invalid/Zone".into());
+    assert!(store.set_request_timezone(&policy).is_err());
+    drop(store);
+    let reopened = Store::open(path).unwrap();
+    let saved = reopened.request_timezone().unwrap();
+    assert!(!saved.enabled);
+    assert_eq!(saved.account_timezones["synthetic"], "Etc/GMT-3");
+    drop(reopened);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn quota_request_timeout_is_validated_and_persists() {
     let root = test_root("quota-policy");
     let path = root.join("relay.sqlite");
@@ -71,7 +100,7 @@ fn routing_policy_is_validated_and_persists() {
         PresetRoutingPolicy {
             tool_policy: Some(Default::default()),
             pool_routing: Some(Default::default()),
-            basis_points_enabled: true,
+            basis_points_enabled: false,
             max_retry_candidates: 5,
             default_service_tier: DefaultServiceTier::Fast,
             image_base_model: Some("gpt-5.4-mini".into()),
@@ -110,6 +139,7 @@ fn model_price_overrides_are_validated_normalized_and_persisted() {
         cache_write_5m_micro_usd_per_million: Some(1_250_000),
         cache_write_1h_micro_usd_per_million: Some(2_500_000),
         output_micro_usd_per_million: 2_000_000,
+        ..Default::default()
     };
     store
         .set_model_price_overrides(BTreeMap::from([(" GPT-Test ".into(), price)]))
@@ -138,6 +168,7 @@ fn detected_source_prices_fall_back_from_manual_overrides_and_refresh_cleanly() 
         cache_write_5m_micro_usd_per_million: None,
         cache_write_1h_micro_usd_per_million: None,
         output_micro_usd_per_million: 2_000_000,
+        ..Default::default()
     };
     let manual = ApiModelPriceOverride {
         input_micro_usd_per_million: 3_000_000,
@@ -145,6 +176,7 @@ fn detected_source_prices_fall_back_from_manual_overrides_and_refresh_cleanly() 
         cache_write_5m_micro_usd_per_million: None,
         cache_write_1h_micro_usd_per_million: None,
         output_micro_usd_per_million: 6_000_000,
+        ..Default::default()
     };
     let mut source = SourceRecord {
         id: "source-detected".into(),
@@ -156,6 +188,7 @@ fn detected_source_prices_fall_back_from_manual_overrides_and_refresh_cleanly() 
         secret_ref: "source:detected".into(),
         pricing_provider: None,
         official_provider_family: None,
+        proxy_id: None,
         wire_api: zenith_relay_core::WireApi::Responses,
         protocol_config: Default::default(),
         protocol_bindings: Vec::new(),

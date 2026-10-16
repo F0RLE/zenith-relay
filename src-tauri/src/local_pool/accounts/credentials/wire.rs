@@ -1,5 +1,7 @@
 use super::error::{CredentialError, CredentialErrorCode};
+use crate::local_pool::accounts::oauth::OAuthClientKind;
 use serde::{Deserialize, Serialize};
+use zenith_relay_core::providers::chatgpt::BasisPointsCapturedHeaders;
 
 pub(super) const CREDENTIAL_VERSION: u32 = 1;
 pub(super) const MAX_SECRET_JSON_BYTES: usize = 256 * 1024;
@@ -12,6 +14,8 @@ pub(super) const MAX_PLAN_BYTES: usize = 64;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct CredentialWire {
     pub(super) version: u32,
+    #[serde(default)]
+    pub(super) oauth_client_kind: OAuthClientKind,
     pub(super) local_account_id: String,
     pub(super) access_token: String,
     pub(super) refresh_token: Option<String>,
@@ -37,6 +41,8 @@ pub(super) struct CredentialWire {
     pub(super) bypass_common_proxy: bool,
     #[serde(default)]
     pub(super) agent_identity: Option<AgentIdentityWire>,
+    #[serde(default)]
+    pub(super) basis_points_headers: Option<BasisPointsCapturedHeaders>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -48,8 +54,8 @@ pub(super) struct AgentIdentityWire {
     pub(super) task_id: Option<String>,
 }
 
-pub(super) fn validate_local_account_id(value: &str) -> Result<(), CredentialError> {
-    if zenith_relay_core::is_ascii_token(value, 128) {
+pub(super) fn validate_local_account_id(account_id: &str) -> Result<(), CredentialError> {
+    if zenith_relay_core::is_ascii_token(account_id, 128) {
         Ok(())
     } else {
         Err(CredentialError::new(
@@ -59,10 +65,10 @@ pub(super) fn validate_local_account_id(value: &str) -> Result<(), CredentialErr
     }
 }
 
-pub(super) fn validate_token(value: &str) -> Result<(), CredentialError> {
-    if value.is_empty()
-        || value.len() > MAX_TOKEN_BYTES
-        || value.bytes().any(|byte| byte.is_ascii_control())
+pub(super) fn validate_token(token_value: &str) -> Result<(), CredentialError> {
+    if token_value.is_empty()
+        || token_value.len() > MAX_TOKEN_BYTES
+        || token_value.bytes().any(|byte| byte.is_ascii_control())
     {
         Err(CredentialError::new(
             CredentialErrorCode::InvalidSecret,
@@ -74,13 +80,13 @@ pub(super) fn validate_token(value: &str) -> Result<(), CredentialError> {
 }
 
 pub(super) fn validate_optional(
-    value: Option<&str>,
+    credential_value: Option<&str>,
     max_bytes: usize,
 ) -> Result<(), CredentialError> {
-    if value.is_some_and(|value| {
-        value.is_empty()
-            || value.len() > max_bytes
-            || value.bytes().any(|byte| byte.is_ascii_control())
+    if credential_value.is_some_and(|credential_text| {
+        credential_text.is_empty()
+            || credential_text.len() > max_bytes
+            || credential_text.bytes().any(|byte| byte.is_ascii_control())
     }) {
         Err(CredentialError::new(
             CredentialErrorCode::InvalidSecret,
@@ -91,8 +97,8 @@ pub(super) fn validate_optional(
     }
 }
 
-pub(super) fn mask_email(value: &str) -> String {
-    let Some((local, domain)) = value.trim().split_once('@') else {
+pub(super) fn mask_email(email_value: &str) -> String {
+    let Some((local, domain)) = email_value.trim().split_once('@') else {
         return "****".to_string();
     };
     let local = local.chars().next().unwrap_or('*');

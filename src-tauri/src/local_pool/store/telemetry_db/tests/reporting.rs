@@ -1,6 +1,116 @@
 use super::*;
 
 #[test]
+fn history_purges_deleted_account_attempts_and_expires_with_the_final_row() {
+    let root = std::env::temp_dir().join(format!("relay-attempt-purge-{}", uuid::Uuid::new_v4()));
+    let path = root.join("usage.sqlite");
+    let database = TelemetryDb::open(&path).unwrap();
+    let mut event = aggregate_test_event("rerouted", 1, 20, 0, None, 8);
+    event.account_id = Some("removed-account".into());
+    event.success = false;
+    database.record(&event).unwrap();
+    event.attempt = 2;
+    event.account_id = None;
+    event.success = true;
+    database.record(&event).unwrap();
+    let query = UsageQuery {
+        request_id: Some("rerouted".into()),
+        ..UsageQuery::default()
+    };
+    assert_eq!(database.usage_page(&query).unwrap().total, 2);
+    database
+        .replace_state_json_and_delete_account_data(&[], "removed-account")
+        .unwrap();
+    let history = database.usage_page(&query).unwrap();
+    assert_eq!(history.total, 1);
+    assert_eq!(history.events[0].attempt, 2);
+    assert_eq!(
+        database.usage_page(&UsageQuery::default()).unwrap().total,
+        1
+    );
+    database
+        .connection
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE request_logs SET created_at = datetime('now', '-31 days')",
+            [],
+        )
+        .unwrap();
+    drop(database);
+    let database = TelemetryDb::open(&path).unwrap();
+    assert_eq!(database.usage_page(&query).unwrap().total, 0);
+    drop(database);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn exact_request_history_survives_reopen_without_inflating_totals() {
+    let root = std::env::temp_dir().join(format!("relay-attempts-{}", uuid::Uuid::new_v4()));
+    let path = root.join("usage.sqlite");
+    let database = TelemetryDb::open(&path).unwrap();
+    let mut event = aggregate_test_event("req", 1, 20, 0, None, 8);
+    event.success = false;
+    event.http_status = 503;
+    event.source_id = "first".into();
+    database.record(&event).unwrap();
+    event.attempt = 2;
+    event.success = true;
+    event.http_status = 200;
+    event.source_id = "second".into();
+    database.record(&event).unwrap();
+    // Late arrival of an earlier attempt must be retained without replacing the final row.
+    event.attempt = 1;
+    event.success = false;
+    event.source_id = "first".into();
+    database.record(&event).unwrap();
+    event.request_id = "req_extra".into();
+    database.record(&event).unwrap();
+    drop(database);
+    let database = TelemetryDb::open(&path).unwrap();
+    assert_eq!(
+        database.usage_page(&UsageQuery::default()).unwrap().total,
+        2
+    );
+    let history = database
+        .usage_page(&UsageQuery {
+            request_id: Some("req".into()),
+            page_size: 1,
+            ..UsageQuery::default()
+        })
+        .unwrap();
+    assert_eq!(history.total, 2);
+    assert_eq!(history.total_pages, 2);
+    assert_eq!(history.events[0].request_id, "req");
+    assert_eq!(history.events[0].attempt, 2);
+    assert!(history.events[0].success);
+    assert!(history.events[0].id < 0);
+    let first = database
+        .usage_page(&UsageQuery {
+            request_id: Some("req".into()),
+            page: 2,
+            page_size: 1,
+            ..UsageQuery::default()
+        })
+        .unwrap();
+    assert_eq!(first.events[0].source_id, "first");
+    assert!(!first.events[0].success);
+    database.clear().unwrap();
+    assert_eq!(
+        database
+            .usage_page(&UsageQuery {
+                request_id: Some("req".into()),
+                ..UsageQuery::default()
+            })
+            .unwrap()
+            .total,
+        0
+    );
+    drop(database);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn response_affinity_survives_reopen_and_expires() {
     let root = std::env::temp_dir().join(format!("zenith-relay-affinity-{}", uuid::Uuid::new_v4()));
     let path = root.join("usage.sqlite");

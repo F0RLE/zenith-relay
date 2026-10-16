@@ -28,7 +28,7 @@ pub(super) async fn retry_upstream_connection(
                 bridge.upstream,
                 bridge.runtime,
                 bridge.key,
-                bridge.state,
+                bridge.bridge_state,
                 connected,
             )
             .await
@@ -48,11 +48,13 @@ pub(super) async fn retry_upstream_connection(
 
 pub(in crate::gateway::websocket) async fn send_request(
     upstream: &mut UpstreamWebSocket,
-    payload: String,
+    request_payload: String,
     origin: ErrorOrigin,
 ) -> Result<(), GatewayFailure> {
     let send = async {
-        upstream.send(UpstreamMessage::Text(payload)).await?;
+        upstream
+            .send(UpstreamMessage::Text(request_payload))
+            .await?;
         upstream.flush().await
     };
     match timeout(UPSTREAM_CONNECT_TIMEOUT, send).await {
@@ -147,6 +149,7 @@ pub(super) fn install_in_flight(
     clear_transient_response_affinity(runtime, state);
     state.lease = Some(lease);
     state.upstream_candidate_id = route.candidate_id.clone();
+    state.upstream_route = route.clone();
     state.credential_fingerprint = credential_fingerprint;
     state.authorization_incarnation = authorization_incarnation;
     state.upstream_origin = route_error_origin(&route);
@@ -155,6 +158,7 @@ pub(super) fn install_in_flight(
         request: request.clone(),
         route,
         event,
+        usage_snapshot: None,
         started,
         response_id: None,
         prompt_affinity_key: request.prompt_affinity_key,

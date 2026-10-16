@@ -72,6 +72,7 @@ fn model_refresh_preparation_errors_have_stable_codes() {
 #[test]
 fn authorization_debug_and_refresh_cache_never_expose_prepared_secrets() {
     let prepared = PreparedAccountAuthorization {
+        oauth_client_kind: Default::default(),
         authorization: bearer_authorization("synthetic-unique-access").unwrap(),
         subscription_authorization: None,
         tokens: None,

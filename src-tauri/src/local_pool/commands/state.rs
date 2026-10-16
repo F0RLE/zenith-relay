@@ -39,9 +39,11 @@ pub async fn refresh_local_pricing_catalog(
     app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> Result<CatalogRefreshOutcome, CommandError> {
-    let result = state.pricing_loader().refresh(true).await;
+    let pricing_refresh_result = state.pricing_loader().refresh(true).await;
     let _ = app.emit("zenith-state-changed", ());
-    result.map_err(pricing_error).map_err(Into::into)
+    pricing_refresh_result
+        .map_err(pricing_error)
+        .map_err(Into::into)
 }
 
 fn pricing_error(error: PricingError) -> LocalPoolError {
@@ -106,6 +108,7 @@ mod parity_tests {
             },
             gateway: GatewaySummary {
                 tool_policy: Default::default(),
+                request_timezone: Default::default(),
                 basis_points_enabled: false,
                 pool_routing: None,
                 running: false,

@@ -18,6 +18,7 @@ async fn incomplete_delete_rollback_closes_the_old_gateway() {
                 api_key: "synthetic-upstream".into(),
                 wire_api: WireApi::Responses,
                 models: vec!["gpt-test".into()],
+                proxy_url: None,
             },
             LocalGatewayKey {
                 id: "synthetic-key".into(),
@@ -34,7 +35,6 @@ async fn incomplete_delete_rollback_closes_the_old_gateway() {
     assert!(!_dispatch_fences.is_empty());
 
     let deleted = PreparedAccountDelete {
-        account_id: "synthetic-account".into(),
         old_credential: None,
         previous_wake: state.wake_snapshot().unwrap(),
         old_automations: state.store().unwrap().automations().clone(),

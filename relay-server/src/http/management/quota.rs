@@ -27,9 +27,9 @@ pub async fn quota(
             .accounts()
             .map_err(store_error)?
             .into_iter()
-            .map(|record| QuotaItem {
-                account_id: record.id,
-                quota: record.quota,
+            .map(|account_record| QuotaItem {
+                account_id: account_record.id,
+                quota: account_record.quota,
             })
             .collect(),
     ))

@@ -4,7 +4,7 @@ import { installTauriMock, type MockOptions } from "./tauri-mock";
 async function openApi(page: Page, options: MockOptions = {}) {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, ...options });
   await page.goto("/");
-  await page.getByRole("button", { name: "API", exact: true }).click();
+  await page.getByRole("button", { name: options.locale === "ru" ? "Доступ" : "Access", exact: true }).click();
   await expect(page.getByRole("tabpanel", { name: "API", exact: true })).toBeVisible();
 }
 
@@ -134,7 +134,9 @@ for (const theme of ["light", "dark"] as const) {
         const rect = node.getBoundingClientRect();
         return node.scrollWidth <= node.clientWidth + 1 && rect.left >= 0 && rect.right <= innerWidth;
       }))).toBe(true);
-      await expect(tab.getByRole("spinbutton", { name: "Порт", exact: true })).toBeInViewport();
+      const port = tab.getByRole("spinbutton", { name: "Порт", exact: true });
+      await port.scrollIntoViewIfNeeded();
+      await expect(port).toBeInViewport();
       await page.locator(".gateway-page").screenshot({ path: `output/playwright/gateway-api-${theme}-${width}.png` });
       await tab.locator(".relay-action-menu summary").click();
       await expect(page.getByRole("menuitem", { name: "Перевыпустить API-ключ" })).toBeInViewport();

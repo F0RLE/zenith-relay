@@ -21,15 +21,15 @@ const URL_CREDENTIALS = /([a-z][a-z\d+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi;
 
 export function sanitizeFeedbackError(error: unknown, fallbackCode = "general", fallbackMessage = ""): FeedbackError {
   const envelope = isRecord(error) && isRecord(error["error"]) ? error["error"] : error;
-  const payload = isRecord(envelope) && isRecord(envelope["diagnostic"])
+  const diagnosticPayload = isRecord(envelope) && isRecord(envelope["diagnostic"])
     ? { ...envelope, ...envelope["diagnostic"] }
     : envelope;
-  const rawCode = isRecord(payload) && typeof payload["code"] === "string"
-    ? payload["code"]
+  const rawCode = isRecord(diagnosticPayload) && typeof diagnosticPayload["code"] === "string"
+    ? diagnosticPayload["code"]
     : fallbackCode;
   const code = normalizeCode(rawCode, fallbackCode);
-  const rawMessage = isRecord(payload) && typeof payload["message"] === "string"
-    ? payload["message"]
+  const rawMessage = isRecord(diagnosticPayload) && typeof diagnosticPayload["message"] === "string"
+    ? diagnosticPayload["message"]
     : error instanceof Error
       ? error.message
       : typeof error === "string"
@@ -37,14 +37,14 @@ export function sanitizeFeedbackError(error: unknown, fallbackCode = "general", 
         : fallbackMessage;
   const message = redactFeedbackText(rawMessage || fallbackMessage || code);
   const diagnostic: FeedbackError = { code, message: message || code };
-  const reason = diagnosticText(payload, ["reason", "stage", "category"]);
-  const model = diagnosticText(payload, ["model", "modelId", "resolvedModel"]);
-  const source = diagnosticText(payload, ["source", "sourceId", "provider"]);
-  const route = diagnosticText(payload, ["route", "endpoint", "wireApi"]);
-  const requestId = diagnosticText(payload, ["requestId", "request_id"]);
-  const status = diagnosticStatus(payload);
-  const retryable = isRecord(payload) && typeof payload["retryable"] === "boolean"
-    ? payload["retryable"]
+  const reason = diagnosticText(diagnosticPayload, ["reason", "stage", "category"]);
+  const model = diagnosticText(diagnosticPayload, ["model", "modelId", "resolvedModel"]);
+  const source = diagnosticText(diagnosticPayload, ["source", "sourceId", "provider"]);
+  const route = diagnosticText(diagnosticPayload, ["route", "endpoint", "wireApi"]);
+  const requestId = diagnosticText(diagnosticPayload, ["requestId", "request_id"]);
+  const status = diagnosticStatus(diagnosticPayload);
+  const retryable = isRecord(diagnosticPayload) && typeof diagnosticPayload["retryable"] === "boolean"
+    ? diagnosticPayload["retryable"]
     : undefined;
 
   if (reason) diagnostic.reason = reason;
@@ -57,17 +57,17 @@ export function sanitizeFeedbackError(error: unknown, fallbackCode = "general", 
   return diagnostic;
 }
 
-function normalizeCode(value: string, fallback: string) {
-  const candidate = value.trim().slice(0, MAX_FEEDBACK_CODE_LENGTH);
+function normalizeCode(codeText: string, fallback: string) {
+  const candidate = codeText.trim().slice(0, MAX_FEEDBACK_CODE_LENGTH);
   if (SAFE_CODE.test(candidate)) return candidate;
   const safeFallback = fallback.trim().slice(0, MAX_FEEDBACK_CODE_LENGTH);
   return SAFE_CODE.test(safeFallback) ? safeFallback : "general";
 }
 
-function diagnosticText(value: unknown, fields: string[]) {
-  if (!isRecord(value)) return undefined;
+function diagnosticText(diagnosticPayload: unknown, fields: string[]) {
+  if (!isRecord(diagnosticPayload)) return undefined;
   for (const field of fields) {
-    const fieldValue = value[field];
+    const fieldValue = diagnosticPayload[field];
     if (typeof fieldValue !== "string") continue;
     const text = redactFeedbackText(fieldValue).slice(0, MAX_FEEDBACK_FIELD_LENGTH);
     if (text) return text;
@@ -75,9 +75,9 @@ function diagnosticText(value: unknown, fields: string[]) {
   return undefined;
 }
 
-function diagnosticStatus(value: unknown) {
-  if (!isRecord(value)) return undefined;
-  const candidate = value["status"] ?? value["statusCode"] ?? value["httpStatus"];
+function diagnosticStatus(diagnosticPayload: unknown) {
+  if (!isRecord(diagnosticPayload)) return undefined;
+  const candidate = diagnosticPayload["status"] ?? diagnosticPayload["statusCode"] ?? diagnosticPayload["httpStatus"];
   if (typeof candidate !== "number" || !Number.isInteger(candidate) || candidate < 100 || candidate > 599) {
     return undefined;
   }
@@ -85,8 +85,8 @@ function diagnosticStatus(value: unknown) {
 }
 
 // Error messages can contain provider echoes, so keep only a short, redacted diagnostic.
-export function redactFeedbackText(value: string) {
-  return value
+export function redactFeedbackText(feedbackText: string) {
+  return feedbackText
     .replace(/[\r\n\t]+/g, " ")
     .replace(/\s{2,}/g, " ")
     .trim()
@@ -101,6 +101,6 @@ export function redactFeedbackText(value: string) {
     .slice(0, MAX_FEEDBACK_MESSAGE_LENGTH);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+function isRecord(recordValue: unknown): recordValue is Record<string, unknown> {
+  return typeof recordValue === "object" && recordValue !== null;
 }

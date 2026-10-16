@@ -11,9 +11,12 @@ use futures_util::future::BoxFuture;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 mod affinity;
+mod basis_points;
+mod claude_desktop;
 mod dispatch;
 mod listing;
 mod member_quota;
+mod native_protocol;
 mod policy;
 
 struct NeverRefresh;
@@ -69,6 +72,7 @@ fn source(id: &str, key: &str, models: &[&str]) -> ProviderSource {
         name: id.to_string(),
         base_url: "https://example.test/v1".to_string(),
         api_key: key.to_string(),
+        proxy_url: None,
         wire_api: WireApi::Responses,
         models: models.iter().map(|model| (*model).to_string()).collect(),
     }
@@ -83,11 +87,14 @@ fn key(id: &str, secret: &str) -> LocalGatewayKey {
 
 fn quota_account(snapshot: QuotaSnapshot) -> RuntimeChatGptAccount {
     RuntimeChatGptAccount {
+        oauth_client_kind: Default::default(),
         id: "account-1".to_string(),
         source_id: "openai-codex".to_string(),
         chatgpt_account_id: "account-1".to_string(),
+        chatgpt_user_id: None,
         responses_url: "https://example.test/v1/responses".to_string(),
         basis_points_enabled: false,
+        basis_points_headers: None,
         models: vec!["gpt-test".to_string()],
         enabled: true,
         draining: false,
@@ -105,6 +112,7 @@ fn quota_account(snapshot: QuotaSnapshot) -> RuntimeChatGptAccount {
         cooldowns: BTreeMap::new(),
         consecutive_failures: 0,
         proxy: None,
+        proxy_timezone: None,
     }
 }
 

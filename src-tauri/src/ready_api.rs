@@ -19,8 +19,8 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             let shown_at = Instant::now();
             crate::tray::show_main_window(app);
-            if let Some(state) = app.try_state::<local_pool::DesktopState>() {
-                let _ = state.record_performance(
+            if let Some(desktop_state) = app.try_state::<local_pool::DesktopState>() {
+                let _ = desktop_state.record_performance(
                     "window",
                     shown_at.elapsed().as_secs_f64() * 1_000.0,
                     Some("warm"),
@@ -46,7 +46,7 @@ fn setup_desktop(
     started: Instant,
     start_in_tray: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let handle = app.handle().clone();
+    let app_handle = app.handle().clone();
     if let Err(error) = platform::resolve_codex_home() {
         crate::diagnostics::record_error(
             "desktop-startup",
@@ -56,8 +56,8 @@ fn setup_desktop(
         );
         return Err(std::io::Error::other(error).into());
     }
-    let relay_root = match platform::relay_dir(&handle) {
-        Ok(root) => root,
+    let relay_root = match platform::relay_dir(&app_handle) {
+        Ok(resolved_relay_root) => resolved_relay_root,
         Err(error) => {
             crate::diagnostics::record_error(
                 "desktop-startup",
@@ -69,8 +69,9 @@ fn setup_desktop(
         }
     };
     crate::diagnostics::initialize(&relay_root);
-    let relay_state = match local_pool::initialize(&handle) {
-        Ok(state) => state,
+    crate::launcher::settings::initialize(&relay_root);
+    let initialized_state = match local_pool::initialize(&app_handle) {
+        Ok(initialized_state) => initialized_state,
         Err(error) => {
             crate::diagnostics::record_error(
                 "desktop-startup",
@@ -81,28 +82,28 @@ fn setup_desktop(
             return Err(std::io::Error::other(error.to_string()).into());
         }
     };
-    app.manage(relay_state);
-    local_pool::start_client_auth_watchdog(handle.clone());
+    app.manage(initialized_state);
+    local_pool::start_client_auth_watchdog(app_handle.clone());
     let native_startup_ms = started.elapsed().as_secs_f64() * 1_000.0;
-    let relay_state = app.state::<local_pool::DesktopState>();
-    let _ = relay_state.record_performance("native_startup", native_startup_ms, Some("cold"));
+    let desktop_state = app.state::<local_pool::DesktopState>();
+    let _ = desktop_state.record_performance("native_startup", native_startup_ms, Some("cold"));
     if !start_in_tray {
-        crate::tray::create_main_window(&handle)?;
+        crate::tray::create_main_window(&app_handle)?;
         let window_ms = started.elapsed().as_secs_f64() * 1_000.0;
-        let _ = relay_state.record_performance("window", window_ms, Some("cold"));
+        let _ = desktop_state.record_performance("window", window_ms, Some("cold"));
     }
-    local_pool::background::start(handle.clone());
-    let state = app.state::<AppState>();
-    build_tray(&handle, &state)?;
+    local_pool::background::start(app_handle.clone());
+    let app_state = app.state::<AppState>();
+    build_tray(&app_handle, &app_state)?;
     crate::portable_update::acknowledge_startup();
     tauri::async_runtime::spawn(async move {
-        let state = handle.state::<local_pool::DesktopState>();
-        let _ = local_pool::commands::gateway::lifecycle::start_if_enabled(&state).await;
+        let desktop_state = app_handle.state::<local_pool::DesktopState>();
+        let _ = local_pool::commands::gateway::lifecycle::start_if_enabled(&desktop_state).await;
         // Auto-start runs after the WebView is created. Notify every
         // renderer once the runtime exists so an initial snapshot that
         // raced startup cannot leave the pool UI with an empty order.
-        let _ = handle.emit("zenith-state-changed", ());
-        crate::tray::refresh_tray(&handle).await;
+        let _ = app_handle.emit("zenith-state-changed", ());
+        crate::tray::refresh_tray(&app_handle).await;
     });
     Ok(())
 }
@@ -120,8 +121,8 @@ fn on_main_window_event(window: &tauri::Window<tauri::Wry>, event: &WindowEvent)
 fn on_app_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: RunEvent) {
     match event {
         RunEvent::ExitRequested { api, code, .. } => {
-            let state = app_handle.state::<AppState>();
-            let prevent = code.is_none() && state.should_prevent_exit();
+            let app_state = app_handle.state::<AppState>();
+            let prevent = code.is_none() && app_state.should_prevent_exit();
             crate::diagnostics::breadcrumb(
                 "desktop",
                 if prevent {
@@ -131,7 +132,7 @@ fn on_app_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: RunEvent) {
                 },
                 &[(
                     "code",
-                    code.map_or_else(|| "none".to_string(), |value| value.to_string()),
+                    code.map_or_else(|| "none".to_string(), |exit_code| exit_code.to_string()),
                 )],
             );
             if prevent {
@@ -148,6 +149,9 @@ fn desktop_commands() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send 
         get_state,
         get_platform,
         get_system_locale,
+        crate::launcher::settings::get_application_launch_path,
+        crate::launcher::settings::set_application_launch_path,
+        crate::launcher::settings::pick_application_launch_path,
         crate::portable_update::get_portable_update_target,
         crate::portable_update::install_portable_update,
         get_saved_key_models,
@@ -198,10 +202,15 @@ fn desktop_commands() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send 
         local_pool::commands::proxies::delete_local_stored_proxies,
         local_pool::commands::proxies::assign_local_stored_proxy,
         local_pool::commands::proxies::set_local_stored_proxy_accounts,
+        local_pool::commands::proxies::set_local_stored_proxy_timezone,
         local_pool::commands::proxies::assign_free_local_account_proxies,
         local_pool::accounts::mutations::edit::set_local_account_enabled,
         local_pool::accounts::mutations::delete::delete_local_account,
         local_pool::accounts::mutations::delete::delete_local_accounts,
+        local_pool::accounts::mutations::delete::trash::list_local_account_trash,
+        local_pool::accounts::mutations::delete::trash::trash_local_accounts,
+        local_pool::accounts::mutations::delete::trash::restore_local_account_trash,
+        local_pool::accounts::mutations::delete::trash::purge_local_account_trash,
         local_pool::accounts::quota_refresh::refresh_local_account_quota,
         local_pool::accounts::quota_refresh::force_refresh_local_account_credentials,
         local_pool::accounts::quota_refresh::refresh_all_local_account_quotas,
@@ -223,6 +232,7 @@ fn desktop_commands() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send 
         local_pool::commands::pool::set_local_model_price,
         local_pool::commands::pool::set_local_model_reasoning,
         local_pool::commands::pool::set_local_model_service_tier,
+        local_pool::commands::pool::set_local_model_context,
         local_pool::commands::pool::set_local_model_display_order,
         local_pool::commands::pool::export_local_configuration_preset,
         local_pool::commands::pool::preview_local_configuration_preset,
@@ -238,6 +248,8 @@ fn desktop_commands() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send 
         local_pool::commands::gateway::settings::set_local_account_proxy_required,
         local_pool::commands::gateway::settings::set_local_codex_background_tasks,
         local_pool::commands::gateway::settings::set_local_tool_policy,
+        local_pool::commands::gateway::settings::set_local_request_timezone,
+        local_pool::commands::gateway::settings::get_request_timezone_catalog,
         local_pool::commands::gateway::settings::set_local_chatgpt_retry_until_available,
         local_pool::commands::gateway::settings::set_local_block_degraded_routes,
         local_pool::commands::gateway::settings::set_local_codex_websockets,
@@ -262,6 +274,11 @@ fn desktop_commands() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send 
         local_pool::commands::profiles::actions::launch_codex_source,
         local_pool::commands::profiles::actions::list_codex_account_bindings,
         local_pool::commands::profiles::actions::restore_codex_account_profile,
+        local_pool::commands::claude_desktop::get_claude_desktop_status,
+        local_pool::commands::claude_desktop::create_claude_desktop_snapshot,
+        local_pool::commands::claude_desktop::connect_claude_desktop,
+        local_pool::commands::claude_desktop::launch_claude_desktop,
+        local_pool::commands::claude_desktop::restore_claude_desktop,
         local_pool::commands::opencode::get_opencode_config_status,
         local_pool::commands::opencode::create_opencode_snapshot,
         local_pool::commands::opencode::connect_opencode_to_local_gateway,

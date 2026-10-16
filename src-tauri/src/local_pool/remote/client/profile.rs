@@ -54,9 +54,12 @@ fn validate_profile_credential_fields(
     Ok(())
 }
 
-pub(super) fn remote_object_path(collection: &str, id: &str) -> Result<String, RemoteClientError> {
-    if !zenith_relay_core::is_ascii_token(id, 128) {
+pub(super) fn remote_object_path(
+    collection: &str,
+    object_id: &str,
+) -> Result<String, RemoteClientError> {
+    if !zenith_relay_core::is_ascii_token(object_id, 128) {
         return Err(RemoteClientError::InvalidResponse);
     }
-    Ok(format!("/{collection}/{id}"))
+    Ok(format!("/{collection}/{object_id}"))
 }

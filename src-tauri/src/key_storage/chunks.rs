@@ -14,11 +14,11 @@ pub(super) struct SecretManifest {
     pub(super) sha256: String,
 }
 
-pub(super) fn split_secret(value: &str) -> Vec<String> {
+pub(super) fn split_secret(secret_text: &str) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut chunk = String::new();
     let mut units = 0;
-    for character in value.chars() {
+    for character in secret_text.chars() {
         let character_units = character.len_utf16();
         if units + character_units > CHUNK_UTF16_UNITS && !chunk.is_empty() {
             chunks.push(std::mem::take(&mut chunk));
@@ -39,8 +39,8 @@ pub(super) fn encode_manifest(manifest: &SecretManifest) -> Result<String, Strin
     Ok(format!("{MANIFEST_PREFIX}{json}"))
 }
 
-pub(super) fn decode_manifest(value: &str) -> Result<SecretManifest, String> {
-    let json = value
+pub(super) fn decode_manifest(encoded_manifest: &str) -> Result<SecretManifest, String> {
+    let json = encoded_manifest
         .strip_prefix(MANIFEST_PREFIX)
         .ok_or_else(|| "Некорректный манифест защищённого секрета".to_string())?;
     let manifest: SecretManifest = serde_json::from_str(json)
@@ -87,8 +87,8 @@ pub(super) fn delete_manifest_chunks_result(
     first_error.map_or(Ok(()), Err)
 }
 
-pub(super) fn sha256_hex(value: &[u8]) -> String {
-    Sha256::digest(value)
+pub(super) fn sha256_hex(secret_bytes: &[u8]) -> String {
+    Sha256::digest(secret_bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()

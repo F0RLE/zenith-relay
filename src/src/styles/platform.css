@@ -160,54 +160,38 @@ button {
   padding-right: 14px;
 }
 
-.titlebar-macos .titlebar-logo {
-  order: 1;
+.titlebar-macos.titlebar-fullscreen .titlebar-native-controls {
+  display: none;
 }
 
-.window-controls-macos {
-  gap: 8px;
-  flex: 0 0 auto;
-  padding-right: 6px;
+/* Keep the setup screens free of a title strip while retaining their window controls. */
+html:not([data-startup-ready="true"]) .app > .titlebar,
+.app:has(.setup-shell) > .titlebar {
+  position: relative;
+  z-index: 1001;
+  border-color: transparent;
+  background: transparent;
 }
 
-.window-controls-macos button {
-  width: 12px;
-  height: 12px;
-  border-radius: 999px;
-  border: 1px solid rgba(0, 0, 0, 0.18);
-  color: rgba(0, 0, 0, 0.72);
+.app:has(.setup-shell) {
+  grid-template-rows: minmax(0, 1fr);
 }
 
-.window-controls-macos .close {
-  background: #ff5f57;
+.app:has(.setup-shell) > .titlebar {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 34px;
 }
 
-.window-controls-macos .minimize {
-  background: #ffbd2e;
+html:not([data-startup-ready="true"]) .app > .titlebar .titlebar-drag > *,
+.app:has(.setup-shell) > .titlebar .titlebar-drag > * {
+  display: none;
 }
 
-.window-controls-macos .zoom {
-  background: #28c840;
-}
-
-.window-controls-macos button:hover {
-  filter: brightness(0.94);
-}
-
-.window-controls-macos button svg {
-  width: 8px;
-  height: 8px;
-  opacity: 0;
-  stroke: rgba(0, 0, 0, 0.65);
-  fill: none;
-  stroke-width: 1.4px;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.window-controls-macos:hover button svg,
-.window-controls-macos button:focus-visible svg {
-  opacity: 1;
+.titlebar-native-controls {
+  width: 66px;
+  flex: 0 0 66px;
+  pointer-events: none;
 }
 
 .window-controls-linux {
@@ -232,7 +216,7 @@ button {
 }
 
 .mode-switch button.active {
-  box-shadow: inset 0 0 0 1px var(--relay-accent);
+  box-shadow: none;
 }
 
 .save-button.saved:not(:disabled) {
@@ -278,7 +262,7 @@ svg {
   gap: 7px;
   min-width: 0;
   padding: 0 10px;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   border-radius: 7px;
   background: var(--relay-surface);
   color: var(--relay-secondary);
@@ -288,18 +272,22 @@ svg {
   white-space: nowrap;
 }
 
-.tabs button.active,
+.tabs button.active {
+  border-color: transparent;
+  background: var(--relay-accent-soft);
+  color: var(--relay-accent-hover);
+}
+
 .tabs button:hover:not(:disabled),
 .section-header button:hover:not(:disabled),
 .history-actions button:hover:not(:disabled) {
-  border-color: var(--relay-accent);
+  border-color: transparent;
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
 }
 
 .status-dot.active {
   background: var(--relay-success);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--relay-success) 16%, transparent);
 }
 
 .error-text {
@@ -332,27 +320,31 @@ svg {
   white-space: nowrap;
 }
 
+.top-up-presets button.selected {
+  border-color: transparent;
+  background: var(--relay-accent-soft);
+}
+
 .top-up-presets button:hover:not(:disabled),
-.top-up-presets button.selected,
 .top-up-submit:hover:not(:disabled) {
-  border-color: var(--relay-accent);
+  border-color: transparent;
   background: var(--relay-accent-soft);
 }
 
 .status-badge.success {
-  border-color: color-mix(in srgb, var(--relay-success) 48%, var(--relay-border));
+  border-color: transparent;
   background: var(--relay-success-soft);
   color: var(--relay-success);
 }
 
 .status-badge.warning {
-  border-color: color-mix(in srgb, var(--relay-warning) 52%, var(--relay-border));
+  border-color: transparent;
   background: var(--relay-warning-soft);
   color: var(--relay-warning);
 }
 
 .status-badge.error {
-  border-color: color-mix(in srgb, var(--relay-error) 52%, var(--relay-border));
+  border-color: transparent;
   background: var(--relay-error-soft);
   color: var(--relay-error);
 }

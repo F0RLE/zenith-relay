@@ -1,50 +1,55 @@
-import { useState } from "react";
+import { useId } from "react";
 import { useTranslation } from "react-i18next";
-import { Dialog, ToggleSwitch } from "./Ui";
-import { readLaunchApplicationAfterConnect, writeLaunchApplicationAfterConnect } from "../state/relayPreferences";
+import { Dialog } from "./Ui";
 
 type ApplicationPickerDialogProps = {
   title?: string;
   onClose: () => void;
-  onChatGPT: (launchAfterConnect: boolean) => void;
-  onOpenCode: (launchAfterConnect: boolean) => void;
-  showLaunchToggle?: boolean;
+  onChatGPT: () => void;
+  onOpenCode: () => void;
+  onClaudeDesktop?: () => void;
   chatGPTDisabled?: boolean;
 };
 
-/** Shared application picker used by Pool and Overview actions. */
 export function ApplicationPickerDialog({
   title,
   onClose,
   onChatGPT,
   onOpenCode,
-  showLaunchToggle = true,
+  onClaudeDesktop,
   chatGPTDisabled = false,
 }: ApplicationPickerDialogProps) {
   const { t } = useTranslation();
-  const [launchAfterConnect, setLaunchAfterConnect] = useState(readLaunchApplicationAfterConnect);
+  const unavailableDescriptionId = useId();
   const dialogTitle = title ?? t("pool.connectDialogTitle");
   const choose = (action: () => void) => {
     onClose();
     action();
   };
-  return <Dialog className="pool-connection-picker" title={dialogTitle} onClose={onClose}>
-    <div className="pool-connection-options" role="list" aria-label={dialogTitle}>
-      <button type="button" className="pool-connection-option" disabled={chatGPTDisabled} data-relay-tooltip={chatGPTDisabled ? t("sources.launchResponsesOnly") : undefined} onClick={() => choose(() => onChatGPT(launchAfterConnect))}>
-        <span className="pool-connection-option-icon"><img src="/icons/chatgpt.svg" alt="" /></span>
-        <strong>{t("pool.connectChatGPT")}</strong>
+  return <Dialog className="application-picker" title={dialogTitle} onClose={onClose}>
+    <div className={`application-picker-options${onClaudeDesktop ? " with-claude-desktop" : ""}`}>
+      <button
+        type="button"
+        className="application-picker-option"
+        disabled={chatGPTDisabled}
+        aria-label={t("pool.connectChatGPT")}
+        aria-describedby={chatGPTDisabled ? unavailableDescriptionId : undefined}
+        onClick={() => choose(onChatGPT)}
+      >
+        <img className="application-picker-logo chatgpt" src="/icons/chatgpt.svg" alt="" />
+        <span className="application-picker-label">
+          <strong>{t("pool.connectChatGPT")}</strong>
+          {chatGPTDisabled ? <small id={unavailableDescriptionId}>{t("sources.launchResponsesOnly")}</small> : null}
+        </span>
       </button>
-      <button type="button" className="pool-connection-option" onClick={() => choose(() => onOpenCode(launchAfterConnect))}>
-        <span className="pool-connection-option-icon"><img src="/icons/opencode.svg" alt="" /></span>
-        <strong>{t("pool.connectOpenCode")}</strong>
+      {onClaudeDesktop ? <button type="button" className="application-picker-option" onClick={() => choose(onClaudeDesktop)}>
+        <img className="application-picker-logo" src="/icons/claude-desktop.svg" alt="" />
+        <span className="application-picker-label"><strong>{t("pool.connectClaudeDesktop")}</strong></span>
+      </button> : null}
+      <button type="button" className="application-picker-option" onClick={() => choose(onOpenCode)}>
+        <img className="application-picker-logo" src="/icons/opencode.svg" alt="" />
+        <span className="application-picker-label"><strong>{t("pool.connectOpenCode")}</strong></span>
       </button>
     </div>
-    {showLaunchToggle ? <label className="pool-connection-launch-toggle">
-      <ToggleSwitch label={t("pool.launchAfterConnect")} checked={launchAfterConnect} onChange={(enabled) => {
-        setLaunchAfterConnect(enabled);
-        writeLaunchApplicationAfterConnect(enabled);
-      }} />
-      <span>{t("pool.launchAfterConnect")}</span>
-    </label> : null}
   </Dialog>;
 }

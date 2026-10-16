@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { HTMLAttributes, ReactNode } from "react";
 import {
   Check,
   Clock3,
   Download,
+  Globe2,
   ListMinus,
   ListPlus,
   Loader2,
@@ -19,10 +21,10 @@ import {
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, CandidateRuntimeSnapshot } from "../../api/types";
-import { accountQuotaRefreshState, currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
+import { accountQuotaRefreshState, canLaunchCodexAccount, currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
 import { refreshOneAccountQuota } from "../../accountQuotaRefresh";
 import {
-  AccountPlanBadge,
+  AccountBadges,
   ActionMenu,
   ActionMenuItem,
   Button,
@@ -39,11 +41,15 @@ import { AccountSubscriptionLine } from "../../components/AccountSubscriptionLin
 import { ResetCreditsControl } from "../../components/ResetCreditsControl";
 import { formatDetailedRemainingTime } from "../../quotaFormatting";
 import { upcomingModelRetries } from "../../routingOrder";
-import { updatePoolMembership } from "../../poolMembership";
+import { canAccountJoinPool, updatePoolMembership } from "../../poolMembership";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { usePendingFlag } from "../../state/usePendingFlag";
 import { accountParticipates } from "./accountTableModel";
 import { AccountLoginNotes } from "../../components/AccountLoginNotes";
+import { AccountTokenExpiry } from "../../components/AccountTokenExpiry";
+import { AccountTimezoneDialog } from "../../components/AccountTimezoneDialog";
+import { useRequestTimezone } from "../../hooks/useRequestTimezone";
+import { useConnectionAccountRemoval } from "./accountRemoval";
 
 type AccountCardProps = {
   account: AccountSummary;
@@ -76,13 +82,18 @@ export function AccountCard({
 }: AccountCardProps) {
   const { t } = useTranslation();
   const [notesOpen, setNotesOpen] = useState(false);
+  const [timezoneOpen, setTimezoneOpen] = useState(false);
+  const { supported: timezoneSupported } = useRequestTimezone();
   const confirm = useConfirm();
-  const { mode, perform, activateCodexProfile, refresh, busy, accountIdentitiesVisible, accountValueVisible } = useRelayState();
+  const membershipPending = useRef(false);
+  const { mode, runtime, perform, activateCodexProfile, refresh, busy, accountIdentitiesVisible, accountValueVisible } = useRelayState();
+  const { canTrash, remove, openDeleteMenu, permanentDeleteMenu } = useConnectionAccountRemoval();
   const participation = usePendingFlag(accountParticipates(account));
   const enabledFlag = usePendingFlag(account.enabled);
   const participates = participation.checked;
   const accountEnabled = enabledFlag.checked;
   const onServer = mode === "local" && Boolean(account.remoteLocation);
+  useEffect(() => setTimezoneOpen(false), [mode, account.id, onServer, runtime?.runtimeTarget.serverId, runtime?.runtimeTarget.origin]);
   const showNotes = mode === "local" && !onServer && account.secretAvailable;
   const errorCode = onServer
     ? account.lastErrorCode === "remote_missing" ? "remote_missing" : null
@@ -109,6 +120,7 @@ export function AccountCard({
   const quotaStatus = accountQuotaRefreshState(account);
   const clientAuthWarning = account.clientAuthStatus === "login_required";
   const displayedErrorCode = quotaStatus === "refreshing" ? null : errorCode;
+  const canLaunch = canLaunchCodexAccount(account) && !onServer;
   const indicatorTone = onServer
     ? "info"
     : operationalStatus === "unavailable" || operationalStatus === "disabled"
@@ -125,12 +137,22 @@ export function AccountCard({
   const statusIndicatorLabel = quotaStatus === "updated" ? operationalLabel : `${t(`accounts.quotaRefreshStatus.${quotaStatus}`)} · ${operationalLabel}`;
   const indicatorLabel = `${clientAuthWarning ? `${t("accounts.clientAuthWarning")} · ` : ""}${runtimeHint ? `${statusIndicatorLabel} · ${runtimeHint}` : statusIndicatorLabel}`;
 
-  const updateParticipation = (participate: boolean) => participation.select(participate, () => perform(
-    `pool-${account.id}`,
-    () => updatePoolMembership(mode, { accountIds: [account.id], sourceIds: [], inPool: participate }),
-    "feedback.saved",
-    { backgroundRefresh: true, uiLock: false },
-  ));
+  const updateParticipation = async (participate: boolean) => {
+    if (membershipPending.current || participation.saving || (participate && !canAccountJoinPool(account))) return;
+    membershipPending.current = true;
+    try {
+      const save = perform(
+        `pool-${account.id}`,
+        () => updatePoolMembership(mode, { accountIds: [account.id], sourceIds: [], inPool: participate }),
+        "feedback.saved",
+        { backgroundRefresh: true, uiLock: false },
+      );
+      participation.select(participate, () => save);
+      await save;
+    } finally {
+      membershipPending.current = false;
+    }
+  };
   const returnToComputer = async () => {
     if (!await confirm(t("accounts.returnToComputerConfirm", { name: account.label }), {
       title: t("accounts.returnToComputer"),
@@ -154,27 +176,19 @@ export function AccountCard({
     "feedback.saved",
     { backgroundRefresh: true, uiLock: false },
   ));
-  const deleteAccount = async () => {
-    const confirmKey = onServer
-      ? "accounts.deleteLocalRecoveryConfirm"
-      : mode === "remote"
-        ? "accounts.deleteRemoteConfirm"
-        : "accounts.deleteConfirm";
-    if (!await confirm(t(confirmKey), { danger: true })) return;
-    await perform(
-      `delete-${account.id}`,
-      () => mode === "local"
-        ? relayCommands.deleteAccount(account.id)
-        : relayCommands.remoteAction({ type: "delete_account", id: account.id }),
-      "feedback.deleted",
-      { backgroundRefresh: true },
-    );
+  const deleteAccount = async (permanently = false) => {
+    const removed = await remove([account.id], permanently, `delete-${account.id}`, onServer);
+    if (!removed) await refresh().catch(() => undefined);
   };
 
   return (
-    <article className={`account-card${selected ? " selected" : ""}`} role="listitem">
-      <div className="account-card-main">
-        {displayedErrorCode
+    <>
+      <AccountCardLayout
+        label={account.label}
+        identityVisible={accountIdentitiesVisible}
+        selected={selected}
+        onToggleSelected={() => onToggleSelected(account.id)}
+        icon={displayedErrorCode
           ? (
             <IconButton
               className="account-kind-icon account-status-button"
@@ -189,15 +203,17 @@ export function AccountCard({
               <UserRound aria-hidden />
             </StatusIcon>
           )}
-        <div className="account-identity">
-          <strong className={accountIdentitiesVisible ? "revealed" : undefined} data-relay-tooltip={account.label}>{account.label}</strong>
-          <div className="account-identity-meta"><AccountPlanBadge planType={account.subscription.planType} unknown={t("common.unknown")} /></div>
-        </div>
-        <div className="account-card-header-actions">
+        details={<div className="account-identity-meta"><AccountBadges planType={account.subscription.planType} oauthClientKind={account.oauthClientKind} unknown={t("common.unknown")} /></div>}
+        menu={
           <ActionMenu className="account-row-menu">
             {showNotes ? (
               <ActionMenuItem icon={<StickyNote aria-hidden />} onClick={() => setNotesOpen(true)}>
                 {t("accounts.loginDetails")}
+              </ActionMenuItem>
+            ) : null}
+            {timezoneSupported && !onServer ? (
+              <ActionMenuItem icon={<Globe2 aria-hidden />} disabled={Boolean(busy)} onClick={() => setTimezoneOpen(true)}>
+                {t("gateway.timezone.accountTitle")}
               </ActionMenuItem>
             ) : null}
             {onServer ? (
@@ -229,44 +245,29 @@ export function AccountCard({
                 {accountEnabled ? t("common.disable") : t("common.enable")}
               </ActionMenuItem>
             ) : null}
-            <ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => void deleteAccount()}>
+            <ActionMenuItem
+              danger icon={<Trash2 aria-hidden />} disabled={Boolean(busy)}
+              data-relay-context-action
+              title={t(canTrash ? "trash.deleteHint" : "trash.serverUpdateRequired")}
+              onClick={() => void deleteAccount()}
+              onContextMenu={(event) => openDeleteMenu(event, () => void deleteAccount(true))}
+            >
               {t("common.delete")}
             </ActionMenuItem>
           </ActionMenu>
-          <IconButton
-            className="account-select-button"
-            label={selected ? t("accounts.deselect", { name: account.label }) : t("accounts.select", { name: account.label })}
-            icon={selected ? <Check aria-hidden /> : <Square aria-hidden />}
-            aria-pressed={selected}
-            onClick={() => onToggleSelected(account.id)}
-          />
-        </div>
-      </div>
-      <div className="account-card-quota compact-quota-layout">
-        <AccountQuotaPanel account={account} nowMs={nowMs} onReauthenticate={onReauthenticate} />
-        {mode === "local" ? <ResetCreditsControl account={account} onCompleted={() => refresh()} /> : null}
-      </div>
-      <AccountProviderQuotaStrip account={account} />
-      <AccountSubscriptionLine activeUntilMs={account.subscription.activeUntilMs} nowMs={nowMs} />
-      {runtimeHint ? (
-        <div className="account-runtime-line" data-warning={modelRetries.length > 0}>
-          <Clock3 aria-hidden />
-          <span>{runtimeHint}</span>
-        </div>
-      ) : null}
-      {accountValueVisible ? <AccountValueStrip account={account} /> : null}
-      <footer className="account-card-footer">
-        <div className="account-card-actions">
+        }
+        actions={<>
           {onServer ? (
             <IconButton label={t("accounts.onServerHint")} icon={<Server aria-hidden />} disabled />
-          ) : (
+          ) : canAccountJoinPool(account) ? (
             <IconButton
               className={participates ? "danger" : ""}
               label={poolActionLabel}
               icon={participates ? <ListMinus aria-hidden /> : <ListPlus aria-hidden />}
+              disabled={participation.saving}
               onClick={() => void updateParticipation(!participates)}
             />
-          )}
+          ) : null}
           <IconButton
             label={t("accounts.refreshQuota")}
             icon={busy === `connection-account-quota-${account.id}`
@@ -284,12 +285,18 @@ export function AccountCard({
             <IconButton
               label={t("accounts.launchAccount")}
               icon={<Play aria-hidden />}
-              disabled={onServer || !account.secretAvailable || busy === `launch-account-${account.id}`}
+              disabled={!canLaunch || busy === `launch-account-${account.id}`}
               title={onServer
                 ? t("accounts.onServerHint")
+                : account.oauthClientKind === "excel_bps"
+                  ? t("accounts.bpsChatgptSignInUnavailable")
                 : !account.secretAvailable
                   ? t("accounts.credentialsUnavailable")
-                  : t("accounts.launchAccount")}
+                  : !account.enabled
+                    ? t("common.disabled")
+                  : !canLaunch
+                    ? accountErrorLabel(errorCode ?? account.routingBlockReason ?? "auth_requires_reauth", t)
+                    : t("accounts.launchAccount")}
               onClick={() => void activateCodexProfile(
                 `launch-account-${account.id}`,
                 () => relayCommands.launchCodexAccount(account.id),
@@ -297,8 +304,25 @@ export function AccountCard({
               )}
             />
           ) : null}
+        </>}
+      >
+        <div className="account-card-quota compact-quota-layout">
+          <AccountQuotaPanel account={account} nowMs={nowMs} onReauthenticate={onReauthenticate} />
+          {mode === "local" ? <ResetCreditsControl account={account} onCompleted={() => refresh()} /> : null}
         </div>
-      </footer>
+        <AccountProviderQuotaStrip account={account} />
+        <AccountTokenExpiry account={account} nowMs={nowMs} />
+        <AccountSubscriptionLine activeUntilMs={account.subscription.activeUntilMs} nowMs={nowMs} />
+        {runtimeHint ? (
+          <div className="account-runtime-line" data-warning={modelRetries.length > 0}>
+            <Clock3 aria-hidden />
+            <span>{runtimeHint}</span>
+          </div>
+        ) : null}
+        {accountValueVisible ? <AccountValueStrip account={account} /> : null}
+      </AccountCardLayout>
+      {permanentDeleteMenu}
+      {timezoneOpen ? <AccountTimezoneDialog account={account} onClose={() => setTimezoneOpen(false)} /> : null}
       {showNotes && notesOpen ? (
         <Dialog
           className="account-login-dialog"
@@ -309,6 +333,58 @@ export function AccountCard({
           <AccountLoginNotes accountId={account.id} />
         </Dialog>
       ) : null}
-    </article>
+    </>
   );
+}
+
+export function AccountCardLayout({
+  label,
+  selected,
+  onToggleSelected,
+  icon,
+  details,
+  menu,
+  actions,
+  children,
+  identityVisible = false,
+  selectionDisabled = false,
+  className = "",
+  ...articleProps
+}: {
+  label: string;
+  selected: boolean;
+  onToggleSelected: () => void;
+  icon: ReactNode;
+  details: ReactNode;
+  menu?: ReactNode;
+  actions: ReactNode;
+  children?: ReactNode;
+  identityVisible?: boolean;
+  selectionDisabled?: boolean;
+} & HTMLAttributes<HTMLElement>) {
+  const { t } = useTranslation();
+  return <article {...articleProps} className={`account-card${selected ? " selected" : ""} ${className}`.trim()} role="listitem">
+    <div className="account-card-main">
+      {icon}
+      <div className="account-identity">
+        <strong className={identityVisible ? "revealed" : undefined} data-relay-tooltip={label}>{label}</strong>
+        {details}
+      </div>
+      <div className="account-card-header-actions">
+        {menu}
+        <IconButton
+          className="account-select-button"
+          label={t(selected ? "accounts.deselect" : "accounts.select", { name: label })}
+          icon={selected ? <Check aria-hidden /> : <Square aria-hidden />}
+          aria-pressed={selected}
+          disabled={selectionDisabled}
+          onClick={onToggleSelected}
+        />
+      </div>
+    </div>
+    {children}
+    <footer className="account-card-footer">
+      <div className="account-card-actions">{actions}</div>
+    </footer>
+  </article>;
 }

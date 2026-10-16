@@ -48,6 +48,24 @@ pub struct CandidateQuotaState {
     pub reset_at_ms: Option<u64>,
     pub provider_credits_micro_units: Option<u64>,
     pub provider_credits_unlimited: bool,
+    pub provider_credits_observed_at_ms: Option<u64>,
+}
+
+impl CandidateQuotaState {
+    pub fn from_snapshot(
+        snapshot: &crate::quota::QuotaSnapshot,
+        now_ms: u64,
+        stale_after_ms: u64,
+    ) -> Self {
+        Self {
+            quota: CandidateQuota::from_snapshot(snapshot, now_ms, stale_after_ms),
+            updated_at_ms: snapshot.quota_observed_at_ms(),
+            reset_at_ms: snapshot.limiting_reset_at_ms(),
+            provider_credits_micro_units: snapshot.available_credits_micro_units,
+            provider_credits_unlimited: snapshot.provider_credits_unlimited,
+            provider_credits_observed_at_ms: snapshot.provider_credits_observed_at_ms,
+        }
+    }
 }
 
 pub fn account_candidate_health(
@@ -101,10 +119,10 @@ impl CandidateScope {
         self.source_ids
             .as_ref()
             .is_some_and(|ids| ids.contains(&candidate.source_id))
-            || candidate.account_id.as_ref().is_some_and(|id| {
+            || candidate.account_id.as_ref().is_some_and(|account_id| {
                 self.account_ids
                     .as_ref()
-                    .is_some_and(|ids| ids.contains(id))
+                    .is_some_and(|account_ids| account_ids.contains(account_id))
             })
     }
 }
@@ -116,7 +134,12 @@ pub struct RuntimeCandidate {
     pub kind: CandidateKind,
     pub source_id: String,
     pub account_id: Option<String>,
+    /// Legacy default, retained for older serialized candidates.
     pub protocol: WireApi,
+    /// Exact model/client contracts of one physical member. Empty keeps the
+    /// legacy single-protocol behavior; independent unions are insufficient.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_protocols: BTreeMap<String, BTreeSet<WireApi>>,
     pub enabled: bool,
     pub draining: bool,
     pub priority: i32,
@@ -130,6 +153,8 @@ pub struct RuntimeCandidate {
     /// actual rate-limit window.
     pub provider_credits_micro_units: Option<u64>,
     pub provider_credits_unlimited: bool,
+    #[serde(default)]
+    pub provider_credits_observed_at_ms: Option<u64>,
     pub quota_updated_at_ms: Option<u64>,
     pub quota_reset_at_ms: Option<u64>,
     pub cooldowns: BTreeMap<String, u64>,
@@ -139,6 +164,15 @@ pub struct RuntimeCandidate {
 }
 
 impl RuntimeCandidate {
+    pub(crate) fn set_quota_state(&mut self, state: CandidateQuotaState) {
+        self.quota = state.quota;
+        self.quota_updated_at_ms = state.updated_at_ms;
+        self.quota_reset_at_ms = state.reset_at_ms;
+        self.provider_credits_micro_units = state.provider_credits_micro_units;
+        self.provider_credits_unlimited = state.provider_credits_unlimited;
+        self.provider_credits_observed_at_ms = state.provider_credits_observed_at_ms;
+    }
+
     pub fn is_eligible(
         &self,
         model: &str,
@@ -171,6 +205,14 @@ impl RuntimeCandidate {
         self.is_configured(model, allowed_protocols, scope) && self.health.is_eligible()
     }
 
+    pub(crate) fn is_discovery_visible(&self, scope: &CandidateScope) -> bool {
+        self.enabled
+            && !self.draining
+            && self.secret_available
+            && self.health.is_eligible()
+            && scope.includes(self)
+    }
+
     pub(crate) fn is_configured(
         &self,
         model: &str,
@@ -180,10 +222,7 @@ impl RuntimeCandidate {
         self.enabled
             && !self.draining
             && self.secret_available
-            && (allowed_protocols.contains(&self.protocol)
-                || (self.kind == CandidateKind::OAuthAccount
-                    && self.protocol == WireApi::Responses
-                    && !allowed_protocols.is_empty()))
+            && self.supports_protocol(model, allowed_protocols)
             && self.supports_model(model)
             && self.model_rules.allows(model)
             && scope.includes(self)
@@ -206,6 +245,21 @@ impl RuntimeCandidate {
         self.models
             .iter()
             .any(|candidate_model| candidate_model.eq_ignore_ascii_case(model))
+    }
+
+    pub(crate) fn supports_protocol(&self, model: &str, allowed: &[WireApi]) -> bool {
+        if !self.model_protocols.is_empty() {
+            return self
+                .model_protocols
+                .get(&crate::model_id_key(model))
+                .is_some_and(|protocols| {
+                    allowed.iter().any(|protocol| protocols.contains(protocol))
+                });
+        }
+        allowed.contains(&self.protocol)
+            || (self.kind == CandidateKind::OAuthAccount
+                && self.protocol == WireApi::Responses
+                && !allowed.is_empty())
     }
 }
 

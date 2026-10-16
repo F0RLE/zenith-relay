@@ -10,7 +10,7 @@ async fn websocket_http_fallback_preserves_json_compaction_events() {
             "event: response.compaction.delta\ndata: {  \"type\": \"response.compaction.delta\", \"opaque\": true }\n\n",
         ),
         StreamChunk::Data(
-            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"compact-done\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"compact-done\",\"status\":\"completed\",\"output\":[]}}\n\n",
         ),
     ])])
     .await;
@@ -87,7 +87,7 @@ async fn websocket_http_fallback_accepts_compaction_events_over_one_mebibyte() {
     let (upstream, _) = spawn_upstream(vec![Reply::Stream(vec![
         StreamChunk::Data(large_event),
         StreamChunk::Data(
-            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"large-compact\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"large-compact\",\"status\":\"completed\",\"output\":[]}}\n\n",
         ),
     ])])
     .await;
@@ -152,7 +152,7 @@ async fn managed_websocket_quota_failure_falls_back_to_http_api_source() {
         .await;
     let (source_upstream, source_state) =
         spawn_upstream(vec![Reply::Stream(vec![StreamChunk::Data(
-            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"api fallback\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"http-fallback\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"api fallback\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"http-fallback\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
         )])])
         .await;
     let authority = ready_authority("limited-account", "limited-access").await;
@@ -417,6 +417,89 @@ async fn abrupt_websocket_disconnect_releases_its_lease_without_retrying() {
         Some("client_websocket")
     );
     assert_eq!(events[0].retry_at_ms, None);
+}
+
+#[tokio::test]
+async fn disconnect_before_first_websocket_response_releases_lease_without_fallback_or_cooldown() {
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let (upstream, state) =
+        spawn_websocket_upstream_with_behavior(WebSocketBehavior::GatedSuccess(barrier.clone()))
+            .await;
+    let (reserve, reserve_state) = spawn_websocket_upstream().await;
+    let authority = Arc::new(TokenAuthority::new(2).unwrap());
+    register_ready(&authority, "first", "synthetic-first-access").await;
+    register_ready(&authority, "reserve", "synthetic-reserve-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("first", "synthetic-first", &upstream, 100),
+            account("reserve", "synthetic-reserve", &reserve, 0),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    let upgraded = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    let mut socket = upgraded.into_websocket().await.unwrap();
+    socket
+        .send(ClientWsMessage::Text(
+            json!({
+                "type": "response.create", "model": MODEL, "input": "synthetic cancellation"
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while state.requests.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("upstream did not receive the request");
+    drop(socket);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if gateway
+                .runtime
+                .as_ref()
+                .unwrap()
+                .candidate_runtime_order()
+                .iter()
+                .all(|member| member.in_flight == 0)
+                && !events.lock().unwrap().is_empty()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("silent upstream kept the disconnected client lease");
+    barrier.wait().await;
+    assert_eq!(state.requests.lock().unwrap().len(), 1);
+    assert!(reserve_state.requests.lock().unwrap().is_empty());
+    let snapshots = gateway.runtime.as_ref().unwrap().candidate_runtime_order();
+    assert!(snapshots
+        .iter()
+        .all(|member| member.next_retry_at_ms.is_none()));
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(!events[0].success);
+    assert_eq!(events[0].ttft_ms, None);
+    assert_eq!(events[0].retry_at_ms, None);
+    assert_eq!(
+        events[0].routing.as_ref().unwrap().attempt_outcome,
+        Some(zenith_relay_core::AttemptOutcome::ClientDisconnected)
+    );
 }
 
 #[tokio::test]

@@ -37,10 +37,10 @@ function AnalyticsPanel({
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const hasAnalytics = analytics !== null;
   const buckets = useMemo(() => analytics ? fillBuckets(windows, analytics.buckets) : windows.map(emptyUsageTotals), [analytics, windows]);
-  const requestValues = useMemo(() => buckets.map((totals) => totals.requests || null), [buckets]);
-  const apiValues = useMemo(() => buckets.map((totals) => pricedUsd(totals.apiEquivalent)), [buckets]);
-  const generationSpeedValues = useMemo(() => buckets.map((totals) => observedTokensPerSecond(totals.generationOutputTokens, totals.generationMs)), [buckets]);
-  const e2eSpeedValues = useMemo(() => buckets.map((totals) => observedTokensPerSecond(totals.speedOutputTokens, totals.speedDurationMs)), [buckets]);
+  const requestSeries = useMemo(() => buckets.map((totals) => totals.requests || null), [buckets]);
+  const apiCostSeries = useMemo(() => buckets.map((totals) => pricedUsd(totals.apiEquivalent)), [buckets]);
+  const generationSpeedSeries = useMemo(() => buckets.map((totals) => observedTokensPerSecond(totals.generationOutputTokens, totals.generationMs)), [buckets]);
+  const endToEndSpeedSeries = useMemo(() => buckets.map((totals) => observedTokensPerSecond(totals.speedOutputTokens, totals.speedDurationMs)), [buckets]);
   const totals = useMemo(() => analytics?.totals ?? emptyUsageTotals(), [analytics]);
   const averageGenerationSpeed = observedTokensPerSecond(totals.generationOutputTokens, totals.generationMs);
   const averageE2eSpeed = observedTokensPerSecond(totals.speedOutputTokens, totals.speedDurationMs);
@@ -52,7 +52,7 @@ function AnalyticsPanel({
       <h2>{t("overview.analytics")}</h2>
       <div className="overview-analytics-controls">
         <OptionMenu className="overview-scope-menu" label={t("overview.scopeLabel")} value={scope} onChange={setScope} options={scopeOptions} />
-        <Tabs value={range} onChange={(value) => setRange(value as Range)} label={t("overview.period")} items={rangeTabs} />
+        <Tabs value={range} onChange={(selectedRange) => setRange(selectedRange as Range)} label={t("overview.period")} items={rangeTabs} />
       </div>
     </header>
     {error ? <p className="overview-analytics-message error-text" role="alert">{t("overview.analyticsUnavailable")}</p> : null}
@@ -62,48 +62,48 @@ function AnalyticsPanel({
         icon={<CreditCard aria-hidden />}
         title={t("usage.apiEquivalent")}
         summary={formatApproximateUsd(pricedUsd(apiTotal), locale)}
-        values={apiValues}
+        seriesValues={apiCostSeries}
         windows={windows}
         variant="bars"
         tone="cost"
-        formatValue={(value) => formatApproximateUsd(value, locale)}
-        formatAxis={(value) => formatScaledUsd(value, locale)}
+        formatValue={(chartValue) => formatApproximateUsd(chartValue, locale)}
+        formatAxis={(axisValue) => formatScaledUsd(axisValue, locale)}
         loading={loading && !hasAnalytics}
       />
       <OverviewChart
         icon={<Activity aria-hidden />}
         title={t("usage.requests")}
         summary={formatCompactNumber(totals.requests, locale)}
-        values={requestValues}
+        seriesValues={requestSeries}
         windows={windows}
         variant="bars"
         tone="requests"
-        formatValue={(value) => formatFullNumber(value, locale)}
-        formatAxis={(value) => formatFullNumber(value, locale)}
+        formatValue={(chartValue) => formatFullNumber(chartValue, locale)}
+        formatAxis={(axisValue) => formatFullNumber(axisValue, locale)}
         loading={loading && !hasAnalytics}
       />
       <OverviewChart
         icon={<Gauge aria-hidden />}
         title={t("usage.generationSpeed")}
         summary={formatTokenSpeed(averageGenerationSpeed, locale, t("usage.tokensPerSecondUnit"))}
-        values={generationSpeedValues}
+        seriesValues={generationSpeedSeries}
         windows={windows}
         variant="line"
         tone="speed"
-        formatValue={(value) => formatTokenSpeed(value, locale, t("usage.tokensPerSecondUnit"))}
-        formatAxis={(value) => formatNumber(value, locale, { maximumFractionDigits: 1 })}
+        formatValue={(chartValue) => formatTokenSpeed(chartValue, locale, t("usage.tokensPerSecondUnit"))}
+        formatAxis={(axisValue) => formatNumber(axisValue, locale, { maximumFractionDigits: 1 })}
         loading={loading && !hasAnalytics}
       />
       <OverviewChart
         icon={<Timer aria-hidden />}
         title={t("usage.summaryMetrics.e2eSpeed")}
         summary={formatTokenSpeed(averageE2eSpeed, locale, t("usage.tokensPerSecondUnit"))}
-        values={e2eSpeedValues}
+        seriesValues={endToEndSpeedSeries}
         windows={windows}
         variant="line"
         tone="e2e-speed"
-        formatValue={(value) => formatTokenSpeed(value, locale, t("usage.tokensPerSecondUnit"))}
-        formatAxis={(value) => formatNumber(value, locale, { maximumFractionDigits: 1 })}
+        formatValue={(chartValue) => formatTokenSpeed(chartValue, locale, t("usage.tokensPerSecondUnit"))}
+        formatAxis={(axisValue) => formatNumber(axisValue, locale, { maximumFractionDigits: 1 })}
         loading={loading && !hasAnalytics}
       />
     </div>
@@ -115,24 +115,24 @@ function TokenUsageTrend({ buckets, totals, windows, loading }: { buckets: Usage
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const tokenSeries = [
-    { key: "input", label: t("overview.tokenTrend.input"), color: "input", values: buckets.map((totals) => totals.requests > 0 ? totals.inputTokens : null) },
-    { key: "output", label: t("overview.tokenTrend.output"), color: "output", values: buckets.map((totals) => totals.requests > 0 ? totals.outputTokens : null) },
-    { key: "cacheWrite", label: t("overview.tokenTrend.cacheWrite"), color: "cache-write", values: buckets.map((totals) => totals.cacheWriteInputSamples ? totals.cacheWriteInputTokens ?? 0 : null) },
-    { key: "cacheRead", label: t("overview.tokenTrend.cacheRead"), color: "cache-read", values: buckets.map((totals) => totals.cachedInputSamples ? totals.cachedInputTokens : null) },
+    { key: "input", label: t("overview.tokenTrend.input"), color: "input", points: buckets.map((totals) => totals.requests > 0 ? totals.inputTokens : null) },
+    { key: "output", label: t("overview.tokenTrend.output"), color: "output", points: buckets.map((totals) => totals.requests > 0 ? totals.outputTokens : null) },
+    { key: "cacheWrite", label: t("overview.tokenTrend.cacheWrite"), color: "cache-write", points: buckets.map((totals) => totals.cacheWriteInputSamples ? totals.cacheWriteInputTokens ?? 0 : null) },
+    { key: "cacheRead", label: t("overview.tokenTrend.cacheRead"), color: "cache-read", points: buckets.map((totals) => totals.cachedInputSamples ? totals.cachedInputTokens : null) },
   ];
-  const maxTokens = Math.max(0, ...tokenSeries.flatMap((series) => series.values.filter((value): value is number => value != null))) || 1;
+  const maxTokens = Math.max(0, ...tokenSeries.flatMap((series) => series.points.filter((tokenValue): tokenValue is number => tokenValue != null))) || 1;
   const cacheRateValues = buckets.map((totals) => totals.requests > 0 && totals.inputTokens > 0 && totals.cachedInputSamples ? Math.min(100, totals.cachedInputTokens / totals.inputTokens * 100) : null);
-  const cacheTotals = buckets.reduce((result, totals) => {
+  const cacheTotals = buckets.reduce((tokenTotals, totals) => {
     if (totals.cachedInputSamples > 0 && totals.inputTokens > 0) {
-      result.inputTokens += totals.inputTokens;
-      result.cachedInputTokens += Math.min(totals.cachedInputTokens, totals.inputTokens);
+      tokenTotals.inputTokens += totals.inputTokens;
+      tokenTotals.cachedInputTokens += Math.min(totals.cachedInputTokens, totals.inputTokens);
     }
-    return result;
+    return tokenTotals;
   }, { inputTokens: 0, cachedInputTokens: 0 });
   const averageCacheRate = cacheTotals.inputTokens > 0
     ? Math.min(100, cacheTotals.cachedInputTokens / cacheTotals.inputTokens * 100)
     : null;
-  const hasData = tokenSeries.some((series) => series.values.some((value) => value != null && value > 0));
+  const hasData = tokenSeries.some((series) => series.points.some((tokenValue) => tokenValue != null && tokenValue > 0));
   return <article className="overview-chart tokens overview-token-trend">
     <header className="overview-token-trend-header">
       <div className="overview-chart-title"><Database aria-hidden /><span><strong>{t("overview.tokenUsage")}</strong></span></div>
@@ -148,7 +148,7 @@ function TokenUsageTrend({ buckets, totals, windows, loading }: { buckets: Usage
         <div className="overview-token-trend-canvas">
           <svg aria-hidden viewBox="0 0 100 100" preserveAspectRatio="none">
             <path className="overview-chart-grid" d="M0 0H100 M0 50H100 M0 100H100" />
-            {tokenSeries.map((series) => lineSegments(series.values, maxTokens).map((path, index) => (
+            {tokenSeries.map((series) => lineSegments(series.points, maxTokens).map((path, index) => (
               <path className={`overview-token-trend-line is-${series.color}`} d={path} key={`${series.key}-${index}`} />
             )))}
             {lineSegments(cacheRateValues, 100).map((path, index) => (
@@ -161,15 +161,15 @@ function TokenUsageTrend({ buckets, totals, windows, loading }: { buckets: Usage
               return (
                 <li key={window.startMs}>
                   {tokenSeries.map((series) => {
-                    const value = series.values[index];
-                    if (value == null) return null;
-                    const amount = formatCompactNumber(value, locale);
+                    const tokenValue = series.points[index];
+                    if (tokenValue == null) return null;
+                    const amount = formatCompactNumber(tokenValue, locale);
                     return (
                       <span
                         key={series.key}
                         tabIndex={0}
                         className={`overview-token-trend-dot is-${series.color}`}
-                        style={{ top: `${(1 - value / maxTokens) * 100}%` }}
+                        style={{ top: `${(1 - tokenValue / maxTokens) * 100}%` }}
                         aria-label={`${window.fullLabel}: ${series.label} ${amount}`}
                       >
                         <span role="tooltip">{window.fullLabel}<strong>{series.label}: {amount}</strong></span>
@@ -202,7 +202,7 @@ function OverviewChart({
   icon,
   title,
   summary,
-  values,
+  seriesValues,
   windows,
   variant,
   tone,
@@ -213,19 +213,19 @@ function OverviewChart({
   icon: ReactNode;
   title: string;
   summary: string;
-  values: Array<number | null>;
+  seriesValues: Array<number | null>;
   windows: WindowBucket[];
   variant: "bars" | "line";
   tone: string;
-  formatValue: (value: number) => string;
-  formatAxis: (value: number) => string;
+  formatValue: (chartValue: number) => string;
+  formatAxis: (axisValue: number) => string;
   loading: boolean;
 }) {
   const { t } = useTranslation();
-  const measured = values.filter((value): value is number => value != null);
+  const measured = seriesValues.filter((chartValue): chartValue is number => chartValue != null);
   const max = Math.max(0, ...measured) || 1;
-  const hasData = measured.some((value) => value > 0);
-  const segments = lineSegments(values, max);
+  const hasData = measured.some((chartValue) => chartValue > 0);
+  const segments = lineSegments(seriesValues, max);
   return <article className={`overview-chart ${tone}`}>
     <header><div className="overview-chart-title">{icon}<span><strong>{title}</strong></span></div><strong className="overview-chart-summary">{loading ? "—" : summary}</strong></header>
     <div className="overview-chart-body">
@@ -236,20 +236,20 @@ function OverviewChart({
             <path className="overview-chart-grid" d="M0 0H100 M0 50H100 M0 100H100" />
             {variant === "line" ? segments.map((path, index) => <path className="overview-chart-line" d={path} key={index} />) : null}
           </svg>
-          <ol className={`overview-chart-points ${variant}`} style={{ gridTemplateColumns: `repeat(${values.length}, minmax(0, 1fr))` }}>
-            {values.map((value, index) => {
+          <ol className={`overview-chart-points ${variant}`} style={{ gridTemplateColumns: `repeat(${seriesValues.length}, minmax(0, 1fr))` }}>
+            {seriesValues.map((chartValue, index) => {
               const window = windows[index];
               if (!window) return null;
-              const ratio = value == null ? 0 : value / max;
-              const label = value == null ? t("common.unknown") : formatValue(value);
+              const ratio = chartValue == null ? 0 : chartValue / max;
+              const label = chartValue == null ? t("common.unknown") : formatValue(chartValue);
               return (
                 <li key={window.startMs}>
-                  {variant === "bars" && value != null ? (
+                  {variant === "bars" && chartValue != null ? (
                     <span tabIndex={0} className="overview-chart-bar" style={{ height: `${Math.max(3, ratio * 100)}%` }} aria-label={`${window.fullLabel}: ${label}`}>
                       <span role="tooltip">{window.fullLabel}<strong>{label}</strong></span>
                     </span>
                   ) : null}
-                  {variant === "line" && value != null ? (
+                  {variant === "line" && chartValue != null ? (
                     <span tabIndex={0} className="overview-chart-dot" style={{ top: `${(1 - ratio) * 100}%` }} aria-label={`${window.fullLabel}: ${label}`}>
                       <span role="tooltip">{window.fullLabel}<strong>{label}</strong></span>
                     </span>

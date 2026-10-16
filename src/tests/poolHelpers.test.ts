@@ -274,7 +274,7 @@ describe("pool helpers", () => {
 
     const models = currentPoolModelSummaries(snapshot);
     expect(models.map((model) => model.id)).toEqual(["gpt-live", "claude-live", "grok-live"]);
-    expect(groupModelSummaries(models, snapshot.accounts).map((group) => [group.provider, group.items.map((model) => model.id)])).toEqual([
+    expect(groupModelSummaries(models, snapshot.accounts).map((group) => [group.provider, group.models.map((model) => model.id)])).toEqual([
       ["openai", ["gpt-live"]],
       ["anthropic", ["claude-live"]],
       ["xai", ["grok-live"]],

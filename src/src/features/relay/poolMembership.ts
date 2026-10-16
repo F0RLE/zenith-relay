@@ -1,5 +1,15 @@
 import { relayCommands } from "./api/commands";
-import type { RelayMode } from "./api/types";
+import type { OAuthClientKind, RelayMode } from "./api/types";
+
+export function canAccountJoinPool(account: {
+  oauthClientKind?: OAuthClientKind;
+  subscription?: { planType?: string | null };
+  plan?: string | null;
+}) {
+  const plan = (account.subscription?.planType ?? account.plan)?.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+  return account.oauthClientKind !== "excel_bps"
+    || !["free", "freeplan", "freetier", "chatgptfree", "chatgptfreeplan", "chatgptfreetier"].includes(plan ?? "");
+}
 
 export type PoolMembershipInput = {
   accountIds: readonly string[];

@@ -13,7 +13,7 @@ type SettingsUpdateState = "idle" | "checking" | "current" | "available" | "erro
 
 export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }: { updateCheckState: SettingsUpdateState; updateVersion: string | null; onCheckUpdates: () => Promise<SettingsUpdateState> }) {
   const { t, i18n } = useTranslation();
-  const { mode, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, resetOnboarding, perform, busy } = useRelayState();
+  const { mode, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, launchApplicationAfterConnect, setLaunchApplicationAfterConnect, resetOnboarding, perform, busy } = useRelayState();
   const confirm = useConfirm();
   const [storageInfo, setStorageInfo] = useState<RelayStorageInfo | null>(null);
   const [storageUnavailable, setStorageUnavailable] = useState(false);
@@ -22,22 +22,22 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
   useEffect(() => {
     let active = true;
     void relayCommands.storageInfo()
-      .then((info) => { if (active) setStorageInfo(info); })
+      .then((storageInfo) => { if (active) setStorageInfo(storageInfo); })
       .catch(() => { if (active) setStorageUnavailable(true); });
     return () => { active = false; };
   }, []);
   useEffect(() => {
     let active = true;
     void relayCommands.diagnosticSettings()
-      .then((settings) => { if (active) setDiagnosticSettings(settings); })
+      .then((diagnosticSettings) => { if (active) setDiagnosticSettings(diagnosticSettings); })
       .catch(() => { if (active) setDiagnosticsUnavailable(true); });
     return () => { active = false; };
   }, []);
   const debugMode = usePendingFlag(diagnosticSettings?.debugEnabled ?? false);
   const updateDiagnosticDebug = async (enabled: boolean) => {
-    const settings = await relayCommands.setDiagnosticDebugMode(enabled);
-    setDiagnosticSettings(settings);
-    return settings;
+    const updatedDiagnosticSettings = await relayCommands.setDiagnosticDebugMode(enabled);
+    setDiagnosticSettings(updatedDiagnosticSettings);
+    return updatedDiagnosticSettings;
   };
   const reset = async () => { if (await confirm(t("settings.resetDataConfirm"), { danger: true })) await perform("recovery-reset", async () => { await relayCommands.resetLocalData(); resetOnboarding(); await restartApplication(); }, "feedback.reset"); };
   const updateStatus = updateCheckState === "available" ? { status: "info" as const, label: t("updates.availableVersion", { version: updateVersion }) }
@@ -57,16 +57,16 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
             className="field-option-menu"
             label={t("settings.language")}
             value={i18n.language.startsWith("ru") ? "ru" : "en"}
-            onChange={(value) => void setI18nLanguage(value)}
+            onChange={(languageCode) => void setI18nLanguage(languageCode)}
             options={[{ value: "ru", label: "Русский" }, { value: "en", label: "English" }]}
           />
         </div>
         <div className="settings-control-row">
           <div><strong>{t("settings.theme")}</strong></div>
           <div className="segmented settings-theme-control" role="group" aria-label={t("settings.theme")}>
-            {(["system", "light", "dark"] as const).map((value) => (
-              <button key={value} type="button" className={theme === value ? "active" : ""} aria-pressed={theme === value} onClick={() => setTheme(value)}>
-                {t(`settings.themes.${value}`)}
+            {(["system", "light", "dark"] as const).map((themeName) => (
+              <button key={themeName} type="button" className={theme === themeName ? "active" : ""} aria-pressed={theme === themeName} onClick={() => setTheme(themeName)}>
+                {t(`settings.themes.${themeName}`)}
               </button>
             ))}
           </div>
@@ -74,6 +74,12 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
       </SettingsGroup>
 
       <SettingsGroup icon={<RefreshCw aria-hidden />} title={t("settings.application")}>
+        <SettingToggle
+          label={t("settings.launchAfterConnect")}
+          description={t("settings.launchAfterConnectHint")}
+          checked={launchApplicationAfterConnect}
+          onChange={setLaunchApplicationAfterConnect}
+        />
         <div className="settings-control-row">
           <div>
             <strong>{t("settings.currentVersion")}</strong>
@@ -102,7 +108,7 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
             className="settings-debug-toggle"
             label={t("settings.debugMode")}
             description={diagnosticSettings
-              ? t("settings.debugModeHint", { state: t(diagnosticSettings.debugEnabled ? "settings.debugModeOn" : "settings.debugModeOff") })
+              ? t("settings.debugModeHint")
               : t(diagnosticsUnavailable ? "settings.debugModeUnavailable" : "settings.debugModeLoading")}
             checked={debugMode.checked}
             disabled={diagnosticSettings === null}

@@ -1,6 +1,103 @@
 use super::*;
+use crate::gateway::request::client_context_fingerprint;
 use crate::providers::chatgpt::CODEX_CLIENT_VERSION;
 use axum::http::header::AUTHORIZATION;
+
+#[test]
+fn permitted_protocol_headers_preserve_all_values_and_opaque_bytes() {
+    for (name, forward) in [
+        (
+            "openai-beta",
+            forwarded_responses_headers as fn(&HeaderMap) -> HeaderMap,
+        ),
+        ("anthropic-beta", forwarded_messages_headers),
+    ] {
+        let mut client = HeaderMap::new();
+        client.append(name, HeaderValue::from_static("feature-a"));
+        client.append(
+            name,
+            HeaderValue::from_bytes(b"feature-b;opaque=\x80").unwrap(),
+        );
+        let forwarded = forward(&client);
+        assert_eq!(
+            forwarded.get_all(name).iter().collect::<Vec<_>>(),
+            client.get_all(name).iter().collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn connection_options_and_unknown_extensions_are_not_forwarded() {
+    let mut client = HeaderMap::new();
+    client.append(
+        "connection",
+        HeaderValue::from_static("keep-alive, OpenAI-Beta"),
+    );
+    client.append(
+        "connection",
+        HeaderValue::from_static("anthropic-beta, X-Claude-Private"),
+    );
+    client.insert("openai-beta", HeaderValue::from_static("responses=v1"));
+    client.insert("anthropic-beta", HeaderValue::from_static("tools"));
+    client.insert("x-claude-private", HeaderValue::from_static("hop-local"));
+    client.insert(
+        "x-untrusted-extension",
+        HeaderValue::from_static("not-a-protocol-contract"),
+    );
+    for forwarded in [
+        forwarded_responses_headers(&client),
+        forwarded_messages_headers(&client),
+    ] {
+        for name in [
+            "connection",
+            "openai-beta",
+            "anthropic-beta",
+            "x-claude-private",
+            "x-untrusted-extension",
+        ] {
+            assert!(
+                !forwarded.contains_key(name),
+                "{name} must not be forwarded"
+            );
+        }
+    }
+}
+
+#[test]
+fn duplicate_session_and_state_headers_do_not_cross_the_native_boundary() {
+    for name in [
+        "x-codex-session-id",
+        "x-codex-turn-state",
+        "x-codex-turn-metadata",
+        "session-id",
+        "session_id",
+        "x-session-id",
+        "thread-id",
+        "x-codex-parent-thread-id",
+    ] {
+        let mut client = HeaderMap::new();
+        client.append(name, HeaderValue::from_static("synthetic-a"));
+        client.append(name, HeaderValue::from_static("synthetic-b"));
+        assert!(!forwarded_responses_headers(&client).contains_key(name));
+    }
+    let mut client = HeaderMap::new();
+    client.append(
+        CLAUDE_CODE_SESSION_HEADER,
+        HeaderValue::from_static("first"),
+    );
+    client.append(
+        CLAUDE_CODE_SESSION_HEADER,
+        HeaderValue::from_static("second"),
+    );
+    for forwarded in [
+        forwarded_messages_headers(&client),
+        forwarded_bridge_messages_headers(&client),
+    ] {
+        assert!(!forwarded.contains_key(CLAUDE_CODE_SESSION_HEADER));
+    }
+    let forwarded = forwarded_codex_headers(&client, "synthetic-fallback");
+    assert_eq!(forwarded[CLAUDE_CODE_SESSION_HEADER], "synthetic-fallback");
+}
 
 #[test]
 fn forwarded_codex_headers_keep_session_identity_and_drop_secrets() {

@@ -39,13 +39,14 @@ pub(in crate::gateway) async fn gemini(
     super::super::execution::execute_gemini_client_request(runtime, request, model, stream).await
 }
 
-fn parse_gemini_model_action(value: &str) -> Option<(String, bool)> {
-    let (model, stream) = if let Some(model) = value.strip_suffix(":streamGenerateContent") {
-        (model, true)
-    } else {
-        let model = value.strip_suffix(":generateContent")?;
-        (model, false)
-    };
-    let model = model.strip_prefix("models/").unwrap_or(model).trim();
-    crate::is_valid_model_id(model).then(|| (model.to_string(), stream))
+fn parse_gemini_model_action(model_action_path: &str) -> Option<(String, bool)> {
+    let (model_id, stream) =
+        if let Some(model_id) = model_action_path.strip_suffix(":streamGenerateContent") {
+            (model_id, true)
+        } else {
+            let model_id = model_action_path.strip_suffix(":generateContent")?;
+            (model_id, false)
+        };
+    let model_id = model_id.strip_prefix("models/").unwrap_or(model_id).trim();
+    crate::is_valid_model_id(model_id).then(|| (model_id.to_string(), stream))
 }

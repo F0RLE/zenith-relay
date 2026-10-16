@@ -167,7 +167,10 @@ pub fn run_helper_if_requested() {
         if argument != HELPER_ARG {
             continue;
         }
-        let Some(pid) = args.next().and_then(|value| value.to_str()?.parse().ok()) else {
+        let Some(pid) = args
+            .next()
+            .and_then(|pid_argument| pid_argument.to_str()?.parse().ok())
+        else {
             std::process::exit(2);
         };
         let Some(target) = args.next().map(PathBuf::from) else {
@@ -176,8 +179,8 @@ pub fn run_helper_if_requested() {
         let Some(ack) = args.next().map(PathBuf::from) else {
             std::process::exit(2);
         };
-        let result = helper::run_helper(pid, target, ack);
-        std::process::exit(if result.is_ok() { 0 } else { 1 });
+        let helper_result = helper::run_helper(pid, target, ack);
+        std::process::exit(if helper_result.is_ok() { 0 } else { 1 });
     }
 }
 

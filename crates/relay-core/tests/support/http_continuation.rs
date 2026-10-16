@@ -4,7 +4,7 @@ use super::*;
 async fn codex_compatibility_aliases_reach_the_canonical_account_endpoints() {
     let (upstream, state) = spawn_upstream(vec![
         success_reply("alias-response"),
-        Reply::Json(StatusCode::OK, json!({"type": "compaction"})),
+        compaction_reply("alias-compaction"),
         Reply::Json(StatusCode::OK, json!({"results": []})),
     ])
     .await;
@@ -530,7 +530,7 @@ async fn api_pool_removal_releases_only_self_contained_tool_continuations() {
             });
             let (owner, owner_state) = spawn_upstream(vec![Reply::Json(
                 StatusCode::OK,
-                json!({"id": "api-tool-response", "model": MODEL, "output": [call.clone()]}),
+                json!({"id": "api-tool-response", "status": "completed", "model": MODEL, "output": [call.clone()]}),
             )])
             .await;
             let (replacement, replacement_state) = spawn_upstream(vec![if stream {
@@ -779,27 +779,197 @@ fn set_account_remainder(runtime: &GatewayRuntime, account_id: &str, remaining: 
     ));
 }
 
-fn reply_without_saved_history(id: &str) -> Reply {
-    Reply::Json(
-        StatusCode::OK,
-        json!({
-            "id": id,
-            "object": "response",
-            "model": MODEL,
-            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
-        }),
-    )
+#[tokio::test]
+async fn portable_tool_history_yields_to_fresh_quota_but_unpaired_outputs_keep_the_owner() {
+    for endpoint in ["/v1/responses", "/v1/alpha/search"] {
+        for include_call in [true, false] {
+            let call = json!({
+                "type": "function_call", "id": "fc_quota", "call_id": "call_quota",
+                "name": "lookup", "arguments": "{}"
+            });
+            let (owner_upstream, owner_state) = spawn_upstream(vec![
+                Reply::Json(
+                    StatusCode::OK,
+                    json!({
+                        "id": "quota-tool-response", "status": "completed", "model": MODEL,
+                        "output": [call.clone()]
+                    }),
+                ),
+                success_reply("owner-stays"),
+            ])
+            .await;
+            let (other_upstream, other_state) =
+                spawn_upstream(vec![success_reply("quota-replacement")]).await;
+            let authority = Arc::new(TokenAuthority::new(4).unwrap());
+            register_ready(&authority, "owner-account", "owner-access").await;
+            register_ready(&authority, "other-account", "other-access").await;
+            let (gateway, _, _, _) = spawn_mixed_gateway(
+                Vec::new(),
+                vec![
+                    account("owner-account", "provider-owner", &owner_upstream, 100),
+                    account("other-account", "provider-other", &other_upstream, 100),
+                ],
+                vec![mixed_key(None, None)],
+                authority,
+                refresh_adapter(),
+                Arc::new(PersistenceAdapter::default()),
+            )
+            .await;
+            let runtime = gateway.runtime.as_ref().unwrap();
+            set_account_remainder(runtime, "owner-account", 9_800);
+            set_account_remainder(runtime, "other-account", 3_300);
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap();
+            let first = request(&gateway, false).await;
+            assert_eq!(first.status(), StatusCode::OK);
+            let first: Value = first.json().await.unwrap();
+            assert_eq!(first["id"], "quota-tool-response");
+
+            set_account_remainder(runtime, "owner-account", 2_000);
+            set_account_remainder(runtime, "other-account", 8_000);
+            let mut input = Vec::new();
+            if include_call {
+                input.push(call);
+            }
+            input.push(json!({
+                "type": "function_call_output", "call_id": "call_quota",
+                "output": "synthetic result"
+            }));
+            let response = client
+                .post(format!("{}{endpoint}", gateway.base_url))
+                .bearer_auth(LOCAL_KEY)
+                .json(&json!({"model": MODEL, "input": input}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let _: Value = response.json().await.unwrap();
+            let owner_requests = owner_state.requests.lock().unwrap();
+            let other_requests = other_state.requests.lock().unwrap();
+            assert_eq!(
+                other_requests.len(),
+                usize::from(include_call),
+                "endpoint={endpoint}, paired={include_call}"
+            );
+            assert_eq!(owner_requests.len(), if include_call { 1 } else { 2 });
+            let forwarded = if include_call {
+                &other_requests[0]
+            } else {
+                &owner_requests[1]
+            };
+            assert_eq!(forwarded.body["input"], json!(input));
+            assert!(forwarded.body.get("previous_response_id").is_none());
+        }
+    }
 }
 
 #[tokio::test]
-async fn account_compact_continuation_moves_only_for_a_larger_fresh_remainder() {
+async fn websocket_portable_tool_history_yields_to_fresh_quota_without_losing_the_input() {
+    for reconnect in [false, true] {
+        let call = json!({
+            "type":"function_call", "id":"fc_quota", "call_id":"call_quota",
+            "name":"lookup", "arguments":"{}"
+        });
+        let (owner_upstream, owner_state) =
+            spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![
+                json!({"type":"response.output_item.done", "item":call.clone()}),
+                json!({"type":"response.completed", "response":{
+                    "id":"quota-tool-response", "status":"completed", "model":MODEL,
+                    "output":[call.clone()]
+                }}),
+            ])))
+            .await;
+        let (other_upstream, other_state) = spawn_websocket_upstream().await;
+        let authority = Arc::new(TokenAuthority::new(4).unwrap());
+        register_ready(&authority, "owner-account", "owner-access").await;
+        register_ready(&authority, "other-account", "other-access").await;
+        let (gateway, _, _, _) = spawn_mixed_gateway(
+            Vec::new(),
+            vec![
+                account("owner-account", "provider-owner", &owner_upstream, 100),
+                account("other-account", "provider-other", &other_upstream, 100),
+            ],
+            vec![mixed_key(None, None)],
+            authority,
+            refresh_adapter(),
+            Arc::new(PersistenceAdapter::default()),
+        )
+        .await;
+        let runtime = gateway.runtime.as_ref().unwrap();
+        set_account_remainder(runtime, "owner-account", 9_800);
+        set_account_remainder(runtime, "other-account", 3_300);
+        let client = reqwest::Client::new();
+        let url = format!("{}/v1/responses", gateway.base_url);
+        let mut socket = client
+            .get(&url)
+            .bearer_auth(LOCAL_KEY)
+            .upgrade()
+            .send()
+            .await
+            .unwrap()
+            .into_websocket()
+            .await
+            .unwrap();
+        socket
+            .send(ClientWsMessage::Text(
+                json!({
+                    "type":"response.create", "model":MODEL, "input":"synthetic lookup"
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        let first = receive_websocket_completion(&mut socket).await;
+        assert_eq!(first["response"]["id"], "quota-tool-response");
+        set_account_remainder(runtime, "owner-account", 2_000);
+        set_account_remainder(runtime, "other-account", 8_000);
+        if reconnect {
+            drop(socket);
+            socket = client
+                .get(&url)
+                .bearer_auth(LOCAL_KEY)
+                .upgrade()
+                .send()
+                .await
+                .unwrap()
+                .into_websocket()
+                .await
+                .unwrap();
+        }
+        let input = json!([
+            call,
+            {"type":"function_call_output", "call_id":"call_quota", "output":"synthetic result"}
+        ]);
+        socket
+            .send(ClientWsMessage::Text(
+                json!({
+                    "type":"response.create", "model":MODEL, "input":input
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        let _ = receive_websocket_completion(&mut socket).await;
+        assert_eq!(owner_state.requests.lock().unwrap().len(), 1);
+        let requests = other_state.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1, "reconnect={reconnect}");
+        assert_eq!(requests[0]["input"], input);
+        assert!(requests[0].get("previous_response_id").is_none());
+    }
+}
+
+#[tokio::test]
+async fn account_compact_replays_plaintext_history_only_for_a_larger_fresh_remainder() {
     let (owner_upstream, owner_state) = spawn_upstream(vec![
         success_reply("owner-compact"),
         success_reply("owner-stays"),
         success_reply("owner-after-shrink"),
     ])
     .await;
-    let (other_upstream, other_state) = spawn_upstream(vec![success_reply("other-compact")]).await;
+    let (other_upstream, other_state) =
+        spawn_upstream(vec![compaction_reply("other-compact")]).await;
     let authority = Arc::new(TokenAuthority::new(4).unwrap());
     register_ready(&authority, "owner-account", "owner-access").await;
     register_ready(&authority, "other-account", "other-access").await;
@@ -821,7 +991,7 @@ async fn account_compact_continuation_moves_only_for_a_larger_fresh_remainder() 
     let client = reqwest::Client::new();
 
     let first: Value = client
-        .post(format!("{}/v1/responses/compact", gateway.base_url))
+        .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
         .json(&json!({"model": MODEL, "input": "first"}))
         .send()
@@ -833,7 +1003,7 @@ async fn account_compact_continuation_moves_only_for_a_larger_fresh_remainder() 
     assert_eq!(first["id"], "owner-compact");
 
     let stayed: Value = client
-        .post(format!("{}/v1/responses/compact", gateway.base_url))
+        .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
         .json(&json!({
             "model": MODEL,
@@ -898,7 +1068,7 @@ async fn account_compact_continuation_moves_only_for_a_larger_fresh_remainder() 
 #[tokio::test]
 async fn account_continuation_without_saved_history_stays_on_its_owner() {
     let (owner_upstream, owner_state) = spawn_upstream(vec![
-        reply_without_saved_history("owner-opaque"),
+        success_reply("owner-opaque"),
         success_reply("owner-follow-up"),
     ])
     .await;
@@ -923,9 +1093,11 @@ async fn account_continuation_without_saved_history_stays_on_its_owner() {
     set_account_remainder(&runtime, "other-account", 3_300);
     let client = reqwest::Client::new();
     let first: Value = client
-        .post(format!("{}/v1/responses/compact", gateway.base_url))
+        .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
-        .json(&json!({"model": MODEL, "input": "first"}))
+        .json(&json!({
+            "model": MODEL, "input": "first", "conversation": "synthetic-conversation"
+        }))
         .send()
         .await
         .unwrap()

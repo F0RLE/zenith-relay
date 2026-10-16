@@ -20,8 +20,8 @@ pub(super) fn build_keys(keys: Vec<RuntimeMixedLocalKey>) -> Result<KeyRuntimePa
             allowed: normalized_set(key.allowed_models.iter()),
             excluded: normalized_set(key.excluded_models.iter()),
         };
-        let client_wire_apis = key.wire_apis.map(|values| {
-            values
+        let client_wire_apis = key.wire_apis.map(|wire_api_list| {
+            wire_api_list
                 .into_iter()
                 .map(normalize_client_wire_api)
                 .collect::<BTreeSet<_>>()

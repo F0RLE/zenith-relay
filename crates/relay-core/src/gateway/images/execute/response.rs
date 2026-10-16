@@ -1,11 +1,12 @@
 use super::super::super::errors::{
-    apply_failure_state, retryable_failure, settle_classified_failure,
-    settle_image_capability_failure, settle_status_failure, AttemptFailure, TRANSIENT_COOLDOWN_MS,
+    apply_failure_state, retryable_route_failure, route_forbids_fallback,
+    settle_classified_failure, settle_image_capability_failure, settle_status_failure,
+    AttemptFailure, TRANSIENT_COOLDOWN_MS,
 };
 use super::super::super::now_ms;
 use super::super::super::response::{
     apply_usage, emit_usage, populate_tokens, proxy_json_response, proxy_response,
-    proxy_sse_response,
+    proxy_sse_response, route_error_origin,
 };
 use super::super::account::{
     image_capability_unavailable, image_error_response, translate_account_response, ImageAttempt,
@@ -34,12 +35,14 @@ pub(super) fn handle_collected_image(
 ) -> ImageAttemptStep {
     if !status.is_success() {
         let upstream_error =
-            crate::usage::UpstreamErrorDetails::from_body(Some(status.as_u16()), &bytes);
+            crate::usage::UpstreamErrorDetails::from_response_body(Some(status.as_u16()), &bytes);
         let mut failure = AttemptFailure::status_with_body(status, Some(&bytes));
         super::super::super::errors::apply_degraded_route_policy(runtime, &mut failure);
         let capability_failure = image_capability_unavailable(&bytes);
-        if retryable_failure(status, failure.category, false) || capability_failure {
-            let state = if capability_failure {
+        if (retryable_route_failure(route, status, failure.category, false) || capability_failure)
+            && !route_forbids_fallback(route, status, failure.category)
+        {
+            let failure_state = if capability_failure {
                 settle_image_capability_failure(
                     runtime,
                     lease,
@@ -67,7 +70,7 @@ pub(super) fn handle_collected_image(
                 }),
             );
             event.upstream_error = Some(upstream_error);
-            apply_failure_state(&mut event, state);
+            apply_failure_state(&mut event, failure_state);
             emit_usage(runtime, event);
             return ImageAttemptStep::Retry(failure);
         }
@@ -75,23 +78,22 @@ pub(super) fn handle_collected_image(
         populate_tokens(&mut event, &bytes);
         event.upstream_error = Some(upstream_error);
         emit_usage(runtime, event);
-        return ImageAttemptStep::Respond(proxy_response(
+        let origin = route_error_origin(route).for_category(failure.category);
+        let error_response = super::super::super::response::proxy_error_response(
             status,
             &response_headers,
-            Body::from(bytes),
-        ));
+            &bytes,
+            origin,
+            failure.category,
+            Some(observed.request_id),
+        );
+        return ImageAttemptStep::Respond(error_response);
     }
 
     if !account_route {
         let mut event = observed.event(true, status, None);
         populate_tokens(&mut event, &bytes);
-        finish_image_success(
-            runtime,
-            lease,
-            &route.candidate_id,
-            &prepared.resolved_model,
-            event,
-        );
+        finish_image_success(runtime, lease, event);
         return ImageAttemptStep::Respond(if prepared.stream {
             proxy_sse_response(status, &response_headers, Body::from(bytes))
         } else {
@@ -105,7 +107,10 @@ pub(super) fn handle_collected_image(
         endpoint.stream_prefix(),
     ) {
         Ok(translated) => translated,
-        Err(failure) if failure.retryable => {
+        Err(failure)
+            if failure.retryable
+                && retryable_route_failure(route, failure.status, failure.category, false) =>
+        {
             if matches!(
                 failure.category,
                 error_codes::STREAM_INCOMPLETE
@@ -114,7 +119,7 @@ pub(super) fn handle_collected_image(
             ) {
                 lease.settle_rotation_unknown(now_ms());
             }
-            let state = if failure.category == error_codes::IMAGE_GENERATION_NOT_ENABLED {
+            let failure_state = if failure.category == error_codes::IMAGE_GENERATION_NOT_ENABLED {
                 settle_image_capability_failure(
                     runtime,
                     lease,
@@ -138,7 +143,7 @@ pub(super) fn handle_collected_image(
                 details.http_status = Some(status.as_u16());
                 *details
             });
-            apply_failure_state(&mut event, state);
+            apply_failure_state(&mut event, failure_state);
             emit_usage(runtime, event);
             return ImageAttemptStep::Retry(AttemptFailure::classified_with_hint(
                 failure.status,
@@ -155,20 +160,18 @@ pub(super) fn handle_collected_image(
                 *details
             });
             emit_usage(runtime, event);
-            return ImageAttemptStep::Respond(image_error_response(failure));
+            return ImageAttemptStep::Respond(image_error_response(
+                failure,
+                route_error_origin(route),
+                observed.request_id,
+            ));
         }
     };
     let mut event = observed.event(true, status, None);
     if let Some(usage) = translated.usage.as_ref() {
         apply_usage(&mut event, usage);
     }
-    finish_image_success(
-        runtime,
-        lease,
-        &route.candidate_id,
-        &prepared.resolved_model,
-        event,
-    );
+    finish_image_success(runtime, lease, event);
     ImageAttemptStep::Respond(if prepared.stream {
         proxy_sse_response(status, &response_headers, Body::from(translated.stream))
     } else {
@@ -176,16 +179,8 @@ pub(super) fn handle_collected_image(
     })
 }
 
-fn finish_image_success(
-    runtime: &GatewayRuntime,
-    lease: &CandidateLease,
-    candidate_id: &str,
-    model: &str,
-    mut event: UsageEvent,
-) {
-    let recovered =
-        runtime.record_success_with_metrics(candidate_id, model, now_ms(), None, event.latency_ms);
+fn finish_image_success(runtime: &GatewayRuntime, lease: &CandidateLease, mut event: UsageEvent) {
+    let recovered = lease.settle_rotation_success_with_latency(now_ms(), event.ttft_ms);
     event.consecutive_failures = recovered.then_some(0);
     emit_usage(runtime, event);
-    lease.settle_rotation_success(now_ms());
 }

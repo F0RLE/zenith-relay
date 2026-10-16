@@ -13,23 +13,27 @@ impl TelemetryDb {
             "(COALESCE(cached_input_tokens, 0) > 0 OR COALESCE(cache_write_input_tokens, 0) > 0)"
                 .to_string(),
         ];
-        let mut values = Vec::new();
-        if let Some(value) = query.from_ms {
+        let mut sql_parameters = Vec::new();
+        if let Some(from_timestamp_ms) = query.from_ms {
             clauses.push("created_at >= datetime(? / 1000, 'unixepoch')".to_string());
-            values.push(SqlValue::Integer(zenith_relay_core::usage::sql_u64(value)));
+            sql_parameters.push(SqlValue::Integer(zenith_relay_core::usage::sql_u64(
+                from_timestamp_ms,
+            )));
         }
-        if let Some(value) = query.to_ms {
+        if let Some(to_timestamp_ms) = query.to_ms {
             clauses.push("created_at <= datetime(? / 1000, 'unixepoch')".to_string());
-            values.push(SqlValue::Integer(zenith_relay_core::usage::sql_u64(value)));
+            sql_parameters.push(SqlValue::Integer(zenith_relay_core::usage::sql_u64(
+                to_timestamp_ms,
+            )));
         }
         if let Some(account_id) = query
             .source_or_account_query
             .as_deref()
             .map(str::trim)
-            .filter(|value| !value.is_empty())
+            .filter(|account_query| !account_query.is_empty())
         {
             clauses.push("account_id = ?".to_string());
-            values.push(SqlValue::Text(account_id.to_string()));
+            sql_parameters.push(SqlValue::Text(account_id.to_string()));
         }
         let sql = format!(
             "WITH latest AS (
@@ -83,7 +87,7 @@ impl TelemetryDb {
         );
         let mut statement = connection.prepare(&sql).map_err(db_error)?;
         let sessions = statement
-            .query_map(params_from_iter(values.iter()), |row| {
+            .query_map(params_from_iter(sql_parameters.iter()), |row| {
                 let cache_write_ttl: Option<String> = row.get(4)?;
                 Ok(CacheSession {
                     client_context_id: row.get(0)?,

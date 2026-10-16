@@ -8,8 +8,9 @@ import {
 describe("connection view state", () => {
   test("keeps the mode-specific set of available views", () => {
     expect(connectionViews("zenith", [])).toEqual(["sources"]);
-    expect(connectionViews("local", [])).toEqual(["accounts", "sources", "proxies", "automations"]);
+    expect(connectionViews("local", [])).toEqual(["accounts", "sources", "proxies", "automations", "trash"]);
     expect(connectionViews("remote", ["accounts", "sources", "wake_tasks"])).toEqual(["accounts", "sources", "automations", "remote"]);
+    expect(connectionViews("remote", ["accounts", "account_trash_v1"])).toEqual(["accounts", "trash", "remote"]);
   });
 
   test("restores the requested sources view without carrying it into Zenith", () => {

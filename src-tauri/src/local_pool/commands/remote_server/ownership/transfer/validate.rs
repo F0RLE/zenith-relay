@@ -109,6 +109,9 @@ pub(super) fn remote_accounts_are_validated(
             .is_some_and(|account| {
                 account.enabled
                     && account.in_pool
+                        == account
+                            .oauth_client_kind
+                            .supports_pool(account.subscription.plan_type.as_deref())
                     && !account.draining
                     && account.secret_available
                     && account.proxy_available

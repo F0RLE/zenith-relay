@@ -11,6 +11,8 @@ pub struct ProviderSource {
     pub api_key: String,
     pub wire_api: WireApi,
     pub models: Vec<String>,
+    /// Optional HTTP/HTTPS proxy URL applied to all requests for this source.
+    pub proxy_url: Option<String>,
 }
 
 impl ProviderSource {
@@ -29,6 +31,12 @@ impl ProviderSource {
             return Err(Error::Validation(
                 "source base URL must not contain a query or fragment".to_string(),
             ));
+        }
+        if let Some(proxy_url) = &self.proxy_url {
+            if !proxy_url.trim().is_empty() {
+                crate::proxy::normalize_proxy_url(proxy_url)
+                    .map_err(|message| Error::Validation(message.to_string()))?;
+            }
         }
         HeaderValue::from_str(&format!("Bearer {}", self.api_key)).map_err(|_| {
             Error::Validation("source API key contains invalid header characters".to_string())
@@ -52,6 +60,7 @@ impl fmt::Debug for ProviderSource {
             .field("api_key", &"[redacted]")
             .field("wire_api", &self.wire_api)
             .field("models", &self.models)
+            .field("proxy_url", &self.proxy_url.as_ref().map(|_| "[set]"))
             .finish()
     }
 }
@@ -79,8 +88,8 @@ impl fmt::Debug for LocalGatewayKey {
     }
 }
 
-pub(crate) fn normalized_base_url(value: &str) -> Result<Url> {
-    let mut url = Url::parse(value.trim())
+pub(crate) fn normalized_base_url(base_url_text: &str) -> Result<Url> {
+    let mut url = Url::parse(base_url_text.trim())
         .map_err(|_| Error::Validation("source base URL is invalid".to_string()))?;
     if !is_http_endpoint(&url) {
         return Err(Error::Validation(
@@ -99,8 +108,8 @@ pub(crate) fn normalized_base_url(value: &str) -> Result<Url> {
     // or `/chat/completions/chat/completions`.
     let mut segments = url
         .path_segments()
-        .map(|items| {
-            items
+        .map(|path_segments| {
+            path_segments
                 .filter(|segment| !segment.is_empty())
                 .collect::<Vec<_>>()
         })
@@ -134,6 +143,9 @@ pub(crate) fn normalized_base_url(value: &str) -> Result<Url> {
     } else if !url.path().ends_with('/') {
         let path = format!("{}/", url.path());
         url.set_path(&path);
+    }
+    if let Some(service) = url.host_str().and_then(super::services::Service::from_host) {
+        service.normalize_api_root(&mut url);
     }
     Ok(url)
 }
@@ -182,8 +194,8 @@ pub fn url_has_userinfo(url: &Url) -> bool {
 }
 
 /// Drops credentials, query, and fragment before a URL is written to diagnostics.
-pub(crate) fn redact_url(value: &str) -> String {
-    let Ok(mut url) = Url::parse(value) else {
+pub(crate) fn redact_url(url_text: &str) -> String {
+    let Ok(mut url) = Url::parse(url_text) else {
         return "[invalid]".to_string();
     };
     let _ = url.set_username("");
@@ -193,9 +205,9 @@ pub(crate) fn redact_url(value: &str) -> String {
     url.to_string()
 }
 
-fn require_value(name: &str, value: &str) -> Result<()> {
-    if value.trim().is_empty() {
-        return Err(Error::Validation(format!("{name} must not be empty")));
+fn require_value(field_name: &str, required_text: &str) -> Result<()> {
+    if required_text.trim().is_empty() {
+        return Err(Error::Validation(format!("{field_name} must not be empty")));
     }
     Ok(())
 }

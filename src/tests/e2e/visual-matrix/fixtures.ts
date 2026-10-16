@@ -16,10 +16,12 @@ export async function expectTopLevelEmptyCentered(page: Page) {
     page.locator(".relay-page").evaluate((element) => Number.parseFloat(getComputedStyle(element).paddingBottom)),
   ]);
   const tabsBox = tabCount ? await tabs.boundingBox() : null;
+  const accessHeading = page.locator(".integration-section-heading");
+  const accessHeadingBox = await accessHeading.count() ? await accessHeading.boundingBox() : null;
   expect(pageBox).not.toBeNull();
   expect(headerBox).not.toBeNull();
   expect(emptyBox).not.toBeNull();
-  const contentTop = tabsBox ? tabsBox.y + tabsBox.height : headerBox!.y + headerBox!.height;
+  const contentTop = accessHeadingBox ? accessHeadingBox.y + accessHeadingBox.height : tabsBox ? tabsBox.y + tabsBox.height : headerBox!.y + headerBox!.height;
   const availableCenter = (contentTop + pageBox!.y + pageBox!.height - paddingBottom) / 2;
   expect(Math.abs(emptyBox!.y + emptyBox!.height / 2 - availableCenter)).toBeLessThanOrEqual(2);
 }

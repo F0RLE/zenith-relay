@@ -1,4 +1,5 @@
 pub(crate) mod automations;
+pub(crate) mod claude_desktop;
 pub(crate) mod connections;
 pub(crate) mod gateway;
 pub(crate) mod oauth;
@@ -22,8 +23,8 @@ use crate::local_pool::{
 };
 use std::collections::BTreeMap;
 use zenith_relay_core::{
-    cache_write_model_ids, model_id_key, PriceEvidence, PricingContext, SourcePricingMetadata,
-    TokenPrice,
+    cache_write_model_ids, model_id_key, model_metadata::ModelMetadataCatalog, PriceEvidence,
+    PricingContext, SourcePricingMetadata, SourceProtocolResolution, TokenPrice,
 };
 
 pub(super) fn cleanup_created_secret(secret_ref: &str, cause: &LocalPoolError) -> LocalResult<()> {
@@ -45,6 +46,7 @@ pub(super) fn pricing_context(
     gateway: &GatewaySettings,
     sources: &[ProviderSourceRecord],
     accounts: &[LocalAccountRecord],
+    reference_catalog: &ModelMetadataCatalog,
 ) -> PricingContext {
     let account_provider_families = accounts
         .iter()
@@ -67,7 +69,11 @@ pub(super) fn pricing_context(
                 pricing_provider: source.pricing_provider.clone(),
                 official_provider_family: source.official_provider_family.clone(),
                 cache_write_models: cache_write_model_ids(
-                    source.effective_protocol_bindings().unwrap_or_default(),
+                    SourceProtocolResolution::resolved_protocol_bindings_with_catalog(
+                        source,
+                        Some(reference_catalog),
+                    )
+                    .unwrap_or_default(),
                 ),
             },
         );
@@ -98,10 +104,10 @@ pub(super) fn pricing_context(
 pub(in crate::local_pool) use runtime::{
     apply_account_policy_if_running, apply_local_gateway_key_scope,
     apply_source_policies_if_running, apply_source_policy_if_running, core_error, current_time_ms,
-    fail_closed, fence_runtime_candidates, record_catalog_refresh_result,
-    refresh_active_codex_catalog_in_background, refresh_local_gateway_key_scope_if_running,
-    restart_after_secret_change, restart_or_rollback, runtime_account_policy, runtime_from_store,
-    sync_account_or_rollback, sync_account_state_if_running, sync_gateway_or_rollback,
-    sync_records_or_rollback, sync_refreshed_account_or_rollback, sync_running_account_states,
-    sync_runtime_account_state,
+    fail_closed, fence_runtime_candidates, queue_active_client_catalog_refresh,
+    record_catalog_refresh_result, refresh_active_codex_catalog_in_background,
+    refresh_local_gateway_key_scope_if_running, restart_after_secret_change, restart_or_rollback,
+    runtime_account_policy, runtime_from_store, sync_account_or_rollback,
+    sync_account_state_if_running, sync_gateway_or_rollback, sync_records_or_rollback,
+    sync_refreshed_account_or_rollback, sync_running_account_states, sync_runtime_account_state,
 };

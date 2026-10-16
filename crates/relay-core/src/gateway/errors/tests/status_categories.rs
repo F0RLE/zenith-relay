@@ -3,6 +3,8 @@ use super::*;
 #[test]
 fn basis_points_access_and_policy_refusals_are_not_quota_errors() {
     for (body, category) in [
+        (br#"{"error":{"code":"basispoints_model_access_changed"}}"#.as_slice(), error_codes::UPSTREAM_MODEL_UNAVAILABLE),
+        (br#"{"error":{"code":"model_not_allowed"}}"#.as_slice(), error_codes::UPSTREAM_MODEL_UNAVAILABLE),
         (b"403: Model access has changed".as_slice(), error_codes::UPSTREAM_MODEL_UNAVAILABLE),
         (br#"{"error":{"code":"insufficient_quota","message":"Model access has changed"}}"#.as_slice(), error_codes::UPSTREAM_MODEL_UNAVAILABLE),
         (b"403: This request was blocked by our usage policy.".as_slice(), error_codes::UPSTREAM_CONTENT_POLICY),
@@ -96,6 +98,11 @@ fn upstream_errors_use_stable_status_and_body_categories() {
             ),
             (
                 StatusCode::BAD_REQUEST,
+                br#"{"error":{"message":"The encrypted content for item rs_synthetic could not be verified. Reason: Encrypted content could not be decrypted or parsed."}}"#.as_slice(),
+                "upstream_encrypted_content_invalid",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
                 br#"{"error":{"message":"Instructions are required"}}"#.as_slice(),
                 "upstream_instructions_required",
             ),
@@ -170,6 +177,11 @@ fn upstream_errors_use_stable_status_and_body_categories() {
                 "upstream_invalid_request",
             ),
             (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                br#"{"error":{"type":"server_error","message":"422: Invalid request body."}}"#.as_slice(),
+                "upstream_invalid_request",
+            ),
+            (
                 StatusCode::BAD_REQUEST,
                 br#"{"error":{"code":"websocket_not_supported"}}"#.as_slice(),
                 "upstream_websocket_unsupported",
@@ -221,19 +233,24 @@ fn deactivated_workspace_detection_requires_the_exact_structured_code() {
 }
 
 #[test]
-fn generic_gateway_rejection_remains_a_candidate_failure() {
+fn generic_gateway_rejection_does_not_cool_or_retry_the_candidate() {
     let value: Value = serde_json::from_slice(
             br#"{"type":"error","error":{"type":"invalid_request_error","code":"invalid_request","message":"Zenith AI request is invalid. Check the model, messages, tools, and parameters."}}"#,
         )
         .unwrap();
 
     let classification = classify_upstream_error_value(StatusCode::BAD_GATEWAY, &value);
-    assert_eq!(classification.category, "upstream_candidate_rejected");
+    assert_eq!(classification.category, "upstream_invalid_request");
     assert_eq!(
         upstream_event_failure_category(Some("error"), &value),
-        Some("upstream_candidate_rejected")
+        Some("upstream_invalid_request")
     );
-    assert!(failure_category_requires_cooldown(classification.category));
+    assert!(!failure_category_requires_cooldown(classification.category));
+    assert!(!retryable_failure(
+        StatusCode::BAD_REQUEST,
+        classification.category,
+        false
+    ));
 }
 
 #[test]

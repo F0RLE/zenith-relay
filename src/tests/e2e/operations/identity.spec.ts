@@ -18,7 +18,7 @@ test("OAuth sign-in exposes only safe recovery actions", async ({ page }) => {
   await expect(dialog.getByRole("button", { name: /Open again in 3 s|Reopen sign-in window/ })).toBeVisible();
   calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.some((call) => call.command === "resume_codex_oauth")).toBe(true);
-  await expect(dialog.locator("input, textarea, details")).toHaveCount(0);
+  await expect(dialog.locator("input:not([type=radio]), textarea, details")).toHaveCount(0);
 });
 
 test("OAuth countdown follows the active locale", async ({ page }) => {
@@ -192,7 +192,8 @@ test("stale local usage and proxy references never expose internal account IDs",
 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("tab", { name: "Proxies" }).click();
-  await expect(page.locator(".proxy-storage-row").first()).toContainText("Unknown account");
+  await page.locator(".proxy-storage-bindings").first().getByText("Accounts: 1", { exact: true }).hover();
+  await expect(page.getByRole("tooltip")).toHaveText("Unknown account");
   await expect(page.getByText("account_deleted_internal", { exact: true })).toHaveCount(0);
 });
 
@@ -331,6 +332,7 @@ test("pool controls delegate an exhausted OAuth account to the backend", async (
   const dialog = page.getByRole("dialog", { name: "Add connections to pool" });
   await dialog.getByText("Personal Plus", { exact: true }).click();
   await dialog.getByRole("button", { name: "Add selected (1)" }).click();
+  await expect(page.getByRole("dialog", { name: "Add a regular account to the pool?", exact: true })).toHaveCount(0);
 
   await page.getByRole("button", { name: "Overview", exact: true }).click();
   const start = page.getByRole("button", { name: "Start API", exact: true });
@@ -351,7 +353,7 @@ test("switch ChatGPT uses the backend system key and relaunches ChatGPT without 
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await connectPoolToChatGPT(page, true);
+  await connectPoolToChatGPT(page);
   const feedback = page.locator(".global-feedback.success");
   await expect(feedback).toContainText("Client launched.");
   const [feedbackBox, shellBox, helpBox] = await Promise.all([
@@ -370,7 +372,7 @@ test("switch ChatGPT uses the backend system key and relaunches ChatGPT without 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   const workflow = calls.filter((call) => ["start_local_gateway", "attach_codex_to_local_gateway", "launch_managed_codex_profile"].includes(call.command));
   expect(workflow.map((call) => call.command)).toEqual(["attach_codex_to_local_gateway", "launch_managed_codex_profile"]);
-  expect(workflow[0].args).toEqual({ boundOauthAccountId: null });
+  expect(workflow[0].args).toEqual({ boundOauthAccountId: null, disableOauthBinding: true });
   await expect(page.getByRole("dialog", { name: "Confirm action" })).toHaveCount(0);
   await expect(feedback).toBeHidden({ timeout: 5_000 });
 });
@@ -400,7 +402,7 @@ test("pool connection launches Codex before waiting for a renderer snapshot", as
       return result;
     };
   });
-  await connectPoolToChatGPT(page, true);
+  await connectPoolToChatGPT(page);
   await expect(page.locator(".global-feedback.success")).toContainText("Client launched.");
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.map((call) => call.command));
   const attachIndex = calls.lastIndexOf("attach_codex_to_local_gateway");

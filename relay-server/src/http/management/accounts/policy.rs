@@ -42,6 +42,10 @@ pub(super) fn apply_account_policies_if_running(
             }
             continue;
         }
+        runtime.update_account_subscription_plan(
+            &account.id,
+            account.subscription.plan_type.as_deref(),
+        );
         if !runtime.update_account_policy(&account.id, policy) {
             return Ok(false);
         }
@@ -56,7 +60,9 @@ fn account_runtime_policy(
     let credential = state
         .vault
         .load(&account.secret_ref)?
-        .and_then(|value| serde_json::from_str::<AccountCredential>(&value).ok());
+        .and_then(|credential_json| {
+            serde_json::from_str::<AccountCredential>(&credential_json).ok()
+        });
     let secret_available = credential.is_some();
     let proxy_available = credential
         .as_ref()
@@ -69,7 +75,12 @@ fn account_runtime_policy(
         zenith_relay_core::QUOTA_STALE_AFTER_MS,
     ));
     Ok(RuntimeCandidatePolicy {
-        enabled: account_candidate_enabled(account.enabled, operational.routing_block_reason),
+        enabled: account_candidate_enabled(account.enabled, operational.routing_block_reason)
+            && credential.as_ref().is_some_and(|credential| {
+                credential
+                    .validate_plan(account.subscription.plan_type.as_deref())
+                    .is_ok()
+            }),
         draining: account.draining,
         priority: account.priority,
         weight: account.weight,
@@ -79,20 +90,23 @@ fn account_runtime_policy(
 }
 
 pub(super) fn account_runtime_policy_changed(
-    previous: &ServerAccountRecord,
-    next: &ServerAccountRecord,
+    previous_account: &ServerAccountRecord,
+    updated_account: &ServerAccountRecord,
 ) -> bool {
-    previous.enabled != next.enabled
-        || previous.draining != next.draining
-        || previous.priority != next.priority
-        || previous.weight != next.weight
-        || previous.allowed_models != next.allowed_models
-        || previous.excluded_models != next.excluded_models
+    previous_account.enabled != updated_account.enabled
+        || previous_account.draining != updated_account.draining
+        || previous_account.priority != updated_account.priority
+        || previous_account.weight != updated_account.weight
+        || previous_account.allowed_models != updated_account.allowed_models
+        || previous_account.excluded_models != updated_account.excluded_models
 }
 
 pub(super) fn account_dispatch_permission_changed(
-    previous: &ServerAccountRecord,
-    next: &ServerAccountRecord,
+    previous_account: &ServerAccountRecord,
+    updated_account: &ServerAccountRecord,
 ) -> bool {
-    pool_dispatch_permission_changed(previous.pool_access(), next.pool_access())
+    pool_dispatch_permission_changed(
+        previous_account.pool_access(),
+        updated_account.pool_access(),
+    )
 }

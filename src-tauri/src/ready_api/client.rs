@@ -38,9 +38,9 @@ pub(super) fn stored_api_key() -> Result<String, String> {
 }
 
 pub(super) async fn api_error_message(response: reqwest::Response, fallback: &str) -> String {
-    let status = response.status();
+    let response_status = response.status();
     let raw_message = match response.json::<Value>().await {
-        Ok(payload) => payload
+        Ok(error_document) => error_document
             .get("error")
             .and_then(|error| {
                 error.as_str().map(str::to_string).or_else(|| {
@@ -51,7 +51,7 @@ pub(super) async fn api_error_message(response: reqwest::Response, fallback: &st
                 })
             })
             .or_else(|| {
-                payload
+                error_document
                     .get("message")
                     .and_then(Value::as_str)
                     .map(str::to_string)
@@ -60,7 +60,7 @@ pub(super) async fn api_error_message(response: reqwest::Response, fallback: &st
         Err(_) => fallback.to_string(),
     };
     let message = sanitize_api_error_message(&raw_message, fallback);
-    format!("{message} ({})", status.as_u16())
+    format!("{message} ({})", response_status.as_u16())
 }
 
 pub(super) fn sanitize_api_error_message(message: &str, fallback: &str) -> String {
@@ -113,17 +113,17 @@ pub(super) fn contains_only_safe_public_support_links(message: &str) -> bool {
     true
 }
 
-pub(super) fn is_safe_public_support_link(value: &str) -> bool {
-    let Ok(url) = Url::parse(value) else {
+pub(super) fn is_safe_public_support_link(url_text: &str) -> bool {
+    let Ok(url) = Url::parse(url_text) else {
         return false;
     };
     if url.scheme() == "https" && url.host_str() == Some("t.me") {
         return url.path() == "/zenith_service_bot";
     }
     if url.scheme() == "tg" && url.host_str() == Some("resolve") {
-        return url
-            .query_pairs()
-            .any(|(key, value)| key == "domain" && value == top_up::BOT_DOMAIN);
+        return url.query_pairs().any(|(query_key, query_value)| {
+            query_key == "domain" && query_value == top_up::BOT_DOMAIN
+        });
     }
     false
 }

@@ -152,12 +152,7 @@ fn empty_context_management_is_omitted_but_non_empty_policy_is_preserved() {
 }
 
 fn const_branches(values: &[Value]) -> Value {
-    Value::Array(
-        values
-            .iter()
-            .map(|value| json!({"const": value, "description": "choice"}))
-            .collect(),
-    )
+    Value::Array(values.iter().map(|value| json!({"const": value})).collect())
 }
 
 #[test]
@@ -314,6 +309,47 @@ fn codex_tool_schema_normalization_reaches_nested_namespace_tools() {
 }
 
 #[test]
+fn codex_tool_schema_normalization_preserves_annotated_choices() {
+    let values: Vec<Value> = (0..8).map(|value| json!(value)).collect();
+    for union_name in ["oneOf", "anyOf"] {
+        for annotation in ["description", "title"] {
+            for existing_enum in [false, true] {
+                let mut branches = const_branches(&values);
+                branches[3][annotation] = json!("Select this choice for a specific operation");
+                let mut choice = json!({"type": "integer"});
+                choice[union_name] = branches;
+                if existing_enum {
+                    choice["enum"] = json!(values);
+                }
+                let mut request = json!({
+                    "tools": [{
+                        "type": "namespace",
+                        "tools": [{
+                            "type": "function",
+                            "name": "lookup",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "choices": {"type": "array", "items": choice}
+                                }
+                            }
+                        }]
+                    }]
+                });
+                let original = request["tools"].clone();
+
+                normalize_account_request(request.as_object_mut().unwrap(), false);
+
+                assert_eq!(
+                    request["tools"], original,
+                    "{union_name}/{annotation}/{existing_enum}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn codex_tool_schema_normalization_preserves_non_pure_or_duplicate_unions() {
     let values: Vec<Value> = (0..8).map(|value| json!(value)).collect();
     let mut request = json!({
@@ -339,6 +375,23 @@ fn codex_tool_schema_normalization_preserves_non_pure_or_duplicate_unions() {
     normalize_account_request(request.as_object_mut().unwrap(), false);
 
     assert_eq!(request["tools"], original);
+}
+
+#[test]
+fn codex_tool_schema_normalization_keeps_numbers_outside_canonical_exponent_bounds() {
+    for number in [
+        "1e9223372036854775808",
+        "1.1e-9223372036854775808",
+        "10e9223372036854775807",
+    ] {
+        let branches: Value = serde_json::from_str(&format!(
+            r#"[{{"const":{number}}},{{"const":2}},{{"const":3}},{{"const":4}},{{"const":5}},{{"const":6}},{{"const":7}},{{"const":8}}]"#,
+        )).unwrap();
+        let mut schema = json!({"oneOf": branches});
+        let original = schema.clone();
+        super::shape::normalize_codex_schema(&mut schema);
+        assert_eq!(schema, original);
+    }
 }
 
 #[test]

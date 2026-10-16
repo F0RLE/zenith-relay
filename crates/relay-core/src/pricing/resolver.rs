@@ -16,8 +16,8 @@ impl PricingCatalog {
         if let Some(price) = provider_price {
             return self.resolved(price, PriceSource::Provider);
         }
-        if let Some(entry) = self.exact_entry(model, pricing_provider) {
-            if let Some(price) = entry.token {
+        if let Some(pricing_entry) = self.exact_entry(model, pricing_provider) {
+            if let Some(price) = pricing_entry.token {
                 return self.resolved(price, PriceSource::LiteLlmExact);
             }
         }
@@ -26,8 +26,8 @@ impl PricingCatalog {
         // that explicit declaration. Neither choice reads a source label or URL.
         let family = Self::official_model_family(model).or(official_provider_family);
         if let Some(family) = family {
-            if let Some(entry) = self.canonical_entry(model, family) {
-                if let Some(price) = entry.token {
+            if let Some(pricing_entry) = self.canonical_entry(model, family) {
+                if let Some(price) = pricing_entry.token {
                     return self.resolved(price, PriceSource::LiteLlmCanonical);
                 }
             }
@@ -44,15 +44,17 @@ impl PricingCatalog {
     /// the unqualified model component, so `xai/grok-4.7` and `grok-4.7` share
     /// one family. Gemini's official catalog namespace is `gemini`.
     fn official_model_family(model: &str) -> Option<&'static str> {
-        let model = super::unqualified(model);
-        if model.starts_with("gpt-") || model.starts_with("chatgpt-") || model.starts_with("codex-")
+        let model_id = super::unqualified(model);
+        if model_id.starts_with("gpt-")
+            || model_id.starts_with("chatgpt-")
+            || model_id.starts_with("codex-")
         {
             Some("openai")
-        } else if model.starts_with("claude-") {
+        } else if model_id.starts_with("claude-") {
             Some("anthropic")
-        } else if model.starts_with("gemini-") {
+        } else if model_id.starts_with("gemini-") {
             Some("gemini")
-        } else if model.starts_with("grok-") {
+        } else if model_id.starts_with("grok-") {
             Some("xai")
         } else {
             None
@@ -63,7 +65,7 @@ impl PricingCatalog {
     pub fn resolve_account(&self, model: &str, provider_family: Option<&str>) -> ResolvedPrice {
         provider_family
             .and_then(|family| self.canonical_entry(model, family))
-            .and_then(|entry| entry.token)
+            .and_then(|pricing_entry| pricing_entry.token)
             .map_or_else(
                 || ResolvedPrice::unpriced(self.metadata()),
                 |price| self.resolved(price, PriceSource::LiteLlmCanonical),
@@ -71,46 +73,49 @@ impl PricingCatalog {
     }
 
     fn exact_entry(&self, model: &str, provider: Option<&str>) -> Option<&CatalogEntry> {
-        let model = super::normalize(model);
+        let normalized_model_id = super::normalize(model);
         if let Some(provider) = provider.map(super::normalize) {
             // Callers may pass either the public bare id or a provider-qualified
             // id. Build the qualified lookup from the unqualified component so
             // both forms address the same LiteLLM record.
-            let qualified = format!("{provider}/{}", super::unqualified(&model));
-            if let Some(entry) = self.unique.get(&qualified) {
-                if entry.provider.as_deref() == Some(provider.as_str()) {
-                    return Some(entry);
+            let qualified = format!("{provider}/{}", super::unqualified(&normalized_model_id));
+            if let Some(pricing_entry) = self.unique.get(&qualified) {
+                if pricing_entry.provider.as_deref() == Some(provider.as_str()) {
+                    return Some(pricing_entry);
                 }
             }
-            if let Some(entry) = self.unique.get(&model) {
-                if entry.provider.as_deref() == Some(provider.as_str()) {
-                    return Some(entry);
+            if let Some(pricing_entry) = self.unique.get(&normalized_model_id) {
+                if pricing_entry.provider.as_deref() == Some(provider.as_str()) {
+                    return Some(pricing_entry);
                 }
             }
-            if let Some(entry) = self.unique.get(&super::unqualified(&model)) {
-                if entry.provider.as_deref() == Some(provider.as_str()) {
-                    return Some(entry);
+            if let Some(pricing_entry) = self.unique.get(&super::unqualified(&normalized_model_id))
+            {
+                if pricing_entry.provider.as_deref() == Some(provider.as_str()) {
+                    return Some(pricing_entry);
                 }
             }
             // A provider was explicitly requested. Do not silently select a
             // similarly named record belonging to another provider.
             return None;
         }
-        self.unique.get(&model)
+        self.unique.get(&normalized_model_id)
     }
 
     fn canonical_entry(&self, model: &str, family: &str) -> Option<&CatalogEntry> {
         // Canonical matching intentionally ignores the input namespace. The
         // declared family below is the authority for which namespace is safe.
-        let model = super::unqualified(model);
-        let family = super::normalize(family);
+        let unqualified_model_id = super::unqualified(model);
+        let normalized_family = super::normalize(family);
         let candidates = self
             .entries
             .values()
-            .filter(|entry| {
-                entry.provider.as_deref() == Some(family.as_str())
-                    && super::unqualified(&entry.model_id) == model
-                    && !self.conflicts.contains(&super::normalize(&entry.model_id))
+            .filter(|candidate_entry| {
+                candidate_entry.provider.as_deref() == Some(normalized_family.as_str())
+                    && super::unqualified(&candidate_entry.model_id) == unqualified_model_id
+                    && !self
+                        .conflicts
+                        .contains(&super::normalize(&candidate_entry.model_id))
             })
             .collect::<Vec<_>>();
         let first = candidates.first().copied()?;

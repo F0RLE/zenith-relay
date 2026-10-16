@@ -22,14 +22,14 @@ fn startup_upgrades_old_gateway_settings_automatically_and_preserves_controls() 
             gateway.max_retry_candidates = 8;
             gateway.chatgpt_retry_until_available = true;
             store.replace_gateway(gateway).unwrap();
-            let mut old = serde_json::to_value(store.gateway()).unwrap();
-            old["cooldownAfterFailures"] = serde_json::json!(0);
-            old["keepLastCandidateAvailable"] = serde_json::json!(false);
-            old["routingStrategy"] = serde_json::json!("quota_highest");
-            old["subscriptionPlanOrder"] = serde_json::json!(["not a valid\nplan"]);
+            let mut legacy_gateway = serde_json::to_value(store.gateway()).unwrap();
+            legacy_gateway["cooldownAfterFailures"] = serde_json::json!(0);
+            legacy_gateway["keepLastCandidateAvailable"] = serde_json::json!(false);
+            legacy_gateway["routingStrategy"] = serde_json::json!("quota_highest");
+            legacy_gateway["subscriptionPlanOrder"] = serde_json::json!(["not a valid\nplan"]);
             store
                 .database
-                .replace_state_json(&[(STATE_GATEWAY, old.to_string())])
+                .replace_state_json(&[(STATE_GATEWAY, legacy_gateway.to_string())])
                 .unwrap();
             drop(store);
             for _ in 0..2 {
@@ -51,13 +51,16 @@ fn startup_upgrades_old_gateway_settings_automatically_and_preserves_controls() 
                         .unwrap(),
                 )
                 .unwrap();
-                for old in [
+                for legacy_field in [
                     "cooldownAfterFailures",
                     "keepLastCandidateAvailable",
                     "routingStrategy",
                     "subscriptionPlanOrder",
                 ] {
-                    assert!(saved.get(old).is_none(), "obsolete {old} was reserialized");
+                    assert!(
+                        saved.get(legacy_field).is_none(),
+                        "obsolete {legacy_field} was reserialized"
+                    );
                 }
             }
             std::fs::remove_dir_all(root).unwrap();
@@ -104,13 +107,16 @@ fn startup_cleans_old_scalars_from_saved_rotation_policy_without_changing_contro
                     .unwrap(),
             )
             .unwrap();
-            for old in [
+            for legacy_field in [
                 "cooldownAfterFailures",
                 "keepLastCandidateAvailable",
                 "routingStrategy",
                 "subscriptionPlanOrder",
             ] {
-                assert!(saved.get(old).is_none(), "obsolete {old} was reserialized");
+                assert!(
+                    saved.get(legacy_field).is_none(),
+                    "obsolete {legacy_field} was reserialized"
+                );
             }
         }
         std::fs::remove_dir_all(root).unwrap();

@@ -13,6 +13,11 @@ const SECOND_TRANSIENT_PACING_MS: u64 = 500;
 const OPEN_BACKOFF_MS: u64 = 2_000;
 const MAX_OPEN_BACKOFF_MS: u64 = 60_000;
 const FAILURE_WINDOW_MS: u64 = 60_000;
+/// Soft health signals decay independently from the hard circuit state.
+pub(crate) const HEALTH_HALF_LIFE_MS: u64 = 10 * 60 * 1_000;
+pub(crate) const HEALTH_EWMA_ALPHA_MILLI: u32 = 250;
+pub(crate) const HEALTH_FAILURE_SWITCH_MARGIN_MILLI: u32 = 200;
+pub(crate) const HEALTH_LATENCY_SWITCH_MARGIN_MILLI: u32 = 250;
 
 mod budget;
 mod engine;

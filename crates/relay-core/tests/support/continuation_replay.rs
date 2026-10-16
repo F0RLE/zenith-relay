@@ -152,7 +152,7 @@ async fn websocket_continuation_replays_to_another_candidate_after_owner_quota()
             json!({"type": "response.output_text.delta", "delta": "first"}),
             json!({
                 "type": "response.completed",
-                "response": {"id": "owner-response", "output": [{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"first"}]}]}
+                "response": {"id": "owner-response", "status": "completed", "output": [{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"first"}]}]}
             }),
         ],
         vec![json!({
@@ -274,7 +274,7 @@ async fn websocket_continuation_replays_on_the_same_connection_when_another_chat
             json!({"type": "response.output_text.delta", "delta": "first"}),
             json!({
                 "type": "response.completed",
-                "response": {"id": "owner-response", "output": [{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"first"}]}]}
+                "response": {"id": "owner-response", "status": "completed", "output": [{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"first"}]}]}
             }),
         ])))
         .await;
@@ -715,7 +715,7 @@ async fn orphaned_websocket_response_is_rejected_without_materialized_history() 
                 json!({"type": "response.output_text.delta", "delta": "fresh"}),
                 json!({
                     "type": "response.completed",
-                    "response": {"id": "fresh-ws-response"}
+                    "response": {"id": "fresh-ws-response", "status": "completed", "output": []}
                 }),
             ],
         ])))),
@@ -810,7 +810,7 @@ async fn assert_stale_websocket_continuation(reconnect: bool) {
         WebSocketBehavior::Sequence(Arc::new(Mutex::new(VecDeque::from(vec![
             vec![
                 json!({"type": "response.output_text.delta", "delta": "owner"}),
-                json!({"type": "response.completed", "response": {"id": "stale-ws-response", "output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"owner"}]}]}}),
+                json!({"type": "response.completed", "response": {"id": "stale-ws-response", "status": "completed", "output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"owner"}]}]}}),
             ],
             vec![json!({
                 "type": "error",
@@ -823,7 +823,7 @@ async fn assert_stale_websocket_continuation(reconnect: bool) {
             })],
             vec![
                 json!({"type": "response.output_text.delta", "delta": "recovered"}),
-                json!({"type": "response.completed", "response": {"id": "recovered-ws-response"}}),
+                json!({"type": "response.completed", "response": {"id": "recovered-ws-response", "status": "completed", "output": []}}),
             ],
         ])))),
     )

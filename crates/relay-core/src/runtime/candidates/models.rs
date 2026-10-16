@@ -17,11 +17,16 @@ impl GatewayRuntime {
             return false;
         };
         let configured_models = normalized_set(models.iter());
-        let image_main_model = select_image_main_model_with_catalog(
-            &configured_models,
-            self.image_base_model.as_deref(),
-            self.image_pricing_catalog.as_deref(),
-        );
+        let image_main_model = (account.oauth_client_kind
+            == crate::providers::chatgpt::OAuthClientKind::Codex)
+            .then(|| {
+                select_image_main_model_with_catalog(
+                    &configured_models,
+                    self.image_base_model.as_deref(),
+                    self.image_pricing_catalog.as_deref(),
+                )
+            })
+            .flatten();
         let mut candidate_models = configured_models.clone();
         let mut published_models = models.to_vec();
         if image_main_model.is_some() {

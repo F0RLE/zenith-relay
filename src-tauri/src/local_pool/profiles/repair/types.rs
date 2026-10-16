@@ -91,7 +91,7 @@ pub(super) struct SessionMeta {
     pub(super) start: u64,
     pub(super) end: u64,
     pub(super) separator: Vec<u8>,
-    pub(super) value: Value,
+    pub(super) session_record: Value,
 }
 
 #[derive(Deserialize, Serialize)]
