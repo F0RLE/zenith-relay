@@ -1,5 +1,5 @@
+use super::prepare::PreparedAccountDelete;
 use crate::local_pool::accounts::credentials::{CredentialStore, StoredCodexCredentials};
-use crate::local_pool::accounts::proxy::ProxyPool;
 use crate::local_pool::accounts::NativeSecretBackend;
 use crate::local_pool::commands::current_time_ms;
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result as LocalResult};
@@ -48,24 +48,28 @@ pub(super) fn restore_credential_local(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(in crate::local_pool::accounts) fn rollback_deleted_account_side_effects(
     state: &DesktopState,
     credential_store: &CredentialStore<NativeSecretBackend>,
-    old_credential: Option<&StoredCodexCredentials>,
-    previous_wake: zenith_relay_core::automations::WakeCoordinator,
-    old_automations: AutomationRecords,
-    restored_bindings: &[codex::ProfileBinding],
-    previous_proxy_pool: Option<&ProxyPool>,
+    prepared: &PreparedAccountDelete,
     cause: &LocalPoolError,
 ) -> LocalResult<()> {
-    restore_credential_local(credential_store, old_credential, cause)?;
+    let previous_credentials = prepared.old_credential.as_ref();
+    restore_credential_local(credential_store, previous_credentials, cause)?;
     state.store()?.notify_refresh_changed();
     state
-        .restore_wake(previous_wake, old_automations)
+        .restore_wake(
+            prepared.previous_wake.clone(),
+            prepared.old_automations.clone(),
+        )
         .map_err(|error| recovery_after_delete(cause, "wake state", error))?;
-    reattach_account_profiles(state, restored_bindings, old_credential, cause)?;
-    if let Some(pool) = previous_proxy_pool {
+    reattach_account_profiles(
+        state,
+        &prepared.restored_bindings,
+        previous_credentials,
+        cause,
+    )?;
+    if let Some(pool) = prepared.previous_proxy_pool.as_ref() {
         pool.save()
             .map_err(|error| recovery_after_delete(cause, "proxy assignment", error))?;
     }

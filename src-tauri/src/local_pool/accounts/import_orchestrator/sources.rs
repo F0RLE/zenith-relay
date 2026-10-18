@@ -8,7 +8,7 @@ pub(crate) use identity::{
     find_existing_source, imported_source_base_url, imported_source_wire_api,
 };
 pub(crate) use persist::persist_imported_source;
-pub(crate) use record::imported_source_record;
+pub(crate) use record::{imported_source_record, ImportedSourceRecordInput};
 
 use super::{ImportItemError, ItemResult};
 use crate::local_pool::models::ProviderSourceRecord;
@@ -100,7 +100,7 @@ pub(crate) async fn import_source_item(
             &mut detected_model_prices,
         );
         (detected_model_prices, protocol_bindings)
-    } else if !runtime_source.models.is_empty() {
+    } else {
         (
             existing
                 .as_ref()
@@ -111,22 +111,17 @@ pub(crate) async fn import_source_item(
                 .map(|source| source.protocol_bindings.clone())
                 .unwrap_or_default(),
         )
-    } else {
-        return Err(ImportItemError::new(
-            error_codes::MODELS_REQUIRED,
-            "models are required when discovery is disabled",
-        ));
     };
-    let mut imported_source = imported_source_record(
-        &import_item,
+    let mut imported_source = imported_source_record(ImportedSourceRecordInput {
+        import_item: &import_item,
         runtime_source,
         secret_ref,
-        existing.as_ref(),
+        existing: existing.as_ref(),
         protocol_config,
         protocol_bindings,
         detected_model_prices,
-        discover_models.then(|| Utc::now().to_rfc3339()),
-    );
+        tested_at: discover_models.then(|| Utc::now().to_rfc3339()),
+    });
     imported_source.in_pool |= add_to_pool;
     imported_source.validate_protocol_bindings().map_err(|_| {
         ImportItemError::new(

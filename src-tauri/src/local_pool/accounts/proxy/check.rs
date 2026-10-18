@@ -10,6 +10,8 @@ const CHECK_URL: &str = "https://www.cloudflare.com/cdn-cgi/trace";
 const MAX_RESPONSE_BYTES: usize = 4_096;
 static CHECK_LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
+mod location;
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyCheckResult {
@@ -18,6 +20,8 @@ pub struct ProxyCheckResult {
     pub elapsed_ms: u64,
     pub ip: Option<IpAddr>,
     pub country_code: Option<String>,
+    #[serde(default)]
+    pub timezone: Option<String>,
     pub error_code: Option<String>,
 }
 
@@ -27,10 +31,15 @@ pub async fn check(proxy_id: String, proxy: &ProxyConfig, checked_at_ms: u64) ->
         .await
         .expect("proxy check limiter is never closed");
     let started = Instant::now();
-    let check_result = proxy_check_request(proxy, CHECK_URL, Duration::from_secs(12)).await;
-    let (ip, country_code, error_code) = match check_result {
-        Ok((ip, country)) => (Some(ip), country, None),
-        Err(code) => (None, None, Some(code.to_owned())),
+    let check_result = location::lookup(proxy, Duration::from_secs(12)).await;
+    let (ip, country_code, timezone, error_code) = match check_result {
+        Ok(location) => (
+            Some(location.ip),
+            location.country_code,
+            location.timezone,
+            None,
+        ),
+        Err(code) => (None, None, None, Some(code.to_owned())),
     };
     ProxyCheckResult {
         proxy_id,
@@ -38,6 +47,7 @@ pub async fn check(proxy_id: String, proxy: &ProxyConfig, checked_at_ms: u64) ->
         elapsed_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
         ip,
         country_code,
+        timezone,
         error_code,
     }
 }
@@ -47,6 +57,14 @@ async fn proxy_check_request(
     url: &str,
     timeout: Duration,
 ) -> Result<(IpAddr, Option<String>), &'static str> {
+    parse_trace(&proxy_check_body(proxy, url, timeout).await?)
+}
+
+async fn proxy_check_body(
+    proxy: &ProxyConfig,
+    url: &str,
+    timeout: Duration,
+) -> Result<Vec<u8>, &'static str> {
     // Do not inherit environment proxies, follow redirects, or retry directly.
     // Only the chosen proxy receives its credentials; no account/API key is used.
     let client = proxy
@@ -86,7 +104,7 @@ async fn proxy_check_request(
         response_bytes.extend_from_slice(&chunk);
     }
     drop(permit);
-    parse_trace(&response_bytes)
+    Ok(response_bytes)
 }
 
 fn classify_error(error: reqwest::Error) -> &'static str {

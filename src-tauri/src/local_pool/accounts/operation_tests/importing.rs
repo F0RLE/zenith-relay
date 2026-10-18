@@ -433,16 +433,16 @@ fn api_key_auth_json_builds_a_safe_default_responses_source() {
         proxy_url: None,
     };
     runtime.validate().unwrap();
-    let source = imported_source_record(
-        &item,
-        runtime,
-        "source:source_test".into(),
-        None,
-        Default::default(),
-        Default::default(),
-        Default::default(),
-        None,
-    );
+    let source = imported_source_record(ImportedSourceRecordInput {
+        import_item: &item,
+        runtime_source: runtime,
+        secret_ref: "source:source_test".into(),
+        existing: None,
+        protocol_config: Default::default(),
+        protocol_bindings: Default::default(),
+        detected_model_prices: Default::default(),
+        tested_at: None,
+    });
     let serialized = serde_json::to_string(&ImportItemResult::source_success(
         item.item_id,
         source.clone(),
@@ -512,16 +512,16 @@ fn source_duplicate_identity_updates_the_existing_local_record() {
         cache_write_ttl: Default::default(),
         model_ids: vec!["new-model".into()],
     }];
-    let updated = imported_source_record(
-        &item,
-        runtime,
-        existing.secret_ref.clone(),
-        Some(&existing),
-        existing.protocol_config.clone(),
-        discovered_bindings.clone(),
-        existing.detected_model_prices.clone(),
-        None,
-    );
+    let updated = imported_source_record(ImportedSourceRecordInput {
+        import_item: &item,
+        runtime_source: runtime,
+        secret_ref: existing.secret_ref.clone(),
+        existing: Some(&existing),
+        protocol_config: existing.protocol_config.clone(),
+        protocol_bindings: discovered_bindings.clone(),
+        detected_model_prices: existing.detected_model_prices.clone(),
+        tested_at: None,
+    });
 
     assert_eq!(updated.id, existing.id);
     assert_eq!(updated.name, existing.name);

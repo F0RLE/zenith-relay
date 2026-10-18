@@ -97,6 +97,24 @@ impl ProxyPool {
         {
             return false;
         }
+        let mut result = result;
+        result.timezone = result.timezone.take().and_then(|timezone| {
+            zenith_relay_core::normalize_timezone(Some(timezone))
+                .ok()
+                .flatten()
+        });
+        if result.error_code.is_some() || result.ip.is_none() {
+            result.timezone = None;
+        }
+        if result.error_code.is_none() && result.ip.is_some() {
+            if let Some(timezone) = &result.timezone {
+                stored_proxy.timezone = Some(timezone.clone());
+            } else if stored_proxy.last_check.as_ref().and_then(|check| check.ip) != result.ip {
+                // An observed exit change invalidates its old zone. A failed
+                // geolocation must not assign a guessed or stale timezone.
+                stored_proxy.timezone = None;
+            }
+        }
         stored_proxy.last_check = Some(result);
         true
     }
@@ -224,6 +242,9 @@ impl ProxyPool {
         }
     }
 }
+
+#[cfg(test)]
+mod checks;
 
 fn proxy_endpoint(proxy_url: &str) -> String {
     let Ok(url) = Url::parse(proxy_url) else {

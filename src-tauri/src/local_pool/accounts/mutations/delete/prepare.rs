@@ -107,12 +107,13 @@ pub(super) async fn acquire_delete_credential_guards(
     Ok(guards)
 }
 
-pub(super) struct PreparedAccountDelete {
-    pub(super) old_credential: Option<StoredCodexCredentials>,
-    pub(super) previous_wake: zenith_relay_core::automations::WakeCoordinator,
-    pub(super) old_automations: AutomationRecords,
-    pub(super) restored_bindings: Vec<codex::ProfileBinding>,
-    pub(super) previous_proxy_pool: Option<ProxyPool>,
+pub(in crate::local_pool::accounts) struct PreparedAccountDelete {
+    pub(in crate::local_pool::accounts) old_credential: Option<StoredCodexCredentials>,
+    pub(in crate::local_pool::accounts) previous_wake:
+        zenith_relay_core::automations::WakeCoordinator,
+    pub(in crate::local_pool::accounts) old_automations: AutomationRecords,
+    pub(in crate::local_pool::accounts) restored_bindings: Vec<codex::ProfileBinding>,
+    pub(in crate::local_pool::accounts) previous_proxy_pool: Option<ProxyPool>,
 }
 
 pub(super) async fn prepare_delete_local_account(
@@ -174,33 +175,20 @@ async fn prepare_account_removal(
             }
             Err(error) => return Err(error),
         };
+    let mut prepared = PreparedAccountDelete {
+        old_credential,
+        previous_wake,
+        old_automations,
+        restored_bindings,
+        previous_proxy_pool: None,
+    };
     if let Err(error) = state.remove_pending_wakes_for_account(account_id) {
-        return rollback_failed_delete_step(
-            state,
-            credentials,
-            old_credential.as_ref(),
-            previous_wake,
-            old_automations,
-            &restored_bindings,
-            None,
-            error,
-        )
-        .await;
+        return rollback_failed_delete_step(state, credentials, &prepared, error).await;
     }
-    let previous_proxy_pool = match release_account_proxy(account_id) {
-        Ok(previous_account) => previous_account,
+    prepared.previous_proxy_pool = match release_account_proxy(account_id) {
+        Ok(previous_pool) => previous_pool,
         Err(error) => {
-            return rollback_failed_delete_step(
-                state,
-                credentials,
-                old_credential.as_ref(),
-                previous_wake,
-                old_automations,
-                &restored_bindings,
-                None,
-                error,
-            )
-            .await;
+            return rollback_failed_delete_step(state, credentials, &prepared, error).await;
         }
     };
     let credential_result = if delete_credentials {
@@ -211,25 +199,9 @@ async fn prepare_account_removal(
         Ok(())
     };
     if let Err(error) = credential_result {
-        return rollback_failed_delete_step(
-            state,
-            credentials,
-            old_credential.as_ref(),
-            previous_wake,
-            old_automations,
-            &restored_bindings,
-            previous_proxy_pool.as_ref(),
-            error,
-        )
-        .await;
+        return rollback_failed_delete_step(state, credentials, &prepared, error).await;
     }
-    Ok(PreparedAccountDelete {
-        old_credential,
-        previous_wake,
-        old_automations,
-        restored_bindings,
-        previous_proxy_pool,
-    })
+    Ok(prepared)
 }
 
 /// Keep the dispatch fence held until an incomplete delete rollback has
@@ -245,29 +217,15 @@ pub(super) async fn ensure_delete_rollback_or_fail_closed(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn rollback_failed_delete_step(
     state: &DesktopState,
     credentials: &CredentialStore<NativeSecretBackend>,
-    old_credential: Option<&StoredCodexCredentials>,
-    previous_wake: zenith_relay_core::automations::WakeCoordinator,
-    old_automations: AutomationRecords,
-    restored_bindings: &[codex::ProfileBinding],
-    previous_proxy_pool: Option<&ProxyPool>,
+    prepared: &PreparedAccountDelete,
     error: LocalPoolError,
 ) -> LocalResult<PreparedAccountDelete> {
     ensure_delete_rollback_or_fail_closed(
         state,
-        rollback_deleted_account_side_effects(
-            state,
-            credentials,
-            old_credential,
-            previous_wake,
-            old_automations,
-            restored_bindings,
-            previous_proxy_pool,
-            &error,
-        ),
+        rollback_prepared_delete(state, credentials, prepared, &error),
     )
     .await?;
     Err(error)
@@ -279,16 +237,7 @@ pub(super) fn rollback_prepared_delete(
     deleted: &PreparedAccountDelete,
     cause: &LocalPoolError,
 ) -> LocalResult<()> {
-    rollback_deleted_account_side_effects(
-        state,
-        credentials,
-        deleted.old_credential.as_ref(),
-        deleted.previous_wake.clone(),
-        deleted.old_automations.clone(),
-        &deleted.restored_bindings,
-        deleted.previous_proxy_pool.as_ref(),
-        cause,
-    )
+    rollback_deleted_account_side_effects(state, credentials, deleted, cause)
 }
 
 #[allow(clippy::too_many_arguments)]

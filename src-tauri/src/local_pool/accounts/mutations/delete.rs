@@ -23,13 +23,15 @@ mod cleanup;
 mod prepare;
 pub(crate) mod trash;
 pub(in crate::local_pool::accounts) use prepare::ensure_accounts_exist;
+#[cfg(test)]
+use prepare::rollback_prepared_delete;
+#[cfg(test)]
+pub(in crate::local_pool::accounts) use prepare::PreparedAccountDelete;
 use prepare::{
     acquire_delete_credential_guards, delete_local_account_inner,
     ensure_accounts_not_in_ownership_operation, ensure_delete_rollback_or_fail_closed,
     prepare_delete_local_account, rollback_batch_delete,
 };
-#[cfg(test)]
-use prepare::{rollback_prepared_delete, PreparedAccountDelete};
 
 pub(in crate::local_pool::accounts) use cleanup::{
     prune_account_task_selectors, restore_bound_account_profiles,

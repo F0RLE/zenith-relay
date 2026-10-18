@@ -17,14 +17,7 @@ pub(super) async fn codex_release_loop(_app: AppHandle) {
     loop {
         match refresh_codex_client_release().await {
             Ok(release) => {
-                if !configure_codex_client_version(release.version()) {
-                    crate::diagnostics::record_error(
-                        "background-codex-release",
-                        Some("configure_failed"),
-                        "published Codex release could not be applied",
-                        &[],
-                    );
-                }
+                let _ = configure_codex_client_version(release.version());
             }
             Err(error) => crate::diagnostics::record_error(
                 "background-codex-release",

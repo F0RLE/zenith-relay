@@ -12,6 +12,7 @@ use std::collections::HashSet;
 use tauri::State;
 
 mod apply;
+mod timezone;
 mod types;
 
 pub(crate) use apply::set_account_proxy_inner;
@@ -73,12 +74,18 @@ pub async fn check_local_stored_proxy(
         let pool = ProxyPool::load()?;
         (pool.config(&proxy_id)?, pool.stored_url(&proxy_id)?)
     };
-    let result =
+    let mut result =
         crate::local_pool::accounts::proxy::check::check(proxy_id, &proxy, current_time_ms()).await;
     let _mutation = state.setup_guard().await;
     let mut pool = ProxyPool::load()?;
+    let previous_timezone = pool.timezone(&result.proxy_id).ok().flatten();
     if pool.record_check(&expected_url, result.clone()) {
-        pool.save()?;
+        if pool.timezone(&result.proxy_id)? != previous_timezone {
+            timezone::save_pool(&state, &pool, &result.proxy_id).await?;
+        } else {
+            pool.save()?;
+        }
+        result.timezone = pool.timezone(&result.proxy_id)?;
     }
     Ok(result)
 }
@@ -140,34 +147,12 @@ pub async fn set_local_stored_proxy_timezone(
     state: State<'_, DesktopState>,
 ) -> std::result::Result<ProxyPoolSummary, CommandError> {
     let _mutation = state.setup_guard().await;
-    let credentials = CredentialStore::from_backend(NativeSecretBackend);
-    let old_pool = load_reconciled_pool(&state, &credentials)?;
-    let mut pool = old_pool.clone();
+    let mut pool = ProxyPool::load()?;
     let changed = pool.set_timezone(input.proxy_id.trim(), input.timezone)?;
     if !changed {
         return Ok(pool.summary());
     }
-    let settings = state.store()?.gateway().clone();
-    let common_proxy_id = common_proxy_pool_id(&settings, &pool);
-    let mut affected_accounts = Vec::new();
-    for account in state.store()?.accounts() {
-        if let Some(secret) = credentials
-            .load(&account.account.id)
-            .map_err(crate::local_pool::accounts::credentials::credential_invalid_state_error)?
-        {
-            if account_proxy_pool_id(&pool, &secret, common_proxy_id.as_deref()).as_deref()
-                == Some(input.proxy_id.trim())
-            {
-                affected_accounts.push(account.account.id.clone());
-            }
-        }
-    }
-    let runtime = state.gateway.runtime().await;
-    let _dispatch_fences = fence_runtime_candidates(runtime.as_deref(), &affected_accounts, &[]);
-    pool.save()?;
-    if let Err(error) = restart_or_rollback(&state, move || old_pool.save()).await {
-        return Err(error.into());
-    }
+    timezone::save_pool(&state, &pool, input.proxy_id.trim()).await?;
     Ok(pool.summary())
 }
 

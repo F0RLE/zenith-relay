@@ -364,11 +364,13 @@ fn failed_delete_restores_credentials_quota_and_profile_binding() {
     rollback_deleted_account_side_effects(
         &state,
         &credentials,
-        Some(&stored),
-        previous_wake,
-        old_automations,
-        &restored,
-        None,
+        &crate::local_pool::accounts::mutations::delete::PreparedAccountDelete {
+            old_credential: Some(stored.clone()),
+            previous_wake,
+            old_automations,
+            restored_bindings: restored,
+            previous_proxy_pool: None,
+        },
         &LocalPoolError::new(ErrorCode::Io, "injected delete failure"),
     )
     .unwrap();
