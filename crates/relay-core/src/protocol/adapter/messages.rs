@@ -1,7 +1,8 @@
 use super::contracts::{
-    AdapterError, AdapterResult, MessagesBridgeRequest, MessagesBridgeResponse,
-    MessagesBridgeState, MessagesReasoningMode,
+    AdapterContinuationState, AdapterError, AdapterResult, MessagesReasoningMode,
+    TranslatedResponse,
 };
+use super::translation::TranslationRequest;
 use serde_json::Value;
 
 /// Content extensions understood by the Messages response codec.

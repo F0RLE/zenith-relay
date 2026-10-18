@@ -8,6 +8,7 @@ use serde::Deserialize;
 /// first token.
 pub(in crate::gateway) struct FastResponseDelta {
     pub(in crate::gateway) output_index: Option<u64>,
+    pub(in crate::gateway) sequence_number: Option<u64>,
     pub(in crate::gateway) nonempty_text: bool,
 }
 
@@ -38,6 +39,7 @@ pub(in crate::gateway) fn fast_response_delta_json(
     }
     Some(FastResponseDelta {
         output_index: parsed.output_index,
+        sequence_number: parsed.sequence_number,
         nonempty_text: parsed
             .delta_text
             .is_some_and(|delta_text| !delta_text.is_empty()),
@@ -59,6 +61,8 @@ struct FastDeltaBody<'a> {
     delta_text: Option<&'a str>,
     #[serde(default)]
     output_index: Option<u64>,
+    #[serde(default)]
+    sequence_number: Option<u64>,
     #[serde(default)]
     usage: Option<IgnoredAny>,
     #[serde(default, rename = "usageMetadata")]

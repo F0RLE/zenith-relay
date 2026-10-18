@@ -15,6 +15,8 @@ use std::time::Duration;
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TOOLS: usize = 1024;
 
+pub(super) mod discovery;
+
 fn failure(code: &str, parameter: Option<&str>) -> Bytes {
     let message = if parameter == Some("output.run_officejs.args.schema") {
         crate::AdapterError::upstream_tool_arguments_invalid().message()
@@ -22,6 +24,13 @@ fn failure(code: &str, parameter: Option<&str>) -> Bytes {
         "Basis Points stream could not be completed safely"
     };
     let mut body = json!({"type":"error","error":{"code":code,"message":message}});
+    if matches!(
+        code,
+        crate::error_codes::ADAPTER_UPSTREAM_RESPONSE_INVALID
+            | crate::error_codes::ADAPTER_UPSTREAM_STREAM_INVALID
+    ) {
+        body["error"]["type"] = json!("relay_adapter");
+    }
     if let Some(parameter) = parameter {
         body["error"]["param"] = json!(parameter);
         // The bounded diagnostics store preserves the message, not arbitrary

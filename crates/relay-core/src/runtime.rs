@@ -143,7 +143,7 @@ pub struct GatewayRuntime {
     model_display_order: Mutex<Vec<String>>,
     model_metadata_catalog: Option<ModelMetadataCatalogHandle>,
     passive_quotas: Mutex<BTreeMap<String, PassiveQuotaState>>,
-    messages_bridge_store: Mutex<crate::MessagesBridgeStore>,
+    adapter_continuation_store: Mutex<crate::AdapterContinuationStore>,
     native_responses_replay_store: Mutex<NativeResponsesReplayStore>,
     cache_context_store: cache_context::CacheContextStore,
     codex_turn_state_store: CodexTurnStateStore,
@@ -210,7 +210,7 @@ struct ChatGptAccountExecutor {
     chatgpt_account_id: String,
     chatgpt_user_id: Option<String>,
     basis_points_headers: Option<crate::providers::chatgpt::BasisPointsCapturedHeaders>,
-    proxy_timezone: Option<String>,
+    proxy_timezone: RwLock<Option<String>>,
     identity: CodexIdentityEnvelope,
     responses_url: Url,
     basis_points_url: Url,
@@ -317,6 +317,7 @@ pub(crate) enum AuthorizationIncarnation {
 pub(crate) struct AuthorizedResponse {
     pub(crate) response: reqwest::Response,
     pub(crate) account_token_generation: Option<u64>,
+    pub(crate) authorization_incarnation: AuthorizationIncarnation,
 }
 
 #[derive(Debug)]

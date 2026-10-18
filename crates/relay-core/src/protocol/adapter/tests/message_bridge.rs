@@ -139,7 +139,7 @@ fn messages_stream_bridge_emits_responses_tool_events_and_completion() {
         None,
     )
     .unwrap();
-    let mut bridge = MessagesStreamBridge::new(request);
+    let mut bridge = TranslationStream::new(request);
     bridge.push(
         br#"event: message_start
 data: {"type":"message_start","message":{"id":"msg_stream","usage":{"input_tokens":4,"output_tokens":0}}}
@@ -188,7 +188,7 @@ fn messages_stream_bridge_emits_custom_tool_events_and_completion() {
         None,
     )
     .unwrap();
-    let mut bridge = MessagesStreamBridge::new(request);
+    let mut bridge = TranslationStream::new(request);
     bridge.push(
         br#"event: message_start
 data: {"type":"message_start","message":{"id":"msg_custom_stream","usage":{"input_tokens":4,"output_tokens":0}}}
@@ -294,7 +294,7 @@ fn messages_bridge_accepts_empty_refusal_in_json_and_stream() {
     assert!(json.response_body["incomplete_details"].is_null());
     assert!(!json.continuation.is_reusable());
 
-    let mut stream = MessagesStreamBridge::new(make_request(true));
+    let mut stream = TranslationStream::new(make_request(true));
     for event in [
         json!({"type":"message_start","message":{"id":"msg_empty_refusal","usage":{"input_tokens":2}}}),
         json!({"type":"message_delta","delta":{"stop_reason":"refusal"},"usage":{"output_tokens":1}}),
@@ -327,7 +327,7 @@ fn messages_stream_bridge_emits_text_done_and_accepts_metadata_events() {
         None,
     )
     .unwrap();
-    let mut bridge = MessagesStreamBridge::new(request);
+    let mut bridge = TranslationStream::new(request);
     bridge.push(
         br#"event: message_start
 data: {"type":"message_start","message":{"id":"msg_text","usage":{"input_tokens":1}}}
@@ -372,7 +372,7 @@ fn messages_stream_bridge_keeps_text_tool_text_order_and_response_item_ids() {
         None,
     )
     .unwrap();
-    let mut bridge = MessagesStreamBridge::new(request);
+    let mut bridge = TranslationStream::new(request);
     bridge.push(
         br#"data: {"type":"message_start","message":{"id":"msg_interleaved"}}
 
@@ -466,7 +466,7 @@ fn messages_stream_bridge_rejects_unclosed_blocks_before_message_stop() {
         None,
     )
     .unwrap();
-    let mut bridge = MessagesStreamBridge::new(request);
+    let mut bridge = TranslationStream::new(request);
     bridge.push(
         br#"data: {"type":"message_start","message":{"id":"msg_incomplete"}}
 
@@ -495,7 +495,7 @@ fn messages_stream_bridge_preserves_initial_and_incremental_thinking_signature()
         None,
     )
     .unwrap();
-    let mut bridge = MessagesStreamBridge::new(request);
+    let mut bridge = TranslationStream::new(request);
     bridge.push(
         br#"data: {"type":"message_start","message":{"id":"msg_thinking"}}
 

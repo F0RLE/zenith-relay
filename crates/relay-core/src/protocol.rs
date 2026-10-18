@@ -7,13 +7,14 @@ pub(crate) mod sse;
 mod version;
 
 pub use account_trash::TrashedAccountSummary;
+pub use adapter::AdapterStreamBridge;
 pub use adapter::{
     bridged_response_id, bridged_response_id_scoped, prepare_responses_to_messages,
-    prepare_responses_to_messages_scoped, translate_messages_response, AdapterError,
-    AdapterRequestContext, AdapterResponse, AdapterResult, GeminiBridgeRequest,
-    GeminiBridgeResponse, MessagesBridgeRequest, MessagesBridgeResponse, MessagesBridgeState,
-    MessagesBridgeStore, MessagesReasoningMode, MessagesStreamBridge, NativeResponsesReplayState,
-    NativeResponsesReplayStore, PreparedAdapterRequest, SourceAdapter, UpstreamProtocol,
+    prepare_responses_to_messages_scoped, translate_messages_response, AdapterContinuationState,
+    AdapterContinuationStore, AdapterError, AdapterRequestContext, AdapterResponse, AdapterResult,
+    MessagesReasoningMode, NativeResponsesReplayState, NativeResponsesReplayStore,
+    PreparedAdapterRequest, SourceAdapter, TranslatedResponse, TranslationRequest,
+    TranslationStream, UpstreamProtocol,
 };
 pub(crate) use adapter::{
     candidate_incomplete_reason, ensure_compaction_trigger, gemini_incomplete,
@@ -21,7 +22,6 @@ pub(crate) use adapter::{
     remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
     repair_custom_tool_item_ids, wrap_compaction_response_bytes, BridgedCompaction,
 };
-pub use adapter::{AdapterStreamBridge, GeminiStreamBridge};
 pub use capabilities::{Capabilities, Feature, CURRENT_PROTOCOL_VERSION};
 #[cfg(test)]
 pub use management::pool_model_summaries;

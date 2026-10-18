@@ -1,13 +1,13 @@
 //! Portable Responses history and restoration of provider-owned assistant turns.
 
-use super::{request_tool_catalog, AdapterError, AdapterResult, MessagesBridgeState};
+use super::{request_tool_catalog, AdapterContinuationState, AdapterError, AdapterResult};
 use crate::WireApi;
 use serde_json::Value;
 use std::borrow::Cow;
 
 pub(super) fn prepare_request<'a>(
     request: &'a Value,
-    previous: Option<&MessagesBridgeState>,
+    previous: Option<&AdapterContinuationState>,
     model: &str,
 ) -> AdapterResult<Cow<'a, Value>> {
     if request
@@ -96,7 +96,7 @@ fn has_ciphertext(item: &Value) -> bool {
             .is_some_and(|value| !value.is_null())
 }
 
-impl MessagesBridgeState {
+impl AdapterContinuationState {
     pub(crate) fn history_key(&self) -> Option<&str> {
         self.history_key.as_deref()
     }

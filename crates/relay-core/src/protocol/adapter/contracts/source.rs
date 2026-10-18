@@ -1,6 +1,7 @@
 use super::super::messages;
 use super::{
-    AdapterError, AdapterResult, MessagesBridgeState, MessagesReasoningMode, PreparedAdapterRequest,
+    AdapterContinuationState, AdapterError, AdapterResult, MessagesReasoningMode,
+    PreparedAdapterRequest,
 };
 use crate::{CacheWriteTtl, WireApi};
 use serde::{Deserialize, Serialize};
@@ -64,7 +65,7 @@ pub struct AdapterRequestContext<'a> {
     pub stream: bool,
     pub reasoning_mode: MessagesReasoningMode,
     pub cache_write_ttl: CacheWriteTtl,
-    pub previous: Option<MessagesBridgeState>,
+    pub previous: Option<AdapterContinuationState>,
     pub response_scope: &'a str,
     pub response_id_seed: &'a str,
 }

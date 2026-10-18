@@ -328,6 +328,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             reasoning_effort,
             tool_use,
             request_id: &request_id,
+            original_request: &request,
             requested_model: &requested_model,
             resolved_model: &resolved_model,
             client_headers: &client_headers,

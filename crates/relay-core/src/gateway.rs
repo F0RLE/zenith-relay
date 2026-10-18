@@ -156,7 +156,10 @@ async fn method_not_allowed() -> Response<Body> {
 }
 
 #[cfg(test)]
-mod test_support {
+pub(crate) mod test_support {
+    pub(crate) fn basis_points_stream(body: &[u8]) -> Vec<u8> {
+        super::execution::basis_points::synthetic_stream(body).expect("synthetic test response")
+    }
     use crate::runtime::DefaultServiceTier;
     use crate::{ToolUseDiagnostics, UsageEvent};
 

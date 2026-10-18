@@ -3,7 +3,7 @@ use super::*;
 fn prepare_history(
     upstream: WireApi,
     request: &Value,
-    previous: Option<MessagesBridgeState>,
+    previous: Option<AdapterContinuationState>,
 ) -> AdapterResult<PreparedAdapterRequest> {
     SourceAdapter::between(WireApi::Responses, upstream)
         .unwrap()
@@ -67,7 +67,7 @@ fn full_responses_history_restores_native_tool_state_on_each_bridge() {
             .unwrap()
             .unwrap();
         let (_, state) = response.continuation().unwrap();
-        let mut store = MessagesBridgeStore::new(8, 1_000);
+        let mut store = AdapterContinuationStore::new(8, 1_000);
         store.insert(
             "key",
             response.response_id(),
@@ -165,7 +165,7 @@ fn streamed_custom_tool_full_history_restores_native_gemini_parts() {
     }
     bridge.finish();
     let response = bridge.completed().expect("stream should complete");
-    let mut store = MessagesBridgeStore::new(8, 1_000);
+    let mut store = AdapterContinuationStore::new(8, 1_000);
     store.insert(
         "key",
         &response.response_id,
@@ -255,7 +255,7 @@ fn conflicting_state_cannot_replace_a_valid_response_or_its_history_alias() {
         .unwrap()
         .unwrap();
     let (_, state) = response.continuation().unwrap();
-    let mut store = MessagesBridgeStore::new(8, 1_000);
+    let mut store = AdapterContinuationStore::new(8, 1_000);
     assert!(store.insert_if_stored(
         "key",
         response.response_id(),

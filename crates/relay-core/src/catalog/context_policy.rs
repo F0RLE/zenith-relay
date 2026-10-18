@@ -162,15 +162,10 @@ pub fn normalize_model_context_policies(
 
 /// A model has a provider-published long window.
 pub fn entry_has_long_window(entry: &Value) -> bool {
-    let window = |key: &str| {
-        entry
-            .get(key)
-            .and_then(Value::as_u64)
-            .filter(|tokens| *tokens > 0)
-    };
+    let windows = ModelContextWindows::from_entry(entry);
     matches!(
-        (window("context_window"), window("max_context_window")),
-        (Some(current), Some(maximum)) if maximum > current
+        (windows.default_tokens, windows.maximum_tokens),
+        (Some(default), Some(maximum)) if maximum > default
     )
 }
 

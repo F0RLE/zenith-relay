@@ -13,7 +13,7 @@ fn reply() -> Value {
     ],"usage":{"input_tokens":10,"output_tokens":8,"output_tokens_details":{"reasoning_tokens":5}}})
 }
 
-fn assert_reasoning_tool_roundtrip(completed: &MessagesBridgeResponse, native: &Value) {
+fn assert_reasoning_tool_roundtrip(completed: &TranslatedResponse, native: &Value) {
     let body = &completed.response_body;
     let content = body["content"].as_array().unwrap();
     if native["output"][0]["summary"] == json!([]) {
@@ -71,7 +71,7 @@ fn assert_reasoning_tool_roundtrip(completed: &MessagesBridgeResponse, native: &
             .translate_response_bytes(&serde_json::to_vec(&output(WireApi::Responses)).unwrap())
             .unwrap()
             .unwrap();
-        let answer = &finished.messages_continuation().unwrap().response_body;
+        let answer = &finished.translated_response().response_body;
         assert_eq!(answer["content"], json!([{"type":"text","text":"Hi"}]));
         assert_eq!(answer["stop_reason"], "end_turn");
     }
@@ -83,7 +83,7 @@ fn messages_json_keeps_public_reasoning_and_edit_tool_with_native_replay() {
         .translate_response_bytes(&serde_json::to_vec(&reply()).unwrap())
         .unwrap()
         .unwrap();
-    assert_reasoning_tool_roundtrip(response.messages_continuation().unwrap(), &reply());
+    assert_reasoning_tool_roundtrip(response.translated_response(), &reply());
 }
 
 #[test]
@@ -92,7 +92,7 @@ fn messages_harness_empty_signature_keeps_native_tool_continuation() {
         .translate_response_bytes(&serde_json::to_vec(&reply()).unwrap())
         .unwrap()
         .unwrap();
-    let completed = completed.messages_continuation().unwrap();
+    let completed = completed.translated_response();
     for signature in [
         json!(""),
         Value::Null,
@@ -256,7 +256,7 @@ fn messages_json_and_stream_replay_opaque_reasoning_without_public_summary() {
         .translate_response_bytes(&serde_json::to_vec(&native).unwrap())
         .unwrap()
         .unwrap();
-    assert_reasoning_tool_roundtrip(response.messages_continuation().unwrap(), &native);
+    assert_reasoning_tool_roundtrip(response.translated_response(), &native);
     let (stream, events) = stream_response(&native);
     assert!(events.iter().all(|event| {
         event["content_block"]["type"] != "thinking" && event["delta"]["type"] != "thinking_delta"
@@ -280,7 +280,7 @@ fn messages_json_preserves_public_reasoning_and_tools_from_chat_and_gemini() {
             .translate_response_bytes(&serde_json::to_vec(&native).unwrap())
             .unwrap()
             .unwrap();
-        let body = &response.messages_continuation().unwrap().response_body;
+        let body = &response.translated_response().response_body;
         assert_eq!(
             body["content"][0],
             json!({"type":"thinking","thinking":"Plan the edit."})

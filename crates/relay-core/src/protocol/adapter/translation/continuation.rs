@@ -1,6 +1,5 @@
 use super::*;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
 /// Stateless clients replay portable history. Its last assistant turn identifies
 /// the bounded local state; signatures are never embedded in portable text.
@@ -113,17 +112,14 @@ pub(super) fn history_key(
             messages.push(json!({"role": role, "blocks": blocks}));
         }
     }
-    let bytes = serde_json::to_vec(&(client, model, messages))
+    let digest = crate::json_fingerprint::sha256(&(client, model, messages))
         .map_err(|_| AdapterError::invalid_request())?;
-    Ok(format!(
-        "adapter-history:{}",
-        hex::encode(Sha256::digest(bytes))
-    ))
+    Ok(format!("adapter-history:{}", hex::encode(digest)))
 }
 
 pub(super) fn restore(
     request: &mut Request,
-    previous: MessagesBridgeState,
+    previous: AdapterContinuationState,
     client: WireApi,
     upstream: WireApi,
     model: &str,

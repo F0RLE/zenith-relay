@@ -12,7 +12,7 @@ impl GatewayRuntime {
         local_key_id: &str,
         request: &Value,
         now_ms: u64,
-    ) -> crate::AdapterResult<Option<crate::MessagesBridgeState>> {
+    ) -> crate::AdapterResult<Option<crate::AdapterContinuationState>> {
         self.validate_continuation_route(route, local_key_id, request, now_ms)?;
         let Some(key) =
             route
@@ -21,7 +21,8 @@ impl GatewayRuntime {
         else {
             return Ok(None);
         };
-        match self.load_messages_bridge_state(local_key_id, &key, &route.candidate_id, now_ms) {
+        match self.load_adapter_continuation_state(local_key_id, &key, &route.candidate_id, now_ms)
+        {
             Ok(state)
                 if state.upstream_wire_api()
                     == route
@@ -47,14 +48,14 @@ impl GatewayRuntime {
         }
     }
 
-    pub(crate) fn load_messages_bridge_state(
+    pub(crate) fn load_adapter_continuation_state(
         &self,
         local_key_id: &str,
         response_id: &str,
         candidate_id: &str,
         now_ms: u64,
-    ) -> crate::AdapterResult<crate::MessagesBridgeState> {
-        crate::poison::mutex(&self.messages_bridge_store).get(
+    ) -> crate::AdapterResult<crate::AdapterContinuationState> {
+        crate::poison::mutex(&self.adapter_continuation_store).get(
             local_key_id,
             response_id,
             candidate_id,
@@ -62,11 +63,11 @@ impl GatewayRuntime {
         )
     }
 
-    pub(crate) fn save_messages_bridge_response(
+    pub(crate) fn save_adapter_response(
         &self,
         local_key_id: &str,
         candidate_id: &str,
-        response: &crate::MessagesBridgeResponse,
+        response: &crate::TranslatedResponse,
         now_ms: u64,
     ) {
         if !response.continuation.is_reusable()
@@ -76,7 +77,7 @@ impl GatewayRuntime {
             return;
         }
         let storage_key = response.continuation.storage_key(&response.response_id);
-        let stored = crate::poison::mutex(&self.messages_bridge_store).insert_if_stored(
+        let stored = crate::poison::mutex(&self.adapter_continuation_store).insert_if_stored(
             local_key_id,
             storage_key,
             candidate_id,

@@ -38,6 +38,7 @@ mod error;
 pub mod error_codes;
 pub mod gateway;
 mod ids;
+mod json_fingerprint;
 pub mod model_metadata;
 mod paths;
 pub mod poison;
@@ -88,11 +89,11 @@ pub use pricing::{
 pub use protocol::{
     bridged_response_id_scoped, merge_configuration_preset_settings,
     normalize_configuration_preset, prepare_responses_to_messages_scoped,
-    validate_resolved_configuration_preset_members, AdapterError, AdapterRequestContext,
-    AdapterResponse, AdapterResult, AdapterStreamBridge, GeminiBridgeRequest, GeminiBridgeResponse,
-    GeminiStreamBridge, MessagesBridgeRequest, MessagesBridgeResponse, MessagesBridgeState,
-    MessagesBridgeStore, MessagesReasoningMode, MessagesStreamBridge, NativeResponsesReplayState,
-    NativeResponsesReplayStore, PreparedAdapterRequest, SourceAdapter, UpstreamProtocol,
+    validate_resolved_configuration_preset_members, AdapterContinuationState,
+    AdapterContinuationStore, AdapterError, AdapterRequestContext, AdapterResponse, AdapterResult,
+    AdapterStreamBridge, MessagesReasoningMode, NativeResponsesReplayState,
+    NativeResponsesReplayStore, PreparedAdapterRequest, SourceAdapter, TranslatedResponse,
+    TranslationRequest, TranslationStream, UpstreamProtocol,
 };
 pub use providers::chatgpt::{RuntimeChatGptAccount, RuntimeChatGptAuth};
 pub use proxy::{normalize_proxy_url, proxy_reference_id, ProxyConfig};

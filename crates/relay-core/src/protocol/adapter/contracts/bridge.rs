@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 /// Native provider turns stay separate from portable content and are never
 /// serialized into diagnostics, usage, or a foreign provider's request.
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct MessagesBridgeState {
+pub struct AdapterContinuationState {
     pub(in crate::protocol::adapter) client_wire_api: Option<WireApi>,
     pub(in crate::protocol::adapter) portable_history:
         Option<Vec<super::super::translation::Message>>,
@@ -23,7 +23,7 @@ pub struct MessagesBridgeState {
     pub(in crate::protocol::adapter) reasoning_mode: MessagesReasoningMode,
 }
 
-impl MessagesBridgeState {
+impl AdapterContinuationState {
     pub(crate) fn upstream_wire_api(&self) -> WireApi {
         self.upstream_protocol.unwrap_or(WireApi::Messages)
     }
@@ -63,12 +63,9 @@ impl MessagesBridgeState {
     }
 }
 
-/// Source-compatible name; it is the shared request, not a pair-specific engine.
-pub type MessagesBridgeRequest = super::super::translation::TranslationRequest;
-
 #[derive(Clone, Debug)]
-pub struct MessagesBridgeResponse {
+pub struct TranslatedResponse {
     pub response_body: Value,
     pub response_id: String,
-    pub continuation: MessagesBridgeState,
+    pub continuation: AdapterContinuationState,
 }

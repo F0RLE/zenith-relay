@@ -1,5 +1,6 @@
 use crate::protocol::AdapterError;
 use serde_json::{Map, Value};
+use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
 pub(super) struct ClientTool {
@@ -22,10 +23,11 @@ impl ClientTool {
     }
 }
 
-pub(super) fn collect_tools(
+fn collect_tools(
     tool_value: Option<&Value>,
     namespace: Option<&str>,
     collected_tools: &mut Vec<ClientTool>,
+    positions: &mut HashMap<String, usize>,
 ) -> Result<(), AdapterError> {
     let Some(tool_value) = tool_value else {
         return Ok(());
@@ -70,6 +72,7 @@ pub(super) fn collect_tools(
                 tool_object.get("tools"),
                 Some(&qualified_namespace),
                 collected_tools,
+                positions,
             )?;
         } else if matches!(tool_kind.as_str(), "function" | "custom") {
             let tool = ClientTool {
@@ -79,12 +82,11 @@ pub(super) fn collect_tools(
                 spec: tool_object.clone(),
             };
             // Replace the definition without moving its catalog position.
-            if let Some(existing) = collected_tools
-                .iter_mut()
-                .find(|item| item.key() == tool.key())
-            {
-                *existing = tool;
+            let key = tool.key();
+            if let Some(&position) = positions.get(&key) {
+                collected_tools[position] = tool;
             } else {
+                positions.insert(key, collected_tools.len());
                 collected_tools.push(tool);
             }
         }
@@ -94,18 +96,29 @@ pub(super) fn collect_tools(
 
 pub(super) fn client_tools(request_body: &Value) -> Result<Vec<ClientTool>, AdapterError> {
     let mut client_tools = Vec::new();
+    let mut positions = HashMap::new();
     if let Some(input_items) = request_body.get("input").and_then(Value::as_array) {
         for input_item in input_items {
             if matches!(
                 input_item.get("type").and_then(Value::as_str),
                 Some("additional_tools" | "tool_search_output")
             ) {
-                collect_tools(input_item.get("tools"), None, &mut client_tools)?;
+                collect_tools(
+                    input_item.get("tools"),
+                    None,
+                    &mut client_tools,
+                    &mut positions,
+                )?;
             }
         }
     }
     // Current declarations are authoritative; history fills omitted tools only.
-    collect_tools(request_body.get("tools"), None, &mut client_tools)?;
+    collect_tools(
+        request_body.get("tools"),
+        None,
+        &mut client_tools,
+        &mut positions,
+    )?;
     Ok(client_tools)
 }
 

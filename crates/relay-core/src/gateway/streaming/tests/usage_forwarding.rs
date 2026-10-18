@@ -13,6 +13,12 @@ async fn late_model_substitution_ends_the_stream_without_forwarding_completion()
     );
     stream.expected_model = Some("gpt-6-astra".into());
     assert_eq!(stream.next().await.unwrap().unwrap(), first);
+    let failure = parse_sse_event(&stream.next().await.unwrap().unwrap());
+    assert_eq!(failure.outcome, Some(TerminalOutcome::Failure));
+    assert_eq!(
+        failure.event_payload.unwrap()["response"]["error"]["code"],
+        error_codes::UPSTREAM_ROUTE_DEGRADED
+    );
     assert!(stream.next().await.is_none());
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 1);
@@ -53,17 +59,10 @@ async fn usage_stream_forwards_chunks_without_waiting_for_an_sse_boundary() {
 }
 
 #[tokio::test]
-async fn usage_stream_does_not_append_a_synthetic_failure_after_visible_bytes() {
+async fn usage_stream_does_not_append_a_failure_inside_a_visible_frame() {
     let partial = [
-        Bytes::from_static(
-            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
-        ),
-        Bytes::from_static(
-            b"data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\"}\n\n",
-        ),
-        Bytes::from_static(
-            b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\"}}\n\n",
-        ),
+        Bytes::from_static(br#"data: {"type":"response.function_call_arguments.delta","delta":"{"#),
+        Bytes::from_static(br#"data: {"type":"response.created","response":{"id":"resp_"#),
         Bytes::from_static(br#"data: {"type":"response.output_text.delta","delta":"par"#),
     ];
     let cases = partial
@@ -72,7 +71,7 @@ async fn usage_stream_does_not_append_a_synthetic_failure_after_visible_bytes() 
         .chain(std::iter::once((
             vec![
                 Bytes::from_static(
-                    b"data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\"}\n\n",
+                    br#"data: {"type":"response.function_call_arguments.delta","delta":"{"#,
                 ),
                 Bytes::from_static(b"data: invalid-json\n\n"),
             ],
@@ -103,9 +102,7 @@ async fn usage_stream_does_not_append_a_synthetic_failure_after_visible_bytes() 
 
 #[tokio::test]
 async fn usage_stream_preserves_transport_errors_after_partial_output() {
-    let first = Bytes::from_static(
-        b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
-    );
+    let first = Bytes::from_static(br#"data: {"type":"response.output_text.delta","delta":"par"#);
     let mut stream = UsageStream::new(
         stream::iter([
             Ok(first.clone()),
@@ -123,6 +120,103 @@ async fn usage_stream_preserves_transport_errors_after_partial_output() {
         std::io::ErrorKind::ConnectionReset
     );
     assert!(stream.next().await.is_none());
+}
+
+#[tokio::test]
+async fn usage_stream_reports_interruption_after_complete_visible_frames() {
+    let first = Bytes::from_static(
+        concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_interrupted\"}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"sequence_number\":9,\"delta\":\"partial\"}\n\n",
+        )
+        .as_bytes(),
+    );
+    for (tail, category) in [
+        (None, error_codes::STREAM_INCOMPLETE),
+        (
+            Some(Err(std::io::Error::from(
+                std::io::ErrorKind::ConnectionReset,
+            ))),
+            error_codes::UPSTREAM_STREAM,
+        ),
+        (
+            Some(Ok(Bytes::from_static(b"data: invalid-json\n\n"))),
+            error_codes::STREAM_INVALID,
+        ),
+    ] {
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let capture = recorded.clone();
+        let input = std::iter::once(Ok(first.clone())).chain(tail);
+        let mut stream = UsageStream::new(
+            stream::iter(input),
+            Arc::new(move |event| capture.lock().unwrap().push(event)),
+            test_usage_event(),
+            Instant::now(),
+            Arc::new(|_, _, _| {}),
+        );
+        assert_eq!(stream.next().await.unwrap().unwrap(), first);
+        let bytes = stream.next().await.unwrap().unwrap();
+        let terminal = parse_sse_event(&bytes);
+        assert_eq!(terminal.outcome, Some(TerminalOutcome::Failure));
+        assert_eq!(
+            terminal.event_payload.as_ref().unwrap()["sequence_number"],
+            10
+        );
+        let response = &terminal.event_payload.as_ref().unwrap()["response"];
+        assert_eq!(response["id"], "resp_interrupted");
+        assert_eq!(response["status"], "failed");
+        assert_eq!(response["error"]["code"], category);
+        assert!(!String::from_utf8_lossy(&bytes).contains("event: response.completed\n"));
+        assert!(stream.next().await.is_none());
+        drop(stream);
+        let events = recorded.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(!events[0].success);
+        assert_eq!(events[0].error_category.as_deref(), Some(category));
+        if category == error_codes::UPSTREAM_STREAM {
+            let details = events[0].upstream_error.as_ref().unwrap();
+            assert_eq!(
+                details.error_type.as_deref(),
+                Some("relay_stream_transport")
+            );
+            assert!(details
+                .message
+                .as_ref()
+                .unwrap()
+                .contains("io=connection_reset"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn usage_stream_keeps_failure_at_a_boundary_after_fragmented_events() {
+    for ending in ["\n", "\r\n", "\r"] {
+        let frames = format!(
+            "data: {{\"type\":\"response.created\",\"sequence_number\":11,\"response\":{{\"id\":\"resp_fragmented\"}}}}{ending}{ending}data: {{\"type\":\"response.output_text.delta\",\"sequence_number\":19,\"delta\":\"synthetic\"}}{ending}{ending}"
+        );
+        for size in [1, 7, frames.len()] {
+            let input = stream::iter(
+                frames
+                    .as_bytes()
+                    .chunks(size)
+                    .map(|chunk| Ok::<_, Infallible>(Bytes::copy_from_slice(chunk))),
+            );
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let mut stream = usage_stream_with_events(input, events.clone());
+            let mut output = Vec::new();
+            while let Some(bytes) = stream.next().await {
+                output.extend_from_slice(&bytes.unwrap());
+            }
+            assert!(output.starts_with(frames.as_bytes()), "{ending:?}, {size}");
+            let failure = parse_sse_event(&output[frames.len()..]);
+            assert_eq!(failure.outcome, Some(TerminalOutcome::Failure));
+            let payload = failure.event_payload.unwrap();
+            assert_eq!(payload["type"], "response.failed");
+            assert_eq!(payload["sequence_number"], 20);
+            assert_eq!(payload["response"]["id"], "resp_fragmented");
+            assert_eq!(events.lock().unwrap().len(), 1);
+        }
+    }
 }
 
 #[tokio::test]

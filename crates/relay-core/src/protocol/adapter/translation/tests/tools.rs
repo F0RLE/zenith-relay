@@ -146,6 +146,92 @@ fn parallel_responses_calls_stay_in_one_assistant_turn_for_chat_upstream() {
     assert_eq!(messages[2]["tool_call_id"], "call_first");
     assert_eq!(messages[3]["tool_call_id"], "call_second");
 }
+
+#[test]
+fn parallel_history_keeps_every_call_and_result_across_all_upstreams() {
+    let mut input = vec![json!({"role":"user","content":"Read three independent values"})];
+    for index in 0..3 {
+        input.push(
+            json!({"type":"function_call","call_id":format!("call_batch_{index}"),
+            "name":"lookup","arguments":json!({"value":index}).to_string()}),
+        );
+    }
+    // Results need not arrive in dispatch order. Pair by identity, not index.
+    for index in [2, 0, 1] {
+        input.push(
+            json!({"type":"function_call_output","call_id":format!("call_batch_{index}"),
+            "output":format!("result-{index}")}),
+        );
+    }
+    let request = json!({"model":"synthetic","input":input,"parallel_tool_calls":true});
+    let capabilities = crate::model_metadata::ModelCapabilities {
+        reasoning: Some(false),
+        ..Default::default()
+    };
+    for upstream in WireApi::ALL {
+        let prepared = SourceAdapter::between(WireApi::Responses, upstream)
+            .unwrap()
+            .prepare_request_with_capabilities(
+                AdapterRequestContext {
+                    client_wire_api: WireApi::Responses,
+                    request: &request,
+                    model: "test",
+                    stream: false,
+                    reasoning_mode: MessagesReasoningMode::Disabled,
+                    cache_write_ttl: CacheWriteTtl::Provider,
+                    previous: None,
+                    response_scope: "source-test",
+                    response_id_seed: "request-test",
+                },
+                &capabilities,
+            )
+            .unwrap();
+        let body = prepared.upstream_body();
+        let calls: Vec<&Value> = match upstream {
+            WireApi::Responses => body["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|item| item["type"] == "function_call")
+                .collect(),
+            WireApi::ChatCompletions => body["messages"][1]["tool_calls"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .collect(),
+            WireApi::Messages => body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|message| message["content"].as_array().into_iter().flatten())
+                .filter(|block| block["type"] == "tool_use")
+                .collect(),
+            WireApi::Gemini => body["contents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|message| message["parts"].as_array().into_iter().flatten())
+                .filter_map(|part| part.get("functionCall"))
+                .collect(),
+        };
+        assert_eq!(calls.len(), 3, "{upstream:?}");
+        for (index, call) in calls.iter().enumerate() {
+            let id = match upstream {
+                WireApi::Responses => &call["call_id"],
+                _ => &call["id"],
+            };
+            assert_eq!(id, &json!(format!("call_batch_{index}")), "{upstream:?}");
+        }
+        let serialized = body.to_string();
+        for index in 0..3 {
+            assert_eq!(
+                serialized.matches(&format!("result-{index}")).count(),
+                1,
+                "{upstream:?}"
+            );
+        }
+    }
+}
 #[test]
 fn gemini_calls_without_ids_are_unique_across_turns_and_keep_pairing() {
     let mut request = tool_history(WireApi::Gemini);

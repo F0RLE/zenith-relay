@@ -19,9 +19,9 @@ pub(super) use super::super::super::now_ms;
 pub(super) use super::super::super::request::{
     apply_codex_routing_hint, candidate_protocols, codex_client_version, contains_tool_call_output,
     forwarded_bridge_gemini_headers, forwarded_bridge_messages_headers, forwarded_messages_headers,
-    forwarded_responses_headers, normalize_account_request, normalize_responses_lite_request,
-    repair_legacy_responses_call_ids, responses_lite_parallel_tool_calls_valid,
-    unpaired_tool_output_ids, RequestToolPolicy, CODEX_RESPONSES_LITE_HEADER,
+    forwarded_responses_headers, normalize_account_request, repair_legacy_responses_call_ids,
+    responses_lite_parallel_tool_calls_valid, unpaired_tool_output_ids, RequestToolPolicy,
+    CODEX_RESPONSES_LITE_HEADER,
 };
 pub(super) use super::super::super::response::{
     collect_upstream_response, emit_repair, emit_usage, populate_tokens, proxy_error_response,

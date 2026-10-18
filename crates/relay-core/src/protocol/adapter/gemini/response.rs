@@ -1,13 +1,13 @@
 use super::{AdapterError, AdapterResult};
 #[cfg(test)]
-use super::{GeminiBridgeRequest, GeminiBridgeResponse};
+use super::{TranslatedResponse, TranslationRequest};
 use serde_json::Value;
 
 #[cfg(test)]
 pub fn translate_gemini_response(
-    request: GeminiBridgeRequest,
+    request: TranslationRequest,
     upstream: &Value,
-) -> AdapterResult<GeminiBridgeResponse> {
+) -> AdapterResult<TranslatedResponse> {
     request.translate(upstream)
 }
 

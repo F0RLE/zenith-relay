@@ -100,7 +100,7 @@ fn messages_write_svg_and_empty_signature_tool_result_preserve_the_conversation(
             )
             .unwrap()
             .unwrap();
-        let answer = &answer.messages_continuation().unwrap().response_body;
+        let answer = &answer.translated_response().response_body;
         assert_eq!(answer["stop_reason"], "end_turn");
         assert_eq!(answer["content"][0]["text"], "The SVG is ready.");
     }
@@ -185,7 +185,7 @@ fn reasoning_text_and_atomic_tool_complete_through_messages_bridge() {
             "id":"resp_final","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done."}]}]
         })).unwrap()).unwrap().unwrap();
         assert_eq!(
-            answer.messages_continuation().unwrap().response_body["stop_reason"],
+            answer.translated_response().response_body["stop_reason"],
             "end_turn"
         );
     }

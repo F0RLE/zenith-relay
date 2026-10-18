@@ -1,5 +1,5 @@
 use super::contracts::{
-    AdapterError, AdapterResult, MessagesBridgeState, NativeResponsesReplayState,
+    AdapterContinuationState, AdapterError, AdapterResult, NativeResponsesReplayState,
 };
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -168,11 +168,11 @@ impl<T> BoundedStateStore<T> {
 /// a restart is surfaced as a clear continuation error instead of silently
 /// sending a context-free tool output upstream.
 #[derive(Debug)]
-pub struct MessagesBridgeStore {
-    store: BoundedStateStore<MessagesBridgeState>,
+pub struct AdapterContinuationStore {
+    store: BoundedStateStore<AdapterContinuationState>,
 }
 
-impl Default for MessagesBridgeStore {
+impl Default for AdapterContinuationStore {
     fn default() -> Self {
         Self::with_limits(
             DEFAULT_MAX_ENTRIES,
@@ -183,16 +183,16 @@ impl Default for MessagesBridgeStore {
     }
 }
 
-bounded_store_constructors!(MessagesBridgeStore);
+bounded_store_constructors!(AdapterContinuationStore);
 
-impl MessagesBridgeStore {
+impl AdapterContinuationStore {
     pub fn get(
         &mut self,
         local_key_id: &str,
         response_id: &str,
         candidate_id: &str,
         now_ms: u64,
-    ) -> AdapterResult<MessagesBridgeState> {
+    ) -> AdapterResult<AdapterContinuationState> {
         self.store.prune(now_ms);
         let stored_bridge_state = if let Some(stored) = self
             .store
@@ -227,7 +227,7 @@ impl MessagesBridgeStore {
         local_key_id: &str,
         response_id: &str,
         candidate_id: &str,
-        bridge_state: MessagesBridgeState,
+        bridge_state: AdapterContinuationState,
         now_ms: u64,
     ) {
         let _ = self.insert_if_stored(
@@ -244,7 +244,7 @@ impl MessagesBridgeStore {
         local_key_id: &str,
         response_id: &str,
         candidate_id: &str,
-        bridge_state: MessagesBridgeState,
+        bridge_state: AdapterContinuationState,
         now_ms: u64,
     ) -> bool {
         if self

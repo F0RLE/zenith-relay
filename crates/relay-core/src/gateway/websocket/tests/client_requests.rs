@@ -163,7 +163,7 @@ fn client_request_rejects_an_unknown_tool_continuation_before_selection() {
 }
 
 #[test]
-fn websocket_lite_contract_is_normalized_before_non_account_routing() {
+fn websocket_lite_marker_preserves_parallel_policy_on_non_account_routes() {
     let runtime = runtime();
     let key = runtime
         .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
@@ -205,8 +205,16 @@ fn websocket_lite_contract_is_normalized_before_non_account_routing() {
     let payload: serde_json::Value =
         serde_json::from_str(&payload_bytes).expect("payload should be valid JSON");
 
-    assert_eq!(payload["parallel_tool_calls"], false);
+    assert_eq!(payload["parallel_tool_calls"], true);
     assert!(request.responses_lite_for(&route));
+    let mut native_route = route.clone();
+    native_route.account_id = Some("synthetic-native-account".into());
+    native_route.account_transport = crate::runtime::AccountTransport::NativeResponses;
+    let error = request.payload_for(&native_route).unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert!(error
+        .message
+        .contains("does not support parallel_tool_calls: true"));
 }
 
 #[test]

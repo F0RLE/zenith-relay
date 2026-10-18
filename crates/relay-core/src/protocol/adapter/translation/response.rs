@@ -6,6 +6,22 @@ mod upstream;
 
 pub(super) use upstream::decode;
 
+pub(super) fn validate_responses_call_execution(call: &Value) -> AdapterResult<()> {
+    validate_direct_tool_execution(
+        call,
+        AdapterError::upstream_response_invalid().with_parameter("tool_calls.async"),
+        AdapterError::upstream_response_invalid().with_parameter("tool_calls.caller"),
+    )?;
+    // Converted requests declare flat tools. A namespace returned by the
+    // upstream would address a different tool, not our flattened declaration.
+    if call.get("namespace").is_some_and(|value| !value.is_null()) {
+        return Err(
+            AdapterError::upstream_response_invalid().with_parameter("tool_calls.namespace")
+        );
+    }
+    Ok(())
+}
+
 pub(super) fn validate_calls(blocks: &[Block]) -> AdapterResult<()> {
     let mut call_ids = std::collections::BTreeSet::new();
     for block in blocks {
@@ -15,7 +31,7 @@ pub(super) fn validate_calls(blocks: &[Block]) -> AdapterResult<()> {
             arguments,
         } = block
         {
-            if id.is_empty() || !call_ids.insert(id) {
+            if id.trim().is_empty() || !call_ids.insert(id) {
                 return Err(
                     AdapterError::upstream_response_invalid().with_parameter("tool_calls.id")
                 );

@@ -138,7 +138,7 @@ pub(super) fn build_accounts(
                 chatgpt_account_id: account.chatgpt_account_id,
                 chatgpt_user_id: account.chatgpt_user_id,
                 basis_points_headers: account.basis_points_headers,
-                proxy_timezone: account.proxy_timezone,
+                proxy_timezone: RwLock::new(account.proxy_timezone),
                 identity,
                 responses_url,
                 basis_points_url,

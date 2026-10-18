@@ -120,9 +120,8 @@ pub(super) fn prepare_account_attempt(
             return step;
         }
     }
-    // Basis Points does not receive the Responses Lite transport header, but
-    // its adapter translates the Lite item-level tool catalog. Keep that
-    // client-side contract active while preparing the body.
+    // BPS accepts the item-level catalog without inheriting native Lite's
+    // serial execution restriction.
     let route_responses_lite = if basis_points_route {
         None
     } else {
@@ -186,6 +185,9 @@ pub(super) fn prepare_account_attempt(
             error_codes::INVALID_REQUEST,
         ));
     };
+    if basis_points_route {
+        tool_policy.record_upstream_context(&upstream_body);
+    }
     let tool_use = tool_policy.diagnostics.clone();
     AccountPrepare::Ready(Box::new(PreparedAccountAttempt {
         route,
@@ -259,12 +261,20 @@ fn prepare_account_upstream_body(
                     error_codes::INVALID_REQUEST,
                 )));
             }
-            if basis_points_route {
-                crate::gateway::request::normalize_responses_lite_request(object);
-            } else if endpoint == AccountEndpoint::Compact {
-                crate::gateway::request::normalize_compact_account_request(object, true);
-            } else {
-                crate::gateway::request::normalize_account_request(object, true);
+            if !basis_points_route && object.get("parallel_tool_calls") == Some(&Value::Bool(true))
+            {
+                return Err(AccountPrepare::Respond(api_error(
+                    StatusCode::BAD_REQUEST,
+                    "selected Responses Lite transport does not support parallel_tool_calls: true",
+                    error_codes::INVALID_REQUEST,
+                )));
+            }
+            if !basis_points_route {
+                if endpoint == AccountEndpoint::Compact {
+                    crate::gateway::request::normalize_compact_account_request(object, true);
+                } else {
+                    crate::gateway::request::normalize_account_request(object, true);
+                }
             }
         }
     }

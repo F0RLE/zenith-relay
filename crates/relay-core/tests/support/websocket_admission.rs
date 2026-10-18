@@ -287,8 +287,8 @@ async fn responses_rejects_unknown_opaque_previous_response_before_upstream_exec
 }
 
 #[tokio::test]
-async fn responses_websocket_fallback_does_not_append_error_after_partial_output() {
-    let (upstream, _) = spawn_upstream().await;
+async fn responses_websocket_fallback_reports_interruption_without_replaying_output() {
+    let (upstream, state) = spawn_upstream().await;
     let (gateway, _) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
     let upgraded = reqwest::Client::new()
         .get(format!("{}/v1/responses", gateway.base_url))
@@ -311,9 +311,9 @@ async fn responses_websocket_fallback_does_not_append_error_after_partial_output
         .await
         .unwrap();
 
-    let mut saw_partial = false;
-    let mut saw_error = false;
-    let mut saw_close = false;
+    let mut partial_count = 0;
+    let mut failure = None;
+    let mut saw_completed = false;
     for _ in 0..8 {
         let message = match tokio::time::timeout(Duration::from_secs(2), socket.next()).await {
             Ok(Some(Ok(message))) => message,
@@ -322,24 +322,29 @@ async fn responses_websocket_fallback_does_not_append_error_after_partial_output
         match message {
             ClientWsMessage::Text(text) => {
                 let value: Value = serde_json::from_str(text.as_ref()).unwrap();
-                saw_partial |= value["type"] == "response.output_text.delta";
-                saw_error |= value["type"] == "error" || value["type"] == "response.failed";
+                partial_count += usize::from(value["type"] == "response.output_text.delta");
+                saw_completed |= value["type"] == "response.completed";
+                if value["type"] == "response.failed" {
+                    failure = Some(value);
+                    break;
+                }
             }
             ClientWsMessage::Close { .. } => {
-                saw_close = true;
                 break;
             }
             _ => {}
         }
     }
-    assert!(saw_partial, "fallback did not forward the partial output");
-    assert!(
-        !saw_error,
-        "fallback appended an error after partial output"
-    );
-    assert!(
-        saw_close,
-        "fallback did not close after an incomplete stream"
+    assert_eq!(partial_count, 1, "partial output was lost or duplicated");
+    let failure = failure.expect("fallback closed without an explicit terminal failure");
+    assert_eq!(failure["response"]["id"], "partial-response");
+    assert_eq!(failure["response"]["status"], "failed");
+    assert_eq!(failure["response"]["error"]["code"], "stream_incomplete");
+    assert!(!saw_completed, "interruption was presented as completion");
+    assert_eq!(
+        state.requests.lock().unwrap().len(),
+        1,
+        "interrupted execution was replayed"
     );
 }
 

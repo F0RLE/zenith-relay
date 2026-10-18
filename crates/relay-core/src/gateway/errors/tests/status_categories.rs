@@ -1,6 +1,36 @@
 use super::*;
 
 #[test]
+fn typed_adapter_stream_errors_keep_their_category_without_authorizing_replay() {
+    for code in [
+        error_codes::ADAPTER_UPSTREAM_RESPONSE_INVALID,
+        error_codes::ADAPTER_UPSTREAM_STREAM_INVALID,
+    ] {
+        let body = serde_json::json!({"error":{"type":"relay_adapter","code":code}});
+        let classified = classify_upstream_error_value(StatusCode::BAD_GATEWAY, &body);
+        assert_eq!(classified.category, code);
+        assert!(!failure_category_affects_account_state(code));
+        assert!(!retryable_failure(StatusCode::BAD_GATEWAY, code, false));
+        assert_eq!(
+            AttemptFailure::classified_with_hint(StatusCode::BAD_GATEWAY, code, Default::default())
+                .execution
+                .certainty,
+            crate::scheduler::rotation::ExecutionCertainty::Unknown
+        );
+        assert_eq!(
+            classify_upstream_error_value(StatusCode::UNAUTHORIZED, &body).category,
+            error_codes::UPSTREAM_UNAUTHORIZED
+        );
+    }
+    let ordinary =
+        serde_json::json!({"error":{"code":error_codes::ADAPTER_UPSTREAM_STREAM_INVALID}});
+    assert_eq!(
+        classify_upstream_error_value(StatusCode::BAD_GATEWAY, &ordinary).category,
+        error_codes::UPSTREAM_BAD_GATEWAY
+    );
+}
+
+#[test]
 fn basis_points_access_and_policy_refusals_are_not_quota_errors() {
     for (body, category) in [
         (br#"{"error":{"code":"basispoints_model_access_changed"}}"#.as_slice(), error_codes::UPSTREAM_MODEL_UNAVAILABLE),

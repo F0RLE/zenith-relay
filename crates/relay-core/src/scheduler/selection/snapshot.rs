@@ -88,6 +88,7 @@ pub struct RoutingDiagnostics {
 #[serde(rename_all = "snake_case")]
 pub enum AttemptOutcome {
     Completed,
+    ToolDiscovery,
     RetrySelection,
     RetryRepair,
     RetryAuthorization,

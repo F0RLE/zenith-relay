@@ -308,7 +308,7 @@ fn messages_stream_rejects_thinking_without_a_signature() {
 }
 #[test]
 fn responses_to_chat_continuation_resolves_results_after_loading_history() {
-    let mut previous = MessagesBridgeState::new("test", MessagesReasoningMode::Adaptive);
+    let mut previous = AdapterContinuationState::new("test", MessagesReasoningMode::Adaptive);
     previous.client_wire_api = Some(WireApi::Responses);
     previous.response_call_targets.insert(
         "call_saved".into(),

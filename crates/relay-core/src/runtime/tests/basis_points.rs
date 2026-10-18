@@ -10,8 +10,10 @@ use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use tokio::sync::{Notify, Semaphore};
 
+mod catalog_discovery;
 mod quota_rotation;
 mod recovery;
+mod request_timezone;
 mod retry_admission;
 
 struct AccessReply {
@@ -23,11 +25,14 @@ struct AccessState {
     reply: Mutex<AccessReply>,
     generation_body: Mutex<Value>,
     generation_bodies: Mutex<Vec<Value>>,
+    generation_replies: Mutex<std::collections::VecDeque<(StatusCode, Value)>>,
     access_requests: AtomicUsize,
     generation_requests: AtomicUsize,
     attachment_requests: AtomicUsize,
     generation_status: Mutex<StatusCode>,
     strict_request_schema: AtomicBool,
+    stream_generations: AtomicBool,
+    stream_gates: Mutex<std::collections::VecDeque<Arc<Semaphore>>>,
     first_started: Notify,
     first_release: Semaphore,
     hold_first: bool,
@@ -56,11 +61,14 @@ impl AccessServer {
                 "id":"synthetic-response","status":"completed","output":[]
             })),
             generation_bodies: Mutex::new(Vec::new()),
+            generation_replies: Mutex::new(Default::default()),
             access_requests: AtomicUsize::new(0),
             generation_requests: AtomicUsize::new(0),
             attachment_requests: AtomicUsize::new(0),
             generation_status: Mutex::new(StatusCode::OK),
             strict_request_schema: AtomicBool::new(false),
+            stream_generations: AtomicBool::new(false),
+            stream_gates: Mutex::new(Default::default()),
             first_started: Notify::new(),
             first_release: Semaphore::new(0),
             hold_first,
@@ -135,6 +143,7 @@ async fn generation(State(state): State<Arc<AccessState>>, Json(body): Json<Valu
                     && value.is_string()
             })
     });
+    let streaming = body["stream"] == true && state.stream_generations.load(Ordering::SeqCst);
     crate::poison::mutex(&state.generation_bodies).push(body);
     if state.strict_request_schema.load(Ordering::SeqCst)
         && (!explicit_messages || !transport_metadata)
@@ -145,11 +154,57 @@ async fn generation(State(state): State<Arc<AccessState>>, Json(body): Json<Valu
         )
             .into_response();
     }
-    (
+    if let Some((status, response)) = crate::poison::mutex(&state.generation_replies).pop_front() {
+        return generation_reply(&state, status, response, streaming);
+    }
+    generation_reply(
+        &state,
         *crate::poison::mutex(&state.generation_status),
-        Json(crate::poison::mutex(&state.generation_body).clone()),
+        crate::poison::mutex(&state.generation_body).clone(),
+        streaming,
     )
-        .into_response()
+}
+
+fn generation_reply(
+    state: &AccessState,
+    status: StatusCode,
+    body: Value,
+    streaming: bool,
+) -> Response {
+    if !streaming || !status.is_success() {
+        return (status, Json(body)).into_response();
+    }
+    use futures_util::StreamExt;
+    let wire =
+        crate::gateway::test_support::basis_points_stream(&serde_json::to_vec(&body).unwrap());
+    let mut pending = wire.clone();
+    let mut split = wire.len();
+    while let Some(frame) = crate::protocol::take_sse_event(&mut pending) {
+        let event: Value =
+            serde_json::from_slice(&crate::protocol::sse_data(&frame)).unwrap_or(Value::Null);
+        if matches!(
+            event["type"].as_str(),
+            Some("response.output_text.delta" | "response.function_call_arguments.delta")
+        ) {
+            split = wire.len() - pending.len();
+            break;
+        }
+    }
+    let first = axum::body::Bytes::copy_from_slice(&wire[..split]);
+    let rest = axum::body::Bytes::copy_from_slice(&wire[split..]);
+    let gate = crate::poison::mutex(&state.stream_gates).pop_front();
+    let stream = futures_util::stream::once(async { Ok::<_, std::convert::Infallible>(first) })
+        .chain(futures_util::stream::once(async move {
+            if let Some(gate) = gate {
+                gate.acquire().await.unwrap().forget();
+            }
+            Ok(rest)
+        }));
+    Response::builder()
+        .status(status)
+        .header("content-type", "text/event-stream")
+        .body(axum::body::Body::from_stream(stream))
+        .unwrap()
 }
 
 struct RecoveryRefresh {

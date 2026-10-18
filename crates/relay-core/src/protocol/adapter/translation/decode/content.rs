@@ -3,7 +3,7 @@ use super::super::{
 };
 use crate::url_has_userinfo;
 use crate::WireApi;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 mod request;
 mod tools;
@@ -29,11 +29,19 @@ pub(super) fn schema_field(
     }
 }
 
-pub(super) fn role(message_part: &Value) -> AdapterResult<Role> {
-    match message_part.get("role").and_then(Value::as_str) {
-        Some("system" | "developer") => Ok(Role::System),
-        Some("user") | None => Ok(Role::User),
-        Some("assistant" | "model") => Ok(Role::Assistant),
+pub(super) fn role(message_part: &Value, protocol: WireApi) -> AdapterResult<Role> {
+    let supplied = message_part.get("role");
+    match (protocol, supplied.and_then(Value::as_str)) {
+        (WireApi::Gemini, None) if supplied.is_none_or(Value::is_null) => Ok(Role::User),
+        (_, Some("user")) => Ok(Role::User),
+        (WireApi::Gemini, Some("model")) => Ok(Role::Assistant),
+        (WireApi::Responses | WireApi::ChatCompletions | WireApi::Messages, Some("assistant")) => {
+            Ok(Role::Assistant)
+        }
+        (WireApi::Responses | WireApi::ChatCompletions | WireApi::Messages, Some("system")) => {
+            Ok(Role::System)
+        }
+        (WireApi::Responses | WireApi::ChatCompletions, Some("developer")) => Ok(Role::System),
         _ => Err(AdapterError::invalid_request()),
     }
 }
@@ -162,6 +170,29 @@ fn gemini_block(gemini_part: &Value) -> AdapterResult<Block> {
             "thought",
         ],
     )?;
+    // Part.data is a protobuf oneof. Choosing the first populated field would
+    // silently discard a call, result or media payload from a malformed part.
+    let payloads = [
+        "text",
+        "inlineData",
+        "fileData",
+        "functionCall",
+        "functionResponse",
+    ]
+    .into_iter()
+    .filter(|field| {
+        gemini_part
+            .get(*field)
+            .is_some_and(|value| !value.is_null())
+    })
+    .count();
+    if payloads != 1
+        || gemini_part
+            .get("thought")
+            .is_some_and(|value| !value.is_null() && !value.is_boolean())
+    {
+        return Err(AdapterError::invalid_request().with_parameter("contents[].parts"));
+    }
     if let Some(text) = gemini_part.get("text").and_then(Value::as_str) {
         return Ok(
             if gemini_part.get("thought").and_then(Value::as_bool) == Some(true) {
@@ -171,7 +202,10 @@ fn gemini_block(gemini_part: &Value) -> AdapterResult<Block> {
             },
         );
     }
-    if let Some(inline_data) = gemini_part.get("inlineData") {
+    if let Some(inline_data) = gemini_part
+        .get("inlineData")
+        .filter(|value| !value.is_null())
+    {
         checked(inline_data, &["mimeType", "data"])?;
         return image(
             format!(
@@ -182,7 +216,7 @@ fn gemini_block(gemini_part: &Value) -> AdapterResult<Block> {
             None,
         );
     }
-    if let Some(file_data) = gemini_part.get("fileData") {
+    if let Some(file_data) = gemini_part.get("fileData").filter(|value| !value.is_null()) {
         checked(file_data, &["mimeType", "fileUri"])?;
         if file_data
             .get("mimeType")
@@ -193,19 +227,26 @@ fn gemini_block(gemini_part: &Value) -> AdapterResult<Block> {
         }
         return image(required_text(file_data, "fileUri")?.into(), None);
     }
-    if let Some(function_call) = gemini_part.get("functionCall") {
+    if let Some(function_call) = gemini_part
+        .get("functionCall")
+        .filter(|value| !value.is_null())
+    {
         checked(function_call, &["id", "name", "args"])?;
+        let arguments = function_call.get("args").filter(|value| !value.is_null());
+        if arguments.is_some_and(|value| !value.is_object()) {
+            return Err(AdapterError::invalid_request()
+                .with_parameter("contents[].parts[].functionCall.args"));
+        }
         return Ok(Block::ToolCall {
-            id: function_call
-                .get("id")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .unwrap_or_default(),
+            id: gemini_call_id(function_call)?,
             name: required_text(function_call, "name")?.into(),
-            arguments: function_call.get("args").unwrap_or(&json!({})).to_string(),
+            arguments: arguments.map_or_else(|| "{}".to_owned(), Value::to_string),
         });
     }
-    if let Some(function_response) = gemini_part.get("functionResponse") {
+    if let Some(function_response) = gemini_part
+        .get("functionResponse")
+        .filter(|value| !value.is_null())
+    {
         checked(function_response, &["id", "name", "response", "parts"])?;
         let response_payload = function_response
             .get("response")
@@ -226,18 +267,24 @@ fn gemini_block(gemini_part: &Value) -> AdapterResult<Block> {
             }
         }
         return Ok(Block::ToolResult {
-            id: function_response
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .into(),
+            id: gemini_call_id(function_response)?,
             name: required_text(function_response, "name")?.into(),
             content,
-            is_error: response_payload.get("error").is_some(),
+            is_error: response_payload
+                .get("error")
+                .is_some_and(|error| !error.is_null()),
             raw_text: false,
         });
     }
     Err(AdapterError::parameter_unsupported())
+}
+
+fn gemini_call_id(call: &Value) -> AdapterResult<String> {
+    match call.get("id").filter(|value| !value.is_null()) {
+        None => Ok(String::new()),
+        Some(Value::String(id)) if !id.trim().is_empty() => Ok(id.clone()),
+        _ => Err(AdapterError::invalid_request().with_parameter("id")),
+    }
 }
 
 fn content_fields(container: &Value, protocol: WireApi, allowed: &[&str]) -> AdapterResult<()> {
@@ -321,7 +368,9 @@ pub(super) fn tool_result_blocks(
 ) -> AdapterResult<Vec<Block>> {
     if protocol == WireApi::Responses
         && match content_value {
-            Value::Array(items) => !items.iter().any(|item| item.get("type").is_some()),
+            Value::Array(items) => {
+                !items.is_empty() && !items.iter().any(|item| item.get("type").is_some())
+            }
             Value::Object(_) | Value::Bool(_) | Value::Number(_) => true,
             _ => false,
         }

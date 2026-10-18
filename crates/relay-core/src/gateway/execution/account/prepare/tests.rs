@@ -2,7 +2,7 @@ use super::*;
 use serde_json::json;
 
 #[test]
-fn basis_points_accepts_responses_lite_and_preserves_serial_tool_contract() {
+fn basis_points_accepts_lite_items_without_inheriting_serial_transport_policy() {
     let request = json!({
         "model": "test-model",
         "input": "Find a record",
@@ -42,7 +42,7 @@ fn basis_points_accepts_responses_lite_and_preserves_serial_tool_contract() {
         Ok(body) => body,
         Err(_) => panic!("valid Responses Lite request should normalize"),
     };
-    assert_eq!(normalized["parallel_tool_calls"], false);
+    assert_eq!(normalized["parallel_tool_calls"], true);
 
     let basis_points = match rewrite_account_basis_points_body(
         &normalized,
@@ -63,5 +63,31 @@ fn basis_points_accepts_responses_lite_and_preserves_serial_tool_contract() {
         .join("\n");
     assert!(developer_instructions.contains("run_officejs"));
     assert!(developer_instructions.contains("lookup"));
-    assert!(developer_instructions.contains("Invoke at most one client tool"));
+    assert!(!developer_instructions.contains("Invoke at most one client tool"));
+}
+
+#[test]
+fn native_lite_rejects_explicit_parallel_calls_without_rewriting_the_request() {
+    let request = json!({"model":"synthetic", "input":"hello", "parallel_tool_calls":true});
+    assert!(matches!(
+        prepare_account_upstream_body(
+            &request,
+            "synthetic",
+            false,
+            AccountEndpoint::Wake,
+            true,
+            false
+        ),
+        Err(AccountPrepare::Respond(_))
+    ));
+    assert_eq!(request["parallel_tool_calls"], true);
+    let full = prepare_account_upstream_body(
+        &request,
+        "synthetic",
+        false,
+        AccountEndpoint::Wake,
+        false,
+        false,
+    );
+    assert!(matches!(full, Ok(ref body) if body["parallel_tool_calls"] == true));
 }

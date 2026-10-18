@@ -8,7 +8,7 @@ mod source;
 mod tools;
 mod validation;
 
-pub use bridge::{MessagesBridgeRequest, MessagesBridgeResponse, MessagesBridgeState};
+pub use bridge::{AdapterContinuationState, TranslatedResponse};
 pub use error::{AdapterError, AdapterResult};
 pub use prepared::{AdapterResponse, PreparedAdapterRequest};
 pub use reasoning::MessagesReasoningMode;

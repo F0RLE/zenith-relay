@@ -133,7 +133,7 @@ fn known_non_native_model_publishes_short_budget_from_reference_maximum() {
     assert_eq!(model_row["max_context_window"], 64_000);
     assert_eq!(model_row["auto_compact_token_limit"], 14_400);
     assert_eq!(model_row["effective_context_window_percent"], 100);
-    assert_eq!(model_row["supports_parallel_tool_calls"], true);
+    assert_eq!(model_row["supports_parallel_tool_calls"], false);
     assert_eq!(model_row["default_reasoning_level"], "high");
     assert_eq!(
         model_row["supported_reasoning_levels"]

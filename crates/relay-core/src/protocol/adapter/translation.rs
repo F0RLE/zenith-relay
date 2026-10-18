@@ -3,6 +3,7 @@ mod citations;
 mod continuation;
 mod decode;
 mod encode;
+mod model;
 mod options;
 mod response;
 mod schema;
@@ -13,14 +14,15 @@ mod tool_arguments;
 
 pub(super) use super::contracts::validate_bridge_fields as checked;
 use super::contracts::{
-    AdapterError, AdapterRequestContext, AdapterResult, ClientToolTarget, MessagesBridgeResponse,
-    MessagesBridgeState, ResponsesToolKind, ToolChoice,
+    AdapterContinuationState, AdapterError, AdapterRequestContext, AdapterResult, ClientToolTarget,
+    ResponsesToolKind, ToolChoice, TranslatedResponse,
 };
 use crate::{MessagesReasoningMode, WireApi};
-use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
+pub(in crate::protocol::adapter) use model::{Block, Message};
+use model::{Finish, Function, OutputFormat, Reasoning, Request, Response, Role, Usage};
 pub use stream::TranslationStream;
 
 pub(crate) fn continuation_key(
@@ -40,127 +42,6 @@ pub(in crate::protocol::adapter) fn responses_history(
 pub(in crate::protocol::adapter) fn validate_responses_history(input: &Value) -> AdapterResult<()> {
     let mut messages = responses_history(input)?;
     decode::resolve_tool_history(&mut messages)
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub(super) enum Block {
-    Text(String),
-    Image {
-        url: String,
-        detail: Option<String>,
-    },
-    ToolCall {
-        id: String,
-        name: String,
-        arguments: String,
-    },
-    ToolResult {
-        id: String,
-        name: String,
-        content: Vec<Block>,
-        is_error: bool,
-        /// Custom-tool output is literal text, even when it looks like JSON.
-        raw_text: bool,
-    },
-    Reasoning(String),
-    Refusal(String),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-pub(super) enum Role {
-    User,
-    Assistant,
-    System,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub(super) struct Message {
-    role: Role,
-    blocks: Vec<Block>,
-}
-
-#[derive(Clone, Debug)]
-struct Function {
-    name: String,
-    description: Option<String>,
-    parameters: Value,
-    strict: Option<bool>,
-}
-
-#[derive(Clone, Debug)]
-enum OutputFormat {
-    JsonObject,
-    JsonSchema {
-        name: String,
-        description: Option<String>,
-        schema: Value,
-        strict: Option<bool>,
-    },
-}
-
-#[derive(Clone, Debug)]
-enum Reasoning {
-    Effort(String),
-    Budget(u64),
-    Adaptive,
-    DynamicBudget,
-}
-
-#[derive(Clone, Debug, Default)]
-struct Request {
-    origin: Option<WireApi>,
-    metadata: BTreeMap<String, String>,
-    instructions: Option<Message>,
-    messages: Vec<Message>,
-    tools: Vec<Function>,
-    /// Responses client identity (kind, local name, namespace) for each
-    /// upstream tool name. Only a Responses client fills it.
-    client_tools: BTreeMap<String, ClientToolTarget>,
-    tool_choice: Option<ToolChoice>,
-    parallel_tools: Option<bool>,
-    max_tokens: Option<u64>,
-    temperature: Option<f64>,
-    top_p: Option<f64>,
-    top_k: Option<u64>,
-    presence_penalty: Option<f64>,
-    frequency_penalty: Option<f64>,
-    seed: Option<i64>,
-    stop: Vec<String>,
-    output_format: Option<OutputFormat>,
-    reasoning: Option<Reasoning>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct Usage {
-    input: Option<u64>,
-    output: Option<u64>,
-    total: Option<u64>,
-    cached: Option<u64>,
-    reasoning: Option<u64>,
-    cache_write: Option<u64>,
-    cache_write_5m: Option<u64>,
-    cache_write_1h: Option<u64>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Finish {
-    Stop,
-    Tools,
-    Length,
-    Filter,
-    Refusal,
-}
-
-#[derive(Clone, Debug)]
-struct Response {
-    id: String,
-    blocks: Vec<Block>,
-    citations: BTreeMap<usize, Vec<citations::UrlCitation>>,
-    usage: Usage,
-    finish: Finish,
-    /// Exact provider-owned assistant items, separate from portable content.
-    /// They are only replayed to the source protocol that produced them.
-    native_output: Vec<Value>,
 }
 
 #[derive(Clone, Debug)]
@@ -303,16 +184,13 @@ impl TranslationRequest {
         &self.upstream_body
     }
 
-    pub(super) fn translate(
-        self,
-        upstream_response: &Value,
-    ) -> AdapterResult<MessagesBridgeResponse> {
+    pub(super) fn translate(self, upstream_response: &Value) -> AdapterResult<TranslatedResponse> {
         let decoded_response =
             response::decode(self.upstream, upstream_response, &self.response_id)?;
         self.complete(decoded_response)
     }
 
-    fn complete(self, mut response: Response) -> AdapterResult<MessagesBridgeResponse> {
+    fn complete(self, mut response: Response) -> AdapterResult<TranslatedResponse> {
         self.validate_tool_calls(&response.blocks)?;
         for block in &mut response.blocks {
             self.normalize_function_arguments(block, true);
@@ -327,7 +205,7 @@ impl TranslationRequest {
                 self.client,
             )?;
         }
-        let mut continuation = MessagesBridgeState::new(&self.model, self.reasoning_mode);
+        let mut continuation = AdapterContinuationState::new(&self.model, self.reasoning_mode);
         continuation.client_wire_api = Some(self.client);
         continuation.reusable = matches!(response.finish, Finish::Stop | Finish::Tools);
         let mut history = self.history;
@@ -369,7 +247,7 @@ impl TranslationRequest {
                 .as_deref()
                 .expect("portable history"),
         )?);
-        Ok(MessagesBridgeResponse {
+        Ok(TranslatedResponse {
             response_body,
             response_id: self.response_id,
             continuation,
@@ -395,7 +273,7 @@ impl TranslationRequest {
     }
 
     fn validate_tool_call(&self, id: &str, name: &str) -> AdapterResult<()> {
-        if id.is_empty()
+        if id.trim().is_empty()
             || self.history.iter().flat_map(|message| &message.blocks).any(
                 |block| matches!(block, Block::ToolCall { id: previous_id, .. } if previous_id == id),
             )
@@ -450,6 +328,28 @@ fn required_text<'a>(json_object: &'a Value, key: &str) -> AdapterResult<&'a str
         .and_then(Value::as_str)
         .filter(|text| !text.is_empty())
         .ok_or_else(AdapterError::invalid_request)
+}
+
+/// Other protocols expose synchronous, directly executed calls. Explicitly
+/// equivalent Responses metadata is harmless; async/program execution is not.
+fn validate_direct_tool_execution(
+    call: &Value,
+    async_error: AdapterError,
+    caller_error: AdapterError,
+) -> AdapterResult<()> {
+    if call
+        .get("async")
+        .is_some_and(|value| !value.is_null() && value.as_bool() != Some(false))
+    {
+        return Err(async_error);
+    }
+    if let Some(caller) = call.get("caller").filter(|value| !value.is_null()) {
+        checked(caller, &["type"]).map_err(|_| caller_error)?;
+        if caller.get("type").and_then(Value::as_str) != Some("direct") {
+            return Err(caller_error);
+        }
+    }
+    Ok(())
 }
 
 fn optional_u64(json_object: &Value, key: &str) -> AdapterResult<Option<u64>> {

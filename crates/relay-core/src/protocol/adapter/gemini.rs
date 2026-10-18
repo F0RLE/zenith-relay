@@ -57,10 +57,6 @@ pub(in crate::protocol::adapter) fn validate_response_part(
     Ok(fields)
 }
 
-/// Compatibility names share the same protocol-independent implementation.
-pub type GeminiBridgeRequest = super::translation::TranslationRequest;
-pub type GeminiBridgeResponse = super::contracts::MessagesBridgeResponse;
-
 /// Shared assembly for Gemini's complete calls and Vertex's argument fragments.
 /// Client IDs belong to the output adapter; this state retains provider IDs.
 #[derive(Debug, Default)]
@@ -236,4 +232,6 @@ pub(crate) use response::{candidate_incomplete_reason, prompt_blocked};
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
-use super::contracts::{MessagesBridgeState, MessagesReasoningMode};
+use super::contracts::{AdapterContinuationState, MessagesReasoningMode, TranslatedResponse};
+#[cfg(test)]
+use super::translation::TranslationRequest;

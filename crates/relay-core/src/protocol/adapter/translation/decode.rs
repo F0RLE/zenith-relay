@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 /// Keep Responses custom/function result identity outside provider tool names.
 pub(super) fn responses_tool_results(
     request: &Value,
-    previous: Option<&MessagesBridgeState>,
+    previous: Option<&AdapterContinuationState>,
 ) -> AdapterResult<BTreeMap<String, ClientToolTarget>> {
     let mut targets = previous
         .map(|state| state.response_call_targets.clone())
@@ -45,11 +45,6 @@ pub(super) fn responses_tool_results(
                     .is_some_and(|value| value.as_str() != target.namespace.as_deref())
             {
                 return Err(AdapterError::continuation_mismatch());
-            }
-            if target.kind == ResponsesToolKind::Custom
-                && !fields.get("output").is_some_and(Value::is_string)
-            {
-                return Err(AdapterError::invalid_request());
             }
         }
     }
@@ -165,6 +160,7 @@ fn validate_tool_history(messages: &[Message]) -> AdapterResult<()> {
                     arguments,
                 } => {
                     if message.role != Role::Assistant
+                        || id.trim().is_empty()
                         || !seen.insert(id)
                         || serde_json::from_str::<Value>(arguments)
                             .ok()

@@ -216,9 +216,28 @@ impl ModelCapabilities {
                     .map(|value| ((*field).to_string(), value.clone()))
             })
             .collect::<Vec<_>>();
+        let native_parallel = catalog_entry
+            .get("supports_parallel_tool_calls")
+            .and_then(Value::as_bool);
+        let native_lite = catalog_entry
+            .get("use_responses_lite")
+            .and_then(Value::as_bool)
+            == Some(true);
         self.apply_to_codex(catalog_entry);
         if let Some(object) = catalog_entry.as_object_mut() {
             object.extend(context);
+            // A validated native card describes its transport. Ordinary tool
+            // support is not parallel-call evidence, and a transport exclusion
+            // must not be widened by reference model metadata.
+            object.insert(
+                "supports_parallel_tool_calls".into(),
+                json!(
+                    !native_lite
+                        && native_parallel == Some(true)
+                        && self.parallel_tool_call != Some(false)
+                        && self.tool_call != Some(false)
+                ),
+            );
         }
     }
 
@@ -256,7 +275,7 @@ impl ModelCapabilities {
         catalog_object.insert("output_modalities".into(), json!(self.output_modalities));
         catalog_object.insert(
             "supports_parallel_tool_calls".into(),
-            json!(self.parallel_tool_call.or(self.tool_call) == Some(true)),
+            json!(self.parallel_tool_call == Some(true) && self.tool_call != Some(false)),
         );
         catalog_object.insert("supports_search_tool".into(), json!(false));
         catalog_object.insert("supports_image_detail_original".into(), json!(false));
@@ -314,6 +333,39 @@ fn merge_route_capability_status(
 mod tests {
     use super::*;
     use crate::model_metadata::ModelMetadataCatalog;
+
+    #[test]
+    fn parallel_projection_requires_its_own_capability() {
+        for tool_call in [None, Some(false), Some(true)] {
+            for parallel in [None, Some(false), Some(true)] {
+                let capabilities = ModelCapabilities {
+                    tool_call,
+                    parallel_tool_call: parallel,
+                    ..ModelCapabilities::unknown_model()
+                };
+                let mut entry = crate::routed_codex_catalog_entry(None, "synthetic", 0, None);
+                capabilities.apply_to_codex(&mut entry);
+                assert_eq!(
+                    entry["supports_parallel_tool_calls"],
+                    parallel == Some(true) && tool_call != Some(false)
+                );
+                for native_parallel in [false, true] {
+                    for lite in [false, true] {
+                        entry["supports_parallel_tool_calls"] = json!(native_parallel);
+                        entry["use_responses_lite"] = json!(lite);
+                        capabilities.apply_to_native_codex(&mut entry);
+                        assert_eq!(
+                            entry["supports_parallel_tool_calls"],
+                            !lite
+                                && native_parallel
+                                && parallel != Some(false)
+                                && tool_call != Some(false)
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn defaults_fill_missing_fields_without_undoing_reference_exclusions() {

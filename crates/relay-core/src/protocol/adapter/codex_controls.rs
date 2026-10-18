@@ -283,7 +283,7 @@ fn codex_item_metadata_preserves_signed_messages_tool_roundtrip() {
         .continuation_key(WireApi::Responses, &request, "synthetic-model")
         .unwrap()
         .unwrap();
-    let mut store = MessagesBridgeStore::new(8, 1_000);
+    let mut store = AdapterContinuationStore::new(8, 1_000);
     store.insert(
         "key",
         &completed.response_id,

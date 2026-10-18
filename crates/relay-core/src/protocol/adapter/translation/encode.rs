@@ -77,6 +77,7 @@ fn conversation(
 ) -> AdapterResult<(Vec<Value>, Vec<Value>)> {
     let mut history: Vec<Value> = Vec::new();
     let mut system = Vec::new();
+    let mut conversation_started = false;
     let mut gemini_call_ids = BTreeMap::new();
     for (position, message) in request
         .instructions
@@ -85,6 +86,17 @@ fn conversation(
         .enumerate()
     {
         if message.role == Role::System && matches!(protocol, WireApi::Messages | WireApi::Gemini) {
+            if conversation_started {
+                // Hoisting a mid-conversation instruction into the initial
+                // prompt changes which earlier turns it governs.
+                return Err(AdapterError::parameter_unsupported_for(
+                    match request.origin {
+                        Some(WireApi::Responses) => "input[].role",
+                        Some(WireApi::Gemini) => "contents[].role",
+                        _ => "messages[].role",
+                    },
+                ));
+            }
             for block in &message.blocks {
                 let Block::Text(text) = block else {
                     return Err(AdapterError::parameter_unsupported());
@@ -97,6 +109,7 @@ fn conversation(
             }
             continue;
         }
+        conversation_started = true;
         let native = position
             .checked_sub(usize::from(request.instructions.is_some()))
             .and_then(|index| native_turns.get(&index));

@@ -114,9 +114,8 @@ impl super::ClientRequest {
         let responses_lite = headers
             .contains_key(crate::gateway::request::CODEX_RESPONSES_LITE_HEADER)
             || metadata_flag(&request_body, RESPONSES_LITE_METADATA_KEY);
-        // Responses Lite is a transport contract, not an OAuth-only option.
-        // Normalize it before route selection so every selected provider sees
-        // the same serial-tool request shape.
+        // Validate the client field here; only the selected native account
+        // transport may default an omitted Lite policy later.
         if responses_lite {
             let request_object = request_body
                 .as_object_mut()
@@ -126,7 +125,6 @@ impl super::ClientRequest {
                     "responses Lite requires parallel_tool_calls to be a boolean",
                 ));
             }
-            crate::gateway::request::normalize_responses_lite_request(request_object);
         }
         // Keep automatic Lite consistent with HTTP: a pool that can fall back
         // to a non-Lite or non-official Responses route must stay on full

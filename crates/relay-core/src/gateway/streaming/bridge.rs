@@ -1,5 +1,5 @@
 use super::{
-    preserved_stream_error, rewrite_bridge_failure, MessagesBridgeResponse, PreservedUpstreamError,
+    preserved_stream_error, rewrite_bridge_failure, PreservedUpstreamError, TranslatedResponse,
     UpstreamStream,
 };
 use crate::AdapterStreamBridge;
@@ -18,14 +18,14 @@ struct AdapterBridgeStreamState {
     pending: VecDeque<Bytes>,
     finished: bool,
     end_deadline: Option<Instant>,
-    completed: Arc<Mutex<Option<MessagesBridgeResponse>>>,
+    completed: Arc<Mutex<Option<TranslatedResponse>>>,
 }
 
 pub(super) fn bridge_adapter_stream(
     first: Bytes,
     remaining: UpstreamStream,
     bridge: AdapterStreamBridge,
-    completed: Arc<Mutex<Option<MessagesBridgeResponse>>>,
+    completed: Arc<Mutex<Option<TranslatedResponse>>>,
 ) -> impl Stream<Item = Result<Bytes, reqwest::Error>> + Send {
     let inner = stream::once(async move { Ok::<Bytes, reqwest::Error>(first) }).chain(remaining);
     stream::unfold(

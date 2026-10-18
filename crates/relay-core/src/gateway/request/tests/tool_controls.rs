@@ -137,6 +137,15 @@ fn responses_lite_keeps_provider_owned_tools_and_choices_opaque_and_serializes_t
     normalize_account_request(no_tools.as_object_mut().unwrap(), true);
     assert_eq!(no_tools["parallel_tool_calls"], false);
 }
+
+#[test]
+fn lite_defaults_do_not_overwrite_an_explicit_client_policy() {
+    for parallel in [false, true] {
+        let mut request = json!({"model":"synthetic", "parallel_tool_calls":parallel});
+        normalize_account_request(request.as_object_mut().unwrap(), true);
+        assert_eq!(request["parallel_tool_calls"], parallel);
+    }
+}
 #[test]
 fn tool_output_detection_covers_all_client_tool_result_shapes() {
     for output in [

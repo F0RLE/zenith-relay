@@ -104,14 +104,14 @@ impl GatewayRuntime {
         }
     }
 
-    pub(crate) fn save_messages_bridge_response_for_route(
+    pub(crate) fn save_adapter_response_for_route(
         &self,
         local_key_id: &str,
         route: &ExecutorRoute,
-        response: &crate::MessagesBridgeResponse,
+        response: &crate::TranslatedResponse,
         now_ms: u64,
     ) {
-        self.save_messages_bridge_response(local_key_id, &route.candidate_id, response, now_ms);
+        self.save_adapter_response(local_key_id, &route.candidate_id, response, now_ms);
         if !response.continuation.is_reusable()
             || crate::protocol::completion::ResponseCompletion::from_body(&response.response_body)
                 != crate::protocol::completion::ResponseCompletion::Completed
@@ -168,7 +168,7 @@ impl GatewayRuntime {
                     || previous.starts_with("gemini_bridge_")
                     || previous.starts_with("chat_bridge_")
                 {
-                    let state = self.load_messages_bridge_state(
+                    let state = self.load_adapter_continuation_state(
                         local_key_id,
                         previous,
                         &route.candidate_id,

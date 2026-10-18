@@ -67,6 +67,18 @@ fn tool_search_control_entry_is_not_counted_as_a_client_tool() {
 }
 
 #[test]
+fn deferred_search_evidence_requires_both_control_and_deferred_definitions() {
+    let function = json!({"type":"function","name":"fixture","defer_loading":true,"parameters":{"type":"object"}});
+    let request = json!({"tools":[{"type":"tool_search"}, function]});
+    let mut forwarded = request.clone();
+    let result = apply_tool_policy(&mut forwarded, &ToolPolicy::default()).unwrap();
+    assert!(result.after.deferred_search);
+    assert_eq!(forwarded, request);
+    assert!(!catalog_stats(&json!({"tools":[function]})).deferred_search);
+    assert!(!catalog_stats(&json!({"tools":[{"type":"tool_search"}]})).deferred_search);
+}
+
+#[test]
 fn legacy_name_filtering_settings_are_read_as_standard_and_not_serialized() {
     let legacy_policy: ToolPolicy = serde_json::from_value(json!({
         "mode": "allowlist",

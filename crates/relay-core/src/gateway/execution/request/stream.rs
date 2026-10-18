@@ -24,6 +24,8 @@ pub(super) struct StreamRetryState {
 }
 
 pub(super) struct OpenStreamInput<'a> {
+    pub(super) discovery:
+        Option<super::super::basis_points::discovery::execution::StreamingDiscovery>,
     pub(super) upstream: reqwest::Response,
     pub(super) status: StatusCode,
     pub(super) response_headers: &'a HeaderMap,
@@ -64,6 +66,7 @@ pub(super) struct OpenStreamInput<'a> {
 /// bytes are forwarded.
 pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> OpenedStream {
     let OpenStreamInput {
+        discovery,
         upstream,
         status,
         response_headers,
@@ -140,6 +143,7 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
             first,
             remaining,
             basis_points_request,
+            discovery,
         ),
         Err(bootstrap_failure) => {
             let invalid_function_call_output_call_id =
@@ -308,6 +312,7 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn respond_opened_stream(
     execution: StreamExecution,
     status: StatusCode,
@@ -316,6 +321,7 @@ fn respond_opened_stream(
     first: Bytes,
     remaining: UpstreamStream,
     basis_points_request: Option<Value>,
+    discovery: Option<super::super::basis_points::discovery::execution::StreamingDiscovery>,
 ) -> OpenedStream {
     let account_route = execution.route.account_id.is_some();
     let mut stream_response = if basis_points_request.is_some() {
@@ -325,6 +331,7 @@ fn respond_opened_stream(
             first,
             remaining,
             basis_points_request,
+            discovery,
         )
     } else {
         execution.into_response(status, headers.clone(), first, remaining)

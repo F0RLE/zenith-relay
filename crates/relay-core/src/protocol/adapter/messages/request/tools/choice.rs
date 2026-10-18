@@ -3,7 +3,7 @@ use crate::protocol::adapter::contracts::{resolve_responses_tool_choice, ToolCho
 
 pub(in crate::protocol::adapter::messages::request) fn translate_tool_choice(
     choice: &Value,
-    bridge_state: &MessagesBridgeState,
+    bridge_state: &AdapterContinuationState,
 ) -> AdapterResult<TranslatedToolChoice> {
     let available = bridge_state.available_tool_targets();
     let (choice, allowed_names) = resolve_responses_tool_choice(choice, &available)?;

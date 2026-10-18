@@ -61,6 +61,7 @@ pub(super) struct AccountDispatchInput<'a> {
     pub(super) reasoning_effort: ReasoningEffortDiagnostics,
     pub(super) tool_use: ToolUseDiagnostics,
     pub(super) request_id: &'a str,
+    pub(super) original_request: &'a Value,
     pub(super) requested_model: &'a str,
     pub(super) resolved_model: &'a str,
     pub(super) client_headers: &'a HeaderMap,
@@ -87,11 +88,12 @@ pub(super) async fn dispatch_account_attempt(
         route_responses_lite,
         selected_error_origin,
         upstream_url,
-        upstream_body,
+        mut upstream_body,
         request_body,
         reasoning_effort,
-        tool_use,
+        mut tool_use,
         request_id,
+        original_request,
         requested_model,
         resolved_model,
         client_headers,
@@ -101,6 +103,29 @@ pub(super) async fn dispatch_account_attempt(
         last_failure,
         last_failure_origin,
     } = account_attempt_input;
+    let request_body = if basis_points_route {
+        upstream_body = match super::super::basis_points::discovery::execution::prepare_dispatch(
+            original_request,
+            &upstream_body,
+            budget,
+            &mut tool_use,
+        ) {
+            Ok(body) => body,
+            Err(error) => {
+                return AccountDispatch::Respond(
+                    super::super::request::adapter_error_response_for_origin(
+                        error,
+                        selected_error_origin,
+                        Some(request_id),
+                    ),
+                )
+            }
+        };
+        tool_use.upstream_context = Some(crate::usage::RequestContextSize::capture(&upstream_body));
+        serde_json::to_vec(&upstream_body).expect("prepared JSON is serializable")
+    } else {
+        request_body
+    };
     let request_body = if basis_points_route {
         match super::super::basis_points::attach_input_images(
             runtime,
@@ -130,6 +155,7 @@ pub(super) async fn dispatch_account_attempt(
         request_body
     };
     let started = Instant::now();
+    let failure_tool_use = tool_use.clone();
     let failed_usage = |route: &ExecutorRoute, attempt, failure: AttemptFailure| {
         usage_event(
             UsageAttempt {
@@ -139,7 +165,7 @@ pub(super) async fn dispatch_account_attempt(
                 route,
                 reasoning_effort: Some(&reasoning_effort),
                 requested_model,
-                tool_use: tool_use.clone(),
+                tool_use: failure_tool_use.clone(),
             },
             false,
             failure.status.as_u16(),
@@ -147,6 +173,11 @@ pub(super) async fn dispatch_account_attempt(
             started.elapsed().as_millis() as u64,
         )
     };
+    if basis_points_route {
+        // Continuations must reuse uploaded file references, not upload or
+        // resend the original inline images a second time.
+        upstream_body = serde_json::from_slice(&request_body).expect("prepared JSON is valid");
+    }
     let mut request_headers = if basis_points_route {
         route.upstream_headers.clone()
     } else {
@@ -225,7 +256,34 @@ pub(super) async fn dispatch_account_attempt(
     let upstream = match upstream {
         Ok(upstream) => {
             route.account_token_generation = upstream.account_token_generation;
-            upstream.response
+            if basis_points_route {
+                match super::super::basis_points::discovery::resolve(
+                    upstream,
+                    original_request,
+                    upstream_body.clone(),
+                    super::super::basis_points::discovery::DiscoveryExecution {
+                        allow_streaming: false,
+                        runtime,
+                        key,
+                        lease,
+                        budget,
+                        route: &route,
+                        request_id,
+                        requested_model,
+                        reasoning_effort: &reasoning_effort,
+                        tool_use: &mut tool_use,
+                        selected_error_origin,
+                        started,
+                    },
+                )
+                .await
+                {
+                    Ok(response) => response.response,
+                    Err(response) => return AccountDispatch::Respond(response),
+                }
+            } else {
+                upstream.response
+            }
         }
         Err(error) => {
             return reject_authorized_dispatch(

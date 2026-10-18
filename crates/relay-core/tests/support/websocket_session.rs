@@ -58,7 +58,7 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
             "type": "response.create",
             "model": MODEL,
             "input": format!("hello {index}"),
-            "parallel_tool_calls": true
+            "parallel_tool_calls": false
         });
         if index == 1 {
             request["service_tier"] = Value::String("flex".to_string());

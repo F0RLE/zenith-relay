@@ -27,13 +27,8 @@ pub(super) fn normalize_account_request_common(
                 "context".to_string(),
                 Value::String("all_turns".to_string()),
             );
-        // Responses Lite has a stricter tool contract than the regular
-        // Responses endpoint.  The upstream currently requires an explicit
-        // boolean and only supports serial tool execution, even when the
-        // client omitted the field.  Keep the client-owned tool definitions
-        // untouched, but pin this transport-level switch to false.  This is
-        // deliberately done for both OAuth and compact Lite routes so HTTP
-        // and WebSocket requests cannot diverge.
+        // Only a selected native Lite transport receives its serial default.
+        // Callers reject an incompatible explicit policy before dispatch.
         normalize_responses_lite_request(request_fields);
     }
     coerce_responses_input_array(request_fields);
@@ -87,21 +82,14 @@ pub(super) fn normalize_empty_context_management(request_fields: &mut Map<String
     }
 }
 
-/// Apply the transport-level Responses Lite tool contract.
-///
-/// The Lite marker can arrive on a WebSocket before Relay has selected a
-/// concrete route. Normalize it at request parse time as a defensive guard so
-/// a route that does not use the account normalizer cannot forward
-/// `parallel_tool_calls: true` alongside the Lite contract.
+/// Default an omitted native Lite policy without rewriting the client's choice.
+/// This must run after route selection, not on BPS or API-source requests.
 pub(in crate::gateway) fn normalize_responses_lite_request(
     request_fields: &mut Map<String, Value>,
 ) {
-    if !matches!(
-        request_fields.get("parallel_tool_calls"),
-        Some(Value::Bool(false))
-    ) {
-        request_fields.insert("parallel_tool_calls".to_string(), Value::Bool(false));
-    }
+    request_fields
+        .entry("parallel_tool_calls".to_string())
+        .or_insert(Value::Bool(false));
 }
 
 /// Codex rejects some large schemas emitted by MCP tools when an enum is

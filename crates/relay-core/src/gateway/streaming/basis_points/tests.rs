@@ -97,6 +97,47 @@ fn invalid_mixed_or_missing_tools_never_dispatch_a_valid_subset() {
 }
 
 #[test]
+fn streamed_parallel_calls_keep_order_and_honor_an_explicit_serial_policy() {
+    for parallel in [None, Some(true), Some(false)] {
+        let mut request = request();
+        if let Some(parallel) = parallel {
+            request["parallel_tool_calls"] = json!(parallel);
+        }
+        let calls: Vec<_> = (0..3)
+            .map(|index| {
+                let mut item = call("inspect");
+                item["id"] = json!(format!("fc_batch_{index}"));
+                item["call_id"] = json!(format!("call_batch_{index}"));
+                item
+            })
+            .collect();
+        let mut translator = Translator::new(request);
+        translator.push(&frame(completed(json!(calls))));
+        let body = output(&mut translator);
+        if parallel == Some(false) {
+            assert!(body.contains("event: error"));
+            assert!(body.contains("output.run_officejs.parallel_tool_calls"));
+            assert!(!body.contains("response.function_call_arguments.delta"));
+            continue;
+        }
+        let mut pending = body.into_bytes();
+        let mut terminal = None;
+        while let Some(frame) = crate::protocol::take_sse_event(&mut pending) {
+            let event: Value = serde_json::from_slice(&crate::protocol::sse_data(&frame)).unwrap();
+            if event["type"] == "response.completed" {
+                terminal = Some(event["response"].clone());
+            }
+        }
+        let terminal = terminal.unwrap();
+        assert_eq!(terminal["output"].as_array().unwrap().len(), 3);
+        for (index, item) in terminal["output"].as_array().unwrap().iter().enumerate() {
+            assert_eq!(item["name"], "inspect");
+            assert_eq!(item["call_id"], format!("call_batch_{index}"));
+        }
+    }
+}
+
+#[test]
 fn fragmented_sse_is_resequenced_and_stops_at_first_terminal() {
     let mut translator = Translator::new(request());
     let source = [frame(json!({"type":"response.created","response":{"metadata":{"task_id":"internal"},"output":[call("inspect")]}})),frame(completed(json!([call("inspect")]))),frame(json!({"type":"response.output_text.delta","delta":"after-terminal"}))].concat();
@@ -219,6 +260,10 @@ fn tool_validation_failures_keep_safe_parameter_in_persisted_diagnostics() {
     assert!(!body.contains("private-value"));
     assert!(!body.contains("response.function_call_arguments"));
     let parsed = super::super::parse_sse_event(body.as_bytes());
+    assert_eq!(
+        parsed.error_category,
+        Some(crate::error_codes::ADAPTER_UPSTREAM_STREAM_INVALID)
+    );
     let details = parsed.upstream_error.unwrap();
     assert_eq!(
         details.code.as_deref(),
@@ -237,6 +282,10 @@ fn schema_failure_reports_safe_cause_in_persisted_diagnostics() {
         Some("output.run_officejs.args.schema"),
     );
     let parsed = super::super::parse_sse_event(&frame);
+    assert_eq!(
+        parsed.error_category,
+        Some(crate::error_codes::ADAPTER_UPSTREAM_STREAM_INVALID)
+    );
     let details = parsed.upstream_error.unwrap();
     assert!(details
         .message

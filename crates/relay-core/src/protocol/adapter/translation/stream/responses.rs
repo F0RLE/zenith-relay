@@ -116,6 +116,12 @@ impl TranslationStream {
         {
             return Err(invalid());
         }
+        if matches!(
+            response_item.get("type").and_then(Value::as_str),
+            Some("function_call" | "custom_tool_call")
+        ) {
+            response::validate_responses_call_execution(response_item)?;
+        }
         match response_item.get("type").and_then(Value::as_str) {
             Some("function_call") => {
                 self.insert(
@@ -591,6 +597,12 @@ impl TranslationStream {
     fn validate_final_item(&self, index: u64, item: &Value) -> AdapterResult<()> {
         let invalid = AdapterError::upstream_stream_invalid;
         let state = self.response_items.get(&index).ok_or_else(invalid)?;
+        if matches!(
+            item.get("type").and_then(Value::as_str),
+            Some("function_call" | "custom_tool_call")
+        ) {
+            response::validate_responses_call_execution(item)?;
+        }
         for field in ["type", "id", "call_id", "name", "namespace"] {
             if state
                 .item

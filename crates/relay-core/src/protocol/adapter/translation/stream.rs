@@ -33,7 +33,7 @@ pub struct TranslationStream {
     saw_refusal: bool,
     refusal_explanation: Option<String>,
     terminal: bool,
-    completed: Option<MessagesBridgeResponse>,
+    completed: Option<TranslatedResponse>,
     upstream_error: Option<Value>,
     sequence: u64,
 }
@@ -120,7 +120,7 @@ impl TranslationStream {
     pub fn pop_output(&mut self) -> Option<Vec<u8>> {
         self.pending_frames.pop_front()
     }
-    pub fn completed(&self) -> Option<&MessagesBridgeResponse> {
+    pub fn completed(&self) -> Option<&TranslatedResponse> {
         self.completed.as_ref()
     }
     pub fn is_terminal(&self) -> bool {

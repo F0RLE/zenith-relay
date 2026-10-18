@@ -55,7 +55,7 @@ impl<S> UsageStream<S> {
         let Some(event) = self.event.as_ref() else {
             return false;
         };
-        if event.wire_api != WireApi::Responses || self.client_visible_output {
+        if event.wire_api != WireApi::Responses || self.client_frame_open {
             return false;
         }
         let response_id = self.response_id.clone().unwrap_or_else(|| {
@@ -75,6 +75,7 @@ impl<S> UsageStream<S> {
         let message = origin.prefix_message(message);
         let failure_event = json!({
             "type": "response.failed",
+            "sequence_number": self.next_sequence,
             "response": {
                 "id": response_id,
                 "object": "response",
@@ -128,19 +129,26 @@ impl<S> UsageStream<S> {
     }
 
     fn apply_fast_response_delta(&mut self, delta: FastResponseDelta) {
+        self.observe_sequence(delta.sequence_number);
         if self.native_response.is_some() {
             self.native_replay_capture
                 .observe_response_delta(delta.output_index);
         }
-        if delta.nonempty_text
-            && self
-                .event
-                .as_ref()
-                .is_some_and(|event| event.ttft_ms.is_none())
-        {
-            if let Some(usage_event) = self.event.as_mut() {
-                usage_event.ttft_ms = Some(self.started.elapsed().as_millis() as u64);
-            }
+        self.observe_first_output(delta.nonempty_text);
+    }
+
+    fn observe_sequence(&mut self, sequence: Option<u64>) {
+        if let Some(sequence) = sequence {
+            self.next_sequence = self.next_sequence.max(sequence.saturating_add(1));
+        }
+    }
+
+    fn observe_first_output(&mut self, has_output: bool) {
+        if !has_output {
+            return;
+        }
+        if let Some(event) = self.event.as_mut().filter(|event| event.ttft_ms.is_none()) {
+            event.ttft_ms = Some(self.started.elapsed().as_millis() as u64);
         }
     }
 
@@ -156,44 +164,25 @@ impl<S> UsageStream<S> {
         let mut forwarded = Vec::with_capacity(bytes.len());
         loop {
             match self.sse_forward_mode {
-                super::SseForwardMode::Normal => {
+                super::SseForwardMode::Passthrough | super::SseForwardMode::BufferedTerminal => {
                     let Some(end) = crate::protocol::sse_event_end(&self.sse_forward_pending)
                     else {
-                        forwarded.append(&mut self.sse_forward_pending);
+                        if self.sse_forward_mode == super::SseForwardMode::Passthrough {
+                            forwarded.append(&mut self.sse_forward_pending);
+                        }
                         break;
                     };
-                    let event = self.sse_forward_pending.drain(..end).collect::<Vec<_>>();
-                    let terminal = parse_sse_event(&event);
-                    let is_terminal = terminal.outcome.is_some();
-                    forwarded.extend(prefix_stream_error_event(&event, &terminal, origin));
-                    self.sse_forward_mode = super::SseForwardMode::Detect;
-                    if is_terminal {
-                        self.sse_forward_pending.clear();
-                        break;
-                    }
-                }
-                super::SseForwardMode::Error => {
-                    let Some(end) = crate::protocol::sse_event_end(&self.sse_forward_pending)
-                    else {
-                        break;
-                    };
-                    let event = self.sse_forward_pending.drain(..end).collect::<Vec<_>>();
-                    let terminal = parse_sse_event(&event);
-                    let is_terminal = terminal.outcome.is_some();
-                    forwarded.extend(prefix_stream_error_event(&event, &terminal, origin));
-                    self.sse_forward_mode = super::SseForwardMode::Detect;
-                    if is_terminal {
-                        self.sse_forward_pending.clear();
+                    if self.forward_complete_sse_event(end, origin, &mut forwarded) {
                         break;
                     }
                 }
                 super::SseForwardMode::Detect => {
                     match classify_sse_prefix(&self.sse_forward_pending) {
                         Some(true) => {
-                            self.sse_forward_mode = super::SseForwardMode::Error;
+                            self.sse_forward_mode = super::SseForwardMode::BufferedTerminal;
                         }
                         Some(false) => {
-                            self.sse_forward_mode = super::SseForwardMode::Normal;
+                            self.sse_forward_mode = super::SseForwardMode::Passthrough;
                         }
                         None => {
                             let end = crate::protocol::sse_event_end(&self.sse_forward_pending);
@@ -206,16 +195,11 @@ impl<S> UsageStream<S> {
                                 // a terminal marker. Standard terminal SSE
                                 // events are held as soon as their `event:`
                                 // name identifies them.
-                                self.sse_forward_mode = super::SseForwardMode::Normal;
+                                self.sse_forward_mode = super::SseForwardMode::Passthrough;
                                 forwarded.append(&mut self.sse_forward_pending);
                                 break;
                             };
-                            let event = self.sse_forward_pending.drain(..end).collect::<Vec<_>>();
-                            let terminal = parse_sse_event(&event);
-                            let is_terminal = terminal.outcome.is_some();
-                            forwarded.extend(prefix_stream_error_event(&event, &terminal, origin));
-                            if is_terminal {
-                                self.sse_forward_pending.clear();
+                            if self.forward_complete_sse_event(end, origin, &mut forwarded) {
                                 break;
                             }
                         }
@@ -224,6 +208,25 @@ impl<S> UsageStream<S> {
             }
         }
         forwarded
+    }
+
+    /// Returns whether this frame ended the upstream response. Terminal frames
+    /// discard trailing bytes; ordinary frames resume prefix detection.
+    fn forward_complete_sse_event(
+        &mut self,
+        end: usize,
+        origin: crate::ErrorOrigin,
+        forwarded: &mut Vec<u8>,
+    ) -> bool {
+        let frame = self.sse_forward_pending.drain(..end).collect::<Vec<_>>();
+        let event = parse_sse_event(&frame);
+        forwarded.extend(prefix_stream_error_event(&frame, &event, origin));
+        self.sse_forward_mode = super::SseForwardMode::Detect;
+        let is_terminal = event.outcome.is_some();
+        if is_terminal {
+            self.sse_forward_pending.clear();
+        }
+        is_terminal
     }
 
     pub(in crate::gateway::streaming) fn ingest_sse(&mut self, bytes: &[u8]) -> bool {
@@ -237,6 +240,13 @@ impl<S> UsageStream<S> {
                 continue;
             }
             let mut terminal = parse_sse_event(&event);
+            self.observe_sequence(
+                terminal
+                    .event_payload
+                    .as_ref()
+                    .and_then(|payload| payload.get("sequence_number"))
+                    .and_then(Value::as_u64),
+            );
             // Reported consumption remains real even when identity validation
             // rejects the response before it can reach the client.
             if let Some(usage) = terminal.usage {
@@ -336,16 +346,7 @@ impl<S> UsageStream<S> {
             } else if terminal.is_compaction {
                 self.native_replay_capture.mark_unmaterialized();
             }
-            if terminal.has_output_delta
-                && self
-                    .event
-                    .as_ref()
-                    .is_some_and(|event| event.ttft_ms.is_none())
-            {
-                if let Some(usage_event) = self.event.as_mut() {
-                    usage_event.ttft_ms = Some(self.started.elapsed().as_millis() as u64);
-                }
-            }
+            self.observe_first_output(terminal.has_output_delta);
             if terminal.response_id.is_some() {
                 self.response_id = terminal.response_id;
             }
@@ -452,16 +453,7 @@ impl<S> UsageStream<S> {
                     return true;
                 }
             }
-            if terminal.has_output_delta
-                && self
-                    .event
-                    .as_ref()
-                    .is_some_and(|event| event.ttft_ms.is_none())
-            {
-                if let Some(usage_event) = self.event.as_mut() {
-                    usage_event.ttft_ms = Some(self.started.elapsed().as_millis() as u64);
-                }
-            }
+            self.observe_first_output(terminal.has_output_delta);
         }
         true
     }
@@ -471,6 +463,10 @@ impl<S> UsageStream<S> {
         if let (Some(event), Some(snapshot)) = (self.event.as_mut(), self.usage_snapshot.as_ref()) {
             apply_usage(event, snapshot);
         }
+    }
+
+    pub(super) fn record_transport_error(&mut self, error: &(dyn std::error::Error + 'static)) {
+        self.set_upstream_error(Some(super::super::diagnostics::transport_error(error)));
     }
 
     fn set_upstream_error(&mut self, details: Option<crate::usage::UpstreamErrorDetails>) {
@@ -635,16 +631,7 @@ fn classify_json_error_prefix(bytes: &[u8]) -> Option<bool> {
     let Some(event_type_bytes) = event_type_bytes else {
         return Some(false);
     };
-    Some(matches!(
-        event_type_bytes,
-        b"error"
-            | b"response.failed"
-            | b"response.incomplete"
-            | b"response.cancelled"
-            | b"response.canceled"
-            | b"response.completed"
-            | b"response.done"
-    ))
+    Some(is_terminal_sse_event(event_type_bytes))
 }
 
 fn read_json_string_prefix(bytes: &[u8]) -> Option<(Option<&[u8]>, usize)> {

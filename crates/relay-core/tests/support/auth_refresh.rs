@@ -44,7 +44,7 @@ async fn account_headers_use_provider_id_but_usage_keeps_only_local_identity() {
 }
 
 #[tokio::test]
-async fn responses_lite_normalizes_parallel_tools_for_api_sources_too() {
+async fn responses_lite_header_does_not_override_api_source_parallel_policy() {
     let (upstream, state) = spawn_upstream(vec![success_reply("source-response")]).await;
     let authority = ready_authority("unused-account", "unused-access").await;
     let (gateway, _, _, _) = spawn_mixed_gateway(
@@ -73,7 +73,7 @@ async fn responses_lite_normalizes_parallel_tools_for_api_sources_too() {
 
     let requests = state.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].body["parallel_tool_calls"], false);
+    assert_eq!(requests[0].body["parallel_tool_calls"], true);
     assert!(requests[0].responses_lite.is_none());
 }
 

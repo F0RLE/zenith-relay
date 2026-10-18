@@ -165,7 +165,7 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
         reasoning_effort,
         adapter_is_passthrough,
         request_body,
-        tool_use,
+        mut tool_use,
     } = prepared;
     let dispatches_before = budget.dispatches();
     let dispatched = match dispatch_request_attempt(RequestDispatchInput {
@@ -182,7 +182,8 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
         adapter_request: &adapter_request,
         request_body,
         reasoning_effort: &reasoning_effort,
-        tool_use: &tool_use,
+        tool_use: &mut tool_use,
+        basis_points_request: basis_points_request.as_ref(),
         request_id: &request_id,
         requested_model: &requested_model,
         forwarded_headers,
@@ -210,6 +211,7 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
         RequestDispatch::Ready(dispatched) => *dispatched,
     };
     let DispatchedRequestAttempt {
+        discovery,
         route,
         upstream,
         status,
@@ -353,6 +355,7 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
     }
 
     match open_response_stream(OpenStreamInput {
+        discovery,
         upstream,
         status,
         response_headers: &response_headers,

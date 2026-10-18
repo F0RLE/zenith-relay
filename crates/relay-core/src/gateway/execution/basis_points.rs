@@ -14,8 +14,10 @@
 mod attachments;
 mod catalog;
 mod codec;
+pub(in crate::gateway) mod discovery;
 mod history;
 mod prepare;
+mod presentation;
 pub(in crate::gateway) mod response;
 mod schema;
 pub(in crate::gateway::execution) mod structured_output;

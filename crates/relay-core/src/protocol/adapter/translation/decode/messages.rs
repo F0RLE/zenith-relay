@@ -50,7 +50,7 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
     {
         checked(message, &["role", "content"])?;
         decoded_request.messages.push(Message {
-            role: super::content::role(message)?,
+            role: super::content::role(message, WireApi::Messages)?,
             blocks: super::content::text_blocks(
                 message
                     .get("content")

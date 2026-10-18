@@ -143,6 +143,15 @@ impl ClientRequest {
         &self,
         route: &ExecutorRoute,
     ) -> Result<(Value, ToolUseDiagnostics), GatewayFailure> {
+        if route.account_id.is_some()
+            && route.account_transport == crate::runtime::AccountTransport::NativeResponses
+            && self.responses_lite_for(route)
+            && self.request_body.get("parallel_tool_calls") == Some(&Value::Bool(true))
+        {
+            return Err(GatewayFailure::invalid_request(
+                "selected Responses Lite transport does not support parallel_tool_calls: true",
+            ));
+        }
         let mut filtered_request = self.request_for_route(route);
         let mut policy = self.tool_policy.clone();
         policy
@@ -186,10 +195,9 @@ impl ClientRequest {
             Value::String(route.source_model.clone()),
         );
         let responses_lite = self.responses_lite_for(route);
-        if responses_lite {
-            crate::gateway::request::normalize_responses_lite_request(routed_object);
-        }
-        if route.account_id.is_some() {
+        if route.account_id.is_some()
+            && route.account_transport == crate::runtime::AccountTransport::NativeResponses
+        {
             crate::gateway::request::normalize_account_request(routed_object, responses_lite);
         }
         routed_request

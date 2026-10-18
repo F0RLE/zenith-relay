@@ -30,6 +30,34 @@ pub(in crate::gateway) fn classify_upstream_error_value(
     status: StatusCode,
     error_payload: &Value,
 ) -> UpstreamErrorClassification {
+    // BPS normalization emits a typed local adapter failure into the stream.
+    // Keep its exact category instead of falling back to upstream_terminal.
+    // Only these representation failures are accepted, never arbitrary codes
+    // or origin claims, and an HTTP authorization refusal still owns its status.
+    if status == StatusCode::BAD_GATEWAY {
+        for path in ["/error", "/response/error", "/body/error"] {
+            if let Some(error) = error_payload
+                .pointer(path)
+                .filter(|error| error.get("type").and_then(Value::as_str) == Some("relay_adapter"))
+            {
+                let adapter = match error.get("code").and_then(Value::as_str) {
+                    Some(error_codes::ADAPTER_UPSTREAM_RESPONSE_INVALID) => {
+                        Some(crate::AdapterError::upstream_response_invalid())
+                    }
+                    Some(error_codes::ADAPTER_UPSTREAM_STREAM_INVALID) => {
+                        Some(crate::AdapterError::upstream_stream_invalid())
+                    }
+                    _ => None,
+                };
+                if let Some(adapter) = adapter {
+                    return UpstreamErrorClassification {
+                        category: adapter.code(),
+                        message: adapter.message(),
+                    };
+                }
+            }
+        }
+    }
     if [
         "/code",
         "/error_code",

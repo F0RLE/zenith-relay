@@ -1,11 +1,11 @@
-use super::contracts::MessagesBridgeResponse;
+use super::contracts::TranslatedResponse;
 use serde_json::Value;
 
 mod frame;
 
+#[cfg(test)]
+use super::translation::TranslationStream;
 pub(crate) use frame::merge_usage;
-pub type GeminiStreamBridge = super::translation::TranslationStream;
-pub type MessagesStreamBridge = super::translation::TranslationStream;
 
 pub enum AdapterStreamBridge {
     Translated(Box<super::translation::TranslationStream>),
@@ -37,7 +37,7 @@ impl AdapterStreamBridge {
             Self::Translated(bridge) => bridge.pop_output(),
         }
     }
-    pub fn completed(&self) -> Option<&MessagesBridgeResponse> {
+    pub fn completed(&self) -> Option<&TranslatedResponse> {
         match self {
             Self::Translated(bridge) => bridge.completed(),
         }
@@ -70,7 +70,7 @@ mod gemini_stream_tests {
             "request-42",
         )
         .unwrap();
-        let mut bridge = GeminiStreamBridge::new(request);
+        let mut bridge = TranslationStream::new(request);
         bridge.push(
             br#"data: {"candidates":[{"content":{"parts":[{"text":"Hello"}]}}]}
 
@@ -109,7 +109,7 @@ data: {"candidates":[{"content":{"parts":[{"text":"Hello world"}]},"finishReason
             "request-tool",
         )
         .unwrap();
-        let mut bridge = GeminiStreamBridge::new(request);
+        let mut bridge = TranslationStream::new(request);
         bridge.push(
             br#"data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"run","args":{"command":"pwd"},"id":"call-1"}}]}}]}
 
@@ -159,7 +159,7 @@ data: {"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}],"usageMetad
             "partial-tool",
         )
         .unwrap();
-        let mut bridge = GeminiStreamBridge::new(request);
+        let mut bridge = TranslationStream::new(request);
         bridge.push(
             br#"data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"get_weather","willContinue":true},"thoughtSignature":"sig"}]}}]}
 

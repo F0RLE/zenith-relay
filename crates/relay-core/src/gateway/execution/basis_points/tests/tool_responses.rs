@@ -375,6 +375,59 @@ fn serial_tool_requests_do_not_return_multiple_client_tool_calls() {
 }
 
 #[test]
+fn parallel_responses_keep_repeated_tool_names_and_distinct_call_ids() {
+    for parallel in [None, Some(true)] {
+        let mut request = request_with_tool();
+        if let Some(parallel) = parallel {
+            request["parallel_tool_calls"] = json!(parallel);
+        }
+        let calls: Vec<_> = (0..3).map(|index| json!({
+            "type":"function_call", "id":format!("fc_batch_{index}"),
+            "call_id":format!("call_batch_{index}"), "name":TRANSPORT_TOOL,
+            "arguments":json!({"references":["exec_command"],
+                "code":json!({"cmd":format!("synthetic-read-{index}")}).to_string()}).to_string()
+        })).collect();
+        let body = serde_json::to_vec(&json!({
+            "id":"resp_batch", "status":"completed", "output":calls
+        }))
+        .unwrap();
+        let translated: Value =
+            serde_json::from_slice(&translate_response(&body, &request).unwrap()).unwrap();
+        assert_eq!(translated["output"].as_array().unwrap().len(), 3);
+        for (index, call) in translated["output"].as_array().unwrap().iter().enumerate() {
+            assert_eq!(call["call_id"], format!("call_batch_{index}"));
+            assert_eq!(call["name"], "exec_command");
+            let args: Value = serde_json::from_str(call["arguments"].as_str().unwrap()).unwrap();
+            assert_eq!(args["cmd"], format!("synthetic-read-{index}"));
+        }
+    }
+}
+
+#[test]
+fn tool_call_identity_rejects_blank_values_without_normalizing_opaque_ids() {
+    for call_id in ["", "   ", "\t\r\n", "call_synthetic", " call_with_padding "] {
+        let mut response: Value = serde_json::from_slice(&tool_response(
+            r#"{"tool":"exec_command","args":{"cmd":"synthetic"}}"#,
+        ))
+        .unwrap();
+        response["output"][0]["call_id"] = json!(call_id);
+        let translated = translate_response(
+            &serde_json::to_vec(&response).unwrap(),
+            &request_with_tool(),
+        );
+        if call_id.trim().is_empty() {
+            assert_eq!(
+                translated.unwrap_err().parameter(),
+                Some("output.run_officejs.call_id")
+            );
+        } else {
+            let translated: Value = serde_json::from_slice(&translated.unwrap()).unwrap();
+            assert_eq!(translated["output"][0]["call_id"], call_id);
+        }
+    }
+}
+
+#[test]
 fn ambiguous_namespace_tool_name_is_rejected() {
     let request = json!({
         "tools": [

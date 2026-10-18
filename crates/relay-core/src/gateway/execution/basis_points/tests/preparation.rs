@@ -2,7 +2,7 @@ use super::*;
 use serde_json::json;
 
 #[test]
-fn tool_prompt_and_validation_use_the_same_json_schema() {
+fn tool_prompt_is_compact_but_keeps_the_original_schema_for_validation() {
     let schema = json!({"type":"object","properties":{
         "path":{"type":"string","description":"File path","minLength":1},
         "limit":{"type":"integer","minimum":1,"maximum":100},
@@ -12,8 +12,10 @@ fn tool_prompt_and_validation_use_the_same_json_schema() {
     let original = request.clone();
     let prepared = prepare_request(&request).unwrap();
     let instructions = prepared["input"][0]["content"][0]["text"].as_str().unwrap();
-    assert!(instructions.contains("matching this JSON Schema:"));
-    assert!(instructions.contains(&schema.to_string()));
+    assert!(instructions.contains("complete argument contract"));
+    assert!(instructions.contains(". Parameters: "));
+    assert!(instructions.contains("\"path\":string @"));
+    assert!(instructions.contains("\"minLength\":1"));
     assert_eq!(request, original);
 }
 
@@ -177,7 +179,7 @@ fn tool_examples_follow_the_declared_tool_instead_of_a_fixed_patch() {
     let prepared = prepare_request(&request_with_tool()).unwrap();
     let instructions = prepared["input"][0]["content"][0]["text"].as_str().unwrap();
     assert!(instructions.contains("Example outer arguments for exec_command (function)"));
-    assert!(instructions.contains("\"cmd\":{\"type\":\"string\"}"));
+    assert!(instructions.contains("\"cmd\":string"));
     assert!(!instructions.contains("Example outer arguments for apply_patch"));
     assert!(!instructions.contains("*** Begin Patch"));
 
@@ -284,6 +286,73 @@ fn tool_catalog_is_one_message_and_examples_follow_the_bare_name() {
     assert!(!instructions.contains("Reminder:"));
     assert_eq!(input.len(), 2);
     assert_eq!(input[1]["role"], "user");
+}
+
+#[test]
+fn large_catalog_keeps_every_schema_without_repeating_shared_instructions() {
+    let schema = json!({
+        "type":"object",
+        "properties":{"mode":{"type":"string","enum":["read","write"]}},
+        "required":["mode"],"additionalProperties":false
+    });
+    let tools: Vec<_> = (0..64)
+        .map(|index| {
+            json!({
+                "type":"function", "name":format!("fixture_{index}"),
+                "description":"Preserve this synthetic description.",
+                "parameters":schema
+            })
+        })
+        .collect();
+    let request = json!({"input":"hello", "tools":tools});
+    let original = request.clone();
+    let prepared = prepare_request(&request).unwrap();
+    let instructions = prepared["input"][0]["content"][0]["text"].as_str().unwrap();
+    assert_eq!(
+        instructions
+            .matches("pass one JSON object matching it")
+            .count(),
+        1
+    );
+    assert_eq!(instructions.matches(". Parameters: ").count(), 64);
+    assert_eq!(
+        instructions
+            .matches("Preserve this synthetic description.")
+            .count(),
+        64
+    );
+    assert_eq!(
+        instructions
+            .matches(&super::super::schema::prompt_schema(&schema))
+            .count(),
+        64
+    );
+    assert!(!instructions.contains("Arguments must be one JSON object matching this JSON Schema"));
+    for index in 0..64 {
+        assert!(instructions.contains(&format!("- fixture_{index} (function)")));
+    }
+    assert_eq!(request, original);
+}
+
+#[test]
+fn large_historical_catalog_keeps_current_definitions_without_duplicates() {
+    let historical: Vec<_> = (0..200).map(|index| json!({
+        "type":"function", "name":format!("fixture_{index}"),
+        "description":format!("Historical definition {index}."), "parameters":{"type":"object"}
+    })).collect();
+    let request = json!({
+        "input":[{"type":"additional_tools","tools":historical},{"role":"user","content":"hello"}],
+        "tools":[
+            {"type":"function","name":"fixture_37","description":"Current definition wins.","parameters":{"type":"object"}},
+            {"type":"function","name":"new_fixture","parameters":{"type":"object"}}
+        ]
+    });
+    let prepared = prepare_request(&request).unwrap();
+    let instructions = prepared["input"][0]["content"][0]["text"].as_str().unwrap();
+    assert_eq!(instructions.matches(". Parameters: ").count(), 201);
+    assert_eq!(instructions.matches("- fixture_37 (function)").count(), 1);
+    assert!(instructions.contains("Current definition wins."));
+    assert!(!instructions.contains("Historical definition 37."));
 }
 
 #[test]
@@ -451,6 +520,38 @@ fn preparation_adds_stable_basis_points_turn_metadata() {
     assert_eq!(first["metadata"]["agent_iteration"], "2");
     assert!(first["metadata"].get("request_kind").is_none());
     assert!(first["metadata"].get("nested").is_none());
+}
+
+#[test]
+fn borrowed_turn_prefix_keeps_the_existing_metadata_fingerprint() {
+    use sha2::Digest;
+    let request = json!({
+        "input":[
+            {"role":"developer","content":"Synthetic policy. ".repeat(2000)},
+            {"role":"user","content":"Synthetic question."},
+            {"role":"assistant","content":"Synthetic response."},
+            {"role":"user","content":"Synthetic next question."},
+            {"type":"function_call_output","call_id":"synthetic_call","output":"Synthetic large result. ".repeat(5000)}
+        ]
+    });
+    let input = request["input"].as_array().unwrap();
+    let conversation = codec::short_hash(&input[0]);
+    let previous_prefix_hash = hex::encode(sha2::Sha256::digest(
+        serde_json::to_vec(&Value::Array(input[..4].to_vec())).unwrap(),
+    ));
+    let metadata = codec::basis_points_metadata(request.as_object().unwrap(), input);
+    assert_eq!(
+        metadata["task_id"],
+        codec::stable_uuid("cpa-oai-basispoints", &conversation)
+    );
+    assert_eq!(
+        metadata["turn_id"],
+        codec::stable_uuid(
+            "cpa-oai-basispoints/turn",
+            &format!("{conversation}/{previous_prefix_hash}")
+        )
+    );
+    assert_eq!(metadata["agent_iteration"], "2");
 }
 
 #[test]

@@ -1,12 +1,12 @@
 //! Convenience response entry point and shared Responses identity helpers.
-use super::{AdapterError, AdapterResult, MessagesBridgeRequest, MessagesBridgeResponse};
+use super::{AdapterError, AdapterResult, TranslatedResponse, TranslationRequest};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 pub fn translate_messages_response(
-    request: MessagesBridgeRequest,
+    request: TranslationRequest,
     upstream: &Value,
-) -> AdapterResult<MessagesBridgeResponse> {
+) -> AdapterResult<TranslatedResponse> {
     request.translate(upstream)
 }
 

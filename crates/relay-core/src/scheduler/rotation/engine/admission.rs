@@ -54,46 +54,9 @@ impl RotationEngine {
 
     pub fn select(&self, request: &RotationRequest, now_ms: u64) -> Option<RotationSelection> {
         let (ready_candidates, _) = self.selection_candidates(request, now_ms);
-        let least_loaded_candidates = self.least_loaded_group(&ready_candidates);
         let selection_group = self.selection_group(&ready_candidates, request, now_ms);
         let selected_candidate = self.choose_for_request(request, &selection_group)?;
-        let selected_quota = self.fresh_quota_remaining(&selected_candidate.id, now_ms);
-        let quota_influenced = request.owner.is_none()
-            && !selected_candidate.recovery
-            && self.mode == RotationMode::Automatic
-            && selected_quota.is_some()
-            && least_loaded_candidates.iter().any(|candidate| {
-                self.fresh_quota_remaining(&candidate.id, now_ms) != selected_quota
-            });
-        let selected_provider_credits = self.fresh_provider_credits(&selected_candidate.id, now_ms);
-        let provider_credits_influenced = request.owner.is_none()
-            && !selected_candidate.recovery
-            && self.mode == RotationMode::Automatic
-            && least_loaded_candidates
-                .iter()
-                .all(|candidate| self.fresh_quota_remaining(&candidate.id, now_ms).is_none())
-            && selected_provider_credits.is_some()
-            && least_loaded_candidates.iter().any(|candidate| {
-                self.fresh_provider_credits(&candidate.id, now_ms) != selected_provider_credits
-            });
-        let load_influenced = least_loaded_candidates.len() < ready_candidates.len();
-        let reason = if request.owner.is_some() {
-            RotationSelectionReason::HardOwner
-        } else if selected_candidate.recovery {
-            RotationSelectionReason::Recovery
-        } else if ready_candidates.len() == 1 {
-            RotationSelectionReason::OnlyEligible
-        } else if matches!(self.mode, RotationMode::InOrder | RotationMode::Manual) {
-            RotationSelectionReason::ManualPriority
-        } else if load_influenced && self.mode == RotationMode::Automatic {
-            RotationSelectionReason::LeastLoaded
-        } else if quota_influenced {
-            RotationSelectionReason::QuotaHeadroom
-        } else if provider_credits_influenced {
-            RotationSelectionReason::ProviderCredits
-        } else {
-            RotationSelectionReason::WeightedRotation
-        };
+        let reason = self.selection_reason(request, &ready_candidates, &selected_candidate, now_ms);
         Some(RotationSelection {
             candidate_id: selected_candidate.id.clone(),
             priority: selected_candidate.priority,
@@ -101,6 +64,58 @@ impl RotationEngine {
             eligible_candidates: u32::try_from(ready_candidates.len()).unwrap_or(u32::MAX),
             reason,
         })
+    }
+
+    fn selection_reason(
+        &self,
+        request: &RotationRequest,
+        ready_candidates: &[ReadyCandidate],
+        selected: &ReadyCandidate,
+        now_ms: u64,
+    ) -> RotationSelectionReason {
+        if request.owner.is_some() {
+            return RotationSelectionReason::HardOwner;
+        }
+        if selected.recovery {
+            return RotationSelectionReason::Recovery;
+        }
+        if ready_candidates.len() == 1 {
+            return RotationSelectionReason::OnlyEligible;
+        }
+        if matches!(self.mode, RotationMode::InOrder | RotationMode::Manual) {
+            return RotationSelectionReason::ManualPriority;
+        }
+        if self.mode != RotationMode::Automatic {
+            return RotationSelectionReason::WeightedRotation;
+        }
+
+        // Only automatic selection compares resource headroom. Resolve its
+        // explanation after selection, without scanning balances for owners,
+        // recovery requests or manual/round-robin routing.
+        let least_loaded = self.least_loaded_group(ready_candidates);
+        if least_loaded.len() < ready_candidates.len() {
+            return RotationSelectionReason::LeastLoaded;
+        }
+        let selected_quota = self.fresh_quota_remaining(&selected.id, now_ms);
+        if selected_quota.is_some()
+            && least_loaded.iter().any(|candidate| {
+                self.fresh_quota_remaining(&candidate.id, now_ms) != selected_quota
+            })
+        {
+            return RotationSelectionReason::QuotaHeadroom;
+        }
+        let selected_credits = self.fresh_provider_credits(&selected.id, now_ms);
+        if selected_credits.is_some()
+            && least_loaded
+                .iter()
+                .all(|candidate| self.fresh_quota_remaining(&candidate.id, now_ms).is_none())
+            && least_loaded.iter().any(|candidate| {
+                self.fresh_provider_credits(&candidate.id, now_ms) != selected_credits
+            })
+        {
+            return RotationSelectionReason::ProviderCredits;
+        }
+        RotationSelectionReason::WeightedRotation
     }
 
     pub(super) fn selection_candidates(

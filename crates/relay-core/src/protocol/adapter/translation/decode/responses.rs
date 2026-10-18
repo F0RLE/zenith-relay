@@ -1,6 +1,6 @@
 use super::super::{
-    checked, optional_bool, required_text, AdapterError, AdapterResult, Block, Message, Reasoning,
-    Request, Role,
+    checked, optional_bool, required_text, validate_direct_tool_execution, AdapterError,
+    AdapterResult, Block, Message, Reasoning, Request, Role,
 };
 use crate::WireApi;
 use serde_json::{json, Value};
@@ -46,7 +46,7 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
                         response_item,
                         &["type", "role", "content", "id", "status", "phase"],
                     )?;
-                    let role = super::content::role(response_item)?;
+                    let role = super::content::role(response_item, WireApi::Responses)?;
                     let blocks = super::content::text_blocks(
                         response_item
                             .get("content")
@@ -83,8 +83,11 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
                             "name",
                             "namespace",
                             "arguments",
+                            "async",
+                            "caller",
                         ],
                     )?;
+                    validate_call_execution(response_item)?;
                     append_assistant_blocks(
                         &mut decoded_request.messages,
                         vec![Block::ToolCall {
@@ -105,8 +108,11 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
                             "name",
                             "namespace",
                             "input",
+                            "async",
+                            "caller",
                         ],
                     )?;
+                    validate_call_execution(response_item)?;
                     let tool_input = response_item
                         .get("input")
                         .and_then(Value::as_str)
@@ -124,19 +130,23 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
                 "function_call_output" | "custom_tool_call_output" => {
                     checked_item(
                         response_item,
-                        &["type", "id", "status", "call_id", "output", "namespace"],
+                        &[
+                            "type",
+                            "id",
+                            "status",
+                            "call_id",
+                            "output",
+                            "namespace",
+                            "caller",
+                        ],
                     )?;
+                    validate_call_execution(response_item)?;
                     decoded_request.messages.push(Message {
                         role: Role::User,
                         blocks: vec![Block::ToolResult {
                             id: required_text(response_item, "call_id")?.into(),
                             name: String::new(),
-                            content: super::content::tool_result_blocks(
-                                response_item
-                                    .get("output")
-                                    .ok_or_else(AdapterError::invalid_request)?,
-                                WireApi::Responses,
-                            )?,
+                            content: tool_result_content(response_item)?,
                             is_error: false,
                             raw_text: response_item.get("type").and_then(Value::as_str)
                                 == Some("custom_tool_call_output"),
@@ -272,6 +282,30 @@ fn checked_item(item: &Value, allowed: &[&str]) -> AdapterResult<()> {
         return Err(AdapterError::invalid_request().with_parameter(PARAMETER));
     }
     Ok(())
+}
+
+fn tool_result_content(item: &Value) -> AdapterResult<Vec<Block>> {
+    let output = item
+        .get("output")
+        .ok_or_else(AdapterError::invalid_request)?;
+    if item.get("type").and_then(Value::as_str) == Some("custom_tool_call_output")
+        && !match output {
+            Value::String(_) => true,
+            Value::Array(parts) => parts.iter().all(|part| part.get("type").is_some()),
+            _ => false,
+        }
+    {
+        return Err(AdapterError::invalid_request().with_parameter("input.output"));
+    }
+    super::content::tool_result_blocks(output, WireApi::Responses)
+}
+
+fn validate_call_execution(call: &Value) -> AdapterResult<()> {
+    validate_direct_tool_execution(
+        call,
+        AdapterError::parameter_unsupported_for("input.async"),
+        AdapterError::parameter_unsupported_for("input.caller"),
+    )
 }
 
 /// The upstream name of a replayed call: namespaced calls use the flattened

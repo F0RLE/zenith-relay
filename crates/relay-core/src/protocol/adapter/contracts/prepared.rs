@@ -1,5 +1,5 @@
 use super::super::stream::AdapterStreamBridge;
-use super::{AdapterError, AdapterResult, MessagesBridgeResponse, MessagesBridgeState};
+use super::{AdapterContinuationState, AdapterError, AdapterResult, TranslatedResponse};
 use crate::tool_policy::{apply_tool_policy, ToolPolicyResult};
 use crate::ToolPolicy;
 use serde_json::Value;
@@ -7,7 +7,7 @@ use serde_json::Value;
 /// One response codec result, independent of the selected upstream API.
 #[derive(Clone, Debug)]
 pub enum AdapterResponse {
-    Translated(MessagesBridgeResponse),
+    Translated(TranslatedResponse),
 }
 
 impl AdapterResponse {
@@ -21,12 +21,12 @@ impl AdapterResponse {
         &response.response_id
     }
 
-    pub fn messages_continuation(&self) -> Option<&MessagesBridgeResponse> {
+    pub fn translated_response(&self) -> &TranslatedResponse {
         let Self::Translated(response) = self;
-        Some(response)
+        response
     }
 
-    pub fn continuation(&self) -> Option<(&str, &MessagesBridgeState)> {
+    pub fn continuation(&self) -> Option<(&str, &AdapterContinuationState)> {
         let Self::Translated(response) = self;
         response
             .continuation
@@ -75,7 +75,7 @@ impl PreparedAdapterRequest {
     pub const fn requires_bridge_headers(&self) -> bool {
         !self.is_passthrough()
     }
-    pub const fn uses_messages_continuation(&self) -> bool {
+    pub const fn uses_local_continuation_state(&self) -> bool {
         !self.is_passthrough()
     }
 

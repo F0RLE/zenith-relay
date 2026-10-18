@@ -51,6 +51,15 @@ impl SseProgress {
 pub(crate) async fn collect_with_progress(
     response: reqwest::Response,
     idle_timeout: Option<Duration>,
+    stop_at_event: impl FnMut(&[u8]) -> bool,
+) -> std::result::Result<Vec<u8>, BodyReadFailure> {
+    collect_with_progress_limit(response, idle_timeout, usize::MAX, stop_at_event).await
+}
+
+pub(crate) async fn collect_with_progress_limit(
+    response: reqwest::Response,
+    idle_timeout: Option<Duration>,
+    max_bytes: usize,
     mut stop_at_event: impl FnMut(&[u8]) -> bool,
 ) -> std::result::Result<Vec<u8>, BodyReadFailure> {
     let sse = response
@@ -94,6 +103,12 @@ pub(crate) async fn collect_with_progress(
                 })
             }
         };
+        if chunk.len() > max_bytes.saturating_sub(bytes.len()) {
+            return Err(BodyReadFailure {
+                bytes,
+                timed_out: false,
+            });
+        }
         let advanced = if sse {
             progress.observe(&chunk)
         } else {

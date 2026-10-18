@@ -16,7 +16,7 @@ use crate::error_codes;
 use crate::runtime::{CandidateLease, ExecutorRoute};
 use crate::usage::ReasoningEffortDiagnostics;
 use crate::{
-    GatewayRuntime, MessagesBridgeResponse, PreparedAdapterRequest, ToolUseDiagnostics, UsageEvent,
+    GatewayRuntime, PreparedAdapterRequest, ToolUseDiagnostics, TranslatedResponse, UsageEvent,
     WireApi,
 };
 use axum::body::{Body, Bytes};
@@ -93,7 +93,7 @@ impl StreamExecution {
         first: Bytes,
         remaining: UpstreamStream,
     ) -> Response<Body> {
-        self.into_response_with_basis_points(status, headers, first, remaining, None)
+        self.into_response_with_basis_points(status, headers, first, remaining, None, None)
     }
 
     pub(in crate::gateway) fn into_response_with_basis_points(
@@ -103,6 +103,9 @@ impl StreamExecution {
         first: Bytes,
         remaining: UpstreamStream,
         basis_points_request: Option<Value>,
+        discovery: Option<
+            crate::gateway::execution::basis_points::discovery::execution::StreamingDiscovery,
+        >,
     ) -> Response<Body> {
         let Self {
             runtime,
@@ -166,8 +169,8 @@ impl StreamExecution {
         let completion_headers = headers.clone();
         let completion_uses_response_affinity = client_wire_api == WireApi::Responses;
         let completion_bridge_state = adapter_request
-            .uses_messages_continuation()
-            .then(|| Arc::new(Mutex::new(None::<MessagesBridgeResponse>)));
+            .uses_local_continuation_state()
+            .then(|| Arc::new(Mutex::new(None::<TranslatedResponse>)));
         let completion_bridge_state_for_callback = completion_bridge_state.clone();
         let completion_native_response = (client_wire_api == WireApi::Responses
             && adapter_is_passthrough)
@@ -178,7 +181,15 @@ impl StreamExecution {
         ));
         let completion_native_template = request;
         let completion_local_key = local_key_id.clone();
-        let completion_settlement = completion::StreamCompletionSettlement {
+        let discovery_progress = discovery.as_ref().map(|discovery| {
+            Arc::new(Mutex::new(basis_points::discovery::DiscoveryProgress {
+                budget: discovery.budget.clone(),
+                tool_use: initial_event.tool_use.clone(),
+                headers: None,
+            }))
+        });
+        let completion_settlement = Arc::new(completion::StreamCompletionSettlement {
+            discovery_progress: discovery_progress.clone(),
             route: route.clone(),
             _cache_context_observation: route.cache_context_observation.clone(),
             upstream_usage,
@@ -194,10 +205,27 @@ impl StreamExecution {
             tool_call_capture: tool_call_capture.clone(),
             native_template: completion_native_template,
             local_key: completion_local_key,
-        };
+        });
+        let discovery_settlement = completion_settlement.clone();
         let completion: CompletionCallback = Arc::new(move |event, response_id, hint| {
             completion_settlement.settle(event, response_id, hint);
         });
+        let (first, remaining) = if let Some(discovery) = discovery {
+            (
+                Bytes::new(),
+                basis_points::discovery::translate_stream(
+                    first,
+                    remaining,
+                    discovery,
+                    discovery_settlement,
+                    discovery_progress.expect("discovery progress is configured"),
+                    initial_event.clone(),
+                    started,
+                ),
+            )
+        } else {
+            (first, remaining)
+        };
         let (first, remaining) = if let Some(request) = basis_points_request {
             (
                 Bytes::new(),

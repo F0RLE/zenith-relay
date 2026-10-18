@@ -27,6 +27,21 @@ pub enum TerminalOutputKind {
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BasisPointsCatalogDiagnostics {
+    pub mode: String,
+    pub full_schema_bytes: u64,
+    pub rendered_schema_bytes: u64,
+    pub catalog_prompt_bytes: u64,
+    pub loaded_tool_count: u16,
+    pub discovery_rounds: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_output_tokens: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolUseDiagnostics {
     pub client_tool_count: u16,
     pub forwarded_tool_count: u16,
@@ -34,6 +49,12 @@ pub struct ToolUseDiagnostics {
     pub client_schema_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forwarded_schema_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_context: Option<super::RequestContextSize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_context: Option<super::RequestContextSize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis_points_catalog: Option<BasisPointsCatalogDiagnostics>,
     #[serde(default)]
     pub filtered_tool_count: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -113,10 +134,11 @@ impl ToolUseDiagnostics {
             && matches!(self.terminal_output, TerminalOutputKind::Text)
     }
 
-    /// Usage storage is sparse: an ordinary text request without a tools
-    /// configuration should not grow a meaningless diagnostics section.
+    /// Old records without tools or context evidence stay sparse.
     pub fn has_evidence(&self) -> bool {
         self.client_tool_count > 0
+            || self.client_context.is_some()
+            || self.upstream_context.is_some()
             || self.forwarded_tool_count > 0
             || self.filtered_tool_count > 0
             || self.policy_fallback

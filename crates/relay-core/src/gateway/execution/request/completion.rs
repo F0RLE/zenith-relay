@@ -165,7 +165,15 @@ pub(super) async fn complete_buffered_response(
         status.as_u16(),
         (!completed).then(|| error_codes::RESPONSE_INCOMPLETE.to_string()),
     );
-    timing.apply(&mut event);
+    if !tool_use
+        .basis_points_catalog
+        .as_ref()
+        .is_some_and(|catalog| catalog.mode == "discovery")
+    {
+        // Catalog discovery has already buffered upstream bytes. A synthetic
+        // final body is not evidence of first/last-token arrival.
+        timing.apply(&mut event);
+    }
     // Accounting reads the actual upstream counters before translation.
     populate_tokens(&mut event, &bytes);
     if completion == crate::protocol::completion::ResponseCompletion::Invalid {
@@ -233,10 +241,10 @@ pub(super) async fn complete_buffered_response(
         .filter(|_| completed)
         .and_then(|response| response.continuation())
     {
-        runtime.save_messages_bridge_response_for_route(
+        runtime.save_adapter_response_for_route(
             &key.id,
             route,
-            &crate::MessagesBridgeResponse {
+            &crate::TranslatedResponse {
                 response_body: bridge_response
                     .as_ref()
                     .expect("continuation response is present")
@@ -265,7 +273,7 @@ pub(super) async fn complete_buffered_response(
             calls.bind(runtime, &key.id, route, now_ms());
         }
     }
-    buffered_client_response(
+    buffered_client_response(BufferedClientResponse {
         status,
         response_headers,
         forwarded_headers,
@@ -277,14 +285,13 @@ pub(super) async fn complete_buffered_response(
         client_stream,
         selected_error_origin,
         request_id,
-    )
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn buffered_client_response(
+struct BufferedClientResponse<'a> {
     status: StatusCode,
-    response_headers: &HeaderMap,
-    forwarded_headers: &HeaderMap,
+    response_headers: &'a HeaderMap,
+    forwarded_headers: &'a HeaderMap,
     bytes: Vec<u8>,
     basis_points_stream: Option<Vec<u8>>,
     account_route: bool,
@@ -292,8 +299,23 @@ fn buffered_client_response(
     summarize: bool,
     client_stream: bool,
     selected_error_origin: ErrorOrigin,
-    request_id: &str,
-) -> CompletionStep {
+    request_id: &'a str,
+}
+
+fn buffered_client_response(input: BufferedClientResponse<'_>) -> CompletionStep {
+    let BufferedClientResponse {
+        status,
+        response_headers,
+        forwarded_headers,
+        bytes,
+        basis_points_stream,
+        account_route,
+        adapter_is_passthrough,
+        summarize,
+        client_stream,
+        selected_error_origin,
+        request_id,
+    } = input;
     if let Some(stream_body) = basis_points_stream {
         let mut stream_response =
             proxy_sse_response(status, response_headers, Body::from(stream_body));

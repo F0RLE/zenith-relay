@@ -3,11 +3,13 @@ use std::sync::{Arc, Mutex};
 use super::upstream_usage::UpstreamUsage;
 use super::*;
 use crate::runtime::CandidateLease;
-use crate::MessagesBridgeResponse;
+use crate::TranslatedResponse;
 use axum::http::HeaderMap;
 use serde_json::Value;
 
 pub(super) struct StreamCompletionSettlement {
+    pub(super) discovery_progress:
+        Option<Arc<Mutex<super::basis_points::discovery::DiscoveryProgress>>>,
     // Keep the request-local comparison alive until terminal usage is emitted.
     pub(super) _cache_context_observation:
         Option<crate::runtime::cache_context::CacheContextObservation>,
@@ -20,7 +22,7 @@ pub(super) struct StreamCompletionSettlement {
     pub(super) headers: HeaderMap,
     pub(super) prompt_affinity: Option<String>,
     pub(super) uses_response_affinity: bool,
-    pub(super) bridge_state: Option<Arc<Mutex<Option<MessagesBridgeResponse>>>>,
+    pub(super) bridge_state: Option<Arc<Mutex<Option<TranslatedResponse>>>>,
     pub(super) native_response: Option<Arc<Mutex<Option<Value>>>>,
     pub(super) tool_call_capture: Arc<Mutex<crate::gateway::request::ToolCallCapture>>,
     pub(super) native_template: Value,
@@ -36,6 +38,20 @@ impl StreamCompletionSettlement {
     ) {
         if let Some(capture) = &self.upstream_usage {
             crate::poison::mutex(capture).apply_to(event);
+        }
+        let mut discovery_headers = None;
+        if let Some(progress) = &self.discovery_progress {
+            let progress = crate::poison::mutex(progress);
+            event.attempt = u16::from(progress.budget.dispatches());
+            event
+                .tool_use
+                .basis_points_catalog
+                .clone_from(&progress.tool_use.basis_points_catalog);
+            event
+                .tool_use
+                .upstream_context
+                .clone_from(&progress.tool_use.upstream_context);
+            discovery_headers.clone_from(&progress.headers);
         }
         if event.success {
             let recovered = self
@@ -68,7 +84,7 @@ impl StreamCompletionSettlement {
                     status: StatusCode::from_u16(event.http_status)
                         .unwrap_or(StatusCode::BAD_GATEWAY),
                     category,
-                    headers: &self.headers,
+                    headers: discovery_headers.as_ref().unwrap_or(&self.headers),
                     hint,
                     now,
                 })
@@ -105,7 +121,7 @@ impl StreamCompletionSettlement {
             }
             if let Some(shared) = self.bridge_state.as_ref() {
                 if let Some(messages_bridge_response) = crate::poison::mutex(shared).take() {
-                    self.runtime.save_messages_bridge_response_for_route(
+                    self.runtime.save_adapter_response_for_route(
                         &self.local_key,
                         &self.route,
                         &messages_bridge_response,

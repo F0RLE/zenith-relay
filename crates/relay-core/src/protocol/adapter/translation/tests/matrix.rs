@@ -1,6 +1,48 @@
 use super::*;
 use serde_json::json;
 
+#[test]
+fn all_protocol_paths_include_each_instruction_and_history_text_once() {
+    const POLICY_A: &str = "SYNTHETIC_INITIAL_POLICY_SENTINEL";
+    const POLICY_B: &str = "SYNTHETIC_ADDITIONAL_POLICY_SENTINEL";
+    const QUESTION: &str = "SYNTHETIC_QUESTION_SENTINEL";
+    const ANSWER: &str = "SYNTHETIC_ANSWER_SENTINEL";
+    const NEXT: &str = "SYNTHETIC_NEXT_SENTINEL";
+    for client in WireApi::ALL {
+        let request = match client {
+            WireApi::Responses => json!({"model":"test","instructions":POLICY_A,"input":[
+                {"role":"developer","content":POLICY_B},
+                {"role":"user","content":QUESTION},{"role":"assistant","content":ANSWER},{"role":"user","content":NEXT}
+            ]}),
+            WireApi::ChatCompletions => json!({"model":"test","messages":[
+                {"role":"system","content":POLICY_A},{"role":"developer","content":POLICY_B},
+                {"role":"user","content":QUESTION},{"role":"assistant","content":ANSWER},{"role":"user","content":NEXT}
+            ]}),
+            WireApi::Messages => json!({"model":"test","max_tokens":64,"system":[
+                {"type":"text","text":POLICY_A},{"type":"text","text":POLICY_B}
+            ],"messages":[{"role":"user","content":QUESTION},{"role":"assistant","content":ANSWER},{"role":"user","content":NEXT}]}),
+            WireApi::Gemini => {
+                json!({"systemInstruction":{"parts":[{"text":POLICY_A},{"text":POLICY_B}]},"contents":[
+                    {"role":"user","parts":[{"text":QUESTION}]},{"role":"model","parts":[{"text":ANSWER}]},{"role":"user","parts":[{"text":NEXT}]}
+                ]})
+            }
+        };
+        let original = request.clone();
+        for upstream in WireApi::ALL {
+            let prepared = prepare(client, upstream, &request, false);
+            let serialized = prepared.upstream_body().to_string();
+            for text in [POLICY_A, POLICY_B, QUESTION, ANSWER, NEXT] {
+                assert_eq!(
+                    serialized.matches(text).count(),
+                    1,
+                    "{client:?} -> {upstream:?}: {text}"
+                );
+            }
+        }
+        assert_eq!(request, original);
+    }
+}
+
 pub(super) fn prepare_portable_tool_history(
     client: WireApi,
     upstream: WireApi,

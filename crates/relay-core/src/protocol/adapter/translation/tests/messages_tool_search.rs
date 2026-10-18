@@ -405,7 +405,7 @@ fn messages_tool_search_preserves_opaque_reasoning_ownership_across_discovery() 
             .translate_response_bytes(&serde_json::to_vec(&native).unwrap())
             .unwrap()
             .unwrap();
-        let completed = response.messages_continuation().unwrap();
+        let completed = response.translated_response();
         assert!(!completed
             .response_body
             .to_string()

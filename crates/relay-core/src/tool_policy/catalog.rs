@@ -63,14 +63,20 @@ fn visit_array(tool_array: &Value, depth: usize, visit_tool: &mut impl FnMut(&Va
 
 pub(crate) fn catalog_stats(request_payload: &Value) -> CatalogStats {
     let mut stats = CatalogStats::default();
+    let mut search = false;
+    let mut deferred = false;
     // `tool_search` is a provider control entry, not one of the client's
     // callable definitions. Do not report a catalog growing from N to N+1
     // just because Relay added that control entry.
     visit_entries(request_payload, &mut |tool| {
-        if tool.get("type").and_then(Value::as_str) != Some("tool_search") {
+        if tool.get("type").and_then(Value::as_str) == Some("tool_search") {
+            search = true;
+        } else {
             stats.count = stats.count.saturating_add(1);
+            deferred |= tool.get("defer_loading").and_then(Value::as_bool) == Some(true);
         }
     });
+    stats.deferred_search = search && deferred;
     arrays(request_payload, &mut |tool_array| {
         if tool_array.is_array() {
             let mut counter = ByteCounter(0);
@@ -80,6 +86,13 @@ pub(crate) fn catalog_stats(request_payload: &Value) -> CatalogStats {
         }
     });
     stats
+}
+
+pub(crate) fn serialized_bytes(value: &impl serde::Serialize) -> u64 {
+    let mut counter = ByteCounter(0);
+    // Callers pass parsed JSON values or object maps; the writer cannot fail.
+    let _ = serde_json::to_writer(&mut counter, value);
+    counter.0
 }
 
 struct ByteCounter(u64);

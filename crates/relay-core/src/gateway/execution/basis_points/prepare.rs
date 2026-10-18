@@ -4,7 +4,9 @@ use super::codec::{
 };
 use super::history::{separate_tool_images, translate_input_items};
 use super::response::has_encrypted_agent_message;
-use super::schema::{matches as schema_matches, parameter_schema, prompt_schema, validator};
+use super::schema::{
+    matches as schema_matches, parameter_schema, prompt_schema, validator, PROMPT_SCHEMA_NOTATION,
+};
 use super::{is_transport_tool, FUNCTION_RELAY_ENCODING, TRANSPORT_TOOL, TRANSPORT_TOOL_ALIAS};
 use crate::protocol::AdapterError;
 use serde_json::{json, Map, Value};
@@ -24,10 +26,59 @@ pub(super) fn tool_instructions(tools: &[ClientTool], request: &Value) -> String
     // tool array. A deterministic prologue improves prompt-cache reuse and
     // prevents the model from seeing a different routing instruction for the
     // same set of client tools.
-    let mut sorted_tools = tools.to_vec();
-    sorted_tools.sort_by_key(ClientTool::key);
-    let mut lines = Vec::with_capacity(sorted_tools.len());
-    for tool in &sorted_tools {
+    let mut sorted_tools: Vec<_> = tools.iter().collect();
+    sorted_tools.sort_by_cached_key(|tool| tool.key());
+    let catalog = super::presentation::describe_catalog(&sorted_tools, request);
+    let notation = if super::presentation::uses_discovery(tools, request)
+        || super::presentation::requested_mode(request)
+            == Ok(super::presentation::CatalogMode::Full)
+    {
+        ""
+    } else {
+        PROMPT_SCHEMA_NOTATION
+    };
+    let choice = request
+        .get("tool_choice")
+        .and_then(|choice_value| serde_json::to_string(choice_value).ok())
+        .map(|serialized_choice| format!(" Client tool_choice: {serialized_choice}."))
+        .unwrap_or_default();
+    let parallel = request
+        .get("parallel_tool_calls")
+        .and_then(Value::as_bool)
+        .filter(|parallel| !parallel)
+        .map(|_| " Invoke at most one client tool in this response.")
+        .unwrap_or_default();
+    let examples = tool_relay_examples(&sorted_tools);
+    format!(
+        "This request is relayed by an external Responses API client, not by the live Excel workbook. \
+         Native {TRANSPORT_TOOL} is intercepted as a transport endpoint; it never runs Office code or changes a workbook. \
+         Other native server-injected Excel, Office, connector, workbook, list_skills, and web-search tools are unavailable. \
+         For shell, filesystem, workspace, or repository access, invoke a suitable catalog tool rather than claiming access is unavailable. \
+         Use exactly one outer native {TRANSPORT_TOOL} call for each client tool invocation. \
+         Independent client tools may use multiple outer calls in one response unless the client disables parallel calls. \
+         Respect tool-specific ordering and shared browser/session state. \
+         Set references to an array containing exactly one fully qualified client tool name from the catalog; references is the routing field, not a list of files or cells. \
+         Put only that tool payload in code. \
+         Parameters describes the tool's complete argument contract: pass one JSON object matching it. \
+         {notation}\
+         {FUNCTION_RELAY_ENCODING} \
+         For a custom tool, code contains the exact raw input text, not JSON: preserve every quote, backslash, newline and space without another encoding layer. \
+         The proxy parses function arguments but does not parse custom input. \
+         Serialize the outer arguments object once. \
+         Do not put a tool/args wrapper, JavaScript, Markdown fence, or another {TRANSPORT_TOOL} envelope in code, and do not route references to {TRANSPORT_TOOL} or {TRANSPORT_TOOL_ALIAS}. \
+         Do not merely say you will act; make the tool call. \
+         Historical calls may contain the old tool/args envelope; do not copy that format into new calls.{examples} \
+         The proxy converts this native call into the real client tool call, then replays the original {TRANSPORT_TOOL} identity with the client tool result on the next request. \
+         Interpret that result as the named client tool output. \
+         Do not replay completed client calls merely to reconstruct history. \
+         Repeated observations or new calls to the same tool are allowed when the task needs them; use a fresh invocation, not a replay of an old call. \
+         The available client tools are authoritative:{choice}{parallel}\n{catalog}",
+    )
+}
+
+pub(super) fn describe_tools(tools: &[&ClientTool], full_json: bool) -> String {
+    let mut lines = Vec::with_capacity(tools.len());
+    for tool in tools {
         let description = tool
             .spec
             .get("description")
@@ -47,49 +98,19 @@ pub(super) fn tool_instructions(tools: &[ClientTool], request: &Value) -> String
                 }
             }
         } else if let Some(schema) = parameter_schema(tool) {
-            line.push_str(". Arguments must be one JSON object matching this JSON Schema: ");
-            line.push_str(&prompt_schema(schema));
+            line.push_str(". Parameters: ");
+            line.push_str(&if full_json {
+                schema.to_string()
+            } else {
+                prompt_schema(schema)
+            });
         }
         lines.push(line);
     }
-    let choice = request
-        .get("tool_choice")
-        .and_then(|choice_value| serde_json::to_string(choice_value).ok())
-        .map(|serialized_choice| format!(" Client tool_choice: {serialized_choice}."))
-        .unwrap_or_default();
-    let parallel = request
-        .get("parallel_tool_calls")
-        .and_then(Value::as_bool)
-        .filter(|parallel| !parallel)
-        .map(|_| " Invoke at most one client tool in this response.")
-        .unwrap_or_default();
-    let examples = tool_relay_examples(&sorted_tools);
-    format!(
-        "This request is relayed by an external Responses API client, not by the live Excel workbook. \
-         The native {TRANSPORT_TOOL} function is a transport endpoint owned by this proxy; the proxy intercepts it before execution, so it never runs Office code or changes the workbook. \
-         Other native server-injected Excel, Office, connector, workbook, list_skills, and web-search tools are unavailable. \
-         Never claim shell, filesystem, or workspace access is unavailable when the catalog contains a suitable client tool. \
-         For repository inspection, invoke a suitable catalog shell tool through {TRANSPORT_TOOL}. \
-         Use exactly one outer native {TRANSPORT_TOOL} call for each client tool invocation. \
-         Set references to an array containing exactly one fully qualified client tool name from the catalog; references is the routing field, not a list of files or cells. \
-         Put only that tool payload in code. \
-         For a function tool, code contains one JSON object of arguments. \
-         {FUNCTION_RELAY_ENCODING} \
-         For a custom tool, code contains the exact raw input text, not JSON: preserve every quote, backslash, newline and space without another encoding layer. \
-         The proxy parses function arguments but does not parse custom input. \
-         Serialize the outer arguments object once. \
-         Do not put a tool/args wrapper, JavaScript, Markdown fence, or another {TRANSPORT_TOOL} envelope in code, and do not route references to {TRANSPORT_TOOL} or {TRANSPORT_TOOL_ALIAS}. \
-         Do not merely say you will act; make the tool call. \
-         Historical calls may contain the old tool/args envelope; do not copy that format into new calls.{examples} \
-         The proxy converts this native call into the real client tool call, then replays the original {TRANSPORT_TOOL} identity with the client tool result on the next request. \
-         Interpret that result as the named client tool output. \
-         Never repeat a tool request whose output is already present. \
-         The available client tools are authoritative:{choice}{parallel}\n{}",
-        lines.join("\n"),
-    )
+    lines.join("\n")
 }
 
-fn tool_relay_examples(tools: &[ClientTool]) -> String {
+fn tool_relay_examples(tools: &[&ClientTool]) -> String {
     const PATCH: &str =
         "*** Begin Patch\n*** Add File: hello.js\n+console.log(\"hello\");\n*** End Patch";
     let mut examples = String::new();
@@ -180,6 +201,7 @@ pub(in crate::gateway::execution) fn prepare_request(
         validate_text_format(request_object.get("text"))?;
     }
     let all_tools = client_tools(request)?;
+    super::presentation::requested_mode(request)?;
     if all_tools.iter().any(|tool| is_transport_tool(&tool.key())) {
         return Err(AdapterError::invalid_request().with_parameter("tools"));
     }
@@ -264,6 +286,11 @@ pub(in crate::gateway::execution) fn prepare_request(
         ));
     }
     input_items.splice(0..0, prologue);
+    if let Some(contracts) = super::presentation::loaded_contracts(&callable, request) {
+        // Newly needed contracts belong after history, never in the stable
+        // index prefix. Loading one tool must not rewrite that prefix.
+        input_items.push(text_message("developer", "input_text", contracts));
+    }
     upstream_request.insert("input".to_string(), Value::Array(input_items));
 
     if let Some(prompt_cache_key) = request_object

@@ -25,16 +25,16 @@ pub(crate) use contracts::{
     repair_custom_tool_item_ids,
 };
 pub use contracts::{
-    AdapterError, AdapterRequestContext, AdapterResponse, AdapterResult, MessagesBridgeRequest,
-    MessagesBridgeResponse, MessagesBridgeState, MessagesReasoningMode, NativeResponsesReplayState,
-    PreparedAdapterRequest, SourceAdapter, UpstreamProtocol,
+    AdapterContinuationState, AdapterError, AdapterRequestContext, AdapterResponse, AdapterResult,
+    MessagesReasoningMode, NativeResponsesReplayState, PreparedAdapterRequest, SourceAdapter,
+    TranslatedResponse, UpstreamProtocol,
 };
 pub(crate) use gemini::{candidate_incomplete_reason, gemini_incomplete, prompt_blocked};
-pub use gemini::{GeminiBridgeRequest, GeminiBridgeResponse};
 pub use messages::{
     bridged_response_id, bridged_response_id_scoped, prepare_responses_to_messages,
     prepare_responses_to_messages_scoped, translate_messages_response,
 };
-pub use store::{MessagesBridgeStore, NativeResponsesReplayStore};
+pub use store::{AdapterContinuationStore, NativeResponsesReplayStore};
 pub(crate) use stream::merge_usage;
-pub use stream::{AdapterStreamBridge, GeminiStreamBridge, MessagesStreamBridge};
+pub use stream::AdapterStreamBridge;
+pub use translation::{TranslationRequest, TranslationStream};

@@ -1,6 +1,7 @@
 //! Convenience entry points and native Messages cache/token controls.
 use super::{
-    AdapterError, AdapterResult, MessagesBridgeRequest, MessagesBridgeState, MessagesReasoningMode,
+    AdapterContinuationState, AdapterError, AdapterResult, MessagesReasoningMode,
+    TranslationRequest,
 };
 use crate::{AdapterRequestContext, CacheWriteTtl, PreparedAdapterRequest, SourceAdapter, WireApi};
 use serde_json::{json, Map, Value};
@@ -14,8 +15,8 @@ pub fn prepare_responses_to_messages(
     model: &str,
     stream: bool,
     reasoning_mode: MessagesReasoningMode,
-    previous: Option<MessagesBridgeState>,
-) -> AdapterResult<MessagesBridgeRequest> {
+    previous: Option<AdapterContinuationState>,
+) -> AdapterResult<TranslationRequest> {
     prepare_responses_to_messages_scoped(request, model, stream, reasoning_mode, previous, "")
 }
 
@@ -25,9 +26,9 @@ pub fn prepare_responses_to_messages_scoped(
     model: &str,
     stream: bool,
     reasoning_mode: MessagesReasoningMode,
-    previous: Option<MessagesBridgeState>,
+    previous: Option<AdapterContinuationState>,
     response_scope: &str,
-) -> AdapterResult<MessagesBridgeRequest> {
+) -> AdapterResult<TranslationRequest> {
     let seed = format!(
         "direct-request-{}",
         DIRECT_REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)

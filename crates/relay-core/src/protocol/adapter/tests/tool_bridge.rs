@@ -309,7 +309,7 @@ fn messages_bridge_rejects_invalid_tool_output_image_data() {
     assert_eq!(error.code(), "adapter_invalid_request");
 }
 #[test]
-fn messages_bridge_rejects_non_text_custom_tool_output() {
+fn messages_bridge_rejects_untyped_object_custom_tool_output() {
     let first = prepare_responses_to_messages(
         &json!({
             "model": "claude-test",
@@ -344,7 +344,7 @@ fn messages_bridge_rejects_non_text_custom_tool_output() {
             "input": [{
                 "type": "custom_tool_call_output",
                 "call_id": "toolu_custom_output",
-                "output": [{"type": "input_text", "text": "not a direct text result"}]
+                "output": {"text": "not a string or typed content list"}
             }]
         }),
         "claude-test",

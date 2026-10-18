@@ -192,8 +192,7 @@ pub(in crate::gateway) fn normalize_compact_account_request(
 }
 
 pub(in crate::gateway) use shape::{
-    normalize_basis_points_request, normalize_responses_lite_request,
-    responses_lite_parallel_tool_calls_valid,
+    normalize_basis_points_request, responses_lite_parallel_tool_calls_valid,
 };
 
 #[cfg(test)]

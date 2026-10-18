@@ -58,7 +58,7 @@ async fn account_catalog_uses_reference_metadata_and_preserves_native_transport(
     assert!(catalog["models"][0].get("service_tiers").is_some());
     assert_eq!(catalog["models"][0]["use_responses_lite"], true);
     assert_eq!(catalog["models"][0]["supported_in_api"], true);
-    assert_eq!(catalog["models"][0]["supports_parallel_tool_calls"], true);
+    assert_eq!(catalog["models"][0]["supports_parallel_tool_calls"], false);
     assert_eq!(catalog["models"][0]["default_reasoning_level"], "low");
     assert_eq!(
         catalog["models"][0]["supported_reasoning_levels"],
@@ -99,7 +99,7 @@ async fn account_catalog_uses_reference_metadata_and_preserves_native_transport(
         let mut body = json!({
             "model": OFFICIAL_CODEX_MODEL,
             "input": "hello",
-            "parallel_tool_calls": true,
+            "parallel_tool_calls": false,
             "reasoning": {
                 "effort": "low",
                 "summary": "detailed"
@@ -284,7 +284,7 @@ async fn pool_catalog_keeps_transport_owned_and_model_semantics_stable_across_ac
         3
     );
     assert_eq!(first_model["use_responses_lite"], false);
-    assert_eq!(first_model["supports_parallel_tool_calls"], true);
+    assert_eq!(first_model["supports_parallel_tool_calls"], false);
 
     // If the first account is temporarily unreachable, the stale manifest is
     // retained only for that account and cannot overwrite the live second
@@ -315,7 +315,7 @@ async fn pool_catalog_keeps_transport_owned_and_model_semantics_stable_across_ac
         3
     );
     assert_eq!(second_model["use_responses_lite"], true);
-    assert_eq!(second_model["supports_parallel_tool_calls"], true);
+    assert_eq!(second_model["supports_parallel_tool_calls"], false);
     assert_eq!(
         second_model["supported_reasoning_levels"],
         first_model["supported_reasoning_levels"]
@@ -429,7 +429,7 @@ async fn pool_catalog_retains_unreachable_account_metadata_beside_live_account_c
         .await
         .unwrap();
     assert_eq!(live["models"][0]["default_reasoning_level"], "high");
-    assert_eq!(live["models"][0]["supports_parallel_tool_calls"], true);
+    assert_eq!(live["models"][0]["supports_parallel_tool_calls"], false);
 
     drop(second_upstream);
 

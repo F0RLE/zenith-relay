@@ -104,9 +104,8 @@ pub(super) fn prepare_request_attempt(
             return step;
         }
     }
-    // Basis Points does not receive the Responses Lite transport header. Its
-    // adapter does translate Lite's item-level tool catalog, so still apply
-    // the client-side serial-tool normalization before translating the body.
+    // Lite item catalogs can arrive on BPS too, but serial execution is a
+    // native transport restriction, not a property of the client item format.
     let route_responses_lite = if basis_points_route {
         None
     } else {
@@ -123,8 +122,18 @@ pub(super) fn prepare_request_attempt(
         || (basis_points_route
             && client_wire_api == WireApi::Responses
             && responses_lite.is_some());
-    if let Some(step) = normalize_prepared_responses_lite(request, normalize_responses_lite) {
+    if let Some(step) = validate_prepared_responses_lite(request, normalize_responses_lite) {
         return step;
+    }
+    if account_route
+        && route_responses_lite.is_some()
+        && request.get("parallel_tool_calls") == Some(&Value::Bool(true))
+    {
+        return RequestPrepare::Respond(api_error(
+            StatusCode::BAD_REQUEST,
+            "selected Responses Lite transport does not support parallel_tool_calls: true",
+            error_codes::INVALID_REQUEST,
+        ));
     }
     let previous_continuation =
         match load_prepared_continuation(runtime, &route, &key.id, request, request_id) {
@@ -200,6 +209,9 @@ pub(super) fn prepare_request_attempt(
         ));
     };
     tool_policy.observe_cache_context(runtime, &mut route, adapter_request.upstream_body());
+    if basis_points_route {
+        tool_policy.record_upstream_context(adapter_request.upstream_body());
+    }
     let tool_use = tool_policy.diagnostics.clone();
     RequestPrepare::Ready(Box::new(PreparedRequestAttempt {
         route,
@@ -259,11 +271,11 @@ fn route_responses_lite_header(
         .flatten()
 }
 
-fn normalize_prepared_responses_lite(request: &mut Value, enabled: bool) -> Option<RequestPrepare> {
+fn validate_prepared_responses_lite(request: &Value, enabled: bool) -> Option<RequestPrepare> {
     if !enabled {
         return None;
     }
-    let Some(request_fields) = request.as_object_mut() else {
+    let Some(request_fields) = request.as_object() else {
         return Some(RequestPrepare::Respond(api_error(
             StatusCode::BAD_REQUEST,
             "request body must be a JSON object",
@@ -277,9 +289,6 @@ fn normalize_prepared_responses_lite(request: &mut Value, enabled: bool) -> Opti
             error_codes::INVALID_REQUEST,
         )));
     }
-    // Apply the shared Lite contract before adapter translation. This
-    // keeps native, bridged, OAuth, and API-source routes identical.
-    normalize_responses_lite_request(request_fields);
     None
 }
 
@@ -290,7 +299,7 @@ fn load_prepared_continuation(
     key_id: &str,
     request: &Value,
     request_id: &str,
-) -> Result<Option<crate::MessagesBridgeState>, Response<Body>> {
+) -> Result<Option<crate::AdapterContinuationState>, Response<Body>> {
     if !route.adapter.uses_local_continuation_state() {
         return Ok(None);
     }
@@ -329,7 +338,7 @@ fn translate_prepared_request(
     request: &Value,
     source_model: &str,
     stream: bool,
-    previous_bridge_state: Option<crate::MessagesBridgeState>,
+    previous_bridge_state: Option<crate::AdapterContinuationState>,
     request_id: &str,
     last_adapter_error: &mut Option<AdapterError>,
 ) -> Result<PreparedAdapterRequest, RequestPrepare> {

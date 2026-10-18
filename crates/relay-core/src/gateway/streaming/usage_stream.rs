@@ -13,6 +13,7 @@ pub(super) struct UsageStream<S> {
     pub(super) completion: CompletionCallback,
     pub(super) event: Option<UsageEvent>,
     pub(super) response_id: Option<String>,
+    next_sequence: u64,
     pub(super) native_response: Option<Arc<Mutex<Option<Value>>>>,
     pub(super) tool_call_capture: Option<Arc<Mutex<crate::gateway::request::ToolCallCapture>>>,
     pub(super) native_gemini: bool,
@@ -27,9 +28,10 @@ pub(super) struct UsageStream<S> {
     sse_forward_pending: Vec<u8>,
     sse_forward_mode: SseForwardMode,
     pub(super) output_pending: VecDeque<Bytes>,
-    // Track yielded bytes, not parsed deltas: even an incomplete SSE frame is
-    // already owned by the client and cannot be replaced by a synthetic response.
-    client_visible_output: bool,
+    // Parser buffers are cleared on rejection. Remember separately whether
+    // the client owns an unfinished frame: a failure may be appended between
+    // frames, never inside JSON that has already reached the client.
+    client_frame_open: bool,
     pub(super) heartbeat: Pin<Box<Sleep>>,
     pub(super) terminated: bool,
 }
@@ -37,8 +39,8 @@ pub(super) struct UsageStream<S> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SseForwardMode {
     Detect,
-    Normal,
-    Error,
+    Passthrough,
+    BufferedTerminal,
 }
 
 impl<S> UsageStream<S> {
@@ -60,6 +62,7 @@ impl<S> UsageStream<S> {
             completion,
             event: Some(event),
             response_id: None,
+            next_sequence: 0,
             native_response,
             tool_call_capture: None,
             native_gemini,
@@ -74,7 +77,7 @@ impl<S> UsageStream<S> {
             sse_forward_pending: Vec::new(),
             sse_forward_mode: SseForwardMode::Detect,
             output_pending: VecDeque::new(),
-            client_visible_output: false,
+            client_frame_open: false,
             heartbeat: Box::pin(sleep(SSE_HEARTBEAT_INTERVAL)),
             terminated: false,
         }
@@ -115,6 +118,7 @@ impl<S> UsageStream<S> {
 impl<S, E> Stream for UsageStream<S>
 where
     S: Stream<Item = std::result::Result<Bytes, E>>,
+    E: std::error::Error + 'static,
 {
     type Item = std::result::Result<Bytes, E>;
 
@@ -122,7 +126,6 @@ where
         let this = self.as_mut().get_mut();
         loop {
             if let Some(bytes) = this.output_pending.pop_front() {
-                this.client_visible_output |= !bytes.is_empty();
                 return Poll::Ready(Some(Ok(bytes)));
             }
             if this.terminated {
@@ -145,7 +148,7 @@ where
                     if valid {
                         let forwarded = this.forward_sse_bytes(&bytes, origin);
                         if !forwarded.is_empty() {
-                            this.client_visible_output = true;
+                            this.client_frame_open = !this.sse_pending.is_empty();
                             return Poll::Ready(Some(Ok(Bytes::from(forwarded))));
                         }
                     } else {
@@ -153,7 +156,6 @@ where
                         this.sse_forward_mode = SseForwardMode::Detect;
                     }
                     if let Some(failure) = this.output_pending.pop_front() {
-                        this.client_visible_output |= !failure.is_empty();
                         return Poll::Ready(Some(Ok(failure)));
                     }
                     if !valid {
@@ -161,6 +163,7 @@ where
                     }
                 }
                 Poll::Ready(Some(Err(error))) => {
+                    this.record_transport_error(&error);
                     this.sse_forward_pending.clear();
                     this.sse_forward_mode = SseForwardMode::Detect;
                     if this.fail_stream(error_codes::UPSTREAM_STREAM) {
@@ -172,7 +175,7 @@ where
                     if !this.sse_forward_pending.is_empty() {
                         let pending = std::mem::take(&mut this.sse_forward_pending);
                         this.sse_forward_mode = SseForwardMode::Detect;
-                        this.client_visible_output = true;
+                        this.client_frame_open = !this.sse_pending.is_empty();
                         return Poll::Ready(Some(Ok(Bytes::from(pending))));
                     }
                     if this.native_gemini {

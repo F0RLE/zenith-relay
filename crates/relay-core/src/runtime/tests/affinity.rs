@@ -110,7 +110,7 @@ async fn saving_bridge_continuation_binds_its_response_to_the_creating_candidate
     )
     .unwrap();
 
-    runtime.save_messages_bridge_response("key-1", "source-a", &bridge_response, 123);
+    runtime.save_adapter_response("key-1", "source-a", &bridge_response, 123);
 
     let authenticated = runtime
         .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))

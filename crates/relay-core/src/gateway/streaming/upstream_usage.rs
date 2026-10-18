@@ -32,6 +32,32 @@ impl UpstreamUsage {
         self
     }
 
+    pub(super) fn reset_generation(&mut self) {
+        self.pending.clear();
+        self.forward_pending.clear();
+        self.usage_snapshot = None;
+        self.event.input_tokens = None;
+        self.event.output_tokens = None;
+        self.event.total_tokens = None;
+        self.event.cached_input_tokens = None;
+        self.event.cache_write_input_tokens = None;
+        self.event.cache_write_ttl = None;
+        self.event.reasoning_tokens = None;
+        self.event.applied_service_tier = None;
+    }
+
+    pub(super) fn finish_json_generation(&mut self, bytes: &[u8]) {
+        if let Ok(payload) = serde_json::from_slice::<Value>(bytes) {
+            if let Some(usage) = payload.get("usage") {
+                apply_usage(&mut self.event, usage);
+            }
+        }
+        // JSON gives a real terminal arrival, not an incremental first token.
+        if let Some((started, timing)) = &mut self.timing {
+            timing.finish(started.elapsed().as_millis() as u64);
+        }
+    }
+
     pub(super) fn forward(&mut self, bytes: Bytes) -> Bytes {
         if self.expected_model.is_none() {
             self.observe(&bytes);
@@ -145,6 +171,22 @@ fn skip_aligned_response_deltas(bytes: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovery_generation_reset_does_not_reuse_prior_usage() {
+        let mut capture =
+            UpstreamUsage::new(crate::gateway::test_support::test_usage_event(), None);
+        capture.observe(b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":100,\"output_tokens\":10}}}\n\n");
+        capture.reset_generation();
+        capture.observe(
+            b"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+        );
+        let mut event = crate::gateway::test_support::test_usage_event();
+        capture.apply_to(&mut event);
+        assert_eq!(event.input_tokens, None);
+        assert_eq!(event.output_tokens, None);
+        assert_eq!(event.total_tokens, None);
+    }
 
     #[test]
     fn raw_tool_timing_and_partial_usage_survive_without_a_terminal() {

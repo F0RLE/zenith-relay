@@ -12,17 +12,30 @@ impl GatewayRuntime {
     }
 
     pub(crate) fn apply_request_timezone(&self, candidate_id: &str, body: &mut Value) {
-        if !self.chatgpt_accounts.contains_key(candidate_id) {
+        let Some(account) = self.chatgpt_accounts.get(candidate_id) else {
             return;
-        }
+        };
         let policy = crate::poison::read(&self.request_timezone);
-        let proxy_timezone = self
-            .chatgpt_accounts
-            .get(candidate_id)
-            .and_then(|account| account.proxy_timezone.as_deref());
-        if let Some(timezone) = policy.timezone_for(candidate_id, proxy_timezone) {
+        let proxy_timezone = crate::poison::read(&account.proxy_timezone);
+        if let Some(timezone) = policy.timezone_for(candidate_id, proxy_timezone.as_deref()) {
             crate::request_timezone::rewrite_request_timezone(body, &timezone);
         }
+    }
+
+    /// Proxy checks update future account requests without rebuilding the
+    /// gateway or interrupting an in-flight response. Host mutation guards
+    /// serialize this with proxy reassignment and runtime replacement.
+    pub fn set_account_proxy_timezone(
+        &self,
+        account_id: &str,
+        timezone: Option<String>,
+    ) -> Result<()> {
+        let timezone = crate::normalize_timezone(timezone)
+            .map_err(|message| Error::Validation(message.into()))?;
+        if let Some(account) = self.chatgpt_accounts.get(account_id) {
+            *crate::poison::write(&account.proxy_timezone) = timezone;
+        }
+        Ok(())
     }
 
     /// Installs a lightweight observer for request start/end activity.

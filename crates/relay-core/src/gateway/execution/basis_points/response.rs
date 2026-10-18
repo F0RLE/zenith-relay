@@ -203,7 +203,7 @@ pub(in crate::gateway) fn translate_response_value(
         let call_id = output_object
             .get("call_id")
             .and_then(Value::as_str)
-            .filter(|call_id| !call_id.is_empty())
+            .filter(|call_id| !call_id.trim().is_empty())
             .ok_or_else(|| invalid_tool_output("output.run_officejs.call_id"))?
             .to_string();
         if !call_ids.insert(call_id.clone()) {

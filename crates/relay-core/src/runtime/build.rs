@@ -407,7 +407,7 @@ impl GatewayRuntime {
             model_display_order: Mutex::new(Vec::new()),
             model_metadata_catalog: options.model_metadata_catalog.clone(),
             passive_quotas: Mutex::new(account_parts.passive_quotas),
-            messages_bridge_store: Mutex::new(crate::MessagesBridgeStore::default()),
+            adapter_continuation_store: Mutex::new(crate::AdapterContinuationStore::default()),
             native_responses_replay_store: Mutex::new(NativeResponsesReplayStore::default()),
             cache_context_store: super::cache_context::CacheContextStore::default(),
             codex_turn_state_store: CodexTurnStateStore::default(),

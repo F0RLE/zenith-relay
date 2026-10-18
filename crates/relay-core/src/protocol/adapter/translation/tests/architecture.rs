@@ -307,7 +307,7 @@ fn structured_output_keeps_envelope_and_schema_descriptions() {
     .is_err());
 }
 
-fn tool_reply(protocol: WireApi) -> Value {
+pub(super) fn tool_reply(protocol: WireApi) -> Value {
     let calls = (0..2).map(|index| json!({"type":"function_call","id":format!("fc_{index}"),"call_id":format!("call_new_{index}"),"name":"lookup","arguments":format!("{{\"value\":{index}}}")})).collect::<Vec<_>>();
     match protocol {
         WireApi::Responses => {
@@ -325,12 +325,35 @@ fn tool_reply(protocol: WireApi) -> Value {
     }
 }
 
-fn with_tool_results(client: WireApi, completed: &MessagesBridgeResponse) -> Value {
+fn with_tool_results(client: WireApi, completed: &TranslatedResponse) -> Value {
+    append_tool_results(client, tool_history(client), completed, false)
+}
+
+pub(super) fn append_tool_results(
+    client: WireApi,
+    mut request: Value,
+    completed: &TranslatedResponse,
+    reverse: bool,
+) -> Value {
     let body = &completed.response_body;
-    let mut request = tool_history(client);
+    let decoded = response::decode(client, body, "test").unwrap();
+    let mut calls = decoded
+        .blocks
+        .iter()
+        .filter_map(|block| {
+            if let Block::ToolCall { id, name, .. } = block {
+                Some((id, name))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    if reverse {
+        calls.reverse();
+    }
     if client == WireApi::Responses {
         request["previous_response_id"] = completed.response_id.clone().into();
-        request["input"] = (0..2).map(|i|json!({"type":"function_call_output","call_id":format!("call_new_{i}"),"output":"synthetic result"})).collect::<Vec<_>>().into();
+        request["input"] = calls.iter().map(|(id, _)|json!({"type":"function_call_output","call_id":id,"output":"synthetic result"})).collect::<Vec<_>>().into();
         return request;
     }
     let key = if client == WireApi::Gemini {
@@ -346,11 +369,15 @@ fn with_tool_results(client: WireApi, completed: &MessagesBridgeResponse) -> Val
         _ => unreachable!(),
     });
     if client == WireApi::ChatCompletions {
-        messages.extend((0..2).map(|i|json!({"role":"tool","tool_call_id":format!("call_new_{i}"),"content":"synthetic result"})));
+        messages.extend(
+            calls.iter().map(
+                |(id, _)| json!({"role":"tool","tool_call_id":id,"content":"synthetic result"}),
+            ),
+        );
     } else if client == WireApi::Messages {
-        messages.push(json!({"role":"user","content":(0..2).map(|i|json!({"type":"tool_result","tool_use_id":format!("call_new_{i}"),"content":"synthetic result"})).collect::<Vec<_>>()}));
+        messages.push(json!({"role":"user","content":calls.iter().map(|(id, _)|json!({"type":"tool_result","tool_use_id":id,"content":"synthetic result"})).collect::<Vec<_>>()}));
     } else {
-        messages.push(json!({"role":"user","parts":(0..2).map(|i|json!({"functionResponse":{"id":format!("call_new_{i}"),"name":"lookup","response":{"output":"synthetic result"}}})).collect::<Vec<_>>()}));
+        messages.push(json!({"role":"user","parts":calls.iter().map(|(id, name)|json!({"functionResponse":{"id":id,"name":name,"response":{"output":"synthetic result"}}})).collect::<Vec<_>>()}));
     }
     request
 }
@@ -379,8 +406,7 @@ fn every_conversion_completes_real_tool_result_cycles_for_json_and_fragmented_ss
                         )
                         .unwrap()
                         .unwrap()
-                        .messages_continuation()
-                        .unwrap()
+                        .translated_response()
                         .clone()
                 };
                 let request = with_tool_results(client, &completed);
@@ -463,7 +489,7 @@ fn custom_result_text_and_kind_survive_catalog_replacement_on_all_upstreams() {
             .unwrap()
             .unwrap();
         let text = "{\"result\":\"literal JSON-looking text\"}";
-        let make_request = |kind: &str| json!({"previous_response_id":completed.response_id(),"input":(0..2).map(|i|json!({"type":kind,"call_id":format!("call_new_{i}"),"output":text})).collect::<Vec<_>>(),"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]});
+        let make_request = |kind: &str, output: &Value| json!({"previous_response_id":completed.response_id(),"input":(0..2).map(|i|json!({"type":kind,"call_id":format!("call_new_{i}"),"output":output})).collect::<Vec<_>>(),"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]});
         let resume = |request: &Value| {
             SourceAdapter::between(WireApi::Responses, upstream)
                 .unwrap()
@@ -480,18 +506,98 @@ fn custom_result_text_and_kind_survive_catalog_replacement_on_all_upstreams() {
                 })
         };
         assert_eq!(
-            resume(&make_request("function_call_output"))
+            resume(&make_request("function_call_output", &json!(text)))
                 .unwrap_err()
                 .code(),
             "adapter_continuation_mismatch"
         );
-        let continued = resume(&make_request("custom_tool_call_output")).unwrap();
-        if upstream == WireApi::Gemini {
-            let contents = continued.upstream_body()["contents"].as_array().unwrap();
+        for output in [json!(text), json!([{"type":"input_text","text":text}])] {
+            let continued = resume(&make_request("custom_tool_call_output", &output))
+                .unwrap_or_else(|error| panic!("{upstream:?}, output={output}: {error}"));
+            let mut decoded = decode::request(upstream, continued.upstream_body()).unwrap();
+            decode::resolve_tool_history(&mut decoded.messages).unwrap();
+            let expected_content = vec![Block::Text(if upstream == WireApi::Gemini {
+                json!({"output":text}).to_string()
+            } else {
+                text.into()
+            })];
             assert_eq!(
-                contents.last().unwrap()["parts"][0]["functionResponse"]["response"],
-                json!({"output":text})
+                decoded
+                    .messages
+                    .iter()
+                    .flat_map(|message| &message.blocks)
+                    .filter(|block| matches!(block, Block::ToolResult { content, .. }
+                        if content == &expected_content))
+                    .count(),
+                2
             );
+            if upstream == WireApi::Gemini {
+                let contents = continued.upstream_body()["contents"].as_array().unwrap();
+                assert_eq!(
+                    contents.last().unwrap()["parts"][0]["functionResponse"]["response"],
+                    json!({"output":text})
+                );
+            }
+            continued
+                .translate_response_bytes(&serde_json::to_vec(&super::output(upstream)).unwrap())
+                .unwrap()
+                .unwrap();
+        }
+        let empty_request = make_request("custom_tool_call_output", &json!([]));
+        let empty = resume(&empty_request).unwrap();
+        let body = empty.upstream_body();
+        let empty_content = match upstream {
+            WireApi::ChatCompletions => {
+                &body["messages"].as_array().unwrap().last().unwrap()["content"]
+            }
+            WireApi::Messages => {
+                &body["messages"].as_array().unwrap().last().unwrap()["content"][0]["content"]
+            }
+            WireApi::Gemini => &body["contents"].as_array().unwrap().last().unwrap()["parts"][0]
+                ["functionResponse"]["response"]["output"],
+            _ => unreachable!(),
+        };
+        assert_eq!(empty_content, "");
+        empty
+            .translate_response_bytes(&serde_json::to_vec(&super::output(upstream)).unwrap())
+            .unwrap()
+            .unwrap();
+        let media_output = json!([
+            {"type":"input_text","text":"Synthetic image"},
+            {"type":"input_image","image_url":"data:image/png;base64,YQ=="}
+        ]);
+        let media_request = make_request("custom_tool_call_output", &media_output);
+        if upstream == WireApi::ChatCompletions {
+            assert_eq!(
+                resume(&media_request).unwrap_err().parameter(),
+                Some("input.output")
+            );
+        } else {
+            let continued = resume(&media_request).unwrap();
+            let decoded = decode::request(upstream, continued.upstream_body()).unwrap();
+            assert_eq!(
+                decoded
+                    .messages
+                    .iter()
+                    .flat_map(|message| &message.blocks)
+                    .filter(|block| matches!(block, Block::ToolResult { content, .. }
+                    if matches!(content.as_slice(), [Block::Text(_), Block::Image { .. }])))
+                    .count(),
+                2
+            );
+            continued
+                .translate_response_bytes(&serde_json::to_vec(&super::output(upstream)).unwrap())
+                .unwrap()
+                .unwrap();
+        }
+        for invalid in [
+            json!(null),
+            json!(true),
+            json!(42),
+            json!({"result":"not a content list"}),
+            json!([{"type":"unknown_content"}]),
+        ] {
+            assert!(resume(&make_request("custom_tool_call_output", &invalid)).is_err());
         }
     }
 }

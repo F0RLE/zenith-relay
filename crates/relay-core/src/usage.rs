@@ -1,5 +1,6 @@
 mod api_equivalent;
 mod cache_context;
+mod context_size;
 mod event;
 mod reasoning;
 mod tools;
@@ -23,10 +24,13 @@ pub use cache_context::{
     CacheContextBaseline, CacheContextDiagnostics, CacheContextScope, CacheContextSection,
     CacheHistoryComparison, CacheHistoryDiagnostics, CacheInputKind,
 };
+pub use context_size::RequestContextSize;
 pub use event::{ErrorOrigin, UsageEvent, UsageTransport};
 pub use reasoning::normalize_reasoning_effort;
 pub(crate) use reasoning::ReasoningEffortDiagnostics;
-pub use tools::{TerminalOutputKind, ToolChoiceMode, ToolUseDiagnostics};
+pub use tools::{
+    BasisPointsCatalogDiagnostics, TerminalOutputKind, ToolChoiceMode, ToolUseDiagnostics,
+};
 pub use upstream_error::UpstreamErrorDetails;
 
 /// Escapes a user value for a `LIKE ? ESCAPE '\\'` contains query.

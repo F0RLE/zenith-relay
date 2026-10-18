@@ -197,6 +197,12 @@ fn decode_responses(
         .and_then(Value::as_array)
         .ok_or_else(invalid)?
     {
+        if matches!(
+            response_item.get("type").and_then(Value::as_str),
+            Some("function_call" | "custom_tool_call")
+        ) {
+            super::validate_responses_call_execution(response_item)?;
+        }
         match response_item.get("type").and_then(Value::as_str) {
             Some("message") => {
                 for response_content in response_item

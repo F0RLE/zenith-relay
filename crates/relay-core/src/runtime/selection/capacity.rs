@@ -110,35 +110,21 @@ impl GatewayRuntime {
         if hidden.contains(&crate::model_id_key(model)) {
             return (None, false);
         }
+        let selection_request = || SelectionRequest {
+            model,
+            allowed_protocols,
+            scope: &scope,
+            tried,
+            response_affinity_key,
+            prompt_affinity_key,
+            now_ms,
+        };
         let selection = match (lane, operation) {
-            (CandidateLeaseLane::Text, RotationOperation::Compaction) => scheduler
-                .select_compaction(SelectionRequest {
-                    model,
-                    allowed_protocols,
-                    scope: &scope,
-                    tried,
-                    response_affinity_key,
-                    prompt_affinity_key,
-                    now_ms,
-                }),
-            (CandidateLeaseLane::Text, _) => scheduler.select(SelectionRequest {
-                model,
-                allowed_protocols,
-                scope: &scope,
-                tried,
-                response_affinity_key,
-                prompt_affinity_key,
-                now_ms,
-            }),
-            (CandidateLeaseLane::Image, _) => scheduler.select_image(SelectionRequest {
-                model,
-                allowed_protocols,
-                scope: &scope,
-                tried,
-                response_affinity_key,
-                prompt_affinity_key,
-                now_ms,
-            }),
+            (CandidateLeaseLane::Text, RotationOperation::Compaction) => {
+                scheduler.select_compaction(selection_request())
+            }
+            (CandidateLeaseLane::Text, _) => scheduler.select(selection_request()),
+            (CandidateLeaseLane::Image, _) => scheduler.select_image(selection_request()),
         };
         let reserved = selection.and_then(|selection| {
             let reservation = scheduler.reserve_request_with_operation(
@@ -198,19 +184,8 @@ impl GatewayRuntime {
                 (selection, lease)
             })
         });
-        let capacity_blocked = reserved.is_none()
-            && scheduler.capacity_blocked_for(
-                SelectionRequest {
-                    model,
-                    allowed_protocols,
-                    scope: &scope,
-                    tried,
-                    response_affinity_key,
-                    prompt_affinity_key,
-                    now_ms,
-                },
-                operation,
-            );
+        let capacity_blocked =
+            reserved.is_none() && scheduler.capacity_blocked_for(selection_request(), operation);
         (reserved, capacity_blocked)
     }
 

@@ -9,6 +9,8 @@ pub(super) enum RequestDispatch {
 }
 
 pub(super) struct DispatchedRequestAttempt {
+    pub(super) discovery:
+        Option<super::super::basis_points::discovery::execution::StreamingDiscovery>,
     pub(super) route: ExecutorRoute,
     pub(super) upstream: reqwest::Response,
     pub(super) status: StatusCode,
@@ -30,7 +32,8 @@ pub(super) struct RequestDispatchInput<'a> {
     pub(super) adapter_request: &'a PreparedAdapterRequest,
     pub(super) request_body: Vec<u8>,
     pub(super) reasoning_effort: &'a ReasoningEffortDiagnostics,
-    pub(super) tool_use: &'a ToolUseDiagnostics,
+    pub(super) tool_use: &'a mut ToolUseDiagnostics,
+    pub(super) basis_points_request: Option<&'a Value>,
     pub(super) request_id: &'a str,
     pub(super) requested_model: &'a str,
     pub(super) forwarded_headers: &'a HeaderMap,
@@ -60,6 +63,7 @@ pub(super) async fn dispatch_request_attempt(
         request_body,
         reasoning_effort,
         tool_use,
+        basis_points_request,
         request_id,
         requested_model,
         forwarded_headers,
@@ -68,6 +72,30 @@ pub(super) async fn dispatch_request_attempt(
         last_failure,
         last_failure_origin,
     } = request_dispatch_input;
+    let mut discovery_body = None;
+    let request_body = if let Some(original) = basis_points_request {
+        let body = match super::super::basis_points::discovery::execution::prepare_dispatch(
+            original,
+            adapter_request.upstream_body(),
+            budget,
+            tool_use,
+        ) {
+            Ok(body) => body,
+            Err(error) => {
+                return RequestDispatch::Respond(super::adapter_error_response_for_origin(
+                    error,
+                    selected_error_origin,
+                    Some(request_id),
+                ))
+            }
+        };
+        tool_use.upstream_context = Some(crate::usage::RequestContextSize::capture(&body));
+        let encoded = serde_json::to_vec(&body).expect("prepared JSON is serializable");
+        discovery_body = Some(body);
+        encoded
+    } else {
+        request_body
+    };
     let request_body = if basis_points_route {
         match super::super::basis_points::attach_input_images(
             runtime,
@@ -96,6 +124,10 @@ pub(super) async fn dispatch_request_attempt(
     } else {
         request_body
     };
+    if discovery_body.is_some() {
+        discovery_body =
+            Some(serde_json::from_slice(&request_body).expect("prepared JSON is valid"));
+    }
     let upstream_stream = stream || (account_route && !basis_points_route);
     let started = Instant::now();
     let request_client = runtime.request_client(&route.candidate_id);
@@ -188,10 +220,42 @@ pub(super) async fn dispatch_request_attempt(
     // Includes internal auth replay; repair and recovery cannot refund a
     // real upstream dispatch just by changing their visible attempt count.
     *attempt = u16::from(budget.dispatches());
+    let mut discovery = None;
     let upstream = match upstream {
         Ok(upstream) => {
             route.account_token_generation = upstream.account_token_generation;
-            upstream.response
+            if let (Some(original), Some(body)) = (basis_points_request, discovery_body) {
+                match super::super::basis_points::discovery::resolve(
+                    upstream,
+                    original,
+                    body,
+                    super::super::basis_points::discovery::DiscoveryExecution {
+                        allow_streaming: stream,
+                        runtime,
+                        key,
+                        lease,
+                        budget,
+                        route: &route,
+                        request_id,
+                        requested_model,
+                        reasoning_effort,
+                        tool_use,
+                        selected_error_origin,
+                        started,
+                    },
+                )
+                .await
+                {
+                    Ok(response) => {
+                        *attempt = u16::from(budget.dispatches());
+                        discovery = response.streaming;
+                        response.response
+                    }
+                    Err(response) => return RequestDispatch::Respond(response),
+                }
+            } else {
+                upstream.response
+            }
         }
         Err(error) => {
             let uncertain = error.execution_certainty() == ExecutionCertainty::Unknown;
@@ -249,6 +313,7 @@ pub(super) async fn dispatch_request_attempt(
     let upstream_status = upstream.status();
     let response_headers = upstream.headers().clone();
     RequestDispatch::Ready(Box::new(DispatchedRequestAttempt {
+        discovery,
         route,
         upstream,
         status: upstream_status,

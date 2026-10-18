@@ -38,7 +38,7 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
     {
         checked(content, &["role", "parts"])?;
         decoded_request.messages.push(Message {
-            role: super::content::role(content)?,
+            role: super::content::role(content, WireApi::Gemini)?,
             blocks: super::content::text_blocks(
                 content
                     .get("parts")
@@ -48,36 +48,7 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
         });
     }
     decoded_request.tools = super::content::tools(request_body.get("tools"), WireApi::Gemini)?;
-    if let Some(tool_config) = request_body.get("toolConfig") {
-        checked(tool_config, &["functionCallingConfig"])?;
-        let choice_config = tool_config
-            .get("functionCallingConfig")
-            .ok_or_else(AdapterError::unsupported_tool)?;
-        checked(choice_config, &["mode", "allowedFunctionNames"])?;
-        decoded_request.tool_choice = Some(match required_text(choice_config, "mode")? {
-            "AUTO" => ToolChoice::Auto,
-            "NONE" => ToolChoice::None,
-            "ANY" => {
-                if let Some(names) = choice_config
-                    .get("allowedFunctionNames")
-                    .and_then(Value::as_array)
-                {
-                    if names.len() != 1 {
-                        return Err(AdapterError::unsupported_tool());
-                    }
-                    ToolChoice::Function(
-                        names[0]
-                            .as_str()
-                            .ok_or_else(AdapterError::unsupported_tool)?
-                            .into(),
-                    )
-                } else {
-                    ToolChoice::Required
-                }
-            }
-            _ => return Err(AdapterError::unsupported_tool()),
-        });
-    }
+    decoded_request.tool_choice = tool_choice(request_body)?;
     if let Some(generation_config) = request_body
         .get("generationConfig")
         .filter(|generation_config_value| !generation_config_value.is_null())
@@ -173,4 +144,56 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
         }
     }
     Ok(decoded_request)
+}
+
+fn tool_choice(request_body: &Value) -> AdapterResult<Option<ToolChoice>> {
+    let Some(tool_config) = request_body
+        .get("toolConfig")
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(None);
+    };
+    checked(tool_config, &["functionCallingConfig"])?;
+    let Some(choice) = tool_config
+        .get("functionCallingConfig")
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(None);
+    };
+    checked(choice, &["mode", "allowedFunctionNames"])?;
+    let mode = choice
+        .get("mode")
+        .filter(|value| !value.is_null())
+        .map(|_| required_text(choice, "mode"))
+        .transpose()?
+        .unwrap_or("AUTO");
+    let names = choice
+        .get("allowedFunctionNames")
+        .filter(|value| !value.is_null())
+        .map(|value| value.as_array().ok_or_else(AdapterError::invalid_request))
+        .transpose()?;
+    if mode != "ANY" && names.is_some_and(|names| !names.is_empty()) {
+        return Err(AdapterError::parameter_unsupported_for(
+            "toolConfig.functionCallingConfig.allowedFunctionNames",
+        ));
+    }
+    Ok(Some(match mode {
+        "AUTO" => ToolChoice::Auto,
+        "NONE" => ToolChoice::None,
+        "ANY" => match names.map(Vec::as_slice).unwrap_or_default() {
+            [] => ToolChoice::Required,
+            [name] => ToolChoice::Function(
+                name.as_str()
+                    .filter(|name| !name.trim().is_empty())
+                    .ok_or_else(AdapterError::invalid_request)?
+                    .into(),
+            ),
+            _ => {
+                return Err(AdapterError::parameter_unsupported_for(
+                    "toolConfig.functionCallingConfig.allowedFunctionNames",
+                ))
+            }
+        },
+        _ => return Err(AdapterError::unsupported_tool()),
+    }))
 }

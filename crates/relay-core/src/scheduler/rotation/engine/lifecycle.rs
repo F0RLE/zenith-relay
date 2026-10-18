@@ -177,8 +177,9 @@ impl RotationEngine {
         self.begin_dispatch_internal(lease_id, budget, false)
     }
 
-    /// Only the transport controller can retain a lease for an explicitly
-    /// rejected auth/endpoint repair. Budget charging follows every fence.
+    /// Only the transport controller can retain a lease for a proven repair
+    /// or a completed read-only tool turn. Every new generation is charged
+    /// after the same availability, scope, and authorization fences.
     pub(crate) fn begin_transport_dispatch(
         &mut self,
         lease_id: LeaseId,

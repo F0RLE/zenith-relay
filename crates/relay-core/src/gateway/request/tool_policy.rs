@@ -5,6 +5,7 @@ pub(in crate::gateway) fn tool_use_diagnostics(request_payload: &Value) -> ToolU
     ToolUseDiagnostics {
         client_tool_count: stats.count,
         client_schema_bytes: Some(stats.bytes),
+        client_context: Some(crate::usage::RequestContextSize::capture(request_payload)),
         tool_choice: tool_choice_mode(request_payload),
         ..ToolUseDiagnostics::default()
     }
@@ -89,11 +90,18 @@ impl RequestToolPolicy {
         // Usage rows describe one attempt, not the maximum across other routes.
         self.diagnostics.forwarded_tool_count = policy_result.after.count;
         self.diagnostics.forwarded_schema_bytes = Some(policy_result.after.bytes);
+        self.diagnostics.deferred_tool_search = policy_result.after.deferred_search;
+        self.diagnostics.upstream_context = Some(policy_result.context);
         self.diagnostics.filtered_tool_count = policy_result
             .before
             .count
             .saturating_sub(policy_result.after.count);
         self.diagnostics.policy_outcome = Some(policy_result.outcome);
+    }
+
+    pub(in crate::gateway) fn record_upstream_context(&mut self, request: &Value) {
+        self.diagnostics.upstream_context =
+            Some(crate::usage::RequestContextSize::capture(request));
     }
 }
 

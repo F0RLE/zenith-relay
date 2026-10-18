@@ -122,10 +122,10 @@ pub(super) fn explicit_conversation_key(request_fields: &Map<String, Value>) -> 
         })
 }
 
-pub(super) fn short_hash(json_value: &Value) -> String {
-    let mut digest = Sha256::new();
-    digest.update(serde_json::to_vec(json_value).unwrap_or_default());
-    hex::encode(digest.finalize())
+pub(super) fn short_hash(json_value: &impl serde::Serialize) -> String {
+    let digest =
+        crate::json_fingerprint::sha256(json_value).unwrap_or_else(|_| Sha256::digest([]).into());
+    hex::encode(digest)
 }
 
 pub(super) fn stable_uuid(namespace: &str, identifier: &str) -> String {
@@ -200,10 +200,9 @@ pub(super) fn basis_points_metadata(
             (input_item.get("role").and_then(Value::as_str) == Some("user")).then_some(index)
         })
         .next_back();
-    let turn_prefix = last_user
-        .map(|index| translated_input[..=index].to_vec())
-        .unwrap_or_else(|| translated_input.to_vec());
-    let turn_fingerprint = short_hash(&Value::Array(turn_prefix));
+    let prefix_end = last_user.map_or(translated_input.len(), |index| index + 1);
+    let turn_prefix = &translated_input[..prefix_end];
+    let turn_fingerprint = short_hash(&turn_prefix);
     json!({
         "task_id": stable_uuid("cpa-oai-basispoints", &conversation),
         "turn_id": stable_uuid(

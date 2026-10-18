@@ -9,7 +9,7 @@ mod catalog;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-pub(crate) use catalog::catalog_stats;
+pub(crate) use catalog::{catalog_stats, serialized_bytes};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -103,12 +103,14 @@ pub(crate) struct CatalogStats {
     pub count: u16,
     /// Compact JSON bytes for catalog arrays, not a token/billing estimate.
     pub bytes: u64,
+    pub deferred_search: bool,
 }
 
 pub(crate) struct ToolPolicyResult {
     pub before: CatalogStats,
     pub after: CatalogStats,
     pub outcome: ToolPolicyOutcome,
+    pub context: crate::usage::RequestContextSize,
 }
 
 /// Records catalog size. The request itself is never rewritten.
@@ -125,6 +127,7 @@ pub(crate) fn apply_tool_policy(
         before: stats,
         after: stats,
         outcome,
+        context: crate::usage::RequestContextSize::capture(request),
     })
 }
 

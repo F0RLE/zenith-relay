@@ -48,7 +48,7 @@ pub(in crate::gateway) use normalization::coerce_responses_input_array;
 pub(super) use normalization::{apply_default_service_tier_if_missing, request_service_tier};
 pub(super) use normalization::{
     normalize_account_request, normalize_basis_points_request, normalize_compact_account_request,
-    normalize_responses_lite_request, responses_lite_parallel_tool_calls_valid, ServiceTierPolicy,
+    responses_lite_parallel_tool_calls_valid, ServiceTierPolicy,
 };
 
 use super::execution::execute_client_request;

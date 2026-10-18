@@ -83,6 +83,13 @@ impl RequestTimezonePolicy {
         if self.account_timezone_sources.get(account_id) == Some(&AccountTimezoneSource::Proxy) {
             return proxy_timezone.map(str::to_owned);
         }
+        if !self.account_timezone_sources.contains_key(account_id)
+            && !self.account_timezones.contains_key(account_id)
+        {
+            if let Some(timezone) = proxy_timezone {
+                return Some(timezone.to_owned());
+            }
+        }
         Some(
             self.account_timezones
                 .get(account_id)
@@ -301,6 +308,32 @@ mod tests {
         );
         policy.account_timezone_bindings.insert("a".into(), false);
         assert_eq!(policy.timezone_for("a", Some("Etc/GMT-3")), None);
+    }
+
+    #[test]
+    fn global_enable_still_inherits_proxy_without_overriding_an_explicit_account_choice() {
+        let mut policy = RequestTimezonePolicy {
+            enabled: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            policy.timezone_for("a", Some("Asia/Tokyo")),
+            Some("Asia/Tokyo".into())
+        );
+        policy
+            .account_timezone_sources
+            .insert("a".into(), AccountTimezoneSource::Account);
+        assert_eq!(
+            policy.timezone_for("a", Some("Asia/Tokyo")),
+            Some(DEFAULT_REQUEST_TIMEZONE.into())
+        );
+        policy
+            .account_timezones
+            .insert("a".into(), "Europe/Amsterdam".into());
+        assert_eq!(
+            policy.timezone_for("a", Some("Asia/Tokyo")),
+            Some("Europe/Amsterdam".into())
+        );
     }
 
     #[test]

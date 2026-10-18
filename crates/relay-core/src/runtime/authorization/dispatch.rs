@@ -24,7 +24,7 @@ impl GatewayRuntime {
         request: reqwest::RequestBuilder,
         dispatch: AuthorizationDispatch<'_>,
     ) -> std::result::Result<AuthorizedResponse, AuthorizedRequestError> {
-        self.send_authorized_request_with_binding(candidate_id, request, dispatch, None)
+        self.send_authorized_request_with_binding(candidate_id, request, dispatch, None, None)
             .await
     }
 
@@ -39,6 +39,29 @@ impl GatewayRuntime {
             request,
             dispatch,
             route.account_id.is_none().then(|| route.binding_key()),
+            None,
+        )
+        .await
+    }
+
+    /// Continue a completed read-only catalog lookup on its exact OAuth
+    /// incarnation. No fallback, owner switch, or authorization replay occurs.
+    pub(crate) async fn send_basis_points_catalog_continuation(
+        &self,
+        route: &crate::runtime::ExecutorRoute,
+        request: reqwest::RequestBuilder,
+        dispatch: AuthorizationDispatch<'_>,
+        expected: &AuthorizationIncarnation,
+    ) -> std::result::Result<AuthorizedResponse, AuthorizedRequestError> {
+        if !self.is_basis_points_account(&route.candidate_id) {
+            return Err(AuthorizedRequestError::NotReplayable);
+        }
+        self.send_authorized_request_with_binding(
+            &route.candidate_id,
+            request,
+            dispatch,
+            None,
+            Some(expected),
         )
         .await
     }
@@ -49,6 +72,7 @@ impl GatewayRuntime {
         request: reqwest::RequestBuilder,
         dispatch: AuthorizationDispatch<'_>,
         binding: Option<crate::SourceProtocolBindingKey>,
+        expected: Option<&AuthorizationIncarnation>,
     ) -> std::result::Result<AuthorizedResponse, AuthorizedRequestError> {
         if self.is_basis_points_account(candidate_id) {
             self.validate_basis_points_plan(candidate_id, None)
@@ -69,6 +93,9 @@ impl GatewayRuntime {
                 .await
                 .map_err(AuthorizedRequestError::Prepare)?
         };
+        if expected.is_some_and(|expected| *expected != prepared.incarnation()) {
+            return Err(AuthorizedRequestError::NotReplayable);
+        }
         let upstream_response = self
             .send_prepared_authorization(candidate_id, first_request, &prepared, dispatch)
             .await?;
@@ -80,7 +107,7 @@ impl GatewayRuntime {
                     return Ok(self.accept_authorized_response(
                         candidate_id,
                         unauthorized_response,
-                        prepared.token_generation,
+                        &prepared,
                     ));
                 }
                 // Preserve the real 401 when there is no room for a second
@@ -90,6 +117,7 @@ impl GatewayRuntime {
                     return Ok(AuthorizedResponse {
                         response: unauthorized_response,
                         account_token_generation: prepared.token_generation,
+                        authorization_incarnation: prepared.incarnation(),
                     });
                 }
                 self.record_authorization_replay(dispatch, prepared.token_generation);
@@ -111,18 +139,14 @@ impl GatewayRuntime {
                 return Ok(self.accept_authorized_response(
                     candidate_id,
                     refreshed_response,
-                    refreshed.token_generation,
+                    &refreshed,
                 ));
             }
         }
         if upstream_response.status() != StatusCode::UNAUTHORIZED
             || prepared.token_generation.is_none()
         {
-            return Ok(self.accept_authorized_response(
-                candidate_id,
-                upstream_response,
-                prepared.token_generation,
-            ));
+            return Ok(self.accept_authorized_response(candidate_id, upstream_response, &prepared));
         }
 
         if self.is_basis_points_account(candidate_id) {
@@ -151,17 +175,14 @@ impl GatewayRuntime {
                 .map_err(|_| AuthorizedRequestError::Prepare(ExecutorPrepareError::Persistence))?;
             // Keep the Excel refresh token and the original refusal. The next
             // request prepares a fresh bearer; this response is never replayed.
-            return Ok(self.accept_authorized_response(
-                candidate_id,
-                upstream_response,
-                prepared.token_generation,
-            ));
+            return Ok(self.accept_authorized_response(candidate_id, upstream_response, &prepared));
         }
 
         if budget.is_some_and(|budget| !budget.can_dispatch()) {
             return Ok(AuthorizedResponse {
                 response: upstream_response,
                 account_token_generation: prepared.token_generation,
+                authorization_incarnation: prepared.incarnation(),
             });
         }
         self.record_authorization_replay(dispatch, prepared.token_generation);
@@ -181,18 +202,14 @@ impl GatewayRuntime {
         let refreshed_response = self
             .send_prepared_authorization(candidate_id, request, &refreshed, dispatch)
             .await?;
-        Ok(self.accept_authorized_response(
-            candidate_id,
-            refreshed_response,
-            refreshed.token_generation,
-        ))
+        Ok(self.accept_authorized_response(candidate_id, refreshed_response, &refreshed))
     }
 
     fn accept_authorized_response(
         &self,
         candidate_id: &str,
         response: reqwest::Response,
-        account_token_generation: Option<u64>,
+        prepared: &PreparedAuthorization,
     ) -> AuthorizedResponse {
         self.observe_codex_quota_headers(
             candidate_id,
@@ -202,7 +219,8 @@ impl GatewayRuntime {
         );
         AuthorizedResponse {
             response,
-            account_token_generation,
+            account_token_generation: prepared.token_generation,
+            authorization_incarnation: prepared.incarnation(),
         }
     }
 
