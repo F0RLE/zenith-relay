@@ -42,7 +42,14 @@ export type RoutingDiagnostics = {
   dispatchesBefore: number;
   endpointKind?: string | null;
   cacheContext?: CacheContextDiagnostics | null;
-  attemptOutcome?: "completed" | "retry_selection" | "retry_repair" | "retry_authorization" | "returned_failure" | "execution_uncertain" | "client_disconnected" | null;
+  attemptOutcome?: "completed" | "tool_discovery" | "retry_selection" | "retry_repair" | "retry_authorization" | "returned_failure" | "execution_uncertain" | "client_disconnected" | null;
+};
+
+export type RequestContextSize = {
+  bodyBytes: number;
+  instructionBytes: number;
+  conversationBytes: number;
+  toolCatalogBytes: number;
 };
 
 export type ToolUseDiagnostics = {
@@ -50,6 +57,18 @@ export type ToolUseDiagnostics = {
   forwardedToolCount: number;
   clientSchemaBytes?: number;
   forwardedSchemaBytes?: number;
+  clientContext?: RequestContextSize;
+  upstreamContext?: RequestContextSize;
+  basisPointsCatalog?: {
+    mode: "full" | "compact" | "discovery";
+    fullSchemaBytes: number;
+    renderedSchemaBytes: number;
+    catalogPromptBytes: number;
+    loadedToolCount: number;
+    discoveryRounds: number;
+    discoveryInputTokens?: number;
+    discoveryOutputTokens?: number;
+  };
   filteredToolCount?: number;
   policyMode?: ToolPolicyMode;
   policyOutcome?: "pass_through" | "below_threshold" | "no_selection" | "unchanged" | "filtered" | "deferred";

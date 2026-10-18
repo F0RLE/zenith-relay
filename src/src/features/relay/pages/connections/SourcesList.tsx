@@ -10,6 +10,7 @@ import { sourceSupportsNativeResponses, sourceSupportsNativeProtocol } from "../
 import { ActionMenu, ActionMenuItem, Button, EmptyState, ErrorDetailsDialog, IconButton, OptionMenu, StatusIcon, useConfirm } from "../../components/Ui";
 import type { FeedbackError } from "../../state/feedback";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { setVisibleIdsSelected, toggleSelectedId } from "../../state/selectionModel";
 import { NoResults } from "./connectionHelpers";
 import { routingOrderPositions, runtimeCandidateForMember, upcomingModelRetries } from "../../routingOrder";
 import { updatePoolMembership } from "../../poolMembership";
@@ -183,9 +184,9 @@ export function SourcesList({ query, sourceStats, onEdit, onRefresh, onRefreshSe
               checked={allVisibleSelected}
               disabled={!sources.length || Boolean(busy)}
               aria-label={t("sources.selectVisible")}
-              onChange={(event) => setSelected((previous) => event.target.checked
-                ? [...new Set([...previous, ...sources.map((source) => source.id)])]
-                : previous.filter((id) => !sources.some((source) => source.id === id)))}
+              onChange={(event) => setSelected((selectedIds) => setVisibleIdsSelected(
+                selectedIds, sources.map((source) => source.id), event.target.checked,
+              ))}
             />
             <span className="sources-list-count">{t("connections.sources")} <strong>{sources.length}</strong></span>
           </div>
@@ -272,9 +273,7 @@ export function SourcesList({ query, sourceStats, onEdit, onRefresh, onRefreshSe
             identityVisible
             selected={selected.includes(source.id)}
             selectionDisabled={Boolean(busy)}
-            onToggleSelected={() => setSelected((previous) => previous.includes(source.id)
-              ? previous.filter((id) => id !== source.id)
-              : [...previous, source.id])}
+            onToggleSelected={() => setSelected((selectedIds) => toggleSelectedId(selectedIds, source.id))}
             icon={failure
               ? <IconButton
                 className="account-kind-icon account-status-button"

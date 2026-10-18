@@ -169,6 +169,23 @@ describe("relay operation policy", () => {
     expect(events).toEqual(["work", "success:feedback.saved", "settled", "refresh-start", "refresh-end"]);
   });
 
+  test("does not start a queued background refresh after ownership changes", async () => {
+    let current = true;
+    let refreshes = 0;
+    const result = await runRelayOperation({
+      work: async () => undefined,
+      refresh: async () => { refreshes += 1; },
+      isCurrent: () => current,
+      successKey: "feedback.saved",
+      options: { backgroundRefresh: true },
+      resolveError: resolvedError,
+      setFeedback: () => { queueMicrotask(() => { current = false; }); },
+      settle: () => undefined,
+    });
+    expect(result).toBeTrue();
+    expect(refreshes).toBe(0);
+  });
+
   test("reports a background refresh failure without treating the command as unsent", async () => {
     const events: string[] = [];
     const result = await runRelayOperation({

@@ -57,7 +57,11 @@ export async function runRelayOperation({
       // The command result must not wait for the snapshot. A failed refresh
       // is reported separately and does not undo a command that already ran.
       if (isCurrent()) {
-        void Promise.resolve().then(() => refresh()).then(() => undefined, (cause: unknown) => {
+        void Promise.resolve().then(() => {
+          // Ownership can change between scheduling and starting this read.
+          if (isCurrent()) return refresh();
+          return undefined;
+        }).then(() => undefined, (cause: unknown) => {
           if (!isCurrent()) return;
           const resolved = resolveError(cause);
           try {

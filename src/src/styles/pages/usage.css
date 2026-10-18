@@ -1135,6 +1135,10 @@
   background: var(--relay-surface);
 }
 
+.request-technical-grid > .request-context-section {
+  grid-column: 1 / -1;
+}
+
 .request-technical-grid > .request-identifiers-section,
 .request-technical-grid > .request-tool-details {
   padding: 0;

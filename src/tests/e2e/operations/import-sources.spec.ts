@@ -241,7 +241,8 @@ test("local proxy storage confirms assigned deletion and sends one atomic batch 
   await expect(summary).toContainText("Free2");
   await expect(summary).toContainText("Assigned1");
   await expect(page.locator(".proxy-storage-list")).not.toContainText("secret");
-  await expect(page.locator(".proxy-storage-row").first().getByRole("img", { name: "Not checked yet" })).toBeVisible();
+  await expect(page.locator(".proxy-storage-row").first().getByRole("img", { name: "Connection works" })).toBeVisible();
+  await expect(page.locator(".proxy-storage-row").first()).toContainText("Europe/Amsterdam");
 
   await page.getByRole("button", { name: "Manage assigned accounts" }).first().click();
   let manager = page.getByRole("dialog", { name: "Proxy accounts" });
@@ -275,6 +276,52 @@ test("local proxy storage confirms assigned deletion and sends one atomic batch 
   // The host detaches and deletes atomically, never via separate renderer writes.
   expect(calls.filter((call) => call.command === "set_local_stored_proxy_accounts" && call.args.input?.accountIds?.length === 0)).toHaveLength(0);
 });
+
+for (const staleReadOutcome of ["resolve", "reject"] as const) {
+  test(`a proxy assignment survives an older pool read that will ${staleReadOutcome}`, async ({ page }) => {
+    await installTauriMock(page, { locale: "en", mode: "local", populated: true, accountCount: 3, proxyCount: 3 });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Connections", exact: true }).click();
+    await page.getByRole("tab", { name: "Proxies" }).click();
+    await expect(page.locator(".proxy-storage-counts")).toContainText("Total3");
+
+    await page.evaluate((outcome) => {
+      const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
+      const invoke = internals.invoke.bind(internals);
+      let held = false;
+      internals.invoke = async (command, args, options) => {
+        if (command !== "get_local_proxy_pool" || held) return invoke(command, args, options);
+        held = true;
+        const snapshot = await invoke(command, args, options);
+        document.body.dataset.proxyRead = "held";
+        await new Promise<void>((resolve, reject) => {
+          window.addEventListener("relay-test-release-proxy-read", () => {
+            if (outcome === "reject") reject(new Error("synthetic stale pool read"));
+            else resolve();
+          }, { once: true });
+        });
+        return snapshot;
+      };
+    }, staleReadOutcome);
+    await page.locator(".proxy-storage-toolbar").getByRole("button", { name: "Refresh", exact: true }).click();
+    await page.waitForFunction(() => document.body.dataset.proxyRead === "held");
+
+    await page.getByRole("button", { name: "Manage assigned accounts" }).first().click();
+    const manager = page.getByRole("dialog", { name: "Proxy accounts" });
+    await manager.getByText("Personal Plus", { exact: true }).click();
+    await manager.getByRole("button", { name: "Save" }).click();
+    const assignedAccounts = page.locator(".proxy-storage-bindings").first().getByText("Accounts: 2", { exact: true });
+    await expect(assignedAccounts).toBeVisible();
+
+    await page.evaluate(async () => {
+      window.dispatchEvent(new Event("relay-test-release-proxy-read"));
+      // Let the stale promise and its React state updates finish before checking.
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    });
+    await expect(assignedAccounts).toBeVisible();
+    await expect(page.locator(".proxy-storage-counts")).toContainText("Total3");
+  });
+}
 
 test("account import can reuse an already assigned stored proxy", async ({ page }) => {
   await installTauriMock(page, { locale: "en", mode: "local", populated: true, accountCount: 2, proxyCount: 1 });

@@ -29,6 +29,7 @@ export type ProxyPoolImportResult = {
 };
 
 export type ProxyCheckResult = {
+  timezone?: string | null;
   proxyId: string;
   checkedAtMs: number;
   elapsedMs: number;

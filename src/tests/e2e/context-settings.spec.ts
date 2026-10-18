@@ -185,13 +185,13 @@ for (const mode of ["local", "remote"] as const) {
   });
 }
 
-test("context editor exposes deferred Codex reload and does not guess unknown windows", async ({ page }) => {
+test("context editor keeps deferred Codex reload quiet and does not guess unknown windows", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, catalogRefreshWarning: "deferred",
     modelContext: { "gpt-5.4": { configurable: true } } });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("tab", { name: "Model Rules", exact: true }).click();
-  await expect(page.locator(".model-context-status")).toHaveAttribute("aria-label", /Restart Codex/);
+  await expect(page.locator(".model-context-status")).toHaveCount(0);
   await expect(page.locator(".model-context-notice")).toHaveCount(0);
   const row = page.locator('[data-model-id="gpt-5.4"]');
   await expect(row.locator(".pool-context-token-value")).toHaveText("Unknown");
@@ -228,11 +228,7 @@ for (const defaultTokens of [undefined, 200_000]) {
     await page.goto("/");
     await page.getByRole("button", { name: "Pool", exact: true }).click();
     await page.getByRole("tab", { name: "Model Rules", exact: true }).click();
-    const status = page.locator(".model-context-status");
-    await expect(status).toHaveAttribute("role", "alert");
-    await expect(status).toHaveAttribute("aria-label", /client catalog could not be updated/);
-    await status.focus();
-    await expect(status).toBeFocused();
+    await expect(page.locator(".model-context-status")).toHaveCount(0);
     const row = page.locator('[data-model-id="gpt-5.4"]');
     const expected = defaultTokens === undefined ? "Unknown" : "200,000";
     await expect(row.locator(".pool-context-token-value")).toHaveText(expected);

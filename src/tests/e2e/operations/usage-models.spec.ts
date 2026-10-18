@@ -145,7 +145,7 @@ test("usage shows the request protocol and keeps aggregate summaries compact", a
   await expect(page.locator(".usage-overview").getByText("Generation speed", { exact: true })).toHaveCount(0);
 });
 
-test("usage details warn when forwarded tools yield a text-only response", async ({ page }) => {
+test("usage details accept a text-only response with automatic tool choice", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, usageToolDiagnostics: "forwarded_text_only" });
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
@@ -160,7 +160,7 @@ test("usage details warn when forwarded tools yield a text-only response", async
   await expect(dialog.locator(".request-tool-details").getByText("3", { exact: true })).toBeVisible();
   await expect(dialog.getByText("Tools sent", { exact: true })).toHaveCount(0);
   await expect(dialog.getByText("Text only", { exact: true })).toBeVisible();
-  await expect(dialog.getByText(/Relay forwarded 3 tool definitions/)).toBeVisible();
+  await expect(dialog.getByText(/Relay forwarded 3 tool definitions/)).toHaveCount(0);
 });
 
 test("usage details do not blame the upstream when tools were not forwarded", async ({ page }) => {

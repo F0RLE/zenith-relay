@@ -42,7 +42,8 @@ export function RequestExecution({ row, loadPage }: { row: UsageRow; loadPage: A
   const decision = row.routing?.attemptOutcome;
   const stopReason = !row.success
     ? decision?.startsWith("retry_") ? "historyEndsBeforeResult"
-      : decision && decision !== "completed" ? `stops.${decision}` : hasRepeats ? "stopUnknown" : null
+      : decision === "tool_discovery" ? "historyEndsBeforeResult"
+        : decision && decision !== "completed" ? `stops.${decision}` : hasRepeats ? "stopUnknown" : null
     : null;
   if (!hasRepeats && !failed && !missing) return null;
   const historyBadge = failed ? t("usage.execution.unavailable")
@@ -56,15 +57,17 @@ export function RequestExecution({ row, loadPage }: { row: UsageRow; loadPage: A
     </div> : hasRepeats && !history ? <p className="form-note" role="status">{t("usage.execution.loading")}</p> : null}
     {sends.length > 1 ? <ol className="request-execution-list">{sends.map((send) => {
       const message = send.upstreamError?.message;
+      const lookup = send.routing?.attemptOutcome === "tool_discovery";
+      const label = lookup ? t("usage.execution.decisions.tool_discovery") : requestStatusLabel(send, t);
       return <li key={`${send.attempt}:${send.id}`} aria-label={t("usage.execution.send", { number: send.attempt })}>
-        <span className="request-send-marker"><StatusIcon status={send.success ? "ready" : "error"} label={requestStatusLabel(send, t)} /></span>
+        <span className="request-send-marker"><StatusIcon status={send.success || lookup ? "ready" : "error"} label={label} /></span>
         <div className="request-send-content">
           <div className="request-send-heading">
             <strong><span className="request-send-index">{send.attempt}.</span> {send.connection}</strong>
             <span>{formatDurationMs(send.duration, i18n.resolvedLanguage ?? i18n.language, t)}{send.httpStatus != null ? ` · HTTP ${send.httpStatus}` : ""}</span>
           </div>
-          <p className={send.success ? "request-send-success" : "request-send-error"}>
-            {send.success ? t("common.success") : formatErrorCategory(send.errorCategory, t)}
+          <p className={send.success || lookup ? "request-send-success" : "request-send-error"}>
+            {lookup ? label : send.success ? t("common.success") : formatErrorCategory(send.errorCategory, t)}
           </p>
           {send.routing?.attemptOutcome?.startsWith("retry_") ? <p className="request-send-decision">{t(`usage.execution.decisions.${send.routing.attemptOutcome}`)}</p> : null}
           {message && send !== row ? <details className="request-send-details">

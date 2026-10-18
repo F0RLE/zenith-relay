@@ -170,11 +170,3 @@
   .account-timezone-globe { width: 36px; height: 36px; }
   .account-timezone-modes label { padding-inline: 5px; font-size: 11px; }
 }
-
-.relay-dialog.proxy-timezone-dialog {
-  width: min(560px, 100%);
-}
-
-.proxy-timezone-dialog .account-timezone-content {
-  gap: 12px;
-}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { BrainCircuit, ChevronDown, ChevronRight, CircleAlert, GripVertical } from "lucide-react";
+import { BrainCircuit, ChevronDown, ChevronRight, GripVertical } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { DefaultServiceTier, ModelSummary } from "../../api/types";
@@ -201,16 +201,8 @@ export function ModelRulesView() {
   if (!models.length) {
     return <div className="model-rules-empty"><EmptyState title={t("models.emptyTitle")} description={t("models.emptyDescription")} /></div>;
   }
-  const catalogRefreshFailed = runtime?.warnings.some((warning) => warning.startsWith("model_catalog_refresh_failed"));
-  const catalogReloadPending = runtime?.warnings.includes("model_catalog_refresh_deferred:codex_running");
-  const contextStatus = catalogRefreshFailed ? t("pool.contextPolicies.refreshFailed")
-    : catalogReloadPending ? t("pool.contextPolicies.codexRestart") : null;
   return <>
     <section className="model-rules relay-compact-content" aria-label={t("models.visible")}>
-      {contextStatus ? <span className={`model-context-status${catalogRefreshFailed ? " error-text" : ""}`}
-        role={catalogRefreshFailed ? "alert" : "status"} tabIndex={0}
-        data-relay-tooltip={contextStatus} aria-label={contextStatus}
-      ><CircleAlert aria-hidden /></span> : null}
       <div className="relay-table-wrap">
         <table className="relay-table model-rules-table">
           <colgroup><col data-column="model" /><col data-column="actions" /></colgroup>

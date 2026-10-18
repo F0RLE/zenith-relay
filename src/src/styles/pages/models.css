@@ -418,23 +418,6 @@
   max-width: 100%;
 }
 
-.model-context-status {
-  float: right;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  margin: 0 6px 4px;
-  border-radius: 5px;
-  color: var(--relay-warning);
-  cursor: help;
-}
-
-.model-context-status svg { width: 15px; height: 15px; }
-.model-context-status.error-text { color: var(--relay-error); }
-.model-context-status:focus-visible { outline: 2px solid var(--relay-accent); }
-
 @container (max-width: 700px) {
   .model-rules-table col[data-column="actions"] { width: 320px; }
   .model-rule-actions {

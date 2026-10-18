@@ -5,20 +5,20 @@ import { CacheContextDetails } from "./CacheContextDetails";
 import { RequestDisclosure } from "./RequestDisclosure";
 import { RequestSection } from "./RequestSection";
 import type { UsageRow } from "./usageData";
-import { formatEndpointKind, formatErrorOrigin, formatModelId, formatObservedServiceTier, formatToolChoice, formatTerminalOutput } from "./usageReportFormat";
+import { formatContextBytes, formatEndpointKind, formatErrorOrigin, formatModelId, formatObservedServiceTier, formatToolChoice, formatTerminalOutput, missingRequiredToolCall } from "./usageReportFormat";
 
 export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; debugEnabled: boolean }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const routing = row.routing;
   const toolUse = row.toolUse;
   const hasTools = toolUse && (toolUse.clientToolCount > 0 || toolUse.forwardedToolCount > 0 || toolUse.toolCallCount > 0);
-  const toolWarning = Boolean(
-    row.success
-      && toolUse
-      && toolUse.forwardedToolCount > 0
-      && toolUse.toolCallCount === 0
-      && toolUse.terminalOutput === "text",
-  );
+  const toolWarning = row.success && missingRequiredToolCall(toolUse);
+  const clientContext = toolUse?.clientContext;
+  const upstreamContext = toolUse?.upstreamContext;
+  const hasContext = Boolean(clientContext || upstreamContext);
+  const catalog = toolUse?.basisPointsCatalog;
+  const contextBytes = (client: number | undefined, upstream: number | undefined) =>
+    `${formatContextBytes(client, i18n.language)} → ${formatContextBytes(upstream, i18n.language)}`;
   const observedTier = formatObservedServiceTier(row);
   const modelAlias = row.requestedModel && formatModelId(row.requestedModel, row.routedModel) !== row.requestedModel
     ? row.requestedModel : null;
@@ -26,7 +26,7 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
   const separateEndpoint = routing?.endpointKind && routing.endpointKind !== row.wireApi;
   const hasErrorMetadata = !row.success && (row.httpStatus != null || row.errorOrigin || row.errorCategory
     || row.upstreamError?.httpStatus != null || row.upstreamError?.code || row.upstreamError?.errorType);
-  if (!row.requestId && !row.upstreamError?.requestId && !modelAlias && !hasErrorMetadata && !separateEndpoint && !observedTier && !routing && !hasTools) return null;
+  if (!row.requestId && !row.upstreamError?.requestId && !modelAlias && !hasErrorMetadata && !separateEndpoint && !observedTier && !routing && !hasTools && !hasContext) return null;
   return <RequestDisclosure title={t("usage.technicalDetails")} icon={<Braces />} className="request-technical-details">
     <div className="request-technical-grid">
       {row.requestId || row.upstreamError?.requestId || modelAlias ? <RequestSection title={t("usage.requestSections.identifiers")} className="request-identifiers-section">
@@ -79,9 +79,27 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
         </dl>
         {unresolvedRetry ? <p className="form-note request-routing-note">{t("usage.execution.historyEndsBeforeResult")}</p> : null}
       </RequestSection> : null}
+      {hasContext ? <RequestSection title={t("usage.contextSize.title")} className="request-context-section">
+        <dl className="request-details-list">
+          {(["bodyBytes", "instructionBytes", "conversationBytes", "toolCatalogBytes"] as const).map((field, index) => <div key={field}>
+            <dt>{t(`usage.contextSize.fields.${index}`)}</dt><dd>{contextBytes(clientContext?.[field], upstreamContext?.[field])}</dd>
+          </div>)}
+          {catalog ? <>
+            <div><dt>{t("usage.contextSize.catalogMode")}</dt><dd>{t(`usage.contextSize.modes.${catalog.mode}`)}</dd></div>
+            <div><dt>{t("usage.contextSize.schemas")}</dt><dd>{contextBytes(catalog.fullSchemaBytes, catalog.renderedSchemaBytes)}</dd></div>
+            <div><dt>{t("usage.contextSize.loaded")}</dt><dd>{catalog.loadedToolCount} / {toolUse?.forwardedToolCount ?? 0}</dd></div>
+            {catalog.mode === "discovery" ? <>
+              <div><dt>{t("usage.contextSize.lookups")}</dt><dd>{catalog.discoveryRounds}</dd></div>
+              {catalog.discoveryRounds > 0 ? <div><dt>{t("usage.contextSize.lookupTokens")}</dt><dd>{catalog.discoveryInputTokens ?? "—"} / {catalog.discoveryOutputTokens ?? "—"}</dd></div> : null}
+            </> : null}
+          </> : null}
+        </dl>
+        {routing?.endpointKind === "excel_basis_points" ? <p className="form-note">{t("usage.contextSize.bps")}</p> : null}
+        {catalog?.mode === "discovery" ? <p className="form-note">{t("usage.contextSize.discovery")}</p> : null}
+      </RequestSection> : null}
       {hasTools && toolUse ? <RequestSection title={t("usage.requestSections.tools")} className="request-tool-details">
         <dl className="request-details-list request-tools-list">
-          <div><dt>{t("usage.clientTools")}</dt><dd>{toolUse.clientToolCount}</dd></div>
+          <div><dt>{t("usage.clientTools")}</dt><dd>{toolUse.clientToolCount}{!hasContext && toolUse.clientSchemaBytes != null ? ` · ${formatContextBytes(toolUse.clientSchemaBytes, i18n.language)}` : null}</dd></div>
           {toolUse.forwardedToolCount !== toolUse.clientToolCount
             ? <div><dt>{t("usage.forwardedTools")}</dt><dd>{toolUse.forwardedToolCount}</dd></div>
             : null}
@@ -91,7 +109,7 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
             : null}
           <div><dt>{t("usage.terminalOutput")}</dt><dd>{formatTerminalOutput(toolUse.terminalOutput, t)}</dd></div>
         </dl>
-        {toolWarning ? <p className="form-note warning-text">{t("usage.toolCallMissing", { count: toolUse.forwardedToolCount })}</p> : null}
+        {toolWarning ? <p className="form-note warning-text">{t("usage.toolCallMissing")}</p> : null}
       </RequestSection> : null}
     </div>
     {debugEnabled && routing?.cacheContext

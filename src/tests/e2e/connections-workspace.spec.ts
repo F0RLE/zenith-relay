@@ -46,26 +46,23 @@ for (const locale of ["ru", "en"] as const) {
       const cards = page.locator(".proxy-storage-row.account-card");
       await expect(cards).toHaveCount(3);
       const card = cards.first();
-      await expect(card.locator(".account-card-actions button")).toHaveCount(3);
+      await expect(card.locator(".account-card-actions button")).toHaveCount(2);
       const selection = card.locator(".account-select-button");
       await selection.click();
       await expect(selection).toHaveAttribute("aria-pressed", "true");
       await expect(card).toHaveClass(/selected/);
       await selection.click();
       await expect(selection).toHaveAttribute("aria-pressed", "false");
-      await card.getByRole("button", { name: russian ? "Часовой пояс прокси" : "Proxy timezone", exact: true }).click();
-      await expect(page.getByRole("dialog")).toBeVisible();
-      await page.getByRole("dialog").getByRole("button", { name: russian ? "Отмена" : "Cancel", exact: true }).click();
+      await expect(card.getByRole("button", { name: russian ? "Часовой пояс прокси" : "Proxy timezone", exact: true })).toHaveCount(0);
       await card.locator(".account-row-menu summary").click();
       await expect(page.getByRole("menuitem")).toHaveText(russian ? "Удалить" : "Delete");
       await page.keyboard.press("Escape");
-      await card.getByRole("button", { name: russian ? "Проверить прокси" : "Test proxy", exact: true }).click();
       await expect(card).toContainText("203.0.113.42");
+      await expect(card).toContainText("Europe/Amsterdam");
       await expect(card.locator(".account-kind-icon")).toHaveAttribute("data-status", "ready");
       await expect(card.locator(".proxy-diagnostic-status")).toHaveCount(0);
-      await expect(cards.nth(1).locator(".account-kind-icon")).toHaveAttribute("aria-label", russian ? "Ещё не проверен" : "Not checked yet");
-      await expect(cards.nth(1).locator(".account-kind-icon")).toHaveAttribute("data-status", "disabled");
-      await expect(cards.nth(1).locator(".proxy-storage-meta, .proxy-storage-bindings")).toHaveCount(0);
+      await expect(cards.nth(1).locator(".account-kind-icon")).toHaveAttribute("data-status", "ready");
+      await expect(cards.nth(1)).toContainText("Europe/Amsterdam");
       await expect(cards.locator(".proxy-storage-location, .proxy-storage-timezone.unset, .proxy-storage-bindings > small")).toHaveCount(0);
       const boxes = await cards.evaluateAll((elements) => elements.map((element) => {
         const box = element.getBoundingClientRect();
@@ -77,7 +74,7 @@ for (const locale of ["ru", "en"] as const) {
       await page.mouse.move(1, 1);
       await page.screenshot({ path: `output/playwright/proxy-cards-${locale}-${theme}.png`, animations: "disabled" });
       const calls = await commands(page);
-      expect(calls.filter((call) => call.command === "check_local_stored_proxy")).toHaveLength(1);
+      expect(calls.filter((call) => call.command === "check_local_stored_proxy")).toHaveLength(3);
       expect(calls.some((call) => ["set_local_stored_proxy_accounts", "set_local_stored_proxy_timezone", "set_local_account_proxy"].includes(call.command))).toBe(false);
     });
   }
@@ -126,26 +123,20 @@ test("proxy action cards retain a selected stored endpoint before saving", async
   expect((await commands(page)).findLast((call) => call.command === "assign_local_stored_proxy")?.args).toEqual({ input: { accountId: "account_synthetic", proxyId: "proxy_synthetic_2" } });
 });
 
-test("proxy checks are explicit, show observed egress, and keep account assignments", async ({ page }) => {
-  await installTauriMock(page, { populated: true, proxyCount: 2, proxyCheckDelayMs: 500 });
+test("proxy checks automatically detect timezone, show observed egress, and keep account assignments", async ({ page }) => {
+  await installTauriMock(page, { populated: true, proxyCount: 2, proxyCheckDelayMs: 1500 });
   await openConnections(page);
   await page.getByRole("tab", { name: "Proxies" }).click();
   const row = page.locator(".proxy-storage-row").first();
   const status = row.locator(".account-kind-icon");
   await expect(row).not.toContainText("Declared:");
   await expect(row).not.toContainText("Not checked yet");
-  await expect(status).toHaveAttribute("aria-label", "Not checked yet");
-  await status.hover();
-  await expect(page.getByRole("tooltip")).toHaveText("Not checked yet");
-  expect((await commands(page)).some((call) => call.command === "check_local_stored_proxy")).toBe(false);
-  await row.getByRole("button", { name: "Test proxy", exact: true }).hover();
-  await expect(page.getByRole("tooltip")).toHaveText("Test proxy");
-  await row.getByRole("button", { name: "Test proxy", exact: true }).click();
   await expect(row.getByRole("button", { name: "Test proxy", exact: true })).toBeDisabled();
   await expect(status).toHaveAttribute("aria-label", "Checking connection…");
   await expect(status).toHaveAttribute("data-status", "info");
   await expect(row).toContainText("203.0.113.42");
   await expect(row).toContainText("Netherlands");
+  await expect(row).toContainText("Europe/Amsterdam");
   await expect(row).toContainText("184 ms");
   await expect(status).toHaveAttribute("data-status", "ready");
   await expect(status).toHaveAttribute("aria-label", "Connection works");
@@ -155,11 +146,31 @@ test("proxy checks are explicit, show observed egress, and keep account assignme
   await row.locator(".proxy-diagnostic").hover();
   await expect(page.getByRole("tooltip")).toContainText("Checked:");
   const calls = await commands(page);
-  expect(calls.filter((call) => call.command === "check_local_stored_proxy")).toEqual([{ command: "check_local_stored_proxy", args: { proxyId: "proxy_synthetic_1" } }]);
+  expect(calls.filter((call) => call.command === "check_local_stored_proxy")).toEqual([
+    { command: "check_local_stored_proxy", args: { proxyId: "proxy_synthetic_1" } },
+    { command: "check_local_stored_proxy", args: { proxyId: "proxy_synthetic_2" } },
+  ]);
   expect(calls.some((call) => ["set_local_account_proxy", "set_local_stored_proxy_accounts", "start_local_gateway"].includes(call.command))).toBe(false);
   await page.getByRole("tab", { name: "Sources" }).click();
   await page.getByRole("tab", { name: "Proxies" }).click();
   await expect(page.locator(".proxy-storage-row").first()).toContainText("203.0.113.42");
+});
+
+test("automatic proxy checks reserve queued entries and do not loop on tab changes", async ({ page }) => {
+  await installTauriMock(page, { populated: true, proxyCount: 5, proxyCheckDelayMs: 200 });
+  await openConnections(page);
+  await page.getByRole("tab", { name: "Proxies" }).click();
+  await page.getByRole("tab", { name: "Sources" }).click();
+  await page.getByRole("tab", { name: "Proxies" }).click();
+  await expect(page.locator(".proxy-storage-timezone")).toHaveCount(5);
+  const checkedIds = async () => (await commands(page))
+    .filter((call) => call.command === "check_local_stored_proxy")
+    .map((call) => call.args["proxyId"]).sort();
+  expect(await checkedIds()).toEqual(Array.from({ length: 5 }, (_, index) => `proxy_synthetic_${index + 1}`));
+  await page.getByRole("tab", { name: "Sources" }).click();
+  await page.getByRole("tab", { name: "Proxies" }).click();
+  await expect(page.locator(".proxy-storage-timezone")).toHaveCount(5);
+  expect(await checkedIds()).toHaveLength(5);
 });
 
 test("import checks only new proxies and retains them after a failed check", async ({ page }) => {
@@ -169,7 +180,7 @@ test("import checks only new proxies and retains them after a failed check", asy
   await page.getByRole("button", { name: "Import", exact: true }).first().click();
   const dialog = page.getByRole("dialog", { name: "Import proxies" });
   await dialog.getByLabel("Proxy list").fill("proxy-new.example.test:1234:user:synthetic-password\nproxy-new.example.test:1234:user:synthetic-password");
-  await expect(dialog.getByLabel("Check after adding")).toBeChecked();
+  await expect(dialog.getByLabel("Check after adding")).toHaveCount(0);
   await dialog.getByRole("button", { name: "Import 2", exact: true }).click();
   await expect(dialog).toContainText("Added 1; skipped 1 duplicate(s).");
   await expect(dialog).toContainText("Check failed");
@@ -183,17 +194,19 @@ test("import checks only new proxies and retains them after a failed check", asy
   expect((await commands(page)).filter((call) => call.command === "check_local_stored_proxy")).toHaveLength(1);
 });
 
-test("proxy import can skip checks and complete without diagnostic requests", async ({ page }) => {
+test("proxy import determines timezone without extra controls or a manual save", async ({ page }) => {
   await installTauriMock(page, { populated: true, proxyCount: 0 });
   await openConnections(page);
   await page.getByRole("tab", { name: "Proxies" }).click();
   await page.getByRole("button", { name: "Import", exact: true }).first().click();
   const dialog = page.getByRole("dialog", { name: "Import proxies" });
   await dialog.getByLabel("Proxy list").fill("proxy-new.example.test:1234:user:synthetic-password");
-  await dialog.getByLabel("Check after adding").uncheck();
+  await expect(dialog.getByLabel("Check after adding")).toHaveCount(0);
   await dialog.getByRole("button", { name: "Import 1", exact: true }).click();
-  await expect(dialog).toContainText("Not checked yet");
-  expect((await commands(page)).some((call) => call.command === "check_local_stored_proxy")).toBe(false);
+  await expect(dialog).toContainText("Connection works");
+  await dialog.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(page.locator(".proxy-storage-row").first()).toContainText("Europe/Amsterdam");
+  expect((await commands(page)).filter((call) => call.command === "check_local_stored_proxy")).toHaveLength(1);
 });
 
 for (const mode of ["local", "remote"] as const) {

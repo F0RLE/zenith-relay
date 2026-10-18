@@ -6,6 +6,7 @@ import { relayCommands } from "../../api/commands";
 import type { AccountImportProgress, ConfirmAccountImportResponse, ImportSession, RelayMode } from "../../api/types";
 import { AccountPlanBadge, Button, Dialog, SettingToggle } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { toggleSelectedId } from "../../state/selectionModel";
 import { captureOperationResult } from "../../state/relayOperationModel";
 import {
   beginAccountImportConfirmation,
@@ -293,9 +294,7 @@ export function ImportDialog({
     }
   }, [relayMode]);
   const importRows = session?.preview.rows ?? [];
-  const toggle = (itemId: string) => setSelected((previousSelectedItemIds) => previousSelectedItemIds.includes(itemId)
-    ? previousSelectedItemIds.filter((selectedItemId) => selectedItemId !== itemId)
-    : [...previousSelectedItemIds, itemId]);
+  const toggle = (itemId: string) => setSelected((selectedIds) => toggleSelectedId(selectedIds, itemId));
   // Keep invalid rows selectable so the user can explicitly submit them and
   // receive a per-item failure result instead of losing the row silently.
   // Rust still validates the item and never imports unusable credentials.

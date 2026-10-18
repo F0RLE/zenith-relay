@@ -45,6 +45,7 @@ import { providerCreditsSummary } from "../../providerCredits";
 import { routingOrderPositions, runtimeCandidateForMember } from "../../routingOrder";
 import { canAccountJoinPool, updatePoolMembership } from "../../poolMembership";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { toggleSelectedId } from "../../state/selectionModel";
 import { NoResults } from "./connectionHelpers";
 import { AccountErrorDialog } from "./AccountErrorDialog";
 import { AccountCard } from "./AccountCard";
@@ -211,7 +212,7 @@ export function AccountsTable({
       />
     );
   }
-  const toggleSelected = (accountId: string) => setSelected((previousSelectedAccountIds) => previousSelectedAccountIds.includes(accountId) ? previousSelectedAccountIds.filter((selectedAccountId) => selectedAccountId !== accountId) : [...previousSelectedAccountIds, accountId]);
+  const toggleSelected = (accountId: string) => setSelected((selectedIds) => toggleSelectedId(selectedIds, accountId));
   const toggleAllVisible = (checked: boolean) => setSelected(checked ? accounts.map((account) => account.id) : []);
   const togglePlanGrouping = () => setGroupByPlan((previousGroupByPlan) => {
     localStorage.setItem("relay.accountsGroupByPlan", String(!previousGroupByPlan));

@@ -97,11 +97,6 @@
 .proxy-storage-error svg { width: 16px; height: 16px; flex: 0 0 auto; color: var(--relay-error); }
 .proxy-import-form .proxy-list-field textarea { min-height: 152px; resize: vertical; padding: 12px 46px 12px 12px; line-height: 1.6; }
 .proxy-format-line { display: flex; flex-wrap: wrap; gap: 8px 14px; color: var(--relay-muted); font-size: 10px; }
-.proxy-check-option { display: flex; align-items: flex-start; gap: 12px; padding: 16px; border-radius: 12px; background: var(--relay-subtle); cursor: pointer; }
-.proxy-check-option input { margin-top: 2px; }
-.proxy-check-option > span { min-width: 0; display: grid; gap: 5px; }
-.proxy-check-option strong { font-size: 13px; font-weight: 550; }
-.proxy-check-option small { color: var(--relay-muted); font-size: 11px; line-height: 1.5; }
 .proxy-import-results { display: grid; gap: 8px; }
 .proxy-import-results > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px 16px; align-items: center; padding: 16px; border-radius: 12px; background: var(--relay-subtle); }
 .proxy-import-results > div > strong { font-size: 12px; overflow-wrap: anywhere; grid-column: 1 / -1; }

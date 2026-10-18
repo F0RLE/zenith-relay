@@ -1,6 +1,6 @@
 import type { Page } from "../bun-playwright";
 import type { ApiModelPriceOverride, ModelSummary, SourceStats, UpstreamErrorDetails, SourceProtocolBinding, SourceProtocolConfig, SourceProbeInput, WakeTask, ToolPolicy, ToolPolicyUpdate, RequestTimezonePolicy, RequestTimezoneUpdate, AccountSummary } from "../../src/features/relay/api/types";
-import type { CacheContextDiagnostics, RoutingDiagnostics } from "../../src/features/relay/api/types";
+import type { CacheContextDiagnostics, RoutingDiagnostics, ProxyPoolEntry } from "../../src/features/relay/api/types";
 
 export type MockOptions = {
   platform?: "windows" | "macos" | "linux";
@@ -482,7 +482,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       },
     };
     const assignedProxyAccount = localRuntime.accounts.find((item) => item.proxyMode === "account");
-    let proxyEntries = Array.from({ length: input.proxyCount ?? (populated ? 3 : 0) }, (_, index) => ({
+    let proxyEntries: ProxyPoolEntry[] = Array.from({ length: input.proxyCount ?? (populated ? 3 : 0) }, (_, index) => ({
       id: `proxy_synthetic_${index + 1}`,
       endpoint: `http://proxy-${index + 1}.example.test:${10_000 + index}`,
       assignedAccountIds: index === 0 && input.staleAccountReferences ? ["account_deleted_internal"] : index === 0 && assignedProxyAccount ? [assignedProxyAccount.id] : [],
@@ -1011,7 +1011,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "check_local_stored_proxy": {
             if (input.proxyCheckDelayMs) await new Promise((resolve) => setTimeout(resolve, input.proxyCheckDelayMs));
             const errorCode = input.proxyCheckError ?? null;
-            return { proxyId: args.proxyId, checkedAtMs: Date.now(), elapsedMs: 184, ip: errorCode ? null : "203.0.113.42", countryCode: errorCode ? null : "NL", errorCode };
+            const entry = proxyEntries.find((entry) => entry.id === args.proxyId);
+            const result = { proxyId: String(args.proxyId), checkedAtMs: Date.now(), elapsedMs: 184, ip: errorCode ? null : "203.0.113.42", countryCode: errorCode ? null : "NL", timezone: errorCode ? entry?.timezone ?? null : "Europe/Amsterdam", errorCode };
+            if (entry) { entry.lastCheck = result; entry.timezone = result.timezone; }
+            return result;
           }
           case "import_local_proxy_pool": {
             const values = (args.input as { proxyUrls?: string[] })?.proxyUrls ?? [];

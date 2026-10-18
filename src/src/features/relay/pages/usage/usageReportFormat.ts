@@ -19,6 +19,17 @@ export function compactRequestId(requestId: string | null): string {
 
 export { formatModelId } from "./usageModelIdentity";
 
+export function formatContextBytes(bytes: number | undefined, locale: string): string {
+  if (bytes == null || !Number.isFinite(bytes) || bytes < 0) return "—";
+  const kilo = bytes >= 1000;
+  return `${formatNumber(kilo ? bytes / 1000 : bytes, locale, { maximumFractionDigits: 1 })} ${kilo ? "kB" : "B"}`;
+}
+
+export function missingRequiredToolCall(tools: ToolUseDiagnostics | null | undefined): boolean {
+  return Boolean(tools && tools.forwardedToolCount > 0 && tools.toolCallCount === 0
+    && tools.terminalOutput === "text" && (tools.toolChoice === "required" || tools.toolChoice === "specific"));
+}
+
 export type AggregateRow = {
   name: string;
   requests: number;

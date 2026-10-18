@@ -5,6 +5,7 @@ import { relayCommands } from "../../api/commands";
 import type { TrashedAccountSummary } from "../../api/types";
 import { Button, EmptyState, IconButton, StatusIcon, useConfirm } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { toggleSelectedId } from "../../state/selectionModel";
 import { AccountCardLayout } from "./AccountCard";
 import { NoResults } from "./connectionHelpers";
 
@@ -76,8 +77,7 @@ export function AccountTrashView() {
   };
 
   const visibleAccounts = accounts.filter((entry) => entry.label.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
-  const toggleSelected = (accountId: string) => setSelected((previous) =>
-    previous.includes(accountId) ? previous.filter((id) => id !== accountId) : [...previous, accountId]);
+  const toggleSelected = (accountId: string) => setSelected((selectedIds) => toggleSelectedId(selectedIds, accountId));
   const disabled = Boolean(busy) || loading;
 
   return <div className="account-trash-view">

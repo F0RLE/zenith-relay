@@ -1,19 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { TFunction } from "i18next";
-import { CircleAlert, CircleCheck, Clock3, Database, Eye, EyeOff, Globe, Loader2, Network, Plus, RefreshCw, RotateCcw, Server, Shuffle, Trash2, Upload, UsersRound, WifiOff, X } from "lucide-react";
+import { CircleAlert, CircleCheck, Clock3, Database, Eye, EyeOff, Globe, Loader2, Network, Plus, RefreshCw, Server, Shuffle, Trash2, Upload, UsersRound, WifiOff, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, ProxyAssignmentResult, ProxyPoolEntry, ProxyPoolImportResult, ProxyPoolSummary, StoredProxyAssignmentResult } from "../../api/types";
 import { AccountBadges, ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, IconButton, OptionMenu, SecretField, StatusIcon, useConfirm } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { toggleSelectedId } from "../../state/selectionModel";
 import { captureOperationResult } from "../../state/relayOperationModel";
-import { useRequestTimezone } from "../../hooks/useRequestTimezone";
-import { TimezonePicker, TimezonePreview } from "../../components/AccountTimezoneDialog";
 import { matchesQuery, NoResults } from "./connectionHelpers";
 import { useProxyPool } from "../../hooks/useProxyPool";
 import type { ProxyChecks, ProxyCheckState } from "./useProxyChecks";
 import { AccountCardLayout } from "./AccountCard";
+import { buildProxyBindings, proxyTimezone } from "./proxyStorageModel";
 
 type AccountProxyChoice = "direct" | "automatic" | "stored" | "custom" | "common";
 
@@ -25,22 +25,16 @@ export function ProxyStorageView({ revision, diagnostics, onImport }: { revision
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [managedProxyId, setManagedProxyId] = useState<string | null>(null);
-  const [timezoneProxyId, setTimezoneProxyId] = useState<string | null>(null);
+  const automaticChecks = useRef(new Set<string>());
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const accountList = (runtime?.accounts ?? []).filter((account) => !account.remoteLocation);
-  const accounts = new Map(accountList.map((account) => [account.id, account]));
-  const bindings = new Map((pool?.entries ?? []).map((entry) => {
-    const isCommon = runtime?.gateway.commonProxyId === entry.id;
-    const accountIds = new Set(entry.assignedAccountIds);
-    if (isCommon) {
-      for (const account of accountList) if (account.proxyMode === "common") accountIds.add(account.id);
-    }
-    return [entry.id, {
-      accountNames: [...accountIds].map((id) => accounts.get(id)?.label ?? t("accounts.importUnknownAccount")),
-      sourceNames: (runtime?.sources ?? []).filter((source) => source.proxyId === entry.id).map((source) => source.name),
-      isCommon,
-    }] as const;
-  }));
+  const bindings = buildProxyBindings({
+    entries: pool?.entries ?? [],
+    accounts: accountList,
+    sources: runtime?.sources ?? [],
+    commonProxyId: runtime?.gateway.commonProxyId,
+    unknownAccountLabel: t("accounts.importUnknownAccount"),
+  });
   const assignedCount = [...bindings.values()].filter((binding) => binding.accountNames.length || binding.sourceNames.length || binding.isCommon).length;
   const proxyEntries = (pool?.entries ?? []).filter((proxyEntry) => matchesQuery(
     query,
@@ -51,11 +45,18 @@ export function ProxyStorageView({ revision, diagnostics, onImport }: { revision
     (diagnostics.checks[proxyEntry.id]?.result ?? proxyEntry.lastCheck)?.countryCode,
     bindings.get(proxyEntry.id)?.accountNames,
     bindings.get(proxyEntry.id)?.sourceNames,
-    proxyEntry.timezone,
+    proxyTimezone(proxyEntry, diagnostics.checks[proxyEntry.id]?.result),
   ));
   const allSelectableSelected = proxyEntries.length > 0 && proxyEntries.every((proxyEntry) => selected.includes(proxyEntry.id));
   useEffect(() => setSelected((previousSelectedProxyIds) => previousSelectedProxyIds.filter((proxyId) => pool?.entries.some((proxyEntry) => proxyEntry.id === proxyId))), [pool]);
   useEffect(() => setDeleteError(null), [selected]);
+  useEffect(() => {
+    const missing = (pool?.entries ?? []).filter((entry) =>
+      !entry.lastCheck?.timezone && !diagnostics.checks[entry.id] && !automaticChecks.current.has(entry.id),
+    ).map((entry) => entry.id);
+    for (const id of missing) automaticChecks.current.add(id);
+    if (missing.length) void diagnostics.checkMany(missing);
+  }, [pool, diagnostics.checks, diagnostics.checkMany]);
   const remove = async (proxyIds: string[]) => {
     if (busy) return;
     setDeleteError(null);
@@ -93,7 +94,6 @@ export function ProxyStorageView({ revision, diagnostics, onImport }: { revision
   }
   if (!pool) return <div className="center-loading" role="status"><Loader2 className="spin" aria-hidden />{t("common.loading")}</div>;
   const managedProxy = pool.entries.find((proxyEntry) => proxyEntry.id === managedProxyId) ?? null;
-  const timezoneProxy = pool.entries.find((proxyEntry) => proxyEntry.id === timezoneProxyId) ?? null;
   return <div className="proxy-storage connection-workspace">
     {pool.total ? <div className="table-toolbar proxy-storage-toolbar">
       <div className="proxy-storage-search">
@@ -131,6 +131,7 @@ export function ProxyStorageView({ revision, diagnostics, onImport }: { revision
           const usage = bindings.get(proxyEntry.id)!;
           const checkState = diagnostics.checks[proxyEntry.id];
           const lastCheck = checkState?.result ?? proxyEntry.lastCheck;
+          const timezone = proxyTimezone(proxyEntry, checkState?.result);
           const success = Boolean(lastCheck?.ip && !lastCheck.errorCode);
           const statusLabel = t(checkState?.pending ? "proxies.checking" : success ? "proxies.checkSuccess" : lastCheck ? "proxies.checkFailed" : "proxies.notChecked");
           return <AccountCardLayout
@@ -140,7 +141,7 @@ export function ProxyStorageView({ revision, diagnostics, onImport }: { revision
             identityVisible
             selected={selected.includes(proxyEntry.id)}
             selectionDisabled={Boolean(busy)}
-            onToggleSelected={() => setSelected((previousSelectedProxyIds) => previousSelectedProxyIds.includes(proxyEntry.id) ? previousSelectedProxyIds.filter((selectedProxyId) => selectedProxyId !== proxyEntry.id) : [...previousSelectedProxyIds, proxyEntry.id])}
+            onToggleSelected={() => setSelected((selectedIds) => toggleSelectedId(selectedIds, proxyEntry.id))}
             icon={<StatusIcon className="account-kind-icon" status={checkState?.pending ? "info" : success ? "ready" : lastCheck ? "error" : "disabled"} label={statusLabel}><Network aria-hidden /></StatusIcon>}
             details={null}
             menu={<ActionMenu className="account-row-menu">
@@ -148,16 +149,15 @@ export function ProxyStorageView({ revision, diagnostics, onImport }: { revision
             </ActionMenu>}
             actions={<>
               <IconButton label={t("proxies.testConnection")} icon={<Globe aria-hidden />} busy={Boolean(checkState?.pending)} onClick={() => void diagnostics.check(proxyEntry.id)} />
-              <IconButton label={t("proxies.timezone")} icon={<Clock3 aria-hidden />} disabled={Boolean(busy)} onClick={() => setTimezoneProxyId(proxyEntry.id)} />
               <IconButton label={t("proxies.manageAccounts")} icon={<UsersRound aria-hidden />} disabled={Boolean(busy)} onClick={() => setManagedProxyId(proxyEntry.id)} />
             </>}
           >
-            {lastCheck || proxyEntry.timezone ? <div className="proxy-storage-meta">
+            {lastCheck || timezone ? <div className="proxy-storage-meta">
               <ProxyDiagnostic compact state={{
                 pending: checkState?.pending ?? false,
                 ...(lastCheck ? { result: lastCheck } : {}),
               }} />
-              {proxyEntry.timezone ? <span className="proxy-storage-timezone"><Clock3 aria-hidden />{proxyEntry.timezone}</span> : null}
+              {timezone ? <span className="proxy-storage-timezone"><Clock3 aria-hidden />{timezone}</span> : null}
             </div> : null}
             {usage.isCommon || usage.accountNames.length || usage.sourceNames.length ? <div className="proxy-storage-bindings">
               {usage.isCommon ? <span><Network aria-hidden />{t("proxies.useCommon")}</span> : null}
@@ -167,7 +167,6 @@ export function ProxyStorageView({ revision, diagnostics, onImport }: { revision
           </AccountCardLayout>;
         })}</div>}
     {managedProxy ? <ProxyAccountsDialog proxyEntry={managedProxy} accounts={accountList} onSaved={setPool} onClose={() => setManagedProxyId(null)} /> : null}
-    {timezoneProxy ? <ProxyTimezoneDialog proxyEntry={timezoneProxy} onSaved={setPool} onClose={() => setTimezoneProxyId(null)} /> : null}
   </div>;
 }
 
@@ -186,76 +185,6 @@ function ProxyDiagnostic({ state, compact = false }: { state: ProxyCheckState | 
     {!compact ? <div className="proxy-diagnostic-status"><Icon className={pending ? "spin" : undefined} aria-hidden /><strong>{t(pending ? "proxies.checking" : success ? "proxies.checkSuccess" : proxyCheckResult ? "proxies.checkFailed" : "proxies.notChecked")}</strong></div> : null}
     {success && proxyCheckResult ? <div className="proxy-diagnostic-details"><code>{proxyCheckResult.ip}</code><small>{[country, t("proxies.latency", { ms: proxyCheckResult.elapsedMs })].filter(Boolean).join(" · ")}</small></div> : proxyCheckResult && !pending ? <small className="proxy-diagnostic-error">{t(`proxies.checkErrors.${proxyCheckResult.errorCode}`, { defaultValue: t("proxies.checkUnavailable") })}</small> : null}
   </div>;
-}
-
-function ProxyTimezoneDialog({
-  proxyEntry,
-  onSaved,
-  onClose,
-}: {
-  proxyEntry: ProxyPoolEntry;
-  onSaved: (pool: ProxyPoolSummary) => void;
-  onClose: () => void;
-}) {
-  const { t } = useTranslation();
-  const { busy, perform } = useRelayState();
-  const { supported } = useRequestTimezone();
-  const [date] = useState(() => new Date());
-  const [selected, setSelected] = useState(proxyEntry.timezone ?? "");
-  const [saveError, setSaveError] = useState<string | null>(null);
-  const saving = useRef(false);
-  const save = async () => {
-    if (!supported || busy || saving.current) return;
-    saving.current = true;
-    setSaveError(null);
-    try {
-      const captured = await captureOperationResult(
-        (work) => perform(`proxy-timezone-${proxyEntry.id}`, work, "feedback.saved", { backgroundRefresh: true, reportError: false }),
-        () => relayCommands.setStoredProxyTimezone(proxyEntry.id, selected || null),
-      );
-      if (captured.ok && captured.value) {
-        onSaved(captured.value);
-        onClose();
-      } else if (!captured.ok) {
-        setSaveError(t("gateway.timezone.saveFailed"));
-      }
-    } finally {
-      saving.current = false;
-    }
-  };
-  return <Dialog
-    className="account-timezone-dialog proxy-timezone-dialog"
-    title={t("gateway.timezone.proxyTitle")}
-    subtitle={<span className="account-timezone-identity">{proxyEntry.endpoint}</span>}
-    onClose={() => { if (!saving.current) onClose(); }}
-    footer={<>
-      <Button variant="secondary" disabled={Boolean(busy)} onClick={onClose}>{t("common.cancel")}</Button>
-      <Button
-        variant="primary"
-        busy={busy === `proxy-timezone-${proxyEntry.id}`}
-        disabled={!supported || Boolean(busy)}
-        onClick={() => void save()}
-      >
-        {t("common.save")}
-      </Button>
-    </>}
-  >
-    <div className="account-timezone-content">
-      <TimezonePreview
-        zone={selected || null}
-        date={date}
-        emptyLabel={t("gateway.timezone.proxyUnset")}
-        hint={t(selected ? "gateway.timezone.proxyDescription" : "gateway.timezone.proxyUnsetHint")}
-      />
-      <Button variant="ghost" className="account-timezone-reset" icon={<RotateCcw aria-hidden />}
-        disabled={!selected || Boolean(busy)} onClick={() => { setSelected(""); setSaveError(null); }}>
-        {t("gateway.timezone.clearProxy")}
-      </Button>
-      <TimezonePicker value={selected} date={date} disabled={Boolean(busy)} label={t("gateway.timezone.proxyTitle")}
-        onChange={(zone) => { setSelected(zone); setSaveError(null); }} />
-      {saveError ? <p className="account-timezone-error" role="alert">{saveError}</p> : null}
-    </div>
-  </Dialog>;
 }
 
 function ProxyAccountsDialog({ proxyEntry, accounts, onSaved, onClose }: { proxyEntry: ProxyPoolEntry; accounts: AccountSummary[]; onSaved: (pool: ProxyPoolSummary) => void; onClose: () => void }) {
@@ -299,7 +228,7 @@ function ProxyAccountsDialog({ proxyEntry, accounts, onSaved, onClose }: { proxy
         </label>
       </div>
       <div className="scope-grid proxy-account-grid">{visible.map((account) => <label key={account.id}>
-        <input type="checkbox" checked={selected.includes(account.id)} onChange={() => setSelected((previousSelectedAccountIds) => previousSelectedAccountIds.includes(account.id) ? previousSelectedAccountIds.filter((selectedAccountId) => selectedAccountId !== account.id) : [...previousSelectedAccountIds, account.id])} />
+        <input type="checkbox" checked={selected.includes(account.id)} onChange={() => setSelected((selectedIds) => toggleSelectedId(selectedIds, account.id))} />
         <span className="proxy-account-identity" data-relay-tooltip={account.label}><strong>{account.label}</strong></span>
         <AccountBadges planType={account.subscription.planType} oauthClientKind={account.oauthClientKind} unknown={t("common.unknown")} />
       </label>)}</div>
@@ -327,7 +256,6 @@ export function ProxyImportDialog({ diagnostics, onImported, onClose }: { diagno
   const [content, setContent] = useState("");
   const [revealed, setRevealed] = useState(false);
   const [importResult, setImportResult] = useState<ProxyPoolImportResult | null>(null);
-  const [checkAfterImport, setCheckAfterImport] = useState(true);
   const proxyUrls = content.split(/\r?\n/).map((proxyLine) => proxyLine.trim()).filter(Boolean);
   const importProxies = async () => {
     const captured = await captureOperationResult(
@@ -339,7 +267,7 @@ export function ProxyImportDialog({ diagnostics, onImported, onClose }: { diagno
     setImportResult(importResult);
     setContent("");
     onImported();
-    if (checkAfterImport) void diagnostics.checkMany(importResult.addedProxyIds);
+    void diagnostics.checkMany(importResult.addedProxyIds);
   };
   const importedProxyEntries = importResult?.pool.entries.filter((proxyEntry) => importResult.addedProxyIds.includes(proxyEntry.id)) ?? [];
   return <Dialog
@@ -372,10 +300,6 @@ export function ProxyImportDialog({ diagnostics, onImported, onClose }: { diagno
           </div>
         </label>
         <div className="proxy-format-line"><code>host:port:user:pass</code><code>user:pass@host:port</code><code>http(s)://...</code></div>
-        <label className="proxy-check-option">
-          <input type="checkbox" checked={checkAfterImport} onChange={(event) => setCheckAfterImport(event.target.checked)} />
-          <span><strong>{t("proxies.checkAfterImport")}</strong><small>{t("proxies.checkHint")}</small></span>
-        </label>
       </>}
     </div>
   </Dialog>;
@@ -645,7 +569,7 @@ function RemoteBulkProxyDialog({ accountIds, onClose }: { accountIds: string[]; 
   const proxyUrls = content.split(/\r?\n/).map((proxyLine) => proxyLine.trim()).filter(Boolean);
   const selectedAccountIds = accounts.filter((account) => selected.includes(account.id)).map((account) => account.id);
   const valid = selectedAccountIds.length > 0 && proxyUrls.length >= selectedAccountIds.length;
-  const toggle = (accountId: string) => setSelected((previousSelectedAccountIds) => previousSelectedAccountIds.includes(accountId) ? previousSelectedAccountIds.filter((selectedAccountId) => selectedAccountId !== accountId) : [...previousSelectedAccountIds, accountId]);
+  const toggle = (accountId: string) => setSelected((selectedIds) => toggleSelectedId(selectedIds, accountId));
   const assign = async () => {
     const captured = await captureOperationResult(
       (work) => perform("proxy-bulk", work, "feedback.saved", { backgroundRefresh: true }),
