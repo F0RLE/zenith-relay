@@ -48,11 +48,11 @@ for (const locale of ["ru", "en"] as const) {
       await page.keyboard.press("Enter");
       const section = dialog.getByRole("region", { name: locale === "ru" ? "Сравнение контекста" : "Context comparison" });
       await expect(section).toBeVisible();
-      await expect(section).toContainText(locale === "ru" ? "Предыдущий завершённый запрос" : "Previous completed request");
+      await expect(section.getByText(locale === "ru" ? "Предыдущий завершённый" : "Previous completed", { exact: true })).toBeVisible();
       await expect(section).toContainText(locale === "ru" ? "Первое изменение: Инструкции" : "First change: Instructions");
       const relayChanges = section.locator("dl > div").filter({ has: page.getByText(locale === "ru" ? "Изменения Relay в этом запросе" : "Relay changes in this request", { exact: true }) });
       await expect(relayChanges.locator("dd")).toHaveText(locale === "ru" ? "Рассуждение" : "Reasoning");
-      await expect(section).toContainText(locale === "ru" ? "Размер JSON — не число токенов" : "JSON bytes are not tokens");
+      await expect(section).toContainText(locale === "ru" ? "Без содержимого и хешей" : "No content or hashes");
       expect(await dialog.locator(".relay-dialog-body, .request-cache-context, .request-details-list dd").evaluateAll((elements) =>
         elements.every((element) => element.scrollWidth <= element.clientWidth + 1))).toBe(true);
       if (locale === "ru" && mode === "local") {
