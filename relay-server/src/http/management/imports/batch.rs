@@ -13,7 +13,7 @@ use std::sync::Arc;
 use zenith_relay_core::accounts::{
     combine_import_documents, parse_import, ImportAuthMode, ImportError, ImportErrorCode,
     ImportFormat, ImportIssueCode, ImportPreviewRow, ImportPreviewStatus, ImportQuotaStatus,
-    ImportWarning, ImportWarningCode, ParsedImport, ParsedImportItem, MAX_IMPORT_ITEMS,
+    ImportWarning, ParsedImport, ParsedImportItem, MAX_IMPORT_ITEMS,
 };
 use zenith_relay_core::error_codes;
 
@@ -46,7 +46,7 @@ struct BatchImportPreview {
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     rows: Vec<BatchImportRow>,
-    warnings: Vec<BatchImportWarning>,
+    warnings: Vec<ImportWarning>,
 }
 
 #[derive(Serialize)]
@@ -55,32 +55,33 @@ struct BatchImportRow {
     item_id: String,
     label: String,
     identity: String,
-    auth_mode: String,
+    // The shared enum derives `o_auth`; management has always exposed `oauth`.
+    #[serde(serialize_with = "serialize_import_auth_mode")]
+    auth_mode: ImportAuthMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     oauth_client_kind: Option<OAuthClientKind>,
     source_name: String,
-    quota_status: String,
-    status: String,
+    quota_status: ImportQuotaStatus,
+    status: ImportPreviewStatus,
     plan: Option<String>,
     default_selected: bool,
     selectable: bool,
     existing: bool,
-    warnings: Vec<BatchImportWarning>,
+    warnings: Vec<ImportWarning>,
     error: Option<BatchImportIssue>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BatchImportWarning {
-    code: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    count: Option<usize>,
 }
 
 #[derive(Serialize)]
 struct BatchImportIssue {
     code: String,
     message: String,
+}
+
+fn serialize_import_auth_mode<S>(mode: &ImportAuthMode, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(mode.as_str())
 }
 
 pub async fn preview_account_batch_import(
@@ -90,13 +91,8 @@ pub async fn preview_account_batch_import(
     cleanup_expired_imports(&state)?;
     let parsed = parse_batch_import_input(input)?;
     let format = import_format_name(parsed.preview.format).to_string();
-    let description = parsed.preview.description.clone();
-    let warnings = parsed
-        .preview
-        .warnings
-        .iter()
-        .map(batch_import_warning)
-        .collect();
+    let description = parsed.preview.description;
+    let warnings = parsed.preview.warnings;
     let mut parsed_items_by_id = parsed
         .items
         .into_iter()
@@ -116,25 +112,20 @@ pub async fn preview_account_batch_import(
                         item_id: preview.session_id.clone(),
                         label: preview.label,
                         identity: preview.identity_hint,
-                        auth_mode: preview_row.auth_mode.as_str().to_string(),
+                        auth_mode: preview_row.auth_mode,
                         oauth_client_kind: Some(preview.oauth_client_kind),
                         source_name: preview_row.source_name.clone(),
-                        quota_status: import_quota_status_name(preview_row.quota_status)
-                            .to_string(),
+                        quota_status: preview_row.quota_status,
                         status: if preview.duplicate_account_id.is_some() {
-                            "existing".to_string()
+                            ImportPreviewStatus::Existing
                         } else {
-                            "ready".to_string()
+                            ImportPreviewStatus::Ready
                         },
                         plan: preview.plan_type,
                         default_selected: preview.duplicate_account_id.is_none(),
                         selectable: true,
                         existing: preview.duplicate_account_id.is_some(),
-                        warnings: preview_row
-                            .warnings
-                            .iter()
-                            .map(batch_import_warning)
-                            .collect(),
+                        warnings: preview_row.warnings,
                         error: None,
                     },
                     Err(error) => invalid_shared_batch_row(
@@ -232,16 +223,16 @@ fn batch_preview_row(row: ImportPreviewRow) -> BatchImportRow {
         item_id: row.item_id,
         label: row.label,
         identity: row.identity,
-        auth_mode: row.auth_mode.as_str().to_string(),
+        auth_mode: row.auth_mode,
         oauth_client_kind: row.oauth_client_kind,
         source_name: row.source_name,
-        quota_status: import_quota_status_name(row.quota_status).to_string(),
-        status: import_preview_status_name(row.status).to_string(),
+        quota_status: row.quota_status,
+        status: row.status,
         plan: row.plan,
         default_selected: row.default_selected,
         selectable: row.selectable,
         existing: row.existing,
-        warnings: row.warnings.iter().map(batch_import_warning).collect(),
+        warnings: row.warnings,
         error: row.error.map(|error| BatchImportIssue {
             code: import_issue_code_name(error.code).to_string(),
             message: error.message,
@@ -261,24 +252,17 @@ fn invalid_shared_batch_row(
         item_id,
         label,
         identity,
-        auth_mode: "unknown".to_string(),
+        auth_mode: ImportAuthMode::Unknown,
         oauth_client_kind: None,
         source_name,
-        quota_status: "skipped".to_string(),
-        status: "invalid".to_string(),
+        quota_status: ImportQuotaStatus::Skipped,
+        status: ImportPreviewStatus::Invalid,
         plan: None,
         default_selected: false,
         selectable: false,
         existing: false,
         warnings: Vec::new(),
         error: Some(BatchImportIssue { code, message }),
-    }
-}
-
-fn batch_import_warning(warning: &ImportWarning) -> BatchImportWarning {
-    BatchImportWarning {
-        code: import_warning_code_name(warning.code).to_string(),
-        count: warning.count,
     }
 }
 
@@ -384,6 +368,8 @@ pub async fn confirm_account_batch_import(
     }))
 }
 
+// The management API predates the shared enum's `_v1` bundle label. Keep this
+// one compatibility mapping; row states and warnings use the shared types.
 fn import_format_name(import_format: ImportFormat) -> &'static str {
     match import_format {
         ImportFormat::JsonObject => "json_object",
@@ -391,35 +377,6 @@ fn import_format_name(import_format: ImportFormat) -> &'static str {
         ImportFormat::JsonLines => "json_lines",
         ImportFormat::PortableAccountBundleV1 => "portable_account_bundle",
         ImportFormat::ZenithV1 => "zenith_v1",
-    }
-}
-
-fn import_preview_status_name(preview_status: ImportPreviewStatus) -> &'static str {
-    match preview_status {
-        ImportPreviewStatus::Ready => "ready",
-        ImportPreviewStatus::Existing => "existing",
-        ImportPreviewStatus::QuotaFailed => "quota_failed",
-        ImportPreviewStatus::Invalid => "invalid",
-    }
-}
-
-fn import_quota_status_name(quota_status: ImportQuotaStatus) -> &'static str {
-    match quota_status {
-        ImportQuotaStatus::Skipped => "skipped",
-        ImportQuotaStatus::Success => "success",
-        ImportQuotaStatus::Failed => "failed",
-    }
-}
-
-fn import_warning_code_name(warning_code: ImportWarningCode) -> &'static str {
-    match warning_code {
-        ImportWarningCode::AccessTokenOnly => "access_token_only",
-        ImportWarningCode::ConcurrencyIgnored => "concurrency_ignored",
-        ImportWarningCode::InvalidMetadataIgnored => "invalid_metadata_ignored",
-        ImportWarningCode::ProxiesIgnored => "proxies_ignored",
-        ImportWarningCode::RefreshExchangeRequired => "refresh_exchange_required",
-        ImportWarningCode::UnusedCredentialsIgnored => "unused_credentials_ignored",
-        ImportWarningCode::UnknownAuthMode => error_codes::UNKNOWN_AUTH_MODE,
     }
 }
 
@@ -438,3 +395,6 @@ fn import_issue_code_name(issue_code: ImportIssueCode) -> &'static str {
         ImportIssueCode::UnsupportedValue => error_codes::UNSUPPORTED_VALUE,
     }
 }
+
+#[cfg(test)]
+mod tests;

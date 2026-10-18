@@ -2,15 +2,19 @@ use super::super::{account_summary, store_error, validation_error, vault_error, 
 use super::preview::AccountImportPreview;
 use crate::jobs;
 use crate::state::{now_ms, AccountCredential, AppState, ServerAccountRecord};
+use crate::store::{AccountRefreshFence, PendingImport};
 use axum::extract::State;
 use axum::Json;
 use serde::Deserialize;
-use std::collections::BTreeMap;
 use std::sync::Arc;
-use zenith_relay_core::accounts::{AccountAuthState, AccountHealthState};
+use zenith_relay_core::accounts::AccountHealthState;
 use zenith_relay_core::error_codes;
 use zenith_relay_core::protocol::{valid_generated_id, AccountSummary};
-use zenith_relay_core::quota::{Subscription, SubscriptionInput};
+
+mod record;
+use record::{confirmed_account_record, ConfirmedAccountRecordInput};
+
+const IMPORT_SESSION_LIFETIME_MS: u64 = 30 * 60 * 1_000;
 
 pub(super) struct ConfirmedAccountImport {
     pub(super) account: ServerAccountRecord,
@@ -62,9 +66,8 @@ pub(super) async fn confirm_one_account_import(
         .ok_or_else(|| {
             ManagementError::not_found(error_codes::IMPORT_NOT_FOUND, "import session not found")
         })?;
-    if now_ms().saturating_sub(pending.created_at_ms) > 30 * 60 * 1_000 {
-        let _ = state.store.delete_pending_import(session_id);
-        let _ = state.vault.delete(&pending.secret_ref);
+    if now_ms().saturating_sub(pending.created_at_ms) > IMPORT_SESSION_LIFETIME_MS {
+        discard_expired_import(state, &pending)?;
         return Err(ManagementError::validation(
             error_codes::IMPORT_EXPIRED,
             "import session expired",
@@ -96,9 +99,8 @@ pub(super) async fn confirm_one_account_import(
         .ok_or_else(|| {
             ManagementError::not_found(error_codes::IMPORT_NOT_FOUND, "import session not found")
         })?;
-    if now_ms().saturating_sub(current_pending.created_at_ms) > 30 * 60 * 1_000 {
-        let _ = state.store.delete_pending_import(session_id);
-        let _ = state.vault.delete(&current_pending.secret_ref);
+    if now_ms().saturating_sub(current_pending.created_at_ms) > IMPORT_SESSION_LIFETIME_MS {
+        discard_expired_import(state, &current_pending)?;
         return Err(ManagementError::validation(
             error_codes::IMPORT_EXPIRED,
             "import session expired",
@@ -192,106 +194,15 @@ pub(super) async fn confirm_one_account_import(
     }
     let prepared_secret = serde_json::to_string(&pending_credential)
         .map_err(|_| validation_error("prepared account credential could not be saved"))?;
-    let auth_state =
-        if pending_credential.is_agent_identity() || pending_credential.refresh_token.is_some() {
-            AccountAuthState::Active
-        } else {
-            AccountAuthState::DegradedAccessOnly
-        };
-    let mut subscription =
-        if preview.plan_type.is_some() || preview.subscription_active_until_ms.is_some() {
-            Subscription::normalize(SubscriptionInput {
-                plan_type: preview.plan_type.clone(),
-                active_until_ms: preview.subscription_active_until_ms,
-                forbidden: false,
-                observed_at_ms: now_ms(),
-            })
-        } else {
-            existing_account
-                .as_ref()
-                .map(|existing_record| existing_record.subscription.clone())
-                .unwrap_or_default()
-        };
-    if subscription.active_until_ms.is_none() {
-        subscription.updated_at_ms = None;
-    }
-    pending_credential
-        .validate_plan(subscription.plan_type.as_deref())
-        .map_err(|message| {
-            ManagementError::validation(error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED, message)
-        })?;
-    let mut account_record = ServerAccountRecord {
-        id: preview.account_id.clone(),
-        label: existing_account
-            .as_ref()
-            .map(|existing_record| existing_record.label.clone())
-            .unwrap_or(preview.label),
-        identity_hint: preview.identity_hint,
-        enabled: existing_account
-            .as_ref()
-            .is_none_or(|existing_record| existing_record.enabled),
-        in_pool: add_to_pool
-            || existing_account
-                .as_ref()
-                .is_some_and(|existing_record| existing_record.in_pool),
-        draining: existing_account
-            .as_ref()
-            .is_some_and(|existing_record| existing_record.draining),
-        source_id: "openai_codex".to_string(),
+    let mut account_record = confirmed_account_record(ConfirmedAccountRecordInput {
+        preview,
+        credential: &pending_credential,
+        existing: existing_account.as_ref(),
         secret_ref: pending.secret_ref.clone(),
-        provider_family: existing_account
-            .as_ref()
-            .and_then(|existing_record| existing_record.provider_family.clone())
-            .or_else(|| Some("openai".to_string())),
-        auth_state,
-        health: AccountHealthState::Healthy,
-        models: existing_account
-            .as_ref()
-            .map(|existing_record| existing_record.models.clone())
-            .unwrap_or(preview.models),
-        discovered_models: existing_account
-            .as_ref()
-            .and_then(|existing_record| existing_record.discovered_models.clone()),
-        allowed_models: existing_account
-            .as_ref()
-            .map(|existing_record| existing_record.allowed_models.clone())
-            .unwrap_or(preview.allowed_models),
-        excluded_models: existing_account
-            .as_ref()
-            .map(|existing_record| existing_record.excluded_models.clone())
-            .unwrap_or(preview.excluded_models),
-        priority: existing_account
-            .as_ref()
-            .map_or(preview.priority, |existing_record| existing_record.priority),
-        weight: existing_account
-            .as_ref()
-            .map_or(preview.weight, |existing_record| existing_record.weight),
-        subscription,
-        quota: existing_account
-            .as_ref()
-            .map(|existing_record| existing_record.quota.clone())
-            .unwrap_or_default(),
-        purchase_cost_micro_usd: existing_account
-            .as_ref()
-            .and_then(|existing_record| existing_record.purchase_cost_micro_usd),
-        cooldowns: BTreeMap::new(),
-        consecutive_failures: 0,
-        created_at_ms: existing_account
-            .as_ref()
-            .map(|existing_record| existing_record.created_at_ms)
-            .filter(|created_at_ms| *created_at_ms > 0)
-            .unwrap_or(pending.created_at_ms),
-        last_used_at_ms: existing_account
-            .as_ref()
-            .and_then(|existing_record| existing_record.last_used_at_ms),
-        last_error_code: None,
-        proxy_id: existing_account
-            .as_ref()
-            .and_then(|existing_record| existing_record.proxy_id.clone()),
-        bypass_common_proxy: existing_account
-            .as_ref()
-            .is_some_and(|existing_record| existing_record.bypass_common_proxy),
-    };
+        created_at_ms: pending.created_at_ms,
+        observed_at_ms: now_ms(),
+        add_to_pool,
+    })?;
     // A replacement login must close pending final dispatches before its
     // durable reference changes. The build lock prevents another publication;
     // this fence closes the still-live runtime through commit and replacement.
@@ -316,6 +227,13 @@ pub(super) async fn confirm_one_account_import(
             return Err(store_error(error));
         }
     };
+    // Follow-up diagnostics are best-effort, but their ownership is not:
+    // capture the committed login/configuration before releasing its locks.
+    let import_refresh_fence = state
+        .store
+        .account_refresh_scope(&account_record.id)
+        .ok()
+        .map(|(_, fence)| fence);
     state.token_authority.remove(&account_record.id);
     if let Some(runtime) = previous_runtime.as_ref() {
         runtime.remove_candidate(&account_record.id);
@@ -330,11 +248,19 @@ pub(super) async fn confirm_one_account_import(
         match jobs::refresh_account_now(state, account_record.clone()).await {
             Ok(updated_account) => account_record = updated_account,
             Err(_) => {
-                mark_import_failure(state, &account_record, "metadata_refresh_failed");
+                mark_import_failure(
+                    state,
+                    import_refresh_fence.as_ref(),
+                    "metadata_refresh_failed",
+                );
             }
         }
     } else if !rebuilt {
-        mark_import_failure(state, &account_record, "runtime_rebuild_failed");
+        mark_import_failure(
+            state,
+            import_refresh_fence.as_ref(),
+            "runtime_rebuild_failed",
+        );
     }
     if let Some(previous_account) = existing_account {
         if previous_account.secret_ref != account_record.secret_ref {
@@ -347,22 +273,42 @@ pub(super) async fn confirm_one_account_import(
     })
 }
 
-fn mark_import_failure(state: &AppState, imported_account: &ServerAccountRecord, code: &str) {
-    // A later import may already have installed another credential under the
-    // same account id. Never save the captured pre-HTTP record over it.
-    if let Ok((stored_account, fence)) = state.store.account_refresh_scope(&imported_account.id) {
-        if stored_account.secret_ref == imported_account.secret_ref {
-            let _ = state.store.apply_account_refresh(&fence, |account_record| {
-                account_record.health = AccountHealthState::Degraded;
-                account_record.last_error_code = Some(code.to_string());
-                Ok(())
-            });
-        }
+fn discard_expired_import(
+    state: &AppState,
+    pending: &PendingImport,
+) -> Result<(), ManagementError> {
+    // A concurrent confirmation may have consumed the pending row and made
+    // this same secret the account's active credential.
+    if state
+        .store
+        .delete_pending_import(pending)
+        .map_err(store_error)?
+    {
+        state
+            .vault
+            .delete(&pending.secret_ref)
+            .map_err(vault_error)?;
     }
+    Ok(())
+}
+
+fn mark_import_failure(state: &AppState, fence: Option<&AccountRefreshFence>, code: &str) {
+    let Some(fence) = fence else {
+        return;
+    };
+    let _ = state.store.apply_account_refresh(fence, |account| {
+        // A generic follow-up error must not hide a newer quota/auth/model
+        // diagnosis, even when it belongs to the same login incarnation.
+        if account.health == AccountHealthState::Healthy && account.last_error_code.is_none() {
+            account.health = AccountHealthState::Degraded;
+            account.last_error_code = Some(code.to_string());
+        }
+        Ok(())
+    });
 }
 
 pub(super) fn cleanup_expired_imports(state: &AppState) -> Result<(), ManagementError> {
-    let cutoff = now_ms().saturating_sub(30 * 60 * 1_000);
+    let cutoff = now_ms().saturating_sub(IMPORT_SESSION_LIFETIME_MS);
     for secret_ref in state
         .store
         .delete_pending_imports_before(cutoff)
@@ -372,3 +318,6 @@ pub(super) fn cleanup_expired_imports(state: &AppState) -> Result<(), Management
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

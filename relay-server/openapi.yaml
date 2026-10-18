@@ -506,18 +506,30 @@ paths:
             flags describe omissions. Missing details in older records are not
             reconstructed. Successful events omit upstreamError.
             routing.attemptOutcome, when present, records an executor decision
-            such as retry_selection, retry_repair, retry_authorization, completed,
+            such as retry_selection, retry_repair, retry_authorization, tool_discovery, completed,
             returned_failure, execution_uncertain, or client_disconnected.
             It is not inferred from status and does not grant retry permission.
             toolUse may include policyMode, policyOutcome, policyFallback,
             deferredToolSearch, clientSchemaBytes and
             forwardedSchemaBytes. A true deferredToolSearch means a native
             Responses route sent provider-hosted tool search with deferred
-            function schemas. A true policyFallback means Relay retried once
+            function schemas. BPS basisPointsCatalog instead reports local
+            presentation mode (full, compact, discovery), fullSchemaBytes,
+            renderedSchemaBytes, catalogPromptBytes, loadedToolCount,
+            discoveryRounds, and optional discoveryInputTokens/discoveryOutputTokens.
+            Each local discovery generation is a separately charged attempt;
+            final response counters describe the last generation, not their sum.
+            Discovery buffers streaming output and does not fabricate token timing.
+            A true policyFallback means Relay retried once
             before output without the optimization after a compatibility
             rejection. Sizes measure compact catalog JSON, not tokens or
             savings. Old records may also contain the legacy filteredToolCount;
             new requests never filter tools. Old records leave sizes unknown.
+            clientContext and upstreamContext, when present, contain bodyBytes,
+            instructionBytes, conversationBytes and toolCatalogBytes for the
+            client and prepared JSON. These are byte counts, not token estimates;
+            no content is stored. BPS embeds its catalog in instructions, and
+            provider-injected context is not observable in these measurements.
           content:
             application/json:
               schema: { type: object }

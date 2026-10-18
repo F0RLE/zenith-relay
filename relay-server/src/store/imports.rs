@@ -44,10 +44,20 @@ impl Store {
             .map_err(db_error)
     }
 
-    pub fn delete_pending_import(&self, import_id: &str) -> Result<bool, String> {
+    /// Only the caller that removes this exact pending snapshot owns its
+    /// vault cleanup. A confirmation or replacement makes old work a no-op.
+    pub fn delete_pending_import(&self, expected: &PendingImport) -> Result<bool, String> {
         Ok(self
             .lock()?
-            .execute("DELETE FROM pending_imports WHERE id = ?1", [import_id])
+            .execute(
+                "DELETE FROM pending_imports WHERE id = ?1 AND secret_ref = ?2 AND created_at_ms = ?3 AND preview_json = ?4",
+                params![
+                    expected.id,
+                    expected.secret_ref,
+                    zenith_relay_core::usage::sql_u64(expected.created_at_ms),
+                    expected.preview_json
+                ],
+            )
             .map_err(db_error)?
             > 0)
     }
