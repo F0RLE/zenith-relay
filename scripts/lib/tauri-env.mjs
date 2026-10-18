@@ -152,9 +152,7 @@ export function withZenithRustEnv(env = process.env) {
   const nextEnvironment = { ...env };
   const nodeBin = dirname(process.execPath);
   const pathKey = process.platform === "win32" ? "Path" : "PATH";
-  const existingPath = nextEnvironment[pathKey] ?? nextEnvironment.PATH ?? "";
-  nextEnvironment[pathKey] = `${nodeBin}${delimiter}${existingPath}`;
-  nextEnvironment.PATH = nextEnvironment[pathKey];
+  prependPath(nextEnvironment, [nodeBin]);
 
   if (process.platform === "win32") {
     const probe = spawnSync("rustc", ["--print", "sysroot"], {
@@ -172,8 +170,7 @@ export function withZenithRustEnv(env = process.env) {
         nextEnvironment.CARGO_HOME = cargoHome;
         nextEnvironment.RUSTUP_HOME = rustupHome;
       }
-      nextEnvironment[pathKey] = `${toolchainBin}${delimiter}${nextEnvironment[pathKey]}`;
-      nextEnvironment.PATH = nextEnvironment[pathKey];
+      prependPath(nextEnvironment, [toolchainBin]);
     }
 
     const developmentHome = nextEnvironment.DEVELOPMENT_HOME
@@ -254,9 +251,7 @@ export function withZenithRustEnv(env = process.env) {
     }
 
     if (toolPaths.length > 0) {
-      const existingToolPath = nextEnvironment[pathKey] ?? nextEnvironment.PATH ?? "";
-      nextEnvironment[pathKey] = `${toolPaths.join(delimiter)}${delimiter}${existingToolPath}`;
-      nextEnvironment.PATH = nextEnvironment[pathKey];
+      prependPath(nextEnvironment, toolPaths);
     }
 
     // The portable SDK is not registered with CMake. Ninja keeps native

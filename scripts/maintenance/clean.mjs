@@ -1,23 +1,20 @@
 import { rmSync } from "node:fs";
+import { artifactPathsToClean } from "../lib/build-artifacts.mjs";
+import { repoRoot } from "../lib/tauri-env.mjs";
 
-const cleanMode = process.argv.includes("--all") ? "all" : "default";
-const artifactPaths = cleanMode === "all"
-  ? [
-      ".build",
-      "dist",
-      "test-results",
-      "playwright-report",
-      "../src-tauri/target",
-      "../src-tauri/gen",
-      "../crates/relay-core/target",
-      "../relay-server/target",
-      "../target",
-      "../gen",
-    ]
-  : [".build", "dist"];
-
-for (const artifactPath of artifactPaths) {
+const cliArgs = process.argv.slice(2);
+if (cliArgs.some((argument) => argument === "--help" || argument === "-h")) {
+  console.log("Usage: bun scripts/maintenance/clean.mjs [--all]");
+  console.log("Remove Relay frontend artifacts; --all also removes local Rust build artifacts.");
+  process.exit(0);
+}
+if (cliArgs.some((argument) => argument !== "--all")) {
+  console.error("Unknown cleanup option. Use --help for usage.");
+  process.exit(2);
+}
+const includeRustArtifacts = cliArgs.includes("--all");
+for (const artifactPath of artifactPathsToClean(repoRoot(), includeRustArtifacts)) {
   rmSync(artifactPath, { recursive: true, force: true });
 }
 
-console.log(`Cleaned ${cleanMode === "all" ? "all local" : "frontend"} build artifacts.`);
+console.log(`Cleaned ${includeRustArtifacts ? "all local" : "frontend"} build artifacts.`);

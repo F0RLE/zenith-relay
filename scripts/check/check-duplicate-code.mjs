@@ -82,3 +82,4 @@ function check(paths, format) {
 
 check(["crates", "relay-server", "src-tauri"], "rust");
 check(["src/src"], "typescript");
+check(["src/src"], "tsx");

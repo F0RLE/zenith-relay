@@ -35,6 +35,8 @@ jobs:
         run: bun test ./scripts/check/pr-metadata.test.mjs
       - name: Test proposed CI policy
         run: bun test ./scripts/check/ci-policy.test.mjs
+      - name: Test build artifact cleanup scope
+        run: bun test ./scripts/maintenance/clean.test.mjs
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: rustfmt, clippy
