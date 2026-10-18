@@ -38,41 +38,25 @@ exempt.
 
 ## Repository boundaries
 
-| Area | Owns |
-| --- | --- |
-| <code>src/src</code> | React UI, i18n, typed snapshot rendering, and Tauri command wrappers. |
-| <code>src-tauri/src</code> | Desktop storage, OS secret services, OAuth callbacks, local process lifecycle, profile attach and recovery. |
-| <code>crates/relay-core</code> | Shared account/source state, scheduler, gateway execution, quota, protocol, and redacted usage logic. |
-| <code>relay-server</code> | Standalone user-managed runtime, encrypted vault, SQLite state, migrations, and management API. |
-
-The frontend does not access files, secrets, provider endpoints, or client
-configuration directly. Keep private provider economy, customer billing,
-Zenith inventory, and public gateway business logic out of this repository.
+The [architecture](docs/project/PLANNING.md#scope-and-ownership) owns the module
+map and current contracts. Keep I/O, credentials, and routing out of the renderer.
+Relay is separate from production Zenith Gateway and Control.
 
 ## Secret and logic boundary
 
-Zenith Relay is a separate desktop/personal-pool product. It must not receive
-or forward Zenith production credentials, customer API keys, backend tokens,
-account-pool inventory, provider cabinet credentials, or internal Gateway and
-Control API business/routing logic. Do not copy those values into code,
-fixtures, documentation, tests, or support artifacts.
-
-User-owned provider secrets belong in the existing desktop credential store or
-the encrypted vault of a server owned by that user. A desktop-to-server transfer
-is allowed only through an explicit, confirmed management operation targeting
-that user-managed Relay Server. It is not an upload to Zenith production.
-
-Remote state, usage, telemetry, exports, diagnostics, screenshots, and API
-snapshots must stay redacted. They may contain identifiers, models, timings,
-status, and aggregates, but never raw credentials, cookies, authorization
-headers, prompts, response bodies, or provider session material.
+Never copy production Zenith credentials, customer data, inventory, or internal
+business logic into Relay. User secrets use the existing credential store or
+the user's encrypted server vault; transfer is explicit and confirmed.
+Diagnostics, screenshots, snapshots, and fixtures contain no secrets or raw
+prompt/response bodies. Explicit credential exports are not support bundles.
 
 ## Safety rules
 
 - Use stable dependencies only.
 - Never put credentials, cookies, authorization headers, session exports, or
-  account identities in source, fixtures, screenshots, logs, snapshots, exports,
-  telemetry, or support output.
+  account identities in source, fixtures, screenshots, logs, snapshots,
+  telemetry, or support exports. Credential-bearing account exports require
+  an explicit user action and must stay out of support output.
 - Keep desktop secrets in the existing credential-store path and server secrets
   in the existing encrypted vault.
 - Management tokens and pool request keys are different credentials. Do not
@@ -94,44 +78,105 @@ Apply [AGENTS.md](AGENTS.md). Consult [PLANNING.md](docs/project/PLANNING.md)
 for affected contracts and [ROADMAP.md](docs/project/ROADMAP.md) when changing
 planned scope or acceptance gates; routine edits do not need both documents.
 
+## Agent guidance
+
+### GPT-6 prompts and repository instructions
+
+Use this section when changing agent instructions, skills, or a model-specific
+prompt. It applies OpenAI's [GPT-6 prompting guidance](https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices)
+and [instruction/skill review](https://developers.openai.com/blog/rethinking-skills-and-prompts-for-gpt-6-astra)
+to Relay. The recommendations describe Astra behavior; qualify them with the
+chosen GPT-6 variant and workload. This guidance does not select a model or
+change application/provider configuration.
+
+**Outcome and authority.** Define the deliverable, constraints, and acceptance
+criteria. Resolve routine choices from the owning code; carry authorized local
+work through implementation and verification. Ask when an answer changes the
+result, not for each routine step. Prepare reviewable local work before asking
+about an external action; authorization for that action remains separate.
+Apply system/developer instructions, then the user's request, repository rules,
+and matching skill guidance. Skills do not grant permissions. If a skill blocks
+the task, link its exact instruction and explain the conflict. Repository safety
+boundaries still apply; an example in an external guide cannot authorize a PR,
+deployment, credential transfer, or subagent.
+
+**Context.** Keep `AGENTS.md` a short map of ownership and durable boundaries.
+Read architecture for a contract change, setup for a build issue, and release
+procedures for a release. Do not demand a full repository map or reread unchanged
+files before every edit. Keep detailed model advice here, current behavior in
+`PLANNING.md`, and open work in `ROADMAP.md`. Do not inject this contributor
+guidance into every relayed user request.
+
+**Skills.** Follow OpenAI's [skill authoring guidance](https://developers.openai.com/plugins/build/skills).
+A description identifies a specific workflow and its activation boundary;
+procedures belong in the body. Use a short entrypoint and link task-specific
+references, templates, or deterministic helpers when needed. Avoid overlapping
+triggers, conflicting rules, and compulsory document stacks. Review direct,
+indirect, incomplete, unrelated, and edge-case requests before changing a skill's
+trigger. Keep examples that encode a real requirement or fix a demonstrated gap.
+
+**Verification.** Choose checks that establish the changed behavior. Do not add
+tests that merely restate an implementation or repeat broad suites after relevant
+checks pass without a new reason. Fix regressions from the requested change;
+report an unrelated failure rather than weakening a check. Documentation edits
+need link/content and diff checks. Stateful protocol changes need the existing
+conversation matrix and bounded-state tests. Paid probes and release actions
+have their own authorization requirements.
+
+**Communication and collaboration.** State the result first in the user's
+language; use concrete terms and only useful technical detail. Give enough
+evidence to distinguish implementation, tests, and live acceptance. Avoid stock
+phrases, repeated disclaimers, decorative tables, and unrequested recaps.
+For long work, give short updates at meaningful transitions. Delegation requires
+explicit current authorization; if authorized, divide independent tasks and
+communicate clearly. A model guide's delegation example does not change this rule.
+
+**Evaluating a prompt change.** Follow OpenAI's
+[evaluation-led optimization](https://developers.openai.com/api/docs/guides/model-optimization).
+Begin with a working prompt. Change one group of instructions at a time and
+compare representative tasks for correctness,
+completion, tool roundtrips, latency, total usage, and cost. Check both cold
+starts and growing conversations. A smaller JSON body, fewer turns, or a faster
+answer alone does not prove better quality or lower total cost. Keep required
+tool schemas, reasoning state, and user constraints intact.
+
+**Model and transport compatibility.** Use the exact model and endpoint requested.
+Check the current [model guide](https://developers.openai.com/api/docs/guides/latest-model#limitations)
+before changing reasoning effort, verbosity, sampling, caching, or tool controls;
+sibling models need not share support. OpenAI's public capabilities do not prove
+BPS/account-transport or third-party API support. Protocol and BPS behavior stays
+in its existing owner. Adopting a public feature requires a scoped implementation
+and protocol acceptance, not just a link to its documentation.
+
+A task request can state the contract without prescribing every tool call:
+
+~~~text
+Goal: <observable result>.
+Scope: <Relay component; preserve unrelated local work>.
+Acceptance: <required behavior and relevant checks>.
+Constraints: <compatibility, data, and side-effect boundaries>.
+Delivery: implement locally, fix caused regressions, report results/checks/gaps.
+~~~
+
 ## API and protocol references
 
-Use the official documentation and SDK types for the selected provider,
-endpoint, and API version as the primary contract for requests, responses,
-tools, reasoning, streaming, usage, cache fields, and errors. The
-[protocol contract references](.agents/skills/relay-protocol-adapters/references/contracts.md)
-identify the public APIs. A compatible endpoint does not necessarily support
-all features of the original API; verify the owning provider's documentation.
+Use official documentation and SDK types for the exact endpoint/version:
+[contract references](.agents/skills/relay-protocol-adapters/references/contracts.md).
+Compatible API names do not establish identical features. BPS/account transport
+behavior is observed, not specified by the public OpenAI API.
 
-Relay's account transports, including Excel / Basis Points, are not public
-provider APIs. Keep observed behavior and synthetic regression evidence
-separate from documented guarantees. Do not claim an official BPS contract or
-infer model access, capabilities, prices, or quota from another proxy.
-
-Third-party implementations are optional comparisons, not the specification.
-When using one, record the inspected commit and paths, resolve differences
-against the official contract, and retain attribution and license terms for
-any reused code. Do not import another proxy runtime or its fallback policy.
-
-The [Relay protocol adapter skill](.agents/skills/relay-protocol-adapters/SKILL.md)
-adds references for reasoning replay, tool roundtrips, and stream lifecycle,
-with an acceptance matrix for each affected protocol pair. A reference
-implementation or a passing first response is not proof of compatibility.
+Follow the [protocol skill](.agents/skills/relay-protocol-adapters/SKILL.md) and
+its complete conversation matrix. Third-party comparisons need an inspected
+revision, file paths, and retained license/attribution; they are not the spec
+or a replacement runtime. A passing first answer does not prove tool continuation.
 
 ## Account connector references
 
-Use the
-[account connector skill](.agents/skills/relay-account-connectors/SKILL.md)
-for OAuth, device authorization, reauthentication, and account imports.
-Its references identify provider credential implementations in CLIProxyAPI,
-OpenCodex, and New API, with inspected commits and deliberate differences.
-
-Use the
-[account pool lifecycle skill](.agents/skills/relay-account-pool-lifecycle/SKILL.md)
-for admission, renewal, quota observations, request ownership, and removal.
-Adapt reference behavior to Relay's existing credential authority and scheduler.
-Check supported login methods against the provider's official contract;
-a working login alone does not establish pool compatibility.
+Use [account connectors](.agents/skills/relay-account-connectors/SKILL.md) for
+OAuth, sign-in/import, and reauthentication; use
+[pool lifecycle](.agents/skills/relay-account-pool-lifecycle/SKILL.md) for renewal,
+quota, admission, execution ownership, and removal. Reuse Relay's authority and
+scheduler. A working login alone does not establish pool compatibility.
 
 ## Development setup
 
@@ -150,7 +195,7 @@ Linux. Install Bun, Rust, and the native tools listed below before running
   - Linux: GTK 3, WebKitGTK 4.1, librsvg, and a secret service such as
     gnome-keyring. The Build workflow lists the packages CI installs.
 
-Then install the locked frontend packages and fetch the Rust crates:
+Prepare the locked dependencies and start the desktop app:
 
 ~~~sh
 bun scripts/setup/start-dev.mjs
@@ -193,36 +238,25 @@ bun run setup:browsers
 
 ## Documentation policy
 
-The tracked human-facing documentation is deliberately small:
+Use one owner per subject:
 
-~~~text
-README.md
-CONTRIBUTING.md
-docs/project/PLANNING.md
-docs/project/ROADMAP.md
-docs/project/HOSTED_RELAY_ARCHITECTURE.md
-docs/releases/CHANGELOG.md
-catalog/README.md
-docs/help/<locale>/README.md
-docs/screenshots/*.png
-~~~
+| Content | File |
+| --- | --- |
+| Product/download/first run | `README.md` |
+| Development/checks/releases | `CONTRIBUTING.md` |
+| Current contracts and core map | `docs/project/PLANNING.md` |
+| Open work and acceptance | `docs/project/ROADMAP.md` |
+| Proposed Hosted design | `docs/project/HOSTED_RELAY_ARCHITECTURE.md` |
+| User steps/error recovery | `docs/help/<locale>/README.md` |
+| User-visible release history | `docs/releases/CHANGELOG.md` |
+| Catalog policy/export | `catalog/README.md` and versioned catalog JSON |
 
-<code>AGENTS.md</code> is repository guidance. <code>LICENSE</code> and
-<code>CONTRIBUTOR_LICENSE_AGREEMENT.md</code> are legal documents, and
-<code>relay-server/openapi.yaml</code> is the machine-readable server contract.
-The existing Hosted Relay architecture proposal owns the detailed future hosted
-design; it is not an implemented local/server contract or a release claim.
-Keep its delivery stages and open gates in `ROADMAP.md`. Do not add additional
-parallel architecture, design, handoff, or historical planning documents.
-Put implemented contracts in
-<code>docs/project/PLANNING.md</code>, accepted unfinished work in
-<code>docs/project/ROADMAP.md</code>, and user steps in localized Help files.
-
-Model display rules and their consumer format live in
-[catalog/README.md](catalog/README.md). Edit the versioned JSON policy rather
-than adding per-model ranks to Rust or frontend code. The documented exporter
-refreshes public references and generates the ordered catalog with the shared
-Rust comparator; publishing those artifacts is a separate action.
+`AGENTS.md` owns repository guidance; legal terms stay in `LICENSE` and the
+Contributor Agreement. `relay-server/openapi.yaml` is the machine-readable
+server contract. Keep screenshots under `docs/screenshots/`.
+Do not add parallel architecture/handoff documents, transcripts, completed TODOs,
+or per-model tables copied from generated data. Publishing an export is separate
+from generating it. Mark proposals as proposals, not available features.
 
 ### Changelog and release notes
 
@@ -231,9 +265,17 @@ Record every user-visible change in
 `Unreleased`, grouped by behavior rather than by branch. Include the relevant
 PR or commit in the entry when the change is ready for review. When publishing
 a tag, move the shipped entries into a dated version section and leave
-`Unreleased` available for the next cycle. Release-body translations used by
-the updater remain separate and must use the `relay-notes:<locale>` markers
-described below.
+`Unreleased` available for the next cycle.
+
+Use the same localized layout in `Unreleased` and dated releases: the version
+heading, `<!-- relay-notes:en -->`, the complete English notes, then
+`<!-- relay-notes:ru -->` and the complete Russian notes. Keep `### Changed` /
+`### Изменения` and, when needed, `### Fixed` / `### Исправления` inside each
+locale block. Group longer lists with `####` topic headings; keep both locales
+aligned by topic, changes, and PR/commit references. Do not append a second
+summary or leave changes outside the locale blocks: the updater omits unmarked
+text once locale markers are present. The release workflow extracts one version
+section before the updater selects its locale.
 
 Keep the audience boundary explicit: changelog entries and updater notes are
 for users. Do not put test counts, CI job status, formatter or audit output,
@@ -351,6 +393,16 @@ bun run app:build --no-bundle
 On Windows, the executable is written to
 `src-tauri/target/release/zenith-relay.exe`. Building does not replace or
 restart an installed Relay.
+
+### Build artifacts
+
+To remove frontend build artifacts, run
+`bun scripts/maintenance/clean.mjs` from the repository root, or `bun run clean`
+from `src`. The optional `--all` also removes this repository's Rust targets
+and generated build files. Cleanup paths are anchored to Relay, never the
+caller's working directory; neither command changes an installed application.
+For cleanup tooling changes, run `bun test ./scripts/maintenance/clean.test.mjs`;
+the Build workflow runs the same synthetic, non-destructive checks.
 
 ### Shared runtime
 

@@ -6,456 +6,330 @@ release entries are kept concise and link to the corresponding tag.
 
 ## [Unreleased]
 
+<!-- relay-notes:en -->
+
+This update adds Claude Desktop pool profiles, shared protocol conversion, and
+recoverable account deletion. Changes below are grouped by area.
+
 ### Changed
 
-- Converted requests reject conflicting Gemini schemas, unrepresentable
-  tool-caller policies, and client-owned Responses discovery history before
-  sending instead of silently dropping constraints or conversation turns.
-  Matching native protocols retain their original provider payloads.
+#### Protocol adapters and Excel / Basis Points
+
+- BPS starts large tool catalogs with names grouped by kind and namespace, loading complete
+  descriptions and schemas through bounded Relay-local lookups without weakening
+  argument validation. Long descriptions and custom formats also trigger automatic
+  discovery. Previously used schemas keep compact presentation after history.
+  Context details show loaded schemas and lookup usage. Discovery streams text
+  before pending tool calls and validates calls before release. Native tool-search
+  semantics are unchanged.
+- Large conversations use less scratch memory when Relay fingerprints their
+  history for BPS and protocol continuations, without changing session identity,
+  client instructions, history, or reasoning effort.
+- Responses, Chat Completions, Messages, and Gemini use one conversion pipeline.
+  Supported tool identities, namespaces, text/image results, schemas, citations,
+  and parallel-call rules survive conversion; unsupported features fail explicitly.
+  Native forwarding preserves provider extensions, precise numbers, object order,
+  and permitted headers without cross-protocol conversion.
   ([1f64175](https://github.com/F0RLE/zenith-relay/commit/1f64175))
-- Gemini OpenAPI-style tool and output schemas keep their nullable values and
-  bounds when converted to Responses, Chat Completions, or Messages. Schema
-  traversal leaves literal defaults, enums, and property names unchanged.
-
-- Protocol bridges preserve nested tool namespaces through calls, results and
-  continuation. Explicitly disabled thinking does not require a reasoning-capable
-  model, and exact route restrictions also constrain native model-picker efforts.
-  Excel/BPS tool instructions use the original JSON Schema instead of shorthand;
-  invalid generated arguments remain blocked rather than executed or retried,
-  with a specific schema-mismatch message and no argument contents in diagnostics.
-
-- Messages bridges accept the empty thinking signature initialized by Claude's
-  stream assembler, so a tool result can resume the saved native provider turn.
-  Real foreign signatures and malformed values remain explicit errors; native
-  Messages requests, scoped reasoning state and continuation ownership are kept.
-
-- Claude Desktop connections enable on-demand MCP tool loading instead of an
-  eagerly expanded catalog. Messages bridges validate client-owned deferred
-  definitions and discovery references, forwarding only loaded function schemas
-  while keeping call/result IDs, exact constraints and native passthrough.
-  Hosted search is not emulated. Reconnect through the updated Relay and start
-  a new Claude session; existing integrations and recovery snapshots are kept.
-
-- Automatic quota rotation no longer pins self-contained tool conversations
-  to their earlier account when another eligible member has more fresh quota.
-  HTTP, account endpoints, Excel/BPS and WebSocket retain complete call/result
-  history; opaque continuations and unpaired results keep their owner unless
-  validated local history can be replayed. Both quota windows still constrain
-  selection; rotation does not promise identical remaining percentages.
-
-- Excel/BPS stream normalization uses the same validated terminal forms as the
-  shared Responses reader instead of rejecting a supported completion envelope.
-  Incomplete JSON replies retain partial text and usage without releasing tools.
-  Terminal processing avoids redundant JSON/SSE conversions, and request errors
-  show the failed validation field without exposing tool inputs or provider bodies.
-
-- Native ChatGPT model discovery tolerates slow catalog reads and retries one
-  transient transport failure automatically. Shared HTTP limits, account
-  revision checks and provider retry delays remain in force; failed reads keep
-  the last model list, and successful refreshes clear the stale discovery error.
-
-- Desktop pages use the available workspace beside the sidebar. Pool and
-  connection grids keep compact card tracks as the workspace grows, while
-  forms and dialogs retain readable width limits.
-  ([4cb1d2d](https://github.com/F0RLE/zenith-relay/commit/4cb1d2d))
-
-- Claude Code and other Messages clients receive available public reasoning
-  summaries without aborting JSON or SSE tool responses. Tool results retain
-  their call IDs and resume the original provider state; foreign signatures
-  are never fabricated. BPS-generated streams preserve reasoning-summary events
-  before tools, including when upstream returns JSON instead of SSE.
-- Claude Desktop lists each pool model once instead of multiplying it by
-  reasoning level. Effort remains a separate Messages request parameter; the
-  effort-suffixed model workaround is removed. Compatible models use Claude's
-  built-in Effort selector through a unique client-only Claude role route,
-  capped by executable Messages routes and pool policy. Real upstream identity,
-  context and prices stay unchanged; custom levels are not invented. Oversized
-  catalogs count real models and are rejected before changing the profile.
-
-- Model Rules preserves published Short/Long windows; the 25% Short fallback
-  applies only without a published default. Management and OpenCode share the
-  original window evidence. Compact, aligned context controls keep Custom on
-  one line without percentage captions or explanatory banners. Context saves
-  serialize rapid edits; an accessible status icon retains Codex reload and
-  catalog-refresh warnings without restarting applications.
-
-- Quota refresh and rotation track provider credits separately from response
-  headers. Busy traffic no longer keeps an old balance artificially fresh or
-  postpones its full refresh indefinitely. Late credit reads preserve newer
-  quota windows, expired credits stop granting credit-only admission, and
-  shared-account totals use the latest ledger rather than header activity.
-  Queued usage cannot roll back credits, and older headers cannot clear a
-  newer provider limit.
-
-- Excel/BPS preserves tool-result images and collaboration attribution, streams
-  text before completion, and withholds all tools until the terminal response
-  validates. Truncated or invalid streams cannot release a valid tool subset.
-  Responses callers may explicitly request buffered local JSON/schema validation;
-  this does not claim native strict decoding. Developers can run capped manual
-  quality observations with local reference solvers and no automatic disabling.
-- Native protocol forwarding preserves JSON object order and arbitrary-precision
-  numbers, repeated permitted headers, and original successful SSE/WebSocket
-  payloads. Tool-schema normalization keeps annotated choices intact. Root
-  session affinity is distinct from child-thread context; explicit cache keys
-  and strict continuation/credential ownership keep their existing priorities.
-- Claude Desktop Messages requests can include standard user metadata and cache
-  hints on converted OpenAI routes without a spurious native-endpoint error.
-  Metadata is preserved; foreign caching uses the selected provider's policy,
-  not Anthropic TTLs or pricing. Unsupported required controls remain rejected.
-- Basis Points expands compact Responses messages into explicit typed input,
-  including converted Claude Desktop histories. Client metadata stays local and
-  is restored in translated responses instead of violating the strict BPS body
-  schema with fields such as Claude's `user_id`. Invalid-body HTTP 422 responses
-  no longer retry across accounts or mark healthy accounts as temporarily failed.
-- Account sign-in replaces completed authorization controls with one saving
-  status and dismisses automatically, without a second setup dialog. Failed
-  saves return to an explicit, closable error state. Initial quota and model
-  checks run concurrently; pool membership remains an explicit choice.
-- Claude Desktop uses stable Relay-owned route IDs accepted by its model-name
-  validation, while retaining real picker labels and upstream model identities.
-  Alias resolution preserves key scope, visibility and normal route admission.
-- Access uses matching compact navigation for applications and accounts. Stored
-  proxies use the connection-card layout with explicit checks, timezone and
-  assignment actions; check status lives in the upper-left icon without repeated
-  status lines or unset/unused placeholders. API sources show source readiness
-  instead of account rotation status; Launch follows Edit in the card footer,
-  not the overflow menu.
-- Excel/BPS usage measures first output and total time from the real upstream
-  stream, retaining known timings after partial failures. The first/total column
-  explicitly marks unknown first-output time instead of showing total time alone.
-- Cross-protocol requests now share one conversion pipeline across Responses,
-  Chat Completions, Anthropic Messages, and Gemini. Native routes preserve
-  provider extensions; converted routes retain tool identity and opaque
-  continuation state and reject unavailable hosted tools instead of dropping them.
-- API source cards in Connections use the compact pool-card layout and show
-  balance, spend or Relay estimate, request totals, and model count without
-  pool rotation mode or active-request data.
-- Access starts ChatGPT, Claude Desktop and OpenCode settings with only an
-  application path, folder picker button and Save. Native launches use the
-  selected executable; saving it does not start a client or
-  change pool/server configuration. The duplicate Claude connection panel was
-  removed from Access, and its protected disconnect/restore action moved to
-  Recovery. Pool connection and explicit Overview launch remain available.
-- Application choices consistently place Claude Desktop after ChatGPT and before
-  OpenCode, including local Quick Setup. Pool/Overview modal pickers show
-  horizontal application cards with each logo above its name.
-- Claude Desktop can connect to the local pool through its third-party inference
-  profile. Relay preserves foreign Desktop profiles, exports the exact ordered
-  Messages-compatible pool catalog without synthetic model aliases, keeps the
-  request key in the local configuration only, validates before closing Desktop
-  and applying the profile, and launches only when requested. Launch success
-  requires a running Desktop process. Lost recovery is recreated only for a
-  matching local gateway configuration; recovery never points back to Relay
-  itself or deletes foreign configuration based on a display name. Restore
-  preserves newer manual selections and does not automatically relaunch Desktop.
-- Native ChatGPT requests check turn-state ownership in HTTP headers, JSON bodies,
-  and WebSocket metadata against the exact endpoint and authorization incarnation.
-  Complete client identity profiles stay together; incomplete profiles use the
-  Relay fallback. WebSocket capability observations follow the same authorization
-  boundary, and upgrade retries share the request's wire budget.
-- Conversation turn limits return `turn_rate_limit_exceeded` with known retry
-  delays, without cooling down the account, rotating the pool, or repairing history.
-- Access now keeps account-wide ChatGPT request settings in
-  **Access → Accounts**, with a visible ChatGPT selector beside the settings.
-  Per-account timezone choices and enable/disable overrides remain in each
-  account's Connections menu; accounts without an override inherit the shared
-  setting.
-- API connections select each known model's native upstream independently of
-  the client: OpenAI uses Responses, Claude uses Messages, Google uses Gemini,
-  and Grok and GLM use Chat Completions. Incompatible endpoints are excluded.
-  Route selection retains the exact client projection without duplicate
-  candidates or changing the binding used for streaming and continuation.
-- Native account model cards keep their provider-owned default window and
-  effective-window percentage even when the card advertises a smaller maximum.
-  API defaults and automatic compaction still respect their known hard limits.
-- Account re-import preserves the saved direct or common-proxy route, and
-  preview, quota checks, and commit now use the same resolved route.
-- Direct API refresh resolves each model's native protocol from the validated
-  reference catalog before grouping OpenCode providers, so stale legacy
-  bindings no longer pin a model to the wrong SDK.
-  Switching models preserves completed conversation history; active tool
-  continuations retain their original provider state.
-- Accounts, API sources, pool editors, and managed client catalogs share one
-  default model order by developer, family, class, and descending version.
-  Manual sorting remains available. A versioned JSON policy and public
-  reference exporter let other applications use the same order. The policy
-  covers OpenAI, Anthropic, Google, xAI, DeepSeek, Z.ai, Alibaba / Qwen,
-  Moonshot / Kimi, MiniMax, Xiaomi / MiMo, Mistral, Tencent / Hunyuan, NVIDIA,
-  StepFun, Meta, ByteDance, Perplexity, Cohere, Amazon, Nous Research, and
-  Inception, distinguishing generations from release dates and parameter sizes.
-- Protocol adapters share completion checks across JSON and streaming paths.
-  Incomplete answers retain reported usage without recovering route health or
-  creating reusable continuation state. Gemini drains late usage after its
-  finish reason and keeps provider call IDs separate from client IDs.
-  Converted histories retain native reasoning only for the original source,
-  model, and protocol; signed Gemini parts are not merged with ordinary text.
-  Gemini tool continuations omit bare empty text parts that can cause upstream
-  rejection, while retaining empty signed parts, metadata, and whitespace.
-  Gemini tool schemas remove the harness-only `encrypted` annotation while
-  retaining validation constraints, property names, and literal default values.
-  Chat Completions-to-Responses calls normalize exact integral JSON numbers so typed
-  tools accept decimal and exponent notation without changing their values.
-  Unsupported meaningful output extensions fail conversion explicitly.
-  Failures before the first output retain reported tokens and cache usage;
-  partial usage updates replace stale totals without erasing known counters.
-  Repaired history keeps the rejected attempt in the request report.
-- Very high reasoning uses one `xhigh` identity in Relay settings, catalog
-  projections, and request reports, including older aliases. Protocol bridges
-  consistently respect effort and budget modes; compatible Messages routes
-  retain `xhigh`. Unrepresentable combinations fail before sending, and
-  Messages, Gemini, and BPS reports read the exact outgoing reasoning control.
-- Model settings use reference capabilities and configured connections for speed
-  choices. A request keeps its chosen speed through retries and transport changes.
-  Pricing retains separate Standard, Flex, Fast, and Ultrafast schedules;
-  missing rates remain unknown. Retained Ultrafast usage is reclassified without
-  changing token totals.
-- Account notes mask passwords and 2FA secrets with individual reveal controls,
-  keep automatic saving, and hide the code row until a 2FA secret is entered.
-  Save feedback no longer moves the dialog during a click, and changing the
-  secret clears the previous code while the new code is being calculated.
-  Secret fields share one layout across notes, API keys, proxy settings, and
-  server connections, including while their values are loading.
-- Connections moves deleted accounts to a persistent trash with restore controls.
-  Right-clicking Delete opens a permanent-deletion confirmation; restored
-  accounts remain disabled and outside the pool. Relay Server advertises trash
-  support separately so older servers cannot silently delete accounts permanently.
-- UI settings retain their previous saved values when browser storage temporarily
-  rejects reading or writing during an upgrade.
-- Responses-to-Chat conversion preserves web-search URL citations in JSON and
-  streaming responses, including character offsets across joined text parts.
-- Gemini bridges accept requests with parallel tool calls disabled and enforce
-  that limit in JSON and streaming replies. Empty tool catalogs no longer send
-  unnecessary tool-choice or parallel-call controls to converted endpoints.
-  Allowing parallel calls also admits models that produce calls sequentially.
-- Protocol adapters keep parallel tool calls paired with their results across
-  turns, including after the tool catalog changes. Gemini continuations retain
-  call IDs and thought signatures; streamed arguments and custom-tool input
-  reach the client in the correct format. Supported text and image results
-  retain their content, and tool-selection restrictions no longer reopen a
-  restricted catalog. Claude bridges preserve cache counts and response limits,
-  respect serial tool calls, and emit complete text events in block order.
-  Thinking signatures stay in native continuation state; incompatible reasoning
-  and forced-tool settings are rejected before sending. Cache markers skip
-  thinking and empty text blocks.
-- Request details use a dedicated report design with a clear model and outcome,
-  a compact metrics grid beside the request summary, grouped parameters, and
-  separate input/output token panels. Failed requests show the reason and
-  provider message on a soft background without a side stripe. Narrow screens
-  stack the same content, and both themes keep the launcher palette.
-  First-output timing comes before total response time; estimated cache time
-  uses the ≈ symbol.
-  Token breakdowns, retry activity, and provider error messages are visible
-  immediately. Technical details group IDs with copy controls, error codes,
-  route selection, and tool counters into separate blocks.
-  Empty sections and tabs are removed. All sends stay inside
-  one Relay request without replacing its final result when inspecting an
-  earlier error. The report shows short failure reasons and distinguishable
-  request IDs, keeps separate client requests, and identifies missing history
-  or stop decisions.
-
-- Optional request timezone binding lets native ChatGPT and BPS accounts use
-  fixed IANA timezones. It is off by default, uses America/New_York for accounts
-  without a choice, and preserves choices when switched off. Local and server
-  controls rewrite existing user-environment and web-search timezone fields
-  without changing dates, ordinary text, or API-source requests.
-- BPS cards and member settings show local credential expiry and recovery
-  hints. Provider errors retain validated request IDs from response headers
-  alongside the existing status, model, and error details.
-- The application picker uses vertical rows with application logos beside their
-  names. Pool connections launch ChatGPT or OpenCode by default; the switch is now in
-  Settings, and existing opt-outs are preserved. Overview's OpenCode launch
-  action now opens the application after configuring it.
-- English and Russian Help start with guided setup and distinguish direct
-  connections from pool use. The guides explain API keys, partial imports,
-  server setup, client recovery, and common problems alongside the searchable
-  error reference. Help and interface text omit repeated labels and descriptions
-  of control placement.
-- Codex connections retain native account context and compaction settings.
-  API connections publish known model maxima separately from the default
-  window in the exact installed Codex card, keeping long context opt-in.
-  Client-owned settings and unknown limits remain unchanged unless a managed
-  context policy is selected.
+- Reasoning settings and reports share the `xhigh` identity and actual effort or
+  budget. Messages clients receive available public summaries and accept Claude's
+  empty initial thinking signature while retaining native continuation state;
+  foreign provider signatures are not fabricated.
+- Excel/BPS supports tool-search results, function/custom tools, tool-result images,
+  and collaboration attribution. It streams text but releases tools only after
+  terminal validation against the current catalog and original schemas. Optional
+  buffered JSON/schema validation is local, not provider-native strict decoding.
   ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
-- ChatGPT settings include independent controls for context size and
-  auto compaction. Context offers application defaults, the ordinary official
-  window, long context labelled 1M, or a custom budget; compaction offers application
-  settings, an automatic threshold selected by default, or a custom threshold. Model limits remain
-  authoritative, and returning either control to default restores only its own
-  saved override. Existing default compaction settings upgrade once to Automatic;
-  custom thresholds and the chosen context remain intact.
-- Source pricing retains service-tier and long-context schedules.
-  Model rows select tier and context separately, with only the ranges published
-  for that model. LiteLLM prices include the 100k, 128k, and 512k thresholds as
-  well as 200k and 272k, and explicit zero token/cache prices are preserved.
-  Actual request input counts determine the estimate
-  independently of application context settings. Member rules group the
-  connection name and type in the header, and manual edits retain other rates.
+- ChatGPT and Excel / Basis Points have separate sign-ins and issuing-client
+  refresh. Native ChatGPT accounts can join the pool or launch ChatGPT directly;
+  BPS is pool-only, rejects known Free plans, and supports Zenith/Sub2API exports.
+  The old transport switch and manual callback entry are removed.
+- Excel model access refreshes before catalog publication and execution. Disabled,
+  restricted, and policy-blocked models are omitted; provider order is preserved
+  and cached access belongs to the current token, with bounded reads.
+  ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
 
-- ChatGPT model discovery follows official catalog priorities instead of raw
-  array positions. Pool snapshots and runtime catalogs both prefer account
-  order for shared IDs, while API inventories retain their source order.
-  Account-only catalogs keep the same order. Display groups follow the
-  canonical manufacturer, and member editors retain their own source order.
-  New models stay beside their saved group; manual model order is preserved
-  when reference metadata is unavailable.
-- Usage filters include period, status, model, and pool member, with protocol,
-  transport, error category, and request ID under More filters. Error reports
-  omit success rates and speeds; narrow request tables keep the member visible.
-- Sign-in, proxy selection, account import/export, source setup, and pricing
-  dialogs use a consistent design.
-- API sources support sorting and show connection status. Provider presets
-  fill connection fields.
-- Proxy check results are saved locally and remain visible after restarting
-  Relay. Rechecking updates the saved exit IP, country, latency, and check time.
-- Debug mode adds a context comparison under Technical details for native
-  Responses requests. It compares parameter, history, and member changes without
-  saving conversation text or claiming to explain provider cache misses.
-- API setup includes Anthropic, Google Gemini, DeepSeek, Groq, Mistral,
-  Moonshot / Kimi API, Kimi Code, and MiniMax presets with console links.
-  Kimi Code remains separate from Moonshot's API wallet.
-- Moonshot balances retain USD or CNY according to the API region. Known
-  services without a supported balance reader no longer receive generic
-  billing probes; custom compatible services retain autodetection.
-- Access combines the former API and Integrations pages with Local API,
-  Applications, and Accounts tabs. Accounts contains model-substitution checks;
-  Applications contains context, compaction, background tasks, and WebSocket
-  settings. Sign-in and saved connections remain in Connections.
-- Basis Points is available only through a separate Excel / Basis Points
-  sign-in. Ordinary ChatGPT connections always use native Responses, including
-  when old settings enabled BPS. The API transport switch is removed.
-- Excel model access is refreshed from the provider's access envelope before
-  catalog publication and execution. Disabled, restricted, and policy-blocked
-  models are omitted, provider order is preserved, and the result is scoped to
-  the current token with bounded timeout and body size.
+#### Pool, routing, and models
+
+- Automatic rotation can move self-contained tool conversations to a better
+  eligible member. Opaque continuations and unpaired results retain their owner
+  unless validated local replay restores complete history. Both quota windows
+  constrain selection; equal remaining percentages are not guaranteed.
+- Credit refresh is independent of response headers. Busy traffic cannot keep
+  stale credits fresh, postpone polling indefinitely, or replace newer limits;
+  shared ChatGPT credit totals count the newest provider ledger once.
+- API routes use each known model's native upstream independently of the client.
+  OpenCode SDK selection follows the same reference policy; unsupported endpoints
+  stay excluded. Model switches preserve completed history without transferring
+  another model's active provider state.
+- Context and compaction have independent controls. Published Short/Long windows
+  and native account defaults are preserved; the 25% fallback applies only without
+  a published default. API limits stay authoritative and long context is opt-in.
+  Saves are serialized and show reload warnings without restarting applications.
   ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
-- Excel / Basis Points tool declarations prefer the current catalog over
-  history and support tools returned by tool search. Function arguments are
-  checked against their original schemas; simple schemas use a compact prompt
-  representation. Encrypted agent assignments are rejected before sending.
-  ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
-- Regular ChatGPT accounts can join the pool alongside Excel / Basis Points
-  connections and API sources. Add an account from Connections, after sign-in,
-  or during import without an account-kind warning. Native accounts keep their
-  Responses transport and direct application sign-in.
-- Free accounts cannot be imported or signed in through Excel / Basis Points.
-  Existing Free BPS connections cannot discover models or send requests, including
-  after a plan downgrade. Native ChatGPT Free accounts can still join the pool.
-- Documentation now separates current behavior from the roadmap, removes
-  obsolete feature claims, and keeps the localized error reference unchanged.
-- ChatGPT account discovery and Codex model catalog requests accept up to 4 MiB,
-  so larger official model catalogs do not leave the pool without models.
+- Catalogs share a default developer/family/version order with manual overrides
+  and a public policy export. Discovery retains provider priorities and valid
+  cached data after failures. ChatGPT/Codex catalog reads accept up to 4 MiB
+  and retry one transient transport failure with pacing.
   ([#86](https://github.com/F0RLE/zenith-relay/pull/86))
-- macOS uses system window buttons, including the native move and resize menu.
-  ([#85](https://github.com/F0RLE/zenith-relay/pull/85))
-- Excel / Basis Points imports preserve allowlisted provider client headers
-  through reauthentication and token refresh, keep native upstream identity on
-  routed requests, isolate attachment cache entries by credential session, and
-  return provider credential failures without rotating to another account.
+- Speed stays stable through retries. Prices retain separate Standard, Flex,
+  Fast, Ultrafast, and published long-context bands, including explicit zero
+  prices. Estimates use actual request input; missing prices remain unknown.
+- API setup groups provider presets and console links, keeping Kimi Code separate
+  from Moonshot's API wallet. Moonshot balances retain regional USD/CNY units;
+  known services without balance readers no longer receive generic billing probes.
+
+#### Claude Desktop and profiles
+
+- Claude Desktop connects through a third-party inference profile. Relay validates
+  before closing the client, saves recovery data, writes the catalog, and launches
+  only when requested. Restore preserves foreign profiles and newer selections.
+  Direct ChatGPT uses native discovery; pool profiles use Relay's catalog.
+- Each Claude Desktop model appears once, with stable client-only route IDs and
+  separate built-in Effort selection bounded by the route and pool policy. Real
+  labels, upstream model identities, context, and prices stay unchanged;
+  oversized catalogs are rejected before editing the profile.
+- MCP tools load on demand. Messages bridges accept validated loaded definitions,
+  discovery references, metadata, and advisory cache hints without emulating hosted
+  search or Anthropic cache prices on other providers. Reconnect and start a new
+  session to apply the profile setting.
+
+#### Desktop UI and Access
+
+- Access combines Local API, Applications, and Accounts settings. Application
+  setup saves an executable path without launching or changing the pool; protected
+  Claude restore lives in Recovery. Shared account settings retain per-account
+  overrides, optional IANA timezone binding, and existing launch opt-outs.
+- Pages, pickers, dialogs, source cards, and saved proxies use compact layouts.
+  Source cards show readiness and balances, not account rotation; Launch sits
+  beside Edit. Proxy checks retain exit IP, country, latency, and check time,
+  automatically binding the exit IP's validated timezone without manual setup.
+  macOS uses native window controls and the system move/resize menu.
+  ([4cb1d2d](https://github.com/F0RLE/zenith-relay/commit/4cb1d2d),
+  [#85](https://github.com/F0RLE/zenith-relay/pull/85))
+- Sign-in shows one saving status and closes on success; failed saves remain
+  explicit. Initial model/quota checks run concurrently and pool membership stays
+  opt-in. Import/export supports Cockpit Tools JSON and account metadata.
+- Deleted accounts enter persistent trash. Restore leaves them disabled and out
+  of the pool; permanent deletion needs confirmation, and older servers without
+  trash support cannot silently turn deletion into a permanent action.
+- Usage reports group timing, tokens/cache, attempts, provider IDs, and errors,
+  with period/member/model filters and no empty sections. Debug context comparison
+  keeps conversation text out of storage. BPS cards show expiry/recovery hints;
+  English and Russian Help cover chart legends, BPS sign-in requirements,
+  setup, recovery, and error codes.
+- Passwords and 2FA secrets have individual reveal controls and stable save
+  feedback. Changing a secret clears its previous generated code.
+- Request context details compare client and prepared instruction/history/tool
+  JSON sizes without storing content or inventing token estimates. BPS catalog
+  preparation avoids repeated shared schema guidance and redundant sorting copies;
+  ordinary text replies no longer warn about unused tools in automatic mode.
 
 ### Fixed
 
-- BPS HTTP 401 preserves the Excel refresh token and renews access before the
-  next request, without repeating the failed generation or trying another
-  account. Delayed failures cannot invalidate refreshed tokens or a new login.
-  Temporary refresh failures keep credentials, and recovery preserves disabled
-  and draining states and pool membership.
-- BPS model permission refusals pause only the affected canonical model and
-  its aliases for at least 30 minutes; other models keep their own eligibility.
-- Basis Points rate limits pause all models of the affected Excel connection.
-  Access checks preserve HTTP 429 and Retry-After; cached failures count down
-  the existing pause instead of extending it on each read. Requests no longer
-  report an unknown model when its access check is temporarily unavailable.
-  BPS requests have a default User-Agent when the imported session omits it.
-  Completed-response conversion failures no longer mark an account unhealthy.
-- Quota countdown requests refresh Basis Points model access and use its
-  transport even when the local API listener is stopped. Their successful
-  requests remain pending until quota verification instead of canceling
-  themselves as ordinary account use. Unavailable saved models are shown
-  explicitly and require a new selection.
-- Usage calculation hints remain visible when opened near the bottom of a
-  narrow window.
+- Desktop windows can be moved by dragging the existing title bar region.
+  ([#88](https://github.com/F0RLE/zenith-relay/pull/88))
+- Interrupted Responses streams report an explicit failure after complete SSE
+  frames and retain event sequencing. They never insert another event into a
+  forwarded partial frame or treat disconnection as successful completion.
+- Conversion preserves explicit token limits, typed empty custom-tool results,
+  and instruction order. Conflicting Gemini schemas/Parts, malformed tool values,
+  and unsupported caller/namespace changes fail instead of silently losing data.
+- BPS 401 renews access before the next request without repeating the failed
+  generation. Late or temporary refresh failures preserve newer credentials,
+  operator disable/drain state, and pool membership.
+- BPS 429 pauses the affected connection and respects Retry-After without
+  extending cached pauses on reads. Model-access refusals pause only that model
+  and its aliases for at least 30 minutes; temporary access failures no longer
+  masquerade as unknown models.
+- BPS normalizes compact histories and keeps foreign client metadata local.
+  Invalid-body 422 and completed-response conversion failures do not rotate or
+  mark healthy accounts unhealthy. Direct single-tool replies are supported;
+  invalid terminal tool output cannot trigger another generation.
+- Excel requests have a default 120-second upstream-progress timeout; heartbeats
+  do not extend it and valid terminal events do not wait for connection closure.
+  Partial failures retain reported usage and real first/total timings, while
+  unknown timing stays explicit. BPS access and encoding share reasoning aliases.
   ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
-- Excel requests default to a 120-second limit without upstream progress; SSE
-  heartbeats do not extend the wait. Terminal events finish without waiting
-  for the connection to close, and failures retain reported token usage.
-  ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
-- A completed Excel response with invalid tool output returns a conversion
-  error without automatically starting a second generation.
-  ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
-- Excel / Basis Points responses also accept a single direct client-tool call
-  such as `exec_command({...})` or `apply_patch("...")`, while keeping the
-  existing catalog, schema, namespace, and tool-choice checks.
-- Excel access and request encoding use the same reasoning aliases, so a
-  supported `max` mode is not hidden when the provider reports `xhigh`.
-  ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
-- Reported stream token totals remain consistent when later events update the
-  input and output counters, including when the final response is interrupted.
-  ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
-- Switching between ChatGPT and Excel / Basis Points sign-in keeps the dialog
-  open and updates the selection immediately. The dialog blocks the previous
-  sign-in link during replacement.
-- Account and pool credit totals count a shared ChatGPT balance once across
-  Codex and Excel / Basis Points connections, using the newest reported balance.
-- Account monitoring distinguishes model-list and quota timeouts from other
-  connection failures. Error details omit account identities and show only
-  the timestamp belonging to the displayed error.
-- Native Responses API sources keep allowlisted client metadata. Failed
-  request details retain supported provider request IDs for support correlation.
-- Supported provider request IDs also appear in client-visible error messages,
-  including clients that ignore separate diagnostic fields.
-- Generic API request rejections no longer pause healthy pool members or
-  trigger tool-history replay. Recovery still requires a specific continuation
-  or tool-link error.
-- Explicitly unsupported protocols stay excluded when selecting stored or
-  fallback routes. A model with no available protocol has no executable route.
-- Clearing Usage filters also resets the selected period.
-- The active-filter badge stays inside its button on narrow Usage layouts.
-- Buttons and tabs keep visible keyboard focus.
-- Rejected encrypted compaction checkpoints no longer get discarded during
-  account history repair. The original rejection is returned without retrying
-  or rotating; reasoning-only repair retains its bounded pre-output retry.
-
-<!-- relay-notes:en -->
-
-- Sign-in offers separate ChatGPT and Excel / Basis Points connections. Token
-  refresh keeps the issuing OAuth client. Excel is available through the pool
-  and supports Zenith and Sub2API exports.
-- Excel connections are marked BPS. Sign-in Help explains setup and limits;
-  manual browser callback entry is removed.
-- Account error details use the same category labels as Usage. Request details
-  hide empty provider messages and show the attempt number only from attempt 2.
-- Basis Points is reserved for Excel sign-ins. Ordinary ChatGPT connections
-  stay outside the pool and launch ChatGPT directly.
-
-- Account import recognizes Cockpit Tools JSON, and account export can create Cockpit Tools files with safe account metadata.
-
-- Direct ChatGPT sign-in restores native model discovery. Pool connections
-  use Relay's catalog. Profile backups remain in Relay recovery storage;
-  credential snapshots use the OS secret store.
+- Generic rejections and turn limits no longer cause account-wide rotation or
+  tool-history repair. Rejected encrypted compaction checkpoints remain intact.
+  Native ChatGPT turn/WS state stays bound to its endpoint and authorization;
+  transport retries share the original request budget.
+- Delayed import, proxy, and timezone work cannot overwrite newer settings or
+  remove credentials adopted by a completed import. Re-import preserves the
+  selected proxy; replacing a sign-in blocks its previous authorization link.
+- BPS quota countdown requests work with the local API stopped and wait for quota
+  verification after successful generation. Unavailable saved models require a
+  new selection instead of silently running another model.
+- Monitoring distinguishes discovery/quota timeouts, redacts account identity,
+  and retains safe provider IDs in client-visible errors. Usage filter resets,
+  narrow badges/tooltips, keyboard focus, and temporary browser-storage failures
+  no longer hide controls or erase saved preferences.
 
 <!-- relay-notes:ru -->
 
-- При входе можно выбрать отдельное подключение ChatGPT или Excel / Basis Points.
-  Токен обновляется через выдавший его OAuth-клиент. Excel работает через пул
-  и поддерживает экспорт Zenith и Sub2API.
-- Подключения Excel отмечены BPS. Помощь при входе объясняет подключение
-  и ограничения; ручная вставка ссылки возврата убрана.
-- Детали ошибки аккаунта используют те же названия категорий, что и
-  «Использование». Сведения о запросе скрывают пустой ответ провайдера и
-  показывают номер попытки начиная со второй.
-- Basis Points доступен только через отдельный вход Excel. Обычный вход
-  ChatGPT сохраняется вне пула и используется для прямого запуска приложения.
-- Доступ к моделям Excel обновляется по ответу провайдера перед публикацией
-  каталога и выполнением запроса. Отключённые, ограниченные и заблокированные
-  правилами модели исключаются, порядок провайдера сохраняется, а результат
-  привязан к текущему токену и ограничен таймаутом и размером ответа.
+Обновление добавляет профили пула для Claude Desktop, общий механизм
+преобразования протоколов и корзину аккаунтов. Изменения сгруппированы по темам.
+
+### Изменения
+
+#### Адаптеры протоколов и Excel / Basis Points
+
+- BPS группирует имена инструментов по типу и пространству имён; полные
+  описания и схемы загружаются ограниченными локальными запросами Relay без
+  ослабления проверки аргументов. Длинные описания и форматы custom-инструментов
+  тоже учитываются при автоматическом выборе поиска. Схемы использованных
+  инструментов сохраняют компактное представление после истории. В деталях видны
+  загруженные схемы и расход поиска. Текст до ожидающих вызовов передаётся потоком,
+  а сами вызовы выдаются только после проверки. Нативный поиск инструментов
+  не подменяется.
+- При подготовке больших диалогов BPS и продолжений между протоколами Relay
+  использует меньше временной памяти для отпечатков истории. Идентификаторы сессии,
+  инструкции клиента, история и уровень размышлений не меняются.
+- Responses, Chat Completions, Messages и Gemini используют общий механизм
+  преобразования. Сохраняются поддерживаемые идентификаторы и пространства имён
+  инструментов, текстовые результаты и изображения, схемы, цитаты и правила
+  параллельных вызовов. Неподдерживаемые возможности отклоняются явно; нативная
+  передача сохраняет расширения провайдера, точные числа, порядок полей и заголовки.
+  ([1f64175](https://github.com/F0RLE/zenith-relay/commit/1f64175))
+- Настройки и отчёты размышлений используют единый `xhigh` и фактический уровень
+  или бюджет. Клиенты Messages получают доступные публичные сводки и принимают
+  пустую начальную подпись Claude с сохранением нативного состояния продолжения.
+  Подписи чужого провайдера не подделываются.
+- Excel/BPS поддерживает результаты поиска инструментов, function/custom,
+  изображения в результатах и атрибуцию совместной работы. Текст поступает
+  постепенно, инструменты — только после проверки завершения по текущему каталогу
+  и исходным схемам. Необязательная буферизованная проверка JSON/схем выполняется
+  локально и не является нативным строгим выводом провайдера.
+  ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
+- ChatGPT и Excel / Basis Points имеют отдельный вход и обновление через выдавший
+  токен OAuth-клиент. Нативные аккаунты ChatGPT работают напрямую или через пул.
+  BPS работает только через пул, отклоняет известные Free-тарифы и поддерживает
+  экспорт Zenith/Sub2API. Старый переключатель транспорта и ручной callback убраны.
+- Доступ к моделям Excel обновляется до публикации каталога и выполнения запроса.
+  Отключённые, ограниченные и заблокированные правилами модели исключаются;
+  порядок провайдера сохраняется. Кэш доступа привязан к текущему токену,
+  чтение ограничено таймаутом и размером ответа.
   ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
 
-- Импорт распознаёт JSON Cockpit Tools, а экспорт создаёт файлы Cockpit Tools с безопасными метаданными аккаунта.
+#### Пул, маршрутизация и модели
 
-- Прямой вход ChatGPT возвращает нативное получение моделей. Подключение к пулу
-  использует каталог Relay. Копии профиля хранятся в восстановлении Relay,
-  копии входа — в системном хранилище секретов.
+- Автоматическая ротация может передать диалог с полной историей инструментов
+  более подходящему участнику. Непрозрачные продолжения и результаты без вызова
+  сохраняют владельца, пока проверенное локальное восстановление не даст полную
+  историю. Оба окна квоты ограничивают выбор; одинаковые остатки не гарантируются.
+- Обновление кредитов отделено от заголовков ответов. Нагрузка не делает старые
+  кредиты свежими, не откладывает опрос бесконечно и не отменяет новые лимиты.
+  Общий баланс ChatGPT учитывает последнее состояние одного счёта провайдера один раз.
+- API-маршруты выбирают нативный протокол известной модели независимо от клиента.
+  Выбор SDK OpenCode использует ту же справочную политику; неподдерживаемые
+  эндпоинты исключаются. Смена модели сохраняет завершённую историю, но не переносит
+  активное провайдерское состояние другой модели.
+- Контекст и сжатие настраиваются независимо. Опубликованные Short/Long и нативные
+  значения аккаунта сохраняются; резервные 25% применяются только без известного
+  значения по умолчанию. Лимиты API остаются обязательными, длинный контекст включается
+  явно. Сохранения последовательны, предупреждения не перезапускают приложения.
+  ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
+- Каталоги используют общий порядок по разработчику, семейству и версии, ручные
+  исключения и публичный экспорт политики. Получение моделей сохраняет приоритеты
+  провайдера и корректный кэш при ошибках. Каталоги ChatGPT/Codex принимают до 4 МиБ
+  и один раз повторяют временный сетевой сбой с задержкой.
+  ([#86](https://github.com/F0RLE/zenith-relay/pull/86))
+- Скорость сохраняется при повторах. Цены разделяют Standard, Flex, Fast, Ultrafast
+  и опубликованные диапазоны длинного контекста, включая нулевые цены. Оценка
+  использует фактический вход запроса; отсутствующие цены остаются неизвестными.
+- Настройка API объединяет пресеты провайдеров и ссылки на консоли, отделяя
+  Kimi Code от API-кошелька Moonshot. Балансы Moonshot сохраняют региональную валюту
+  USD/CNY; известные сервисы без чтения баланса не получают общие биллинг-пробы.
+
+#### Claude Desktop и профили
+
+- Claude Desktop подключается через профиль стороннего провайдера. Relay проверяет
+  настройки до закрытия клиента, сохраняет восстановление, записывает каталог
+  и запускает приложение только по выбранному действию. Восстановление сохраняет
+  чужие профили и новые ручные изменения. Прямой ChatGPT получает нативный каталог,
+  профили пула — каталог Relay.
+- Каждая модель Claude Desktop показана один раз со стабильным клиентским ID.
+  Встроенный Effort выбирается отдельно в пределах возможностей маршрута и правил
+  пула. Названия, реальные модели провайдера, контекст и цены не меняются;
+  слишком большой каталог отклоняется до изменения профиля.
+- Инструменты MCP загружаются по требованию. Мост Messages принимает проверенные
+  загруженные определения, ссылки поиска, метаданные и рекомендательные указания
+  кэша, но не имитирует серверный поиск или цены кэша Anthropic у другого провайдера.
+  Для применения настройки профиля переподключитесь и начните новый диалог.
+
+#### Интерфейс и Доступ
+
+- Доступ объединяет Локальный API, Приложения и Аккаунты. Настройка приложения
+  сохраняет путь без запуска и изменения пула; защищённое восстановление Claude
+  находится в Восстановлении. Общие настройки аккаунтов сохраняют индивидуальные
+  исключения, необязательную привязку IANA-пояса и прежние отказы от автозапуска.
+- Страницы, выбор приложений, диалоги, карточки источников и прокси стали компактнее.
+  Источники показывают готовность и баланс, а не ротацию аккаунтов; Запустить стоит
+  рядом с Изменить. Проверки прокси сохраняют IP, страну, задержку и время проверки,
+  автоматически привязывая проверенный пояс выходного IP без ручной настройки.
+  macOS использует нативные кнопки окна и системное меню перемещения и размера.
+  ([4cb1d2d](https://github.com/F0RLE/zenith-relay/commit/4cb1d2d),
+  [#85](https://github.com/F0RLE/zenith-relay/pull/85))
+- Вход показывает одно состояние сохранения и закрывается при успехе; ошибка
+  остаётся явной. Первые проверки моделей и квоты параллельны, участие в пуле
+  включается отдельно. Импорт и экспорт поддерживают JSON Cockpit Tools и метаданные.
+- Удалённые аккаунты попадают в постоянную корзину. Восстановленные остаются
+  отключёнными и вне пула; окончательное удаление требует подтверждения. Старый
+  сервер без корзины не может молча превратить удаление в безвозвратное.
+- Отчёты объединяют время, токены/кэш, попытки, ID провайдера и ошибки без пустых
+  разделов, с фильтрами периода, участника и модели. Сравнение контекста в отладке
+  не сохраняет текст диалога. Карточки BPS показывают срок входа и восстановление;
+  справка EN/RU объясняет графики, требования входа BPS, подключение,
+  восстановление и коды ошибок.
+- Пароли и секреты 2FA раскрываются отдельно, сохранение не сдвигает элементы.
+  Смена секрета очищает ранее рассчитанный код.
+- Сведения о контексте сравнивают размеры JSON инструкций, истории и инструментов
+  клиента и подготовленного запроса, не сохраняя текст и не выдумывая токены.
+  Подготовка каталога BPS не повторяет общие указания схем и не копирует их для
+  сортировки; обычный ответ без инструментов в автоматическом режиме не вызывает предупреждение.
+
+### Исправления
+
+- Окно приложения можно перемещать за существующую область заголовка.
+  ([#88](https://github.com/F0RLE/zenith-relay/pull/88))
+- При обрыве Responses после полных SSE-событий клиент получает явную ошибку
+  с сохранением последовательности. Новое событие не вставляется в уже
+  переданный незавершённый фрейм; разрыв не считается успешным завершением.
+- Преобразование сохраняет явные лимиты токенов, типизированные пустые результаты
+  custom-инструментов и порядок инструкций. Конфликтующие схемы/Parts Gemini,
+  неверные значения инструментов и неподдерживаемая смена исполнителя или
+  пространства имён отклоняются вместо тихой потери данных.
+- После BPS 401 доступ обновляется перед следующим запросом без повтора неудачной
+  генерации. Поздние и временные ошибки обновления сохраняют новые учётные данные,
+  отключение/завершение работы участника и его членство в пуле.
+- BPS 429 приостанавливает подключение и соблюдает Retry-After; чтение кэша не
+  продлевает паузу. Отказ доступа к модели затрагивает только её и псевдонимы
+  минимум на 30 минут. Временная ошибка доступа больше не выглядит неизвестной моделью.
+- BPS нормализует сокращённую историю и оставляет чужие метаданные клиента локально.
+  Ошибка тела 422 и ошибка преобразования завершённого ответа не вызывают ротацию
+  или ухудшение состояния исправного аккаунта. Поддержан одиночный прямой вызов
+  инструмента; невалидный итоговый вывод не запускает другую генерацию.
+- Для Excel по умолчанию действует таймаут 120 секунд без прогресса провайдера;
+  heartbeat его не продлевает, корректное завершение не ждёт закрытия соединения.
+  При частичных сбоях сохраняются сообщённые токены и реальные времена первого
+  вывода/всего ответа, неизвестное время помечается явно. Доступ и кодирование BPS
+  используют одинаковые псевдонимы размышлений.
+  ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
+- Общие отказы запроса и лимиты хода больше не вызывают ротацию всего аккаунта
+  или восстановление истории инструментов. Отклонённые зашифрованные контрольные
+  точки сжатия сохраняются. Состояние хода/WS ChatGPT привязано к эндпоинту и входу;
+  транспортные повторы используют исходный бюджет запроса.
+- Поздние операции импорта, прокси и пояса не перезаписывают новые настройки
+  и не удаляют учётные данные завершённого импорта. Повторный импорт сохраняет
+  выбранный прокси, смена входа блокирует прежнюю ссылку авторизации.
+- BPS-запросы обратного отсчёта квоты работают при выключенном локальном API
+  и после успешной генерации ждут проверки квоты. Недоступная сохранённая модель
+  требует нового выбора вместо незаметного запуска другой модели.
+- Мониторинг различает таймауты каталога/квоты, скрывает личность аккаунта
+  и сохраняет безопасные ID провайдера в клиентских ошибках. Сброс фильтров,
+  узкие индикаторы/подсказки, фокус клавиатуры и временные сбои хранилища браузера
+  больше не скрывают элементы и не стирают сохранённые настройки.
 
 ## [1.1.5] - 2026-10-05
 
@@ -469,6 +343,7 @@ Zenith Relay 1.1.5 changes pool rotation, keeps ChatGPT account continuity, labe
 - Pool rotation has Automatic and Manual modes. Manual cycles through the saved member order, skips unavailable members and concurrency limits, and wraps to the start. Automatic keeps request weights and per-member limits.
 - In Automatic mode, pool cards with no positive quota window sort by fresh provider-reported credits. API source wallet balances do not affect the order.
 - Quick Setup places the Relay mark between connection sources and compatible applications, with window controls in a frameless, draggable top area.
+- Excel / Basis Points imports preserve allowlisted provider client headers through reauthentication and token refresh, keep native upstream identity on routed requests, isolate attachment cache entries by credential session, and return provider credential failures without rotating to another account.
 - The pool rotation dialog no longer repeats mode explanations. The behavior is in Help.
 - Account login notes save in order, keep their fields through reauthentication, and do not show a success message for a failed or closed save. Reauthentication replaces the stored token, keeps local notes, and does not open new-account pool setup.
 - Direct ChatGPT launch is disabled for accounts that need sign-in or have a terminal credential, proxy, or health failure. Relay validates credentials before stopping an existing ChatGPT session and restores the session after a failed profile change.

@@ -1,1015 +1,444 @@
 # Hosted Relay Architecture
 
-Status: proposed target design. This document does not describe shipped hosted
-behavior. The current implementation and open work remain in
-[PLANNING.md](PLANNING.md) and [ROADMAP.md](ROADMAP.md).
+**Proposal, not shipped behavior.** Current single-owner contracts are in
+[PLANNING.md](PLANNING.md); implementation order is in [ROADMAP.md](ROADMAP.md#delivery-stages).
 
 ## Decision
 
-Build Hosted Relay as a multi-user service with one identity and account API
-shared by the website, Telegram, and future entry channels. End-user
-applications connect directly to its inference API with user-scoped Relay API
-keys. The Relay desktop is an operator control client, not a required hop for
-user requests.
+Build a multi-user service around `relay-core`, initially as one modular backend
+and deployment unit with bounded workers. PostgreSQL owns durable hosted state;
+provider secrets use an encrypted vault with keys outside the database.
 
-Use PostgreSQL as the durable source of truth for hosted identities,
-ownership, grants, key metadata, configuration revisions, request attribution,
-usage, continuation ownership, and Relay's own customer accounting. Keep
-provider credentials in an encrypted vault whose encryption key is not stored
-in PostgreSQL. Any retained continuation payload has a separate, explicit
-encrypted-state policy; it is not part of usage history or response replay.
-
-Start as a modular monolith: one versioned service boundary and one deployment
-unit for the API, with bounded background workers. Keep local Relay and its
-single-owner server behavior separate while hosted contracts are proven.
-Reuse `relay-core` for provider routing, protocol adapters, pool scheduling,
-stream validation, and request semantics. Build the hosted identity,
-authorization, PostgreSQL, accounting, and management layers around it. Do
-not fork protocol behavior or import Zenith production billing rules.
-
-This is a rebuild of the hosted control plane, not a reason to rewrite the
-desktop application or the protocol engine. If the current SQLite-backed
-`relay-server` cannot keep a clear ownership boundary, introduce a separate
-hosted server crate rather than scattering hosted-mode branches through the
-single-owner server. Consolidation can be considered after hosted acceptance.
+Reuse the existing protocol, routing, scheduler, and stream semantics. Do not
+fork the codec engine or scatter Hosted-mode conditions through the single-owner
+server. A separate hosted crate is preferable if its ownership cannot stay clear.
+This proposal does not require a desktop or local-server rewrite.
 
 ## Product boundaries
 
-- A person can use the website, Telegram, or another supported channel to
-  access the same Relay account, keys, balance, model grants, and usage.
-- A compatible client calls Relay's public API directly. It does not need a
-  browser session, Telegram bot, or desktop process.
-- The desktop authenticates as an operator and manages the hosted service:
-  provider connections, pools, models, grants, limits, users, audited balance
-  adjustments, and operations.
-- The hosted service can serve operator-owned shared capacity and
-  workspace-owned private capacity. Ownership and sharing policy are explicit;
-  importing a credential never makes it globally available by default.
-- Relay does not conceal account sharing, spoof provider identity, or promise
-  that a provider permits a particular shared-account arrangement. Every
-  connector and pooling mode needs a permission review before being offered.
-- Separate official provider API credentials from consumer subscriptions and
-  OAuth identities. A paid shared pool may use only a provider product and
-  credential whose applicable terms permit serving Relay customers. A valid
-  key or working endpoint is not proof of that permission. BYOK credentials
-  remain private to their workspace and are never silently pooled or resold.
-- The first release may run one service instance with several workers and pool
-  members. Cross-node scheduling is not required, but database and ownership
-  boundaries must not assume that one process owns durable state.
+- Website and Telegram are clients of one identity/account API, not separate
+  balances, user registries, payment truth, or key logic.
+- Applications call inference directly with scoped keys. Desktop is an operator
+  management client, not a required inference hop.
+- Capacity is explicitly platform-shared, workspace-private, or shared by grant.
+  Importing a credential does not make it public or commercially usable.
+- Provider/product permission, region, credential type, and supported billable
+  usage must be reviewed before offering a shared paid route. Working personal
+  subscriptions or BYOK keys are not permission to pool/resell them.
+- No identity spoofing, sharing concealment, or production Zenith credentials,
+  inventory, customer data, or internal billing/routing code.
 
 ## Service shape
 
-Keep these modules in one hosted backend initially. They are security and
-ownership boundaries, not a mandate to deploy microservices.
-
-| Module | Responsibility |
+| Module | Owns |
 | --- | --- |
-| Identity | Relay users, external sign-in identities, sessions, account linking |
-| Workspace | Ownership, membership, roles, pool and billing scope |
-| Management API | Desktop operator actions, configuration revisions, audit |
-| Inference API | Protocol endpoints, key authentication, admission, streaming |
-| Catalog and grants | Public model identity, executable routes, per-workspace access |
-| Accounting | Price snapshots, reservations, settlement, credits, refunds |
-| Usage | Logical requests, physical attempts, user and operator views |
-| Credential vault | Encrypted provider credentials and controlled transfer |
-| Workers | Refresh, payment events, cleanup, reconciliation, bounded jobs |
+| Identity/workspace | People, linked identities, sessions, ownership, membership |
+| Management | Operator pairing, configuration revisions, audit, transfers |
+| Inference | Key authentication, grants/admission, `relay-core`, streams |
+| Catalog/grants | Public model projection and exact runnable route access |
+| Accounting | Tariff snapshots, reservations, journal, settlement/payments |
+| Usage | Logical requests, physical attempts, safe user/operator reports |
+| Vault/workers | Protected credentials, renewal, bounded jobs/reconciliation |
 
-The request path is:
-
-```text
-Website / Telegram / future account clients
-                  |
-             Identity API
-                  |
-     shared account, key, balance, usage APIs
-
-Compatible client -- Relay API key --> Inference API
-                                      |-- identity and scope
-                                      |-- grant, quota, balance admission
-                                      |-- pool scheduler and relay-core
-                                      |-- provider credential vault
-                                      |-- usage and settlement
-
-Relay desktop -- operator session --> Management API
-                                      |-- pools, providers, models, grants
-                                      |-- users, limits, activity, audit
-```
-
-The website and Telegram bot are clients of the same domain operations. They
-must not keep separate balances, user registries, payment truth, or key logic.
-The inference API must remain available when those interfaces or the desktop
-are offline.
+Inference remains available when website, Telegram, or Desktop is offline.
+These are module boundaries, not a requirement to deploy microservices.
 
 ## Ownership model
 
-Use a person identity and a billing/ownership boundary as separate concepts:
+A user is a person; a workspace owns keys, connections, pool policy, grants,
+usage, and a wallet. Registration creates a personal workspace. Staff/operator
+roles are distinct from workspace membership; collaboration roles can wait.
+A grant permits access but cannot override provider entitlement, route features,
+physical quota, or health.
 
-- **User** is a human identity that can authenticate through one or more
-  linked channels.
-- **Workspace** owns provider connections, pool policy, model grants, API
-  keys, usage scope, and a wallet. A newly registered person receives a
-  personal workspace automatically.
-- **Membership** links users to workspaces with explicit roles. At launch, a
-  personal workspace has one owner and does not need invitations or shared
-  credentials. Keep platform staff roles separate from workspace memberships;
-  add workspace roles only when shared workspaces are a real product need.
-- **Pool** is a capacity and policy boundary owned by the platform operator
-  or a workspace. It contains physical provider members and configured source
-  routes.
-- **Grant** allows a workspace to use a model or pool. A grant cannot create
-  a route or override provider entitlement, physical quota, protocol
-  capability, or health.
-
-Keep all authorization server-side and action-specific. Platform staff actions
-use a separate privileged identity and are audited. If workspace collaboration
-is added later, define distinct roles for provider management, billing,
-credential transfer, and read-only access; never infer one permission from
-another. Provider secrets are not returned to any role.
-
-Every tenant-owned row carries `workspace_id`. References between tenant rows
-use composite foreign keys including that ID, preventing a valid object ID
-from being attached across workspaces. PostgreSQL row-level security can add
-defense in depth, but application authorization remains mandatory. Set
-workspace context transaction-locally; never trust a workspace ID from a
-request body as authority.
-
-For a personal-workspace-only release, keep the workspace abstraction anyway.
-It makes key scope, imported pool ownership, accounting, and future
-multi-person access consistent from the beginning.
+Tenant records carry `workspace_id`; references use tenant-scoped composite
+foreign keys. Server-side action authorization is mandatory even with RLS.
+Workspace context is transaction-local and never trusted from request JSON.
+Private credentials cannot be listed, exported, or used across tenants.
+Ownership transfer is audited, not a label change.
 
 ## Identity and account channels
 
-All sign-in methods resolve to one internal `user_id`. Store external
-identities as `(identity_provider, provider_subject, user_id)` with a unique
-constraint on the provider and subject.
+Federated channel linking is later work, not an alternative to the initial
+[passkey-only administrator sign-in](#passkey-only-administrator-access).
 
-- Website authentication creates a Relay session using secure, HTTP-only
-  cookies and CSRF protection for state-changing browser requests.
-- Telegram authentication proves control of a Telegram identity through a
-  verified bot flow or short-lived linking challenge. A raw Telegram user ID
-  supplied by a caller is not authentication.
-- Linking another identity requires an already authenticated Relay session or
-  a one-time challenge approved by the existing account. Do not merge accounts
-  automatically by display name, phone number, or an unverified email.
-- Sessions are revocable and have bounded lifetime. Account recovery and
-  identity unlinking must not orphan the workspace owner.
-- Payment callbacks identify a payment, not a person. The server resolves the
-  payment intent to the owning workspace before crediting its wallet.
+External identities have a unique `(provider, subject)` linked to internal
+`user_id`. Linking requires an authenticated account or approved one-time
+challenge, never a matching display name/email. Telegram IDs and payment
+callbacks are not authentication by themselves.
 
-The Telegram bot can remain an entry and payment channel, but all balance
-changes go through the same idempotent accounting API used by the website.
+Browser sessions use secure HTTP-only cookies and CSRF protection. Sessions
+are bounded/revocable; recovery and unlinking cannot orphan the owner.
+Payment intents resolve the owning workspace server-side.
 
 ## Authentication and keys
 
-Separate three credentials:
+| Credential | Boundary |
+| --- | --- |
+| Account session | Human account operations |
+| Inference key | One workspace's model/request scope; no management access |
+| Operator session | Action-scoped management, preferably device-paired and short-lived |
 
-1. **Account session** authenticates a person to website or Telegram account
-   operations.
-2. **Inference key** authenticates a compatible client to public model and
-   generation APIs. It is scoped to exactly one workspace, has explicit
-   permissions and limits, and cannot call management endpoints.
-3. **Operator session** authenticates the desktop to management APIs with
-   operator or workspace roles. Prefer short-lived device authorization or
-   OAuth-style pairing over a permanent shared management token. Store its
-   refresh credential in the OS credential store.
+Inference keys have a non-secret prefix and high-entropy secret with a one-way
+verifier. Show the secret once. Record scope, assigned user when applicable,
+limits, expiry, revocation, and last use. Rotation creates a replacement first;
+revocation affects new requests without rebuilding runtime. A key narrows grants,
+never broadens them. Provider keys never authenticate Relay clients.
 
-Inference keys have a non-secret lookup prefix and a high-entropy secret. Store
-only a one-way verifier for the secret; show the complete key once at
-creation. Record its workspace, creator, label, allowed models/protocols,
-optional spend or request limits, creation, last-use, expiry, and revocation.
-Key rotation creates a replacement before the old key is revoked. Revocation
-must take effect for new requests without waiting for a runtime rebuild.
+### Passkey-only administrator access
 
-A key may narrow workspace access but cannot broaden it. User identity,
-workspace, roles, pricing, and grants are resolved by the server from the
-authenticated session or key. Ignore client-supplied identity fields for
-authorization and billing.
+The initial human sign-in to the Hosted administration panel is passkey-only
+through WebAuthn/FIDO2. Google/OIDC login, passwords, email/SMS sign-in, Telegram
+authentication, and wallet signatures are outside this first implementation.
+A passkey stored in Google Password Manager is not Sign in with Google.
+This is planned behavior; the current single-owner server's management-token
+authentication and Desktop pairing remain unchanged until explicitly migrated.
 
-Keep inference, account, payment callback, and management routes on separate
-authorization policies. A request key is never a management credential; a
-provider key is never a Relay client credential.
+**First owner.** Provision the installation owner through an explicit server-local
+setup operation, not the first public registration. A short-lived, one-use setup
+authorization binds the installation, setup session, and first credential
+registration. Do not put it in URLs, logs, or committed configuration. Verify the
+WebAuthn registration before atomically consuming setup authorization and creating
+the owner/credential binding. Concurrent setup, failure, or restart must not create
+another owner or reopen completed setup. A passkey proves identity, not authority:
+server-side owner/admin roles authorize every management action; workspace ownership
+does not grant installation-wide administration.
+
+**Registration and sign-in.** Use a maintained server-side WebAuthn library, not
+custom signature verification. Configure a stable RP ID and an explicit HTTPS
+origin allowlist; never derive trusted origins from untrusted proxy headers.
+Use discoverable credentials for sign-in without an email/password. Server-issued
+cryptographically random challenges have bounded lifetimes, bind the operation
+and setup or authentication session, and are consumed atomically once, including
+failed verification attempts. Verify challenge, ceremony type, origin, RP ID,
+credential/user binding, signature, and user-presence/user-verification flags.
+Require user verification for administrator credentials and assertions; unsupported
+authenticators fail clearly rather than falling back to weaker authentication.
+
+**Storage and sessions.** Store credential IDs, public keys, opaque user handles,
+owner bindings, library-required counter/backup metadata, and revocation state in
+PostgreSQL. Relay never receives or stores a passkey's private key. Follow the
+library's synced-passkey and counter semantics; a zero or unchanged signature
+counter alone is not universal proof of replay. Successful verification creates
+a fresh bounded, server-revocable session with Secure/HttpOnly cookies, an explicit
+SameSite policy, and CSRF protection. Recheck authorization on each action. A
+customer inference key or provider secret cannot create an administrator session.
+
+**Privileged changes and recovery.** Require fresh passkey user verification for
+adding/removing passkeys, changing administrators, exporting credentials, and
+changing payment/security settings. Offer a second passkey during setup; do not
+remove the last usable credential without a verified replacement or explicit
+recovery. If all passkeys are lost, recovery requires an audited server-local
+operator procedure, revokes existing sessions and lost credentials, and enrolls
+a replacement through a new bounded ceremony. No public reset endpoint, permanent
+master-key login, email/SMS bypass, or automatic trust in a matching email address.
+Bound pre-authentication requests and retained challenges; audit credential and
+role changes without storing assertions, setup secrets, or session tokens.
+
+Before exposing the panel, acceptance must establish:
+
+- Setup authorization is single-use and expires; concurrent setup and restarts
+  cannot take over an existing installation or leave an owner without a credential.
+- Wrong origins/RP IDs, missing user verification, invalid signatures, expired or
+  replayed challenges, and foreign/revoked credentials cannot establish a session.
+- Supported synced and device-bound passkeys work, including supported zero-counter
+  behavior; key registration/revocation cannot cross users or elevate roles.
+- Session fixation, CSRF, revocation, stale privilege checks, and missing fresh
+  verification cannot bypass management boundaries. Recovery and loss of the last
+  credential preserve an accountable owner without enabling an alternate login.
+- Inference keys stay non-administrative, existing personal-server authentication
+  is not silently changed, and diagnostics/backups expose no private auth material.
+
+Implementation references: [WebAuthn](https://www.w3.org/TR/webauthn-3/),
+[server-side registration](https://developers.google.com/identity/passkeys/developer-guides/server-registration),
+and [server-side authentication](https://developers.google.com/identity/passkeys/developer-guides/server-authentication).
+Recheck the selected library and applicable specification at implementation time;
+these references do not commit Relay to a JavaScript backend or a Google login.
 
 ## Pools, connections, and model access
 
-Each physical provider account or API source belongs to one pool and has one
-ownership classification:
+A route is available only under the authenticated grant/key, an enabled member,
+compatible endpoint/credential/features, and current quota/health policy.
+`GET /v1/models` projects that key's usable public IDs. Separate account metadata
+may expose supported context modes, limits, and customer prices, not private
+upstream inventory or another tenant's credential state.
 
-- platform-owned shared capacity;
-- workspace-owned private capacity;
-- explicitly shared workspace capacity with named grants.
-
-Moving a connection between owners is an audited transfer, not an edit to a
-label. Secrets are referenced through the vault. A workspace cannot list,
-export, or use another workspace's private connection. Operator-managed shared
-capacity is visible as shared capacity, with an explicit policy for who may
-use it.
-
-Keep the public model catalog separate from route eligibility. For a workspace
-and protocol, a model is available only when all of these are true:
-
-- a workspace grant permits it;
-- at least one granted pool contains an enabled physical member for it;
-- the source credential and endpoint are valid for the selected upstream
-  protocol;
-- required input, output, tool, image, reasoning, and transport features are
-  supported by the exact route;
-- account quota, route health, and operator policy permit dispatch.
-
-`GET /v1/models` returns only the compatible public model IDs available to the
-authenticated key. A separate Relay account/catalog endpoint may return
-extended metadata such as context modes, output limits, supported protocols,
-features, and customer price. Do not expose private upstream model names,
-credential state, or another workspace's inventory in the public catalog.
-
-Treat short and long context as named user-facing modes resolved to numeric
-limits for the exact grant and route. Enforce the effective input limit as the
-minimum of model evidence, source/route capability, workspace grant, key
-policy, and service safety limit. Enforce output independently. A model name,
-catalog row, or marketing label cannot establish a long-context route. Unknown
-hard limits remain unknown and must not be advertised as guaranteed capacity.
-
-The selected route stores its public model, upstream model, endpoint,
-protocol, adapter, capability evidence, and configuration revision. Protocol
-adapters for one physical member do not create extra capacity, quota, or
-rotation weight.
+Effective input limits combine model/route evidence, grant, key, and service
+limits; output is independent. Unknown hard limits are not advertised guarantees.
+Route identity includes public/upstream model, endpoint, protocol, adapter,
+evidence, and revision. Aliases/protocol bindings do not multiply physical capacity.
 
 ## Provider onboarding and native API surfaces
 
-Treat each provider product and API surface as a versioned connector contract,
-not just a base URL and key. A source records its provider and product, credential
-kind, upstream region and endpoint, native API surface/version, model inventory,
-supported features, hard context/output limits, usage fields, quota method,
-price schedule, configuration revision, and permission-review state. Secret
-material is referenced through the vault.
+A connector records provider/product, credential kind, region, exact API/version,
+features, limits, usage/quota method, pricing, permission review, and revision.
+Revalidate its official contract at implementation time; provider/example URL
+tables are not evidence that a model or plan supports a surface.
 
-For this hosted product, keep two policies separate:
+Native upstream and client ingress are separate: permitted ingress bridges use
+the existing four codecs to reach the chosen model's exact native surface.
+Unsupported required semantics fail before dispatch. A route may require
+`native_only`; this is not a global prohibition on ingress conversion.
 
-- **Native upstream only**: the selected model is executed through the
-  provider's documented native request, response, streaming, error, and usage
-  contract. Relay never silently substitutes an OpenAI model with a Kimi,
-  Gemini, or other vendor model, and never uses a different vendor as a
-  fallback just because the first route failed.
-- **Bridged ingress allowed**: the client may use any of the four supported
-  public contracts (Responses, Chat Completions, Anthropic Messages, or
-  Gemini). `relay-core` converts that ingress contract to the selected
-  model's native upstream protocol and converts the response back. The bridge
-  must reject the request before dispatch when a required field, feature, tool,
-  continuation, or usage semantic cannot be represented without loss.
+Versioned model mappings are explicit. No cross-provider/model substitution or
+fallback. Credential rotation stays within the same provider, product, model,
+surface, compatible capabilities, and existing retry contract. Relay keys are
+replaced with only the selected vault credential at the provider boundary.
 
-Therefore a Chat Completions request may reach a model whose native upstream is
-Responses, while the actual provider call remains a native Responses call.
-This is a protocol bridge, not a cross-provider substitution. A provider's own
-OpenAI-compatible wire format is still native pass-through when Relay targets
-that provider directly.
-
-Bridging is enabled by default only when the route's capability contract and
-pricing policy support it. A paid route may set an explicit `native_only`
-constraint on its `model_grant` or route revision when protocol conversion is
-undesirable for its usage or accounting semantics. `native_only` is a
-route-level policy, not a global Hosted-server prohibition.
-
-Initial surface candidates, subject to revalidation against the provider's
-official API contract during implementation:
-
-| Provider | Native surface candidate | Relay rule |
-| --- | --- | --- |
-| OpenAI | Responses API, `/v1/responses` | Upstream remains Responses; supported client contracts may bridge into it unless the route is `native_only`. |
-| Google Gemini | `generateContent` and `streamGenerateContent`; evaluate Interactions as its own surface | Upstream remains Gemini; do not bridge between separate Google products or surfaces implicitly. |
-| xAI / Grok | xAI Responses API | Select an explicit xAI surface per route; ingress bridging does not make xAI interchangeable with OpenAI. |
-| Moonshot / Kimi | Kimi Platform API, `/v1/chat/completions` | Preserve Kimi-specific fields and behavior; keep API Platform credentials distinct from other Kimi products. |
-| Z.ai / GLM | Official PaaS `/api/paas/v4/chat/completions` API | Preserve the documented GLM request and response; ingress conversion must not change the upstream vendor. |
-
-These paths are connector examples, not a promise that every account, model,
-region, or API plan supports them. Expose a provider-specific base URL or
-explicit namespace so identical paths such as `/v1/responses` cannot select an
-upstream by guesswork. Model discovery is scoped to the authenticated key and
-that public API surface. Do not infer provider identity from a model string.
-
-At ingress, never forward a Relay inference key to a provider. Replace it only
-with the selected vault credential, bridge the client contract when the route
-allows it, preserve the provider-native payload and response semantics, and
-reject unsupported required features before dispatch. Do not rewrite model IDs
-except through an explicit, versioned route mapping. Return provider-scoped
-errors and usage; do not silently substitute another vendor's model. Rotation
-may select another credential only inside the same provider, product, model,
-native surface, and compatible capability contract, and only under the request
-retry rules below.
-
-Do not make a route sellable until its commercial-use permission, regional
-availability, native usage extraction, customer tariff, and finite reservation
-bound are validated. Subscription quota is not a billable usage record. If a
-connector cannot produce supported billable usage, keep it private/BYOK-only
-where permitted or disable paid serving; do not estimate a customer charge
-from an unrelated provider's pricing.
+Do not sell a route without permitted commercial use, supported billable usage,
+a valid tariff, and finite enforceable reservation bounds. Otherwise keep it
+private/BYOK-only where permitted, or disabled for paid serving.
 
 ## Request lifecycle
 
-Every generation is a durable logical request with zero or more physical
-attempts. Keep execution state separate from accounting state:
+Keep durable execution and accounting state separate:
 
 ```text
-request:     received -> authenticated -> admitted -> reserved -> dispatched
-             -> streaming -> completed | failed | cancelled | uncertain
-pre-dispatch: rejected | failed
-reservation: none -> held -> settled | released
-                         -> held_for_reconciliation -> settled | released
+execution: received → admitted → reserved → dispatched → streaming
+           → completed | failed | cancelled | uncertain
+accounting: none → held → settled | released
+                      → held_for_reconciliation → settled | released
 ```
 
-1. Apply TLS, connection, body-size, and parser limits before expensive work.
-2. Authenticate the inference key and resolve `workspace_id`, `key_id`, and
-   allowed scope from server state.
-3. Validate the protocol, model ID, request shape, stream controls, and
-   idempotency semantics. Reject unsupported required features before dispatch.
-4. Check workspace grant, key scope, rate/concurrency limits, requested
-   context, output cap, current route eligibility, and the customer's price
-   schedule. Perform the pre-dispatch input sizing described below before
-   opening the reservation transaction.
-5. In a short PostgreSQL transaction, create the request and reserve the
-   stage-two amount calculated from the selected route, context band, input
-   estimate, and effective output cap. Do not keep a database transaction open
-   while waiting for a provider or streaming to a client.
-6. Acquire bounded scheduler capacity and select an eligible physical member
-   under pool health, quota, fairness, affinity, and rotation rules. A shared
-   account's capacity and provider quota are counted once across all users.
-7. Execute through `relay-core` with a server-created scope containing the
-   workspace, request, permitted members, model, protocol, and limits. The
-   client cannot replace this scope.
-8. Preserve native provider semantics where supported; otherwise use a typed
-   adapter that rejects required fields it cannot represent. Capture upstream
-   usage before output conversion, validate terminal stream completion, and
-   retain safe partial-usage observations.
-9. Write one logical outcome and each actually dispatched attempt. Commit
-   reusable continuation checkpoints before advertising terminal success.
-   Settle the reservation idempotently from the usage evidence and snapshotted
-   pricing/closure policy, then release unused reserved funds.
-10. On disconnect, cancel upstream work where supported. Persist cancellation,
-    partial usage, and uncertain execution distinctly; do not report success
-    just because an HTTP connection closed cleanly.
+1. Bound parsing/connections and authenticate key/workspace before lookup.
+2. Validate request, grants, route features, context/output caps, idempotency,
+   and tariff. Size prepared input before the reservation transaction.
+3. Atomically create the request and bounded reservation; no transaction spans
+   provider I/O or streaming.
+4. Acquire bounded physical capacity and execute through a server-created core
+   scope. If the selected route changes cost bounds, adjust/revalidate the hold
+   before dispatch, not after execution.
+5. Capture upstream usage before conversion and validate completion. Record one
+   logical outcome and every dispatched attempt, including uncertain failures.
+6. Commit reusable continuation state before advertising terminal success.
+   Settle once and release unused funds. Disconnect cancels supported upstream
+   work but does not prove non-execution or zero expense.
 
 ### Reconciliation and estimated settlement
 
-Release an undispatched request's reservation immediately. Settle a valid
-terminal usage outcome under its tariff and release the unused remainder.
-Otherwise enter `held_for_reconciliation` with an absolute deadline and the
-route's snapshotted closure policy. The policy sets a finite TTL, normally
-5-10 minutes from entry; retries of the reconciliation job cannot extend it.
-Final supported usage takes precedence if it arrives before closure. At the
-deadline apply this evidence order:
+Undispatched requests release immediately. Missing final usage enters a finite,
+snapshotted reconciliation deadline; worker retries/restarts cannot extend it.
+Final supported usage received before closure takes precedence. At deadline:
 
-1. If validated cumulative usage was captured from stream frames, use the
-   reported components under the partial-usage policy and release the unused
-   reservation. Mark the basis `provider_partial`; a cumulative snapshot is
-   not proof of final totals. Missing reasoning or cache counters stay unknown.
-2. If no substantive output was forwarded, the launch default is a customer
-   waiver: release the reservation, record `policy_waiver`, and retain the
-   attempt's observed or unknown provider expense. Headers, heartbeats, and
-   response-start events do not count as substantive output. No visible output
-   does not prove non-execution or zero input/reasoning cost; acceptance alone
-   is not a billable-usage counter.
-3. If substantive output was forwarded without usable terminal usage, apply
-   only the route's published stream-estimation policy. Use the input estimate
-   and supported visible output deltas, excluding framing, repeated snapshots,
-   and metadata. Record `settled_by_stream_estimate`, estimator revision, and
-   the uncertainty described under
-   [estimation risk](#estimation-risk-and-provider-expense). The customer charge
-   is capped by the reservation. Unsupported or unbounded components are
-   waived by the launch policy, not invented from hidden reasoning or an
-   assumed cache hit.
+| Evidence | Closure policy |
+| --- | --- |
+| Valid cumulative partial usage | Settle supported observed components as `provider_partial`; missing components remain unknown. |
+| No substantive output forwarded | Launch default: release as `policy_waiver`; provider expense may still exist. |
+| Substantive output, no usable final usage | Only the published bounded stream-estimation policy, marked `settled_by_stream_estimate`, capped by the hold. Unsupported hidden components are waived, not invented. |
 
-A worker owns the deadline transition and performs it idempotently. A paid
-route without a deterministic policy for all three evidence shapes is not
-sellable; it may not leave wallet funds in
-`held_for_reconciliation` indefinitely or treat missing usage as zero.
+Persist deadline, policy/estimator version, observation watermark, substantive
+output counters, and observation gaps. Headers/heartbeats are not substantive
+output, and transport writes do not prove human receipt. Overdue recovery uses
+the original deadline. No route may leave a hold indefinitely.
 
-The reconciliation record stores `deadline_at`, the last usage observation,
-substantive output counters, their durable observation watermark,
-provider-acceptance evidence, and the selected closure policy. An observation
-gap after a crash stays explicit; transport writes do not prove receipt by the
-human client. Recovery processes overdue records without resetting deadlines.
-Closing the customer's reservation never proves provider completion or makes
-an uncertain attempt safe to repeat.
-
-Late provider usage updates expense evidence without reopening the reservation.
-For launch, a lower customer amount calculated under the original tariff
-produces one idempotent compensating credit; a higher amount is recorded as
-operator exposure, not an automatic extra debit. Differences due solely to
-the published markup are not refunds or accounting errors.
+Late usage improves expense evidence without reopening the reservation. Under
+the original tariff, a lower customer amount creates one compensating credit;
+a higher amount is operator exposure, not an automatic extra debit. Markup
+differences alone are not a refund. Closure does not make uncertain inference
+safe to repeat.
 
 ### Idempotency and SDK error responses
 
-For billable inference, clients should send an `Idempotency-Key` when they may
-retry after a network failure. Scope its stored digest to the workspace,
-inference key, and endpoint, and bind it to a canonical incoming-request hash.
-Snapshot effective defaults on first admission; a changed server default does
-not turn the same incoming request into a new operation. Authenticate before
-lookup, and enforce uniqueness in PostgreSQL in the request/reservation
-transaction. Concurrent duplicates must not create a second attempt or hold.
+Authenticate first. Scope the digest of `Idempotency-Key` to workspace, key,
+and endpoint; bind it to the canonical incoming request and snapshot effective
+defaults. Enforce uniqueness in the request/reservation transaction.
 
-v1 does not retain generated response bodies for duplicate replay. A duplicate
-generation POST returns a structured **non-2xx** error, never a successful JSON
-generation placeholder, an empty body, or a successful empty SSE stream:
+v1 retains no generated body for duplicate replay. Planned duplicate POSTs are
+non-2xx protocol-shaped errors, decided before SSE success headers:
 
-| Condition within the deduplication window | HTTP status | Relay code |
+| Condition | HTTP | Planned code |
 | --- | --- | --- |
-| Same key, different request hash | 409 | `relay_idempotency_conflict` |
-| Same request still running or execution uncertain | 409 | `relay_request_in_progress` |
-| Same request terminal; original body is not retained | 409 | `relay_request_result_unavailable` |
+| Same key, different request | 409 | `relay_idempotency_conflict` |
+| Running or uncertain | 409 | `relay_request_in_progress` |
+| Terminal, original body unavailable | 409 | `relay_request_result_unavailable` |
 
-For `stream=true`, decide this before sending SSE success headers. Render the
-error in the ingress protocol's error envelope: OpenAI-style `error` for
-Responses/Chat, the Messages error envelope for Messages, and the Gemini error
-envelope for Gemini. Do not return an OpenAI error schema on every endpoint.
-Expose the stable Relay code and safe metadata through that envelope's
-extensions and response headers, with acceptance tests for the supported SDKs.
-An illustrative Responses/Chat error is:
+Use the ingress protocol's error envelope, `no-store`, safe request/error-code
+headers, and `x-should-retry: false`. Test supported SDKs with default retry and
+ignored hints; duplicates must still have no execution/accounting side effects.
+Never return empty successful JSON/SSE or suggest a new key to recover an answer.
 
-```json
-{
-  "error": {
-    "type": "invalid_request_error",
-    "code": "relay_request_result_unavailable",
-    "message": "The original request has finished; its response body is not retained.",
-    "relay": {
-      "request_id": "req_example",
-      "execution_state": "completed",
-      "accounting_state": "settled",
-      "usage_ref": "/relay/v1/requests/req_example",
-      "retryable": false,
-      "new_charge_created": false
-    }
-  }
-}
-```
-
-Return `Content-Type: application/json`, `Cache-Control: no-store`,
-`X-Relay-Request-ID`, `X-Relay-Error-Code`, and the SDK retry hint
-`x-should-retry: false` on these HTTP conflicts. A bare 409 can trigger SDK
-automatic retries; the header is a compatibility hint, not a guarantee for
-every SDK/version. Test default retry settings as well as retries disabled;
-unsupported clients need an explicit no-retry setting or Relay-aware handler.
-If a client ignores the hint, every duplicate must still have zero execution
-and accounting side effects. Do not advise retrying with a new key merely to
-recover a lost answer; that would be a separately billable generation.
-
-The status endpoint in `usage_ref` is Relay-specific, not a generation endpoint.
-It requires the original key's request-read scope or an authorized account
-session, returns only the caller's request, and exposes execution/accounting
-states, usage completeness, settlement basis, and charge metadata. Monetary
-amounts include currency and subunit precision; pending values are not zero.
-It returns no prompt, answer, continuation payload, provider credential, or
-another tenant's metadata. Ordinary SDKs receive a typed API error and need
-client handling to inspect this endpoint; this is not transparent replay.
-
-Deduplication records survive restarts for a published retention window that
-covers execution, reconciliation, and supported client retries. After that
-window, key reuse has no deduplication guarantee. Without the header, each
-POST is a new logical request; Relay cannot infer duplicates from similar
-prompts or assume every SDK supplies a stable key automatically.
-
-Retries are allowed only when the existing Relay execution contract proves
-that the prior attempt was not sent or rejected before execution, before output
-reached the client, and within a shared request retry budget. Unknown execution
-is not safe to replay, even when the caller repeats the same idempotency key.
-A continuation is bound to its workspace, key scope, model, route owner, and
-provider state; it cannot cross users or silently move to an incompatible
-account.
-
-Bound per-key and per-workspace request rate, concurrency, body size, token
-limits, waiting queues, and stream duration. Return stable Relay error codes
-with a request ID. Never let a slow or disconnected client retain an unlimited
-provider lease.
+A scoped Relay status endpoint exposes execution/accounting states, usage
+completeness, settlement basis, and currency/precision, not prompts, answers,
+continuation content, credentials, or foreign metadata. Pending amounts are not
+zero. Publish a durable deduplication window covering execution/reconciliation/
+supported retries. Without a key, each POST is a new request; prompt similarity
+cannot establish duplication. Existing core retry safety still applies.
 
 ## Durable continuations and restart recovery
 
-Persist correctness-critical continuation ownership from the initial hosted
-schema, not only after adding more inference nodes. A route-owner mapping
-alone is not enough for bridges that need the original signed/native blocks
-or tool-call state. Use two separate layers:
+The initial schema needs tenant/key-scoped `continuation_sessions`: origin
+request/attempt, provider/product/member, model/endpoint/protocol, route and
+adapter version, authorization generation, turn/version, call correlation,
+expiry/state, and optional encrypted payload reference. Scoped lookup digests
+are not authentication.
 
-- **`continuation_sessions` in PostgreSQL**: tenant/key-scoped identity,
-  origin logical request and physical attempt, provider/product, physical
-  member, upstream model/endpoint/protocol, route revision, adapter/state
-  version, credential authorization generation, parent/turn version, tool-call
-  correlation, expiry, lifecycle state, and an optional encrypted payload
-  reference. Use scoped opaque digests for response/history lookup; a provider
-  response ID is not authentication.
-- **Encrypted continuation state, only under an explicit retention policy**:
-  the minimum original native blocks, signatures, reversible tool mappings,
-  or replay material needed by that connector. Keep it separate from
-  `logical_requests`, `physical_attempts`, usage, audit, and API response
-  replay. Keys live outside PostgreSQL; enforce tenant binding, bounded bytes,
-  TTL, deletion, and a versioned schema. Staff usage screens cannot read it.
+Native blocks/signatures/replay material require an explicit encrypted-state
+retention policy, with independent access, keys outside PostgreSQL, byte/TTL
+bounds, deletion, and schema version. They are not usage/audit records or
+generated-response replay. Staff usage screens cannot read them. When content
+retention is forbidden, use supported provider references or complete compatible
+client history, otherwise reject resume. Metadata alone is not restart-safe replay.
 
-Metadata persistence is required. Payload retention is not implicitly enabled:
-the workspace/route must explicitly allow it, including any user content that
-the required native blocks contain. When native provider-retained state is
-sufficient, store only its protected reference and ownership. If content
-retention is forbidden, require complete compatible client-supplied history or
-reject the unsupported resume mode. Never promise restart-safe bridged replay
-using metadata alone, or override a client's storage/privacy restriction.
+Commit a completed-turn checkpoint before terminal success. Earlier streamed IDs
+remain pending; partial tool arguments are not resumable. Restore only committed,
+unexpired state after key/grant/owner/authorization/version checks. Restart is not
+reauthentication; refresh preserves ownership only under the connector contract.
 
-The completed-turn checkpoint is the recovery boundary. Commit its ownership
-and necessary payload before releasing the final successful response or
-terminal success event. An ID emitted earlier in a native stream is only
-pending until that checkpoint commits. A completed assistant turn waiting for
-tool results is resumable; a truncated tool-call argument stream is not.
-Checkpoint failure cannot be ignored or turned into successful reusable state.
-
-Restore only unexpired, committed checkpoints. Revalidate workspace/key
-permission, exact owner, route compatibility, authorization generation, and
-state-schema support. A process restart alone does not create a new credential
-generation; reauthentication or credential replacement follows the connector's
-invalidation contract. Ordinary token refresh preserves ownership only when
-that connector proves the same provider session remains valid. Revocation,
-expired provider state, or incompatible state yields an explicit continuation
-error, not silent rotation, stripped signatures, or a restarted tool loop.
-
-Serialize advancement of one continuation with a short compare-and-swap
-transaction on its turn/version and a fenced execution lease. Duplicate
-submissions use request idempotency; simultaneous different next turns cannot
-overwrite one checkpoint. Deliberate branches need distinct child identities.
-Never hold this transaction open during provider execution. Lease expiry after
-a crash means uncertain execution, not permission to resend the prior turn.
-
-On a planned container upgrade, stop admission, drain active requests for a
-bounded period, flush completed checkpoints and usage, then stop. Abrupt
-restart cannot preserve an open HTTP/SSE/WebSocket connection or recover
-unobserved output. In-flight attempts without a committed terminal checkpoint
-remain uncertain and enter reconciliation; completed turns, including those
-awaiting tool results, can continue when their provider state is still valid.
-
-Soft affinity, disposable transport observations, and diagnostic caches can
-remain process-local. They cannot replace the durable owner or financial
-state. Restore applicable hard quota/retry deadlines from durable evidence;
-an empty cache is not permission to reset a provider limit.
+Advance turns with short version-CAS transactions and fenced execution leases.
+Concurrent distinct turns cannot overwrite state; deliberate branches need child
+identities. Expired leases imply uncertain execution, not permission to resend.
+Graceful upgrades stop admission and drain/flush under a deadline. Abrupt restart
+cannot preserve sockets or unobserved output; uncertain work enters reconciliation.
+Persist hard quota/retry deadlines separately from disposable affinity/cache hints.
 
 ## Customer balance and provider expense
 
-Use an append-only, double-entry journal as the monetary source of truth.
-Maintain a balance projection for fast reads, but reconstruct and verify it
-from journal postings. Never edit a balance as an isolated number and never
-delete financial entries; corrections are compensating transactions.
+An append-only double-entry journal owns money; balances are reconstructible
+projections. Use one explicit wallet currency and checked integer subunits.
+Choose precision, rounding, and tariff before paid traffic. Corrections are
+compensating entries, not edits/deletions. Keep customer charge, physical provider
+expense, provider quota, and operator pricing/margin distinct.
 
-Each wallet has one explicit currency. Use checked integer fixed-point amounts,
-never floating-point arithmetic. Choose the launch currency, subunit precision,
-rounding policy, and customer tariff before enabling paid traffic. Do not
-silently mix or convert currencies.
+Reservation has two stages:
 
-Represent these separately:
+1. Size the actual prepared request after bridge/continuation expansion using
+   a supported counter or versioned conservative route-specific text/media bound.
+   Account for the most expensive possible context band. Bytes are not exact
+   tokens; the model's whole context window is not this request's input size.
+2. Resolve a client output limit or the key/workspace/service default and a
+   finite enforceable route bound. This applies to every paid protocol. Include
+   supported reasoning/cache/media/tool costs without double-counting components.
 
-- **Customer charge**: amount Relay bills the workspace under its published
-  tariff.
-- **Provider expense**: actual, estimated, or unknown cost incurred by a
-  physical provider attempt.
-- **Provider quota**: subscription or account allowance observed from a
-  provider; it is not a customer balance.
-- **Operator price/margin**: configured commercial pricing, not provider
-  expense evidence.
-
-For a request, move a bounded amount from wallet-available to wallet-reserved
-before dispatch. Use a two-stage calculation:
-
-1. **Pre-dispatch input sizing** runs before the PostgreSQL reservation
-   transaction, after bridge preparation and continuation expansion. Prefer a
-   supported token counter; otherwise use a versioned conservative bound for
-   that route's text and media shapes. A byte heuristic is not an exact token
-   count, and a universal fixed media weight is not a safe bound. Reserve for
-   the most expensive applicable context band within that bound; final reported
-   usage determines the actual tariff band. Reject requests whose supported
-   bounds cannot fit the route limits. Do not use the advertised full context
-   window as a substitute for sizing this request.
-2. **Stage-two reservation** runs after the route and tariff revision are
-   known. Normalize the output cap to the explicit client limit, or to
-   `default_reserved_output_tokens` resolved by key, workspace, and service
-   policy. The launch default is configurable (for example, 8,192 tokens);
-   it applies to every paid protocol, not only Messages. An explicit larger
-   output cap must be requested by the client and must fit the route's hard
-   output limit and wallet reservation bound.
-
-The server does not reserve against the model's full passport window merely
-because the client omitted an output limit. The effective reservation is
-derived from the input estimate, selected context band, effective output cap,
-allowed request options, and the exact public tariff. Map the effective cap to
-supported native upstream controls, including billable reasoning where needed.
-Do not add reasoning twice when an upstream output cap/count already includes
-it. Stopping visible output locally is not proof that upstream computation and
-billing stopped. Cache reads/writes, media, and paid tools need their own
-supported bounds. If a candidate route changes these bounds before dispatch,
-revalidate and adjust the reservation atomically first. Reject paid dispatch if
-no valid tariff or finite enforceable bound exists.
-
-Snapshot the tariff version, input-sizing method and result, context band,
-effective output cap, and reservation calculation inputs on the request. After
-the request, settle the customer charge once from validated billable usage and
-release the unused reservation. Partial execution follows the reconciliation
-policy above. Missing provider usage is `unknown`, never an invented zero;
-only routes with an approved billable-usage policy may serve paid traffic.
-Retries do not create duplicate logical customer charges, while every attempt
-that reached a provider retains its own expense and usage outcome.
+Snapshot tariff, sizing method/result, context band, output cap, and calculation
+inputs. Unsupported/unbounded requests or missing tariffs cannot enter paid
+dispatch. Stopping visible output does not prove stopped provider billing.
+Settle one logical customer charge from supported evidence; each physical
+attempt retains separate expense/usage even when it fails.
 
 ### Estimation risk and provider expense
 
-`settled_by_stream_estimate` describes a customer settlement policy, not
-confirmed upstream usage or expense. Visible text cannot establish hidden
-reasoning tokens, cache hits/writes, or processing that continued after a
-disconnect. An uncached input estimate can overstate the customer tariff while
-unobserved thinking can understate provider expense; neither direction is
-established until comparable evidence arrives.
+Stream estimates are customer policy, not confirmed usage/expense. Retain:
 
-For every physical attempt retain numeric evidence and an explicit audit
-classification:
+- final/partial/missing usage completeness and nullable component observations;
+- the logical settlement reference and its basis/tariff/cap;
+- estimator version, sizing/output counters, and observation gaps, without bodies;
+- confirmed/estimated/unknown provider expense and its currency/evidence;
+- divergence risk and bounded reasons for unobserved reasoning/cache, missing
+  final usage, estimates, gaps, or waiver.
 
-| Field | Meaning |
-| --- | --- |
-| `usage_completeness` and component observations | Final, partial, or missing upstream usage, with observation time/watermark. Absent reasoning/cache counters remain null, not zero. |
-| `customer_settlement_ref` | Link to the logical request's one settlement and its basis, tariff, cap, and closure policy; not another per-attempt customer debit. |
-| `estimate_method`, `estimate_version`, estimate inputs | Input-sizing result, substantive output delta counts, and known observation gaps. No saved prompt or output text is needed for these counters. |
-| `provider_expense_state` | Confirmed, estimated, or unknown, with nullable amount/currency and evidence source. Never copy the customer charge here. |
-| `charge_expense_divergence_possible` | Required true when closure relies on stream estimates or incomplete reasoning/cache/delivery evidence; false must not be the default for missing evidence. |
-| `divergence_reasons` | Bounded codes such as `hidden_reasoning_unobserved`, `cache_hit_unknown`, `cache_write_unknown`, `final_usage_missing`, `input_sizing_estimated`, `observation_gap`, or `customer_waiver`. |
-
-Capture upstream counters before translating them for the client. Keep
-provider-reported counters and Relay estimates separate, including through a
-protocol bridge. Cumulative observations are merged once, not summed as
-independent usage frames; preserve provider semantics where reasoning or cached
-input is already included in a total.
-
-The operator sees the settlement basis, uncertainty reasons, and expense
-evidence together. Aggregate dashboards distinguish confirmed margin from
-estimated exposure; unknown expense cannot produce a confirmed profit. The
-expected difference from Relay's published markup is not itself an anomaly.
-Any later numeric comparison must use matching request/attempt coverage,
-currency, and the snapshotted tariff. Preserve the original estimate and risk
-flag as audit evidence after reconciliation rather than rewriting history.
+Merge cumulative snapshots once. Unknown expense cannot produce confirmed profit.
+Compare matching currency and request/attempt coverage; preserve original
+estimates as audit evidence after reconciliation.
 
 ### Wallet transactions and contention
 
-Use short `READ COMMITTED` transactions with guarded row updates for hosted
-wallet operations. Do not require `SERIALIZABLE` for the single-wallet hot
-path and do not perform a separate balance read followed by an unconditional
-decrement. The wallet is a synchronous, reconstructible journal projection.
-A reservation's wallet update has this shape:
+Use short `READ COMMITTED` transactions with guarded updates, not a separate
+balance read and unconditional decrement. The reservation update checks the
+authenticated wallet/workspace/currency, positive amount, and `available >= hold`.
+The unique operation/idempotency claim, wallet update, reservation, balanced
+postings, and request price snapshot commit together or all roll back.
 
-```sql
-UPDATE wallets
-SET available = available - $1,
-    reserved = reserved + $1,
-    version = version + 1
-WHERE workspace_id = $2
-  AND wallet_id = $3
-  AND currency = $4
-  AND $1 > 0
-  AND available >= $1
-RETURNING wallet_id, available, reserved, version;
-```
+Settlement/release conditionally closes the exact held reservation once. For
+hold `H` and charge `C`, require `0 <= C <= H`, remove `H` from reserved, and
+return `H - C` to available. Release uses `C = 0`; a verified zero tariff may
+have zero hold, but missing pricing may not. Losing concurrent closers read the
+committed result instead of decrementing reserved again.
 
-Amounts use the checked integer subunits of the wallet currency. Wallet and
-workspace IDs come from authenticated server state. This update is only one
-part of a transaction, never a standalone money operation:
+Use uniform lock order and bounded lock/statement timeouts. Retry whole
+transactions for supported transient failures. A lost commit acknowledgement
+requires same-operation lookup, never inference resend. All credit/refund/adjustment
+and spend-counter writers use this accounting owner. Measure wallet contention;
+`READ COMMITTED` does not remove locks or make arbitrary multi-row decisions safe.
 
-1. Claim a unique accounting operation ID and the scoped logical request
-   idempotency identity. A committed duplicate returns its recorded result,
-   without repeating any wallet mutation.
-2. Apply the guarded wallet update. No returned row is a rejection, not a
-   successful reservation; roll back the operation claim and all financial
-   writes. Database failures are not reported as insufficient balance.
-3. Insert the reservation, balanced `journal_postings`, and request/pricing
-   snapshot in that same transaction. Commit all of them before dispatch; a
-   failed journal or reservation write rolls back the wallet update too.
-
-Settlement and release use a conditional transition of that exact reservation
-from `held` or `held_for_reconciliation` to one terminal state. The transition,
-unique closure operation, wallet projection, and postings commit together.
-For a held amount `H` and authorized charge `C`, require `0 <= C <= H`, subtract
-`H` from reserved, and return `H - C` to available. Release is the same closure
-with `C = 0`. A losing concurrent closer rolls back all its writes and reads
-the committed outcome; it must not decrement the aggregate reserved balance
-again. A validated zero-price route may record a zero hold, but missing pricing
-must never be converted into one.
-
-Conditional updates still acquire row locks and wait behind a concurrent
-writer. `READ COMMITTED` rechecks the balance predicate after that writer
-commits; it does not remove contention. Use a uniform lock order for wallet,
-reservation, and journal operations, bounded lock/statement timeouts, and
-bounded whole-transaction retries for deadlocks or transient failures. Never
-retry only the decrement. If the commit acknowledgement is lost, look up the
-same operation ID before retrying; do not resend inference.
-
-Other balance writers (credits, refunds, adjustments) use the same accounting
-owner and transaction rules. Additional key/workspace spend counters must be
-updated atomically with reservation in a consistent lock order. This design
-does not make arbitrary multi-row decisions safe under `READ COMMITTED`.
-Measure wallet lock wait, transaction latency, database pool wait, and
-reconciliation lag with 8-16 concurrent requests in one workspace as well as
-many workspaces. No wallet lock or database transaction spans provider I/O,
-streaming, or a callback to an external payment service.
-
-Payment flow is:
-
-```text
-payment intent -> provider checkout -> signed callback verification
-               -> idempotent provider event -> journal credit -> receipt
-```
-
-Use a unique provider event ID and idempotency key. A callback cannot choose
-its credited workspace or amount; those come from the server-side payment
-intent and verified provider response. Duplicate, delayed, invalid, refunded,
-and out-of-order callbacks have explicit transitions. Admin credits, debits,
-refunds, and corrections require an actor, reason, reference, and immutable
-audit event. Payment adapters can be selected independently from the ledger
-contract.
+Payments follow server intent → signed verified event → idempotent journal
+credit → receipt. Provider event IDs are unique. Callbacks cannot choose the
+workspace/amount. Duplicate, delayed, refunded, and out-of-order events have
+explicit transitions; administrative money changes require actor/reason/reference.
 
 ## Usage and operator views
 
-Store one logical request row with `workspace_id`, authenticated `user_id`
-when the credential identifies one, `key_id`, public model, timestamps, final
-state, customer charge, usage counters, and safe diagnostics. Store physical
-attempts separately with attempt number, pool/member reference, upstream model,
-protocol/adapter, configuration revision, dispatch outcome, latency, provider
-usage, provider expense state, retry reason, and the estimation-risk fields
-defined above. Do not sum a linked logical customer settlement once per
-physical attempt.
+Store tenant/key-scoped logical outcomes and separate physical attempts with
+route revision, execution certainty, usage, expense, retry reason, and risk.
+Never sum the logical charge once per attempt. A shared key identifies a key
+and workspace, not the human who used it; individual attribution needs assigned keys.
 
-Attribute identity from the authenticated session or the user to whom an
-individual inference key is assigned, never from request JSON or a model name.
-Issue separate keys per user when operator reporting must identify the actual
-person. A shared key can identify the key and workspace, but cannot prove which
-human used it; label that activity accordingly instead of attributing it to the
-key creator. Persist no prompt or response body by default. Secrets,
-authorization headers, cookies, raw provider errors, and provider response
-bodies do not belong in logs, audit records, metrics labels, or support exports.
-
-Users see only their workspace's request history, balance journal projection,
-keys, model access, and safe errors. Operators can filter activity by user and
-inspect route/attempt metadata, balance operations, and status, but raw prompts
-and provider secrets remain unavailable by default. Sensitive administrative
-reads and all state-changing actions are audited. Retention and account
-deletion must preserve legally required financial records while removing or
-anonymizing eligible personal data.
-
-Keep operational logs, immutable audit events, request usage, provider expense,
-and financial journal as distinct data sets with independent access and
-retention policy. Metrics use bounded labels; never label by key, user, prompt,
-or arbitrary model input.
+User views are tenant-scoped. Privileged changes/reads are audited. Operational
+logs, audit, usage, expense, and journal have separate access/retention. No raw
+prompts, responses, cookies, authorization, or provider bodies by default; authorized
+continuation content is the separate policy above. Metrics labels are bounded,
+not key/user/prompt/arbitrary-input labels. Deletion retains required financial
+records while removing eligible personal data.
 
 ## Local and hosted pool transfer
 
-The local pool is an authoring and migration source, not an automatic
-synchronization authority. Settings presets, account transfer, hosted grants,
-and user billing data remain distinct records.
+Use a revisioned preview/apply/recovery operation, not implicit synchronization.
+Manifests contain portable settings, route declarations, rules, and credential
+references, not user wallets, usage, keys, sessions, or conversations.
 
-Use a revisioned import operation:
+Static API sources default to `copy`. OAuth defaults to `stage_and_drain`:
+atomically drain/disable the local refresh owner before transferring its secret.
+Secrets move only after confirmation over HTTPS directly into the destination
+vault. Unsupported transfers require destination sign-in.
 
-1. The operator connects to the hosted service and selects the destination
-   workspace and local pool.
-2. The desktop creates a manifest of portable settings, physical connections,
-   route declarations, model rules, and credential references. It does not
-   include user balances, usage history, API keys, sessions, or conversations.
-3. The server stages the manifest and returns a preview: added/changed items,
-   duplicates, ownership, models without viable routes, context/features,
-   expected grants, and credentials requiring reauthentication.
-4. The transfer default depends on the credential kind:
-   - static API sources use `copy`, allowing bounded parallel verification;
-   - OAuth connectors such as `codex` and `excel_bps` use
-     `stage_and_drain`. Before the server receives the secret, the desktop
-     atomically marks the local account `draining` or `disabled`, so two
-     refresh owners cannot race the same provider session.
-   A move remains explicit and keeps the source recoverable until hosted
-   verification completes.
-5. Transfer secrets only after explicit confirmation, over HTTPS, directly
-   into the server vault. Never write them into a portable preset, ordinary
-   log, or support bundle. Credentials that cannot safely transfer require a
-   fresh sign-in on the destination.
-6. Validate the full target configuration, authorize ownership, apply one
-   revision, build the runtime, and perform a bounded probe without paid
-   generation unless explicitly requested.
-7. Report the resulting revision and per-item outcome. On failure, roll back
-   the hosted revision. For `stage_and_drain`, restore the local OAuth account
-   to `active` automatically if the hosted revision was not applied; for a
-   successful apply, keep the local account drained until the operator
-   explicitly completes the move or restores it.
-8. Mark a move complete only after the operator verifies the hosted pool;
-   then remove the source copy through an explicit confirmation. A failed
-   transfer must not delete the local credential or leave it permanently
-   disabled.
-
-The reverse flow follows the same preview, permission, secret, revision, and
-recovery rules. A workspace can export only connections it owns or is allowed
-to transfer. Never transfer opaque provider conversation state or silently
-overwrite a newer local or hosted revision.
+Validate/apply the target revision and return per-item outcomes. Failure before
+apply rolls back Hosted and restores the drained local account; success keeps
+the source drained until an explicit completion/restore. Delete the source only
+after operator verification and confirmation. Reverse transfer follows the same
+rules. No newer revision or opaque conversation state is overwritten/transferred.
 
 ## Data and deployment
 
-PostgreSQL owns durable hosted state. Use append-only migrations and explicit
-transaction boundaries. Expected top-level records include:
+PostgreSQL owns identities/workspaces, grants/keys, pool/route revisions,
+wallet/journal/reservation/payment records, request/attempt/audit/import records,
+and continuation metadata. Initial migrations include tenant-scoped references,
+deduplication, reservation closure uniqueness, and continuation versions/expiry.
+This is a domain inventory, not a prescribed table-per-noun schema.
 
-```text
-users, external_identities, sessions
-workspaces, memberships, pools, pool_members, sources, credential_refs
-model_grants, route_revisions, api_keys
-wallets, journal_transactions, journal_postings, reservations
-payment_intents, payment_events
-logical_requests, physical_attempts, audit_events, import_operations
-continuation_sessions, continuation_payload_refs
-```
+Start with one versioned API image, bounded workers, PostgreSQL, encrypted vault,
+and HTTPS; Docker Compose is the installation contract. Keep database and secrets
+off public ingress and out of committed images/configuration. Choose region from
+provider permission/availability, user latency, residency, payments, and operations;
+narrow the launch set instead of assuming one region supports every provider.
 
-This is a domain inventory, not a required one-table-per-name schema. Enforce
-unique idempotency keys, tenant-scoped foreign keys, valid state transitions,
-nonnegative available balances, and append-only financial/audit records in
-database constraints or narrowly owned transaction code. The first hosted
-schema includes scoped deduplication keys, one terminal closure per reservation,
-continuation origin links to logical requests/physical attempts, and
-continuation version/expiry indexes. Payload references are optional and obey
-the encrypted-state policy. Tenant-facing continuation references must not
-make shared provider inventory or another workspace's state enumerable.
-
-Choose the first deployment region as the intersection of the initial paying
-users' latency needs, each provider product's documented regional availability,
-data-residency obligations, payment support, and an operator's ability to
-support that jurisdiction. Do not select a region to bypass a provider's
-availability or account restrictions. If no single region satisfies the
-initial provider set, narrow the launch set or design an explicitly reviewed
-provider-specific egress path; do not pretend one region supports every source.
-Start with one API deployment region and add regions only when user demand,
-provider rules, and measured latency justify the added state and recovery
-complexity.
-
-The first hosted deployment should have one versioned API image, bounded
-workers, PostgreSQL, a persistent encrypted credential store, and HTTPS
-ingress. Docker Compose is the canonical installation; an install script may
-prepare and run that same deployment. Do not expose PostgreSQL to the public
-internet. Keep database, vault, and payment credentials out of images and
-compose files committed to source.
-
-Backups must include a consistent database snapshot and the matching encrypted
-vault material. Test restore into an isolated environment and validate keys,
-credential references, balances, usage links, and a synthetic request before
-accepting restored traffic. Include authorized continuation payloads and their
-key material in the recovery plan without extending TTLs or resurrecting
-revoked keys and expired provider state. Reconcile restored in-flight financial
-operations before enabling paid dispatch. Health endpoints expose readiness,
-not secrets.
-
-Add caches or a distributed queue only when measured load requires them.
-PostgreSQL remains the authority; ephemeral caches never decide identity,
-authorization, wallet balance, model grants, or settlement. Multi-instance
-inference later requires shared admission limits, physical-member leases,
-cross-node enforcement of the existing durable continuation ownership, and
-idempotent usage delivery.
+Back up consistent database/vault/key material and authorized continuation state.
+Restore in isolation, validate references/balances/revocation/expiry, reconcile
+in-flight money, then accept traffic. Backups do not extend TTLs or revive revoked
+keys. Caches are not identity/wallet/grant authority. Multiple inference nodes
+require shared admission/member leases, durable ownership, and idempotent usage.
 
 ## Capacity and server sizing
 
-Do not use registered-user count as an inference capacity promise. Track these
-quantities separately:
+No unmeasured hardware-to-user/generation promise. Distinguish registered users,
+active users, concurrent generations, and request shape. Effective capacity is
+the minimum of server/database/worker capacity, eligible physical-member limits,
+provider quota, workspace limits, and key limits. Shared upstream principals
+need a shared quota fence; aliases and protocols are not extra slots.
 
-- **Registered users**: identities and workspaces stored in PostgreSQL. A
-  single node can hold many thousands of mostly idle users; this number is
-  primarily a product, database, and support concern.
-- **Active users**: users making requests during a time window. This drives
-  authentication, model listing, usage reads, and admission traffic.
-- **Concurrent generations**: requests that have reserved a physical member or
-  are streaming from a provider. This is the critical capacity number.
-- **Request shape**: input tokens, output cap, long-context mode, tools,
-  images, stream duration, and whether the request needs a durable
-  continuation. A long-context stream can consume the same server slot for
-  much longer than a short completion.
-
-The effective generation limit is the minimum of the independent ceilings:
-
-```text
-C_effective = min(
-  C_server,
-  C_database_and_workers,
-  sum(C_eligible_member),
-  C_provider_route_quota,
-  C_workspace,
-  C_key
-)
-```
-
-`C_eligible_member` is counted per physical provider member, not per protocol
-adapter or public model alias. If two credentials belong to the same upstream
-principal and share a provider quota, aggregate them under one quota fence
-instead of counting them as independent capacity. Provider limits can also be
-measured in requests per minute, tokens per minute, daily quota, spend, or
-concurrent sessions; the scheduler must enforce all applicable dimensions.
-
-For a first single-node paid deployment, use admission limits below as
-starting policy, not as a service-level guarantee:
-
-| Deployment profile | Typical node shape | Initial generation cap | Policy |
-| --- | --- | ---: | --- |
-| Budget launch, all-in | 4 vCPU, 8-16 GB RAM, local PostgreSQL, bounded workers | 20-30 | Prefer short context; queue briefly, then return a stable overload error. |
-| Compute-focused launch | 8 vCPU, 16 GB RAM, local PostgreSQL, separate backup target | 40-60 | Increase only after load tests and provider-quota observation. |
-| Long-context-heavy pool | Any of the above | 10-25 | Use a separate context band and stricter per-workspace limits. |
-
-These caps assume an async Rust service, bounded request bodies, streaming
-backpressure, no prompt/response archiving, and a small number of management
-workers. They are deliberately below a theoretical CPU maximum so that
-PostgreSQL commits, settlement, refresh jobs, TLS, and operator actions keep
-latency predictable. They must be replaced by measured limits from a
-synthetic load test using the real request mix.
-
-At launch, enforce a small hierarchy such as:
-
-- 2-4 concurrent generations per inference key;
-- 8-16 per workspace;
-- a global server cap from the table above;
-- a separate bounded waiting queue per priority class;
-- immediate rejection with a request ID and retry hint when the queue or
-  reservation budget is exhausted.
-
-Provider accounts normally become the first bottleneck. For example, ten
-eligible physical members with an observed limit of four concurrent requests
-each provide at most forty provider slots before token, spend, or daily
-quotas reduce the usable number. The server must not promise forty slots if
-only two members are healthy, if the same upstream quota is shared, or if the
-requested model/context is supported by fewer members.
-
-Scale decisions should use measured signals: active streams, queue age,
-provider `429` rate, p95 admission latency, database pool wait time, CPU,
-memory, network, settlement lag, and vault/refresh failures. First increase
-the single node or add pool members when the provider is the bottleneck.
-Introduce a second inference node only after shared PostgreSQL admission,
-member leases, continuation ownership, idempotent usage delivery, and
-restore/recovery tests exist. A `$100` single-node installation is therefore
-appropriate for an initial controlled launch, not for an HA or
-unbounded-public-traffic promise.
+Bound per-key/workspace/global concurrency, queue age, bodies, stream duration,
+and reservations. Select limits from the real request mix and measure active
+streams, p95 admission/DB/lock waits, 429s, CPU/memory/network, settlement lag,
+and vault/refresh failures. Add another inference node only after its shared-state
+and recovery contracts exist, not from a speculative server-price table.
 
 ## Delivery and acceptance
 
-The dependency order is owned by
-[ROADMAP.md](ROADMAP.md#delivery-stages); the workstreams below define the
-acceptance scope, not a separate implementation schedule.
+The order is in [ROADMAP.md](ROADMAP.md#delivery-stages). Paid launch remains
+blocked until acceptance establishes:
 
-1. **Contract and threat model**: decide workspace ownership, shared versus
-   private provider capacity, sign-in/linking methods, currency, pricing,
-   partial-failure charging, data retention, provider commercial-use permission,
-   and launch regions. Record each decision before schema or payment
-   integration.
-2. **Hosted foundation**: PostgreSQL migrations, identity linking, workspaces,
-   membership checks, device-paired desktop management, audit, and vault
-   references, including scoped request idempotency and continuation ownership
-   in the initial schema. No public paid generation yet.
-3. **Catalog and pool control**: management CRUD, configuration revisions,
-   credential lifecycle, grants, route health, and per-workspace model
-   projection. Verify private inventory isolation.
-4. **Accounting**: immutable ledger, reservations, settlement, adjustments,
-   idempotent payment events, bounded reconciliation, and explicit estimation
-   risk. Prove `READ COMMITTED` guarded updates, atomic postings, concurrency,
-   and recovery before enabling charges.
-5. **Inference**: user-scoped keys, native-surface model listing, request
-   admission, safe route handoff into `relay-core`, provider-native streaming,
-   usage attribution, SDK-compatible duplicate errors, and committed
-   continuation recovery. Allow qualified ingress bridges without substituting
-   upstream vendors or models. Enable only routes with approved commercial
-   use, supported pricing, and billable usage policy.
-6. **Entry channels and import**: website and existing Telegram flows use the
-   same identity/account APIs; add local-to-hosted and hosted-to-local
-   revisioned transfer.
-7. **Release operations**: Docker installation, TLS, monitoring, rate limits,
-   backup/restore, migrations, incident recovery, and real-client/provider
-   acceptance.
-
-Release is blocked unless tests prove:
-
-- two channels resolve to one linked user and the same workspace state;
-- no user or key can enumerate, read, spend, or infer another workspace's
-  private resources;
-- the same physical member is counted once for quota, load, and rotation even
-  when several workspaces can use it;
-- concurrent reservations cannot overspend, and ledger replay matches the
-  balance projection;
-- competing reservations on one wallet, duplicate settlement/release jobs, a
-  failed posting insert, deadlock/timeout retries, and a lost commit
-  acknowledgement leave one financial effect or a full rollback; test these
-  against real PostgreSQL, not only an in-memory accounting mock;
-- retries, timeouts, cancellation, late usage, payment callbacks, and process
-  restarts settle exactly once or remain explicitly uncertain;
-- reconciliation releases holds by the configured policy after its deadline;
-  hidden-reasoning and cache-hit/miss fixtures preserve missing counters and
-  the divergence flag, never present a stream estimate as confirmed expense,
-  and do not create a second charge from late usage;
-- SDK JSON and streaming retries receive a valid non-2xx error envelope for
-  completed, in-progress, and conflicting duplicates; test supported
-  OpenAI/Anthropic SDK versions with default retries and with retry hints
-  ignored, proving one logical request, reservation, and generation;
-- after graceful and abrupt restarts, an unexpired completed-turn checkpoint
-  resumes on its exact owner, including a turn awaiting tool results; missing
-  payload, expired state, changed credentials, revoked keys, incompatible
-  versions, and cross-tenant references fail without replay or substitution;
-- a crash before checkpoint commit cannot turn a pending response/tool call
-  into a reusable continuation; simultaneous next turns are fenced, and
-  continuation-storage refusal does not silently enable content retention;
-- model lists and context limits match exact grants and runnable routes;
-- each public provider surface preserves the selected upstream provider's
-  native request, response, stream, error, and usage contract; ingress bridges
-  may convert client protocols, but there is no cross-provider model
-  substitution or fallback;
-- no shared paid route is active without documented provider permission,
-  regional availability, billable usage, and bounded customer pricing;
-- imported credentials, ownership, and configuration recover after partial
-  failure without deleting the source;
-- logs, metrics, exports, and user/operator views contain no forbidden secrets
-  or raw prompt/response data; any authorized encrypted continuation content
-  is separately access-controlled and expires under its explicit policy.
+- Linked channels share identity/state; tenant/key isolation prevents enumeration,
+  cross-workspace reads, grants, continuation reuse, and spending.
+- Physical capacity/quota is counted once; model/context projection matches grants
+  and exact runnable provider surfaces without cross-vendor substitution.
+- Real PostgreSQL tests cover same-wallet contention, duplicate closure/payments,
+  failed postings, rollback, deadlock/timeout retry, and lost commit acknowledgements.
+- Cancellation/late usage/restart settles once or remains explicitly uncertain;
+  reconciliation deadlines release holds and preserve estimate/expense uncertainty.
+- Supported SDK JSON/SSE duplicate requests receive valid non-2xx envelopes,
+  including ignored retry hints, without another hold or generation.
+- Graceful/abrupt restart restores only valid committed completed turns, including
+  turns awaiting tool results. Pending, expired, revoked, foreign, or unavailable
+  payload state fails without content retention or replay being silently enabled.
+- Routes have reviewed commercial permission, region, billable usage, tariff,
+  finite bounds, and real-client/provider qualification.
+- Transfers and isolated backup/restore recover without deleting source credentials;
+  logs, exports, operator views, and metrics expose no forbidden content/secrets.

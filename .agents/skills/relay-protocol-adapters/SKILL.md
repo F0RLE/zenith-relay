@@ -24,6 +24,9 @@ and [ROADMAP.md](../../../docs/project/ROADMAP.md) for unfinished acceptance.
   dispatch and the owning converter under `crates/relay-core/src/protocol/adapter`.
   All twelve cross-protocol routes use the shared typed translation pipeline;
   four matching-protocol routes bypass it and preserve native wire extensions.
+  Portable types live in `translation/model.rs`; `AdapterContinuationState`
+  and `AdapterContinuationStore` are shared state owners, not Messages-only
+  implementations. Do not restore protocol-named compatibility aliases.
 - For continuation, trace `contracts/bridge.rs`, `store.rs`, and
   `translation/continuation.rs` with their callers. Distinguish restored native
   state from client-supplied history and foreign opaque payloads.

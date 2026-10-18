@@ -1,28 +1,23 @@
 # Relay instructions
 
-Relay is a separate local-first desktop and personal-pool product. Apply the
-workspace [AGENTS.md](../AGENTS.md) when present; production Zenith rules do not
-define Relay.
+Relay is a separate local-first desktop/personal-pool product. Apply the workspace
+[AGENTS.md](../AGENTS.md) when present; production Zenith contracts do not define Relay.
 
 ## Sources of truth
 
-- Source code and focused tests define implemented behavior.
-- Use [PLANNING.md](docs/project/PLANNING.md) for the affected current contract
-  and [ROADMAP.md](docs/project/ROADMAP.md) for planned work or acceptance gates.
-- Localized Help owns user steps; `CONTRIBUTING.md` owns development and
-  release procedures. Plans and memory do not prove implemented behavior.
+- Code and focused tests define behavior; plans and memory are not evidence.
+- [PLANNING.md](docs/project/PLANNING.md) owns current contracts;
+  [ROADMAP.md](docs/project/ROADMAP.md) owns open work and acceptance gates.
+- Localized Help owns user steps; `CONTRIBUTING.md` owns development/releases.
 
-When sources conflict, inspect the owning code and correct each affected
-document in scope. Avoid copying architecture details into multiple files.
-For API integrations and protocol adapters, follow the official provider contract
-workflow in [CONTRIBUTING.md](CONTRIBUTING.md#api-and-protocol-references).
-For Relay protocol conversions, use the
-[relay-protocol-adapters skill](.agents/skills/relay-protocol-adapters/SKILL.md)
-for implementation references and conversation acceptance.
-For account sign-in, reauthentication, or imports, use
-[relay-account-connectors](.agents/skills/relay-account-connectors/SKILL.md).
-For account admission, renewal, observations, and removal in the pool, use
-[relay-account-pool-lifecycle](.agents/skills/relay-account-pool-lifecycle/SKILL.md).
+Resolve conflicts at the owning code and document; do not duplicate contracts.
+Load guidance for the affected task only:
+
+- API/protocol work: [official references](CONTRIBUTING.md#api-and-protocol-references)
+  and [protocol skill](.agents/skills/relay-protocol-adapters/SKILL.md).
+- Sign-in/import/reauthentication: [connectors](.agents/skills/relay-account-connectors/SKILL.md).
+- Pool admission/renewal/quota/removal: [lifecycle](.agents/skills/relay-account-pool-lifecycle/SKILL.md).
+- Agent instructions or GPT-6 prompting: [agent guidance](CONTRIBUTING.md#agent-guidance).
 
 ## Ownership
 
@@ -33,28 +28,28 @@ For account admission, renewal, observations, and removal in the pool, use
 | `crates/relay-core` | Shared discovery, scheduling, protocols, gateway, quota, usage |
 | `relay-server` | User-managed runtime, encrypted vault, persistence, management API |
 
-Keep validation and side effects in Rust. Keep hosted API, local pool, and
-user-managed server distinct. Never import production credentials, customer
-inventory, or internal Gateway/Control logic. Accounts stay on the user's device
-by default. Store secrets only in the credential store or that user's encrypted
-server vault; transfer requires explicit confirmation. Management tokens and
-pool request keys are distinct. Redact snapshots, logs, exports, and diagnostics.
+Keep validation/side effects in Rust and hosted API/local pool/server distinct.
+No production credentials, customer inventory, or Gateway/Control business logic
+in Relay. Accounts stay local by default; secrets use the credential store or
+the user's encrypted server vault. Transfers need explicit confirmation;
+credential exports need explicit user action. Management tokens and pool keys
+are distinct. Redact snapshots, logs, support bundles, and diagnostics.
 
-Preserve account inventory; resolve model meaning from Relay's validated
-reference catalog, not participant capability declarations. Price evidence,
-quota monitoring, and route eligibility are separate concerns; detailed rules
-live in `PLANNING.md`. Retry only after a proven pre-execution rejection or
-not-sent outcome, before response bytes reach the client, and with preserved
-ownership. Complete history does not make unknown execution safe to repeat.
-Server migrations are append-only. Profile
-recovery follows inspect, snapshot, attach, verify, and restore, preserving
-newer user logins.
+Preserve account inventory. Model meaning comes from Relay's validated catalog,
+not participant declarations. Price evidence, quota, and route eligibility are
+separate; `PLANNING.md` owns their contracts. Retry only after proven
+pre-execution rejection or not-sent, before client output, preserving ownership.
+History does not make uncertain execution safe to repeat. Server migrations are
+append-only. Profile recovery uses inspect/snapshot/attach/verify/restore and
+preserves newer user logins.
 
-Check branch, status, and local changes before editing. Complete the requested
-local change in the owning layer and update callers when its contract changes.
-Choose validation from [CONTRIBUTING.md](CONTRIBUTING.md#verification) for the
-affected behavior, respecting user and harness permissions. Contributor docs
-need content/link and diff checks; a text edit does not require the complete
-desktop, server, and browser suites. Review and release gates still apply when
-preparing those actions. Do not commit, push, create PRs, merge, deploy, or
-publish without explicit current authorization.
+Check branch/status and preserve unrelated work. Implementation requests authorize
+scoped local edits and non-destructive checks; review requests authorize inspection.
+Continue through the requested result and fix regressions caused by the change.
+Ask only when missing information changes correctness, scope, or safety.
+
+Use the affected [checks](CONTRIBUTING.md#verification); broaden or repeat them
+only for new changes, failures, or unresolved concerns. Docs need content/link
+and diff checks, not full runtime suites. Release gates remain separate. Commit,
+push, PR, merge, deploy, publish, external messages, and subagents require explicit
+current authorization.

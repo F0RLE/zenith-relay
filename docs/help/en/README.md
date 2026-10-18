@@ -116,6 +116,32 @@ In pool mode it shows request counts, connections, models, errors, and charts.
 Choose a period and connection for the statistics. Open **Usage** for
 the details of an individual request.
 
+### Reading the charts
+
+**Today** shows 24 hourly intervals including the current hour; **Week** shows
+7 days and **Month** 30 days. Times are local. The connection selector above
+the charts limits their data to that account or API source.
+
+The top **Requests** and **Errors** counters use the same filter; errors count
+all recorded unsuccessful requests. **Connections** counts enabled accounts and
+API sources, not confirmed healthy connections. **Models** counts models
+published by the pool API.
+
+| Chart | Meaning |
+| --- | --- |
+| **Token usage** | Input includes instructions, history and tools; output includes the model's answer and reported reasoning. Cache reads and writes are parts of input, not additional tokens to add again. The left axis shows tokens; the right axis shows the cache-hit percentage. |
+| **API equiv. used** | Estimated API-price value of recorded usage, not a subscription debit or balance. Missing prices make the estimate incomplete. |
+| **Requests** | Recorded requests per interval, including errors. Open **Usage** for individual outcomes. |
+| **Generation speed** | Observed output speed after the first token, excluding reported reasoning tokens; tokens/s. Time waiting for the first token is excluded. |
+| **E2E speed** | Output tokens divided by the full request duration, including the wait for the first token; tokens/s. It is not directly comparable to generation speed. |
+
+The legend names each color. The purple dashed **Cache hit rate** line is the share
+of input tokens read from cache, not remaining quota or context-window usage.
+The number in each chart header summarizes the selected period; speed uses
+summed tokens and measured time, not the arithmetic mean of plotted points.
+Hover or focus a point/bar for its exact value. A gap or **—** means no
+measurement, not necessarily zero usage. Loading failures show a warning.
+
 ### Balances and estimates
 
 Provider balance, subscription quota, and **API equiv. used** mean different
@@ -146,6 +172,10 @@ A switch cannot turn an ordinary ChatGPT connection into BPS. To use BPS,
 sign in separately through **Excel / Basis Points** with a non-Free account.
 Free BPS sign-in and imports are rejected. This connection cannot
 use **Launch in ChatGPT** on the card; connect the application through the pool.
+
+Relay does not require a phone number or SMS verification for **Excel / Basis
+Points** authorization, quota reads or use of available quota. This does not
+disable the provider's own account checks during sign-in.
 
 1. Select **Open sign-in window** and complete sign-in. Relay accepts
    the result automatically.
@@ -214,8 +244,8 @@ When a request fails, open it in **Usage**:
 | `429` | Wait for the displayed pause to end. Signing in again and sending frequent requests do not remove the limit. |
 | Parameter or history error | Check the named field and route capabilities. Repeating an incompatible request does not fix its format. |
 
-If you use a proxy, assign it to the connection; set its timezone separately
-in **Connections → Proxies**. A proxy and timezone setting alone do not
+If you use a proxy, assign it to the connection; Relay detects and saves its
+timezone automatically. A proxy and timezone setting alone do not
 confirm model access.
 
 BPS exports support **Zenith** and **Sub2API** formats. Sub2API transfers
@@ -300,8 +330,15 @@ The result survives a restart, so check its date too.
 A successful connection test does not prove access to a model.
 Relay does not bypass a failed assigned proxy with a direct connection.
 
-Set a proxy's timezone manually using its clock button; the connection check
-does not determine it. **Leave timezone unset** clears this setting.
+Relay checks new proxies automatically and determines the timezone from their
+exit IP. Opening storage also checks proxies without a detected timezone once.
+The timezone appears on the card and applies to future bound account requests
+without saving or restarting Relay or the client application. Explicit account
+timezone choices, including **Don't replace**, remain in force.
+The lookup uses IPWhois through the selected proxy and sends no account tokens.
+If the service cannot determine a valid timezone, Relay does not guess it from
+the country; **Test proxy** can refresh the result later. A failed check keeps
+the known timezone, but a changed exit without a detected zone clears stale data.
 Each card shows account and API-source assignments. Deleting an account proxy
 asks for confirmation and returns those accounts to the common proxy, or to a
 direct connection when no common proxy is set and direct access is permitted.
@@ -545,22 +582,11 @@ the pool continues to distribute generation requests through its API.
 **Keep 1% reserved** is intended to preserve part of the selected account's
 quota for direct ChatGPT launch.
 
-**Context** comes from the model card. In **Pool → Model Rules**, text models
-can use **Short** (the published default, otherwise 25% of a known maximum),
-**Extended** (the full window), or **Custom size**. Custom size is available
-even when no short/long pair is published and is clamped only by a known hard
-route maximum.
-
-Auto compaction runs inside Relay at about 90% of the selected window. There is
-no separate user setting; known input and output limits can lower the
-threshold. Without a known maximum, a native card's published default is kept;
-without an exact native card Relay does not invent a window.
-
-Relay applies the policy to its model catalog immediately without restarting
-the pool. The managed client catalog is refreshed in the background. ChatGPT
-loads a local catalog at startup: close and relaunch it to apply the new context
-to an already open application. Request speed is a request parameter and does
-not require this catalog reload.
+Set context in **Pool → Model Rules**; see [model policies](#models-and-member-policies).
+Relay refreshes its catalog without restarting the pool, but an already open
+ChatGPT needs relaunch to read it. Speed changes do not need that catalog reload.
+Automatic compaction uses about 90% of the selected window, subject to known
+input/output limits; there is no separate compaction switch.
 
 **ChatGPT background tasks** allows automatic activity summaries and task titles.
 **WebSocket for ChatGPT** selects a persistent connection; disabling it uses HTTP.
@@ -568,65 +594,34 @@ Enabling WebSocket requires confirmation to restart the application.
 
 #### Claude Desktop
 
-If context is occupied before you start, inspect Claude's breakdown:
-**MCP tools** and **System tools** are tool definitions, not computer RAM.
-Relay's profile enables on-demand MCP schema loading without removing tools.
-After updating Relay, reconnect or launch Desktop through Relay and start a new
-conversation; an old running Relay and an existing conversation do not update
-themselves. Relay bridges client-owned tool discovery from Messages to other
-protocols. A native Messages route needs upstream support for the original
-feature. System tools, selected skills and the autocompaction reserve remain;
-these figures are not all equivalent to actual billed token usage. Do not
-delete working MCP integrations, skills or history to reduce this indicator.
+In **Computer** mode, start the API and select **Pool → Connect → Claude Desktop**.
+Relay validates the connection, closes Desktop, and writes its own profile while
+keeping other profiles. It launches Desktop again only when automatic launch is
+enabled. For explicit launch, use **Overview → Launch application → Claude Desktop**.
+Managed device inference policy can override the local profile.
 
-In Computer mode, start the local API and choose **Pool → Connect → Claude Desktop**.
-Relay adds its own third-party inference profile without replacing other saved
-profiles. Only enabled pool models with a Messages API route appear, keeping their
-real labels and pool order. Relay uses stable internal route IDs compatible with
-Desktop's model-name validation; the provider still receives the real model ID.
-After updating Relay, reconnect to regenerate a previously rejected model list.
-Each model appears once; reasoning levels are not additional model choices.
-After updating Relay, reconnect or launch Desktop through Relay to refresh an
-older list. Compatible models use Desktop's native Claude Effort selector;
-their internal Claude UI route still resolves to the real pool model. The
-selector uses Claude's own scale, capped to the consecutive supported and
-pool-allowed levels starting at Low. Other levels (including Ultra) are not
-added or silently substituted. Models whose allowed levels cannot be represented
-on that scale keep the ordinary model entry without an Effort selector.
-Reasoning parameters sent by a client remain separate from the model ID and
-follow the real model's supported levels and pool rules; Relay does not force
-an effort from its name.
-Desktop accepts up to 200 models; reduce enabled models if this limit is exceeded.
-Relay preserves the previous profile and leaves Desktop running in that case.
-For OpenAI models, Relay converts Messages to the model's Responses route,
-including standard user metadata. Valid Claude cache hints do not block the
-request, but caching and prices follow the upstream provider, not Claude's
-requested cache TTL. Required features without a compatible mapping still
-return an error rather than silently changing the request.
-The `Claude-3p/configLibrary` directory belongs to Claude's connection profiles;
-it is not the launch path or Relay's own data folder.
-If a connection made by an older Relay version was ignored by Claude, connect
-again after updating Relay. Relay creates a UUID profile that Desktop can read;
-it removes an orphaned old profile only if its endpoint, key and settings still
-match this Relay. Other saved profiles are kept. If the recovery record was lost,
-a matching local Relay profile can be reconnected; an unknown previous selection
-cannot be recovered and is left unset on restore.
+The model list keeps pool labels/order and one entry per enabled Messages-routable
+model. Internal Claude-compatible IDs still route to the real model. Desktop's
+native Effort control appears only for a representable consecutive set of supported
+and pool-allowed levels starting at Low; unsupported levels are not substituted.
+Reduce enabled models if Desktop's 200-model limit is exceeded. Relay rejects
+that setup before changing the old profile or closing Desktop.
 
-Connecting launches the installed desktop app unless automatic launch is disabled
-in Settings. **Overview → Launch application → Claude Desktop** launches it
-explicitly. Windows and macOS launchers distinguish Claude Desktop from the
-Claude Code CLI. Relay validates before closing Desktop and saving the profile.
-With automatic launch disabled it leaves Desktop closed. Explicit launch checks
-the profile and local API and confirms Desktop started. Device-managed inference
-policy can override the local profile.
+After updating the running Relay, reconnect Desktop and start a new conversation
+to refresh its profile and tool settings. **MCP tools** and **System tools** in
+Claude's context breakdown are definitions, not RAM or an exact bill. Relay
+enables on-demand MCP schemas; do not delete working tools, skills, or history
+to reduce that indicator. Native Messages routes still need provider support
+for the original tool-discovery feature.
 
-Use **Recovery → Claude Desktop** like ChatGPT and OpenCode: before changing
-the connection, enter a **Snapshot name** and select **Create snapshot**.
-Select the snapshot, choose **Restore**, and confirm. Restore removes only
-Relay's unchanged profile and restores the previous selection. A newer manual
-selection is preserved; edited Relay profiles are not overwritten. The profile
-contains a local pool request key, not provider account credentials or a
-management token. Do not share it.
+Caching/prices follow the actual provider. Required features that cannot be
+converted return an error. `Claude-3p/configLibrary` is the profile directory,
+not an executable path. Do not share its Relay profile: it contains a pool key.
+
+Use [Recovery](#6-recovery) to undo attachment. Newer manual selections and
+edited profiles are preserved. If a recovery record was lost, reconnect can
+reclaim an exactly matching Relay profile, but cannot recover an unknown previous
+selection; restore then leaves that selection unset.
 
 #### OpenCode
 
@@ -673,6 +668,25 @@ to the model, and output is generated by it.
 Cache tokens are already included in input, and reasoning tokens in output.
 Do not add them to the total again.
 Request text, response text, and secrets are not stored in the usage log.
+
+A short greeting can still have a large input: the client also sends instructions,
+history, and tool definitions. **Technical details → Context** compares
+client and prepared JSON sizes for all protocols; these are bytes, not estimated
+tokens. BPS embeds tools in instructions and its native application may add
+unobservable context. Cache hits do not shrink the context window. Where supported,
+use the client's on-demand tool loading. For large BPS catalogs Relay supplies
+an index of names grouped by kind and declared namespace. Previously used tools
+retain compact schemas after history; full descriptions, usage rules, and exact
+schemas load together through bounded local lookups. Smaller catalogs use compact
+schema descriptions. All tools remain available; client instructions, history,
+and schema constraints are unchanged. This is not provider-hosted tool search.
+
+The context details show catalog mode, schema sizes, loaded/available tools,
+and lookup input/output tokens. Lookups consume the request's dispatch budget
+and have separate usage attempts; the final response counters describe its last
+generation. Discovery buffers even a streaming answer, so first/last-token
+timing is unavailable. Responses clients may request `relay_bps_tool_catalog`
+with `compact` or `full` to avoid discovery, or `auto` for the default policy.
 
 In debug mode, supported new Responses requests have a context comparison
 under **Technical details**. This is additional diagnostics without
@@ -801,7 +815,7 @@ such as 429, explains why. More retries do not replenish quota.
 | `upstream_usage_not_included`, `usage_not_included` · 403 | The plan does not include this capability. | Choose an entitled model or connection. A normal quota reset does not grant a new capability. |
 | `upstream_unauthorized` · `invalid_api_key` from a provider | The provider rejected authentication. | Update an external API key in **Connections**, then refresh models. BPS with a saved refresh token renews access before the next request; the failed generation is not repeated automatically. Follow the account's recovery hint and sign in again when refresh is no longer possible. Changing the pool key does not fix provider authorization. |
 | `upstream_account_disabled`, `account_deactivated` · 403 | An account, workspace, or project is disabled. | Check its provider dashboard and restore access through that provider. Use another permitted member while it is unavailable. |
-| `upstream_account_verification_required`, `account_verification_required` | Account verification is required. | Complete verification on the provider website, then refresh sign-in and account data in Relay. |
+| `upstream_account_verification_required`, `account_verification_required` | The provider requires account verification. | Complete it on the provider website, then refresh sign-in and account data. This is not a general Relay phone requirement; see [BPS sign-in requirements](#account-sign-in). |
 | `upstream_forbidden`, `permission_denied` · 403 | The account or key lacks permission for the operation. | Check project, key, and model permissions. Reading a model list does not prove inference access. |
 | `upstream_region_unsupported`, `unsupported_country_region_territory` | The provider does not serve the connection's region. | Check the provider's supported regions and permitted network configuration. Use a connection available in your region. |
 | `upstream_edge_challenge`, `edge_security_challenge` | An edge security check replaced the API response. | Verify the API address, service status, and network configuration. Ask the provider for supported API access; signing in to Relay again cannot resolve its edge challenge. |

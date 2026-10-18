@@ -21,6 +21,14 @@ not silently discard state or cause duplicate historical calls.
 
 ## Tool and streaming boundaries
 
+- Validate roles using the incoming protocol, including Gemini's omitted-role
+  default. Do not reinterpret a role from another wire format or move a
+  mid-conversation instruction into the initial system prompt.
+- Nullable or alternate token-limit fields must not erase an explicit limit.
+  Conflicting non-null limits need a named error instead of an arbitrary winner.
+- Gemini Parts retain one data payload. Reject conflicting content, malformed
+  supplied call IDs/arguments, and unrepresentable function-name restrictions;
+  preserve documented defaults for omitted calling modes and empty name sets.
 - Separate a Responses output item ID from `call_id`. Verify result matching
   after aliasing, namespace conversion, and any required provider-ID mapping.
 - Cover repeated identity fields, late ID/name metadata, fragmented arguments,
@@ -29,6 +37,11 @@ not silently discard state or cause duplicate historical calls.
 - Preserve function/custom-tool semantics and schema constraints. Unsupported
   hosted tools, structured outputs, or tool-choice modes need a named error
   rather than removal or weakening.
+- Cover custom results as text and typed content lists, including media and
+  literal JSON-looking text. Reject unrepresentable content without removing it.
+- Preserve execution semantics: unexpected async/program callers or namespaces
+  cannot become direct calls during conversion, including late stream metadata.
+  Matching native Responses must retain those fields without this conversion guard.
 - Require consistent event/block/item order and one terminal outcome. An EOF,
   error, or output limit is not successful completion. Preserve reported usage
   even when output is partial.

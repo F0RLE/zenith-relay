@@ -14,37 +14,9 @@ larger sizes precede smaller ones.
 An undated alias precedes dated snapshots; newer snapshots precede older ones.
 The normalized model ID breaks remaining ties.
 
-Providers follow the table order. Families and classes follow the JSON arrays:
-
-| Provider | Main families and classes |
-| --- | --- |
-| OpenAI | Astra, Sol, Terra, Luna, base GPT |
-| Anthropic | Fable, Opus, Sonnet, Haiku |
-| Google | Gemini: Pro, Flash, Flash Lite; Gemma, Imagen, Veo |
-| xAI | Grok |
-| DeepSeek | V: Pro, Flash, base; R, Coder, Math, OCR |
-| Z.ai | GLM: Prime, base, Turbo, Air, FlashX, Flash; vision, AutoGLM, image |
-| Alibaba / Qwen | Qwen: Max, Plus, Turbo, Flash, open sizes; Coder, VL, Omni, MT, QwQ, QVQ, embedding, reranker, image, Wan |
-| Moonshot AI / Kimi | Kimi: descending K generations, then Code, Instruct, Thinking and serving variants; legacy Moonshot |
-| MiniMax | M, H: Max, base; legacy MiniMax, text, image, speech |
-| Xiaomi | MiMo: Pro, base, Flash, Omni |
-| Mistral | Mistral: Large, Medium, Small, Tiny; Magistral, Devstral, Leanstral, Codestral, Ministral, Mixtral, Pixtral, Voxtral, OCR |
-| Tencent | Hunyuan / Hy; Hunyuan MT |
-| NVIDIA | Nemotron: Ultra, Super, Lightning, Nano, base; safety, Switchyard, Cosmos |
-| StepFun | Step: descending generations, then serving variants; Gelab Zero |
-| Meta | Muse: Spark, Glimmer; Llama: Maverick, Scout, open sizes; Muse Image, Muse Voice, Llama Guard, Prompt Guard |
-| ByteDance | Seed: Pro, Code, base, Turbo, Lite, Mini, Flash; Seed OSS, UI-TARS, Seedance |
-| Perplexity | Sonar: Deep Research, Reasoning Pro, Pro Search, Pro, Reasoning, base; Decider, legacy PPLX, PPLX Embed |
-| Cohere | Command A: Plus, base, Reasoning, Vision, Translate; Command R: Plus, base; legacy Command, North, Aya, Tiny Aya, Parse, Embed, Rerank |
-| Amazon | Nova: Premier, Pro, Lite, Micro; Nova Sonic, Titan |
-| Nous Research | Hermes: descending generations, then sizes and variants; base Llama versions are not Hermes generations |
-| Inception | Mercury, Mercury Coder, Mercury Edit |
-
-[OpenRouter's author request shares and model token rankings](https://openrouter.ai/rankings)
-guide initial coverage; the additional groups use the model IDs and names in
-its [public catalog](https://openrouter.ai/api/v1/models). Traffic changes do not
-reorder the catalog automatically. Family and class positions are a stable
-presentation policy, not a measured quality ranking across different tasks.
+Provider, family, and class lists live only in the JSON; do not maintain a
+second table here. Positions are a presentation policy, not a quality ranking
+or an automatic reflection of provider traffic.
 
 Provider aliases and inference patterns also live in the JSON. Anchored family
 patterns use Rust regex syntax and optional named captures:
@@ -73,9 +45,9 @@ capability rank. Unknown identities remain available. The same rules work
 without downloaded metadata; reference identity resolves hosted aliases when
 available. Ambiguous reference leaves are never assigned a manufacturer by name.
 
-Add a class or family by editing the JSON. Keep `revision: "1"` while preparing
-the first release; increase it when changing an already released policy.
-New numeric versions need no new entry. Keep `schemaVersion` for format changes.
+Add a class or family by editing the JSON. Increase `revision` when changing
+a published policy; reserve `schemaVersion` for format changes.
+New numeric versions need no new entry.
 An explicit saved model order overrides the default. Sorting neither rewrites
 route IDs nor grants model access, capabilities, prices, or protocol support.
 Direct native ChatGPT sign-in keeps the application's own catalog.

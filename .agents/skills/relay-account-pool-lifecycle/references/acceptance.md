@@ -37,7 +37,8 @@ define acceptance; they do not claim that live compatibility was established.
 | --- | --- |
 | Account throttled with reset/Retry-After | Correct account/model scope and deadline; other connections retain their own policy. |
 | Auth recovery after a generation failure | Recover credentials only when allowed; no replay/fallback after unknown or completed execution. |
-| Tool-result or opaque continuation request | Keep originating account/route ownership; unavailable ownership returns the existing specific recovery outcome. |
+| Opaque continuation, unresolved reference, or unpaired tool result | Keep account/route ownership unless validated local replay materializes complete history; unavailable ownership returns the specific recovery outcome. |
+| Complete portable call/result history without an opaque predecessor | Allow normal eligible-member selection; soft affinity must not become a hard account pin. |
 | Completed response fails conversion | Terminal conversion error; do not blame credentials, refresh, or send another generation. |
 | Membership commit/runtime update fails | Existing rollback restores only its own mutation; newer user changes survive. |
 | Trash during monitoring or dispatch preparation | Routing/monitoring eligibility ends and pending work is fenced; credentials remain recoverable in trash. |

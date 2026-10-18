@@ -1,7 +1,7 @@
 <div align="center">
   <img src="src-tauri/icons/zenith-relay.svg" width="128" alt="Zenith Relay">
   <h1>Zenith Relay</h1>
-  <p>Personal desktop relay for ChatGPT, OpenCode, and compatible APIs.</p>
+  <p>Personal desktop relay for ChatGPT, Claude Desktop, OpenCode, and API clients.</p>
   <p>
     <a href="https://github.com/F0RLE/zenith-relay/releases/latest"><img src="https://img.shields.io/github/v/release/F0RLE/zenith-relay?display_name=tag&style=for-the-badge" alt="Latest release"></a>&nbsp;
     <a href="docs/help/en/README.md"><img src="https://img.shields.io/badge/docs-English-2ea44f?style=for-the-badge" alt="English documentation"></a>&nbsp;
@@ -18,7 +18,7 @@
 ## What it does
 
 - Combines native ChatGPT accounts, Excel / Basis Points connections, and compatible API sources in a local pool.
-- Connects installed ChatGPT and OpenCode applications, or another client through
+- Connects installed ChatGPT, Claude Desktop, and OpenCode, or another client through
   a compatible API. Relay does not install those applications.
 - Selects an available pool member for each request and shows its status,
   quota, and request history.
@@ -58,7 +58,7 @@ Download a package for your platform from
 3. In **Pool → Members**, add the saved connections. Check **Model Rules**
    for the model you want to use.
 4. Start the API under **Access → Local API**, then use **Pool → Connect**
-   for ChatGPT or OpenCode. Other clients use the API address and request key
+   for ChatGPT, Claude Desktop, or OpenCode. Other clients use the API address and request key
    from **Access**.
 5. Send a request from the client and find it in **Usage → Requests**.
 

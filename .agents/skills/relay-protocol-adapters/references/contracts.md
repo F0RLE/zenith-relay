@@ -15,6 +15,38 @@ Provider-compatible APIs need their own official capability and endpoint
 documentation. OpenAI wire compatibility alone does not establish stateful
 Responses support, tool search, structured outputs, or a reasoning level.
 
+## Typed contract references
+
+Use these inspected official SDK revisions to reproduce field-level checks;
+fetch the exact endpoint's current documentation before changing the contract.
+They are references, not dependencies or copied converters.
+
+- [OpenAI SDK](https://github.com/openai/openai-node/blob/bb024d41522d0b5a6b6c64055471111068811ccd/src/resources/chat/completions/completions.ts):
+  protocol-specific message roles and nullable Chat token-limit fields.
+- [Responses SDK](https://github.com/openai/openai-node/blob/bb024d41522d0b5a6b6c64055471111068811ccd/src/resources/responses/responses.ts):
+  function/custom result content lists, item versus call identity, and direct
+  versus program callers. The official [async tool guide](https://developers.openai.com/api/docs/guides/async-tool-calling)
+  and [programmatic tool guide](https://developers.openai.com/api/docs/guides/tools-programmatic-tool-calling)
+  define execution semantics; they are not optional tracing metadata.
+- [Anthropic SDK](https://github.com/anthropics/anthropic-sdk-typescript/blob/04a4c28c70de498d6d0e930e43edb5edb9ac545e/src/resources/messages/messages.ts):
+  message roles, content-block identity, thinking signatures, and stop reasons.
+  SDK acceptance of an inline system role does not justify hoisting that turn
+  into the initial prompt on a different endpoint.
+- [Google SDK](https://github.com/googleapis/js-genai/blob/177ee684ada5d2fd39450e88a9416b301eaa6ff4/src/types.ts):
+  optional Content roles, function-call identity and arguments, and calling modes.
+  The official [Generate Content protobuf](https://github.com/googleapis/googleapis/blob/master/google/ai/generativelanguage/v1beta/content.proto)
+  also defines the Part data oneof and function-calling defaults.
+
+## Context accounting
+
+For context accounting use the provider's [OpenAI token-counting guide](https://developers.openai.com/api/docs/guides/token-counting),
+[Claude token-counting guide](https://platform.claude.com/docs/en/build-with-claude/token-counting),
+and [Gemini token guide](https://ai.google.dev/gemini-api/docs/tokens).
+Loaded instructions, history, tools, and supported media contribute to input;
+JSON byte counts are not interchangeable with provider token counts. Deferred
+loading requires the exact client's and route's supported discovery contract,
+not name-based tool filtering or fabricated hosted-tool results.
+
 ## Account transport boundary
 
 Public OpenAI API documentation does not specify ChatGPT account or Excel / BPS
