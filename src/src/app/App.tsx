@@ -8,6 +8,15 @@ import { RelayApp } from "./RelayApp";
 
 export function App() {
   const [platform, setPlatform] = useState<Platform | "unknown">(() => platformFromUserAgent(navigator.userAgent));
+  const [starting, setStarting] = useState(() => document.documentElement.dataset["startupReady"] !== "true");
+
+  useLayoutEffect(() => {
+    // Keep native window controls usable while the workspace waits for data.
+    document.getElementById("root")!.inert = false;
+    const revealWorkspace = () => setStarting(false);
+    window.addEventListener("zenith-startup-ready", revealWorkspace);
+    return () => window.removeEventListener("zenith-startup-ready", revealWorkspace);
+  }, []);
 
   useLayoutEffect(() => {
     const preventChromeSelectAll = (event: KeyboardEvent) => {
@@ -28,9 +37,11 @@ export function App() {
   return (
     <main className={`app platform-${platform}`}>
       <TitleBar platform={platform} />
-      <RelayApp />
-      <AppContextMenu />
-      <AppTooltips />
+      <div className="app-workspace" inert={starting}>
+        <RelayApp />
+        <AppContextMenu />
+        <AppTooltips />
+      </div>
     </main>
   );
 }

@@ -3,22 +3,34 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <script src="/theme-init.js"></script>
+    <script src="/startup.js"></script>
     <link rel="preload" href="/icons/zenith-sword.png" as="image" type="image/png" />
     <style>
       html {
-        --bootstrap-bg: #f2f5f6;
+        --bootstrap-bg: #f4f3ee;
+        --bootstrap-text: #202b29;
+        --bootstrap-muted: #65716c;
+        --bootstrap-border: #dce1d8;
+        --bootstrap-accent: #15644d;
         color-scheme: light;
       }
 
       html[data-theme="dark"] {
-        --bootstrap-bg: #121719;
+        --bootstrap-bg: #141414;
+        --bootstrap-text: #f2f0eb;
+        --bootstrap-muted: #aaa9a2;
+        --bootstrap-border: #333332;
+        --bootstrap-accent: #80b49a;
         color-scheme: dark;
       }
 
       @media (prefers-color-scheme: dark) {
         html[data-theme="system"] {
-          --bootstrap-bg: #121719;
+          --bootstrap-bg: #141414;
+          --bootstrap-text: #f2f0eb;
+          --bootstrap-muted: #aaa9a2;
+          --bootstrap-border: #333332;
+          --bootstrap-accent: #80b49a;
           color-scheme: dark;
         }
       }
@@ -40,48 +52,52 @@
         display: grid;
         place-items: center;
         background: var(--bootstrap-bg);
-        color: #172025;
+        color: var(--bootstrap-text);
+        font-family: "Segoe UI", system-ui, sans-serif;
         user-select: none;
         -webkit-user-select: none;
         opacity: 1;
-        visibility: visible;
-        transition: opacity 280ms ease, visibility 0s linear 280ms;
-      }
-
-      html[data-theme="dark"] #splash-screen {
-        color: #edf2f4;
-      }
-
-      @media (prefers-color-scheme: dark) {
-        html[data-theme="system"] #splash-screen {
-          color: #edf2f4;
-        }
+        transition: opacity 120ms ease;
       }
 
       html[data-startup-ready="true"] #splash-screen {
         pointer-events: none;
         opacity: 0;
-        visibility: hidden;
-        transition-delay: 0s, 280ms;
       }
 
       .splash-content {
-        display: grid;
-        justify-items: center;
-        gap: 16px;
+        width: min(320px, calc(100% - 48px));
+        text-align: center;
+      }
+
+      .splash-logo {
+        display: block;
+        width: 72px;
+        height: 72px;
+        margin: 0 auto 20px;
       }
 
       .splash-brand {
-        font: 650 18px/1 "Segoe UI", system-ui, sans-serif;
-        letter-spacing: 0;
+        margin: 0 0 10px;
+        font: 650 24px/1.25 "Segoe UI", system-ui, sans-serif;
+        letter-spacing: -0.5px;
+      }
+
+      #splash-message,
+      #splash-hint {
+        margin: 0;
+        color: var(--bootstrap-muted);
+        font-size: 13px;
+        line-height: 1.6;
       }
 
       .splash-progress {
-        width: 88px;
+        width: 144px;
         height: 3px;
+        margin: 22px auto 0;
         overflow: hidden;
         border-radius: 3px;
-        background: color-mix(in srgb, #0d9270 18%, transparent);
+        background: var(--bootstrap-border);
       }
 
       .splash-progress::after {
@@ -89,7 +105,7 @@
         width: 42%;
         height: 100%;
         border-radius: inherit;
-        background: #0d9270;
+        background: var(--bootstrap-accent);
         content: "";
         animation: splash-progress 1.1s ease-in-out infinite;
       }
@@ -99,6 +115,25 @@
         50%, 100% { transform: translateX(250%); }
       }
 
+      #splash-hint { margin-top: 20px; }
+
+      #splash-reload {
+        margin-top: 16px;
+        padding: 8px 18px;
+        border: 1px solid var(--bootstrap-border);
+        border-radius: 8px;
+        background: transparent;
+        color: var(--bootstrap-text);
+        font: 500 13px/1.5 "Segoe UI", system-ui, sans-serif;
+        cursor: pointer;
+      }
+
+      #splash-reload:hover { background: color-mix(in srgb, var(--bootstrap-text) 6%, transparent); }
+      #splash-reload:focus-visible { outline: 2px solid var(--bootstrap-accent) !important; outline-offset: 3px; }
+      #splash-reload[hidden], #splash-hint[hidden] { display: none; }
+      html[data-startup-state="error"] .splash-progress { visibility: hidden; }
+      html[data-startup-state="error"] .splash-progress::after { animation: none; }
+
       @media (prefers-reduced-motion: reduce) {
         #splash-screen { transition: none; }
         .splash-progress::after { animation: none; transform: translateX(70%); }
@@ -107,13 +142,17 @@
     <title>Zenith Relay</title>
   </head>
   <body>
-    <div id="splash-screen" role="status" aria-live="polite" aria-label="Zenith Relay">
+    <div id="splash-screen" data-tauri-drag-region>
       <div class="splash-content">
-        <div class="splash-brand">Zenith Relay</div>
+        <img class="splash-logo" src="/icons/zenith-sword.png" width="72" height="72" alt="" draggable="false" />
+        <h1 class="splash-brand">Zenith Relay</h1>
+        <p id="splash-message" role="status" aria-live="polite" aria-atomic="true">Opening Relay…</p>
         <div class="splash-progress" aria-hidden="true"></div>
+        <p id="splash-hint" hidden></p>
+        <button id="splash-reload" type="button" hidden>Reload</button>
       </div>
     </div>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <div id="root" inert></div>
+    <script type="module" src="/src/bootstrap.ts"></script>
   </body>
 </html>

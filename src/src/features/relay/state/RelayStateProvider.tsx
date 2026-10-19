@@ -210,7 +210,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     const applyTheme = () => {
       document.documentElement.dataset["theme"] = theme;
       const dark = theme === "dark" || (theme === "system" && systemTheme.matches);
-      void setWindowBackgroundColor(dark ? "#121719" : "#f2f5f6");
+      void setWindowBackgroundColor(dark ? "#141414" : "#f4f3ee");
     };
     applyTheme();
     if (theme !== "system") return;

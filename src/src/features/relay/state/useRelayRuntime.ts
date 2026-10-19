@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { recordPerformance } from "../../../platform/desktop";
+import { revealStartupShell, setStartupPhase } from "../../../platform/startup";
 import { relayCommands, type UiState } from "../api/commands";
 import type { PageId, RelayMode, RuntimeActivitySnapshot, RuntimeActivityState, RuntimeSnapshot } from "../api/types";
 import { preferNewerRuntimeOrder, reconcileRuntimeActivityOverlay } from "../routingOrder";
@@ -48,6 +49,7 @@ export function useRelayRuntime({
     candidates: {},
   });
   const [loading, setLoading] = useState(true);
+  const [initialized, setInitialized] = useState(false);
   const modeRef = useRef(mode);
   const pageRef = useRef(page);
   const stateRevision = useRef(1);
@@ -140,6 +142,7 @@ export function useRelayRuntime({
         runtimeSnapshotRef.current = snapshot;
         if (snapshot) snapshotsByMode.current[requestedMode] = snapshot;
         setRuntime(snapshot);
+        setInitialized(true);
         clearInactiveUsage(requestedMode);
         refreshedRevision.current = requestedRevision;
         setRuntimeRevision((previousRevision) => previousRevision + 1);
@@ -223,23 +226,37 @@ export function useRelayRuntime({
     if (runtimeSnapshotRef.current === null) setLoading(true);
     refresh()
       .then(scheduleStartupRetry)
-      .catch((error) => active && reportErrorFeedback(error, "feedback.refreshFailed", "refresh_failed"))
+      .catch((error) => {
+        if (!active) return;
+        reportErrorFeedback(error, "feedback.refreshFailed", "refresh_failed");
+        setStartupPhase("error");
+      })
       .finally(() => {
         if (!active) return;
         setLoading(false);
-        if (performance.getEntriesByName("zenith:interactive", "mark").length) return;
-        requestAnimationFrame(() => requestAnimationFrame(() => {
-          performance.mark("zenith:interactive");
-          const measure = performance.measure("zenith:interactive", "zenith:html-start", "zenith:interactive");
-          void recordPerformance("interactive", measure.duration, "startup");
-          window.dispatchEvent(new Event("zenith-startup-ready"));
-        }));
       });
     return () => {
       active = false;
       if (startupRetryTimer !== undefined) window.clearTimeout(startupRetryTimer);
     };
   }, [mode, refresh, reportErrorFeedback]);
+
+  useEffect(() => {
+    if (!initialized || loading || performance.getEntriesByName("zenith:interactive", "mark").length) return;
+    let secondFrame = 0;
+    const firstFrame = requestAnimationFrame(() => {
+      secondFrame = requestAnimationFrame(() => {
+        performance.mark("zenith:interactive");
+        const measure = performance.measure("zenith:interactive", "zenith:html-start", "zenith:interactive");
+        void recordPerformance("interactive", measure.duration, "startup");
+        revealStartupShell();
+      });
+    });
+    return () => {
+      cancelAnimationFrame(firstFrame);
+      cancelAnimationFrame(secondFrame);
+    };
+  }, [initialized, loading]);
 
   useRuntimeRouting({
     mode,

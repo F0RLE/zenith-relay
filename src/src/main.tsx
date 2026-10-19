@@ -3,32 +3,11 @@ import ReactDOM from "react-dom/client";
 import { App } from "./app/App";
 import { RelayErrorBoundary } from "./app/RelayErrorBoundary";
 import { initI18n } from "./i18n";
-import { getSystemLocale, recordPerformance, revealWindowAfterBackgroundColor } from "./platform/desktop";
+import { getSystemLocale, recordPerformance } from "./platform/desktop";
 import { relayCommands } from "./features/relay/api/commands";
 import { redactFeedbackText } from "./features/relay/state/feedback";
 import { consumeInterruptedAccountImportConfirmation } from "./features/relay/state/relayPreferences";
-
-const STARTUP_REVEAL_FALLBACK_MS = 10_000;
-let startupFallbackTimer: number | undefined;
-
-function revealStartupShell() {
-  if (document.documentElement.dataset["startupReady"] === "true") return;
-  if (startupFallbackTimer !== undefined) window.clearTimeout(startupFallbackTimer);
-  const splash = document.getElementById("splash-screen");
-  if (splash && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-    splash.remove();
-  } else if (splash) {
-    const removeAfterFade = (event: TransitionEvent) => {
-      if (event.target !== splash || event.propertyName !== "opacity") return;
-      splash.removeEventListener("transitionend", removeAfterFade);
-      splash.remove();
-    };
-    splash.addEventListener("transitionend", removeAfterFade);
-  }
-  document.documentElement.dataset["startupReady"] = "true";
-}
-
-window.addEventListener("zenith-startup-ready", revealStartupShell, { once: true });
+import { setStartupPhase } from "./platform/startup";
 
 // Renderer failures used to disappear with the WebView.  Keep a small,
 // redacted breadcrumb in Relay's native diagnostics directory so a startup or
@@ -49,7 +28,7 @@ function reportRendererError(source: string, errorValue: unknown, stack?: string
     source,
     message,
     ...(stack ? { stack: redactFeedbackText(stack) } : {}),
-    fatal: source === "window-error",
+    fatal: source === "window-error" || source === "bootstrap",
   }).catch(() => undefined);
 }
 
@@ -71,15 +50,12 @@ function reportInterruptedAccountImportConfirmation() {
   }).catch(() => undefined);
 }
 
-const initialTheme = document.documentElement.dataset["theme"];
-const initialThemeIsDark = initialTheme === "dark" || (
-  initialTheme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches
-);
-void revealWindowAfterBackgroundColor(initialThemeIsDark ? "#121719" : "#f2f5f6");
-void bootstrap();
+void bootstrap().catch((error: unknown) => {
+  reportRendererError("bootstrap", error, error instanceof Error ? error.stack : undefined);
+  setStartupPhase("error");
+});
 
 async function bootstrap() {
-  startupFallbackTimer = window.setTimeout(revealStartupShell, STARTUP_REVEAL_FALLBACK_MS);
   reportInterruptedAccountImportConfirmation();
   const systemLocale = getSystemLocale().catch(() => null);
   await initI18n(navigator.language);
@@ -88,6 +64,7 @@ async function bootstrap() {
   });
   performance.mark("zenith:i18n-ready");
   performance.measure("zenith:i18n", "zenith:html-start", "zenith:i18n-ready");
+  setStartupPhase("runtime");
 
   ReactDOM.createRoot(document.getElementById("root")!).render(
     <React.StrictMode>

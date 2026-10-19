@@ -16,7 +16,7 @@ function lazyNamed<P>(load: () => Promise<ComponentType<P>>) {
   return {
     Component: lazy(run),
     preload: () => {
-      void run();
+      void run().catch(() => { pending = undefined; });
     },
   };
 }
@@ -30,25 +30,26 @@ const profilesPage = lazyNamed(async () => (await import("../pages/profiles/Prof
 const settingsPage = lazyNamed(async () => (await import("../pages/settings/SettingsPage")).SettingsPage);
 const helpCenter = lazyNamed(async () => (await import("../help/HelpCenter")).HelpCenter);
 
-const pages: Array<{ id: PageId; icon: typeof LayoutDashboard }> = [
+const pages: Array<{ id: PageId; icon: typeof LayoutDashboard; preload?: () => void }> = [
   { id: "overview", icon: LayoutDashboard },
-  { id: "connections", icon: Cable },
-  { id: "pool", icon: SlidersHorizontal },
-  { id: "integrations", icon: Plug },
-  { id: "usage", icon: Activity },
-  { id: "profiles", icon: ArchiveRestore },
-  { id: "settings", icon: Settings },
+  { id: "connections", icon: Cable, preload: connectionsPage.preload },
+  { id: "pool", icon: SlidersHorizontal, preload: poolPage.preload },
+  { id: "integrations", icon: Plug, preload: integrationsPage.preload },
+  { id: "usage", icon: Activity, preload: usagePage.preload },
+  { id: "profiles", icon: ArchiveRestore, preload: profilesPage.preload },
+  { id: "settings", icon: Settings, preload: settingsPage.preload },
 ];
 
 export function RelayShell() {
   const { t } = useTranslation();
   const { mode, setMode, page, setPage, feedback, clearFeedback, loading } = useRelayState();
+  const sidebarPreference = useRef<boolean | null>(null);
   const [collapsed, setCollapsed] = useState(() => window.matchMedia?.("(max-width: 1023px)").matches ?? false);
   useEffect(() => {
     const compact = window.matchMedia?.("(max-width: 1023px)");
-    const collapseOnNarrowWindow = () => { if (compact?.matches) setCollapsed(true); };
-    compact?.addEventListener("change", collapseOnNarrowWindow);
-    return () => compact?.removeEventListener("change", collapseOnNarrowWindow);
+    const syncSidebarWithViewport = () => setCollapsed(sidebarPreference.current ?? compact?.matches ?? false);
+    compact?.addEventListener("change", syncSidebarWithViewport);
+    return () => compact?.removeEventListener("change", syncSidebarWithViewport);
   }, []);
   const [modeOpen, setModeOpen] = useState(false);
   const [importRequest, setImportRequest] = useState<{ id: number; paths?: string[] } | null>(null);
@@ -72,7 +73,7 @@ export function RelayShell() {
   const visiblePages = pages.filter((pageItem) => mode !== "zenith" || !(["pool", "integrations", "usage"] as PageId[]).includes(pageItem.id));
   const mainPages = visiblePages.filter(({ id }) => id !== "profiles" && id !== "settings");
   const utilityPages = visiblePages.filter(({ id }) => id === "profiles" || id === "settings");
-  const navigationButton = ({ id: pageId, icon: Icon }: (typeof pages)[number]) => (
+  const navigationButton = ({ id: pageId, icon: Icon, preload }: (typeof pages)[number]) => (
     <button
       key={pageId}
       type="button"
@@ -81,6 +82,8 @@ export function RelayShell() {
       aria-current={page === pageId ? "page" : undefined}
       data-relay-tooltip={collapsed ? t(`nav.${pageId}`) : undefined}
       onClick={() => setPage(pageId)}
+      onPointerEnter={preload}
+      onFocus={preload}
     >
       <Icon aria-hidden />
       <span>{t(`nav.${pageId}`)}</span>
@@ -90,23 +93,11 @@ export function RelayShell() {
     modePickerRef.current?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
   }, []);
   const openImport = useCallback((paths?: string[]) => {
+    importDialog.preload();
     if (mode === "zenith") setMode("local");
     setPage("connections");
     setImportRequest({ id: ++nextImportRequest.current, ...(paths ? { paths } : {}) });
   }, [mode, setMode, setPage]);
-  useEffect(() => {
-    const frame = requestAnimationFrame(() => {
-      connectionsPage.preload();
-      importDialog.preload();
-      poolPage.preload();
-      integrationsPage.preload();
-      usagePage.preload();
-      profilesPage.preload();
-      settingsPage.preload();
-      helpCenter.preload();
-    });
-    return () => cancelAnimationFrame(frame);
-  }, []);
 
   useEffect(() => {
     if (contentRef.current) {
@@ -228,6 +219,8 @@ export function RelayShell() {
                 aria-label={t("common.help")}
                 aria-current={page === "help" ? "page" : undefined}
                 onClick={() => setPage("help")}
+                onPointerEnter={helpCenter.preload}
+                onFocus={helpCenter.preload}
               >
                 <CircleHelp aria-hidden />
                 <span className="sidebar-help-copy"><span>{t("common.help")}</span><small>v{APP_VERSION}</small></span>
@@ -235,7 +228,10 @@ export function RelayShell() {
               <IconButton
                 label={collapsed ? t("shell.expand") : t("shell.collapse")}
                 icon={collapsed ? <PanelLeftOpen aria-hidden /> : <PanelLeftClose aria-hidden />}
-                onClick={() => setCollapsed((isCollapsed) => !isCollapsed)}
+                onClick={() => {
+                  sidebarPreference.current = !collapsed;
+                  setCollapsed(!collapsed);
+                }}
               />
             </div>
           </div>
