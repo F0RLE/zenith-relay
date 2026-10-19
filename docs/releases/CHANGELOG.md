@@ -15,6 +15,65 @@ recoverable account deletion. Changes below are grouped by area.
 
 #### Protocol adapters and Excel / Basis Points
 
+- BPS keeps turn-local tool choices and serial-call constraints outside its
+  stable catalog/history prefix. Account Responses requests without a client
+  cache key derive an opaque context-scoped key consistently over HTTP and
+  WebSocket; explicit keys, API-source bodies and routing limits stay unchanged.
+- BPS supports explicitly framed multiline function strings without nested
+  JSON escaping, retaining original argument-schema checks and opaque custom
+  input. Local stream failures use Responses error fields and ordered sequence
+  numbers instead of a nested HTTP error envelope.
+- BPS preserves literal line breaks and tabs inside nested function JSON strings
+  instead of rejecting the whole response. JSON and streaming share this decoder;
+  malformed syntax and schema violations still fail without retrying generation.
+- BPS accepts its existing single-call compatibility form with an explicit tool
+  reference too, requiring an exact name match and original schema validation.
+  Invalid JSON diagnostics distinguish syntax errors from premature EOF without
+  retaining arguments or automatically regenerating a response.
+- BPS JSON failures now include an allowlisted parser reason, input-shape
+  category, byte count and parse coordinates without argument contents.
+  Buffered and streaming catalog discovery preserve those details in request
+  diagnostics as well as the client error; invalid tools still never execute.
+- BPS retains literal backslashes in unknown printable JSON-string escapes
+  from tool arguments, avoiding failures for regex and command strings.
+  Valid JSON escapes keep their meaning; malformed Unicode, structural errors,
+  and schema violations still fail. Custom tools and explicit frames stay opaque.
+- Buffered local adapter failures send `x-should-retry: false` so clients that
+  honor it do not automatically regenerate after a failed conversion. HTTP
+  status and usage stay unchanged; explicit client resends remain possible.
+- Removing a deferred tool from client-search results no longer reactivates it
+  through historical calls. Converted Chat/Messages replies reject contradictory
+  tool stop reasons in JSON/SSE instead of publishing a successful terminal.
+  Required/named tool choices also reject a normal text-only success while
+  preserving refusal and token-limit outcomes.
+- Responses client-executed tool search works across converted JSON/SSE routes,
+  including deferred schemas, namespaces, paired results and the next answer.
+  Search results do not duplicate complete schemas in foreign model input.
+- Base64 PDF inputs retain bytes and labels across all twelve conversions;
+  Responses/Messages also support PDF URLs and PDF tool results. Provider file
+  IDs and unrepresentable rendering/citation controls remain native-only.
+- Native Gemini continuations retain candidate tokens and late usage, bind to
+  their original owner/key/model/contents and never automatically replay a
+  generation. Native cache references and provider-hosted tools stay native.
+- BPS preserves argument-validation causes in streamed errors instead of
+  reporting every failure as a broken stream. Transport examples cover quoted
+  multiline commands; all catalog modes reject call IDs reused from history.
+- SSE parsing borrows single-line payloads and avoids repeated buffer shifts in
+  protocol conversion, upstream usage capture, and HTTP-to-WebSocket fallback.
+  Native Responses forwarding reuses validated delta
+  parsing, including escaped text/tool arguments, without building a full JSON
+  tree; usage and terminal checks remain.
+  WebSocket forwarding avoids ordinary-frame copies and inapplicable retry
+  parsing; HTTP fallback consumes parsed events without cloning JSON or opaque
+  payloads. Converted streams avoid copying
+  unchanged text/reasoning snapshots without weakening closed-block checks.
+  Messages native text/thinking snapshots finalize at block closure instead of
+  copying on every delta; signature fragments append in place.
+  Responses appends custom-input fragments and missing final text suffixes in
+  place instead of copying the accumulated prefix.
+  Continuation hashing appends adjacent text fragments in place as well.
+  Stream completion transfers existing history and native continuation state
+  without cloning the whole prepared request; Gemini Part boundaries stay intact.
 - BPS starts large tool catalogs with names grouped by kind and namespace, loading complete
   descriptions and schemas through bounded Relay-local lookups without weakening
   argument validation. Long descriptions and custom formats also trigger automatic
@@ -31,6 +90,10 @@ recoverable account deletion. Changes below are grouped by area.
   Native forwarding preserves provider extensions, precise numbers, object order,
   and permitted headers without cross-protocol conversion.
   ([1f64175](https://github.com/F0RLE/zenith-relay/commit/1f64175))
+- Initial system attachments after a user message no longer block converted
+  Claude requests before the first reply. Instructions retain their order in
+  the target system field; instructions after earlier assistant turns still fail
+  explicitly when the target cannot preserve their position.
 - Reasoning settings and reports share the `xhigh` identity and actual effort or
   budget. Messages clients receive available public summaries and accept Claude's
   empty initial thinking signature while retaining native continuation state;
@@ -81,6 +144,11 @@ recoverable account deletion. Changes below are grouped by area.
 
 #### Claude Desktop and profiles
 
+- Claude Desktop's fixed effort picker maps missing intermediate levels to
+  the nearest supported, pool-allowed lower level, or the lowest allowed level
+  when none is lower. Usage keeps requested and effective efforts separate;
+  off, explicit budgets, direct API requests and other clients stay unchanged.
+
 - Claude Desktop connects through a third-party inference profile. Relay validates
   before closing the client, saves recovery data, writes the catalog, and launches
   only when requested. Restore preserves foreign profiles and newer selections.
@@ -96,6 +164,14 @@ recoverable account deletion. Changes below are grouped by area.
 
 #### Desktop UI and Access
 
+- Startup uses a themed, localized loader with real loading states and a reload
+  action for slow or failed starts. The window opens before React loads;
+  secondary pages load on navigation intent instead of competing with startup.
+
+- Pool rotation separates presets into a side panel and groups participants
+  into compact cards. Selected buttons use fill instead of colored borders;
+  narrow windows keep every control available in a single scrolling area.
+  The header close button replaces the redundant footer action.
 - Access combines Local API, Applications, and Accounts settings. Application
   setup saves an executable path without launching or changing the pool; protected
   Claude restore lives in Recovery. Shared account settings retain per-account
@@ -127,6 +203,46 @@ recoverable account deletion. Changes below are grouped by area.
 
 ### Fixed
 
+- Native BPS keeps named Responses function outputs without a call ID, fixing
+  thread startup and handoffs without inventing a matching tool call. Invalid
+  supplied IDs and custom outputs without IDs remain rejected.
+- Claude Desktop no longer hides supported `high` or `max` effort when an
+  intermediate level is absent. The native menu cap and exact route validation
+  stay separate; unsupported choices are never silently remapped.
+
+- OpenCode profiles explicitly hide unsupported built-in reasoning variants so
+  the SDK cannot offer Medium to a route that only accepts other effort levels.
+- Claude Desktop requests routed to Gemini retain opaque user attribution through
+  Gemini safety labels instead of failing on Messages metadata before replying.
+- Converted Responses requests accept a function result's optional name when it
+  matches the recorded call. Standalone outputs without `call_id` report that
+  unsupported mapping instead of a generic input failure; no call is invented.
+- Chat conversion preserves refusal history through the next user turn and
+  pairs historical function results by name rather than call ID. Unrepresentable
+  participant names and foreign Messages reply roles no longer disappear silently.
+- Responses WebSocket requests discover BPS-only models when access is cold or
+  expired, including later turns. Excluded native accounts are not contacted;
+  expired access is revalidated and revoked model access remains blocked.
+- Messages `pause_turn` no longer becomes a fabricated token-limit result on a
+  converted route. JSON conversion rejects foreign Responses output roles and
+  invalid Chat choice indexes instead of silently changing response identity.
+- Converted output formats reject misplaced schema controls, competing schema
+  envelopes, invalid names, and wrong-type Gemini MIME values instead of
+  silently weakening the request. Messages/Gemini preparation avoids an unused
+  copy of the complete response schema.
+- Image continuation fingerprints retain non-default detail, preventing an
+  edited history from restoring older native state. Invalid or misplaced
+  detail controls fail instead of silently becoming automatic detail.
+- Chat/Messages conversions reject foreign tool-choice shapes and unexpected
+  fields instead of silently dropping controls. Messages `tool_choice: none`
+  no longer carries an unsupported parallel-use modifier.
+- Converted Chat Completions streams validate and respect `include_usage`
+  without disabling internal accounting. Native usage capture ignores data after
+  its terminal marker while retaining Gemini's separate trailing usage.
+- Usage separates per-request cache reads/writes from retention estimates,
+  preserves reported zeroes, and isolates cache activity by chat, connection,
+  and upstream model. Misses do not extend the estimate; unknown and mixed
+  windows no longer inherit a guessed or maximum lifetime.
 - Desktop windows can be moved by dragging the existing title bar region.
   ([#88](https://github.com/F0RLE/zenith-relay/pull/88))
 - Interrupted Responses streams report an explicit failure after complete SSE
@@ -175,6 +291,70 @@ recoverable account deletion. Changes below are grouped by area.
 
 #### Адаптеры протоколов и Excel / Basis Points
 
+- BPS больше не меняет стабильный префикс каталога и истории при смене настроек
+  вызова инструментов. Для аккаунтных Responses без клиентского ключа кэша
+  используется непрозрачный ключ контекста, одинаковый в HTTP и WebSocket;
+  явные ключи, тела запросов к API-источникам и ограничения ротации сохранены.
+- BPS передаёт сложные многострочные аргументы функций в явном обрамлении без
+  вложенного JSON-экранирования; исходные схемы и сырые входы custom-инструментов
+  сохраняются. Локальные ошибки стрима используют поля Responses и правильную
+  нумерацию событий вместо вложенной HTTP-обёртки.
+- BPS сохраняет буквальные переносы строк и табуляции внутри вложенного JSON
+  аргументов функций вместо отказа всего ответа. JSON и поток используют один
+  декодер; повреждённый синтаксис и нарушения схемы по-прежнему отклоняются
+  без повторной генерации.
+- BPS распознаёт уже поддерживаемую совместимую форму одного вызова и с явной
+  ссылкой на инструмент, проверяя точное совпадение имени и исходную схему.
+  Диагностика отличает синтаксическую ошибку JSON от преждевременного обрыва,
+  не сохраняя аргументы и не запуская автоматическую перегенерацию.
+- Ошибки JSON в BPS содержат безопасный код причины парсера, категорию формы
+  входа, размер и координаты ошибки без содержимого аргументов. Эти сведения
+  сохраняются и при поиске инструментов — в ответе клиенту и диагностике
+  запроса. Некорректные вызовы по-прежнему не выполняются.
+- BPS сохраняет обратный слеш в неизвестных печатных escape-последовательностях
+  строк аргументов, не отклоняя весь ответ из-за регулярного выражения или
+  команды. Обычные JSON-экранирования не меняют смысл; повреждённый Unicode,
+  структура и нарушения схемы по-прежнему отклоняются. Custom-входы и явное
+  обрамление передаются без изменений.
+- Локальные ошибки адаптера в обычных HTTP-ответах содержат
+  `x-should-retry: false`: учитывающие его клиенты не повторяют генерацию
+  автоматически. Статус HTTP и учёт использования не меняются; явная повторная
+  отправка клиентом остаётся возможной.
+- Удалённый из результатов клиентского поиска отложенный инструмент больше
+  не включается снова из-за старых вызовов. Преобразуемые ответы Chat/Messages
+  отклоняют противоречивую причину остановки в JSON/SSE вместо успешного завершения.
+  Обязательный или конкретный выбор инструмента также исключает обычный успешный
+  ответ без вызова, сохраняя смысл отказов и остановки по лимиту токенов.
+- Клиентский tool search Responses работает на преобразуемых JSON/SSE-маршрутах:
+  отложенные схемы, пространства имён, парные результаты и следующий ответ.
+  Результаты поиска не дублируют полные схемы во входе чужой модели.
+- PDF в base64 сохраняет байты и подписи во всех двенадцати преобразованиях;
+  Responses/Messages также передают URL PDF и PDF-результаты инструментов.
+  ID файлов провайдера и непереносимые настройки рендеринга/цитат остаются нативными.
+- Нативные продолжения Gemini сохраняют токены кандидатов и завершающий usage,
+  привязаны к исходному владельцу/ключу/модели/contents и не перезапускают генерацию
+  автоматически. Ссылки на кэш и серверные инструменты остаются нативными.
+- BPS сохраняет причину ошибки аргументов в потоке вместо общей ошибки
+  стриминга. Примеры упаковки включают многострочные команды с кавычками;
+  все режимы каталога отклоняют повторное использование ID вызова из истории.
+- Разбор SSE не копирует однострочные данные событий и не сдвигает буфер после
+  каждого события при преобразовании протоколов, учёте исходного расхода
+  и HTTP→WebSocket-fallback. Нативная передача дельт
+  Responses использует проверенный быстрый разбор, в том числе для текста и
+  аргументов с экранированием, без полного JSON-дерева;
+  проверки использования и завершения ответа сохраняются.
+  WebSocket не копирует обычные кадры и не разбирает их для уже запрещённого
+  повтора; HTTP-fallback использует готовые события без копирования JSON
+  и непрозрачных данных. Преобразователи не копируют
+  неизменившиеся блоки текста и размышлений, сохраняя проверку закрытых блоков.
+  Нативные снимки текста и размышлений Messages собираются при закрытии блока,
+  а не копируются на каждой дельте; фрагменты подписи дописываются на месте.
+  Responses дописывает фрагменты custom-input и недостающие суффиксы итогового
+  текста без копирования накопленного префикса.
+  Ключ истории также вычисляется без пересборки накопленного текста
+  на каждом фрагменте.
+  При завершении потока история и нативное состояние передаются в продолжение
+  без копирования всего подготовленного запроса; границы Parts Gemini сохраняются.
 - BPS группирует имена инструментов по типу и пространству имён; полные
   описания и схемы загружаются ограниченными локальными запросами Relay без
   ослабления проверки аргументов. Длинные описания и форматы custom-инструментов
@@ -192,6 +372,10 @@ recoverable account deletion. Changes below are grouped by area.
   параллельных вызовов. Неподдерживаемые возможности отклоняются явно; нативная
   передача сохраняет расширения провайдера, точные числа, порядок полей и заголовки.
   ([1f64175](https://github.com/F0RLE/zenith-relay/commit/1f64175))
+- Начальные служебные инструкции после сообщения пользователя больше не блокируют
+  преобразованные запросы Claude до первого ответа. Их порядок сохраняется в
+  системном поле целевого протокола; инструкции после предыдущих ответов ассистента
+  по-прежнему отклоняются явно, если целевой формат не сохраняет их положение.
 - Настройки и отчёты размышлений используют единый `xhigh` и фактический уровень
   или бюджет. Клиенты Messages получают доступные публичные сводки и принимают
   пустую начальную подпись Claude с сохранением нативного состояния продолжения.
@@ -244,6 +428,11 @@ recoverable account deletion. Changes below are grouped by area.
 
 #### Claude Desktop и профили
 
+- Фиксированная шкала размышлений Claude Desktop сопоставляет пропущенные
+  уровни с ближайшим поддерживаемым и разрешённым уровнем снизу либо минимальным
+  разрешённым, если ниже ничего нет. В использовании остаются запрошенный и
+  фактический уровни; выключение, явные бюджеты, прямой API и другие клиенты не меняются.
+
 - Claude Desktop подключается через профиль стороннего провайдера. Relay проверяет
   настройки до закрытия клиента, сохраняет восстановление, записывает каталог
   и запускает приложение только по выбранному действию. Восстановление сохраняет
@@ -260,6 +449,14 @@ recoverable account deletion. Changes below are grouped by area.
 
 #### Интерфейс и Доступ
 
+- Новый экран запуска учитывает тему и язык, показывает этап загрузки и
+  позволяет перезагрузить окно при задержке или ошибке. Окно открывается до
+  загрузки React; остальные страницы подгружаются при переходе, а не все сразу.
+
+- В окне ротации пресеты вынесены на боковую панель, а участники собраны
+  в компактные карточки. Выбор выделяется заливкой, а не цветной обводкой;
+  в узком окне все настройки доступны в одной области прокрутки.
+  Закрытие оставлено в заголовке без дублирующей нижней кнопки.
 - Доступ объединяет Локальный API, Приложения и Аккаунты. Настройка приложения
   сохраняет путь без запуска и изменения пула; защищённое восстановление Claude
   находится в Восстановлении. Общие настройки аккаунтов сохраняют индивидуальные
@@ -291,6 +488,47 @@ recoverable account deletion. Changes below are grouped by area.
 
 ### Исправления
 
+- Нативный BPS сохраняет именованные результаты функций Responses без ID вызова:
+  запуск чатов и передача задач больше не требуют выдуманного вызова инструмента.
+  Некорректные переданные ID и custom-результаты без ID по-прежнему отклоняются.
+- Claude Desktop больше не скрывает доступные `high` или `max`, если отсутствует
+  промежуточный уровень. Ограничение нативного меню не заменяет точную проверку
+  маршрута; неподдерживаемый выбор не подменяется другим уровнем.
+
+- Профили OpenCode явно скрывают неподдерживаемые встроенные режимы размышления,
+  чтобы SDK не предлагал Medium для маршрута, разрешающего другие уровни.
+- Запросы Claude Desktop к Gemini передают непрозрачный идентификатор пользователя
+  через safety labels Gemini вместо ошибки поля metadata до первого ответа.
+- Преобразование Responses принимает необязательное имя результата функции,
+  если оно совпадает с вызовом. Результат без `call_id` явно сообщает об
+  отсутствии точного отображения вместо общей ошибки `input`; вызов не выдумывается.
+- Преобразование Chat сохраняет историю отказов на следующем ходе и связывает
+  старые результаты функций по имени, а не ID вызова. Имена участников без
+  точного отображения и чужая роль ответа Messages больше не игнорируются молча.
+- WebSocket-запросы Responses находят модели, доступные только в BPS, при
+  отсутствующем или устаревшем доступе, в том числе на следующих ходах.
+  Запрещённые нативные аккаунты не вызываются; отозванный доступ не обходится.
+- `pause_turn` Messages больше не превращается в вымышленное исчерпание токенов
+  на преобразуемом маршруте. Преобразование JSON отклоняет чужую роль выходного
+  сообщения Responses и неверный индекс варианта Chat вместо подмены их смысла.
+- Форматы ответа при преобразовании отклоняют неуместные ограничения схемы,
+  конфликтующие оболочки, неверные имена и тип MIME Gemini вместо молчаливого
+  ослабления запроса. Подготовка Messages/Gemini больше не создаёт лишнюю
+  полную копию схемы ответа.
+- Ключ продолжения учитывает изменённую детализацию изображения и не позволяет
+  восстановить прежнее нативное состояние для отредактированной истории.
+  Неверный тип и расположение `detail` больше не превращаются молча
+  в автоматический режим.
+- Преобразование Chat/Messages отклоняет чужие формы `tool_choice` и лишние поля
+  вместо молчаливого удаления ограничений. В Messages `tool_choice: none`
+  больше не получает неподдерживаемый параметр параллельных вызовов.
+- Преобразованные потоки Chat Completions проверяют и соблюдают `include_usage`,
+  не отключая внутренний учёт. Учёт исходного потока игнорирует данные после
+  терминального события, сохраняя отдельный завершающий usage Gemini.
+- Использование разделяет чтение/запись кэша за запрос и оценку хранения,
+  сохраняет сообщённые нули и разделяет активность по чату, подключению
+  и модели провайдера. Промахи не продлевают оценку; неизвестным и смешанным
+  срокам больше не назначается угаданный или максимальный срок жизни.
 - Окно приложения можно перемещать за существующую область заголовка.
   ([#88](https://github.com/F0RLE/zenith-relay/pull/88))
 - При обрыве Responses после полных SSE-событий клиент получает явную ошибку

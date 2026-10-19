@@ -58,6 +58,16 @@ does not grant a different retry or ownership contract.
 Data pages use the workspace beside the sidebar. Card tracks remain compact;
 settings, dialogs, and reading content have bounded readable widths. User-facing
 labels and workflows belong in localized Help, not this architecture document.
+Sidebar auto-collapse follows viewport changes until the user explicitly chooses
+a sidebar state for the current session.
+
+Startup paints a themed, localized HTML loader before importing the React UI.
+It reports interface/data loading, not invented progress percentages. The shell
+is revealed after a successful initial snapshot and paint; slow or failed startup
+offers a window reload without clearing settings. Render failures reveal the
+existing error boundary. Secondary pages load on navigation intent, not all at
+startup. Existing first-frame and interactive metrics track renderer readiness,
+not provider or gateway health.
 
 ## State and secret boundaries
 
@@ -146,16 +156,59 @@ are preserved, and temporary health does not rewrite configured choices.
 ## Pool and execution
 
 Automatic selection first filters compatible, enabled, available members, then
-compares normalized load. Fresh positive quota takes precedence; fresh provider
-credits are the fallback. Soft health/first-output latency and request weights
+compares normalized load. Fresh positive quota takes precedence; candidates
+less than five percentage points below the best fresh quota remain in the same
+selection band. At a lead of five points or more the lower remainder yields.
+Fresh provider credits are the fallback. Soft health/first-output latency and request weights
 resolve remaining choices. Wallet prices do not rank members. Missing latency
 does not exclude a member. Soft affinity can yield to a better eligible member;
 opaque response ownership cannot.
 
-Manual mode follows saved member order, skips unavailable/full members, and
-wraps. It ignores weights and soft affinity. A member limit covers all its
-protocol routes; zero means no extra member cap, not unlimited provider capacity.
-Policy saves are serialized and identity-checked.
+Automatic response-owner yield probes the same admission policy with the current
+physical owner preferred on ties. Load, fresh quota, independent credit evidence,
+and soft health therefore cannot disagree with ordinary request selection.
+A recovery trial or another protocol alias is not a reason to move ownership.
+The executor must still materialize reusable history before clearing an opaque
+binding; active generations and unknown execution are never moved or replayed.
+
+Runtime snapshots publish `resourceHeadroom` from the same quota and credit
+freshness checks used by admission, including protected quota reserves. Desktop
+cards use this evidence instead of treating refresh-job status or saved counters
+as routing capacity. A provider ledger must explicitly be usable; its reported
+balance alone is not spendable capacity. Cards rank resource headroom, not a
+model-independent execution queue. The read-only next-member preview is absent
+when eligible model/protocol routes disagree and never advances rotation.
+
+Round-robin mode follows saved member order, skips unavailable/full members,
+and wraps. Equal cycling ignores saved weights and soft affinity. Optional
+weighted cycling uses physical-member request shares; shares are not token or
+spending targets. Equal-credit ties use saved order, not protocol-alias IDs.
+Failover selects the first ready member in saved priority order, without cycling.
+A due lower-priority recovery route does not displace a healthy primary; a due
+primary recovery still follows the bounded recovery admission policy.
+A member limit covers all its protocol routes; zero means no extra member cap,
+not unlimited provider capacity. Policy saves are serialized and identity-checked.
+
+Management protocol three rejects older clients before exposing new saved
+strategy variants; current clients can still negotiate protocol-two servers.
+Rotation policy version three is advertised as `rotation_v3`. Known version-one
+and version-two policies upgrade without changing inventory, member order,
+weights, concurrency limits, or their equal-cycling semantics. Stored `in_order`
+and `round_robin` remain equal cycling; `weighted_round_robin` explicitly opts
+into shares, and `failover` explicitly opts into primary/reserve behavior.
+Unknown versions and invalid legacy pairs are rejected, not normalized.
+The editor may still update version-two servers through `rotation_v2`, but
+never offers them the new strategy variants or presets.
+Portable preset imports may migrate validated legacy policies on newer servers;
+direct updates stay version-exact, and new policies are never downgraded for
+older servers.
+
+Recommended and even-distribution presets change the strategy, not saved shares
+or limits. Accounts-first explicitly places accounts before API sources while
+preserving relative order inside each group; its API reserve may spend balance.
+Presets rebase onto current membership and never restore a removed member.
+Policy-only updates retain active leases, continuation owners, resource evidence,
+and cooldowns. No application or gateway restart is required.
 
 Admission queues, waits, and generation attempts are bounded. One logical
 request owns its dispatch, transport, auth-repair, retry, and irreversible-send
@@ -188,6 +241,10 @@ that provenance. Soft root/thread and prompt-cache hints are separately bounded
 and namespaced; they neither authorize state nor transfer an opaque owner.
 
 A generic HTTP 400 is terminal, not evidence for rotation or history repair.
+Buffered local errors derived from upstream adapter output carry
+`x-should-retry: false` without changing their status or accounting, so clients
+that honor this header do not regenerate automatically. This cannot prevent
+an explicit resend or retries by clients that ignore the header.
 Repair needs a specific validated response-reference/tool-link rejection.
 `turn_rate_limit_exceeded` ends the current turn with the known retry delay,
 without account-wide cooldown or automatic rotation.
@@ -219,6 +276,40 @@ retain wire bytes except explicit terminal validation, bounded-frame rejection,
 and safe error rewriting. The first valid terminal ends consumption without
 waiting for EOF or trailing data.
 
+SSE parsing borrows single-line data payloads and consumes coalesced adapter,
+upstream-usage, and HTTP-to-WebSocket frames in place, moving the incomplete
+tail once per chunk. Native Responses forwarding uses the validated delta fast
+path, including escaped text and tool arguments; usage, model identity, terminal
+events, and opaque compaction stay on their full validation paths. These local
+optimizations do not change service tiers, reasoning, or client cancellation.
+Native WebSocket forwarding retains ordinary text/binary buffers when no error
+rewrite is needed. Committed output bypasses inapplicable retry parsing, not
+served-model checks. HTTP-to-WebSocket fallback consumes parsed JSON and opaque
+payloads without cloning them or decoding a serialized copy. Converted streams
+retain unchanged text, reasoning, and refusal snapshots; closed Messages blocks
+still reject mutations.
+Messages streams finalize native text/thinking snapshots when their block closes
+and append signature fragments in place. Portable deltas still stream immediately;
+only a fully closed response can supply replayable native continuation state.
+
+Converted Chat Completions streams validate `stream_options.include_usage`.
+Only an explicit `true` adds `usage: null` to ordinary chunks and a final
+usage-only chunk. Upstream usage collection is independent of this client flag.
+Native usage capture ignores data after its terminal marker, including later
+usage, tier, and model changes. Gemini candidate endings do not end capture:
+its separate trailing usage remains observable until the stream ends.
+Chat and Messages tool choices are validated using their own wire shapes and
+per-variant fields. Messages `none` carries no parallel-use modifier: no tools
+can execute, so a separate parallel restriction is redundant. Native forwarding
+keeps its existing extension policy; Responses selectors use their own resolver.
+Responses custom-input deltas and missing suffixes in final text snapshots append
+in place after the existing identity, prefix, and closed-block checks.
+
+Completed streams move existing history and native continuation state into the
+saved checkpoint without cloning the entire prepared request. Validation and
+response encoding precede the transfer; final client emission keeps its checks.
+Gemini native Parts retain their original order and signature/thought boundaries.
+
 Responses stream interruptions emit one explicit `response.failed` at a safe
 SSE boundary, even after visible output. An already forwarded partial frame
 cannot be replaced or have another event inserted into it. Interrupted streams
@@ -235,8 +326,57 @@ own field-level review; third-party proxies are comparisons, not specifications.
 
 ### Conversation and routing contracts
 
-- Preserve instruction/block order and protocol-specific roles. Do not hoist
-  mid-conversation instructions. Nullable aliases cannot erase explicit limits;
+- Messages `metadata.user_id` is opaque user attribution, not prompt content.
+  Gemini conversions send its stable SHA-256 pseudonym (first 63 hexadecimal
+  characters) as the documented `labels.safety_identifier`; null remains absent
+  and an empty ID remains empty. Native requests stay unchanged. Arbitrary
+  OpenAI metadata is not safety attribution and still requires a compatible
+  endpoint rather than being discarded or relabeled.
+- Responses client-executed tool search keeps its call/result kind, IDs,
+  namespaces and original catalog across JSON/SSE and both continuation modes.
+  Foreign models receive a callable search function; the client still executes
+  the lookup and receives native `tool_search_call` items. Deferred functions
+  become callable only after discovery or an explicit choice. Historical calls
+  remain replayable but cannot reactivate a tool removed from discovery results.
+  Exact schemas stay in the catalog/checkpoint; foreign search results carry
+  loaded names rather than a second schema copy. Provider-hosted search, MCP,
+  file search and code execution remain native service features, not fake
+  client functions.
+- Base64 PDF inputs preserve bytes and labels across the twelve conversions.
+  Responses/Messages also exchange HTTPS PDF URLs without Relay fetching them
+  and preserve PDF tool results. Chat/Gemini URL conversion, provider file IDs,
+  document citations/context and non-default rendering controls require a
+  compatible native endpoint rather than lossy extraction or invented metadata.
+- Native Gemini `CONTINUATION` is an incomplete generation with a required opaque
+  candidate token. JSON/SSE retain it and trailing usage. Its route owner is
+  bound through the existing affinity store to the local key, model and exact
+  original `contents`; unknown/changed contexts cannot rotate to another owner.
+  Relay never resumes a generation automatically. `cachedContent` stays native
+  and provider-owned; cache creation/expiry are not emulated by conversion.
+- Messages `pause_turn` means an unfinished server-tool loop, not token
+  exhaustion. Converted routes reject it with `stop_reason` rather than invent
+  a token-limit result; matching native routes keep their continuation contract.
+- Converted JSON responses reject supplied non-assistant Responses output roles
+  and invalid/nonzero Chat choice indexes instead of relabeling their identity.
+- Converted Messages replies validate supplied assistant roles in JSON and SSE.
+  Chat history accepts both the `refusal` field and refusal content parts,
+  preserving the text once and rejecting conflicts or non-assistant refusals.
+  Responses-to-Chat history retains refusal parts instead of ordinary text.
+- Historical Chat `function` results pair by function name, not an invented call
+  ID. Ordinary Chat participant names have no lossless mapping here and fail
+  with `messages[].name`; matching native requests retain them unchanged.
+- Converted Chat/Messages terminal reasons must agree with their calls: a tool
+  stop needs a tool call, while ordinary completion cannot contain one. The
+  shared JSON/SSE completion boundary rejects contradictions with `finish_reason`
+  before publishing a successful terminal or reusable continuation.
+- Required or named tool choices need an actual call before a converted reply
+  can complete normally. A plain-text success is rejected with `tool_choice`;
+  refusals, content filtering and token-limit outcomes retain their own meaning.
+- Preserve instruction/block order and protocol-specific roles. For targets
+  with a top-level system field, initial system attachments before the first
+  assistant turn join that field in instruction order; user content order stays
+  unchanged. Do not hoist instructions past an earlier assistant turn.
+  Nullable aliases cannot erase explicit limits;
   conflicting non-null limits fail before transport.
 - Preserve call kind, namespace, declared name, item ID versus `call_id`,
   parallel grouping, arguments, and results. Only argument deltas concatenate;
@@ -255,6 +395,10 @@ own field-level review; third-party proxies are comparisons, not specifications.
 - Responses custom outputs accept strings and typed content lists, including
   representable images. Empty lists mean no content, not literal `[]`. Untyped
   custom results fail. Chat tool messages cannot carry images.
+- Responses function-result names, when supplied, must match their recorded call; a
+  name or item ID cannot replace `call_id`. Standalone outputs without a call
+  have no foreign tool-history mapping and fail with `input.call_id`; matching
+  native Responses input is preserved, not converted to invented calls or text.
 - Equivalent `caller: direct` / `async: false` history is accepted. Async/program
   execution and an unexpected upstream namespace cannot silently become direct
   calls. Native Responses retains those fields unchanged.
@@ -269,6 +413,15 @@ own field-level review; third-party proxies are comparisons, not specifications.
   signatures are replayed unchanged only to their compatible owner. Public
   summaries are not signatures. Missing opaque state cannot be reconstructed
   from visible reasoning or an invented sentinel.
+- Image history fingerprints retain non-default `detail`. Omitted detail and
+  `auto` share the documented default; other changes cannot reuse an older
+  native checkpoint. Wrong detail types and misplaced controls fail before
+  conversion instead of silently becoming the default.
+- Output formats validate fields by variant. Text/JSON-object modes cannot
+  silently discard schema controls; nested and flat schema envelopes cannot
+  compete. Invalid schema names and Gemini MIME types fail before conversion.
+  Absent/null optional controls retain their defaults. Messages/Gemini encoding
+  does not build an unused OpenAI-format copy of the response schema.
 - Chat plaintext `reasoning_content` / `reasoning` aliases must agree. Messages
   clients may replay translated summaries with absent/null/empty signatures;
   nonempty foreign signatures fail. A new ordinary user turn can carry completed
@@ -298,6 +451,10 @@ is observed and regression-tested, not guaranteed by public OpenAI documentation
 - Permission discovery is token-incarnation-scoped, coalesced, bounded, and
   cached briefly. A changed token or failed access read cannot reuse old access.
   Restricted models and account policy constrain execution, not just display.
+- Before rejecting an unknown WebSocket model, refresh scoped BPS access and
+  resolve it again. This applies to initial frames and later turns, including
+  HTTP fallback; known routes and malformed frames need no discovery I/O.
+  BPS-only models use their HTTP executor without a native Responses upgrade.
 - Compact messages, attribution, tool history, and inline attachments are
   normalized at this boundary. Collaboration context is lower-authority user
   context; encrypted agent messages and remote image fetching are unsupported.
@@ -311,6 +468,44 @@ is observed and regression-tested, not guaranteed by public OpenAI documentation
   authoritative terminal validates identity, arguments, and original schemas.
   Failed/incomplete/truncated output releases no tool subset and triggers no
   regeneration. Synthetic client events are not timing or usage evidence.
+  JSON and SSE retain the same tool-validation category and safe cause: malformed
+  JSON, a non-object argument, and a schema mismatch remain distinguishable from
+  a broken stream. Argument contents are never included in these diagnostics.
+  Inner JSON syntax errors and premature EOF have separate safe parameter
+  suffixes and static causes; both survive JSON and streamed error reporting.
+  Their diagnostics retain only an allowlisted parser reason, payload-shape
+  category, byte length, and failing decoder line/column (after any supported
+  whitespace normalization). No key, value, source excerpt, or raw parser error
+  enters diagnostics. Buffered and streaming discovery preserve these fields
+  in both the client error and request usage record, without regeneration.
+  Completed client calls cannot reuse a call ID already present in supplied
+  history, in compact/full mode as well as local discovery.
+- Complex function string arguments may use Relay's explicit private frame:
+  `relay-function-string-v1 {"field":"cmd","args":{}}`, one newline, then
+  the unchanged string value. Other arguments live in the JSON header. The
+  reconstructed object still passes the original schema and tool-choice checks;
+  duplicate fields and malformed headers fail. Ordinary JSON calls remain
+  supported and custom tools stay opaque, even if their text resembles a frame.
+  Replayed client function calls and generated examples share this encoder:
+  the top-level string needing the most JSON escapes becomes the raw frame body;
+  other arguments retain their types in its header. Plain arguments stay JSON.
+  This removes one JSON-escaping layer, not context or model reasoning.
+  For compatibility, the inner function JSON decoder also escapes literal LF,
+  CR, and tab characters inside quoted strings without changing their decoded
+  bytes. Unknown printable string escapes such as `\s`, `\q`, or `\'` retain
+  their literal backslash instead of invalidating the call. Standard JSON
+  escapes keep their existing meaning; malformed Unicode, escaped control
+  characters, quotes, incomplete objects, and schema violations still fail.
+  Custom input and explicit frame bodies remain opaque. This compatibility
+  grammar is private to BPS, not a change to client JSON or the public API.
+- The legacy single-call `name(JSON)` compatibility parser also handles
+  referenced function calls. The parsed name must exactly match the one
+  reference; normal schemas and tool choice still apply. No code is evaluated,
+  no tool identity is inferred, and custom input is never parsed this way.
+- Local BPS stream failures use the Responses `error` event's top-level
+  `code`, `message`, `param` and ordered `sequence_number`. They do not fabricate
+  a successful completion or reveal tool arguments. Text still streams before
+  final tool validation; transport framing is not a provider latency guarantee.
 - Catalogs use compact schema presentation without changing the original
   validator. Complex/unknown JSON Schema constructs remain complete JSON.
   Automatic Relay-local discovery applies from 24 tools and 24 KiB of complete
@@ -454,12 +649,33 @@ Usage records one final row per logical request and separate retained physical
 attempts. Exact `requestId` history is not an additional cost/tokens total.
 Deleting/expiring usage removes corresponding attempts; missing earlier history
 is not reconstructed. Actual retry/stop decisions are recorded when known.
+An interim successful-HTTP `tool_discovery` observation without error metadata
+is pending, not a failed or completed logical request. Attempt timings are
+elapsed from the logical request start, not additive per-send durations.
 
 Counters, served model, tier, timings, and safe provider error IDs come from
 upstream observations. First output excludes heartbeats, empty deltas, lifecycle
 events, terminal snapshots, and synthetic client SSE. Unknown timing stays unknown.
 Partial cumulative counters merge without null erasure; checked derived totals
 stay unknown on overflow, and reported totals are retained.
+
+Cache read/write counters remain per-request observations, including explicit
+zeroes. Local cache activity is scoped by chat, account/source identity, and
+upstream model. Only observed positive reads/writes move the touch; misses and
+future or foreign retention records cannot supply its policy. The UI shows a
+separate retention estimate, refreshes it through the existing usage revision,
+and keeps previous observations after a failed read without extending them.
+Model names do not prove an endpoint's TTL. Mixed prefix windows have no single
+countdown, and an elapsed estimate is not evidence of provider eviction.
+
+Managed account Responses requests reuse a client-supplied `prompt_cache_key`.
+If absent, an identified client context supplies a deterministic opaque key
+scoped to the local key and resolved model, shared by HTTP and native WebSocket.
+Unscoped requests and API-source bodies receive no generated key. Compact and
+search endpoints keep their own contracts. Cache hints never authorize a
+continuation or override quota, load, eligibility, or client cache controls.
+BPS places non-default per-turn tool controls after history, not in the stable
+catalog prefix; default automatic tool selection adds no extra suffix.
 
 API-equivalent cost is an estimate, not a customer bill, subscription debit, or
 routing input. Price resolution uses observed provider prices, exact reference,
@@ -504,10 +720,30 @@ ChatGPT, Claude Desktop, and OpenCode have separate profile ownership and recove
 Claude uses a Relay-owned UUID profile in its `Claude-3p` library, preserves foreign
 profiles/selections, and maps stable client-only Claude IDs back to real models.
 There is one entry per enabled Messages-routable model, not one per effort.
-Native effort choices are only the representable allowed prefix; aliases grant
-no upstream capabilities, pricing, or context. Catalog overflow fails before
+Desktop's native effort menu is capped at the highest pool-allowed level on a
+Messages route, not the longest contiguous prefix. A sparse set does not hide
+higher supported choices. `maxEffort` cannot hide intermediate holes. Reserved
+Desktop reasoning aliases on Messages explicitly map the five native picker
+levels to the nearest executable, pool-allowed lower level, or the lowest
+allowed level when none is lower. The choice uses the configured route union,
+not pool order or cooldown; an exact choice is not downgraded to fit another
+member. Admission and preparation use the same captured effective effort,
+while usage retains the original requested effort. Disabled thinking, explicit
+budgets, unknown levels, Ultra, ordinary model IDs and other client protocols
+are not remapped. Exact route and pool checks still apply to the effective
+choice; an empty supported set does not grant reasoning capabilities.
+Aliases grant no upstream capabilities, pricing, or context. Catalog overflow fails before
 closing/writing rather than truncating. Client-owned MCP discovery is enabled
 only in the owned profile.
+
+OpenCode profiles explicitly disable standard SDK reasoning variants that the
+model route does not advertise; omission would let OpenCode restore its built-in
+defaults. Models without evidenced effort levels retain the provider's default
+mode. Refresh can re-enable a newly supported effort, removes stale generated
+variants, and preserves genuinely custom user variants.
+OpenCode's built-in `Default` is the provider-default mode, not an advertised
+effort, and cannot be removed by the model variant configuration. Clients that
+cache the profile at startup must reload before its new effort list takes effect.
 
 Connect validates routes, key, catalog, ownership, and launch target before process
 changes. Only the requested launch preference starts the client after attachment.
