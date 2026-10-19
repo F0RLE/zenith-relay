@@ -1,6 +1,9 @@
 use std::{
     env,
     path::{Path, PathBuf},
+};
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+use std::{
     thread,
     time::{Duration, Instant},
 };
@@ -119,10 +122,13 @@ fn packaged_target(output: &str) -> Option<&str> {
     })
 }
 
-pub(crate) fn launch_claude_desktop() -> Result<(), String> {
-    if !cfg!(any(target_os = "windows", target_os = "macos")) {
-        return Err("Automatic Claude Desktop launch is supported on Windows and macOS".into());
-    }
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub(crate) fn launch_claude_desktop(_restart: bool) -> Result<(), String> {
+    Err("Automatic Claude Desktop launch is supported on Windows and macOS".into())
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub(crate) fn launch_claude_desktop(restart: bool) -> Result<(), String> {
     let executable = super::settings::configured_path(super::settings::Application::ClaudeDesktop)?
         .or_else(desktop_executable);
     // Resolve and validate the launch target before stopping an existing client.
@@ -140,7 +146,9 @@ pub(crate) fn launch_claude_desktop() -> Result<(), String> {
         .nth(3)
         .ok_or("Invalid Claude Desktop application path")?
         .to_path_buf();
-    super::process::stop_claude_desktop_and_wait()?;
+    if restart {
+        super::process::stop_claude_desktop_and_wait()?;
+    }
     if let Some(_executable) = executable {
         #[cfg(target_os = "windows")]
         super::process::windows_hidden_command(_executable)
@@ -152,11 +160,6 @@ pub(crate) fn launch_claude_desktop() -> Result<(), String> {
             .arg(application)
             .spawn()
             .map_err(|_| "Could not start Claude Desktop".to_string())?;
-        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-        {
-            let _ = _executable;
-            return Err("Automatic Claude Desktop launch is supported on Windows and macOS".into());
-        }
     } else {
         #[cfg(target_os = "windows")]
         start_packaged_desktop(
@@ -172,6 +175,7 @@ pub(crate) fn launch_claude_desktop() -> Result<(), String> {
     wait_for_start(is_claude_desktop_running, Duration::from_secs(10))
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
 fn wait_for_start(mut running: impl FnMut() -> bool, timeout: Duration) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -188,6 +192,15 @@ fn wait_for_start(mut running: impl FnMut() -> bool, timeout: Duration) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[test]
+    fn unsupported_platform_rejects_launch_before_loading_settings() {
+        assert_eq!(
+            launch_claude_desktop(false),
+            Err("Automatic Claude Desktop launch is supported on Windows and macOS".into())
+        );
+    }
 
     #[test]
     fn launch_confirmation_requires_a_running_desktop() {

@@ -363,8 +363,8 @@ For a release UI or layout change, run the focused Playwright suites as well:
 
 ~~~powershell
 cd src
-bunx playwright test tests/e2e/visual-matrix
-bunx playwright test tests/e2e/operations
+bunx --no-install playwright test tests/e2e/visual-matrix
+bunx --no-install playwright test tests/e2e/operations
 bun run screenshots
 ~~~
 

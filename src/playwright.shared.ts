@@ -16,7 +16,7 @@ export const sharedPlaywrightConfig: Pick<
     viewport: { width: 1160, height: 760 },
   },
   webServer: {
-    command: `bun run build && bun x vite preview --host 127.0.0.1 --port ${port} --strictPort`,
+    command: `bun run build && bun x --no-install vite preview --host 127.0.0.1 --port ${port} --strictPort`,
     url: baseURL,
     reuseExistingServer: false,
     timeout: 120_000,

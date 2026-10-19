@@ -54,7 +54,7 @@ jobs:
       - run: cargo clippy --manifest-path relay-server/Cargo.toml --all-targets --locked -- -D warnings
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.3
       - name: Agent guardrails
         run: bun ./scripts/check/check-agent-guardrails.mjs
       - run: cargo test --manifest-path relay-server/Cargo.toml --locked

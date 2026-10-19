@@ -30,7 +30,7 @@ jobs:
           fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.3
       - name: Test proposed PR metadata policy
         run: bun test ./scripts/check/pr-metadata.test.mjs
       - name: Test proposed CI policy
@@ -61,7 +61,7 @@ jobs:
           sudo find /etc/apt/sources.list.d -type f \( -name '*microsoft*' -o -name '*azure*' \) -delete
           sudo apt-get update
           sudo apt-get install -y dbus-x11 gnome-keyring libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev xdg-utils
-      - run: bunx playwright install chromium
+      - run: bunx --no-install playwright install chromium
         timeout-minutes: 10
         working-directory: src
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
@@ -132,7 +132,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.3
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:

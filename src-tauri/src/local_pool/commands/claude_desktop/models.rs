@@ -10,7 +10,7 @@ const MAX_INFERENCE_MODELS: usize = 200;
 fn native_effort_cap(model: &ModelSummary) -> Option<&'static str> {
     ["low", "medium", "high", "xhigh", "max"]
         .into_iter()
-        .filter(|effort| {
+        .rfind(|effort| {
             model
                 .reasoning_allowed_levels
                 .iter()
@@ -20,7 +20,6 @@ fn native_effort_cap(model: &ModelSummary) -> Option<&'static str> {
                         && route.reasoning_efforts.iter().any(|level| level == *effort)
                 })
         })
-        .last()
 }
 
 pub(super) fn inference_models(models: &[ModelSummary]) -> LocalResult<Vec<Value>> {

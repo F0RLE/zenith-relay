@@ -140,7 +140,7 @@ try {
   }
 
   if (wantsBrowsers) {
-    run("install Playwright Chromium", bun, ["x", "playwright", "install", "chromium"], frontendRoot, env);
+    run("install Playwright Chromium", bun, ["x", "--no-install", "playwright", "install", "chromium"], frontendRoot, env);
   }
 
   console.log("[setup] ready — run `bun scripts/setup/start-dev.mjs` to start Relay.");

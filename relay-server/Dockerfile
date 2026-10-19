@@ -1,5 +1,6 @@
 FROM rust:1.98.1-bookworm AS build
 WORKDIR /build
+COPY catalog catalog
 COPY crates/relay-core crates/relay-core
 COPY relay-server relay-server
 RUN cargo build --manifest-path relay-server/Cargo.toml --release --locked
