@@ -203,6 +203,22 @@ recoverable account deletion. Changes below are grouped by area.
 
 ### Fixed
 
+- **Launch application** on Overview now opens ChatGPT, Claude Desktop or OpenCode
+  without connecting it to Relay, changing its configuration or restarting a
+  running client. Launch is available with the API stopped and an empty pool.
+- External account/profile changes no longer send ordinary launches through
+  Relay's profile checks or runtime refresh. New manual ChatGPT context values
+  remain untouched instead of blocking catalog updates and reconnection.
+- Launcher process checks no longer accept `OpenAI.Codex.exe` by name alone or
+  treat Claude's Chromium helpers as running desktop clients or stop targets.
+- The legacy saved-key launch reports errors without hiding Relay. OpenCode
+  restarts, including direct-source launches, no longer block the UI thread.
+- Invalid ChatGPT launch overrides are checked even if the client is already
+  running. Invalid `OPENCODE_BIN` / `CLAUDE_DESKTOP_BIN` overrides fail explicitly
+  instead of silently launching a different installation.
+- OpenCode confirms a running desktop before reporting launch success. Automatic
+  discovery skips CLI entries throughout PATH, selects Claude versions by numeric
+  order, and rejects non-executable desktop files before closing a working client.
 - Native BPS keeps named Responses function outputs without a call ID, fixing
   thread startup and handoffs without inventing a matching tool call. Invalid
   supplied IDs and custom outputs without IDs remain rejected.
@@ -488,6 +504,22 @@ recoverable account deletion. Changes below are grouped by area.
 
 ### Исправления
 
+- **Запустить приложение** на Обзоре открывает ChatGPT, Claude Desktop или OpenCode
+  без подключения к Relay, изменения настроек и перезапуска работающего клиента.
+  Запуск доступен при остановленном API и пустом пуле.
+- После смены аккаунта или профиля вне Relay обычный запуск не зависит от
+  проверок профиля и обновления состояния Relay. Новые ручные настройки контекста
+  ChatGPT сохраняются и не блокируют обновление каталога и повторное подключение.
+- Проверка процессов больше не принимает `OpenAI.Codex.exe` только по имени
+  и не считает служебные процессы Chromium в Claude запущенным приложением
+  или целью остановки.
+- Старый запуск с сохранённым ключом сообщает об ошибке, не скрывая Relay.
+  Перезапуск OpenCode, в том числе для прямого источника, не блокирует UI-поток.
+- Неверный путь ChatGPT проверяется и при уже работающем клиенте. Ошибочные
+  `OPENCODE_BIN` / `CLAUDE_DESKTOP_BIN` больше не подменяются другой установкой.
+- OpenCode подтверждает появление процесса приложения перед сообщением об успехе.
+  Автопоиск проходит мимо CLI по всему PATH, сравнивает версии Claude численно
+  и отклоняет неисполняемые файлы до закрытия работающего клиента.
 - Нативный BPS сохраняет именованные результаты функций Responses без ID вызова:
   запуск чатов и передача задач больше не требуют выдуманного вызова инструмента.
   Некорректные переданные ID и custom-результаты без ID по-прежнему отклоняются.

@@ -712,7 +712,8 @@ short/long windows are not replaced by percentages or pricing bands.
 Compaction is projected at 90% of the selected window, capped by known input
 and output/hard-limit constraints. Relay never silently truncates requests.
 Managed root context overrides are recoverable; explicit newer user settings
-remain user-owned. Catalog changes publish atomically without stopping requests.
+remain user-owned and do not block subsequent catalog updates or reconnects.
+Catalog changes publish atomically without stopping requests.
 A client that only loads configuration at startup still needs relaunch; saving
 policy never automatically closes/restarts an application.
 
@@ -747,6 +748,20 @@ cache the profile at startup must reload before its new effort list takes effect
 
 Connect validates routes, key, catalog, ownership, and launch target before process
 changes. Only the requested launch preference starts the client after attachment.
+Overview's application launcher only opens the selected installed application,
+even with the local API stopped or an empty pool. It does not attach a profile,
+refresh a catalog, change credentials, start the API, or stop a running client;
+existing client configuration remains unchanged. Launch does not depend on a
+Relay runtime refresh or the validity of a previous managed profile.
+Launch preferences take precedence over `OPENCODE_BIN` / `CLAUDE_DESKTOP_BIN`,
+then installation discovery. Explicit overrides are validated even when a client
+is already running; invalid overrides never silently select another installation.
+Autodetected files pass desktop identity and executable checks before a restart.
+Discovery continues past CLI entries on PATH and compares Claude version numbers
+numerically. Process control requires a recognized desktop path and excludes
+Chromium helpers. OpenCode and Claude launch success requires a running desktop,
+not merely a successful spawn. Blocking launch/restart commands run off the UI
+thread; the legacy saved-key launch leaves Relay visible when launch fails.
 Restore refuses modified owned settings, preserves unrelated changes, and does
 not automatically relaunch. Source edits do not upgrade an already running binary.
 

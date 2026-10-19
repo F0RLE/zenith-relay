@@ -579,19 +579,19 @@ Realtime and audio/video conversion are not provided.
 
 ### Applications
 
-**Access → Applications** shows ChatGPT, Claude Desktop, then OpenCode. Each
-application starts with **Application path**. Use the folder button to select
-the installed desktop application, then **Save**. You can also paste an absolute
-executable path and save it. On macOS, select its `.app` bundle; on Windows,
-select its `.exe`, not a shortcut or terminal CLI. Do not enter command arguments
-or a profile/configuration folder.
+In **Access → Applications**, select ChatGPT, Claude Desktop or OpenCode.
+Use the folder button or enter an absolute **Application path**, then **Save**.
+Select the desktop `.app` on macOS or `.exe` on Windows, not a shortcut, CLI,
+command with arguments, or configuration folder.
 
-Clear the field and select **Save** to remove a saved override and return to
-automatic detection. Saving a path does not start, close, or connect the
-application; later launch actions use the saved path. If that file is removed,
-select the new installation or clear the path. Paths stay in Relay's data folder
-on this computer, including in Server mode; they are not sent to the server or
-included in pool presets.
+Clear and **Save** to restore automatic detection. Saving never launches, closes
+or connects the application. If the file moves, update or clear the path.
+Paths remain local, including in Server mode, and are excluded from pool presets.
+
+Launch uses the saved path, then `OPENCODE_BIN` / `CLAUDE_DESKTOP_BIN`, then
+automatic discovery. Invalid overrides must be corrected or removed; they never
+fall back silently. OpenCode and Claude confirm a running desktop before success.
+A timeout preserves settings: check the installation and retry.
 
 #### ChatGPT
 
@@ -754,6 +754,12 @@ configure a pool connection without opening ChatGPT, Claude Desktop, or OpenCode
 saves immediately and survives restarting Relay. An explicitly disabled setting
 from an earlier version stays disabled. **Launch application** on Overview and
 direct launch actions still open the selected application.
+
+**Overview** opens the application without changing its connection, profile, keys
+or catalog, or closing a running client—even with the API stopped or pool empty.
+To attach Relay, use **Pool → Connect**. External profile changes do not block
+ordinary launch. New manual ChatGPT context settings survive catalog updates,
+reconnection and recovery.
 
 **Updates.** Select **Check** beside the version or **Update available**.
 Read the changes and select **Update**.
