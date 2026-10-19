@@ -6,28 +6,40 @@ fn typed_adapter_stream_errors_keep_their_category_without_authorizing_replay() 
         error_codes::ADAPTER_UPSTREAM_RESPONSE_INVALID,
         error_codes::ADAPTER_UPSTREAM_STREAM_INVALID,
     ] {
-        let body = serde_json::json!({"error":{"type":"relay_adapter","code":code}});
-        let classified = classify_upstream_error_value(StatusCode::BAD_GATEWAY, &body);
-        assert_eq!(classified.category, code);
-        assert!(!failure_category_affects_account_state(code));
-        assert!(!retryable_failure(StatusCode::BAD_GATEWAY, code, false));
-        assert_eq!(
-            AttemptFailure::classified_with_hint(StatusCode::BAD_GATEWAY, code, Default::default())
+        for body in [
+            serde_json::json!({"error":{"type":"relay_adapter","code":code}}),
+            serde_json::json!({"type":"error","code":code,"message":"Synthetic adapter failure","param":null,"sequence_number":0}),
+        ] {
+            let classified = classify_upstream_error_value(StatusCode::BAD_GATEWAY, &body);
+            assert_eq!(classified.category, code);
+            assert!(!failure_category_affects_account_state(code));
+            assert!(!retryable_failure(StatusCode::BAD_GATEWAY, code, false));
+            assert_eq!(
+                AttemptFailure::classified_with_hint(
+                    StatusCode::BAD_GATEWAY,
+                    code,
+                    Default::default()
+                )
                 .execution
                 .certainty,
-            crate::scheduler::rotation::ExecutionCertainty::Unknown
-        );
+                crate::scheduler::rotation::ExecutionCertainty::Unknown
+            );
+            assert_eq!(
+                classify_upstream_error_value(StatusCode::UNAUTHORIZED, &body).category,
+                error_codes::UPSTREAM_UNAUTHORIZED
+            );
+        }
+    }
+    for ordinary in [
+        serde_json::json!({"error":{"code":error_codes::ADAPTER_UPSTREAM_STREAM_INVALID}}),
+        serde_json::json!({"type":"error","code":"synthetic_unknown"}),
+        serde_json::json!({"type":"relay_adapter","code":error_codes::ADAPTER_UPSTREAM_STREAM_INVALID}),
+    ] {
         assert_eq!(
-            classify_upstream_error_value(StatusCode::UNAUTHORIZED, &body).category,
-            error_codes::UPSTREAM_UNAUTHORIZED
+            classify_upstream_error_value(StatusCode::BAD_GATEWAY, &ordinary).category,
+            error_codes::UPSTREAM_BAD_GATEWAY
         );
     }
-    let ordinary =
-        serde_json::json!({"error":{"code":error_codes::ADAPTER_UPSTREAM_STREAM_INVALID}});
-    assert_eq!(
-        classify_upstream_error_value(StatusCode::BAD_GATEWAY, &ordinary).category,
-        error_codes::UPSTREAM_BAD_GATEWAY
-    );
 }
 
 #[test]

@@ -249,6 +249,38 @@ fn all_sixteen_stream_contracts_handle_fragmented_frames_and_completion() {
     }
 }
 #[test]
+fn every_stream_conversion_emits_text_before_completion() {
+    for client in WireApi::ALL {
+        for upstream in WireApi::ALL {
+            let prepared = prepare(client, upstream, &input(client), true);
+            let Some(mut bridge) = prepared.into_stream_bridge() else {
+                assert_eq!(client, upstream);
+                continue;
+            };
+            let mut pending = sse(upstream);
+            let mut output = Vec::new();
+            while let Some(frame) = crate::protocol::take_sse_event(&mut pending) {
+                for chunk in frame.chunks(7) {
+                    bridge.push(chunk);
+                }
+                while let Some(bytes) = bridge.pop_output() {
+                    output.extend(bytes);
+                }
+                if String::from_utf8_lossy(&output).contains("Hi") {
+                    break;
+                }
+            }
+            assert!(
+                String::from_utf8_lossy(&output).contains("Hi"),
+                "{client:?} -> {upstream:?}"
+            );
+            assert!(!bridge.is_terminal(), "{client:?} -> {upstream:?}");
+            assert!(bridge.completed().is_none(), "{client:?} -> {upstream:?}");
+        }
+    }
+}
+
+#[test]
 fn every_stream_conversion_keeps_tool_ids_order_arguments_and_actual_usage() {
     for client in WireApi::ALL {
         for upstream in WireApi::ALL {

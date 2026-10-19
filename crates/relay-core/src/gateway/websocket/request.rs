@@ -199,6 +199,12 @@ impl ClientRequest {
             && route.account_transport == crate::runtime::AccountTransport::NativeResponses
         {
             crate::gateway::request::normalize_account_request(routed_object, responses_lite);
+            crate::gateway::request::apply_account_prompt_cache_key(
+                routed_object,
+                &self.local_key_id,
+                &self.resolved_model,
+                self.client_context_id.as_deref(),
+            );
         }
         routed_request
     }

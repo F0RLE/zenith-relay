@@ -1,5 +1,6 @@
 use crate::{runtime::DefaultServiceTier, GatewayRuntime, WireApi};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 
 mod schema;
 mod shape;
@@ -7,6 +8,32 @@ pub(in crate::gateway) use shape::coerce_responses_input_array;
 use shape::normalize_account_request_common;
 
 const CODEX_TOOL_CONST_UNION_THRESHOLD: usize = 8;
+
+/// Managed account transports accept cache keys, unlike arbitrary API sources.
+/// Keep a missing client key stable per local key, model and identified context.
+pub(in crate::gateway) fn apply_account_prompt_cache_key(
+    fields: &mut Map<String, Value>,
+    local_key_id: &str,
+    model: &str,
+    client_context_id: Option<&str>,
+) {
+    if fields.contains_key("prompt_cache_key") {
+        return;
+    }
+    let Some(context) = client_context_id.filter(|context| !context.is_empty()) else {
+        return;
+    };
+    let mut digest = Sha256::new();
+    digest.update(b"relay-prompt-cache-v1");
+    for part in [local_key_id, model, context] {
+        digest.update((part.len() as u64).to_be_bytes());
+        digest.update(part.as_bytes());
+    }
+    fields.insert(
+        "prompt_cache_key".into(),
+        Value::String(format!("relay_{}", hex::encode(digest.finalize()))),
+    );
+}
 
 /// Owns the service-tier field for one routed request.
 ///

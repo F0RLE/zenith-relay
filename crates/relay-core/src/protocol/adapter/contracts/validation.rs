@@ -264,6 +264,20 @@ pub(super) fn validate_bridge_tool(tool: &Value) -> AdapterResult<()> {
         .as_object()
         .ok_or_else(AdapterError::unsupported_tool)?;
     match tool_object.get("type").and_then(Value::as_str) {
+        Some("tool_search")
+            if tool_object.get("execution").and_then(Value::as_str) == Some("client") =>
+        {
+            validate_bridge_fields(tool, &["type", "execution", "description", "parameters"])?;
+            if !tool_object.get("parameters").is_some_and(Value::is_object) {
+                return Err(AdapterError::invalid_request().with_parameter("tools.parameters"));
+            }
+            if tool_object
+                .get("description")
+                .is_some_and(|value| !value.is_null() && !value.is_string())
+            {
+                return Err(AdapterError::invalid_request().with_parameter("tools.description"));
+            }
+        }
         Some("function" | "custom") | None
             if tool_object.get("name").and_then(Value::as_str).is_some() =>
         {

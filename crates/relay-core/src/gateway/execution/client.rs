@@ -6,7 +6,7 @@ use super::super::continuation::{
 use super::super::errors::api_error;
 use super::super::now_ms;
 use super::super::request::{
-    candidate_protocols, chat_request_is_text_or_image_only, client_request_identity,
+    candidate_protocols, chat_request_has_supported_content, client_request_identity,
     codex_background_request_kind, forwarded_codex_headers, forwarded_messages_headers,
     is_managed_codex_client, request_id, ServiceTierPolicy, CODEX_RESPONSES_LITE_HEADER,
 };
@@ -108,11 +108,11 @@ async fn execute_client_request_inner(
         }
     });
     if client_wire_api == WireApi::ChatCompletions
-        && !chat_request_is_text_or_image_only(&request_json)
+        && !chat_request_has_supported_content(&request_json)
     {
         return api_error(
             StatusCode::BAD_REQUEST,
-            "Chat Completions supports text and image content only",
+            "Chat Completions supports text, image and file content only",
             error_codes::CHAT_FEATURE_NOT_SUPPORTED,
         );
     }
@@ -137,6 +137,10 @@ async fn execute_client_request_inner(
             error_codes::INVALID_REQUEST,
         );
     };
+    if client_wire_api == WireApi::Gemini {
+        // Bind path-only continuations to their public model; native encoding removes this field.
+        request_json["model"] = Value::String(requested_model.clone());
+    }
     let background_kind = (client_wire_api == WireApi::Responses)
         .then(|| codex_background_request_kind(&headers, &request_json))
         .flatten();
@@ -193,19 +197,32 @@ async fn execute_client_request_inner(
             client_context_id.as_deref(),
         );
     }
-    let continuation = if client_wire_api == WireApi::Responses {
-        match prepare_response_continuation(&runtime, &key.id, &mut request_json, now_ms(), None) {
-            Ok(continuation) => Some(continuation),
-            Err(()) => {
-                return api_error(
-                    StatusCode::CONFLICT,
-                    RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
-                    RESPONSE_CONTINUATION_UNAVAILABLE_CODE,
-                )
-            }
+    let continuation = match client_wire_api {
+        WireApi::Responses => Some(prepare_response_continuation(
+            &runtime,
+            &key.id,
+            &mut request_json,
+            now_ms(),
+            None,
+        )),
+        WireApi::Gemini => Some(crate::gateway::continuation::gemini::prepare(
+            &runtime,
+            &key.id,
+            &request_json,
+            now_ms(),
+        )),
+        _ => None,
+    }
+    .transpose();
+    let continuation = match continuation {
+        Ok(continuation) => continuation,
+        Err(()) => {
+            return api_error(
+                StatusCode::CONFLICT,
+                RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
+                RESPONSE_CONTINUATION_UNAVAILABLE_CODE,
+            )
         }
-    } else {
-        None
     };
 
     let resolved_model = runtime

@@ -164,7 +164,7 @@ impl DiscoveryStream {
     fn reject(&mut self, error: DiscoveryFailure) {
         self.update_progress();
         self.output.push_back(match error {
-            DiscoveryFailure::Adapter(error) => failure(error.code(), error.parameter()),
+            DiscoveryFailure::Adapter(error) => adapter_failure(error),
             DiscoveryFailure::Upstream(error) => failure(error.category, None),
         });
         self.terminal = true;

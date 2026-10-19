@@ -245,6 +245,45 @@ fn cancellation_is_terminal_and_never_releases_tools() {
 }
 
 #[test]
+fn local_failures_use_the_responses_error_event_contract() {
+    let parameter = "output.run_officejs.args.json";
+    let bytes = failure(
+        crate::error_codes::ADAPTER_UPSTREAM_RESPONSE_INVALID,
+        Some(parameter),
+    );
+    let event: Value = serde_json::from_slice(&sse_event_data(&bytes)).unwrap();
+    assert_eq!(event["type"], "error");
+    assert_eq!(
+        event["code"],
+        crate::error_codes::ADAPTER_UPSTREAM_RESPONSE_INVALID
+    );
+    assert_eq!(event["param"], parameter);
+    assert!(event["message"].as_str().unwrap().contains(parameter));
+
+    let mut translator = Translator::new(request());
+    translator.push(&frame(json!({"type":"response.created","response":{"id":"synthetic","status":"in_progress","output":[]}})));
+    let mut invalid = call("inspect");
+    invalid["arguments"] = json!({"references":["inspect"],"code":"{invalid"})
+        .to_string()
+        .into();
+    translator.push(&frame(completed(json!([invalid]))));
+    let wire = output(&mut translator);
+    let events: Vec<Value> = wire
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1]["type"], "error");
+    assert_eq!(
+        events[1]["code"],
+        crate::error_codes::ADAPTER_UPSTREAM_RESPONSE_INVALID
+    );
+    assert_eq!(events[1]["sequence_number"], 1);
+    assert!(translator.terminal);
+}
+
+#[test]
 fn tool_validation_failures_keep_safe_parameter_in_persisted_diagnostics() {
     let mut translator = Translator::new(request());
     let mut invalid = call("inspect");
@@ -262,17 +301,227 @@ fn tool_validation_failures_keep_safe_parameter_in_persisted_diagnostics() {
     let parsed = super::super::parse_sse_event(body.as_bytes());
     assert_eq!(
         parsed.error_category,
-        Some(crate::error_codes::ADAPTER_UPSTREAM_STREAM_INVALID)
+        Some(crate::error_codes::ADAPTER_UPSTREAM_RESPONSE_INVALID)
     );
     let details = parsed.upstream_error.unwrap();
     assert_eq!(
         details.code.as_deref(),
-        Some(crate::error_codes::ADAPTER_UPSTREAM_STREAM_INVALID)
+        Some(crate::error_codes::ADAPTER_UPSTREAM_RESPONSE_INVALID)
     );
     assert!(details
         .message
         .unwrap()
         .contains("parameter: output.run_officejs.args"));
+}
+
+#[test]
+fn stream_preserves_literal_unknown_string_escapes() {
+    let mut function = call("inspect");
+    function["arguments"] = json!({
+        "references":["inspect"],"code":r#"{"path":"C:\Users\Example\Work"}"#
+    })
+    .to_string()
+    .into();
+    let mut translator = Translator::new(request());
+    translator.push(&frame(completed(json!([function]))));
+    let body = output(&mut translator);
+    let events: Vec<Value> = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .map(|data| serde_json::from_str(data).unwrap())
+        .collect();
+    assert!(!events.iter().any(|event| event["type"] == "error"));
+    let response = events
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .unwrap();
+    let arguments: Value = serde_json::from_str(
+        response["response"]["output"][0]["arguments"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(arguments, json!({"path":r#"C:\Users\Example\Work"#}));
+}
+
+#[test]
+fn streamed_json_diagnostics_preserve_parser_reason_without_arguments() {
+    let mut invalid = call("inspect");
+    invalid["arguments"] = json!({
+        "references":["inspect"],"code":r#"{"path":"synthetic-private\u12X4"}"#
+    })
+    .to_string()
+    .into();
+    let mut translator = Translator::new(request());
+    translator.push(&frame(completed(json!([invalid]))));
+    let body = output(&mut translator);
+    assert!(body.contains("json_reason=invalid_escape"), "{body}");
+    assert!(body.contains("payload_shape=json_object"));
+    assert!(body.contains("parse_line=1"));
+    assert!(body.contains("parse_column="));
+    assert!(!body.contains("synthetic-private"));
+    assert!(!body.contains("function_call_arguments"));
+    assert!(!body.contains("response.completed"));
+    let parsed = super::super::parse_sse_event(body.as_bytes());
+    let message = parsed.upstream_error.unwrap().message.unwrap();
+    assert!(message.contains("json_reason=invalid_escape"));
+    assert!(message.contains("payload_shape=json_object"));
+    assert!(translator.terminal);
+}
+
+#[test]
+fn invalid_json_arguments_keep_their_cause_without_releasing_a_valid_subset() {
+    for (code, parameter, cause) in [
+        (
+            r#"{"path":"private-value""#,
+            "output.run_officejs.args.json.eof",
+            "ended before",
+        ),
+        (
+            r#"["private-value"]"#,
+            "output.run_officejs.args.object",
+            "one complete JSON object",
+        ),
+        (
+            r#"{"path":"private-value",}"#,
+            "output.run_officejs.args.json.syntax",
+            "invalid syntax",
+        ),
+    ] {
+        let mut translator = Translator::new(request());
+        let mut invalid = call("inspect");
+        invalid["id"] = json!("fc_invalid");
+        invalid["call_id"] = json!("call_invalid");
+        invalid["arguments"] = json!({"references":["inspect"],"code":code})
+            .to_string()
+            .into();
+        translator.push(&frame(completed(json!([call("inspect"), invalid]))));
+        let body = output(&mut translator);
+        let parsed = super::super::parse_sse_event(body.as_bytes());
+        assert_eq!(
+            parsed.error_category,
+            Some(crate::error_codes::ADAPTER_UPSTREAM_RESPONSE_INVALID)
+        );
+        assert!(body.contains("one complete JSON object"));
+        assert!(body.contains(parameter));
+        assert!(body.contains(cause));
+        let details = parsed.upstream_error.unwrap();
+        let message = details.message.unwrap();
+        assert!(message.contains(parameter));
+        assert!(message.contains(cause));
+        assert!(!body.contains("private-value"));
+        assert!(!body.contains("response.function_call_arguments"));
+        assert!(!body.contains("response.completed"));
+        assert!(translator.terminal);
+    }
+}
+
+#[test]
+fn stream_accepts_referenced_direct_function_calls_only_after_completion() {
+    let mut function = call("inspect");
+    function["arguments"] = json!({
+        "references":["inspect"],"code":r#"return await inspect({"path":"synthetic"})"#
+    })
+    .to_string()
+    .into();
+    let mut translator = Translator::new(request());
+    translator.push(&frame(
+        json!({"type":"response.output_item.done","item":function}),
+    ));
+    assert!(!output(&mut translator).contains("function_call_arguments"));
+    translator.push(&frame(completed(json!([function]))));
+    let body = output(&mut translator);
+    let events: Vec<Value> = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .map(|data| serde_json::from_str(data).unwrap())
+        .collect();
+    assert!(!events.iter().any(|event| event["type"] == "error"));
+    let response = events
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .unwrap();
+    assert_eq!(response["response"]["output"][0]["name"], "inspect");
+    assert_eq!(
+        response["response"]["output"][0]["arguments"],
+        r#"{"path":"synthetic"}"#
+    );
+}
+
+#[test]
+fn fragmented_stream_preserves_literal_line_breaks_in_function_json_strings() {
+    let mut function = call("inspect");
+    function["arguments"] = json!({
+        "references":["inspect"],"code":"{\"path\":\"synthetic\r\n\t😀\"}"
+    })
+    .to_string()
+    .into();
+    let wire = frame(completed(json!([function])));
+    for size in [1, 7, wire.len()] {
+        let mut translator = Translator::new(request());
+        for chunk in wire.chunks(size) {
+            translator.push(chunk);
+        }
+        let body = output(&mut translator);
+        let events: Vec<Value> = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .map(|data| serde_json::from_str(data).unwrap())
+            .collect();
+        assert!(!events.iter().any(|event| event["type"] == "error"));
+        let response = events
+            .iter()
+            .find(|event| event["type"] == "response.completed")
+            .unwrap();
+        let arguments: Value = serde_json::from_str(
+            response["response"]["output"][0]["arguments"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(arguments, json!({"path":"synthetic\r\n\t😀"}));
+        assert!(translator.terminal);
+    }
+}
+
+#[test]
+fn fragmented_stream_preserves_function_json_and_custom_raw_input() {
+    let mut request = request();
+    request["tools"].as_array_mut().unwrap().push(json!({
+        "type":"custom", "name":"apply_patch", "format":{"type":"text"}
+    }));
+    let arguments = json!({"path":"C:\\synthetic\\quoted\"folder\\file-😀.txt\nline\t\""});
+    let patch = "*** Begin Patch\n*** Add File: synthetic.txt\n+\"quoted\" \\ 😀\n*** End Patch\n";
+    let mut function = call("inspect");
+    function["arguments"] = json!({"references":["inspect"],"code":format!("relay-function-string-v1 {}\n{}", json!({"field":"path","args":{}}), arguments["path"].as_str().unwrap())})
+        .to_string()
+        .into();
+    let custom = json!({
+        "type":"function_call", "id":"fc_patch", "call_id":"call_patch", "name":"run_officejs",
+        "arguments":json!({"references":["apply_patch"],"code":patch}).to_string()
+    });
+    let wire = frame(completed(json!([function, custom])));
+    for size in [1, 7, 64, wire.len()] {
+        let mut translator = Translator::new(request.clone());
+        for chunk in wire.chunks(size) {
+            translator.push(chunk);
+        }
+        let body = output(&mut translator);
+        let mut pending = body.into_bytes();
+        let mut terminal = None;
+        while let Some(frame) = take_sse_event(&mut pending) {
+            let event: Value = serde_json::from_slice(&sse_event_data(&frame)).unwrap();
+            if event["type"] == "response.completed" {
+                terminal = Some(event["response"].clone());
+            }
+        }
+        let terminal = terminal.expect("a valid tool response must complete");
+        let actual: Value =
+            serde_json::from_str(terminal["output"][0]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(actual, arguments);
+        assert_eq!(terminal["output"][1]["type"], "custom_tool_call");
+        assert_eq!(terminal["output"][1]["input"], patch);
+    }
 }
 
 #[test]

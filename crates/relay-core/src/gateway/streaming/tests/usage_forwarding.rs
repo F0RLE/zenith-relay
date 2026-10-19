@@ -1,6 +1,50 @@
 use super::*;
 
 #[tokio::test]
+async fn native_gemini_continuation_retains_its_private_checkpoint_and_late_usage() {
+    let terminal = Bytes::from_static(b"data: {\"candidates\":[{\"index\":0,\"finishReason\":\"CONTINUATION\",\"continuationToken\":\"c3ludGhldGlj\",\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Partial answer\"}]}}]}\n\n");
+    let usage = Bytes::from_static(b"data: {\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":2,\"totalTokenCount\":7}}\n\n");
+    let second = Bytes::from_static(b"data: {\"candidates\":[{\"index\":1,\"finishReason\":\"CONTINUATION\",\"continuationToken\":\"c2Vjb25k\"}]}\n\n");
+    let expected = [terminal.as_ref(), second.as_ref(), usage.as_ref()].concat();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let checkpoint = Arc::new(Mutex::new(None));
+    let mut event = test_usage_event();
+    event.wire_api = WireApi::Gemini;
+    let captured = events.clone();
+    let mut stream = UsageStream::new(
+        stream::iter([Ok::<_, Infallible>(terminal), Ok(second), Ok(usage)]),
+        Arc::new(move |event| captured.lock().unwrap().push(event)),
+        event,
+        Instant::now(),
+        Arc::new(|_, _, _| {}),
+    );
+    stream.native_response = Some(checkpoint.clone());
+    let mut wire = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        wire.extend_from_slice(&chunk.unwrap());
+    }
+    assert_eq!(wire, expected);
+    assert_eq!(
+        checkpoint.lock().unwrap().as_ref().unwrap()["candidates"][0]["continuationToken"],
+        "c3ludGhldGlj"
+    );
+    assert_eq!(
+        checkpoint.lock().unwrap().as_ref().unwrap()["candidates"][1]["continuationToken"],
+        "c2Vjb25k"
+    );
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(!events[0].success);
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some(error_codes::RESPONSE_INCOMPLETE)
+    );
+    assert_eq!(events[0].input_tokens, Some(5));
+    assert_eq!(events[0].output_tokens, Some(2));
+    assert!(!format!("{:?}", events[0].upstream_error).contains("c3ludGhldGlj"));
+}
+
+#[tokio::test]
 async fn late_model_substitution_ends_the_stream_without_forwarding_completion() {
     let first = Bytes::from_static(
         b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"synthetic\"}\n\n",
@@ -56,6 +100,29 @@ async fn usage_stream_forwards_chunks_without_waiting_for_an_sse_boundary() {
     assert_eq!(stream.next().await.unwrap().unwrap(), second);
     assert_eq!(stream.next().await.unwrap().unwrap(), completed);
     assert!(stream.next().await.is_none());
+}
+
+#[tokio::test]
+async fn response_delta_is_delivered_while_upstream_remains_pending() {
+    let delta = Bytes::from_static(
+        b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
+    );
+    let input = stream::iter([Ok::<_, Infallible>(delta.clone())]).chain(stream::pending());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut stream = usage_stream_with_events(input, events.clone());
+    let next = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+        .await
+        .expect("output must not wait for another upstream chunk");
+    assert_eq!(next.unwrap().unwrap(), delta);
+    assert!(events.lock().unwrap().is_empty());
+    drop(stream);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(events[0].ttft_ms.is_some());
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some(error_codes::CLIENT_CANCELLED)
+    );
 }
 
 #[tokio::test]

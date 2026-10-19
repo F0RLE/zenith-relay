@@ -5,6 +5,7 @@ use crate::url_has_userinfo;
 use crate::WireApi;
 use serde_json::Value;
 
+mod documents;
 mod request;
 mod tools;
 
@@ -114,7 +115,7 @@ pub(super) fn block(
                     .into(),
             ))
         }
-        "refusal" if protocol == WireApi::Responses => {
+        "refusal" if matches!(protocol, WireApi::Responses | WireApi::ChatCompletions) => {
             checked(content_part, &["type", "refusal"])?;
             Ok(Block::Refusal(
                 content_part
@@ -125,6 +126,7 @@ pub(super) fn block(
             ))
         }
         "image_url" | "input_image" | "image" => image_block(content_part, protocol),
+        "input_file" | "file" | "document" => documents::decode(content_part, protocol),
         "tool_use" => {
             content_fields(content_part, protocol, &["type", "id", "name", "input"])?;
             Ok(Block::ToolCall {
@@ -206,6 +208,21 @@ fn gemini_block(gemini_part: &Value) -> AdapterResult<Block> {
         .get("inlineData")
         .filter(|value| !value.is_null())
     {
+        if inline_data.get("mimeType").and_then(Value::as_str) == Some("application/pdf") {
+            checked(inline_data, &["mimeType", "data", "displayName"])?;
+            return documents::document(
+                format!(
+                    "data:application/pdf;base64,{}",
+                    required_text(inline_data, "data")?
+                ),
+                inline_data
+                    .get("displayName")
+                    .filter(|value| !value.is_null())
+                    .map(|_| required_text(inline_data, "displayName").map(str::to_owned))
+                    .transpose()?,
+                None,
+            );
+        }
         checked(inline_data, &["mimeType", "data"])?;
         return image(
             format!(
@@ -302,15 +319,27 @@ fn image_block(image_part: &Value, protocol: WireApi) -> AdapterResult<Block> {
             let image_value = image_part
                 .get("image_url")
                 .ok_or_else(AdapterError::invalid_request)?;
-            let (url, detail) = if let Some(url) = image_value.as_str() {
-                (url, image_part.get("detail").and_then(Value::as_str))
+            let (url, detail_fields) = if let Some(url) = image_value.as_str() {
+                (url, image_part)
             } else {
                 checked(image_value, &["url", "detail"])?;
-                (
-                    required_text(image_value, "url")?,
-                    image_value.get("detail").and_then(Value::as_str),
-                )
+                if image_part
+                    .get("detail")
+                    .is_some_and(|detail| !detail.is_null())
+                {
+                    return Err(AdapterError::invalid_request().with_parameter("image.detail"));
+                }
+                (required_text(image_value, "url")?, image_value)
             };
+            let detail = detail_fields
+                .get("detail")
+                .filter(|detail| !detail.is_null())
+                .map(|detail| {
+                    detail.as_str().ok_or_else(|| {
+                        AdapterError::invalid_request().with_parameter("image.detail")
+                    })
+                })
+                .transpose()?;
             image(url.into(), detail.map(str::to_owned))
         }
         "image" => {
@@ -379,7 +408,10 @@ pub(super) fn tool_result_blocks(
     }
     let blocks = text_blocks(content_value, protocol)?;
     for block in &blocks {
-        if !matches!(block, Block::Text(_) | Block::Image { .. }) {
+        if !matches!(
+            block,
+            Block::Text(_) | Block::Image { .. } | Block::Document { .. }
+        ) {
             return Err(AdapterError::parameter_unsupported());
         }
     }

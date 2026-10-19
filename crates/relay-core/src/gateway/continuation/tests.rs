@@ -6,6 +6,10 @@ use serde_json::json;
 use std::sync::Arc;
 
 fn runtime() -> GatewayRuntime {
+    runtime_for(WireApi::Responses)
+}
+
+fn runtime_for(wire_api: WireApi) -> GatewayRuntime {
     GatewayRuntime::from_pool(
         ["source", "other-source"]
             .into_iter()
@@ -15,7 +19,7 @@ fn runtime() -> GatewayRuntime {
                     name: "Test".into(),
                     base_url: "http://127.0.0.1:9/v1".into(),
                     api_key: "synthetic".into(),
-                    wire_api: WireApi::Responses,
+                    wire_api,
                     models: vec!["model".into()],
                     proxy_url: None,
                 })
@@ -29,6 +33,61 @@ fn runtime() -> GatewayRuntime {
         Arc::new(|_| {}),
     )
     .unwrap()
+}
+
+#[test]
+fn gemini_continuations_keep_the_original_owner_caller_model_and_contents() {
+    let runtime = runtime_for(WireApi::Gemini);
+    let original = json!({"model":"model","contents":[{"role":"user","parts":[{"text":"Original prompt"}]}],"continuationToken":"c3ludGhldGlj"});
+    let reference = gemini::request_reference("key", &original)
+        .unwrap()
+        .unwrap();
+    let route = runtime
+        .executor_route(
+            "source",
+            "model",
+            &Default::default(),
+            &[WireApi::Gemini],
+            false,
+        )
+        .unwrap();
+    let response = json!({"candidates":[{"index":0,"finishReason":"CONTINUATION","continuationToken":"c3ludGhldGlj"}]});
+    gemini::bind_response(&runtime, "key", &route, &original, &response, 10);
+    assert!(runtime.has_response_affinity_binding(
+        &runtime.response_affinity_key(Some(&reference)).unwrap(),
+        10
+    ));
+    let mut request = original.clone();
+    let state = gemini::prepare(&runtime, "key", &request, 10).unwrap();
+    assert!(state.requires_affinity_owner);
+    assert_eq!(
+        runtime
+            .response_affinity_candidate(state.response_affinity_key.as_deref().unwrap(), 10)
+            .as_deref(),
+        Some("source")
+    );
+    assert!(!prepare_response_owner_change(
+        &runtime,
+        "key",
+        &mut request,
+        "model",
+        true,
+        10
+    ));
+    assert!(gemini::prepare(&runtime, "another-key", &request, 10).is_err());
+    for (field, value) in [
+        ("model", json!("other-model")),
+        (
+            "contents",
+            json!([{"role":"user","parts":[{"text":"Changed prompt"}]}]),
+        ),
+        ("continuationToken", json!("b3RoZXI=")),
+    ] {
+        let mut changed = original.clone();
+        changed[field] = value;
+        assert!(gemini::prepare(&runtime, "key", &changed, 10).is_err());
+    }
+    assert_eq!(request, original);
 }
 
 #[test]

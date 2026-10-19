@@ -1,11 +1,23 @@
 use super::*;
 
+const KNOWN_REASONING_VARIANTS: [&str; 8] = [
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
+
 pub(super) fn set_variants(model_config: &mut Value, protocol: WireApi) {
+    if model_config.get("reasoning").and_then(Value::as_bool) == Some(true)
+        && model_config.get("variants").is_none()
+    {
+        model_config["variants"] = json!({});
+    }
     if let Some(variants) = model_config
         .get_mut("variants")
         .and_then(Value::as_object_mut)
     {
         variants.retain(|effort, variant_config| {
+            if variant_config.get("disabled").and_then(Value::as_bool) == Some(true) {
+                return true;
+            }
             let generated = match (protocol, effort.as_str()) {
                 (WireApi::Messages, "none") => json!({"thinking":{"type":"disabled"}}),
                 (WireApi::Messages, "low" | "medium" | "high" | "max") => {
@@ -21,6 +33,12 @@ pub(super) fn set_variants(model_config: &mut Value, protocol: WireApi) {
             *variant_config = generated;
             true
         });
+        // OpenCode merges SDK defaults with these entries; omission does not hide an effort.
+        for effort in KNOWN_REASONING_VARIANTS {
+            variants
+                .entry(effort)
+                .or_insert_with(|| json!({"disabled":true}));
+        }
     }
 }
 
@@ -88,14 +106,11 @@ pub(super) fn merge_provider(previous_provider: Option<&Value>, mut generated: V
 }
 
 pub(super) fn is_generated_variant(variant_name: &str, variant_config: &Value) -> bool {
-    if ![
-        "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
-    ]
-    .contains(&variant_name)
-    {
+    if !KNOWN_REASONING_VARIANTS.contains(&variant_name) {
         return false;
     }
     [
+        json!({"disabled":true}),
         json!({"reasoningEffort": variant_name}),
         json!({"effort": variant_name}),
         json!({"thinking":{"type":"adaptive"},"effort":variant_name}),

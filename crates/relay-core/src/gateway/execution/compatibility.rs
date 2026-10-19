@@ -1,4 +1,7 @@
-use crate::gateway::request::{candidate_protocols, requested_reasoning_effort, ServiceTierPolicy};
+use crate::gateway::request::{
+    candidate_protocols, claude_desktop_effort_override, requested_reasoning_effort,
+    ServiceTierPolicy,
+};
 use crate::runtime::{AccountTransport, AuthenticatedKey, DefaultServiceTier, ExecutorRoute};
 use crate::{
     AdapterError, AdapterRequestContext, CapabilityStatus, GatewayRuntime, ProtocolFeature, WireApi,
@@ -39,7 +42,10 @@ pub(in crate::gateway) fn incompatible_routes(
     let mut admitted = BTreeMap::new();
     let mut last_error = None;
     let features = requested_features(request, stream);
-    let effort = requested_reasoning_effort(request, client);
+    let effort_override = claude_desktop_effort_override(runtime, key, model, client, request);
+    let effort = effort_override
+        .clone()
+        .or_else(|| requested_reasoning_effort(request, client));
     // A picker is not an enforcement boundary. Check the same model policy
     // for every client, including Desktop's single opaque model entry.
     let effort_denied_by_pool = effort.as_ref().is_some_and(|effort| {
@@ -51,11 +57,13 @@ pub(in crate::gateway) fn incompatible_routes(
                     .any(|level| level.eq_ignore_ascii_case(effort))
             })
     });
-    for route in runtime.configured_executor_routes(key, model, candidate_protocols(client), stream)
+    for mut route in
+        runtime.configured_executor_routes(key, model, candidate_protocols(client), stream)
     {
         if admitted.contains_key(&route.candidate_id) {
             continue;
         }
+        route.reasoning_effort_override.clone_from(&effort_override);
         let validate = || {
             if effort_denied_by_pool {
                 return Err(AdapterError::reasoning_unsupported());
@@ -132,6 +140,9 @@ pub(in crate::gateway) fn incompatible_routes(
             let continuation_state =
                 runtime.load_adapter_continuation(&route, &key.id, request, now_ms)?;
             let mut candidate_request = request.clone();
+            if let Some(effort) = &effort_override {
+                candidate_request["output_config"]["effort"] = effort.clone().into();
+            }
             tier_policy.prepare_for_candidate(
                 &mut candidate_request,
                 tier_policy.selected_tier(),

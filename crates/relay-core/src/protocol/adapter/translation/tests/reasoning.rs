@@ -447,14 +447,11 @@ fn chat_responses_preserve_reasoning_and_tool_continuations_from_each_protocol()
 
 #[test]
 fn chat_stream_keeps_reasoning_deltas_tool_indices_and_usage() {
-    let mut bridge = prepare(
-        WireApi::ChatCompletions,
-        WireApi::Messages,
-        &chat_request_with_lookup_tool(),
-        true,
-    )
-    .into_stream_bridge()
-    .unwrap();
+    let mut request = chat_request_with_lookup_tool();
+    request["stream_options"] = json!({"include_usage":true});
+    let mut bridge = prepare(WireApi::ChatCompletions, WireApi::Messages, &request, true)
+        .into_stream_bridge()
+        .unwrap();
     let events = [
         json!({"type":"message_start","message":{"id":"msg_test","usage":{"input_tokens":3}}}),
         json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"Check "}}),

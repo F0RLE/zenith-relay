@@ -138,7 +138,7 @@ impl TranslationStream {
         if sse_payload.is_empty() {
             return Ok(());
         }
-        if sse_payload == b"[DONE]" {
+        if sse_payload.as_ref() == b"[DONE]" {
             let completed = match self.translation_request.upstream {
                 WireApi::ChatCompletions => self.chat_completion.outcome().is_terminal(),
                 WireApi::Gemini => self.awaiting_upstream_end(),
@@ -252,7 +252,6 @@ impl TranslationStream {
         response::validate_calls(&self.decoded_response.blocks)?;
         let completed_response = self
             .translation_request
-            .clone()
             .complete(self.decoded_response.clone())?;
         self.emit_changes(true)?;
         self.emit_end(&completed_response.response_body)?;

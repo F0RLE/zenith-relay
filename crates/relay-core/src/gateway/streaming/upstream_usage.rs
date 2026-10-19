@@ -7,6 +7,7 @@ pub(super) struct UpstreamUsage {
     usage_snapshot: Option<Value>,
     expected_model: Option<String>,
     rejection: Option<&'static str>,
+    finished: bool,
     forward_pending: Vec<u8>,
     timing: Option<(Instant, super::super::response::BufferedResponseTiming)>,
 }
@@ -19,6 +20,7 @@ impl UpstreamUsage {
             usage_snapshot: None,
             expected_model,
             rejection: None,
+            finished: false,
             forward_pending: Vec::new(),
             timing: None,
         }
@@ -33,6 +35,7 @@ impl UpstreamUsage {
     }
 
     pub(super) fn reset_generation(&mut self) {
+        self.finished = false;
         self.pending.clear();
         self.forward_pending.clear();
         self.usage_snapshot = None;
@@ -99,40 +102,55 @@ impl UpstreamUsage {
         if bytes.is_empty() {
             return true;
         }
-        self.pending.extend_from_slice(bytes);
-        while let Some(frame) = crate::protocol::take_sse_event(&mut self.pending) {
-            if self.timing.is_none() && super::fast_delta::fast_response_delta(&frame).is_some() {
-                continue;
-            }
-            let parsed = parse_sse_event(&frame);
-            if let Some((started, timing)) = self.timing.as_mut() {
-                let elapsed = started.elapsed().as_millis() as u64;
-                timing.observe(&parsed, elapsed);
-                if parsed.outcome.is_some() {
-                    timing.finish(elapsed);
-                }
-            }
-            if let Some(usage) = &parsed.usage {
-                crate::protocol::merge_usage(&mut self.usage_snapshot, usage);
-                if let Some(snapshot) = &self.usage_snapshot {
-                    apply_usage(&mut self.event, snapshot);
-                }
-            }
-            if parsed.applied_service_tier.is_some() {
-                self.event.applied_service_tier = parsed.applied_service_tier;
-            }
-            if self.expected_model.as_deref().is_some_and(|expected| {
-                parsed
-                    .event_payload
-                    .as_ref()
-                    .is_some_and(|served_model| served_model_is_rejected(served_model, expected))
-            }) {
-                self.pending.clear();
-                self.rejection = Some(error_codes::UPSTREAM_ROUTE_DEGRADED);
-                return false;
+        self.pending = crate::protocol::push_pending_sse_frames(
+            std::mem::take(&mut self.pending),
+            bytes,
+            self,
+            |capture| capture.rejection.is_some(),
+            Self::observe_frame,
+        );
+        self.rejection.is_none()
+    }
+
+    fn observe_frame(&mut self, frame: &[u8]) {
+        if self.finished {
+            return;
+        }
+        if self.timing.is_none() && super::fast_delta::fast_response_delta(frame).is_some() {
+            return;
+        }
+        let parsed = parse_sse_event(frame);
+        if parsed.outcome.is_some() {
+            // Gemini can report final candidate status before a separate usage chunk.
+            self.finished = !parsed
+                .event_payload
+                .as_ref()
+                .is_some_and(crate::protocol::gemini_incomplete);
+        }
+        if let Some((started, timing)) = self.timing.as_mut() {
+            let elapsed = started.elapsed().as_millis() as u64;
+            timing.observe(&parsed, elapsed);
+            if parsed.outcome.is_some() {
+                timing.finish(elapsed);
             }
         }
-        true
+        if let Some(usage) = &parsed.usage {
+            crate::protocol::merge_usage(&mut self.usage_snapshot, usage);
+            if let Some(snapshot) = &self.usage_snapshot {
+                apply_usage(&mut self.event, snapshot);
+            }
+        }
+        if parsed.applied_service_tier.is_some() {
+            self.event.applied_service_tier = parsed.applied_service_tier;
+        }
+        if self.expected_model.as_deref().is_some_and(|expected| {
+            parsed
+                .event_payload
+                .as_ref()
+                .is_some_and(|served_model| served_model_is_rejected(served_model, expected))
+        }) {
+            self.rejection = Some(error_codes::UPSTREAM_ROUTE_DEGRADED);
+        }
     }
 
     pub(super) fn apply_to(&self, event: &mut UsageEvent) {
@@ -171,6 +189,51 @@ fn skip_aligned_response_deltas(bytes: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_generations_ignore_trailing_usage_tier_and_model_changes() {
+        for terminal in [
+            "data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-6-astra\",\"status\":\"completed\",\"output\":[]}}\n\n",
+            "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"output\":[]}}\n\n",
+            "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"server_error\",\"message\":\"synthetic failure\"}}}\n\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+            "data: [DONE]\n\n",
+        ] {
+            let mut capture = UpstreamUsage::new(
+                crate::gateway::test_support::test_usage_event(),
+                Some("gpt-6-astra".into()),
+            );
+            let usage = "data: {\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}\n\n";
+            let trailing = "data: {\"model\":\"gpt-5.6-luna\",\"service_tier\":\"priority\",\"usage\":{\"input_tokens\":999,\"output_tokens\":999}}\n\n";
+            assert!(capture.observe(format!("{usage}{terminal}{trailing}").as_bytes()));
+            assert!(capture.observe(trailing.as_bytes()));
+            let mut event = crate::gateway::test_support::test_usage_event();
+            capture.apply_to(&mut event);
+            assert_eq!(event.input_tokens, Some(3));
+            assert_eq!(event.output_tokens, Some(2));
+            assert_eq!(event.applied_service_tier, None);
+            capture.reset_generation();
+            assert!(capture.observe(b"data: {\"usage\":{\"input_tokens\":7}}\n\n"));
+            capture.apply_to(&mut event);
+            assert_eq!(event.input_tokens, Some(7));
+        }
+    }
+
+    #[test]
+    fn gemini_late_usage_survives_both_complete_and_incomplete_candidates() {
+        for reason in ["STOP", "MAX_TOKENS"] {
+            let mut capture =
+                UpstreamUsage::new(crate::gateway::test_support::test_usage_event(), None);
+            let candidate = json!({"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"Hi"}]},"finishReason":reason}]});
+            assert!(capture.observe(format!("data: {candidate}\n\n").as_bytes()));
+            assert!(capture.observe(b"data: {\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":2,\"totalTokenCount\":5}}\n\n"));
+            let mut event = crate::gateway::test_support::test_usage_event();
+            capture.apply_to(&mut event);
+            assert_eq!(event.input_tokens, Some(3));
+            assert_eq!(event.output_tokens, Some(2));
+            assert_eq!(event.total_tokens, Some(5));
+        }
+    }
 
     #[test]
     fn discovery_generation_reset_does_not_reuse_prior_usage() {
@@ -242,6 +305,72 @@ mod tests {
             event.error_category,
             Some(error_codes::UPSTREAM_ROUTE_DEGRADED)
         );
+    }
+
+    #[test]
+    fn forwarded_frames_preserve_usage_timing_and_incomplete_tail_at_every_split() {
+        let frames = concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"model\":\"gpt-6-astra\"}}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\\\"text\\\":\\\"hi\\nthere\\\"}\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-6-astra\",\"service_tier\":\"default\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5}}}\n\n",
+        );
+        let tail = b"data: {\"type\":\"response.";
+        let input = [frames.as_bytes(), tail].concat();
+        for timed in [false, true] {
+            for chunk_size in 1..=input.len() {
+                let mut capture = UpstreamUsage::new(
+                    crate::gateway::test_support::test_usage_event(),
+                    Some("gpt-6-astra".into()),
+                );
+                if timed {
+                    capture = capture.with_timing(Instant::now() - Duration::from_millis(100));
+                }
+                let mut forwarded = Vec::new();
+                for chunk in input.chunks(chunk_size) {
+                    forwarded.extend_from_slice(&capture.forward(Bytes::copy_from_slice(chunk)));
+                }
+                assert_eq!(forwarded, frames.as_bytes(), "chunk size {chunk_size}");
+                assert_eq!(capture.pending, tail, "chunk size {chunk_size}");
+                assert_eq!(capture.forward_pending, tail, "chunk size {chunk_size}");
+                let mut event = crate::gateway::test_support::test_usage_event();
+                capture.apply_to(&mut event);
+                assert_eq!(event.input_tokens, Some(3));
+                assert_eq!(event.output_tokens, Some(2));
+                assert_eq!(event.total_tokens, Some(5));
+                assert_eq!(event.applied_service_tier.as_deref(), Some("default"));
+                if timed {
+                    assert!(event.ttft_ms.is_some_and(|first| first >= 100));
+                    assert!(event.generation_ms.is_some());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn coalesced_rejection_discards_later_usage_and_partial_events() {
+        let mut capture = UpstreamUsage::new(
+            crate::gateway::test_support::test_usage_event(),
+            Some("gpt-6-astra".into()),
+        );
+        let frames = concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"model\":\"gpt-6-astra\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5.6-luna\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5}}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":999}}}\n\n",
+            "data: {\"type\":\"response.",
+        );
+        let rejected = capture.forward(Bytes::from_static(frames.as_bytes()));
+        assert_eq!(
+            parse_sse_event(&rejected).error_category,
+            Some(error_codes::UPSTREAM_ROUTE_DEGRADED)
+        );
+        assert!(capture.pending.is_empty());
+        assert!(capture.forward_pending.is_empty());
+        assert!(!capture.observe(b"data: [DONE]\n\n"));
+        let mut event = crate::gateway::test_support::test_usage_event();
+        capture.apply_to(&mut event);
+        assert_eq!(event.input_tokens, Some(3));
+        assert_eq!(event.output_tokens, Some(2));
+        assert_eq!(event.total_tokens, Some(5));
     }
 
     #[test]

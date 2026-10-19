@@ -39,6 +39,13 @@ fn request_body(protocol: WireApi, streaming: bool) -> Value {
         request["model"] = "matrix-model".into();
         request["stream"] = streaming.into();
     }
+    if protocol == WireApi::Messages {
+        request["system"] = "Synthetic root instruction.".into();
+        request["messages"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"role":"system","content":"Synthetic initial attachment."}));
+    }
     request
 }
 
@@ -159,6 +166,104 @@ async fn upstream(
 }
 
 #[tokio::test]
+async fn chat_pdf_reaches_native_and_converted_upstreams_without_extraction() {
+    for output in WireApi::ALL {
+        let observed = MatrixUpstream {
+            protocol: output,
+            requests: Arc::default(),
+        };
+        let provider = spawn(
+            Router::new()
+                .fallback(post(upstream))
+                .with_state(observed.clone()),
+        )
+        .await;
+        let mut source = RuntimeSource::unrestricted(ProviderSource {
+            id: "pdf-source".into(),
+            name: "Synthetic PDF source".into(),
+            base_url: format!(
+                "{}/{}",
+                provider.base_url,
+                if output == WireApi::Gemini {
+                    "v1beta"
+                } else {
+                    "v1"
+                }
+            ),
+            api_key: SOURCE_KEY.into(),
+            proxy_url: None,
+            wire_api: output,
+            models: vec!["matrix-model".into()],
+        });
+        source.protocol_bindings = vec![SourceProtocolBinding {
+            wire_api: WireApi::ChatCompletions,
+            adapter: SourceAdapter::between(WireApi::ChatCompletions, output).unwrap(),
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
+            model_ids: vec!["matrix-model".into()],
+        }];
+        let runtime = GatewayRuntime::from_pool(
+            vec![source],
+            vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
+                id: "pdf-key".into(),
+                secret: LOCAL_KEY.into(),
+            })],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let relay = spawn(gateway::router(Arc::new(runtime))).await;
+        for streaming in [false, true] {
+            let response = reqwest::Client::new()
+                .post(format!("{}/v1/chat/completions", relay.base_url))
+                .bearer_auth(LOCAL_KEY)
+                .json(&json!({"model":"matrix-model","stream":streaming,"messages":[{"role":"user","content":[{"type":"file","file":{"filename":"synthetic.pdf","file_data":"data:application/pdf;base64,JVBERi0xLjc="}}]}]}))
+                .send().await.unwrap();
+            let status = response.status();
+            let body = response.text().await.unwrap();
+            assert_eq!(status, StatusCode::OK, "Chat -> {output:?}: {body}");
+            assert!(body.contains("Matrix reply"));
+        }
+        let requests = observed.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let (data_path, filename_path, expected_data) = match output {
+            WireApi::ChatCompletions => (
+                "/messages/0/content/0/file/file_data",
+                "/messages/0/content/0/file/filename",
+                "data:application/pdf;base64,JVBERi0xLjc=",
+            ),
+            WireApi::Responses => (
+                "/input/0/content/0/file_data",
+                "/input/0/content/0/filename",
+                "data:application/pdf;base64,JVBERi0xLjc=",
+            ),
+            WireApi::Messages => (
+                "/messages/0/content/0/source/data",
+                "/messages/0/content/0/title",
+                "JVBERi0xLjc=",
+            ),
+            WireApi::Gemini => (
+                "/contents/0/parts/0/inlineData/data",
+                "/contents/0/parts/0/inlineData/displayName",
+                "JVBERi0xLjc=",
+            ),
+        };
+        for (_, body) in requests.iter() {
+            assert_eq!(
+                body.pointer(data_path).and_then(Value::as_str),
+                Some(expected_data),
+                "{output:?}: {body}"
+            );
+            assert_eq!(
+                body.pointer(filename_path).and_then(Value::as_str),
+                Some("synthetic.pdf"),
+                "{output:?}: {body}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn all_sixteen_routes_execute_json_and_sse_with_actual_upstream_usage() {
     for output in WireApi::ALL {
         let observed = MatrixUpstream {
@@ -236,6 +341,23 @@ async fn all_sixteen_routes_execute_json_and_sse_with_actual_upstream_usage() {
                     !body.contains("adapter_upstream"),
                     "{input:?} -> {output:?}: {body}"
                 );
+                if input == WireApi::Messages && output == WireApi::Gemini {
+                    let requests = observed.requests.lock().unwrap();
+                    let (_, request) = requests.last().unwrap();
+                    assert_eq!(
+                        request["systemInstruction"]["parts"],
+                        json!([
+                            {"text":"Synthetic root instruction."},
+                            {"text":"Synthetic initial attachment."}
+                        ])
+                    );
+                    assert_eq!(
+                        request["contents"],
+                        json!([
+                            {"role":"user","parts":[{"text":"Synthetic matrix request"}]}
+                        ])
+                    );
+                }
                 if streaming {
                     if input == output {
                         assert_eq!(body, stream_body(output), "native {input:?}");

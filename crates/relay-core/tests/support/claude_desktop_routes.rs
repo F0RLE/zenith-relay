@@ -268,6 +268,192 @@ async fn claude_desktop_effort_choices_reach_native_and_bridged_upstreams() {
 }
 
 #[tokio::test]
+async fn claude_desktop_sparse_efforts_use_the_nearest_allowed_lower_level() {
+    use zenith_relay_core::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
+
+    for protocol in [WireApi::Messages, WireApi::Responses] {
+        for (supported, allowed, cases) in [
+            (
+                vec!["none", "low", "high", "max"],
+                vec!["none", "low", "high", "max"],
+                vec![
+                    ("low", "low"),
+                    ("medium", "low"),
+                    ("high", "high"),
+                    ("xhigh", "high"),
+                    ("max", "max"),
+                ],
+            ),
+            (
+                vec!["none", "low", "medium", "high", "xhigh", "max"],
+                vec!["none", "high", "max"],
+                vec![("low", "high"), ("medium", "high"), ("xhigh", "high")],
+            ),
+            (vec!["none"], vec!["none"], vec![]),
+        ] {
+            let (upstream, state) = spawn_upstream(
+                "synthetic-key",
+                (0..=cases.len())
+                    .map(|_| desktop_reply(protocol, "selected", "Ready.", false))
+                    .collect(),
+            )
+            .await;
+            let (gateway, events) = spawn_gateway_with_options(
+                vec![source_with_protocol(
+                    "api",
+                    &upstream,
+                    "synthetic-key",
+                    &[MODEL],
+                    0,
+                    protocol,
+                )],
+                vec![local_key("key", LOCAL_KEY, None)],
+                GatewayRuntimeOptions {
+                    model_reasoning_allowed_levels: std::collections::BTreeMap::from([(
+                        MODEL.to_string(),
+                        allowed.iter().map(|effort| (*effort).to_string()).collect(),
+                    )]),
+                    model_metadata_catalog: Some(ModelMetadataCatalogHandle::new(
+                        ModelMetadataCatalog::from_models_dev_json(
+                            &json!({format!("vendor/{MODEL}"): {
+                                "reasoning": true, "reasoning_effort_levels": supported
+                            }})
+                            .to_string(),
+                        )
+                        .unwrap(),
+                    )),
+                    ..GatewayRuntimeOptions::default()
+                },
+            )
+            .await;
+            let alias = zenith_relay_core::claude_desktop_reasoning_model_alias(MODEL);
+            let history = [json!({"role":"user","content":"Synthetic input."})];
+            let original = desktop_request(&alias, &history, false);
+            let mut rejected = Vec::new();
+            for model in [
+                MODEL.to_string(),
+                zenith_relay_core::claude_desktop_model_alias(MODEL),
+            ] {
+                let mut body = original.clone();
+                body["model"] = model.into();
+                body["output_config"] = json!({"effort":"medium"});
+                rejected.push(("/v1/messages".to_string(), body));
+            }
+            for thinking in [
+                json!({"type":"disabled"}),
+                json!({"type":"enabled","budget_tokens":8192}),
+                json!({"type":"adaptive","budget_tokens":8192}),
+            ] {
+                let mut body = original.clone();
+                body["output_config"] = json!({"effort":"medium"});
+                body["thinking"] = thinking;
+                rejected.push(("/v1/messages".to_string(), body));
+            }
+            for effort in ["minimal", "ultra", "unknown"] {
+                let mut body = original.clone();
+                body["output_config"] = json!({"effort":effort});
+                body["thinking"] = json!({"type":"adaptive"});
+                rejected.push(("/v1/messages".to_string(), body));
+            }
+            rejected.extend([
+                ("/v1/responses".to_string(), json!({"model":alias,"input":"Synthetic input.","reasoning":{"effort":"medium"}})),
+                ("/v1/chat/completions".to_string(), json!({"model":alias,"messages":history,"reasoning_effort":"medium"})),
+                (format!("/v1beta/models/{alias}:generateContent"), json!({"contents":[{"role":"user","parts":[{"text":"Synthetic input."}]}],"generationConfig":{"thinkingConfig":{"thinkingLevel":"MEDIUM"}}})),
+            ]);
+            for (path, body) in rejected {
+                let response = reqwest::Client::new()
+                    .post(format!("{}{path}", gateway.base_url))
+                    .header("user-agent", "Claude Desktop")
+                    .bearer_auth(LOCAL_KEY)
+                    .json(&body)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::BAD_REQUEST,
+                    "{protocol:?} {path}: {body}"
+                );
+            }
+            assert!(state.requests.lock().unwrap().is_empty());
+            let mut disabled = original.clone();
+            disabled["thinking"] = json!({"type":"disabled"});
+            let response = reqwest::Client::new()
+                .post(format!("{}/v1/messages", gateway.base_url))
+                .bearer_auth(LOCAL_KEY)
+                .json(&disabled)
+                .send()
+                .await
+                .unwrap();
+            let status = response.status();
+            let output = response.text().await.unwrap();
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{protocol:?} disabled {allowed:?}: {output}"
+            );
+            for (requested, _) in &cases {
+                let mut body = desktop_request(
+                    &alias,
+                    &[json!({"role":"user","content":"Synthetic input."})],
+                    false,
+                );
+                body["output_config"] = json!({"effort":requested});
+                body["thinking"] = json!({"type":"adaptive"});
+                let response = reqwest::Client::new()
+                    .post(format!("{}/v1/messages", gateway.base_url))
+                    .bearer_auth(LOCAL_KEY)
+                    .json(&body)
+                    .send()
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let output = response.text().await.unwrap();
+                assert_eq!(status, StatusCode::OK, "{protocol:?} {requested}: {output}");
+            }
+            let requests = state.requests.lock().unwrap();
+            assert_eq!(requests.len(), cases.len() + 1);
+            if protocol == WireApi::Messages {
+                assert_eq!(requests[0].body["thinking"]["type"], "disabled");
+                assert!(requests[0].body.get("output_config").is_none());
+            } else {
+                assert_eq!(requests[0].body["reasoning"]["effort"], "none");
+            }
+            for (request, (_, effective)) in requests.iter().skip(1).zip(&cases) {
+                assert_eq!(request.body["model"], MODEL);
+                let pointer = if protocol == WireApi::Messages {
+                    "/output_config/effort"
+                } else {
+                    "/reasoning/effort"
+                };
+                assert_eq!(request.body.pointer(pointer), Some(&json!(effective)));
+            }
+            let events = events.lock().unwrap();
+            assert_eq!(events.len(), cases.len() + 1);
+            assert_eq!(
+                events[0].requested_reasoning_effort.as_deref(),
+                Some("none")
+            );
+            assert_eq!(
+                events[0].effective_reasoning_effort.as_deref(),
+                Some("none")
+            );
+            for (event, (requested, effective)) in events.iter().skip(1).zip(&cases) {
+                assert!(event.success);
+                assert_eq!(
+                    event.requested_reasoning_effort.as_deref(),
+                    Some(*requested)
+                );
+                assert_eq!(
+                    event.effective_reasoning_effort.as_deref(),
+                    Some(*effective)
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn claude_desktop_aliases_preserve_native_and_bridged_streaming() {
     const MESSAGES: &str = concat!(
         "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"gpt-p2\",\"content\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
@@ -284,9 +470,11 @@ async fn claude_desktop_aliases_preserve_native_and_bridged_streaming() {
         "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_stream\",\"output_index\":0,\"content_index\":0,\"delta\":\"streamed\"}\n\n",
         "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_stream\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-p2\",\"output\":[{\"id\":\"msg_stream\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"streamed\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}}\n\n"
     );
-    for (protocol, sse) in [
-        (WireApi::Messages, MESSAGES),
-        (WireApi::Responses, RESPONSES),
+    for (protocol, sse, reasoning) in [
+        (WireApi::Messages, MESSAGES, false),
+        (WireApi::Responses, RESPONSES, false),
+        (WireApi::Messages, MESSAGES, true),
+        (WireApi::Responses, RESPONSES, true),
     ] {
         let (upstream, state) = spawn_upstream(
             "synthetic-key",
@@ -296,7 +484,7 @@ async fn claude_desktop_aliases_preserve_native_and_bridged_streaming() {
             }],
         )
         .await;
-        let (gateway, events) = spawn_gateway(
+        let (gateway, events) = spawn_gateway_with_options(
             vec![source_with_protocol(
                 "api",
                 &upstream,
@@ -306,18 +494,44 @@ async fn claude_desktop_aliases_preserve_native_and_bridged_streaming() {
                 protocol,
             )],
             vec![local_key("key", LOCAL_KEY, None)],
-            1,
+            GatewayRuntimeOptions {
+                model_reasoning_allowed_levels: std::collections::BTreeMap::from([(
+                    MODEL.to_string(), vec!["low".into(), "high".into(), "max".into()],
+                )]),
+                model_metadata_catalog: Some(zenith_relay_core::model_metadata::ModelMetadataCatalogHandle::new(
+                    zenith_relay_core::model_metadata::ModelMetadataCatalog::from_models_dev_json(
+                        &json!({format!("vendor/{MODEL}"): {
+                            "reasoning":true,"reasoning_effort_levels":["low","high","max"]
+                        }}).to_string(),
+                    ).unwrap(),
+                )),
+                ..GatewayRuntimeOptions::default()
+            },
         )
         .await;
+        let alias = if reasoning {
+            zenith_relay_core::claude_desktop_reasoning_model_alias(MODEL)
+        } else {
+            zenith_relay_core::claude_desktop_model_alias(MODEL)
+        };
+        let mut body = desktop_request(
+            &alias,
+            &[
+                json!({"role":"user","content":[{"type":"text","text":"Hello.","cache_control":{"type":"ephemeral"}}]}),
+            ],
+            true,
+        );
+        if reasoning {
+            body["output_config"] = json!({"effort":"xhigh"});
+            body["thinking"] = json!({"type":"adaptive"});
+        }
         let response = reqwest::Client::new()
             .post(format!("{}/v1/messages", gateway.base_url))
             .bearer_auth(LOCAL_KEY)
-            .json(&desktop_request(
-                &zenith_relay_core::claude_desktop_model_alias(MODEL),
-                &[json!({"role":"user","content":[{"type":"text","text":"Hello.","cache_control":{"type":"ephemeral"}}]})],
-                true,
-            ))
-            .send().await.unwrap();
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()[CONTENT_TYPE], "text/event-stream");
         let output = response.text().await.unwrap();
@@ -346,7 +560,132 @@ async fn claude_desktop_aliases_preserve_native_and_bridged_streaming() {
         assert_eq!(events.len(), 1);
         assert!(events[0].success);
         assert_eq!(events[0].resolved_model.as_deref(), Some(MODEL));
+        if reasoning {
+            assert_eq!(
+                events[0].requested_reasoning_effort.as_deref(),
+                Some("xhigh")
+            );
+            assert_eq!(
+                events[0].effective_reasoning_effort.as_deref(),
+                Some("high")
+            );
+        }
     }
+}
+
+#[tokio::test]
+async fn claude_desktop_prefers_exact_effort_without_crossing_key_scope() {
+    use zenith_relay_core::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
+    use zenith_relay_core::{
+        CapabilityOrigin, CapabilityStatus, ModelEndpointCapability, ProtocolFeature,
+    };
+
+    let (lower, lower_state) = spawn_upstream(
+        "synthetic-key",
+        vec![desktop_reply(WireApi::Messages, "lower", "Ready.", false)],
+    )
+    .await;
+    let (exact, exact_state) = spawn_upstream(
+        "synthetic-key",
+        vec![desktop_reply(WireApi::Messages, "exact", "Ready.", false)],
+    )
+    .await;
+    let mut sources = vec![
+        source_with_protocol(
+            "lower",
+            &lower,
+            "synthetic-key",
+            &[MODEL],
+            0,
+            WireApi::Messages,
+        ),
+        source_with_protocol(
+            "exact",
+            &exact,
+            "synthetic-key",
+            &[MODEL],
+            1,
+            WireApi::Messages,
+        ),
+    ];
+    for (source, levels) in sources
+        .iter_mut()
+        .zip([vec!["low", "high", "max"], vec!["xhigh"]])
+    {
+        source.protocol_config.capabilities = vec![ModelEndpointCapability {
+            model_id: MODEL.into(),
+            upstream_wire_api: WireApi::Messages,
+            status: CapabilityStatus::Declared,
+            origin: CapabilityOrigin::Catalog,
+            checked_at_ms: 1,
+            features: [(ProtocolFeature::Reasoning, CapabilityStatus::Declared)].into(),
+            reasoning_efforts: levels.into_iter().map(str::to_string).collect(),
+            service_tiers: None,
+        }];
+    }
+    let (gateway, events) = spawn_gateway_with_options(
+        sources,
+        vec![
+            local_key("all", LOCAL_KEY, None),
+            local_key("restricted", "restricted-local-key", Some(vec!["lower"])),
+        ],
+        GatewayRuntimeOptions {
+            model_metadata_catalog: Some(ModelMetadataCatalogHandle::new(
+                ModelMetadataCatalog::from_models_dev_json(
+                    &json!({format!("vendor/{MODEL}"): {
+                        "reasoning":true,"reasoning_effort_levels":["low","high","xhigh","max"]
+                    }})
+                    .to_string(),
+                )
+                .unwrap(),
+            )),
+            ..GatewayRuntimeOptions::default()
+        },
+    )
+    .await;
+    let alias = zenith_relay_core::claude_desktop_reasoning_model_alias(MODEL);
+    let mut body = desktop_request(
+        &alias,
+        &[json!({"role":"user","content":"Synthetic input."})],
+        false,
+    );
+    body["thinking"] = json!({"type":"adaptive"});
+    body["output_config"] = json!({"effort":"xhigh"});
+    for secret in [LOCAL_KEY, "restricted-local-key"] {
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/messages", gateway.base_url))
+            .bearer_auth(secret)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let output = response.text().await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{output}");
+    }
+    assert_eq!(exact_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(
+        exact_state.requests.lock().unwrap()[0].body["output_config"]["effort"],
+        "xhigh"
+    );
+    assert_eq!(lower_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(
+        lower_state.requests.lock().unwrap()[0].body["output_config"]["effort"],
+        "high"
+    );
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        events[0].effective_reasoning_effort.as_deref(),
+        Some("xhigh")
+    );
+    assert_eq!(
+        events[1].effective_reasoning_effort.as_deref(),
+        Some("high")
+    );
+    assert!(events
+        .iter()
+        .all(|event| event.requested_reasoning_effort.as_deref() == Some("xhigh")));
 }
 
 #[tokio::test]

@@ -53,6 +53,23 @@ impl StreamCompletionSettlement {
                 .clone_from(&progress.tool_use.upstream_context);
             discovery_headers.clone_from(&progress.headers);
         }
+        if self.route.client_wire_api == crate::WireApi::Gemini
+            && self.route.adapter.is_passthrough()
+            && event.error_category.as_deref() == Some(error_codes::RESPONSE_INCOMPLETE)
+        {
+            if let Some(shared) = &self.native_response {
+                if let Some(response) = crate::poison::mutex(shared).take() {
+                    crate::gateway::continuation::gemini::bind_response(
+                        &self.runtime,
+                        &self.local_key,
+                        &self.route,
+                        &self.native_template,
+                        &response,
+                        now_ms(),
+                    );
+                }
+            }
+        }
         if event.success {
             let recovered = self
                 .lease

@@ -11,6 +11,7 @@ mod stream;
 #[cfg(test)]
 mod tests;
 mod tool_arguments;
+mod tool_search;
 
 pub(super) use super::contracts::validate_bridge_fields as checked;
 use super::contracts::{
@@ -49,6 +50,7 @@ pub struct TranslationRequest {
     pub(super) upstream_body: Value,
     metadata: BTreeMap<String, String>,
     client: WireApi,
+    include_stream_usage: bool,
     upstream: WireApi,
     model: String,
     response_id: String,
@@ -56,6 +58,7 @@ pub struct TranslationRequest {
     history: Vec<Message>,
     client_tools: BTreeMap<String, ClientToolTarget>,
     allowed_tool_names: BTreeSet<String>,
+    requires_tool_call: bool,
     parallel_tools: bool,
     response_tools: Option<Vec<Value>>,
     response_call_targets: BTreeMap<String, ClientToolTarget>,
@@ -112,6 +115,20 @@ impl TranslationRequest {
             BTreeMap::new()
         };
         let mut decoded_request = decode::request(context.client_wire_api, &effective_request)?;
+        for target in response_call_targets
+            .values()
+            .filter(|target| target.kind == ResponsesToolKind::ToolSearch)
+        {
+            let name = target.upstream_name();
+            if decoded_request
+                .client_tools
+                .get(&name)
+                .is_some_and(|existing| existing != target)
+            {
+                return Err(AdapterError::continuation_mismatch());
+            }
+            decoded_request.client_tools.insert(name, target.clone());
+        }
         let native_turns = if let Some(previous) = context.previous {
             continuation::restore(
                 &mut decoded_request,
@@ -158,12 +175,22 @@ impl TranslationRequest {
             upstream_body,
             metadata: decoded_request.metadata,
             client: context.client_wire_api,
+            include_stream_usage: context.client_wire_api == WireApi::ChatCompletions
+                && context
+                    .request
+                    .pointer("/stream_options/include_usage")
+                    .and_then(Value::as_bool)
+                    == Some(true),
             upstream,
             model: context.model.to_owned(),
             response_id,
             reasoning_mode: context.reasoning_mode,
             history: decoded_request.messages,
             client_tools: decoded_request.client_tools,
+            requires_tool_call: matches!(
+                decoded_request.tool_choice.as_ref(),
+                Some(ToolChoice::Required | ToolChoice::Function(_))
+            ),
             allowed_tool_names: decoded_request
                 .tools
                 .into_iter()
@@ -184,14 +211,29 @@ impl TranslationRequest {
         &self.upstream_body
     }
 
-    pub(super) fn translate(self, upstream_response: &Value) -> AdapterResult<TranslatedResponse> {
+    pub(super) fn translate(
+        mut self,
+        upstream_response: &Value,
+    ) -> AdapterResult<TranslatedResponse> {
         let decoded_response =
             response::decode(self.upstream, upstream_response, &self.response_id)?;
         self.complete(decoded_response)
     }
 
-    fn complete(self, mut response: Response) -> AdapterResult<TranslatedResponse> {
+    fn complete(&mut self, mut response: Response) -> AdapterResult<TranslatedResponse> {
         self.validate_tool_calls(&response.blocks)?;
+        let has_calls = response
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::ToolCall { .. }));
+        if (response.finish == Finish::Tools && !has_calls)
+            || (response.finish == Finish::Stop && has_calls)
+        {
+            return Err(AdapterError::upstream_response_invalid().with_parameter("finish_reason"));
+        }
+        if self.requires_tool_call && response.finish == Finish::Stop && !has_calls {
+            return Err(AdapterError::upstream_response_invalid().with_parameter("tool_choice"));
+        }
         for block in &mut response.blocks {
             self.normalize_function_arguments(block, true);
         }
@@ -203,13 +245,14 @@ impl TranslationRequest {
                 response_body.as_object_mut().expect("encoded response"),
                 &self.metadata,
                 self.client,
+                None,
             )?;
         }
         let mut continuation = AdapterContinuationState::new(&self.model, self.reasoning_mode);
         continuation.client_wire_api = Some(self.client);
         continuation.reusable = matches!(response.finish, Finish::Stop | Finish::Tools);
-        let mut history = self.history;
-        continuation.native_turns = self.native_turns;
+        let mut history = std::mem::take(&mut self.history);
+        continuation.native_turns = std::mem::take(&mut self.native_turns);
         if !response.native_output.is_empty() {
             continuation
                 .native_turns
@@ -221,8 +264,8 @@ impl TranslationRequest {
             blocks: response.blocks,
         });
         continuation.portable_history = Some(history);
-        continuation.response_tools = self.response_tools;
-        continuation.response_call_targets = self.response_call_targets;
+        continuation.response_tools = self.response_tools.take();
+        continuation.response_call_targets = std::mem::take(&mut self.response_call_targets);
         for block in continuation
             .portable_history
             .as_deref()
@@ -249,7 +292,7 @@ impl TranslationRequest {
         )?);
         Ok(TranslatedResponse {
             response_body,
-            response_id: self.response_id,
+            response_id: self.response_id.clone(),
             continuation,
         })
     }

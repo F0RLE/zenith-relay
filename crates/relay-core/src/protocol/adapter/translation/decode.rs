@@ -22,7 +22,10 @@ pub(super) fn responses_tool_results(
         .flatten()
     {
         let kind = item.get("type").and_then(Value::as_str);
-        if matches!(kind, Some("function_call" | "custom_tool_call")) {
+        if matches!(kind, Some("function_call" | "custom_tool_call"))
+            || (kind == Some("tool_search_call")
+                && item.get("execution").and_then(Value::as_str) == Some("client"))
+        {
             let fields = item.as_object().ok_or_else(AdapterError::invalid_request)?;
             let target = ClientToolTarget::from_call(fields)?;
             let id = required_text(item, "call_id")?;
@@ -33,12 +36,18 @@ pub(super) fn responses_tool_results(
         } else if matches!(
             kind,
             Some("function_call_output" | "custom_tool_call_output")
-        ) {
+        ) || (kind == Some("tool_search_output")
+            && item.get("execution").and_then(Value::as_str) == Some("client"))
+        {
             let fields = item.as_object().ok_or_else(AdapterError::invalid_request)?;
             let target = targets
-                .get(required_text(item, "call_id")?)
+                .get(responses::tool_result_id(item)?)
                 .ok_or_else(AdapterError::continuation_mismatch)?;
             if super::super::contracts::ResponsesToolKind::from_output_item(fields)? != target.kind
+                || fields
+                    .get("name")
+                    .filter(|value| !value.is_null())
+                    .is_some_and(|value| value.as_str() != Some(target.name.as_str()))
                 || fields
                     .get("namespace")
                     .filter(|value| !value.is_null())
@@ -63,6 +72,20 @@ pub(super) fn request(protocol: WireApi, request_body: &Value) -> AdapterResult<
         WireApi::Gemini => gemini::decode(request_body)?,
     };
     decoded_request.origin = Some(protocol);
+    if decoded_request.messages.iter().any(|message| {
+        message.role != Role::Assistant
+            && message
+                .blocks
+                .iter()
+                .any(|block| matches!(block, Block::Refusal(_)))
+    }) {
+        return Err(
+            AdapterError::invalid_request().with_parameter(match protocol {
+                WireApi::Responses => "input[].content",
+                _ => "messages[].content",
+            }),
+        );
+    }
     if let Some(Reasoning::Effort(effort)) = &mut decoded_request.reasoning {
         *effort = crate::catalog::canonical_reasoning_level(effort);
         if effort.is_empty() {

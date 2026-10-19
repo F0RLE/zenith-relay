@@ -22,13 +22,18 @@ not silently discard state or cause duplicate historical calls.
 ## Tool and streaming boundaries
 
 - Validate roles using the incoming protocol, including Gemini's omitted-role
-  default. Do not reinterpret a role from another wire format or move a
-  mid-conversation instruction into the initial system prompt.
+  default. Initial system attachments after the first user message must reach
+  the target's system field in instruction order, with user-content order intact,
+  and survive JSON/SSE tool continuations. Do not reinterpret a foreign role or
+  move an instruction past an earlier assistant turn into the initial prompt.
 - Nullable or alternate token-limit fields must not erase an explicit limit.
   Conflicting non-null limits need a named error instead of an arbitrary winner.
 - Gemini Parts retain one data payload. Reject conflicting content, malformed
   supplied call IDs/arguments, and unrepresentable function-name restrictions;
   preserve documented defaults for omitted calling modes and empty name sets.
+- Replay Chat refusals through the next user turn, covering both the top-level
+  field and content parts, duplicate/conflicting representations, and assistant
+  role restrictions. Unrepresentable participant names must not disappear.
 - Separate a Responses output item ID from `call_id`. Verify result matching
   after aliasing, namespace conversion, and any required provider-ID mapping.
 - Cover repeated identity fields, late ID/name metadata, fragmented arguments,
@@ -45,6 +50,15 @@ not silently discard state or cause duplicate historical calls.
 - Require consistent event/block/item order and one terminal outcome. An EOF,
   error, or output limit is not successful completion. Preserve reported usage
   even when output is partial.
+- Converted Chat/Messages tool stop reasons require a call; their ordinary
+  stop reasons cannot turn a tool invocation into a successful text-only turn.
+  Check JSON and SSE, retaining the native routes' original wire contract.
+- Required/named tool choices reject a normal text-only completion, not a valid
+  refusal or output limit. Cover positive calls and negative JSON/SSE responses
+  across all twelve conversions; never regenerate the response automatically.
+- Removing a deferred tool from client-search results prevents another call,
+  including after historical use. Keep the old call/result replayable; only
+  current discovery or explicit tool choice can expose it again.
 - Check that duplicate terminal events and reconnect/replay handling do not
   execute a tool or emit its result twice.
 - Native JSON preserves ordered schema properties, annotated union branches,
@@ -64,6 +78,20 @@ not silently discard state or cause duplicate historical calls.
   local key and model. None of these hints grants opaque continuation ownership.
 
 ## Reasoning and route ownership
+
+- PDF input: preserve base64 bytes/labels through every supported pair and
+  retain PDF tool-result IDs on Responses/Messages. Keep supported HTTPS URLs
+  unchanged without Relay downloads. Native file IDs, citations/context and
+  rendering controls must never silently degrade during conversion.
+- Client tool search: query, native client call, paired catalog result, loaded
+  function call/result, then final answer in JSON/SSE. Cover namespaces, deferred
+  schemas, forced choice, both continuation modes, wrong result kinds and no
+  duplicate schema text in the foreign model's conversation.
+- Native Gemini continuation: JSON/SSE preserve all candidate tokens and late
+  usage without fabricating success, repeating a hop or warming health. Resume
+  only with the recorded owner/local key/model and identical original contents;
+  reject unknown, changed and expired bindings. Cache references and hosted
+  service tools retain their native request fields.
 
 | State | Required behavior |
 | --- | --- |

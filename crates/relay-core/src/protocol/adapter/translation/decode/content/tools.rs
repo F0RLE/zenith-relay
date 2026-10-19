@@ -136,7 +136,7 @@ fn push_responses_tools(
                     Some(&description),
                 )?;
             }
-            Some("function" | "custom") | None => {
+            Some("function" | "custom" | "tool_search") | None => {
                 push_responses_tool(functions, targets, tool, namespace, namespace_description)?;
             }
             Some(_) => return Err(AdapterError::unsupported_tool().with_parameter("tools.type")),
@@ -158,7 +158,7 @@ fn push_responses_tool(
         return Err(AdapterError::invalid_request());
     }
     let (parameters, strict) = match target.kind {
-        ResponsesToolKind::Function => {
+        ResponsesToolKind::Function | ResponsesToolKind::ToolSearch => {
             let schema = tool
                 .get("parameters")
                 .cloned()

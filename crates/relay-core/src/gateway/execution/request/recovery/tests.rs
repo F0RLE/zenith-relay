@@ -6,8 +6,9 @@ fn adapter_failure_preserves_usage_and_static_reason_without_overwriting_provide
     event.http_status = 200;
     event.input_tokens = Some(17);
     event.output_tokens = Some(4);
-    let error =
-        AdapterError::upstream_response_invalid().with_parameter("output.run_officejs.args");
+    let error = AdapterError::upstream_response_invalid()
+        .with_parameter("output.run_officejs.args")
+        .with_json_diagnostic("invalid_escape", "json_object", 1, 9, 20);
     let marked = mark_adapter_failure(event, &error);
     assert!(!marked.success);
     assert_eq!(marked.http_status, 502);
@@ -21,6 +22,12 @@ fn adapter_failure_preserves_usage_and_static_reason_without_overwriting_provide
         .as_ref()
         .unwrap()
         .contains("output.run_officejs.args"));
+    assert!(details
+        .message
+        .as_ref()
+        .unwrap()
+        .contains("json_reason=invalid_escape"));
+    assert!(details.message.as_ref().unwrap().contains("parse_column=9"));
     let marked_again = mark_adapter_failure(
         marked.clone(),
         &AdapterError::upstream_stream_invalid().with_parameter("stream.terminal"),

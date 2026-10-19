@@ -68,7 +68,9 @@ pub(super) async fn bridge_http_fallback(
             return;
         };
         let next_client_request =
-            match ClientRequest::parse(&runtime, &key, &headers, &next_request_payload) {
+            match ClientRequest::prepare(&runtime, &key, &headers, &next_request_payload, None)
+                .await
+            {
                 Ok(client_request) => client_request,
                 Err(failure) => {
                     send_gateway_error(&mut downstream, &failure, None, None).await;
@@ -174,8 +176,10 @@ async fn serve_http_fallback_request(
     {
         let chunk = chunk.map_err(|_| GatewayFailure::transport(stream_origin))?;
         pending.extend_from_slice(&chunk);
-        while let Some(event) = crate::protocol::take_sse_event(&mut pending) {
-            let terminal = parse_sse_event(&event);
+        let mut consumed = 0;
+        while let Some(end) = crate::protocol::sse_event_end(&pending[consumed..]) {
+            let terminal = parse_sse_event(&pending[consumed..consumed + end]);
+            consumed += end;
             if terminal.has_data && !terminal.valid {
                 return Err(GatewayFailure::transport(stream_origin));
             }
@@ -184,8 +188,9 @@ async fn serve_http_fallback_request(
             if terminal.outcome.is_some() && terminal.event_payload.is_none() {
                 return Err(GatewayFailure::closed(stream_origin));
             }
+            let finished = terminal.outcome.is_some();
             if let Some(fallback_message) = fallback_event_message(
-                &terminal,
+                terminal,
                 client_request.stream_id.as_deref(),
                 stream_origin,
             )? {
@@ -195,10 +200,11 @@ async fn serve_http_fallback_request(
                     .await
                     .map_err(|_| GatewayFailure::client_closed())?;
             }
-            if terminal.outcome.is_some() {
+            if finished {
                 return Ok(());
             }
         }
+        pending.drain(..consumed);
     }
     Err(GatewayFailure::closed(stream_origin))
 }
@@ -209,12 +215,12 @@ pub(super) struct FallbackEventMessage {
 }
 
 pub(super) fn fallback_event_message(
-    terminal: &super::super::streaming::TerminalEvent,
+    mut terminal: super::super::streaming::TerminalEvent,
     stream_id: Option<&str>,
     origin: ErrorOrigin,
 ) -> Result<Option<FallbackEventMessage>, GatewayFailure> {
     if let Some(stream_id) = stream_id {
-        let Some(mut stream_payload) = terminal.event_payload.clone() else {
+        let Some(mut stream_payload) = terminal.event_payload.take() else {
             // A named lane requires JSON events so the lane can be identified.
             // An opaque, non-JSON compaction event cannot be routed safely.
             return if terminal.raw_data.is_some() {
@@ -223,7 +229,7 @@ pub(super) fn fallback_event_message(
                 Ok(None)
             };
         };
-        prefix_fallback_error(&mut stream_payload, terminal, origin);
+        prefix_fallback_error(&mut stream_payload, &terminal, origin);
         let Some(payload_object) = stream_payload.as_object_mut() else {
             return Err(GatewayFailure::transport(origin));
         };
@@ -236,8 +242,7 @@ pub(super) fn fallback_event_message(
         if encoded_fallback_payload.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
             return Err(GatewayFailure::message_too_large(origin));
         }
-        let semantic_output =
-            !terminal.is_compaction && semantic_output_payload(&encoded_fallback_payload);
+        let semantic_output = !terminal.is_compaction && semantic_output_value(&stream_payload);
         let text = String::from_utf8(encoded_fallback_payload)
             .map_err(|_| GatewayFailure::transport(origin))?;
         return Ok(Some(FallbackEventMessage {
@@ -245,12 +250,12 @@ pub(super) fn fallback_event_message(
             semantic_output,
         }));
     }
-    if let Some(raw_data) = terminal.raw_data.as_deref() {
+    if let Some(raw_data) = terminal.raw_data.take() {
         if raw_data.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
             return Err(GatewayFailure::message_too_large(origin));
         }
-        let semantic_output = !terminal.is_compaction && semantic_output_payload(raw_data);
-        let message = match String::from_utf8(raw_data.to_vec()) {
+        let semantic_output = !terminal.is_compaction && semantic_output_payload(&raw_data);
+        let message = match String::from_utf8(raw_data) {
             Ok(text) => Message::Text(text.into()),
             Err(error) => Message::Binary(error.into_bytes().into()),
         };
@@ -260,17 +265,16 @@ pub(super) fn fallback_event_message(
         }));
     }
 
-    let Some(fallback_payload) = terminal.event_payload.as_ref() else {
+    let Some(mut fallback_payload) = terminal.event_payload.take() else {
         return Ok(None);
     };
-    let mut fallback_payload = fallback_payload.clone();
-    prefix_fallback_error(&mut fallback_payload, terminal, origin);
+    prefix_fallback_error(&mut fallback_payload, &terminal, origin);
     let encoded_fallback_payload =
         serde_json::to_vec(&fallback_payload).map_err(|_| GatewayFailure::transport(origin))?;
     if encoded_fallback_payload.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
         return Err(GatewayFailure::message_too_large(origin));
     }
-    let semantic_output = semantic_output_payload(&encoded_fallback_payload);
+    let semantic_output = semantic_output_value(&fallback_payload);
     let text = String::from_utf8(encoded_fallback_payload)
         .map_err(|_| GatewayFailure::transport(origin))?;
     Ok(Some(FallbackEventMessage {

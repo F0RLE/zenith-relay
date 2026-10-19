@@ -124,7 +124,12 @@ async fn claude_desktop_effort_is_separate_from_model_and_obeys_pool_policy() {
         )]))
         .unwrap();
     for (model, expected) in [
-        (alias.clone(), StatusCode::BAD_REQUEST),
+        (alias.clone(), StatusCode::OK),
+        ("gpt-test".to_string(), StatusCode::BAD_REQUEST),
+        (
+            crate::claude_desktop_model_alias("gpt-test"),
+            StatusCode::BAD_REQUEST,
+        ),
         (format!("{alias}-effort-high"), StatusCode::NOT_FOUND),
     ] {
         let response = client
@@ -138,8 +143,14 @@ async fn claude_desktop_effort_is_separate_from_model_and_obeys_pool_policy() {
             .await
             .unwrap();
         assert_eq!(response.status(), expected);
+        response.bytes().await.unwrap();
     }
-    assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 12);
+    assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 13);
+    let bodies = crate::poison::mutex(&server.state.generation_bodies);
+    // The fixed picker stays within pool policy; ordinary API model IDs remain strict.
+    assert_eq!(bodies.last().unwrap()["model"], "gpt-test");
+    assert_eq!(bodies.last().unwrap()["reasoning_effort"], "low");
+    drop(bodies);
     task.abort();
 }
 

@@ -6,10 +6,21 @@ use crate::protocol::AdapterError;
 use serde_json::{json, Map, Value};
 
 pub(super) fn invalid_tool_output(parameter: &'static str) -> AdapterError {
-    if parameter == "output.run_officejs.args.schema" {
-        return AdapterError::upstream_tool_arguments_invalid();
-    }
-    AdapterError::upstream_response_invalid().with_parameter(parameter)
+    let error = match parameter {
+        "output.run_officejs.args.schema" => AdapterError::upstream_tool_arguments_invalid(),
+        "output.run_officejs.args.frame" => AdapterError::upstream_tool_arguments_frame_invalid(),
+        "output.run_officejs.args.json.eof" => {
+            AdapterError::upstream_tool_arguments_json_incomplete()
+        }
+        "output.run_officejs.args.json.syntax" => {
+            AdapterError::upstream_tool_arguments_json_syntax_invalid()
+        }
+        "output.run_officejs.args.json" | "output.run_officejs.args.object" => {
+            AdapterError::upstream_tool_arguments_json_invalid()
+        }
+        _ => AdapterError::upstream_response_invalid(),
+    };
+    error.with_parameter(parameter)
 }
 
 fn parse_direct_tool_call(code: &str) -> Option<Map<String, Value>> {
@@ -175,6 +186,16 @@ pub(in crate::gateway) fn translate_response_value(
     let all_tools = client_tools(request_body)?;
     let tools = selected_tools(request_body, &all_tools);
     let mut call_ids = std::collections::HashSet::new();
+    let history_call_ids = request_body
+        .get("input")
+        .into_iter()
+        .flat_map(|input| {
+            input
+                .as_array()
+                .map_or(std::slice::from_ref(input), Vec::as_slice)
+        })
+        .filter_map(|item| item.get("call_id").and_then(Value::as_str))
+        .collect::<std::collections::HashSet<_>>();
     for output_item in output_items.iter_mut() {
         let Some(output_object) = output_item.as_object_mut() else {
             continue;
@@ -206,7 +227,7 @@ pub(in crate::gateway) fn translate_response_value(
             .filter(|call_id| !call_id.trim().is_empty())
             .ok_or_else(|| invalid_tool_output("output.run_officejs.call_id"))?
             .to_string();
-        if !call_ids.insert(call_id.clone()) {
+        if history_call_ids.contains(call_id.as_str()) || !call_ids.insert(call_id.clone()) {
             return Err(invalid_tool_output("output.run_officejs.call_id"));
         }
         let item_id = fit_item_id(&if tool.kind == "custom" {
@@ -241,9 +262,16 @@ pub(in crate::gateway) fn translate_response_value(
         } else {
             let function_arguments = match tool_arguments {
                 Some(Value::Object(arguments)) => Value::Object(arguments.clone()),
-                Some(Value::String(arguments)) if !direct_call => {
-                    serde_json::from_str::<Value>(arguments)
-                        .map_err(|_| invalid_tool_output("output.run_officejs.args.json"))?
+                Some(arguments @ Value::String(code)) if !direct_call => {
+                    if let Some(mut call) = parse_direct_tool_call(code) {
+                        if call.get("tool").and_then(Value::as_str) != Some(tool_name) {
+                            return Err(invalid_tool_output("output.run_officejs.tool"));
+                        }
+                        call.remove("args")
+                            .ok_or_else(|| invalid_tool_output("output.run_officejs.args.object"))?
+                    } else {
+                        super::codec::function_arguments(arguments)?
+                    }
                 }
                 _ => return Err(invalid_tool_output("output.run_officejs.args.object")),
             };

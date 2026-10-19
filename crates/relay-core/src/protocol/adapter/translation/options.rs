@@ -1,5 +1,6 @@
 //! Non-generation request options. Native forwarding never normalizes these.
 use super::{checked, AdapterError, AdapterResult, BTreeMap, Value, WireApi};
+use sha2::{Digest, Sha256};
 
 pub(super) fn metadata(
     request: &Value,
@@ -35,13 +36,31 @@ pub(super) fn write_metadata(
     fields: &mut serde_json::Map<String, Value>,
     metadata: &BTreeMap<String, String>,
     protocol: WireApi,
+    origin: Option<WireApi>,
 ) -> AdapterResult<()> {
     if metadata.is_empty() {
         return Ok(());
     }
-    if protocol == WireApi::Gemini
-        || (protocol == WireApi::Messages && metadata.keys().any(|key| key != "user_id"))
-    {
+    if protocol == WireApi::Gemini {
+        if origin != Some(WireApi::Messages) || metadata.len() != 1 {
+            return Err(AdapterError::parameter_unsupported_for("metadata"));
+        }
+        let user_id = metadata
+            .get("user_id")
+            .ok_or_else(|| AdapterError::parameter_unsupported_for("metadata"))?;
+        // Gemini safety labels allow 63 lowercase characters; keep attribution opaque, never in content.
+        let identifier = if user_id.is_empty() {
+            String::new()
+        } else {
+            hex::encode(Sha256::digest(user_id.as_bytes()))[..63].to_owned()
+        };
+        fields.insert(
+            "labels".into(),
+            serde_json::json!({"safety_identifier": identifier}),
+        );
+        return Ok(());
+    }
+    if protocol == WireApi::Messages && metadata.keys().any(|key| key != "user_id") {
         return Err(AdapterError::parameter_unsupported_for("metadata"));
     }
     fields.insert("metadata".into(), serde_json::json!(metadata));

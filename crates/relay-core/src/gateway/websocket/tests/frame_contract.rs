@@ -20,6 +20,61 @@ fn websocket_model_guard_checks_text_and_binary_envelopes_only() {
 }
 
 #[test]
+fn websocket_delta_fast_path_does_not_bypass_model_or_error_checks() {
+    use crate::gateway::websocket::upstream::message_serves_rejected_model;
+    use reqwest_websocket::Message;
+
+    for payload in [
+        json!({"type":"response.output_text.delta","delta":"hello"}),
+        json!({"type":"response.output_text.delta","delta":"hello","model":"gpt-other"}),
+        json!({"type":"response.output_text.delta","delta":"hello","response":{"model":"gpt-other"}}),
+        json!({"type":"response.output_text.delta","delta":"hello","model":"gpt-other","error":{"code":"permission_denied","type":"permission_error"},"status":403}),
+    ] {
+        let expected = crate::gateway::streaming::served_model_is_rejected(&payload, "gpt-test");
+        let encoded = payload.to_string();
+        for message in [
+            Message::Text(encoded.clone()),
+            Message::Binary(encoded.as_bytes().to_vec().into()),
+        ] {
+            assert_eq!(
+                message_serves_rejected_model(&message, "gpt-test"),
+                expected
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "manual synthetic WebSocket model-guard throughput measurement"]
+fn measure_websocket_delta_model_guard() {
+    use crate::gateway::websocket::upstream::message_serves_rejected_model;
+    use std::{hint::black_box, time::Instant};
+
+    let text = json!({"type":"response.output_text.delta","output_index":0,"sequence_number":42,"delta":"synthetic \"quoted\"\ntext"}).to_string();
+    let message = reqwest_websocket::Message::Text(text.clone());
+    let started = Instant::now();
+    for _ in 0..100_000 {
+        let payload: Value = serde_json::from_slice(black_box(text.as_bytes())).unwrap();
+        assert!(!black_box(
+            crate::gateway::streaming::served_model_is_rejected(&payload, "gpt-test")
+        ));
+    }
+    let previous = started.elapsed();
+    let started = Instant::now();
+    for _ in 0..100_000 {
+        assert!(!black_box(message_serves_rejected_model(
+            black_box(&message),
+            "gpt-test"
+        )));
+    }
+    eprintln!(
+        "100000 quoted/multiline WebSocket deltas, debug_assertions={}: previous={previous:?}, current={:?}",
+        cfg!(debug_assertions),
+        started.elapsed()
+    );
+}
+
+#[test]
 fn only_upstream_incomplete_failures_cool_the_candidate() {
     assert!(incomplete_requires_cooldown("upstream_websocket_closed"));
     assert!(incomplete_requires_cooldown("websocket_idle_timeout"));
@@ -124,7 +179,8 @@ fn http_fallback_preserves_opaque_compaction_data() {
     let terminal = super::super::parse_sse_event(
         b"event: response.compaction.delta\ndata: encrypted-compaction-fragment\n\n",
     );
-    let message = fallback_event_message(&terminal, None, ErrorOrigin::Account)
+    let data_pointer = terminal.raw_data.as_ref().unwrap().as_ptr();
+    let message = fallback_event_message(terminal, None, ErrorOrigin::Account)
         .ok()
         .flatten()
         .expect("opaque compaction must produce a WebSocket message");
@@ -132,13 +188,31 @@ fn http_fallback_preserves_opaque_compaction_data() {
     assert!(!message.semantic_output);
     match message.message {
         axum::extract::ws::Message::Text(text) => {
-            assert_eq!(text.to_string(), "encrypted-compaction-fragment")
+            assert_eq!(text.to_string(), "encrypted-compaction-fragment");
+            assert_eq!(text.as_bytes().as_ptr(), data_pointer);
         }
         other => assert!(
             matches!(other, axum::extract::ws::Message::Text(_)),
             "UTF-8 compaction data should remain a text message"
         ),
     }
+}
+
+#[test]
+fn http_fallback_moves_non_utf8_compaction_data_into_a_binary_frame() {
+    let terminal =
+        super::super::parse_sse_event(b"event: response.compaction.delta\ndata: \xff\xfe\n\n");
+    let data_pointer = terminal.raw_data.as_ref().unwrap().as_ptr();
+    let message = fallback_event_message(terminal, None, ErrorOrigin::Account)
+        .ok()
+        .flatten()
+        .expect("opaque compaction must produce a WebSocket message");
+    assert!(!message.semantic_output);
+    let axum::extract::ws::Message::Binary(bytes) = message.message else {
+        panic!("non-UTF-8 compaction must remain binary");
+    };
+    assert_eq!(bytes.as_ref(), b"\xff\xfe");
+    assert_eq!(bytes.as_ptr(), data_pointer);
 }
 
 #[test]
@@ -149,7 +223,7 @@ data: {"type":"response.compaction.delta","delta":"opaque","stream_id":"other"}
 
 "#,
     );
-    let message = fallback_event_message(&json_terminal, Some("main"), ErrorOrigin::Account)
+    let message = fallback_event_message(json_terminal, Some("main"), ErrorOrigin::Account)
         .ok()
         .flatten()
         .expect("named compaction JSON must be forwarded");
@@ -166,7 +240,35 @@ data: {"type":"response.compaction.delta","delta":"opaque","stream_id":"other"}
     let raw_terminal = super::super::parse_sse_event(
         b"event: response.compaction.delta\ndata: encrypted-compaction-fragment\n\n",
     );
-    assert!(fallback_event_message(&raw_terminal, Some("main"), ErrorOrigin::Account).is_err());
+    assert!(fallback_event_message(raw_terminal, Some("main"), ErrorOrigin::Account).is_err());
+}
+
+#[test]
+fn http_fallback_classification_matches_the_forwarded_frame() {
+    for payload in [
+        json!({"type":"response.created","response":{"id":"resp_synthetic"}}),
+        json!({"type":"response.future_output_event"}),
+        json!({"type":"response.output_text.delta","delta":""}),
+        json!({"type":"response.output_text.delta","delta":"hello"}),
+        json!({"type":"response.function_call_arguments.delta","delta":"{"}),
+        json!({"type":"response.compaction.delta","delta":"opaque"}),
+    ] {
+        let wire = format!("data: {payload}\n\n");
+        for stream_id in [None, Some("main")] {
+            let terminal = super::super::parse_sse_event(wire.as_bytes());
+            let message = fallback_event_message(terminal, stream_id, ErrorOrigin::Account)
+                .ok()
+                .flatten()
+                .expect("synthetic JSON event must produce a fallback frame");
+            let axum::extract::ws::Message::Text(text) = message.message else {
+                unreachable!()
+            };
+            assert_eq!(
+                message.semantic_output,
+                semantic_output_payload(text.as_bytes())
+            );
+        }
+    }
 }
 
 #[test]
@@ -176,7 +278,7 @@ fn http_fallback_does_not_commit_response_setup_events() {
 
 "#,
     );
-    let message = fallback_event_message(&terminal, None, ErrorOrigin::Account)
+    let message = fallback_event_message(terminal, None, ErrorOrigin::Account)
         .ok()
         .flatten()
         .expect("setup event must still be forwarded");
@@ -186,15 +288,14 @@ fn http_fallback_does_not_commit_response_setup_events() {
 
 #[test]
 fn http_fallback_prefixes_terminal_errors_for_the_selected_account() {
-    let terminal = super::super::parse_sse_event(
-        br#"event: response.failed
+    for stream_id in [None, Some("main")] {
+        let terminal = super::super::parse_sse_event(
+            br#"event: response.failed
 data: {"type":"response.failed","response":{"error":{"code":"server_error","message":"connection closed"}}}
 
 "#,
-    );
-
-    for stream_id in [None, Some("main")] {
-        let message = fallback_event_message(&terminal, stream_id, ErrorOrigin::Account)
+        );
+        let message = fallback_event_message(terminal, stream_id, ErrorOrigin::Account)
             .ok()
             .flatten()
             .expect("terminal failure should be forwarded");

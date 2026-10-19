@@ -83,6 +83,8 @@ pub(super) fn prepare_request<'a>(
 
 pub(in crate::protocol::adapter) fn is_assistant_item(item: &Value) -> bool {
     item.get("role").and_then(Value::as_str) == Some("assistant")
+        || (item.get("type").and_then(Value::as_str) == Some("tool_search_call")
+            && item.get("execution").and_then(Value::as_str) == Some("client"))
         || matches!(
             item.get("type").and_then(Value::as_str),
             Some("reasoning" | "function_call" | "custom_tool_call")

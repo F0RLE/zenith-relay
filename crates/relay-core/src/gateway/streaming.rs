@@ -172,9 +172,10 @@ impl StreamExecution {
             .uses_local_continuation_state()
             .then(|| Arc::new(Mutex::new(None::<TranslatedResponse>)));
         let completion_bridge_state_for_callback = completion_bridge_state.clone();
-        let completion_native_response = (client_wire_api == WireApi::Responses
-            && adapter_is_passthrough)
-            .then(|| Arc::new(Mutex::new(None::<Value>)));
+        let completion_native_response =
+            (matches!(client_wire_api, WireApi::Responses | WireApi::Gemini)
+                && adapter_is_passthrough)
+                .then(|| Arc::new(Mutex::new(None::<Value>)));
         let completion_native_response_for_callback = completion_native_response.clone();
         let tool_call_capture = Arc::new(Mutex::new(
             crate::gateway::request::ToolCallCapture::default(),

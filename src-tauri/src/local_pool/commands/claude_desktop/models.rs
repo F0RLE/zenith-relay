@@ -4,13 +4,13 @@ use zenith_relay_core::protocol::ModelSummary;
 
 const MAX_INFERENCE_MODELS: usize = 200;
 
-/// Desktop owns the native effort scale, not the gateway. `maxEffort` can only
-/// cap that scale, so expose its longest executable prefix rather than offering
-/// holes, inventing levels or mapping a user's explicit choice to another one.
+/// A Desktop cap is not an effort enum: a missing intermediate level must not
+/// hide higher supported choices. Admission maps picker gaps, then validates
+/// the effective choice against the pool and exact route.
 fn native_effort_cap(model: &ModelSummary) -> Option<&'static str> {
     ["low", "medium", "high", "xhigh", "max"]
         .into_iter()
-        .take_while(|effort| {
+        .filter(|effort| {
             model
                 .reasoning_allowed_levels
                 .iter()
@@ -131,7 +131,7 @@ mod tests {
             vec!["low".into(), "medium".into(), "high".into()];
         assert_eq!(
             inference_models(std::slice::from_ref(&configured)).unwrap()[0]["maxEffort"],
-            "low"
+            "high"
         );
 
         let mut responses = configured.protocol_routes[0].clone();
@@ -146,8 +146,8 @@ mod tests {
     }
 
     #[test]
-    fn disabled_unknown_or_unrepresentable_reasoning_does_not_advertise_a_picker() {
-        for levels in [vec![], vec!["high".into(), "ultra".into()]] {
+    fn unknown_or_unsupported_native_reasoning_does_not_advertise_a_picker() {
+        for levels in [vec![], vec!["none".into(), "ultra".into()]] {
             let mut configured = model("upstream/model", true, WireApi::Messages);
             configured.reasoning_allowed_levels = levels;
             configured.protocol_routes[0].reasoning_efforts =
@@ -159,6 +159,27 @@ mod tests {
             );
             assert!(entries[0].get("maxEffort").is_none());
             assert!(entries[0].get("supports1m").is_none());
+        }
+    }
+
+    #[test]
+    fn sparse_efforts_do_not_hide_high_or_max_from_desktop() {
+        for levels in [
+            vec!["high"],
+            vec!["high", "max"],
+            vec!["none", "low", "high", "max"],
+        ] {
+            let mut configured = model("upstream/sparse", true, WireApi::Messages);
+            configured.reasoning_allowed_levels =
+                levels.iter().map(|level| (*level).into()).collect();
+            configured.protocol_routes[0].reasoning_efforts =
+                configured.reasoning_allowed_levels.clone();
+            let entry = &inference_models(&[configured]).unwrap()[0];
+            assert_eq!(entry["maxEffort"], *levels.last().unwrap());
+            assert_eq!(
+                entry["name"],
+                zenith_relay_core::claude_desktop_reasoning_model_alias("upstream/sparse")
+            );
         }
     }
 

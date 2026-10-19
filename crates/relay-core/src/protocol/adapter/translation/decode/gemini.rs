@@ -6,6 +6,14 @@ use crate::WireApi;
 use serde_json::Value;
 
 pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
+    for parameter in ["cachedContent", "continuationToken"] {
+        if request_body
+            .get(parameter)
+            .is_some_and(|value| !value.is_null())
+        {
+            return Err(AdapterError::parameter_unsupported_for(parameter));
+        }
+    }
     checked(
         request_body,
         &[
@@ -89,7 +97,14 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
         )?;
         let mime = generation_config
             .get("responseMimeType")
-            .and_then(Value::as_str);
+            .filter(|value| !value.is_null())
+            .map(|value| {
+                value.as_str().ok_or_else(|| {
+                    AdapterError::invalid_request()
+                        .with_parameter("generationConfig.responseMimeType")
+                })
+            })
+            .transpose()?;
         if response_schema.is_some() && mime != Some("application/json") {
             return Err(
                 AdapterError::invalid_request().with_parameter("generationConfig.responseMimeType")

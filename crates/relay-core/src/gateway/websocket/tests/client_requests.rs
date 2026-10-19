@@ -437,3 +437,83 @@ fn websocket_request_repairs_legacy_call_ids_and_recomputes_affinity() {
     assert_eq!(input[0]["call_id"], input[1]["call_id"]);
     assert!(!request.repair_legacy_call_ids());
 }
+#[test]
+fn account_websocket_cache_key_matches_http_without_changing_api_source_requests() {
+    let runtime = runtime();
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-codex-session-id",
+        HeaderValue::from_static("synthetic-session"),
+    );
+    for explicit in [None, Some("client-cache-key")] {
+        let mut body =
+            serde_json::json!({"model":"relay/upstream-model","input":"Synthetic question"});
+        if let Some(explicit) = explicit {
+            body["prompt_cache_key"] = serde_json::json!(explicit);
+        }
+        let request = ClientRequest::parse(
+            &runtime,
+            &key,
+            &headers,
+            &serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap_or_else(|_| panic!("synthetic request must parse"));
+        let mut route = runtime
+            .executor_route(
+                "source",
+                &request.resolved_model,
+                &key.scope_snapshot(),
+                WEBSOCKET_PROTOCOLS,
+                false,
+            )
+            .unwrap();
+        let source_payload: Value = serde_json::from_str(
+            &request
+                .payload_for(&route)
+                .unwrap_or_else(|_| panic!("synthetic source request must serialize")),
+        )
+        .unwrap();
+        assert_eq!(
+            source_payload.get("prompt_cache_key"),
+            body.get("prompt_cache_key")
+        );
+        route.account_id = Some("synthetic-account".into());
+        route.account_transport = crate::runtime::AccountTransport::NativeResponses;
+        let account_payload: Value = serde_json::from_str(
+            &request
+                .payload_for(&route)
+                .unwrap_or_else(|_| panic!("synthetic account request must serialize")),
+        )
+        .unwrap();
+        let mut http_fields = body.as_object().unwrap().clone();
+        crate::gateway::request::apply_account_prompt_cache_key(
+            &mut http_fields,
+            &key.id,
+            &request.resolved_model,
+            request.client_context_id.as_deref(),
+        );
+        assert_eq!(
+            account_payload["prompt_cache_key"],
+            http_fields["prompt_cache_key"]
+        );
+        assert!(account_payload["prompt_cache_key"].as_str().is_some());
+        assert_eq!(
+            account_payload["input"].as_array().unwrap()[0]["content"][0]["text"],
+            "Synthetic question"
+        );
+        let fallback: Value = serde_json::from_slice(
+            &request
+                .http_payload()
+                .unwrap_or_else(|_| panic!("synthetic fallback must serialize")),
+        )
+        .unwrap();
+        assert_eq!(
+            fallback.get("prompt_cache_key"),
+            body.get("prompt_cache_key")
+        );
+        assert_eq!(fallback["input"], body["input"]);
+    }
+}

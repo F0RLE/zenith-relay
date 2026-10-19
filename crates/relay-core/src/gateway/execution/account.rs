@@ -150,8 +150,8 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             break;
         }
         // Wake checks one named account. Compact and search can leave that
-        // account once, before selection, when another account has a strictly
-        // larger fresh remainder and the saved history can be resent.
+        // account once, before selection, when ordinary admission prefers
+        // another physical member and the saved history can be resent.
         if !repairs.quota_yield {
             repairs.quota_yield = true;
             if endpoint != AccountEndpoint::Wake {

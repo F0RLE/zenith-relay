@@ -44,7 +44,7 @@ mod fallback;
 mod request;
 mod upstream;
 
-use bridge::{bridge, semantic_output_payload};
+use bridge::{bridge, semantic_output_payload, semantic_output_value};
 use fallback::bridge_http_fallback;
 #[cfg(test)]
 use fallback::{
@@ -196,11 +196,13 @@ async fn read_initial_request(
             })?;
         match message {
             Message::Text(text) => {
-                return ClientRequest::parse(runtime, key, headers, text.as_bytes())
+                return ClientRequest::prepare(runtime, key, headers, text.as_bytes(), None)
+                    .await
                     .map_err(|failure| (failure, ClientRequest::error_stream_id(text.as_bytes())));
             }
             Message::Binary(bytes) => {
-                return ClientRequest::parse(runtime, key, headers, &bytes)
+                return ClientRequest::prepare(runtime, key, headers, &bytes, None)
+                    .await
                     .map_err(|failure| (failure, ClientRequest::error_stream_id(&bytes)));
             }
             Message::Ping(payload) => {

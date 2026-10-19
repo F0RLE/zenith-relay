@@ -143,6 +143,20 @@ fn reused_lookup_call_ids_are_rejected() {
 }
 
 #[test]
+fn lookup_call_ids_cannot_reuse_single_item_history() {
+    let mut request = request();
+    let lookup = response(LOOKUP_TOOL, json!({"names":["patch"]}));
+    request["input"] = json!({
+        "type":"function_call_output", "call_id":lookup["output"][0]["call_id"],
+        "output":"synthetic prior result"
+    });
+    let mut session = DiscoverySession::new(&request).unwrap().unwrap();
+    let mut upstream = prepare_request(&request).unwrap();
+    let error = session.advance(&lookup, &mut upstream).unwrap_err();
+    assert_eq!(error.parameter(), Some("output.relay.catalog.call_id"));
+}
+
+#[test]
 fn legacy_local_lookup_objects_use_the_same_validated_catalog_contract() {
     let request = request();
     let mut upstream = prepare_request(&request).unwrap();

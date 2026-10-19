@@ -2,6 +2,125 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn required_tool_choices_reject_text_only_success_without_rejecting_limits_or_refusals() {
+    for client in WireApi::ALL {
+        for named in [false, true] {
+            let mut request = input(client);
+            let schema = json!({"type":"object","properties":{}});
+            request["tools"] = match client {
+                WireApi::Responses => {
+                    json!([{"type":"function","name":"lookup","parameters":schema}])
+                }
+                WireApi::ChatCompletions => {
+                    json!([{"type":"function","function":{"name":"lookup","parameters":schema}}])
+                }
+                WireApi::Messages => json!([{"name":"lookup","input_schema":schema}]),
+                WireApi::Gemini => {
+                    json!([{"functionDeclarations":[{"name":"lookup","parameters":schema}]}])
+                }
+            };
+            match client {
+                WireApi::Responses => {
+                    request["tool_choice"] = if named {
+                        json!({"type":"function","name":"lookup"})
+                    } else {
+                        json!("required")
+                    }
+                }
+                WireApi::ChatCompletions => {
+                    request["tool_choice"] = if named {
+                        json!({"type":"function","function":{"name":"lookup"}})
+                    } else {
+                        json!("required")
+                    }
+                }
+                WireApi::Messages => {
+                    request["tool_choice"] = if named {
+                        json!({"type":"tool","name":"lookup"})
+                    } else {
+                        json!({"type":"any"})
+                    }
+                }
+                WireApi::Gemini => {
+                    request["toolConfig"] = json!({"functionCallingConfig":{"mode":"ANY"}});
+                    if named {
+                        request["toolConfig"]["functionCallingConfig"]["allowedFunctionNames"] =
+                            json!(["lookup"]);
+                    }
+                }
+            }
+            for upstream in WireApi::ALL
+                .into_iter()
+                .filter(|upstream| *upstream != client)
+            {
+                let error = prepare(client, upstream, &request, false)
+                    .translate_response_bytes(&serde_json::to_vec(&output(upstream)).unwrap())
+                    .unwrap_err();
+                assert_eq!(
+                    error.parameter(),
+                    Some("tool_choice"),
+                    "{client:?} -> {upstream:?}"
+                );
+                let mut bridge = prepare(client, upstream, &request, true)
+                    .into_stream_bridge()
+                    .unwrap();
+                for bytes in sse(upstream).chunks(5) {
+                    bridge.push(bytes);
+                }
+                bridge.finish();
+                assert!(bridge.completed().is_none());
+                let wire = String::from_utf8(
+                    std::iter::from_fn(|| bridge.pop_output())
+                        .flatten()
+                        .collect(),
+                )
+                .unwrap();
+                assert!(
+                    wire.contains("\"param\":\"tool_choice\""),
+                    "{client:?} -> {upstream:?}: {wire}"
+                );
+
+                let mut bridge = prepare(client, upstream, &request, true)
+                    .into_stream_bridge()
+                    .unwrap();
+                bridge.push(&tool_stream(upstream));
+                bridge.finish();
+                assert!(bridge.completed().is_some(), "{client:?} -> {upstream:?}");
+
+                let mut limited = output(upstream);
+                let mut refused = output(upstream);
+                match upstream {
+                    WireApi::Responses => {
+                        limited["status"] = "incomplete".into();
+                        limited["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                        refused["output"][0]["content"] =
+                            json!([{"type":"refusal","refusal":"Synthetic refusal"}]);
+                    }
+                    WireApi::ChatCompletions => {
+                        limited["choices"][0]["finish_reason"] = "length".into();
+                        refused["choices"][0]["message"]["refusal"] = "Synthetic refusal".into();
+                        refused["choices"][0]["message"]["content"] = Value::Null;
+                    }
+                    WireApi::Messages => {
+                        limited["stop_reason"] = "max_tokens".into();
+                        refused["stop_reason"] = "refusal".into();
+                    }
+                    WireApi::Gemini => {
+                        limited["candidates"][0]["finishReason"] = "MAX_TOKENS".into();
+                        refused["candidates"][0]["finishReason"] = "SAFETY".into();
+                    }
+                }
+                for payload in [limited, refused] {
+                    prepare(client, upstream, &request, false)
+                        .translate_response_bytes(&serde_json::to_vec(&payload).unwrap())
+                        .unwrap();
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn nested_namespace_tools_roundtrip_across_all_responses_bridges() {
     let request = json!({"input":"Find the file", "max_output_tokens":64,"tools":[{
         "type":"namespace","name":"workspace","description":"Outer scope","tools":[{

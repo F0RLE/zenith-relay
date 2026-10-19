@@ -13,7 +13,7 @@ use terminal::finish_incomplete;
 use upstream_item::handle_upstream_item;
 
 pub(in crate::gateway::websocket) use connection::send_request;
-pub(in crate::gateway::websocket) use events::semantic_output_payload;
+pub(in crate::gateway::websocket) use events::{semantic_output_payload, semantic_output_value};
 
 pub(super) struct InFlight {
     request: ClientRequest,

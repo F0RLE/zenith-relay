@@ -168,7 +168,7 @@ pub(in crate::gateway::images) fn translate_account_response(
 
 fn sse_json(event: &[u8]) -> Option<Value> {
     let sse_payload = crate::protocol::sse_data(event);
-    (!sse_payload.is_empty() && sse_payload != b"[DONE]")
+    (!sse_payload.is_empty() && sse_payload.as_ref() != b"[DONE]")
         .then(|| serde_json::from_slice(&sse_payload).ok())
         .flatten()
 }

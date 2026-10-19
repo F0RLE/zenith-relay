@@ -22,7 +22,8 @@ pub(super) use responses_items::{
     tool_call_output_ids, unpaired_tool_output_ids,
 };
 pub(super) use routing::{
-    candidate_protocols, chat_request_is_text_or_image_only, request_id, requested_reasoning_effort,
+    candidate_protocols, chat_request_has_supported_content, claude_desktop_effort_override,
+    request_id, requested_reasoning_effort,
 };
 #[cfg(test)]
 pub(super) use tool_policy::tool_use_diagnostics;
@@ -44,12 +45,12 @@ pub(super) use headers::{
 };
 pub(super) use identity::{client_context_fingerprint, client_request_identity};
 pub(in crate::gateway) use normalization::coerce_responses_input_array;
+pub(super) use normalization::{
+    apply_account_prompt_cache_key, normalize_account_request, normalize_basis_points_request,
+    normalize_compact_account_request, responses_lite_parallel_tool_calls_valid, ServiceTierPolicy,
+};
 #[cfg(test)]
 pub(super) use normalization::{apply_default_service_tier_if_missing, request_service_tier};
-pub(super) use normalization::{
-    normalize_account_request, normalize_basis_points_request, normalize_compact_account_request,
-    responses_lite_parallel_tool_calls_valid, ServiceTierPolicy,
-};
 
 use super::execution::execute_client_request;
 #[cfg(test)]

@@ -27,18 +27,17 @@ pub(crate) fn lines(mut bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
     })
 }
 
-pub(crate) fn event_data(sse_event: &[u8]) -> Vec<u8> {
-    let mut data_bytes = Vec::new();
-    for (index, line_payload) in lines(sse_event)
+pub(crate) fn event_data(sse_event: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    let mut payloads = lines(sse_event)
         .filter_map(|line| line.strip_prefix(b"data:"))
-        .enumerate()
-    {
-        if index > 0 {
-            data_bytes.push(b'\n');
-        }
-        data_bytes.extend_from_slice(line_payload.strip_prefix(b" ").unwrap_or(line_payload));
+        .map(|payload| payload.strip_prefix(b" ").unwrap_or(payload));
+    let mut data = std::borrow::Cow::Borrowed(payloads.next().unwrap_or_default());
+    for payload in payloads {
+        let data_bytes = data.to_mut();
+        data_bytes.push(b'\n');
+        data_bytes.extend_from_slice(payload);
     }
-    data_bytes
+    data
 }
 
 fn line_end(bytes: &[u8]) -> Option<(usize, usize)> {
@@ -65,13 +64,16 @@ pub(crate) fn consume_frames<T>(
         return;
     }
     pending.extend_from_slice(bytes);
-    while let Some(event) = take_event(pending) {
-        handle(state, &event);
+    let mut consumed = 0;
+    while let Some(end) = event_end(&pending[consumed..]) {
+        handle(state, &pending[consumed..consumed + end]);
+        consumed += end;
         if stop(state) {
             pending.clear();
             return;
         }
     }
+    pending.drain(..consumed);
 }
 
 /// Feeds `bytes` through an SSE buffer that cannot be borrowed with its owner.
@@ -86,6 +88,10 @@ pub(crate) fn push_pending_frames<T>(
     consume_frames(&mut pending, bytes, state, stop, handle);
     pending
 }
+
+#[cfg(test)]
+#[path = "sse/throughput_tests.rs"]
+mod throughput_tests;
 
 #[cfg(test)]
 mod tests {
@@ -104,7 +110,21 @@ mod tests {
                 "",
             ]
             .join(ending);
-            assert_eq!(event_data(event.as_bytes()), b"\n text \n");
+            assert_eq!(event_data(event.as_bytes()).as_ref(), b"\n text \n");
+        }
+    }
+
+    #[test]
+    fn single_data_line_borrows_its_payload() {
+        for ending in ["\n", "\r\n", "\r"] {
+            let event = format!("event: delta{ending}data: {{\"text\":\"hello\"}}{ending}{ending}");
+            let data = event_data(event.as_bytes());
+            assert!(matches!(data, std::borrow::Cow::Borrowed(_)));
+            assert_eq!(data.as_ref(), b"{\"text\":\"hello\"}");
+            assert!(std::ptr::eq(
+                data.as_ptr(),
+                event.as_bytes()[event.find('{').unwrap()..].as_ptr()
+            ));
         }
     }
 
@@ -164,17 +184,21 @@ mod tests {
             let mut pending = Vec::new();
             let mut events = Vec::new();
             for chunk in input.chunks(chunk_size) {
-                pending.extend_from_slice(chunk);
-                while let Some(end) = event_end(&pending) {
-                    let frame = pending.drain(..end).collect::<Vec<_>>();
-                    let event_data_lines = lines(&frame)
-                        .filter_map(|line| line.strip_prefix(b"data:"))
-                        .map(<[u8]>::to_vec)
-                        .collect::<Vec<_>>();
-                    if !event_data_lines.is_empty() {
-                        events.push(event_data_lines);
-                    }
-                }
+                consume_frames(
+                    &mut pending,
+                    chunk,
+                    &mut events,
+                    |_| false,
+                    |events, frame| {
+                        let event_data_lines = lines(frame)
+                            .filter_map(|line| line.strip_prefix(b"data:"))
+                            .map(<[u8]>::to_vec)
+                            .collect::<Vec<_>>();
+                        if !event_data_lines.is_empty() {
+                            events.push(event_data_lines);
+                        }
+                    },
+                );
             }
             assert!(pending.is_empty(), "chunk size {chunk_size}");
             assert_eq!(
@@ -224,5 +248,26 @@ mod tests {
         );
         assert!(pending.is_empty());
         assert!(!handled);
+    }
+
+    #[test]
+    fn consume_frames_borrows_coalesced_events_without_moving_the_tail() {
+        let first = b"data: first\n\n";
+        let second = b"data: second\r\n\r\n";
+        let tail = b"data: partial";
+        let input = [first.as_slice(), second, tail].concat();
+        let mut pending = Vec::with_capacity(input.len());
+        let start = pending.as_ptr();
+        let mut seen = Vec::new();
+        consume_frames(
+            &mut pending,
+            &input,
+            &mut seen,
+            |_| false,
+            |seen, frame| seen.push((frame.as_ptr(), frame.to_vec())),
+        );
+        assert_eq!(seen[0], (start, first.to_vec()));
+        assert_eq!(seen[1], (start.wrapping_add(first.len()), second.to_vec()));
+        assert_eq!(pending, tail);
     }
 }

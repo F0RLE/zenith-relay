@@ -7,10 +7,9 @@ pub(in crate::gateway::execution) fn mark_adapter_failure(
     if error.is_upstream_failure() && event.upstream_error.is_none() {
         let message = error
             .parameter()
-            .map(|parameter| format!("{} (parameter: {parameter})", error.message()))
-            .unwrap_or_else(|| error.message().to_string());
-        // AdapterError contains only static local labels. Preserve the reason
-        // without retaining the invalid provider body or tool arguments.
+            .map(|parameter| format!("{error} (parameter: {parameter})"))
+            .unwrap_or_else(|| error.to_string());
+        // Only fixed labels and numeric parse coordinates enter this diagnostic.
         event.upstream_error = Some(crate::usage::UpstreamErrorDetails::from_value(
             Some(event.http_status),
             &serde_json::json!({"error": {
@@ -201,7 +200,8 @@ pub(in crate::gateway::execution) fn adapter_error_response_for_origin(
     };
     let message = error
         .parameter()
-        .map(|parameter| format!("{} (parameter: {parameter})", error.message()));
+        .map(|parameter| format!("{error} (parameter: {parameter})"))
+        .unwrap_or_else(|| error.to_string());
     // Request-shape and capability failures are produced before an upstream
     // response exists. They are Relay errors even when the selected route is
     // an API source; only adapter failures derived from an upstream response
@@ -211,13 +211,20 @@ pub(in crate::gateway::execution) fn adapter_error_response_for_origin(
     } else {
         crate::ErrorOrigin::Relay
     };
-    super::super::super::errors::api_error_with_parameter(
+    let mut response = super::super::super::errors::api_error_with_parameter(
         status,
-        message.as_deref().unwrap_or(error.message()),
+        &message,
         error.code(),
         error.code(),
         origin,
         request_id,
         error.parameter(),
-    )
+    );
+    if error.is_upstream_failure() {
+        // Inference already ran; an HTTP retry would start another generation.
+        response
+            .headers_mut()
+            .insert("x-should-retry", HeaderValue::from_static("false"));
+    }
+    response
 }

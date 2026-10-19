@@ -185,6 +185,7 @@ async fn adapter_error_response_exposes_safe_parameter_name() {
         Some("relay-request-123"),
     );
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(!response.headers().contains_key("x-should-retry"));
     let bytes = axum::body::to_bytes(response.into_body(), 4096)
         .await
         .unwrap();
@@ -225,6 +226,7 @@ async fn upstream_adapter_errors_keep_the_selected_route_origin() {
         ErrorOrigin::Provider,
         Some("relay-request-upstream"),
     );
+    assert_eq!(response.headers()["x-should-retry"], "false");
     let body = to_bytes(response.into_body(), 4096).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
@@ -233,6 +235,30 @@ async fn upstream_adapter_errors_keep_the_selected_route_origin() {
         "Provider: the upstream response cannot be represented by the selected client protocol"
     );
     assert_eq!(body["error"]["zenith_relay"]["origin"], "provider");
+}
+
+#[tokio::test]
+async fn adapter_json_http_errors_keep_safe_diagnostics_and_disable_sdk_retry() {
+    let response = adapter_error_response_for_origin(
+        AdapterError::upstream_tool_arguments_json_syntax_invalid()
+            .with_parameter("output.run_officejs.args.json.syntax")
+            .with_json_diagnostic("invalid_escape", "json_object", 1, 9, 20),
+        ErrorOrigin::Account,
+        Some("relay-json-diagnostic"),
+    );
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(response.headers()["x-should-retry"], "false");
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(message.contains("json_reason=invalid_escape"));
+    assert!(message.contains("payload_shape=json_object"));
+    assert!(message.contains("parse_column=9"));
+    assert_eq!(body["error"]["code"], "adapter_upstream_response_invalid");
+    assert_eq!(
+        body["error"]["param"],
+        "output.run_officejs.args.json.syntax"
+    );
 }
 
 #[test]

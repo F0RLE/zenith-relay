@@ -62,6 +62,19 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
                 // Tools loaded during the turn are part of the catalog, which
                 // `responses_tools` reads; they are not conversation content.
                 "additional_tools" => {}
+                "tool_search_call" | "tool_search_output"
+                    if response_item.get("execution").and_then(Value::as_str) == Some("client") =>
+                {
+                    let block = super::super::tool_search::history_block(response_item)?;
+                    if matches!(block, Block::ToolCall { .. }) {
+                        append_assistant_blocks(&mut decoded_request.messages, vec![block]);
+                    } else {
+                        decoded_request.messages.push(Message {
+                            role: Role::User,
+                            blocks: vec![block],
+                        });
+                    }
+                }
                 "tool_search_call" | "tool_search_output" => {
                     // Client discovery is a call/result roundtrip, not hosted
                     // search metadata. Until it has a lossless representation,
@@ -135,16 +148,29 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
                             "id",
                             "status",
                             "call_id",
+                            "name",
                             "output",
                             "namespace",
                             "caller",
                         ],
                     )?;
                     validate_call_execution(response_item)?;
+                    if response_item
+                        .get("name")
+                        .is_some_and(|name| !name.is_null())
+                    {
+                        if response_item.get("type").and_then(Value::as_str)
+                            == Some("custom_tool_call_output")
+                        {
+                            return Err(AdapterError::parameter_unsupported_for("input.name"));
+                        }
+                        required_text(response_item, "name")
+                            .map_err(|error| error.with_parameter("input.name"))?;
+                    }
                     decoded_request.messages.push(Message {
                         role: Role::User,
                         blocks: vec![Block::ToolResult {
-                            id: required_text(response_item, "call_id")?.into(),
+                            id: tool_result_id(response_item)?.into(),
                             name: String::new(),
                             content: tool_result_content(response_item)?,
                             is_error: false,
@@ -198,6 +224,7 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
             .retain(|tool| allowed.contains(&tool.name));
     }
     decoded_request.tool_choice = choice;
+    super::super::tool_search::filter_deferred(&mut decoded_request, request_body)?;
     decoded_request.parallel_tools = optional_bool(request_body, "parallel_tool_calls")?;
     super::content::common(
         &mut decoded_request,
@@ -282,6 +309,17 @@ fn checked_item(item: &Value, allowed: &[&str]) -> AdapterResult<()> {
         return Err(AdapterError::invalid_request().with_parameter(PARAMETER));
     }
     Ok(())
+}
+
+pub(super) fn tool_result_id(item: &Value) -> AdapterResult<&str> {
+    // A named standalone result is valid Responses input, but foreign tool
+    // histories require an actual call; neither a name nor an item ID is one.
+    if item.get("type").and_then(Value::as_str) == Some("function_call_output")
+        && item.get("call_id").is_none_or(Value::is_null)
+    {
+        return Err(AdapterError::parameter_unsupported_for("input.call_id"));
+    }
+    required_text(item, "call_id").map_err(|error| error.with_parameter("input.call_id"))
 }
 
 fn tool_result_content(item: &Value) -> AdapterResult<Vec<Block>> {

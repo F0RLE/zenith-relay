@@ -82,50 +82,47 @@ pub(in crate::protocol::adapter::translation::decode) fn choice(
     let Some(choice_value) = choice_value.filter(|choice_value| !choice_value.is_null()) else {
         return Ok(None);
     };
-    let kind = choice_value
-        .as_str()
-        .or_else(|| choice_value.get("type").and_then(Value::as_str))
-        .ok_or_else(AdapterError::unsupported_tool)?;
-    Ok(Some(match kind {
-        "auto" => ToolChoice::Auto,
-        "none" => ToolChoice::None,
-        "required" | "any" => ToolChoice::Required,
-        "function" | "tool" | "custom" => {
-            let target = if protocol == WireApi::ChatCompletions {
-                choice_value
-                    .get("function")
-                    .ok_or_else(AdapterError::unsupported_tool)?
-            } else {
-                choice_value
+    let choice = match protocol {
+        WireApi::ChatCompletions => {
+            if let Some(kind) = choice_value.as_str() {
+                return Ok(Some(match kind {
+                    "auto" => ToolChoice::Auto,
+                    "none" => ToolChoice::None,
+                    "required" => ToolChoice::Required,
+                    _ => return Err(AdapterError::unsupported_tool()),
+                }));
+            }
+            checked(choice_value, &["type", "function"])
+                .map_err(|error| error.with_parameter("tool_choice"))?;
+            if choice_value.get("type").and_then(Value::as_str) != Some("function") {
+                return Err(AdapterError::unsupported_tool());
+            }
+            let function = choice_value
+                .get("function")
+                .ok_or_else(AdapterError::unsupported_tool)?;
+            checked(function, &["name"])
+                .map_err(|error| error.with_parameter("tool_choice.function"))?;
+            ToolChoice::Function(required_text(function, "name")?.into())
+        }
+        WireApi::Messages => {
+            let kind = required_text(choice_value, "type")?;
+            let fields: &[&str] = match kind {
+                "auto" | "any" => &["type", "disable_parallel_tool_use"],
+                "tool" => &["type", "name", "disable_parallel_tool_use"],
+                "none" => &["type"],
+                _ => return Err(AdapterError::unsupported_tool()),
             };
-            let name = required_text(target, "name")?;
-            // A namespaced Responses tool is declared upstream under its
-            // flattened name, so a forced choice must select that name.
-            let namespace = if protocol == WireApi::Responses {
-                target
-                    .get("namespace")
-                    .filter(|namespace_value| !namespace_value.is_null())
-                    .map(|namespace_value| {
-                        namespace_value
-                            .as_str()
-                            .filter(|namespace_name| !namespace_name.is_empty())
-                            .ok_or_else(AdapterError::invalid_request)
-                    })
-                    .transpose()?
-            } else {
-                None
-            };
-            ToolChoice::Function(match namespace {
-                Some(namespace) => {
-                    super::super::super::super::contracts::bridged_namespace_tool_name(
-                        namespace, name,
-                    )
-                }
-                None => name.into(),
-            })
+            checked(choice_value, fields).map_err(|error| error.with_parameter("tool_choice"))?;
+            match kind {
+                "auto" => ToolChoice::Auto,
+                "none" => ToolChoice::None,
+                "any" => ToolChoice::Required,
+                _ => ToolChoice::Function(required_text(choice_value, "name")?.into()),
+            }
         }
         _ => return Err(AdapterError::unsupported_tool()),
-    }))
+    };
+    Ok(Some(choice))
 }
 
 pub(in crate::protocol::adapter::translation::decode) fn output_format(
@@ -134,30 +131,32 @@ pub(in crate::protocol::adapter::translation::decode) fn output_format(
     if format_value.is_null() {
         return Ok(None);
     }
-    checked(
-        format_value,
-        &[
-            "type",
-            "name",
-            "schema",
-            "strict",
-            "description",
-            "json_schema",
-        ],
-    )?;
-    match format_value.get("type").and_then(Value::as_str) {
-        Some("text") => Ok(None),
-        Some("json_object") => Ok(Some(OutputFormat::JsonObject)),
-        Some("json_schema") => {
-            let schema_value = format_value.get("json_schema").unwrap_or(format_value);
-            checked(
-                schema_value,
-                &["type", "name", "schema", "strict", "description"],
-            )?;
+    match required_text(format_value, "type")? {
+        kind @ ("text" | "json_object") => {
+            checked(format_value, &["type"])?;
+            Ok((kind == "json_object").then_some(OutputFormat::JsonObject))
+        }
+        "json_schema" => {
+            let schema_value = if let Some(schema_value) = format_value
+                .get("json_schema")
+                .filter(|value| !value.is_null())
+            {
+                checked(format_value, &["type", "json_schema"])?;
+                checked(schema_value, &["name", "schema", "strict", "description"])?;
+                schema_value
+            } else {
+                checked(
+                    format_value,
+                    &["type", "name", "schema", "strict", "description"],
+                )?;
+                format_value
+            };
             Ok(Some(OutputFormat::JsonSchema {
                 name: schema_value
                     .get("name")
-                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_null())
+                    .map(|_| required_text(schema_value, "name"))
+                    .transpose()?
                     .unwrap_or("response")
                     .into(),
                 description: schema_value

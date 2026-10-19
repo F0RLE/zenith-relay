@@ -140,6 +140,56 @@ fn messages_metadata_is_validated_and_empty_user_id_is_not_fabricated() {
 }
 
 #[test]
+fn messages_user_attribution_uses_gemini_safety_labels_without_prompt_content() {
+    for user_id in [
+        "synthetic-user".to_owned(),
+        "{\"session\":\"SYNTHETIC\"}".to_owned(),
+        "я".repeat(512),
+        String::new(),
+    ] {
+        let mut value = input(WireApi::Messages);
+        value["metadata"] = json!({"user_id":user_id});
+        for stream in [false, true] {
+            let prepared = prepare(WireApi::Messages, WireApi::Gemini, &value, stream);
+            let body = prepared.upstream_body();
+            assert!(body.get("metadata").is_none());
+            let identifier = body["labels"]["safety_identifier"].as_str().unwrap();
+            if user_id.is_empty() {
+                assert_eq!(identifier, "");
+            } else {
+                assert_eq!(identifier.len(), 63);
+                assert!(identifier
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
+                assert!(!body.to_string().contains(&user_id));
+                if user_id == "synthetic-user" {
+                    assert_eq!(
+                        identifier,
+                        "14b2e141bf7cc394d669faf2cec08637d1003fe849a08cf0c43b8066677aeb6"
+                    );
+                }
+            }
+            assert_eq!(body["labels"].as_object().unwrap().len(), 1);
+            let repeated = prepare(WireApi::Messages, WireApi::Gemini, &value, stream);
+            assert_eq!(body["labels"], repeated.upstream_body()["labels"]);
+            if stream {
+                let mut bridge = prepared.into_stream_bridge().unwrap();
+                bridge.push(&sse(WireApi::Gemini));
+                bridge.finish();
+                assert!(bridge.completed().is_some());
+            } else {
+                assert!(prepared
+                    .translate_response_bytes(
+                        &serde_json::to_vec(&output(WireApi::Gemini)).unwrap()
+                    )
+                    .unwrap()
+                    .is_some());
+            }
+        }
+    }
+}
+
+#[test]
 fn portable_metadata_roundtrips_without_silently_dropping_unsupported_keys() {
     for client in [
         WireApi::Messages,
@@ -156,15 +206,23 @@ fn portable_metadata_roundtrips_without_silently_dropping_unsupported_keys() {
             let prepared = prepare(client, upstream, &value, false);
             assert_eq!(prepared.upstream_body()["metadata"], value["metadata"]);
         }
-        let decoded = decode::request(client, &value).unwrap();
-        let mut fields = serde_json::Map::new();
-        let error =
-            options::write_metadata(&mut fields, &decoded.metadata, WireApi::Gemini).unwrap_err();
-        assert_eq!(error.parameter(), Some("metadata"));
+        if client != WireApi::Messages {
+            let decoded = decode::request(client, &value).unwrap();
+            let mut fields = serde_json::Map::new();
+            let error = options::write_metadata(
+                &mut fields,
+                &decoded.metadata,
+                WireApi::Gemini,
+                decoded.origin,
+            )
+            .unwrap_err();
+            assert_eq!(error.parameter(), Some("metadata"));
+        }
     }
     let mut fields = serde_json::Map::new();
     let metadata = BTreeMap::from([("foreign_key".into(), "synthetic-value".into())]);
-    let error = options::write_metadata(&mut fields, &metadata, WireApi::Messages).unwrap_err();
+    let error =
+        options::write_metadata(&mut fields, &metadata, WireApi::Messages, None).unwrap_err();
     assert_eq!(error.parameter(), Some("metadata"));
     for client in [WireApi::Responses, WireApi::ChatCompletions] {
         let mut value = input(client);

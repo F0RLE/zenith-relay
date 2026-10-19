@@ -376,10 +376,8 @@ impl DiscoveryExecution<'_> {
         attempt_error_response(failure, None, self.selected_error_origin, self.request_id)
     }
 
-    fn adapter_failure(&self, mut event: UsageEvent, error: crate::AdapterError) -> Response<Body> {
-        event.success = false;
-        event.http_status = StatusCode::BAD_GATEWAY.as_u16();
-        event.error_category = Some(error.code().to_string());
+    fn adapter_failure(&self, event: UsageEvent, error: crate::AdapterError) -> Response<Body> {
+        let mut event = crate::gateway::execution::request::mark_adapter_failure(event, &error);
         if let Some(routing) = event.routing.as_mut() {
             routing.attempt_outcome = Some(crate::AttemptOutcome::ReturnedFailure);
         }

@@ -17,8 +17,9 @@ pub fn claude_desktop_model_alias(model: &str) -> String {
 /// A distinct, client-only route that opts into Desktop's built-in Claude
 /// effort control. Like CC Switch's Claude role routes, this is a UI identity,
 /// not upstream metadata. The unique suffix keeps real models separate; the
-/// profile caps the native scale to executable, pool-allowed levels. Never
-/// infer upstream capabilities, context, prices or effort from this name.
+/// profile caps the native scale at the highest executable, pool-allowed level.
+/// Only this route opts into Relay's fixed-picker compatibility policy.
+/// Never infer upstream capabilities, context, prices or effort from this name.
 /// Desktop's Fable effort metadata matches a prefix; suffixed Sonnet/Opus
 /// names do not inherit their exact-ID controls. Keep the opaque suffix here
 /// rather than collapsing the pool into a few fixed Claude role slots.
@@ -28,6 +29,15 @@ pub fn claude_desktop_reasoning_model_alias(model: &str) -> String {
 
 pub(crate) fn is_claude_desktop_model_alias(model: &str) -> bool {
     alias_kind(model).is_some()
+}
+
+pub(crate) fn is_claude_desktop_reasoning_model_alias(model: &str) -> bool {
+    alias_kind(model).is_some_and(|(prefix, _)| {
+        matches!(
+            prefix,
+            CLAUDE_DESKTOP_REASONING_ALIAS_PREFIX | LEGACY_REASONING_ALIAS_PREFIX
+        )
+    })
 }
 
 pub(crate) fn claude_desktop_model_alias_matches(alias: &str, model: &str) -> bool {
@@ -101,6 +111,10 @@ mod tests {
                 let alias = alias_fn(&model);
                 assert!(super::super::is_valid_model_token(&alias));
                 assert!(is_claude_desktop_model_alias(&alias.to_uppercase()));
+                assert_eq!(
+                    is_claude_desktop_reasoning_model_alias(&alias.to_uppercase()),
+                    prefix == CLAUDE_DESKTOP_REASONING_ALIAS_PREFIX
+                );
                 let suffix = alias.strip_prefix(prefix).unwrap();
                 assert_eq!(suffix.split('-').count(), 4);
                 assert!(suffix.split('-').all(|group| {
@@ -123,6 +137,10 @@ mod tests {
         for prefix in [LEGACY_ALIAS_PREFIX, LEGACY_REASONING_ALIAS_PREFIX] {
             let alias = format!("{prefix}{}", alias_suffix(&digest, true));
             assert!(is_claude_desktop_model_alias(&alias));
+            assert_eq!(
+                is_claude_desktop_reasoning_model_alias(&alias),
+                prefix == LEGACY_REASONING_ALIAS_PREFIX
+            );
             assert!(claude_desktop_model_alias_matches(
                 &alias.to_uppercase(),
                 model

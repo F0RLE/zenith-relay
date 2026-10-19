@@ -62,34 +62,36 @@ pub(super) fn output_format(
     format: &OutputFormat,
     protocol: WireApi,
 ) -> AdapterResult<()> {
-    let mut format_value = match format {
-        OutputFormat::JsonObject => json!({"type":"json_object"}),
-        OutputFormat::JsonSchema {
-            name,
-            description,
-            schema,
-            strict,
-        } => {
-            let mut schema_value = json!({"type":"json_schema","name":name,"schema":schema});
-            if let Some(description) = description {
-                schema_value["description"] = description.clone().into();
-            }
-            if let Some(strict) = strict {
-                schema_value["strict"] = (*strict).into();
-            }
-            schema_value
-        }
-    };
     match protocol {
-        WireApi::Responses => {
-            request_fields.insert("text".into(), json!({"format":format_value}));
-        }
-        WireApi::ChatCompletions => {
-            if matches!(format, OutputFormat::JsonSchema { .. }) {
-                format_value.as_object_mut().unwrap().remove("type");
-                format_value = json!({"type":"json_schema","json_schema":format_value});
+        WireApi::Responses | WireApi::ChatCompletions => {
+            let mut format_value = match format {
+                OutputFormat::JsonObject => json!({"type":"json_object"}),
+                OutputFormat::JsonSchema {
+                    name,
+                    description,
+                    schema,
+                    strict,
+                } => {
+                    let mut schema_value =
+                        json!({"type":"json_schema","name":name,"schema":schema});
+                    if let Some(description) = description {
+                        schema_value["description"] = description.clone().into();
+                    }
+                    if let Some(strict) = strict {
+                        schema_value["strict"] = (*strict).into();
+                    }
+                    schema_value
+                }
+            };
+            if protocol == WireApi::Responses {
+                request_fields.insert("text".into(), json!({"format":format_value}));
+            } else {
+                if matches!(format, OutputFormat::JsonSchema { .. }) {
+                    format_value.as_object_mut().unwrap().remove("type");
+                    format_value = json!({"type":"json_schema","json_schema":format_value});
+                }
+                request_fields.insert("response_format".into(), format_value);
             }
-            request_fields.insert("response_format".into(), format_value);
         }
         WireApi::Messages => {
             let OutputFormat::JsonSchema {
@@ -306,7 +308,9 @@ pub(super) fn flush_responses_content(
 
 pub(super) fn content_block(block: &Block, protocol: WireApi, role: Role) -> AdapterResult<Value> {
     Ok(match block {
-        Block::Refusal(text) if protocol == WireApi::Responses => {
+        Block::Refusal(text)
+            if matches!(protocol, WireApi::Responses | WireApi::ChatCompletions) =>
+        {
             json!({"type":"refusal","refusal":text})
         }
         Block::Text(text) | Block::Refusal(text) => match protocol {
@@ -351,6 +355,68 @@ pub(super) fn content_block(block: &Block, protocol: WireApi, role: Role) -> Ada
                 }
             }
         },
+        Block::Document {
+            url,
+            filename,
+            detail,
+        } => {
+            if protocol != WireApi::Responses
+                && detail.as_deref().is_some_and(|detail| detail != "auto")
+            {
+                return Err(AdapterError::parameter_unsupported_for("document.detail"));
+            }
+            let data = url.strip_prefix("data:application/pdf;base64,");
+            match protocol {
+                WireApi::Responses => {
+                    let mut file = json!({"type":"input_file"});
+                    file[if data.is_some() {
+                        "file_data"
+                    } else {
+                        "file_url"
+                    }] = url.clone().into();
+                    if let Some(filename) = filename {
+                        file["filename"] = filename.clone().into();
+                    }
+                    if let Some(detail) = detail {
+                        file["detail"] = detail.clone().into();
+                    }
+                    file
+                }
+                WireApi::ChatCompletions => {
+                    if data.is_none() {
+                        return Err(AdapterError::parameter_unsupported_for("document.file_url"));
+                    }
+                    let mut file = json!({"file_data":url});
+                    if let Some(filename) = filename {
+                        file["filename"] = filename.clone().into();
+                    }
+                    json!({"type":"file","file":file})
+                }
+                WireApi::Messages => {
+                    let source = match data {
+                        Some(data) => {
+                            json!({"type":"base64","media_type":"application/pdf","data":data})
+                        }
+                        None => json!({"type":"url","url":url}),
+                    };
+                    let mut file = json!({"type":"document","source":source});
+                    if let Some(filename) = filename {
+                        file["title"] = filename.clone().into();
+                    }
+                    file
+                }
+                WireApi::Gemini => {
+                    let data = data.ok_or_else(|| {
+                        AdapterError::parameter_unsupported_for("document.file_url")
+                    })?;
+                    let mut blob = json!({"mimeType":"application/pdf","data":data});
+                    if let Some(filename) = filename {
+                        blob["displayName"] = filename.clone().into();
+                    }
+                    json!({"inlineData":blob})
+                }
+            }
+        }
         Block::ToolCall {
             id,
             name,

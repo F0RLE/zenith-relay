@@ -64,6 +64,12 @@ fn decode_chat_completion(
         return Err(invalid());
     }
     let choice = &choices[0];
+    if choice
+        .get("index")
+        .is_some_and(|index| index.as_u64() != Some(0))
+    {
+        return Err(invalid().with_parameter("choices[].index"));
+    }
     response.finish = finish(
         protocol,
         choice
@@ -204,7 +210,21 @@ fn decode_responses(
             super::validate_responses_call_execution(response_item)?;
         }
         match response_item.get("type").and_then(Value::as_str) {
+            Some("tool_search_call")
+                if response_item.get("execution").and_then(Value::as_str) == Some("client") =>
+            {
+                response.blocks.push(
+                    super::super::tool_search::history_block(response_item)
+                        .map_err(|_| invalid())?,
+                );
+            }
             Some("message") => {
+                if response_item
+                    .get("role")
+                    .is_some_and(|role| role.as_str() != Some("assistant"))
+                {
+                    return Err(invalid().with_parameter("output[].role"));
+                }
                 for response_content in response_item
                     .get("content")
                     .and_then(Value::as_array)
@@ -319,6 +339,12 @@ fn decode_messages(
     response: &mut Response,
     invalid: fn() -> AdapterError,
 ) -> AdapterResult<()> {
+    if upstream_response
+        .get("role")
+        .is_some_and(|role| role.as_str() != Some("assistant"))
+    {
+        return Err(invalid().with_parameter("role"));
+    }
     response.finish = finish(
         protocol,
         upstream_response

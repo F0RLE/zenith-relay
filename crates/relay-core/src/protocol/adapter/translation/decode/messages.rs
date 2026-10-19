@@ -66,7 +66,6 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
         .get("tool_choice")
         .filter(|choice| !choice.is_null())
     {
-        checked(choice, &["type", "name", "disable_parallel_tool_use"])?;
         decoded_request.parallel_tools =
             optional_bool(choice, "disable_parallel_tool_use")?.map(|disabled| !disabled);
     }

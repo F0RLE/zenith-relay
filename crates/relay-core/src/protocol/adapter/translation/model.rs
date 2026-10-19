@@ -13,6 +13,11 @@ pub(in crate::protocol::adapter) enum Block {
         url: String,
         detail: Option<String>,
     },
+    Document {
+        url: String,
+        filename: Option<String>,
+        detail: Option<String>,
+    },
     ToolCall {
         id: String,
         name: String,

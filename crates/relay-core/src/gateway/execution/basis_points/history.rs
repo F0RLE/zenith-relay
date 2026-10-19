@@ -1,5 +1,5 @@
 use super::catalog::{client_tool_call_name, history_tool, tool_spec, ClientTool};
-use super::codec::{json_text, parse_function_arguments};
+use super::codec::{encode_function_arguments, json_text, parse_function_arguments};
 use super::{is_transport_tool, TRANSPORT_TOOL};
 use crate::gateway::request::responses_item_has_ciphertext as has_item_ciphertext;
 use crate::protocol::AdapterError;
@@ -32,9 +32,9 @@ pub(super) fn transport_call(
         .filter(|call_id| !call_id.trim().is_empty())
         .ok_or_else(|| AdapterError::invalid_request().with_parameter("input.call_id"))?;
     // Basis Points v0.1.14 routes the client tool through the outer
-    // `references` field. `code` is the payload itself: JSON text for a
-    // function tool and unchanged text for a custom tool. Keeping the
-    // payload unwrapped is required for quotes, backslashes and patches.
+    // `references` field. Replay function calls with the same encoding taught
+    // for new calls; otherwise history teaches nested escaping again.
+    // Custom input stays opaque.
     let code = if tool.kind == "custom" {
         tool_call_object
             .get("input")
@@ -42,7 +42,7 @@ pub(super) fn transport_call(
             .map(str::to_owned)
             .ok_or_else(|| AdapterError::invalid_request().with_parameter("input"))?
     } else {
-        json_text(&parse_function_arguments(tool_call_object)?)?
+        encode_function_arguments(&parse_function_arguments(tool_call_object)?)?
     };
     let arguments = json!({
         "summary": format!("Run client tool {}", tool.call_name()),
@@ -119,6 +119,17 @@ pub(super) fn translate_input_items(
                 }
             }
             "function_call_output" | "custom_tool_call_output" => {
+                // Named native results without a call ID do not belong to our transport.
+                if item_type == "function_call_output"
+                    && input_object.get("call_id").is_none_or(Value::is_null)
+                    && input_object
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| !name.trim().is_empty())
+                {
+                    translated_items.push(input_item);
+                    continue;
+                }
                 let call_id = input_object
                     .get("call_id")
                     .and_then(Value::as_str)

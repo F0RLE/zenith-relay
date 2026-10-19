@@ -15,7 +15,14 @@ impl TranslationStream {
             .ok_or_else(invalid)?
         {
             "ping" => {}
-            "message_start" => {}
+            "message_start" => {
+                if upstream_event
+                    .pointer("/message/role")
+                    .is_some_and(|role| role.as_str() != Some("assistant"))
+                {
+                    return Err(invalid().with_parameter("message.role"));
+                }
+            }
             "content_block_start" => {
                 let key = upstream_event
                     .get("index")
@@ -94,11 +101,11 @@ impl TranslationStream {
                             return Err(invalid());
                         }
                         let native = &mut self.decoded_response.native_output[native_index];
-                        let previous = native
-                            .get("signature")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default();
-                        native["signature"] = format!("{previous}{signature}").into();
+                        match &mut native["signature"] {
+                            Value::String(previous) => previous.push_str(signature),
+                            Value::Null => native["signature"] = signature.into(),
+                            _ => return Err(invalid()),
+                        }
                         return Ok(false);
                     }
                     _ => return Err(invalid()),
@@ -128,13 +135,6 @@ impl TranslationStream {
                         ),
                     _ => return Err(invalid()),
                 }
-                let (field, text) = match &self.decoded_response.blocks[index] {
-                    Block::Text(text) => ("text", text),
-                    Block::Reasoning(text) => ("thinking", text),
-                    Block::ToolCall { .. } => return Ok(false),
-                    _ => return Err(invalid()),
-                };
-                self.decoded_response.native_output[native_index][field] = text.clone().into();
             }
             "content_block_stop" => {
                 let key = upstream_event
@@ -150,6 +150,18 @@ impl TranslationStream {
                     return Ok(false);
                 };
                 self.closed.insert(index);
+                // Continuation snapshots are consumed only after every block closes.
+                match &self.decoded_response.blocks[index] {
+                    Block::Text(text) => {
+                        self.decoded_response.native_output[native_index]["text"] =
+                            text.clone().into();
+                    }
+                    Block::Reasoning(text) => {
+                        self.decoded_response.native_output[native_index]["thinking"] =
+                            text.clone().into();
+                    }
+                    _ => {}
+                }
                 if matches!(self.decoded_response.blocks[index], Block::Reasoning(_)) {
                     required_text(
                         &self.decoded_response.native_output[native_index],

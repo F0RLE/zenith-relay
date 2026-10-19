@@ -87,15 +87,14 @@ pub(super) async fn handle_upstream_message(
                     in_flight.client_visible_output = true;
                 }
             }
-            let forwarded_payload =
-                prefix_websocket_error_payload(text.as_bytes(), &terminal, state.upstream_origin);
             let forwarded_text =
-                String::from_utf8(forwarded_payload).unwrap_or_else(|_| text.to_string());
-            if downstream
-                .send(Message::Text(forwarded_text.into()))
-                .await
-                .is_err()
-            {
+                prefix_websocket_error_payload(text.as_bytes(), &terminal, state.upstream_origin)
+                    .and_then(|payload| String::from_utf8(payload).ok());
+            let forwarded_message = match forwarded_text {
+                Some(rewritten) => Message::Text(rewritten.into()),
+                None => Message::Text(text.into()),
+            };
+            if downstream.send(forwarded_message).await.is_err() {
                 finish_incomplete(runtime, state, error_codes::CLIENT_CANCELLED);
                 return false;
             }
@@ -117,9 +116,10 @@ pub(super) async fn handle_upstream_message(
                 }
             }
             let forwarded_payload =
-                prefix_websocket_error_payload(bytes.as_ref(), &terminal, state.upstream_origin);
+                prefix_websocket_error_payload(bytes.as_ref(), &terminal, state.upstream_origin)
+                    .map_or_else(|| bytes, Into::into);
             if downstream
-                .send(Message::Binary(forwarded_payload.into()))
+                .send(Message::Binary(forwarded_payload))
                 .await
                 .is_err()
             {
@@ -160,28 +160,27 @@ pub(super) async fn handle_upstream_message(
     }
 }
 
+/// Returns a replacement only when an error envelope actually needs rewriting.
 fn prefix_websocket_error_payload(
     upstream_frame: &[u8],
     terminal: &EventTerminal,
     origin: crate::ErrorOrigin,
-) -> Vec<u8> {
+) -> Option<Vec<u8>> {
     if !matches!(
         terminal.outcome,
         Some(EventTerminalOutcome::Failure | EventTerminalOutcome::Incomplete)
     ) {
-        return upstream_frame.to_vec();
+        return None;
     }
-    let Ok(mut event_payload) = serde_json::from_slice::<Value>(upstream_frame) else {
-        return upstream_frame.to_vec();
-    };
+    let mut event_payload = serde_json::from_slice::<Value>(upstream_frame).ok()?;
     let category = terminal
         .error_category
         .unwrap_or(error_codes::UPSTREAM_TERMINAL);
     let origin = origin.for_category(category);
     if !super::super::super::errors::prefix_error_value(&mut event_payload, origin) {
-        return upstream_frame.to_vec();
+        return None;
     }
-    serde_json::to_vec(&event_payload).unwrap_or_else(|_| upstream_frame.to_vec())
+    serde_json::to_vec(&event_payload).ok()
 }
 
 async fn reject_oversized_upstream_message(
@@ -276,7 +275,7 @@ pub(in crate::gateway::websocket) fn semantic_output_payload(upstream_frame: &[u
     semantic_output_value(&event_payload)
 }
 
-fn semantic_output_value(event_payload: &Value) -> bool {
+pub(in crate::gateway::websocket) fn semantic_output_value(event_payload: &Value) -> bool {
     let event_type = event_payload.get("type").and_then(Value::as_str);
     if has_semantic_output(event_payload, event_type) {
         return true;
@@ -330,7 +329,8 @@ mod tests {
         };
         let original = br#"{"type":"response.failed","response":{"error":{"code":"server_error","message":"Provider: unavailable"}}}"#;
         let prefixed_payload =
-            prefix_websocket_error_payload(original, &terminal, crate::ErrorOrigin::Account);
+            prefix_websocket_error_payload(original, &terminal, crate::ErrorOrigin::Account)
+                .unwrap();
         let error_response: Value = serde_json::from_slice(&prefixed_payload).unwrap();
 
         assert_eq!(
@@ -338,5 +338,16 @@ mod tests {
             "Account: unavailable"
         );
         assert_eq!(error_response["response"]["error"]["code"], "server_error");
+    }
+
+    #[test]
+    fn ordinary_frames_do_not_build_replacement_payloads() {
+        let original = br#"{ "type":"response.output_text.delta", "delta":"hello", "extension":123456789012345678901234567890 }"#;
+        assert!(prefix_websocket_error_payload(
+            original,
+            &EventTerminal::default(),
+            crate::ErrorOrigin::Account,
+        )
+        .is_none());
     }
 }

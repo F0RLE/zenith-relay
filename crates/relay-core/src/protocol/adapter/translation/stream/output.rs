@@ -1,5 +1,9 @@
 use super::*;
 
+#[cfg(test)]
+#[path = "output_tests.rs"]
+mod tests;
+
 impl TranslationStream {
     pub(super) fn event(&mut self, event_kind: &str, mut event_payload: Value) {
         if self.translation_request.client == WireApi::Responses {
@@ -42,9 +46,32 @@ impl TranslationStream {
             return Err(AdapterError::upstream_stream_invalid());
         }
         for block_index in 0..self.decoded_response.blocks.len() {
+            let current = &self.decoded_response.blocks[block_index];
+            if matches!(
+                current,
+                Block::Text(_) | Block::Reasoning(_) | Block::Refusal(_)
+            ) {
+                let previous = self.emitted.get(block_index);
+                if self.translation_request.client == WireApi::Messages {
+                    if block_index < self.finished_message_blocks {
+                        if previous != Some(current) {
+                            return Err(AdapterError::upstream_stream_invalid());
+                        }
+                        continue;
+                    }
+                } else if previous == Some(current) {
+                    continue;
+                }
+            }
             let mut block = self.decoded_response.blocks[block_index].clone();
             self.translation_request
                 .normalize_function_arguments(&mut block, upstream_finished);
+            if !upstream_finished
+                && self.translation_request.client == WireApi::Responses
+                && matches!(&block, Block::ToolCall { name, .. } if self.translation_request.client_tools.get(name).is_some_and(|target| target.kind == ResponsesToolKind::ToolSearch))
+            {
+                break;
+            }
             // Gemini patches JSON objects rather than appending JSON text.
             // Emit each assembled call once its upstream response is terminal.
             if self.translation_request.upstream == WireApi::Gemini
@@ -155,6 +182,10 @@ impl TranslationStream {
                         let client_name =
                             target.map_or(name.as_str(), |target| target.name.as_str());
                         let mut item = if target
+                            .is_some_and(|target| target.kind == ResponsesToolKind::ToolSearch)
+                        {
+                            json!({"type":"tool_search_call","id":format!("ts_{}_{output_index}",self.decoded_response.id),"call_id":id,"execution":"client","arguments":{},"status":"in_progress"})
+                        } else if target
                             .is_some_and(|target| target.kind == ResponsesToolKind::Custom)
                         {
                             json!({"type":"custom_tool_call","id":super::super::super::contracts::custom_tool_item_id(id),"call_id":id,"name":client_name,"input":"","status":"in_progress"})
@@ -269,7 +300,12 @@ impl TranslationStream {
                     .translation_request
                     .client_tools
                     .get(name)
-                    .is_some_and(|target| target.kind == ResponsesToolKind::Custom)
+                    .is_some_and(|target| {
+                        matches!(
+                            target.kind,
+                            ResponsesToolKind::Custom | ResponsesToolKind::ToolSearch
+                        )
+                    })
                 {
                     return;
                 }
@@ -284,7 +320,11 @@ impl TranslationStream {
     }
 
     fn chat_chunk(&mut self, delta: Value, finish: Option<&str>) {
-        self.event("", json!({"id":self.decoded_response.id,"object":"chat.completion.chunk","created":0,"model":self.translation_request.model,"choices":[{"index":0,"delta":delta,"finish_reason":finish}]}));
+        let mut chunk = json!({"id":self.decoded_response.id,"object":"chat.completion.chunk","created":0,"model":self.translation_request.model,"choices":[{"index":0,"delta":delta,"finish_reason":finish}]});
+        if self.translation_request.include_stream_usage {
+            chunk["usage"] = Value::Null;
+        }
+        self.event("", chunk);
     }
 
     pub(super) fn emit_end(&mut self, completed_response: &Value) -> AdapterResult<()> {
@@ -320,6 +360,7 @@ impl TranslationStream {
                             self.event("response.custom_tool_call_input.delta", json!({"type":"response.custom_tool_call_input.delta","output_index":output_index,"item_id":output_item["id"],"delta":output_item["input"]}));
                             self.event("response.custom_tool_call_input.done", json!({"type":"response.custom_tool_call_input.done","output_index":output_index,"item_id":output_item["id"],"input":output_item["input"]}));
                         }
+                        Some("tool_search_call") => {}
                         Some("reasoning") => {
                             self.event("response.reasoning_summary_text.done", json!({"type":"response.reasoning_summary_text.done","output_index":output_index,"item_id":output_item["id"],"summary_index":0,"text":output_item["summary"][0]["text"]}));
                             self.event("response.reasoning_summary_part.done", json!({"type":"response.reasoning_summary_part.done","output_index":output_index,"item_id":output_item["id"],"summary_index":0,"part":output_item["summary"][0]}));
@@ -357,7 +398,9 @@ impl TranslationStream {
                         self.decoded_response.finish,
                     )),
                 );
-                self.event("", json!({"id":self.decoded_response.id,"object":"chat.completion.chunk","created":0,"model":self.translation_request.model,"choices":[],"usage":response::usage_value(WireApi::ChatCompletions,&self.decoded_response.usage)}));
+                if self.translation_request.include_stream_usage {
+                    self.event("", json!({"id":self.decoded_response.id,"object":"chat.completion.chunk","created":0,"model":self.translation_request.model,"choices":[],"usage":response::usage_value(WireApi::ChatCompletions,&self.decoded_response.usage)}));
+                }
                 self.pending_frames.push_back(b"data: [DONE]\n\n".to_vec());
             }
             WireApi::Gemini => {

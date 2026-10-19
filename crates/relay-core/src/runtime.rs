@@ -248,6 +248,8 @@ pub(crate) struct ExecutorRoute {
     pub(crate) client_wire_api: WireApi,
     pub(crate) adapter: SourceAdapter,
     pub(crate) reasoning_mode: MessagesReasoningMode,
+    /// Explicit client compatibility choice; the original request stays intact for usage.
+    pub(crate) reasoning_effort_override: Option<String>,
     pub(crate) cache_write_ttl: CacheWriteTtl,
     pub(crate) service_tier: DefaultServiceTier,
     pub(crate) upstream_url: Url,

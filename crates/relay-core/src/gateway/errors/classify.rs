@@ -35,11 +35,15 @@ pub(in crate::gateway) fn classify_upstream_error_value(
     // Only these representation failures are accepted, never arbitrary codes
     // or origin claims, and an HTTP authorization refusal still owns its status.
     if status == StatusCode::BAD_GATEWAY {
-        for path in ["/error", "/response/error", "/body/error"] {
-            if let Some(error) = error_payload
-                .pointer(path)
-                .filter(|error| error.get("type").and_then(Value::as_str) == Some("relay_adapter"))
-            {
+        for path in ["", "/error", "/response/error", "/body/error"] {
+            if let Some(error) = error_payload.pointer(path).filter(|error| {
+                let kind = error.get("type").and_then(Value::as_str);
+                kind == Some(if path.is_empty() {
+                    "error"
+                } else {
+                    "relay_adapter"
+                })
+            }) {
                 let adapter = match error.get("code").and_then(Value::as_str) {
                     Some(error_codes::ADAPTER_UPSTREAM_RESPONSE_INVALID) => {
                         Some(crate::AdapterError::upstream_response_invalid())

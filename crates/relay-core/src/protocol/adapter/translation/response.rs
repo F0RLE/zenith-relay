@@ -61,8 +61,11 @@ pub(super) fn finish(protocol: WireApi, finish_reason: &str) -> AdapterResult<Fi
             Ok(Finish::Tools)
         }
         (WireApi::ChatCompletions, "length")
-        | (WireApi::Messages, "max_tokens" | "model_context_window_exceeded" | "pause_turn")
+        | (WireApi::Messages, "max_tokens" | "model_context_window_exceeded")
         | (WireApi::Gemini, "MAX_TOKENS") => Ok(Finish::Length),
+        (WireApi::Messages, "pause_turn") => {
+            Err(AdapterError::upstream_response_invalid().with_parameter("stop_reason"))
+        }
         (WireApi::Messages, "refusal") => Ok(Finish::Refusal),
         (WireApi::ChatCompletions, "content_filter")
         | (
@@ -303,7 +306,10 @@ pub(super) fn encode(
             (WireApi::Responses, Block::ToolCall { id, name, arguments }) => {
                 let target = client_tools.get(name);
                 let client_name = target.map_or(name.as_str(), |target| target.name.as_str());
-                let mut item = if target.is_some_and(|target| target.kind == ResponsesToolKind::Custom) {
+                let mut item = if target.is_some_and(|target| target.kind == ResponsesToolKind::ToolSearch) {
+                    json!({"type":"tool_search_call","id":format!("ts_{}_{index}",response.id),"call_id":id,
+                        "execution":"client","arguments":serde_json::from_str::<Value>(arguments).map_err(|_| AdapterError::upstream_response_invalid())?,"status":"completed"})
+                } else if target.is_some_and(|target| target.kind == ResponsesToolKind::Custom) {
                     json!({
                         "type": "custom_tool_call",
                         "id": super::super::contracts::custom_tool_item_id(id),

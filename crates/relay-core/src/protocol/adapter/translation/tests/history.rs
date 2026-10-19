@@ -2,6 +2,256 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn chat_refusal_history_preserves_both_documented_forms_without_duplication() {
+    for assistant in [
+        json!({"role":"assistant","content":null,"refusal":"Cannot help."}),
+        json!({"role":"assistant","content":[{"type":"refusal","refusal":"Cannot help."}]}),
+        json!({"role":"assistant","refusal":"Cannot help.","content":[
+            {"type":"refusal","refusal":"Cannot "},{"type":"refusal","refusal":"help."}]}),
+    ] {
+        let request = json!({"messages":[
+            {"role":"user","content":"Hello"}, assistant,
+            {"role":"user","content":"A different question"}
+        ]});
+        for upstream in [WireApi::Responses, WireApi::Messages, WireApi::Gemini] {
+            let prepared = prepare(WireApi::ChatCompletions, upstream, &request, false);
+            let decoded = decode::request(upstream, prepared.upstream_body()).unwrap();
+            let text = decoded
+                .messages
+                .iter()
+                .find(|message| message.role == Role::Assistant)
+                .unwrap()
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    Block::Text(text) | Block::Refusal(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>();
+            assert_eq!(text, "Cannot help.", "{upstream:?}");
+        }
+    }
+    let request = json!({"input":[{"role":"user","content":"Hello"},
+        {"role":"assistant","content":[{"type":"refusal","refusal":"Cannot help."}]},
+        {"role":"user","content":"A different question"}]});
+    let prepared = prepare(
+        WireApi::Responses,
+        WireApi::ChatCompletions,
+        &request,
+        false,
+    );
+    assert_eq!(
+        prepared.upstream_body()["messages"][1]["content"][0],
+        json!({"type":"refusal","refusal":"Cannot help."})
+    );
+}
+
+#[test]
+fn chat_refusal_history_rejects_conflicting_values_and_non_assistant_roles() {
+    for assistant in [
+        json!({"role":"assistant","refusal":false}),
+        json!({"role":"assistant","refusal":{}}),
+        json!({"role":"assistant","refusal":"One","content":[{"type":"refusal","refusal":"Other"}]}),
+        json!({"role":"user","refusal":"Cannot help."}),
+        json!({"role":"user","content":[{"type":"refusal","refusal":"Cannot help."}]}),
+        json!({"role":"tool","tool_call_id":"call_test","content":"Result","refusal":"Cannot help."}),
+    ] {
+        let request = json!({"messages":[assistant]});
+        assert!(decode::request(WireApi::ChatCompletions, &request).is_err());
+        assert!(prepare(
+            WireApi::ChatCompletions,
+            WireApi::ChatCompletions,
+            &request,
+            false
+        )
+        .is_passthrough());
+    }
+}
+
+#[test]
+fn legacy_chat_function_results_resolve_names_without_confusing_them_with_call_ids() {
+    let capabilities = crate::model_metadata::ModelCapabilities {
+        reasoning: Some(false),
+        ..Default::default()
+    };
+    let request = json!({"messages":[
+        {"role":"user","content":"Read two records"},
+        {"role":"assistant","function_call":{"name":"lookup","arguments":"{\"value\":1}"}},
+        {"role":"function","name":"lookup","content":"one"},
+        {"role":"assistant","function_call":{"name":"lookup","arguments":"{\"value\":2}"}},
+        {"role":"function","name":"lookup","content":"two"},
+        {"role":"user","content":"Continue"}
+    ]});
+    for upstream in [WireApi::Responses, WireApi::Messages, WireApi::Gemini] {
+        for streaming in [false, true] {
+            let prepared = SourceAdapter::between(WireApi::ChatCompletions, upstream)
+                .unwrap()
+                .prepare_request_with_capabilities(
+                    AdapterRequestContext {
+                        client_wire_api: WireApi::ChatCompletions,
+                        request: &request,
+                        model: "test",
+                        stream: streaming,
+                        reasoning_mode: MessagesReasoningMode::Disabled,
+                        cache_write_ttl: CacheWriteTtl::Provider,
+                        previous: None,
+                        response_scope: "source-test",
+                        response_id_seed: "legacy-history",
+                    },
+                    &capabilities,
+                )
+                .unwrap();
+            let mut decoded = decode::request(upstream, prepared.upstream_body()).unwrap();
+            decode::resolve_tool_history(&mut decoded.messages).unwrap();
+            let mut calls = Vec::new();
+            let mut results = Vec::new();
+            for block in decoded.messages.iter().flat_map(|message| &message.blocks) {
+                match block {
+                    Block::ToolCall { id, name, .. } => {
+                        assert_eq!(name, "lookup");
+                        assert_ne!(id, name);
+                        calls.push(id);
+                    }
+                    Block::ToolResult { id, name, .. } => {
+                        assert_eq!(name, "lookup");
+                        results.push(id);
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(calls.len(), 2);
+            assert_ne!(calls[0], calls[1]);
+            assert_eq!(calls, results);
+        }
+    }
+    let mut invalid = request;
+    invalid["messages"][2]["name"] = "other_function".into();
+    let mut decoded = decode::request(WireApi::ChatCompletions, &invalid).unwrap();
+    assert!(decode::resolve_tool_history(&mut decoded.messages).is_err());
+}
+
+#[test]
+fn translated_chat_refusal_can_be_replayed_before_the_next_user_turn() {
+    for upstream in [WireApi::Responses, WireApi::Messages] {
+        let mut payload = output(upstream);
+        if upstream == WireApi::Responses {
+            payload["output"][0]["content"] = json!([{"type":"refusal","refusal":"Cannot help."}]);
+        } else {
+            payload["content"] = json!([]);
+            payload["stop_reason"] = "refusal".into();
+            payload["stop_details"] = json!({"explanation":"Cannot help."});
+        }
+        let completed = prepare(
+            WireApi::ChatCompletions,
+            upstream,
+            &input(WireApi::ChatCompletions),
+            false,
+        )
+        .translate_response_bytes(&serde_json::to_vec(&payload).unwrap())
+        .unwrap()
+        .unwrap();
+        let request = json!({"messages":[{"role":"user","content":"Hello"},
+            completed.response_body()["choices"][0]["message"],
+            {"role":"user","content":"A different question"}]});
+        for streaming in [false, true] {
+            let prepared = prepare(WireApi::ChatCompletions, upstream, &request, streaming);
+            assert!(prepared
+                .upstream_body()
+                .to_string()
+                .contains("Cannot help."));
+        }
+    }
+}
+
+#[test]
+fn fragmented_history_text_keeps_the_same_scoped_fingerprint() {
+    let parts = ["quoted \"text\"", "\n\\", "\u{1f600}\0", " suffix"];
+    let mut fragmented = vec![Message {
+        role: Role::User,
+        blocks: parts
+            .iter()
+            .map(|text| Block::Text((*text).into()))
+            .collect(),
+    }];
+    let joined = vec![Message {
+        role: Role::User,
+        blocks: vec![Block::Text(parts.concat())],
+    }];
+    for client in WireApi::ALL {
+        let key = continuation::history_key(client, "test", &fragmented).unwrap();
+        assert_eq!(
+            key,
+            continuation::history_key(client, "test", &joined).unwrap()
+        );
+        assert_ne!(
+            key,
+            continuation::history_key(client, "other", &joined).unwrap()
+        );
+    }
+    fragmented[0].role = Role::System;
+    assert_ne!(
+        continuation::history_key(WireApi::Responses, "test", &fragmented).unwrap(),
+        continuation::history_key(WireApi::Responses, "test", &joined).unwrap()
+    );
+}
+
+#[test]
+fn image_detail_changes_cannot_restore_an_older_native_continuation() {
+    let client = WireApi::ChatCompletions;
+    for upstream in [WireApi::Responses, WireApi::Messages, WireApi::Gemini] {
+        let image = json!({"type":"image_url","image_url":{"url":"data:image/png;base64,AA==","detail":"auto"}});
+        let first_request = json!({"messages":[{"role":"user","content":[image]}]});
+        let first = prepare(client, upstream, &first_request, false);
+        let completed = first
+            .translate_response_bytes(&serde_json::to_vec(&output(upstream)).unwrap())
+            .unwrap()
+            .unwrap();
+        let previous = completed.continuation().unwrap().1.clone();
+        let mut request = json!({"messages":[
+            first_request["messages"][0],
+            {"role":"assistant","content":"Hi"},
+            {"role":"user","content":"Continue"}
+        ]});
+        for detail in [Some("auto"), None, Some("low"), Some("high")] {
+            match detail {
+                Some(detail) => {
+                    request["messages"][0]["content"][0]["image_url"]["detail"] = detail.into()
+                }
+                None => {
+                    request["messages"][0]["content"][0]["image_url"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("detail");
+                }
+            }
+            let adapter = SourceAdapter::between(client, upstream).unwrap();
+            let key = adapter.continuation_key(client, &request, "test").unwrap();
+            let restored = adapter.prepare_request(AdapterRequestContext {
+                client_wire_api: client,
+                request: &request,
+                model: "test",
+                stream: false,
+                reasoning_mode: MessagesReasoningMode::Adaptive,
+                cache_write_ttl: CacheWriteTtl::Provider,
+                previous: Some(previous.clone()),
+                response_scope: "source-test",
+                response_id_seed: "second",
+            });
+            if matches!(detail, None | Some("auto")) {
+                assert_eq!(key, previous.history_key);
+                assert!(restored.is_ok(), "{upstream:?}: {detail:?}");
+            } else {
+                assert_ne!(key, previous.history_key);
+                assert_eq!(
+                    restored.unwrap_err().code(),
+                    "adapter_continuation_mismatch"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn responses_continuations_replace_instructions_and_preserve_system_history() {
     for upstream in [WireApi::ChatCompletions, WireApi::Messages, WireApi::Gemini] {
         let first = prepare(

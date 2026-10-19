@@ -62,10 +62,6 @@ pub(super) fn retryable_terminal_request(
     state: &BridgeState,
     message: &UpstreamMessage,
 ) -> Option<ClientRequest> {
-    let terminal = first_message_terminal(message)?;
-    if terminal.outcome != Some(EventTerminalOutcome::Failure) {
-        return None;
-    }
     let in_flight = state.in_flight.as_ref()?;
     if in_flight.client_visible_output
         || in_flight.event.ttft_ms.is_some()
@@ -73,6 +69,10 @@ pub(super) fn retryable_terminal_request(
         || in_flight.event.tool_use.tool_call_count > 0
         || in_flight.event.tool_use.text_output
     {
+        return None;
+    }
+    let terminal = first_message_terminal(message)?;
+    if terminal.outcome != Some(EventTerminalOutcome::Failure) {
         return None;
     }
     let (status, category) = resolved_terminal_failure(&terminal);
@@ -95,6 +95,9 @@ pub(super) fn repairable_terminal_request(
     state: &mut BridgeState,
     message: &UpstreamMessage,
 ) -> Option<ClientRequest> {
+    if state.in_flight.as_ref()?.client_visible_output {
+        return None;
+    }
     let terminal = first_message_terminal(message)?;
     if terminal.outcome != Some(EventTerminalOutcome::Failure) {
         return None;
@@ -103,10 +106,6 @@ pub(super) fn repairable_terminal_request(
         return None;
     }
     if terminal.previous_response_not_found {
-        let in_flight = state.in_flight.as_ref()?;
-        if in_flight.client_visible_output {
-            return None;
-        }
         let repaired_continuation = replay_in_flight_continuation(runtime, state, true)?;
         return Some(repaired_continuation);
     }
@@ -119,7 +118,7 @@ pub(super) fn repairable_terminal_request(
         return None;
     }
     let in_flight = state.in_flight.as_mut()?;
-    if in_flight.client_visible_output || in_flight.legacy_call_id_repair_attempted {
+    if in_flight.legacy_call_id_repair_attempted {
         return None;
     }
     let mut repair_request = in_flight.request.clone();

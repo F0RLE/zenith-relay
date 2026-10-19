@@ -17,26 +17,53 @@ const MAX_TOOLS: usize = 1024;
 
 pub(super) mod discovery;
 
-fn failure(code: &str, parameter: Option<&str>) -> Bytes {
-    let message = if parameter == Some("output.run_officejs.args.schema") {
-        crate::AdapterError::upstream_tool_arguments_invalid().message()
-    } else {
-        "Basis Points stream could not be completed safely"
+fn failure_event(code: &str, parameter: Option<&str>) -> Value {
+    let message = match parameter {
+        Some("output.run_officejs.args.frame") => {
+            crate::AdapterError::upstream_tool_arguments_frame_invalid().message()
+        }
+        Some("output.run_officejs.args.schema") => {
+            crate::AdapterError::upstream_tool_arguments_invalid().message()
+        }
+        Some("output.run_officejs.args.json.eof") => {
+            crate::AdapterError::upstream_tool_arguments_json_incomplete().message()
+        }
+        Some("output.run_officejs.args.json.syntax") => {
+            crate::AdapterError::upstream_tool_arguments_json_syntax_invalid().message()
+        }
+        Some("output.run_officejs.args.json" | "output.run_officejs.args.object") => {
+            crate::AdapterError::upstream_tool_arguments_json_invalid().message()
+        }
+        _ => "Basis Points stream could not be completed safely",
     };
-    let mut body = json!({"type":"error","error":{"code":code,"message":message}});
-    if matches!(
-        code,
-        crate::error_codes::ADAPTER_UPSTREAM_RESPONSE_INVALID
-            | crate::error_codes::ADAPTER_UPSTREAM_STREAM_INVALID
-    ) {
-        body["error"]["type"] = json!("relay_adapter");
-    }
+    let mut body = json!({"type":"error","code":code,"message":message,"param":parameter});
     if let Some(parameter) = parameter {
-        body["error"]["param"] = json!(parameter);
         // The bounded diagnostics store preserves the message, not arbitrary
         // provider fields. This parameter is a local constant, never payload.
-        body["error"]["message"] = json!(format!("{message} (parameter: {parameter})"));
+        body["message"] = json!(format!("{message} (parameter: {parameter})"));
     }
+    body
+}
+
+fn failure(code: &str, parameter: Option<&str>) -> Bytes {
+    failure_frame(failure_event(code, parameter))
+}
+
+fn adapter_failure_event(error: crate::AdapterError) -> Value {
+    let mut body = failure_event(error.code(), error.parameter());
+    body["message"] = json!(error
+        .parameter()
+        .map(|parameter| format!("{error} (parameter: {parameter})"))
+        .unwrap_or_else(|| error.to_string()));
+    body
+}
+
+fn adapter_failure(error: crate::AdapterError) -> Bytes {
+    failure_frame(adapter_failure_event(error))
+}
+
+fn failure_frame(mut body: Value) -> Bytes {
+    body["sequence_number"] = json!(0);
     Bytes::from(format!("event: error\ndata: {body}\n\n"))
 }
 
@@ -111,10 +138,14 @@ impl Translator {
     }
 
     fn reject(&mut self, parameter: &'static str) {
-        self.output.push_back(failure(
+        self.fail(
             crate::error_codes::ADAPTER_UPSTREAM_STREAM_INVALID,
             Some(parameter),
-        ));
+        );
+    }
+
+    fn fail(&mut self, code: &str, parameter: Option<&str>) {
+        self.emit(failure_event(code, parameter));
         self.terminal = true;
         self.pending.clear();
     }
@@ -219,8 +250,15 @@ impl Translator {
                 return Err("stream.tool.output");
             }
             let response = event["response"].take();
-            let translated = translate_response_value(response, &self.request)
-                .map_err(|error| error.parameter().unwrap_or("response"))?;
+            let translated = match translate_response_value(response, &self.request) {
+                Ok(translated) => translated,
+                Err(error) => {
+                    self.emit(adapter_failure_event(error));
+                    self.terminal = true;
+                    self.pending.clear();
+                    return Ok(());
+                }
+            };
             let seen = std::mem::take(&mut self.seen);
             emit_unseen_output(&translated, &seen, |event| self.emit(event));
             event["response"] = translated;

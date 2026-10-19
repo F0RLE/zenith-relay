@@ -3,6 +3,7 @@ use crate::{AdapterRequestContext, CacheWriteTtl, SourceAdapter};
 use serde_json::json;
 mod history;
 mod matrix;
+mod responses_tool_search;
 mod responses_tools;
 mod responses_usage;
 mod terminal;
@@ -12,10 +13,13 @@ mod validation;
 
 mod architecture;
 mod chains;
+mod chat_usage;
 mod citations;
+mod documents;
 mod messages_options;
 mod messages_reasoning;
 mod messages_tool_search;
+mod output_formats;
 mod reasoning;
 
 fn input(protocol: WireApi) -> Value {

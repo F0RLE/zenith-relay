@@ -21,6 +21,28 @@ impl super::ClientRequest {
             .map(str::to_string)
     }
 
+    pub(in crate::gateway::websocket) async fn prepare(
+        runtime: &GatewayRuntime,
+        key: &AuthenticatedKey,
+        headers: &HeaderMap,
+        request_bytes: &[u8],
+        connection_response: Option<(&str, &str)>,
+    ) -> Result<Self, GatewayFailure> {
+        let parsed =
+            Self::parse_on_connection(runtime, key, headers, request_bytes, connection_response);
+        if parsed
+            .as_ref()
+            .is_err_and(|failure| failure.category == crate::error_codes::MODEL_NOT_FOUND)
+        {
+            // Cold BPS access must not look like a missing model; known routes stay I/O-free.
+            runtime.refresh_basis_points_access(key).await;
+            Self::parse_on_connection(runtime, key, headers, request_bytes, connection_response)
+        } else {
+            parsed
+        }
+    }
+
+    #[cfg(test)]
     pub(in crate::gateway::websocket) fn parse(
         runtime: &GatewayRuntime,
         key: &AuthenticatedKey,

@@ -2,6 +2,92 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn framed_function_strings_preserve_commands_and_validate_the_original_schema() {
+    let mut request = request_with_tool();
+    request["tools"][0]["parameters"] = json!({"type":"object","properties":{"cmd":{"type":"string"},"max_output_tokens":{"type":"integer"}},"required":["cmd"],"additionalProperties":false});
+    let raw = "Write-Output \"quoted\"\r\n$x = 'C:\\synthetic\\path'\n\t😀\n".repeat(16);
+    let code = format!(
+        "{}{}\n{raw}",
+        super::super::FUNCTION_STRING_PREFIX,
+        json!({"field":"cmd","args":{"max_output_tokens":123}})
+    );
+    let response = json!({"id":"resp_frame","status":"completed","output":[{
+        "type":"function_call","id":"fc_frame","call_id":"call_frame","name":TRANSPORT_TOOL,
+        "arguments":json!({"references":["exec_command"],"code":code}).to_string()
+    }]});
+    let bytes = translate_response(&serde_json::to_vec(&response).unwrap(), &request).unwrap();
+    let translated: Value = serde_json::from_slice(&bytes).unwrap();
+    let arguments: Value =
+        serde_json::from_str(translated["output"][0]["arguments"].as_str().unwrap()).unwrap();
+    assert_eq!(arguments, json!({"cmd":raw,"max_output_tokens":123}));
+    let nested = json!({"references":["exec_command"],"code":arguments.to_string()}).to_string();
+    assert!(response["output"][0]["arguments"].as_str().unwrap().len() < nested.len());
+    for (header, parameter) in [
+        (
+            json!({"field":"cmd","args":{"cmd":"duplicate"}}),
+            "output.run_officejs.args.frame",
+        ),
+        (
+            json!({"field":"cmd","args":[]}),
+            "output.run_officejs.args.frame",
+        ),
+        (
+            json!({"field":false,"args":{}}),
+            "output.run_officejs.args.frame",
+        ),
+        (
+            json!({"field":"cmd","args":{},"extra":true}),
+            "output.run_officejs.args.frame",
+        ),
+        (
+            json!({"field":"cmd","args":{"max_output_tokens":"wrong type"}}),
+            "output.run_officejs.args.schema",
+        ),
+        (
+            json!({"field":"unknown","args":{}}),
+            "output.run_officejs.args.schema",
+        ),
+        (
+            json!({"field":"max_output_tokens","args":{"cmd":"synthetic"}}),
+            "output.run_officejs.args.schema",
+        ),
+    ] {
+        let mut invalid = response.clone();
+        invalid["output"][0]["arguments"] = json!({"references":["exec_command"],"code":format!("{}{}\n{raw}", super::super::FUNCTION_STRING_PREFIX, header)}).to_string().into();
+        let error =
+            translate_response(&serde_json::to_vec(&invalid).unwrap(), &request).unwrap_err();
+        assert_eq!(error.parameter(), Some(parameter));
+    }
+    for malformed in [
+        "relay-function-string-v1 {\"field\":\"cmd\",\"args\":{}}",
+        "relay-function-string-v1 {invalid}\nsynthetic",
+        "relay-function-string-v1 []\nsynthetic",
+    ] {
+        let mut invalid = response.clone();
+        invalid["output"][0]["arguments"] = json!({"references":["exec_command"],"code":malformed})
+            .to_string()
+            .into();
+        assert_eq!(
+            translate_response(&serde_json::to_vec(&invalid).unwrap(), &request)
+                .unwrap_err()
+                .parameter(),
+            Some("output.run_officejs.args.frame")
+        );
+    }
+    request["tools"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"type":"custom","name":"raw_input","format":{"type":"text"}}));
+    let mut custom = response;
+    custom["output"][0]["arguments"] = json!({"references":["raw_input"],"code":code})
+        .to_string()
+        .into();
+    let translated = translate_response(&serde_json::to_vec(&custom).unwrap(), &request).unwrap();
+    let translated: Value = serde_json::from_slice(&translated).unwrap();
+    assert_eq!(translated["output"][0]["input"], code);
+}
+
+#[test]
 fn response_restores_client_metadata_instead_of_transport_metadata() {
     for status in ["completed", "incomplete"] {
         for metadata in [
@@ -76,6 +162,212 @@ fn response_translates_v014_direct_reference_envelope() {
 }
 
 #[test]
+fn reference_envelope_accepts_the_same_direct_function_calls_as_legacy() {
+    let request = request_with_tool();
+    for code in [
+        r#"exec_command({"cmd":"pwd"})"#,
+        r#"return await exec_command({"cmd":"pwd"})"#,
+    ] {
+        let body = json!({"status":"completed","output":[{
+            "type":"function_call","call_id":"call_direct_reference","name":TRANSPORT_TOOL,
+            "arguments":json!({"references":["exec_command"],"code":code}).to_string()
+        }]});
+        let translated = translate_response(&serde_json::to_vec(&body).unwrap(), &request).unwrap();
+        let translated: Value = serde_json::from_slice(&translated).unwrap();
+        assert_eq!(translated["output"][0]["name"], "exec_command");
+        assert_eq!(translated["output"][0]["arguments"], r#"{"cmd":"pwd"}"#);
+    }
+}
+
+#[test]
+fn referenced_direct_function_calls_keep_identity_schema_and_single_call_checks() {
+    for (code, parameter) in [
+        (r#"other_tool({"cmd":"pwd"})"#, "output.run_officejs.tool"),
+        (
+            r#"exec_command({"cmd":42})"#,
+            "output.run_officejs.args.schema",
+        ),
+        (r#"exec_command("pwd")"#, "output.run_officejs.args.object"),
+        (
+            r#"exec_command({"cmd":"pwd"}); exec_command({"cmd":"ls"})"#,
+            "output.run_officejs.args.json.syntax",
+        ),
+    ] {
+        let body = json!({"status":"completed","output":[{
+            "type":"function_call","call_id":"call_direct_reference","name":TRANSPORT_TOOL,
+            "arguments":json!({"references":["exec_command"],"code":code}).to_string()
+        }]});
+        let error = translate_response(&serde_json::to_vec(&body).unwrap(), &request_with_tool())
+            .unwrap_err();
+        assert_eq!(error.parameter(), Some(parameter));
+        assert!(!error.message().contains("pwd"));
+    }
+}
+
+#[test]
+fn referenced_direct_looking_custom_input_stays_opaque() {
+    let request = json!({"model":"test","tools":[{
+        "type":"custom","name":"raw_tool","format":{"type":"text"}
+    }]});
+    let code = r#"return await other_tool({"cmd":"synthetic"})"#;
+    let body = json!({"status":"completed","output":[{
+        "type":"function_call","call_id":"call_raw_reference","name":TRANSPORT_TOOL,
+        "arguments":json!({"references":["raw_tool"],"code":code}).to_string()
+    }]});
+    let translated = translate_response(&serde_json::to_vec(&body).unwrap(), &request).unwrap();
+    let translated: Value = serde_json::from_slice(&translated).unwrap();
+    assert_eq!(translated["output"][0]["type"], "custom_tool_call");
+    assert_eq!(translated["output"][0]["name"], "raw_tool");
+    assert_eq!(translated["output"][0]["input"], code);
+}
+
+#[test]
+fn unknown_json_string_escapes_preserve_literal_backslashes() {
+    for (code, expected) in [
+        (
+            r#"{"cmd":"rg \s+\w+ C:\Users\Example\Work"}"#,
+            r#"rg \s+\w+ C:\Users\Example\Work"#,
+        ),
+        (
+            r#"{"cmd":"echo \'quoted\' \q \x41 \p{L} \ value"}"#,
+            r#"echo \'quoted\' \q \x41 \p{L} \ value"#,
+        ),
+        (r#"{"cmd":"\\q \\\q"}"#, r#"\q \\q"#),
+        (
+            r#"{"cmd":"first\nsecond\t\q \"quoted\" \\ 😀"}"#,
+            "first\nsecond\t\\q \"quoted\" \\ 😀",
+        ),
+    ] {
+        let body = json!({"status":"completed","output":[{
+            "type":"function_call","call_id":"call_literal_escape","name":TRANSPORT_TOOL,
+            "arguments":json!({"references":["exec_command"],"code":code}).to_string()
+        }]});
+        let translated =
+            translate_response(&serde_json::to_vec(&body).unwrap(), &request_with_tool()).unwrap();
+        let translated: Value = serde_json::from_slice(&translated).unwrap();
+        let arguments: Value =
+            serde_json::from_str(translated["output"][0]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(arguments, json!({"cmd":expected}));
+    }
+}
+
+#[test]
+fn unknown_escape_compatibility_keeps_schema_checks_and_custom_input_opaque() {
+    let mut request = request_with_tool();
+    request["tools"][0]["parameters"]["properties"]["cmd"]["enum"] = json!(["allowed"]);
+    let code = r#"{"cmd":"\q"}"#;
+    let body = json!({"status":"completed","output":[{
+        "type":"function_call","call_id":"call_escape_schema","name":TRANSPORT_TOOL,
+        "arguments":json!({"references":["exec_command"],"code":code}).to_string()
+    }]});
+    let error = translate_response(&serde_json::to_vec(&body).unwrap(), &request).unwrap_err();
+    assert_eq!(error.parameter(), Some("output.run_officejs.args.schema"));
+    request["tools"][0] = json!({"type":"custom","name":"exec_command","format":{"type":"text"}});
+    let translated = translate_response(&serde_json::to_vec(&body).unwrap(), &request).unwrap();
+    let translated: Value = serde_json::from_slice(&translated).unwrap();
+    assert_eq!(translated["output"][0]["type"], "custom_tool_call");
+    assert_eq!(translated["output"][0]["input"], code);
+}
+
+#[test]
+fn unknown_escape_compatibility_never_repairs_unicode_or_structure() {
+    for code in [
+        r#"{"cmd":"\q \u12X4"}"#,
+        r#"{"cmd":"\q \uD800"}"#,
+        r#"{"cmd":"\q" "extra":1}"#,
+        r#"{"cmd":"\q""#,
+        r#"{"cmd":"\q"} {"cmd":"other"}"#,
+        "{\"cmd\":\"bad\\\ncontinuation\"}",
+    ] {
+        assert!(super::super::codec::function_arguments(&json!(code)).is_err());
+    }
+}
+
+#[test]
+fn response_preserves_literal_line_breaks_in_function_json_strings() {
+    let request = request_with_tool();
+    let raw = "echo \"hello\"\r\n\t😀 C:\\synthetic\\file \\n";
+    let code = "{\n\"cmd\":\"echo \\\"hello\\\"\r\n\t😀 C:\\\\synthetic\\\\file \\\\n\"\n}";
+    assert!(serde_json::from_str::<Value>(code).is_err());
+    let response = json!({"status":"completed","output":[{
+        "type":"function_call","call_id":"call_multiline","name":TRANSPORT_TOOL,
+        "arguments":json!({"references":["exec_command"],"code":code}).to_string()
+    }]});
+    let translated = translate_response(&serde_json::to_vec(&response).unwrap(), &request).unwrap();
+    let translated: Value = serde_json::from_slice(&translated).unwrap();
+    let arguments: Value =
+        serde_json::from_str(translated["output"][0]["arguments"].as_str().unwrap()).unwrap();
+    assert_eq!(arguments, json!({"cmd":raw}));
+
+    let mut history = request;
+    history["input"] = json!([
+        {"role":"user","content":"Synthetic command"},
+        translated["output"][0],
+        {"type":"function_call_output","call_id":"call_multiline","output":"Synthetic result"}
+    ]);
+    let prepared = prepare_request(&history).unwrap();
+    let call = prepared["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "function_call")
+        .unwrap();
+    let envelope: Value = serde_json::from_str(call["arguments"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        super::super::codec::function_arguments(&envelope["code"]).unwrap(),
+        arguments
+    );
+}
+
+#[test]
+fn function_json_errors_keep_safe_parser_diagnostics_without_payload() {
+    for (code, reason, shape) in [
+        (
+            r#"{"cmd":"synthetic-private\u12X4"}"#,
+            "invalid_escape",
+            "json_object",
+        ),
+        (
+            r#"{"cmd":"synthetic-private" "extra":1}"#,
+            "expected_separator",
+            "json_object",
+        ),
+        ("synthetic-private", "expected_value", "text"),
+        (
+            r#"{"cmd":"synthetic-private""#,
+            "unexpected_eof",
+            "json_object",
+        ),
+        (
+            "```json\n{\"cmd\":\"synthetic-private\"}\n```",
+            "expected_value",
+            "markdown_fence",
+        ),
+    ] {
+        let body = json!({"status":"completed","output":[{
+            "type":"function_call","call_id":"call_json_diagnostic","name":TRANSPORT_TOOL,
+            "arguments":json!({"references":["exec_command"],"code":code}).to_string()
+        }]});
+        let error = translate_response(&serde_json::to_vec(&body).unwrap(), &request_with_tool())
+            .unwrap_err();
+        let diagnostic = error.to_string();
+        assert!(
+            diagnostic.contains(&format!("json_reason={reason}")),
+            "{diagnostic}"
+        );
+        assert!(
+            diagnostic.contains(&format!("payload_shape={shape}")),
+            "{diagnostic}"
+        );
+        assert!(diagnostic.contains("parse_line="));
+        assert!(diagnostic.contains("parse_column="));
+        assert!(diagnostic.contains(&format!("payload_bytes={}", code.len())));
+        assert!(!diagnostic.contains("synthetic-private"));
+        assert!(!format!("{error:?}").contains("synthetic-private"));
+    }
+}
+
+#[test]
 fn reference_envelope_preserves_json_escaping_and_distinguishes_argument_failures() {
     let request = json!({
         "model":"gpt-test","input":"Synthetic tool request",
@@ -104,7 +396,7 @@ fn reference_envelope_preserves_json_escaping_and_distinguishes_argument_failure
     for (code, parameter) in [
         (
             "{\"path\":\"synthetic-private",
-            "output.run_officejs.args.json",
+            "output.run_officejs.args.json.eof",
         ),
         ("[\"synthetic-private\"]", "output.run_officejs.args.object"),
         (
@@ -115,11 +407,29 @@ fn reference_envelope_preserves_json_escaping_and_distinguishes_argument_failure
             "{\"path\":\"synthetic-private\",\"content\":5}",
             "output.run_officejs.args.schema",
         ),
+        (
+            "{\"path\":\"synthetic\nprivate\" \"content\":\"invalid\"}",
+            "output.run_officejs.args.json.syntax",
+        ),
+        (
+            "{\"path\":\"synthetic\nprivate\",\"content\":5}",
+            "output.run_officejs.args.schema",
+        ),
+        (
+            "{\"path\":\"synthetic\nprivate",
+            "output.run_officejs.args.json.eof",
+        ),
+        (
+            "{\"path\":\"synthetic\nprivate\\u12X4\",\"content\":\"invalid\"}",
+            "output.run_officejs.args.json.syntax",
+        ),
     ] {
         let error = translate_response(&envelope(code), &request).unwrap_err();
         assert_eq!(error.parameter(), Some(parameter));
         if parameter == "output.run_officejs.args.schema" {
             assert!(error.message().contains("JSON Schema"));
+        } else {
+            assert!(error.message().contains("one complete JSON object"));
         }
         assert!(!error.message().contains("synthetic-private"));
     }
@@ -285,6 +595,28 @@ fn tool_response(code: &str) -> Vec<u8> {
 }
 
 #[test]
+fn completed_tool_calls_cannot_reuse_an_identity_from_history() {
+    for history in [
+        json!({"type":"function_call","call_id":"call_1","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"}),
+        json!({"type":"function_call_output","call_id":"call_1","output":"synthetic result"}),
+        json!({"type":"custom_tool_call","call_id":"call_1","name":"apply_patch","input":"synthetic patch"}),
+        json!({"type":"custom_tool_call_output","call_id":"call_1","output":"synthetic result"}),
+    ] {
+        for input in [history.clone(), json!([history])] {
+            let mut request = request_with_tool();
+            request["input"] = input;
+            let response = tool_response(r#"{"tool":"exec_command","args":{"cmd":"pwd"}}"#);
+            let error = translate_response(&response, &request).unwrap_err();
+            assert_eq!(error.parameter(), Some("output.run_officejs.call_id"));
+
+            let mut fresh: Value = serde_json::from_slice(&response).unwrap();
+            fresh["output"][0]["call_id"] = json!("call_fresh");
+            assert!(translate_response(&serde_json::to_vec(&fresh).unwrap(), &request).is_ok());
+        }
+    }
+}
+
+#[test]
 fn incomplete_json_response_preserves_usage_but_never_releases_transport_tools() {
     for tool_choice in [json!("auto"), json!("required")] {
         let mut request = request_with_tool();
@@ -338,7 +670,10 @@ fn malformed_tool_code_is_classified_without_exposing_its_contents() {
 fn function_tool_arguments_must_be_an_object() {
     let code = r#"{"tool":"exec_command","args":"pwd"}"#;
     let error = translate_response(&tool_response(code), &request_with_tool()).unwrap_err();
-    assert_eq!(error.parameter(), Some("output.run_officejs.args.json"));
+    assert_eq!(
+        error.parameter(),
+        Some("output.run_officejs.args.json.syntax")
+    );
 }
 
 #[test]

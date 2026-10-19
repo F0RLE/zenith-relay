@@ -47,9 +47,12 @@ impl DiscoverySession {
         let rendered_schema_bytes = loaded_schema_bytes(&tools, &loaded);
         let call_ids = request
             .get("input")
-            .and_then(Value::as_array)
             .into_iter()
-            .flatten()
+            .flat_map(|input| {
+                input
+                    .as_array()
+                    .map_or(std::slice::from_ref(input), Vec::as_slice)
+            })
             .filter_map(|item| {
                 item.get("call_id")
                     .and_then(Value::as_str)
@@ -135,7 +138,9 @@ impl DiscoverySession {
                 .as_str()
                 .filter(|id| !id.trim().is_empty())
                 .ok_or_else(|| invalid_tool_output("output.relay.catalog.call_id"))?;
-            let arguments = super::codec::parse_json_object(envelope.get("args"));
+            let arguments = envelope
+                .get("args")
+                .and_then(|arguments| super::codec::function_arguments(arguments).ok());
             let selected = arguments.as_ref().and_then(|arguments| {
                 lookup(&self.tools, arguments)
                     .ok()

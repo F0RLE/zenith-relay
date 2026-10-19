@@ -63,6 +63,273 @@ fn filter_finish(protocol: WireApi) -> Finish {
 }
 
 #[test]
+fn messages_server_tool_pause_is_not_reported_as_token_exhaustion() {
+    let paused = json!({"id":"msg_pause","stop_reason":"pause_turn",
+        "content":[{"type":"text","text":"Server work is paused."}],
+        "usage":{"input_tokens":10,"output_tokens":7}});
+    for client in [
+        WireApi::Responses,
+        WireApi::ChatCompletions,
+        WireApi::Gemini,
+    ] {
+        let error = prepare(client, WireApi::Messages, &input(client), false)
+            .translate_response_bytes(&serde_json::to_vec(&paused).unwrap())
+            .unwrap_err();
+        assert_eq!(error.parameter(), Some("stop_reason"));
+
+        let mut bridge = prepare(client, WireApi::Messages, &input(client), true)
+            .into_stream_bridge()
+            .unwrap();
+        for event in [
+            json!({"type":"message_start","message":{"id":"msg_pause","usage":{"input_tokens":10}}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Server work is paused."}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"message_delta","delta":{"stop_reason":"pause_turn"},"usage":{"output_tokens":7}}),
+            json!({"type":"message_stop"}),
+        ] {
+            bridge.push(format!("data: {event}\n\n").as_bytes());
+        }
+        bridge.finish();
+        assert!(bridge.completed().is_none());
+        let wire = String::from_utf8(
+            std::iter::from_fn(|| bridge.pop_output())
+                .flatten()
+                .collect(),
+        )
+        .unwrap();
+        assert!(
+            wire.contains("\"param\":\"stop_reason\""),
+            "{client:?}: {wire}"
+        );
+        assert!(!wire.contains("max_output_tokens"));
+        assert!(!wire.contains("MAX_TOKENS"));
+    }
+    assert!(prepare(
+        WireApi::Messages,
+        WireApi::Messages,
+        &input(WireApi::Messages),
+        false
+    )
+    .is_passthrough());
+}
+
+#[test]
+fn converted_json_responses_cannot_disguise_foreign_roles_or_choices() {
+    for (upstream, variants, parameter) in [
+        (
+            WireApi::Responses,
+            vec![json!("user"), json!("system"), json!(false), Value::Null],
+            "output[].role",
+        ),
+        (
+            WireApi::ChatCompletions,
+            vec![json!(1), json!(-1), json!("0"), Value::Null],
+            "choices[].index",
+        ),
+    ] {
+        for variant in variants {
+            let mut payload = output(upstream);
+            if upstream == WireApi::Responses {
+                payload["output"][0]["role"] = variant;
+            } else {
+                payload["choices"][0]["index"] = variant;
+            }
+            for client in WireApi::ALL
+                .into_iter()
+                .filter(|client| *client != upstream)
+            {
+                let error = prepare(client, upstream, &input(client), false)
+                    .translate_response_bytes(&serde_json::to_vec(&payload).unwrap())
+                    .unwrap_err();
+                assert_eq!(
+                    error.parameter(),
+                    Some(parameter),
+                    "{client:?} -> {upstream:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn converted_messages_and_gemini_responses_validate_supplied_roles_in_json_and_sse() {
+    for upstream in [WireApi::Messages, WireApi::Gemini] {
+        let native_role = if upstream == WireApi::Messages {
+            "assistant"
+        } else {
+            "model"
+        };
+        for role in [
+            json!("user"),
+            json!("system"),
+            json!(false),
+            json!(0),
+            Value::Null,
+            json!(""),
+            json!(native_role),
+        ] {
+            let valid = role == native_role || (upstream == WireApi::Gemini && role == "");
+            let mut payload = output(upstream);
+            if upstream == WireApi::Messages {
+                payload["role"] = role.clone();
+            } else {
+                payload["candidates"][0]["content"]["role"] = role.clone();
+            }
+            for client in WireApi::ALL
+                .into_iter()
+                .filter(|client| *client != upstream)
+            {
+                assert_eq!(
+                    prepare(client, upstream, &input(client), false)
+                        .translate_response_bytes(&serde_json::to_vec(&payload).unwrap())
+                        .is_ok(),
+                    valid,
+                    "{client:?} <- {upstream:?}, role={role}"
+                );
+                let mut wire = String::from_utf8(sse(upstream)).unwrap();
+                wire = wire.replace(
+                    &format!("\"role\":\"{native_role}\""),
+                    &format!("\"role\":{role}"),
+                );
+                let mut bridge = prepare(client, upstream, &input(client), true)
+                    .into_stream_bridge()
+                    .unwrap();
+                for chunk in wire.as_bytes().chunks(3) {
+                    bridge.push(chunk);
+                }
+                bridge.finish();
+                assert_eq!(
+                    bridge.completed().is_some(),
+                    valid,
+                    "{client:?} <- {upstream:?}, role={role}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn malformed_gemini_content_cannot_disappear_at_a_stop_or_output_limit() {
+    for content in [
+        json!(false),
+        json!("invalid"),
+        json!([]),
+        json!({"role":"model","parts":false}),
+        json!({"parts":{}}),
+        json!({"parts":"invalid"}),
+    ] {
+        for reason in ["STOP", "MAX_TOKENS", "SAFETY"] {
+            let mut payload = output(WireApi::Gemini);
+            payload["candidates"][0]["content"] = content.clone();
+            payload["candidates"][0]["finishReason"] = reason.into();
+            for client in [
+                WireApi::Responses,
+                WireApi::ChatCompletions,
+                WireApi::Messages,
+            ] {
+                assert!(
+                    prepare(client, WireApi::Gemini, &input(client), false)
+                        .translate_response_bytes(&serde_json::to_vec(&payload).unwrap())
+                        .is_err(),
+                    "{client:?}, reason={reason}, content={content}"
+                );
+                let mut bridge = prepare(client, WireApi::Gemini, &input(client), true)
+                    .into_stream_bridge()
+                    .unwrap();
+                bridge.push(b"data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hi\"}]}}]}\n\n");
+                bridge.push(format!("data: {payload}\n\n").as_bytes());
+                bridge.finish();
+                assert!(
+                    bridge.completed().is_none(),
+                    "{client:?}, reason={reason}, content={content}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn converted_tool_calls_must_agree_with_the_terminal_reason_in_json_and_sse() {
+    for upstream in [WireApi::ChatCompletions, WireApi::Messages] {
+        for calls_present in [false, true] {
+            let mut payload = output(upstream);
+            let (normal_reason, tool_reason) = if upstream == WireApi::ChatCompletions {
+                ("stop", "tool_calls")
+            } else {
+                ("end_turn", "tool_use")
+            };
+            let reason = if calls_present {
+                normal_reason
+            } else {
+                tool_reason
+            };
+            if upstream == WireApi::ChatCompletions {
+                payload["choices"][0]["finish_reason"] = reason.into();
+                if calls_present {
+                    payload["choices"][0]["message"]["tool_calls"] = json!([{"type":"function","id":"new_lookup","function":{"name":"lookup","arguments":"{\"value\":1}"}}]);
+                }
+            } else {
+                payload["stop_reason"] = reason.into();
+                if calls_present {
+                    payload["content"] = json!([{"type":"tool_use","id":"new_lookup","name":"lookup","input":{"value":1}}]);
+                }
+            }
+            let source = if calls_present {
+                tool_stream(upstream)
+            } else {
+                sse(upstream)
+            };
+            let original_reason = if calls_present {
+                tool_reason
+            } else {
+                normal_reason
+            };
+            let field = if upstream == WireApi::ChatCompletions {
+                "finish_reason"
+            } else {
+                "stop_reason"
+            };
+            let source = String::from_utf8(source).unwrap().replace(
+                &format!("\"{field}\":\"{original_reason}\""),
+                &format!("\"{field}\":\"{reason}\""),
+            );
+            for client in WireApi::ALL
+                .into_iter()
+                .filter(|client| *client != upstream)
+            {
+                let error = matrix::prepare_portable_tool_history(client, upstream, false)
+                    .translate_response_bytes(&serde_json::to_vec(&payload).unwrap())
+                    .unwrap_err();
+                assert_eq!(
+                    error.parameter(),
+                    Some("finish_reason"),
+                    "{client:?} -> {upstream:?}"
+                );
+                let mut bridge = matrix::prepare_portable_tool_history(client, upstream, true)
+                    .into_stream_bridge()
+                    .unwrap();
+                for bytes in source.as_bytes().chunks(7) {
+                    bridge.push(bytes);
+                }
+                bridge.finish();
+                assert!(bridge.completed().is_none(), "{client:?} -> {upstream:?}");
+                let wire = String::from_utf8(
+                    std::iter::from_fn(|| bridge.pop_output())
+                        .flatten()
+                        .collect(),
+                )
+                .unwrap();
+                assert!(
+                    wire.contains("\"param\":\"finish_reason\""),
+                    "{client:?} -> {upstream:?}: {wire}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn incomplete_stream_never_produces_a_successful_completion() {
     for client in WireApi::ALL {
         for upstream in WireApi::ALL {

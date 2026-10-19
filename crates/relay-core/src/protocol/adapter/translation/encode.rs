@@ -11,7 +11,12 @@ pub(super) fn request(
     capabilities: Option<&crate::model_metadata::ModelCapabilities>,
 ) -> AdapterResult<Value> {
     let mut request_fields = Map::new();
-    options::write_metadata(&mut request_fields, &request.metadata, protocol)?;
+    options::write_metadata(
+        &mut request_fields,
+        &request.metadata,
+        protocol,
+        request.origin,
+    )?;
     if protocol != WireApi::Gemini {
         request_fields.insert("model".into(), model.into());
         request_fields.insert("stream".into(), stream.into());
@@ -77,7 +82,7 @@ fn conversation(
 ) -> AdapterResult<(Vec<Value>, Vec<Value>)> {
     let mut history: Vec<Value> = Vec::new();
     let mut system = Vec::new();
-    let mut conversation_started = false;
+    let mut assistant_started = false;
     let mut gemini_call_ids = BTreeMap::new();
     for (position, message) in request
         .instructions
@@ -86,9 +91,9 @@ fn conversation(
         .enumerate()
     {
         if message.role == Role::System && matches!(protocol, WireApi::Messages | WireApi::Gemini) {
-            if conversation_started {
-                // Hoisting a mid-conversation instruction into the initial
-                // prompt changes which earlier turns it governs.
+            if assistant_started {
+                // Initial client attachments can follow a user message, but
+                // later instructions must not govern earlier assistant turns.
                 return Err(AdapterError::parameter_unsupported_for(
                     match request.origin {
                         Some(WireApi::Responses) => "input[].role",
@@ -109,7 +114,7 @@ fn conversation(
             }
             continue;
         }
-        conversation_started = true;
+        assistant_started |= message.role == Role::Assistant;
         let native = position
             .checked_sub(usize::from(request.instructions.is_some()))
             .and_then(|index| native_turns.get(&index));
@@ -146,6 +151,9 @@ fn conversation(
             continuation::replay_items(protocol, native)
         } else {
             let mut visible = message.clone();
+            for block in &mut visible.blocks {
+                super::tool_search::lower_result(block, &request.client_tools)?;
+            }
             if request.origin == Some(WireApi::Responses)
                 && matches!(protocol, WireApi::Messages | WireApi::Gemini)
             {
@@ -338,10 +346,12 @@ fn write_tools(
                 request_fields.insert("parallel_tool_calls".into(), parallel.into());
             }
             WireApi::Messages => {
-                let choice = request_fields
-                    .entry("tool_choice")
-                    .or_insert_with(|| json!({"type": "auto"}));
-                choice["disable_parallel_tool_use"] = (!parallel).into();
+                if !matches!(request.tool_choice, Some(ToolChoice::None)) {
+                    let choice = request_fields
+                        .entry("tool_choice")
+                        .or_insert_with(|| json!({"type": "auto"}));
+                    choice["disable_parallel_tool_use"] = (!parallel).into();
+                }
             }
             WireApi::Gemini => {
                 // Gemini has no native toggle. JSON and stream translation

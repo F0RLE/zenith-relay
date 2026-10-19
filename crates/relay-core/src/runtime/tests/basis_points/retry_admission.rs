@@ -1,6 +1,6 @@
 use super::*;
 
-fn bounded_client() -> reqwest::Client {
+pub(super) fn bounded_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
         .build()

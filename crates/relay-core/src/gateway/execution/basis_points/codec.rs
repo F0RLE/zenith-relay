@@ -57,6 +57,174 @@ pub(super) fn json_text(json_value: &Value) -> Result<String, AdapterError> {
     serde_json::to_string(json_value).map_err(|_| AdapterError::invalid_request())
 }
 
+pub(super) fn encode_function_arguments(arguments: &Value) -> Result<String, AdapterError> {
+    let fields = arguments
+        .as_object()
+        .ok_or_else(|| AdapterError::invalid_request().with_parameter("input.arguments"))?;
+    let framed_field = fields
+        .iter()
+        .filter_map(|(field, value)| {
+            let raw = value.as_str()?;
+            let escapes = raw
+                .bytes()
+                .filter(|byte| matches!(*byte, b'"' | b'\\' | 0..=0x1f))
+                .count();
+            (escapes > 0).then_some((field, raw, escapes))
+        })
+        .max_by_key(|(_, _, escapes)| *escapes);
+    let Some((field, raw, _)) = framed_field else {
+        return json_text(arguments);
+    };
+    let mut other_arguments = fields.clone();
+    other_arguments.remove(field);
+    let header = json!({"field":field,"args":other_arguments});
+    Ok(format!(
+        "{}{}\n{raw}",
+        super::FUNCTION_STRING_PREFIX,
+        json_text(&header)?
+    ))
+}
+
+fn parse_function_json(text: &str) -> Result<Value, serde_json::Error> {
+    serde_json::from_str(text).or_else(|error| {
+        if !text.contains(['\n', '\r', '\t', '\\']) {
+            return Err(error);
+        }
+        // Preserve non-JSON escapes literally; valid escapes retain JSON semantics.
+        let mut normalized = String::with_capacity(text.len());
+        let mut quoted = false;
+        let mut escaped = false;
+        let mut characters = text.chars().peekable();
+        while let Some(character) = characters.next() {
+            if quoted && !escaped {
+                if character == '\\'
+                    && characters.peek().is_some_and(|next| {
+                        !next.is_control()
+                            && !matches!(
+                                *next,
+                                '"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' | 'u'
+                            )
+                    })
+                {
+                    normalized.push_str("\\\\");
+                    continue;
+                }
+                let escape = match character {
+                    '\n' => Some("\\n"),
+                    '\r' => Some("\\r"),
+                    '\t' => Some("\\t"),
+                    _ => None,
+                };
+                if let Some(escape) = escape {
+                    normalized.push_str(escape);
+                    continue;
+                }
+            }
+            normalized.push(character);
+            if character == '"' && !escaped {
+                quoted = !quoted;
+            }
+            escaped = quoted && character == '\\' && !escaped;
+        }
+        serde_json::from_str(&normalized)
+    })
+}
+
+fn json_argument_error(text: &str, error: &serde_json::Error) -> AdapterError {
+    let (failure, parameter) = if error.is_eof() {
+        (
+            AdapterError::upstream_tool_arguments_json_incomplete(),
+            "output.run_officejs.args.json.eof",
+        )
+    } else {
+        (
+            AdapterError::upstream_tool_arguments_json_syntax_invalid(),
+            "output.run_officejs.args.json.syntax",
+        )
+    };
+    let reason = if error.is_eof() {
+        "unexpected_eof"
+    } else {
+        let message = error.to_string();
+        [
+            ("invalid escape", "invalid_escape"),
+            ("invalid unicode", "invalid_unicode"),
+            ("control character", "unescaped_control"),
+            ("expected `,`", "expected_separator"),
+            ("expected `:`", "expected_colon"),
+            ("key must be a string", "key_not_string"),
+            ("trailing characters", "trailing_data"),
+            ("trailing comma", "trailing_comma"),
+            ("expected value", "expected_value"),
+            ("expected ident", "invalid_literal"),
+            ("recursion limit exceeded", "nesting_limit"),
+        ]
+        .into_iter()
+        .find_map(|(prefix, reason)| message.starts_with(prefix).then_some(reason))
+        .unwrap_or("syntax")
+    };
+    let trimmed = text.trim_start();
+    let shape = if trimmed.starts_with(super::FUNCTION_STRING_PREFIX) {
+        "string_frame"
+    } else if trimmed.starts_with("```") {
+        "markdown_fence"
+    } else {
+        match trimmed.chars().next() {
+            Some('{') => "json_object",
+            Some('[') => "json_array",
+            Some('"') => "json_string",
+            None => "empty",
+            _ => "text",
+        }
+    };
+    failure.with_parameter(parameter).with_json_diagnostic(
+        reason,
+        shape,
+        error.line(),
+        error.column(),
+        text.len(),
+    )
+}
+
+pub(super) fn function_arguments(payload: &Value) -> Result<Value, AdapterError> {
+    let arguments = match payload {
+        Value::Object(_) => payload.clone(),
+        Value::String(text) => {
+            if let Some(frame) = text.strip_prefix(super::FUNCTION_STRING_PREFIX) {
+                let invalid = AdapterError::upstream_tool_arguments_frame_invalid();
+                let (header, raw) = frame.split_once('\n').ok_or(invalid)?;
+                let header: serde_json::Map<String, Value> =
+                    serde_json::from_str(header).map_err(|_| invalid)?;
+                if header.len() != 2 {
+                    return Err(invalid);
+                }
+                let field = header.get("field").and_then(Value::as_str).ok_or(invalid)?;
+                let mut arguments = header
+                    .get("args")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .ok_or(invalid)?;
+                if arguments.contains_key(field) {
+                    return Err(invalid);
+                }
+                arguments.insert(field.to_owned(), Value::String(raw.to_owned()));
+                Value::Object(arguments)
+            } else {
+                parse_function_json(text).map_err(|error| json_argument_error(text, &error))?
+            }
+        }
+        _ => {
+            return Err(AdapterError::upstream_tool_arguments_json_invalid()
+                .with_parameter("output.run_officejs.args.object"))
+        }
+    };
+    if !arguments.is_object() {
+        return Err(AdapterError::upstream_tool_arguments_json_invalid()
+            .with_parameter("output.run_officejs.args.object"));
+    }
+    Ok(arguments)
+}
+
 pub(super) fn parse_json_object(json_value: Option<&Value>) -> Option<Value> {
     match json_value {
         Some(Value::Object(object_fields)) => Some(Value::Object(object_fields.clone())),

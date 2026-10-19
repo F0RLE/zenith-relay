@@ -15,6 +15,7 @@ mod quota_rotation;
 mod recovery;
 mod request_timezone;
 mod retry_admission;
+mod routing;
 
 struct AccessReply {
     status: StatusCode,
@@ -75,7 +76,14 @@ impl AccessServer {
         });
         let app = Router::new()
             .route("/responses/access", get(access))
-            .route("/responses", post(generation))
+            .route(
+                "/responses",
+                post(generation).get(|State(state): State<Arc<AccessState>>| async move {
+                    // Count rejected upgrades so tests catch stray native WebSocket requests.
+                    state.generation_requests.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::METHOD_NOT_ALLOWED
+                }),
+            )
             .route("/attachments", post(failed_attachment))
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

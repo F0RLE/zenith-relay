@@ -123,6 +123,50 @@ async fn discovery_streams_text_before_completion_with_and_without_a_lookup() {
 }
 
 #[tokio::test]
+async fn discovery_json_diagnostics_survive_buffered_and_streamed_errors() {
+    for stream in [false, true] {
+        let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+        server
+            .state
+            .stream_generations
+            .store(stream, Ordering::SeqCst);
+        let mut reply = tool_response("lookup", "call_invalid_json", json!({"path":"synthetic"}));
+        reply["output"][0]["arguments"] = json!({
+            "references":["lookup"],"code":r#"{"path":"synthetic-private\u12X4"}"#
+        })
+        .to_string()
+        .into();
+        *crate::poison::mutex(&server.state.generation_body) = reply;
+        let events = Arc::new(Mutex::new(Vec::<crate::UsageEvent>::new()));
+        let captured = events.clone();
+        let mut runtime = runtime(&server).await;
+        runtime.usage = Arc::new(move |event| {
+            crate::poison::mutex(&captured).push(event);
+        });
+        let (base, task) = recovery::gateway(Arc::new(runtime)).await;
+        let response = reqwest::Client::new()
+            .post(format!("{base}/v1/responses"))
+            .bearer_auth("local-secret")
+            .json(&catalog_request(stream))
+            .send()
+            .await
+            .unwrap();
+        let body = response.text().await.unwrap();
+        assert!(body.contains("json_reason=invalid_escape"), "{body}");
+        assert!(body.contains("payload_shape=json_object"));
+        assert!(!body.contains("synthetic-private"));
+        assert!(!body.contains("response.completed"));
+        assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 1);
+        let events = crate::poison::mutex(&events);
+        let diagnostic = events.last().unwrap().upstream_error.as_ref().unwrap();
+        let message = diagnostic.message.as_ref().unwrap();
+        assert!(message.contains("json_reason=invalid_escape"), "{message}");
+        assert!(!message.contains("synthetic-private"));
+        task.abort();
+    }
+}
+
+#[tokio::test]
 async fn discovery_never_releases_invalid_tool_arguments_after_streamed_text() {
     let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
     server

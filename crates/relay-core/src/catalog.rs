@@ -10,6 +10,7 @@ pub use crate::model_metadata::ModelMetadataCatalog;
 pub use claude_desktop::{claude_desktop_model_alias, claude_desktop_reasoning_model_alias};
 pub(crate) use claude_desktop::{
     claude_desktop_model_alias_matches, is_claude_desktop_model_alias,
+    is_claude_desktop_reasoning_model_alias,
 };
 pub(crate) use codex::set_codex_service_tiers;
 pub use codex::{

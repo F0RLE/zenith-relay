@@ -99,8 +99,34 @@ fn converted_only_models_keep_their_existing_provider() {
 }
 
 #[test]
+fn sdk_defaults_cannot_reintroduce_unsupported_reasoning_variants() {
+    for protocol in WireApi::ALL {
+        let mut configured = json!({"reasoning":true,"variants":{"high":{}}});
+        set_variants(&mut configured, protocol);
+        assert_eq!(
+            configured["variants"]["medium"]["disabled"], true,
+            "{protocol:?}"
+        );
+        assert!(configured["variants"]["high"].get("disabled").is_none());
+        let snapshot = configured.clone();
+        set_variants(&mut configured, protocol);
+        assert_eq!(configured, snapshot);
+        let previous = json!({"models":{"model":configured}});
+        let mut refreshed = json!({"reasoning":true,"variants":{"medium":{}}});
+        set_variants(&mut refreshed, protocol);
+        let merged = merge_provider(Some(&previous), json!({"models":{"model":refreshed}}));
+        let variants = &merged["models"]["model"]["variants"];
+        assert!(variants["medium"].get("disabled").is_none(), "{protocol:?}");
+        assert_eq!(variants["high"]["disabled"], true, "{protocol:?}");
+        let mut default_only = json!({"reasoning":true});
+        set_variants(&mut default_only, protocol);
+        assert_eq!(default_only["variants"]["medium"]["disabled"], true);
+    }
+}
+
+#[test]
 fn sdk_variants_disable_thinking_without_forwarding_invalid_effort_names() {
-    for (protocol, expected) in [
+    for (protocol, mut expected) in [
         (
             WireApi::Messages,
             json!({"none":{"thinking":{"type":"disabled"}},"high":{"thinking":{"type":"adaptive"},"effort":"high"},"max":{"thinking":{"type":"adaptive"},"effort":"max"}}),
@@ -110,6 +136,13 @@ fn sdk_variants_disable_thinking_without_forwarding_invalid_effort_names() {
             json!({"none":{"thinkingConfig":{"thinkingBudget":0}},"minimal":{"thinkingConfig":{"thinkingLevel":"minimal"}},"high":{"thinkingConfig":{"thinkingLevel":"high"}}}),
         ),
     ] {
+        for effort in [
+            "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+        ] {
+            if expected.get(effort).is_none() {
+                expected[effort] = json!({"disabled":true});
+            }
+        }
         let mut value = json!({"variants":{"none":{},"minimal":{},"high":{},"max":{},"ultra":{}}});
         set_variants(&mut value, protocol);
         assert_eq!(value["variants"], expected);
@@ -166,8 +199,13 @@ fn direct_refresh_preserves_selection_and_uses_reference_capabilities() {
         models["claude"]["variants"],
         json!({
             "none":{"thinking":{"type":"disabled"}},
+            "minimal":{"disabled":true},
             "low":{"thinking":{"type":"adaptive"},"effort":"low"},
-            "high":{"thinking":{"type":"adaptive"},"effort":"high"}
+            "medium":{"disabled":true},
+            "high":{"thinking":{"type":"adaptive"},"effort":"high"},
+            "xhigh":{"disabled":true},
+            "max":{"disabled":true},
+            "ultra":{"disabled":true}
         })
     );
     let fallback_models = config["provider"]["zenith-relay"]["models"]
@@ -200,7 +238,7 @@ fn unavailable_models_and_obsolete_generated_reasoning_variants_are_removed() {
     .unwrap();
     let models = &config["provider"]["zenith-relay-messages"]["models"];
     assert_eq!(models["claude"]["variants"]["high"]["effort"], "high");
-    assert!(models["claude"]["variants"].get("ultra").is_none());
+    assert_eq!(models["claude"]["variants"]["ultra"]["disabled"], true);
     assert_eq!(models["claude"]["variants"]["custom"]["temperature"], 0.2);
     assert_eq!(
         models["claude"]["variants"]["deliberate"]["thinking"]["budgetTokens"],

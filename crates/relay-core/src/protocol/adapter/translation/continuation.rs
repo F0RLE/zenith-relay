@@ -62,7 +62,24 @@ pub(super) fn history_key(
                 Block::Reasoning(_) => continue,
                 Block::Text(text) | Block::Refusal(text) if text.is_empty() => continue,
                 Block::Text(text) | Block::Refusal(text) => json!({"text": text}),
-                Block::Image { url, .. } => json!({"image": url}),
+                Block::Image { url, detail } => {
+                    let mut image = json!({"image": url});
+                    if let Some(detail) = detail.as_deref().filter(|detail| *detail != "auto") {
+                        image["detail"] = detail.into();
+                    }
+                    image
+                }
+                Block::Document {
+                    url,
+                    filename,
+                    detail,
+                } => {
+                    let mut document = json!({"document":url,"filename":filename});
+                    if let Some(detail) = detail.as_deref().filter(|detail| *detail != "auto") {
+                        document["detail"] = detail.into();
+                    }
+                    document
+                }
                 Block::ToolCall {
                     id,
                     name,
@@ -82,14 +99,11 @@ pub(super) fn history_key(
                 }
             };
             if let Some(previous) = blocks.last_mut().and_then(Value::as_object_mut) {
-                if let (Some(previous_text), Some(text)) = (
-                    previous
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
+                if let (Some(Value::String(previous_text)), Some(text)) = (
+                    previous.get_mut("text"),
                     value.get("text").and_then(Value::as_str),
                 ) {
-                    previous.insert("text".into(), format!("{previous_text}{text}").into());
+                    previous_text.push_str(text);
                     continue;
                 }
             }

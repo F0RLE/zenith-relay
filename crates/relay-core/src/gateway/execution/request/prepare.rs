@@ -172,7 +172,13 @@ pub(super) fn prepare_request_attempt(
         Err(step) => return step,
     };
     if account_route {
-        normalize_prepared_account_body(&mut adapter_request, route_responses_lite.is_some());
+        normalize_prepared_account_body(
+            &mut adapter_request,
+            route_responses_lite.is_some(),
+            &key.id,
+            resolved_model,
+            client_context_id.as_deref(),
+        );
         runtime.apply_request_timezone(candidate_id, adapter_request.upstream_body_mut());
     }
     if let Some(step) = apply_prepared_tool_policy(tool_policy, &mut adapter_request) {
@@ -335,7 +341,7 @@ fn translate_prepared_request(
     route: &ExecutorRoute,
     client_wire_api: WireApi,
     compaction: &BridgedCompaction,
-    request: &Value,
+    request: &mut Value,
     source_model: &str,
     stream: bool,
     previous_bridge_state: Option<crate::AdapterContinuationState>,
@@ -345,7 +351,16 @@ fn translate_prepared_request(
     let capabilities = runtime
         .model_capabilities(source_model)
         .for_route(route.route_capability.as_ref());
-    match route.adapter.prepare_request_with_capabilities(
+    // Restore the client value for usage and retries without copying the whole history.
+    let original_effort = route.reasoning_effort_override.as_ref().map(|effort| {
+        std::mem::replace(
+            request
+                .pointer_mut("/output_config/effort")
+                .expect("admitted Desktop effort exists"),
+            effort.clone().into(),
+        )
+    });
+    let prepared = route.adapter.prepare_request_with_capabilities(
         AdapterRequestContext {
             client_wire_api,
             request: compaction.request(request),
@@ -358,7 +373,13 @@ fn translate_prepared_request(
             response_id_seed: request_id,
         },
         &capabilities,
-    ) {
+    );
+    if let Some(original_effort) = original_effort {
+        *request
+            .pointer_mut("/output_config/effort")
+            .expect("admitted Desktop effort exists") = original_effort;
+    }
+    match prepared {
         Ok(request) => Ok(request),
         Err(error) => Err(stop_for_adapter_error(
             error,
@@ -371,12 +392,21 @@ fn translate_prepared_request(
 fn normalize_prepared_account_body(
     adapter_request: &mut PreparedAdapterRequest,
     responses_lite: bool,
+    local_key_id: &str,
+    model: &str,
+    client_context_id: Option<&str>,
 ) {
     let upstream_body = adapter_request.upstream_body_mut();
     let Value::Object(upstream_fields) = upstream_body else {
         unreachable!("request object was validated before execution")
     };
     normalize_account_request(upstream_fields, responses_lite);
+    crate::gateway::request::apply_account_prompt_cache_key(
+        upstream_fields,
+        local_key_id,
+        model,
+        client_context_id,
+    );
 }
 
 fn apply_prepared_tool_policy(

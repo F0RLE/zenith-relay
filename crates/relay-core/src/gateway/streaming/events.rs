@@ -188,7 +188,7 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
     if sse_payload.is_empty() {
         return TerminalEvent::default();
     }
-    if sse_payload == b"[DONE]" {
+    if sse_payload.as_ref() == b"[DONE]" {
         return TerminalEvent {
             has_data: true,
             valid: true,
@@ -223,7 +223,7 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
                     has_data: true,
                     valid: true,
                     is_compaction: true,
-                    raw_data: Some(sse_payload),
+                    raw_data: Some(sse_payload.into_owned()),
                     ..TerminalEvent::default()
                 };
             }
@@ -343,7 +343,7 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
         // Preserve the exact provider payload for all compaction forms. The
         // output-item envelope is still useful to SSE clients, but an HTTP to
         // WebSocket bridge must not reserialize the opaque encrypted item.
-        raw_data: is_compaction.then_some(sse_payload),
+        raw_data: is_compaction.then(|| sse_payload.into_owned()),
     }
 }
 

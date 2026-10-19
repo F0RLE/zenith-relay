@@ -53,6 +53,10 @@ fn missing_continuation_precedes_tool_result_identity_validation() {
 fn hosted_tools_are_never_silently_dropped_at_any_catalog_depth() {
     for tools in [
         json!([{"type":"web_search"}]),
+        json!([{"type":"file_search","vector_store_ids":["vs_synthetic"]}]),
+        json!([{"type":"code_interpreter","container":{"type":"auto"}}]),
+        json!([{"type":"mcp","server_label":"synthetic","server_url":"https://example.invalid/mcp"}]),
+        json!([{"type":"tool_search","execution":"server"}]),
         json!([{"type":"function","name":"lookup","parameters":{"type":"object"}}, {"type":"web_search"}]),
         json!([{"type":"namespace","name":"synthetic","tools":[{"type":"web_search"}]}]),
     ] {
@@ -73,10 +77,16 @@ fn hosted_tools_are_never_silently_dropped_at_any_catalog_depth() {
 }
 
 #[test]
-fn client_tool_discovery_history_is_not_discarded_by_conversion() {
-    for item in [
-        json!({"type":"tool_search_call","execution":"client","call_id":"call_search","status":"completed","arguments":{"goal":"Find a synthetic tool"}}),
-        json!({"type":"tool_search_output","execution":"client","call_id":"call_search","status":"completed","tools":[]}),
+fn client_tool_discovery_history_requires_paired_calls_and_results() {
+    for (item, expected) in [
+        (
+            json!({"type":"tool_search_call","execution":"client","call_id":"call_search","status":"completed","arguments":{"goal":"Find a synthetic tool"}}),
+            "adapter_invalid_request",
+        ),
+        (
+            json!({"type":"tool_search_output","execution":"client","call_id":"call_search","status":"completed","tools":[]}),
+            "adapter_continuation_mismatch",
+        ),
     ] {
         let request = json!({"input":[item,{"role":"user","content":"Continue"}]});
         for upstream in WireApi::ALL {
@@ -84,7 +94,7 @@ fn client_tool_discovery_history_is_not_discarded_by_conversion() {
             if upstream == WireApi::Responses {
                 assert_eq!(prepared.unwrap().upstream_body()["input"], request["input"]);
             } else {
-                assert_eq!(prepared.unwrap_err().code(), "adapter_tool_unsupported");
+                assert_eq!(prepared.unwrap_err().code(), expected);
             }
         }
     }

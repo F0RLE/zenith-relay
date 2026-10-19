@@ -1,5 +1,6 @@
 use crate::error_codes;
 mod compacted;
+pub(in crate::gateway) mod gemini;
 mod replay;
 
 pub(super) use replay::{drop_materialized_previous_response_id, recover_stale_tool_history};
@@ -11,7 +12,7 @@ use serde_json::Value;
 pub(super) const RESPONSE_CONTINUATION_UNAVAILABLE_CODE: &str =
     error_codes::RESPONSE_CONTINUATION_UNAVAILABLE;
 pub(super) const RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE: &str =
-    "response continuation is unavailable; resend complete history without previous_response_id or start a new conversation";
+    "response continuation is unavailable; resume with its original owner and context or start a new conversation";
 
 /// Trimmed Responses `previous_response_id`, or `None` when the field is absent or blank.
 ///
@@ -37,6 +38,14 @@ pub(super) fn prepare_response_owner_change(
     requires_affinity_owner: bool,
     now_ms: u64,
 ) -> bool {
+    if request.get("contents").is_some()
+        && previous_response_id(request).is_none()
+        && request
+            .get("continuationToken")
+            .is_some_and(|value| !value.is_null())
+    {
+        return false;
+    }
     if !requires_affinity_owner
         && previous_response_id(request).is_none()
         && unpaired_tool_output_ids(request).is_empty()

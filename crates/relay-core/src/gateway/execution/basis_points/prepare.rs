@@ -1,6 +1,7 @@
 use super::catalog::{client_tools, requires_tool_call, selected_tools, ClientTool};
 use super::codec::{
-    as_input_items, basis_points_metadata, basis_points_reasoning_effort, text_message,
+    as_input_items, basis_points_metadata, basis_points_reasoning_effort,
+    encode_function_arguments, text_message,
 };
 use super::history::{separate_tool_images, translate_input_items};
 use super::response::has_encrypted_agent_message;
@@ -37,17 +38,6 @@ pub(super) fn tool_instructions(tools: &[ClientTool], request: &Value) -> String
     } else {
         PROMPT_SCHEMA_NOTATION
     };
-    let choice = request
-        .get("tool_choice")
-        .and_then(|choice_value| serde_json::to_string(choice_value).ok())
-        .map(|serialized_choice| format!(" Client tool_choice: {serialized_choice}."))
-        .unwrap_or_default();
-    let parallel = request
-        .get("parallel_tool_calls")
-        .and_then(Value::as_bool)
-        .filter(|parallel| !parallel)
-        .map(|_| " Invoke at most one client tool in this response.")
-        .unwrap_or_default();
     let examples = tool_relay_examples(&sorted_tools);
     format!(
         "This request is relayed by an external Responses API client, not by the live Excel workbook. \
@@ -72,7 +62,7 @@ pub(super) fn tool_instructions(tools: &[ClientTool], request: &Value) -> String
          Interpret that result as the named client tool output. \
          Do not replay completed client calls merely to reconstruct history. \
          Repeated observations or new calls to the same tool are allowed when the task needs them; use a fresh invocation, not a replay of an old call. \
-         The available client tools are authoritative:{choice}{parallel}\n{catalog}",
+         The available client tools are authoritative:\n{catalog}",
     )
 }
 
@@ -119,7 +109,7 @@ fn tool_relay_examples(tools: &[&ClientTool]) -> String {
             if tool.kind != "function" {
                 continue;
             }
-            Some(json!({"cmd": "printf '%s\\n' \"hello\""}))
+            Some(json!({"cmd": "echo \"hello\"\necho \"world\""}))
         } else if is_named_tool(tool, "apply_patch") {
             if tool.kind == "custom" {
                 None
@@ -141,10 +131,10 @@ fn tool_relay_examples(tools: &[&ClientTool]) -> String {
             if !schema_matches(&arguments, schema) {
                 continue;
             }
-            let Ok(arguments_json) = serde_json::to_string(&arguments) else {
+            let Ok(encoded) = encode_function_arguments(&arguments) else {
                 continue;
             };
-            arguments_json
+            encoded
         } else {
             PATCH.to_string()
         };
@@ -290,6 +280,22 @@ pub(in crate::gateway::execution) fn prepare_request(
         // Newly needed contracts belong after history, never in the stable
         // index prefix. Loading one tool must not rewrite that prefix.
         input_items.push(text_message("developer", "input_text", contracts));
+    }
+    let mut turn_policy = String::new();
+    if let Some(choice) = request_object
+        .get("tool_choice")
+        .filter(|choice| !matches!(choice.as_str(), Some("auto" | "none")))
+    {
+        turn_policy.push_str(&format!("Client tool_choice: {choice}."));
+    }
+    if !callable.is_empty()
+        && request_object.get("parallel_tool_calls") == Some(&Value::Bool(false))
+    {
+        turn_policy.push_str(" Invoke at most one client tool in this response.");
+    }
+    if !turn_policy.is_empty() {
+        // Turn-local controls must not rewrite the reusable catalog/history prefix.
+        input_items.push(text_message("developer", "input_text", turn_policy));
     }
     upstream_request.insert("input".to_string(), Value::Array(input_items));
 

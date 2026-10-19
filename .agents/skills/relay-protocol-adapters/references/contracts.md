@@ -7,13 +7,59 @@ and corresponding official SDK types before changing behavior.
 | Protocol | Primary sources | Boundaries to verify |
 | --- | --- | --- |
 | OpenAI Responses | [API reference](https://developers.openai.com/api/reference/resources/responses/methods/create), [function calling](https://developers.openai.com/api/docs/guides/function-calling), [tool search](https://developers.openai.com/api/docs/guides/tools-tool-search), [streaming](https://developers.openai.com/api/docs/guides/streaming-responses) | Item ID versus call ID, namespaces, client versus server execution, terminal status, encrypted reasoning, continuation |
-| OpenAI Chat Completions | [API reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create), [reasoning](https://developers.openai.com/api/docs/guides/reasoning) | Message/tool grouping, supported options, streamed argument fragments, usage and finish reason |
+| OpenAI Chat Completions | [API reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create), [streaming events](https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events), [reasoning](https://developers.openai.com/api/docs/guides/reasoning) | Message/tool grouping, supported options, streamed argument fragments, requested usage chunks and finish reason |
 | Anthropic Messages | [Messages](https://platform.claude.com/docs/en/api/messages/create), [streaming](https://platform.claude.com/docs/en/build-with-claude/streaming), [thinking](https://platform.claude.com/docs/en/build-with-claude/thinking), [tool use](https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview) | Ordered content blocks, tool use/result IDs, signatures, stop reasons, input/output/cache usage |
 | Gemini Generate Content | [API reference](https://ai.google.dev/api/generate-content), [Schema SDK type](https://googleapis.github.io/js-genai/release_docs/interfaces/types.Schema.html), [function calling](https://ai.google.dev/gemini-api/docs/function-calling), [thought signatures](https://ai.google.dev/gemini-api/docs/thought-signatures) | Candidate/part order, function call IDs, native signatures, schema dialect, finish reason and usage metadata |
 
 Provider-compatible APIs need their own official capability and endpoint
 documentation. OpenAI wire compatibility alone does not establish stateful
 Responses support, tool search, structured outputs, or a reasoning level.
+For native Responses sockets, also check the official
+[WebSocket mode guide](https://developers.openai.com/api/docs/guides/websocket-mode).
+Connection reuse is not evidence of multiplexing or safe replay after output.
+
+For cache optimization, use OpenAI's [prompt caching guide](https://developers.openai.com/api/docs/guides/prompt-caching)
+and [cache diagnostics](https://developers.openai.com/api/docs/guides/prompt-caching/diagnostics).
+Keep stable instructions, tool definitions and ordering ahead of changing input;
+measure observed cached input tokens, not presumed hits. A stable cache key is
+an advisory routing hint, not conversation authorization or a guaranteed hit.
+Public API retention/breakpoint support does not establish support on undocumented
+account transports; do not add those fields without endpoint-specific evidence.
+
+The Responses [streaming-event reference](https://developers.openai.com/api/reference/resources/responses/streaming-events)
+defines `error` with top-level `code`, `message`, `param` and `sequence_number`.
+A nested HTTP error body is not the same wire event. Relay-local BPS argument
+frames are private encoding inside `run_officejs.code`, not a public provider
+feature; reconstruct and validate the original client arguments before release.
+
+The [OpenAI Python SDK retry implementation](https://github.com/openai/openai-python/blob/553703e2d3db379a83e3ead9e40436b7a66f639e/src/openai/_base_client.py)
+checks `x-should-retry: false` before status-based retries. Relay adds this
+advisory to buffered local errors after an upstream adapter failure: another
+HTTP request would otherwise regenerate. This is SDK behavior, not a guarantee
+that every client honors the header or will avoid an explicit resend.
+
+The [Messages stop-reason guide](https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons)
+distinguishes server-tool `pause_turn` from `max_tokens` and context-window
+truncation. Foreign APIs have no equivalent server-loop continuation here;
+reject the unsupported result instead of inventing a token-limit cause.
+OpenAI's SDK types below define output messages as `assistant` and Chat choice
+indexes as positions in the choice list; conversion requests one choice only.
+Reject invalid supplied identities instead of renaming them.
+
+Keep Gemini Generate Content Part signatures distinct from the Interactions
+API's dedicated thought steps. The current
+[thinking guide](https://ai.google.dev/gemini-api/docs/thinking#signatures)
+explains that endpoint distinction; Generate Content uses the Part types in
+the API reference and protobuf below. Native Parts are not merged or reordered
+to reduce continuation size.
+
+For response formats, the official
+[OpenAI structured-output guide](https://developers.openai.com/api/docs/guides/structured-outputs)
+distinguishes JSON mode from schema adherence. Do not silently drop schema or
+strict controls from a format variant that cannot carry them. Gemini's
+[structured-output guide](https://ai.google.dev/gemini-api/docs/structured-output)
+and the Google SDK below define the MIME string and alternative schema fields;
+wrong-type MIME values are not an absent setting.
 
 ## Typed contract references
 
@@ -21,31 +67,119 @@ Use these inspected official SDK revisions to reproduce field-level checks;
 fetch the exact endpoint's current documentation before changing the contract.
 They are references, not dependencies or copied converters.
 
-- [OpenAI SDK](https://github.com/openai/openai-node/blob/bb024d41522d0b5a6b6c64055471111068811ccd/src/resources/chat/completions/completions.ts):
-  protocol-specific message roles and nullable Chat token-limit fields.
+- [OpenAI SDK](https://github.com/openai/openai-node/blob/e9f788ebfb1b6e2f5aa59022eee3da202110390e/src/resources/chat/completions/completions.ts):
+  protocol-specific message roles, nullable Chat token-limit fields, and
+  name-only function selectors versus separate custom-tool selectors. Assistant
+  history supports the `refusal` field and refusal content parts; a participant
+  `name` is not a function result's name or a tool call ID.
 - [Responses SDK](https://github.com/openai/openai-node/blob/bb024d41522d0b5a6b6c64055471111068811ccd/src/resources/responses/responses.ts):
   function/custom result content lists, item versus call identity, and direct
-  versus program callers. The official [async tool guide](https://developers.openai.com/api/docs/guides/async-tool-calling)
+  versus program callers. Function results have optional names and nullable
+  call IDs; custom results require call IDs and do not define a name field.
+  The official [async tool guide](https://developers.openai.com/api/docs/guides/async-tool-calling)
   and [programmatic tool guide](https://developers.openai.com/api/docs/guides/tools-programmatic-tool-calling)
   define execution semantics; they are not optional tracing metadata.
-- [Anthropic SDK](https://github.com/anthropics/anthropic-sdk-typescript/blob/04a4c28c70de498d6d0e930e43edb5edb9ac545e/src/resources/messages/messages.ts):
-  message roles, content-block identity, thinking signatures, and stop reasons.
-  SDK acceptance of an inline system role does not justify hoisting that turn
-  into the initial prompt on a different endpoint.
+  Native BPS preserves named function outputs with missing/null `call_id`;
+  only IDs belonging to its transport are rewritten. Foreign bridges still
+  require a representable call/result association, and custom outputs require IDs.
+- [Anthropic SDK](https://github.com/anthropics/anthropic-sdk-typescript/blob/ca50812ed769a40510bb2f9e5e232e95cdd376f1/src/resources/messages/messages.ts):
+  message roles, content-block identity, thinking signatures, stop reasons, and
+  variant-specific tool choices (`none` has no parallel-use modifier).
+  JSON replies and streamed `message_start.message` use the assistant role.
+  Claude clients also send initial system attachments after a user message.
+  Before the first assistant turn, Relay collects this initial instruction text
+  into a foreign target's system field, retaining instruction and user-content
+  order separately. SDK acceptance of an inline system role does not justify
+  hoisting it past an earlier assistant turn on a different endpoint.
 - [Google SDK](https://github.com/googleapis/js-genai/blob/177ee684ada5d2fd39450e88a9416b301eaa6ff4/src/types.ts):
   optional Content roles, function-call identity and arguments, and calling modes.
-  The official [Generate Content protobuf](https://github.com/googleapis/googleapis/blob/master/google/ai/generativelanguage/v1beta/content.proto)
+  The official [Generate Content protobuf](https://github.com/googleapis/googleapis/blob/bc7e3baa28fbb223fa93782e130260fab8205bfc/google/ai/generativelanguage/v1beta/content.proto)
   also defines the Part data oneof and function-calling defaults.
+
+## Documents, discovery and native state
+
+For user attribution, the official [Anthropic metadata type](https://github.com/anthropics/anthropic-sdk-python/blob/bcd55fe1d3f0f1240765f8cef04295b67337f55a/src/anthropic/types/metadata_param.py)
+defines `user_id` as an opaque UUID/hash usable for abuse detection, never personal
+information. [Generate Content](https://ai.google.dev/api/generate-content)
+documents `labels.safety_identifier` for aggregators and the 63-character,
+lowercase label restriction. The inspected [Google SDK converter](https://github.com/googleapis/python-genai/blob/1d12358a1398b9a510ae8ba25dd31e746d8e9be9/google/genai/models.py)
+writes labels at the request root for both Developer API and Vertex, not in
+`generationConfig`. Relay maps Messages attribution to a stable 63-hex-character
+SHA-256 pseudonym, without adding prompt text or treating arbitrary OpenAI
+metadata as a safety identifier. Empty/null values retain their distinction.
+
+The official [OpenCode model documentation](https://github.com/anomalyco/opencode/blob/ba06ff9e0bf2dcefbbbc3a1d6094f3572d77c84e/packages/web/src/content/docs/models.mdx)
+defines built-in SDK reasoning variants, override/merge behavior, and
+`variants.<name>.disabled`. Generated profiles must explicitly disable unsupported
+standard efforts; an omitted entry does not prevent OpenCode adding `medium` or
+another default. Keep Relay admission checks authoritative rather than silently
+downgrading such a request.
+
+Claude Desktop's official [third-party configuration](https://claude.com/docs/third-party/claude-desktop/configuration#models)
+defines per-model `maxEffort` as an upper bound, not an enum of allowed efforts.
+Cap at the highest executable pool-allowed Messages effort: a missing `medium`
+or `xhigh` must not suppress a supported `high` or `max`. Desktop cannot express
+holes in that menu through this field. As an explicit client compatibility
+policy, reserved Desktop reasoning aliases on Messages map Low/Medium/High/
+XHigh/Max to the nearest executable, pool-allowed lower level, or the lowest
+allowed level if none is lower. This resembles the documented
+`defaultModelEffort` fallback, but applying it to incoming picker selections
+is Relay policy, not a provider guarantee. Resolve across configured routes
+before selection, preserving exact choices even when another member lacks
+them. Admission and preparation share the effective choice; usage preserves
+the requested value. Off, budgets, unknown levels, Ultra, ordinary API model
+IDs and other client protocols stay strict. Never infer a reasoning budget
+or enable a capability from the picker alias.
+OpenCode's built-in `Default` choice means no variant override, not a model
+effort named `default`; disabling a named variant does not remove that client UI.
+
+For PDF wire formats use [OpenAI PDF inputs](https://developers.openai.com/api/docs/guides/pdf-files),
+[Anthropic PDF support](https://platform.claude.com/docs/en/build-with-claude/pdf-support)
+and the Generate Content Part/Blob types above. Transfer PDF bytes without local
+text extraction. Keep file IDs provider-owned; URL support and document
+citations/rendering are endpoint-specific. Gemini Blob `displayName` is a native
+label whose use depends on the provider operation, not a promised citation ID.
+
+The [tool-search guide](https://developers.openai.com/api/docs/guides/tools-tool-search)
+distinguishes `execution: client` from hosted search. Client calls carry object
+arguments and paired `tool_search_output` catalogs. Preserve that native client
+boundary while lowering to an upstream function; do not execute the lookup in
+Relay or turn hosted services into ordinary functions. Removing a definition
+from the loaded search results revokes its deferred availability; historical
+calls do not load it again. An explicit current tool choice remains authoritative.
+
+The [Generate Content reference](https://ai.google.dev/api/generate-content)
+defines candidate `CONTINUATION` tokens and the request's `continuationToken`.
+The subsequent `contents` must exactly repeat the original prompt/history.
+Keep tokens opaque and route-owned; do not classify the pause as output-token
+exhaustion or automatically generate another hop. `cachedContent` refers to a
+provider cache resource, not portable prompt text or a Relay TTL guarantee.
 
 ## Context accounting
 
 For context accounting use the provider's [OpenAI token-counting guide](https://developers.openai.com/api/docs/guides/token-counting),
 [Claude token-counting guide](https://platform.claude.com/docs/en/build-with-claude/token-counting),
 and [Gemini token guide](https://ai.google.dev/gemini-api/docs/tokens).
+The [OpenAI image-input guide](https://developers.openai.com/api/docs/guides/images-vision)
+defines model-specific `detail` modes and the omitted `auto` default for both
+Responses and Chat Completions.
 Loaded instructions, history, tools, and supported media contribute to input;
 JSON byte counts are not interchangeable with provider token counts. Deferred
 loading requires the exact client's and route's supported discovery contract,
 not name-based tool filtering or fabricated hosted-tool results.
+
+## Cache accounting and retention
+
+For cache accounting and retention, use the exact provider's contract:
+[OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching),
+[Anthropic prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching),
+and [Gemini cached-content expiry](https://ai.google.dev/api/caching).
+OpenAI's applicable 30-minute policy and Anthropic's 5-minute/1-hour policies
+refresh on prefix reuse without turning reads into new writes. Gemini explicit
+cache resources have their own expiry/update API; do not infer a sliding TTL
+from a read counter. Retention is not a live cache inventory or a cumulative
+token total. Unknown routes/windows remain unknown, and mixed prefix lifetimes
+cannot be collapsed into their maximum.
 
 ## Account transport boundary
 

@@ -213,6 +213,14 @@ impl GeminiStreamCompletion {
                 .filter(|reason| !reason.is_null())
             {
                 let reason = reason.as_str().ok_or(())?;
+                if reason == "CONTINUATION"
+                    && candidate
+                        .get("continuationToken")
+                        .and_then(Value::as_str)
+                        .is_none_or(|token| token.is_empty())
+                {
+                    return Err(());
+                }
                 let outcome =
                     match super::candidate_incomplete_reason(Some(reason)).map_err(|_| ())? {
                         Some(_) => ResponseCompletion::Incomplete,
@@ -426,6 +434,31 @@ impl MessagesStreamCompletion {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn gemini_native_continuation_is_incomplete_and_requires_its_opaque_token() {
+        let response = json!({"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"Partial answer"}]},
+            "finishReason":"CONTINUATION","continuationToken":"c3ludGhldGlj"}]});
+        assert_eq!(
+            ResponseCompletion::for_protocol(WireApi::Gemini, &response),
+            ResponseCompletion::Incomplete
+        );
+        let mut completion = GeminiStreamCompletion::default();
+        completion.observe(&response).unwrap();
+        completion
+            .observe(&json!({"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2}}))
+            .unwrap();
+        assert_eq!(completion.outcome(), ResponseCompletion::Incomplete);
+        assert!(completion.observe(&response).is_err());
+        for token in [Value::Null, json!(""), json!(false), json!(1), json!({})] {
+            let mut invalid = response.clone();
+            invalid["candidates"][0]["continuationToken"] = token;
+            assert_eq!(
+                ResponseCompletion::for_protocol(WireApi::Gemini, &invalid),
+                ResponseCompletion::Invalid
+            );
+        }
+    }
 
     #[test]
     fn chat_usage_chunk_requires_finished_choices_and_is_last_before_done() {

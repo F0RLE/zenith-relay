@@ -306,12 +306,11 @@ impl TranslationStream {
             .and_then(Value::as_str)
             .ok_or_else(invalid)?;
         if custom {
-            let input = state
-                .item
-                .get("input")
-                .and_then(Value::as_str)
-                .ok_or_else(invalid)?;
-            state.item["input"] = format!("{input}{delta}").into();
+            let input = state.item.get_mut("input").ok_or_else(invalid)?;
+            let Value::String(input) = input else {
+                return Err(invalid());
+            };
+            input.push_str(delta);
             return Ok(());
         }
         let block_index = *self
@@ -500,7 +499,7 @@ impl TranslationStream {
         if close {
             self.closed.insert(block_index);
         }
-        *text = final_text.to_string();
+        text.push_str(&final_text[text.len()..]);
         if expected_type == "output_text" {
             self.retain_annotations(output_index, part_index, part)?;
         }

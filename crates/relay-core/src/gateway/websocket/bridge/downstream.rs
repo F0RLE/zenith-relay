@@ -73,7 +73,7 @@ async fn start_next_request(
             "a response is already in progress",
         ));
     }
-    let mut client_request = ClientRequest::parse_on_connection(
+    let mut client_request = ClientRequest::prepare(
         runtime,
         key,
         headers,
@@ -82,7 +82,8 @@ async fn start_next_request(
             .last_response_id
             .as_deref()
             .zip(state.transient_response_affinity_key.as_deref()),
-    )?;
+    )
+    .await?;
     if let Some(stream_id) = client_request.stream_id.as_deref() {
         if let Some(active_stream_id) = state.stream_id.as_deref() {
             if active_stream_id != stream_id {

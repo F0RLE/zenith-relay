@@ -95,6 +95,9 @@ pub(in crate::gateway::websocket) fn message_serves_rejected_model(
         UpstreamMessage::Binary(bytes) => bytes.as_ref(),
         _ => return false,
     };
+    if crate::gateway::streaming::fast_response_delta_json(upstream_message_bytes).is_some() {
+        return false;
+    }
     serde_json::from_slice::<Value>(upstream_message_bytes).is_ok_and(|upstream_payload| {
         super::super::super::streaming::served_model_is_rejected(&upstream_payload, expected)
     })

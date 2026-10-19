@@ -145,9 +145,14 @@ fn latest_historical_search_catalog_keeps_nested_namespaces_and_original_schema(
     let instructions = prepared["input"][0]["content"][0]["text"].as_str().unwrap();
     assert!(instructions.contains("mcp.repo.read (function): latest"));
     assert!(!instructions.contains("mcp.repo.read (function): old"));
-    assert!(instructions.contains("Invoke at most one client tool in this response."));
+    assert!(!instructions.contains("Client tool_choice:"));
+    let turn_policy = prepared["input"].as_array().unwrap().last().unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(turn_policy.contains("Invoke at most one client tool in this response."));
+    assert!(turn_policy.contains(r#""name":"read""#));
     assert_eq!(request, before);
-    assert_eq!(prepared["input"].as_array().unwrap().len(), 2);
+    assert_eq!(prepared["input"].as_array().unwrap().len(), 3);
     let response = serde_json::to_vec(&json!({"status":"completed","output":[{
         "type":"function_call","name":"run_officejs","call_id":"call_fixture",
         "arguments":json!({"references":["mcp.repo.read"],"code":r#"{"path":"src/main.rs"}"#}).to_string()
@@ -156,6 +161,48 @@ fn latest_historical_search_catalog_keeps_nested_namespaces_and_original_schema(
         serde_json::from_slice(&translate_response(&response, &request).unwrap()).unwrap();
     assert_eq!(translated["output"][0]["namespace"], "mcp.repo");
     assert_eq!(translated["output"][0]["name"], "read");
+}
+
+#[test]
+fn turn_tool_controls_preserve_the_prepared_history_prefix() {
+    let mut request = request_with_tool();
+    request["input"] = json!([
+        {"role":"user","content":"Synthetic request"},
+        {"role":"assistant","content":"Synthetic previous answer"},
+        {"role":"user","content":"Synthetic follow-up"}
+    ]);
+    request.as_object_mut().unwrap().remove("tool_choice");
+    request
+        .as_object_mut()
+        .unwrap()
+        .remove("parallel_tool_calls");
+    let baseline = prepare_request(&request).unwrap();
+    let prefix = baseline["input"].as_array().unwrap();
+    for choice in ["auto", "required"] {
+        for parallel in [false, true] {
+            let mut changed = request.clone();
+            changed["tool_choice"] = json!(choice);
+            changed["parallel_tool_calls"] = json!(parallel);
+            let prepared = prepare_request(&changed).unwrap();
+            let items = prepared["input"].as_array().unwrap();
+            assert_eq!(&items[..prefix.len()], prefix.as_slice());
+            if choice == "auto" && parallel {
+                assert_eq!(items, prefix);
+                continue;
+            }
+            assert_eq!(items.len(), prefix.len() + 1);
+            assert_eq!(items.last().unwrap()["role"], "developer");
+            let policy = items.last().unwrap()["content"][0]["text"]
+                .as_str()
+                .unwrap();
+            assert_eq!(policy.contains("Client tool_choice:"), choice != "auto");
+            if choice != "auto" {
+                assert!(policy.contains(&format!("Client tool_choice: \"{choice}\".")));
+            }
+            assert_eq!(policy.contains("at most one client tool"), !parallel);
+            assert!(prepared.get("parallel_tool_calls").is_none());
+        }
+    }
 }
 
 #[test]
@@ -179,6 +226,22 @@ fn tool_examples_follow_the_declared_tool_instead_of_a_fixed_patch() {
     let prepared = prepare_request(&request_with_tool()).unwrap();
     let instructions = prepared["input"][0]["content"][0]["text"].as_str().unwrap();
     assert!(instructions.contains("Example outer arguments for exec_command (function)"));
+    let encoded = instructions
+        .split_once("Example outer arguments for exec_command (function): ")
+        .unwrap()
+        .1;
+    let example = serde_json::Deserializer::from_str(encoded)
+        .into_iter::<Value>()
+        .next()
+        .unwrap()
+        .unwrap();
+    assert!(example["code"]
+        .as_str()
+        .unwrap()
+        .starts_with(super::super::FUNCTION_STRING_PREFIX));
+    let arguments = super::super::codec::function_arguments(&example["code"]).unwrap();
+    assert_eq!(arguments["cmd"], "echo \"hello\"\necho \"world\"");
+    assert_eq!(example["references"], json!(["exec_command"]));
     assert!(instructions.contains("\"cmd\":string"));
     assert!(!instructions.contains("Example outer arguments for apply_patch"));
     assert!(!instructions.contains("*** Begin Patch"));

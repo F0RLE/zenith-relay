@@ -218,13 +218,20 @@ impl<S> UsageStream<S> {
         origin: crate::ErrorOrigin,
         forwarded: &mut Vec<u8>,
     ) -> bool {
-        let frame = self.sse_forward_pending.drain(..end).collect::<Vec<_>>();
-        let event = parse_sse_event(&frame);
-        forwarded.extend(prefix_stream_error_event(&frame, &event, origin));
+        let frame = &self.sse_forward_pending[..end];
+        let is_terminal = if fast_response_delta(frame).is_some() {
+            forwarded.extend_from_slice(frame);
+            false
+        } else {
+            let event = parse_sse_event(frame);
+            forwarded.extend(prefix_stream_error_event(frame, &event, origin));
+            event.outcome.is_some()
+        };
         self.sse_forward_mode = super::SseForwardMode::Detect;
-        let is_terminal = event.outcome.is_some();
         if is_terminal {
             self.sse_forward_pending.clear();
+        } else {
+            self.sse_forward_pending.drain(..end);
         }
         is_terminal
     }
@@ -340,9 +347,7 @@ impl<S> UsageStream<S> {
                         .tool_use
                         .observe_stream_payload(terminal_event_payload);
                 }
-                if self.native_response.is_some() {
-                    self.native_replay_capture.observe(terminal_event_payload);
-                }
+                self.capture_native_event(terminal_event_payload);
             } else if terminal.is_compaction {
                 self.native_replay_capture.mark_unmaterialized();
             }
@@ -452,6 +457,9 @@ impl<S> UsageStream<S> {
                     self.terminated = true;
                     return true;
                 }
+                if let Some(payload) = terminal.event_payload.as_ref() {
+                    self.capture_native_event(payload);
+                }
             }
             self.observe_first_output(terminal.has_output_delta);
         }
@@ -478,7 +486,43 @@ impl<S> UsageStream<S> {
         }
     }
 
+    fn capture_native_event(&mut self, payload: &Value) {
+        let Some(shared) = &self.native_response else {
+            return;
+        };
+        if self
+            .event
+            .as_ref()
+            .is_some_and(|event| event.wire_api == WireApi::Gemini)
+        {
+            for candidate in payload
+                .get("candidates")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|candidate| candidate["finishReason"] == "CONTINUATION")
+            {
+                let mut checkpoint = crate::poison::mutex(shared);
+                let checkpoint =
+                    checkpoint.get_or_insert_with(|| serde_json::json!({"candidates":[]}));
+                checkpoint["candidates"].as_array_mut().expect("native candidate checkpoint").push(serde_json::json!({
+                    "index":candidate.get("index").and_then(Value::as_u64).unwrap_or(0),
+                    "finishReason":"CONTINUATION","continuationToken":candidate["continuationToken"]
+                }));
+            }
+        } else {
+            self.native_replay_capture.observe(payload);
+        }
+    }
+
     fn capture_native_response(&mut self, completed_response: Option<Value>) {
+        if self
+            .event
+            .as_ref()
+            .is_some_and(|event| event.wire_api == crate::WireApi::Gemini)
+        {
+            return;
+        }
         let Some(shared) = self.native_response.as_ref() else {
             return;
         };

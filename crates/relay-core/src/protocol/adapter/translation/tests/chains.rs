@@ -14,6 +14,13 @@ fn every_adapter_preserves_long_parallel_tool_chains_and_reversed_results() {
             for streaming in [false, true] {
                 let adapter = SourceAdapter::between(client, upstream).unwrap();
                 let mut request = input(client);
+                if client == WireApi::Messages {
+                    request["system"] = "Synthetic root policy.".into();
+                    request["messages"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"role":"system","content":"Synthetic initial attachment."}));
+                }
                 request["tools"] = tool_history(client)["tools"].clone();
                 let mut previous = None;
                 for round in 0..=6 {
@@ -25,6 +32,20 @@ fn every_adapter_preserves_long_parallel_tool_chains_and_reversed_results() {
                     }, &capabilities).unwrap_or_else(|error| panic!("{client:?} -> {upstream:?}, stream={streaming}, round={round}: {error}"));
                     let mut decoded = decode::request(upstream, prepared.upstream_body()).unwrap();
                     decode::resolve_tool_history(&mut decoded.messages).unwrap();
+                    if client == WireApi::Messages {
+                        assert_eq!(
+                            decoded
+                                .messages
+                                .iter()
+                                .filter(|message| message.role == Role::System)
+                                .flat_map(|message| &message.blocks)
+                                .collect::<Vec<_>>(),
+                            vec![
+                                &Block::Text("Synthetic root policy.".into()),
+                                &Block::Text("Synthetic initial attachment.".into()),
+                            ]
+                        );
+                    }
                     let count = decoded
                         .messages
                         .iter()

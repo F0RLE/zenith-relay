@@ -17,6 +17,7 @@ pub(crate) fn candidate_incomplete_reason(
     match reason {
         Some("STOP") => Ok(None),
         Some("MAX_TOKENS") => Ok(Some("max_output_tokens")),
+        Some("CONTINUATION") => Ok(Some("continuation")),
         Some(
             "SAFETY"
             | "RECITATION"

@@ -15,9 +15,32 @@ fn protocol_negotiation_accepts_current_server_and_features_are_explicit() {
     assert!(capabilities.supports(Feature::Sources));
     assert!(capabilities.supports(Feature::ModelPricing));
     assert!(capabilities.supports(Feature::ProfileAttach));
-    // Keep the negotiated token stable for already installed clients/servers.
+    // New saved strategy variants require explicit capability negotiation.
     assert!(capabilities.supports(Feature::Rotation));
-    assert!(capabilities.features.contains("rotation_v2"));
+    assert!(capabilities.features.contains("rotation_v3"));
+    assert!(!capabilities.features.contains("rotation_v2"));
+}
+
+#[test]
+fn old_clients_cannot_read_new_strategies_but_new_clients_can_use_old_servers() {
+    let current = Capabilities::personal_server("server", "fingerprint");
+    assert!(current.supports_rotation_policy(3));
+    assert!(!current.supports_rotation_policy(2));
+    assert!(!current.supports_rotation_policy(255));
+    assert!(negotiate(ClientProtocolRange { min: 2, max: 2 }, &current).is_err());
+    let mut old_server = current;
+    old_server.protocol_version = 2;
+    old_server.compatibility_min_client = 2;
+    old_server.features.remove("rotation_v3");
+    old_server.features.insert("rotation_v2".into());
+    assert!(old_server.supports_rotation_policy(2));
+    assert!(!old_server.supports_rotation_policy(3));
+    assert_eq!(
+        negotiate(ClientProtocolRange::default(), &old_server)
+            .unwrap()
+            .version,
+        2
+    );
 }
 
 #[test]

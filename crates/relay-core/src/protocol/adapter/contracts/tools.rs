@@ -150,6 +150,7 @@ fn merge_tool_definitions(catalog: &mut Vec<Value>, definitions: &[Value]) -> Ad
 pub(in crate::protocol::adapter) enum ResponsesToolKind {
     Function,
     Custom,
+    ToolSearch,
 }
 
 /// One client-visible tool represented by an upstream Messages tool name.
@@ -169,6 +170,13 @@ impl ClientToolTarget {
     pub(in crate::protocol::adapter) fn from_call(
         call: &Map<String, Value>,
     ) -> AdapterResult<Self> {
+        if ResponsesToolKind::from_call_item(call)? == ResponsesToolKind::ToolSearch {
+            return Ok(Self {
+                kind: ResponsesToolKind::ToolSearch,
+                name: "tool_search".into(),
+                namespace: None,
+            });
+        }
         let namespace = call
             .get("namespace")
             .filter(|value| !value.is_null())
@@ -198,12 +206,18 @@ impl ClientToolTarget {
         namespace: Option<&str>,
     ) -> AdapterResult<Self> {
         let kind = ResponsesToolKind::from_definition(tool)?;
-        let name = tool
-            .get("name")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .ok_or_else(AdapterError::unsupported_tool)?;
+        let name = if kind == ResponsesToolKind::ToolSearch {
+            if namespace.is_some() {
+                return Err(AdapterError::unsupported_tool());
+            }
+            "tool_search"
+        } else {
+            tool.get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .ok_or_else(AdapterError::unsupported_tool)?
+        };
         Ok(Self {
             kind,
             name: name.to_owned(),
@@ -212,6 +226,9 @@ impl ClientToolTarget {
     }
 
     pub(in crate::protocol::adapter) fn upstream_name(&self) -> String {
+        if self.kind == ResponsesToolKind::ToolSearch {
+            return bridged_namespace_tool_name("relay.tool_search", &self.name);
+        }
         self.namespace
             .as_deref()
             .map(|namespace| bridged_namespace_tool_name(namespace, &self.name))
@@ -226,6 +243,11 @@ impl ResponsesToolKind {
         match tool.get("type").and_then(Value::as_str) {
             Some("function") => Ok(Self::Function),
             Some("custom") => Ok(Self::Custom),
+            Some("tool_search")
+                if tool.get("execution").and_then(Value::as_str) == Some("client") =>
+            {
+                Ok(Self::ToolSearch)
+            }
             // Responses namespace children have historically omitted `type`
             // for ordinary client functions. A named, untyped definition is
             // still representable as a JSON-schema function for Messages.
@@ -246,6 +268,11 @@ impl ResponsesToolKind {
         match call_item.get("type").and_then(Value::as_str) {
             Some("function_call") => Ok(Self::Function),
             Some("custom_tool_call") => Ok(Self::Custom),
+            Some("tool_search_call")
+                if call_item.get("execution").and_then(Value::as_str) == Some("client") =>
+            {
+                Ok(Self::ToolSearch)
+            }
             _ => Err(AdapterError::invalid_request()),
         }
     }
@@ -256,6 +283,11 @@ impl ResponsesToolKind {
         match output_item.get("type").and_then(Value::as_str) {
             Some("function_call_output") => Ok(Self::Function),
             Some("custom_tool_call_output") => Ok(Self::Custom),
+            Some("tool_search_output")
+                if output_item.get("execution").and_then(Value::as_str) == Some("client") =>
+            {
+                Ok(Self::ToolSearch)
+            }
             _ => Err(AdapterError::invalid_request()),
         }
     }
@@ -335,6 +367,19 @@ fn selected_tool_names(
         .as_object()
         .ok_or_else(AdapterError::unsupported_tool)?;
     match fields.get("type").and_then(Value::as_str) {
+        Some("tool_search") => {
+            super::validation::validate_bridge_fields(choice, &["type"])?;
+            let names = available
+                .iter()
+                .filter_map(|(name, target)| {
+                    (target.kind == ResponsesToolKind::ToolSearch).then_some(name.clone())
+                })
+                .collect::<BTreeSet<_>>();
+            if names.is_empty() {
+                return Err(AdapterError::unsupported_tool());
+            }
+            Ok(names)
+        }
         Some("namespace") => {
             super::validation::validate_bridge_fields(choice, &["type", "name", "namespace"])?;
             let namespace = fields

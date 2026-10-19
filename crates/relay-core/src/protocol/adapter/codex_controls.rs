@@ -240,6 +240,102 @@ fn codex_item_metadata_keeps_semantic_and_shape_guards() {
 }
 
 #[test]
+fn responses_named_function_results_keep_their_call_identity() {
+    let capabilities = crate::model_metadata::ModelCapabilities {
+        reasoning: Some(false),
+        ..Default::default()
+    };
+    for namespace in [Value::Null, json!("records")] {
+        let mut request = json!({"input":[
+            {"role":"user","content":"Read a synthetic record"},
+            {"type":"function_call","call_id":"synthetic-call","name":"lookup",
+                "namespace":namespace,"arguments":"{}"},
+            {"type":"function_call_output","call_id":"synthetic-call","name":"lookup",
+                "namespace":namespace,"output":"Synthetic result"}
+        ]});
+        for adapter in BRIDGES {
+            let prepared = adapter
+                .prepare_request_with_capabilities(
+                    AdapterRequestContext {
+                        client_wire_api: WireApi::Responses,
+                        request: &request,
+                        model: "synthetic-model",
+                        stream: false,
+                        reasoning_mode: MessagesReasoningMode::Disabled,
+                        cache_write_ttl: Default::default(),
+                        previous: None,
+                        response_scope: "synthetic-route",
+                        response_id_seed: "synthetic-request",
+                    },
+                    &capabilities,
+                )
+                .unwrap();
+            assert!(prepared
+                .upstream_body()
+                .to_string()
+                .contains("Synthetic result"));
+        }
+        for invalid_name in [json!("other"), json!(42), json!("")] {
+            request["input"][2]["name"] = invalid_name;
+            for adapter in BRIDGES {
+                assert!(prepare(adapter, &request).is_err(), "{adapter:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn responses_unpaired_named_outputs_report_the_missing_bridge_identity() {
+    for call_id in [None, Some(Value::Null)] {
+        let mut request = json!({"input":[
+            {"role":"user","content":"Synthetic startup context"},
+            {"type":"function_call_output","id":"synthetic-result","name":"lookup","namespace":"records",
+                "output":"Synthetic external result"}
+        ]});
+        if let Some(call_id) = call_id {
+            request["input"][1]["call_id"] = call_id;
+        }
+        for adapter in BRIDGES {
+            for error in [
+                adapter
+                    .continuation_key(WireApi::Responses, &request, "synthetic-model")
+                    .unwrap_err(),
+                prepare(adapter, &request).unwrap_err(),
+            ] {
+                assert_eq!(
+                    error.code(),
+                    crate::error_codes::ADAPTER_PARAMETER_UNSUPPORTED
+                );
+                assert_eq!(error.parameter(), Some("input.call_id"));
+            }
+        }
+        assert_eq!(
+            prepare(SourceAdapter::Native, &request)
+                .unwrap()
+                .upstream_body()["input"],
+            request["input"]
+        );
+    }
+}
+
+#[test]
+fn responses_custom_outputs_do_not_accept_function_only_names() {
+    let request = json!({"input":[
+        {"role":"user","content":"Synthetic task"},
+        {"type":"custom_tool_call","call_id":"synthetic-call","name":"lookup","input":"Synthetic input"},
+        {"type":"custom_tool_call_output","call_id":"synthetic-call","name":"lookup","output":"Synthetic result"}
+    ]});
+    for adapter in BRIDGES {
+        let error = prepare(adapter, &request).unwrap_err();
+        assert_eq!(
+            error.code(),
+            crate::error_codes::ADAPTER_PARAMETER_UNSUPPORTED
+        );
+        assert_eq!(error.parameter(), Some("input.name"));
+    }
+}
+
+#[test]
 fn codex_item_metadata_preserves_signed_messages_tool_roundtrip() {
     let adapter = SourceAdapter::ResponsesToMessages;
     let first_input = json!([{"role":"user","content":"Synthetic task",
