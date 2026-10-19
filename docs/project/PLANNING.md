@@ -203,12 +203,19 @@ Portable preset imports may migrate validated legacy policies on newer servers;
 direct updates stay version-exact, and new policies are never downgraded for
 older servers.
 
-Recommended and even-distribution presets change the strategy, not saved shares
-or limits. Accounts-first explicitly places accounts before API sources while
+Presets restore equal request shares and no extra member concurrency limits.
+Strategy-only changes preserve those controls. Recommended and even-distribution
+preserve member order. Accounts-first places accounts before API sources while
 preserving relative order inside each group; its API reserve may spend balance.
 Presets rebase onto current membership and never restore a removed member.
 Policy-only updates retain active leases, continuation owners, resource evidence,
 and cooldowns. No application or gateway restart is required.
+
+Runtime strategies use explicit names: Automatic, RoundRobin,
+WeightedRoundRobin, and Failover. Legacy saved `in_order` maps to equal
+RoundRobin without changing the stored policy contract. Round-robin cursors
+survive member changes while their route remains configured; removing the last
+route discards its cursor, including during model-inventory replacement.
 
 Admission queues, waits, and generation attempts are bounded. One logical
 request owns its dispatch, transport, auth-repair, retry, and irreversible-send
@@ -253,6 +260,9 @@ Errors retain origin (`Relay`, `Account`, `Provider`), category, status, timings
 and safe provider IDs. Prompts, raw bodies, arguments, credentials, and
 authorization headers do not enter diagnostics. Stable codes live in
 `error_codes.rs` and both localized Help tables.
+Adapter diagnostics retain static field names, value types and object-field counts,
+never arbitrary payload keys or values. Known output-limit/filter terminals remain
+incomplete responses with their usage, even when no visible output was generated.
 
 ## Protocol adapters
 
@@ -288,6 +298,10 @@ served-model checks. HTTP-to-WebSocket fallback consumes parsed JSON and opaque
 payloads without cloning them or decoding a serialized copy. Converted streams
 retain unchanged text, reasoning, and refusal snapshots; closed Messages blocks
 still reject mutations.
+The ChatGPT WebSocket setting controls client ingress and the managed profile,
+not provider transport. Catalog changes do not override it. BPS and converted
+routes use the HTTP executor behind the same client socket; usage records the
+client transport. A failed client restart does not roll back a saved setting.
 Messages streams finalize native text/thinking snapshots when their block closes
 and append signature fragments in place. Portable deltas still stream immediately;
 only a fully closed response can supply replayable native continuation state.

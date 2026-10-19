@@ -102,8 +102,10 @@ evidence. Discovery must not generate paid probes across a catalog.
 
 - Finish native Responses WS multiplexing: independent lanes/FIFO, bounded
   queues, scoped errors, continuation forks, retry/usage and disconnect ownership.
-- Measure mixed HTTP/SSE/WS/image admission fairness, queue age, lock waits,
-  retained memory, cancellation, and lease release before adding caches/limits.
+- Qualify mixed HTTP/SSE/WS/image admission on an authorized live pool. Local
+  fixtures cover repeated mixed waves, lifecycle churn, bounded queue retention,
+  and scheduler lock/reservation timings; they do not establish process-memory
+  stability, provider latency, or long-running live fairness.
 - Complete delayed-result, token-ownership, concurrent-refresh, rollback, and
   deleted/re-added account cases on Desktop and server.
 

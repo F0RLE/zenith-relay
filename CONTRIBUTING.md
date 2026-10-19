@@ -413,6 +413,44 @@ bun scripts/build/cargo.mjs clippy --manifest-path crates/relay-core/Cargo.toml 
 bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked
 ~~~
 
+### Pool rotation acceptance
+
+The ordinary core suite includes lifecycle churn and repeated local HTTP,
+SSE, WebSocket, and image waves. These fixtures use synthetic credentials and
+loopback providers; they do not consume account quota. The Build workflow also
+runs the opt-in queue test at the per-principal limit:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --lib large_mixed_queue_reaches_per_principal_limit_without_starvation -- --ignored --nocapture
+~~~
+
+Measure scheduler overhead separately from provider latency:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --lib scheduling_latency_under_contention -- --ignored --nocapture
+~~~
+
+For an extended loopback run, execute 240 mixed waves (5,760 requests) with
+shared member limits and alternating source availability:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --test accounts extended_mixed_transport_soak -- --ignored --nocapture
+~~~
+
+The local probe reports mutex-wait and reservation p50/p95/p99 in nanoseconds
+for 2, 16, and 64 members with four competing threads. It has no provider I/O
+or hardware-dependent pass threshold. Compare repeated runs of the same build
+profile and machine; these values are not model first-token measurements.
+The queue check reports local admission-wait p50/p95/p99, verifies bounded
+retained metadata, service across principals, and release after draining; it is
+not a process-memory or live-provider soak.
+
+Live acceptance still requires an explicitly authorized isolated pool and the
+installed executable's identity. Include unequal generation durations, quota
+resets, cancellations, and account replacement; verify outcomes and ownership,
+not only the visible reply. Do not replace or restart the user's app as part of
+a synthetic check.
+
 ### Manual quality observations
 
 `quality_probe` is a development example, not a startup/background monitor.

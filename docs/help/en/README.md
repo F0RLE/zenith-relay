@@ -443,8 +443,8 @@ Three buttons apply a ready-made setup in one click:
   The order inside each group is preserved. Reserve API requests may spend
   their balance.
 
-Presets do not reset saved shares or limits. Settings that differ from the
-defaults, such as a concurrent-request limit, are shown as **Custom**.
+Presets reset shares to 1 and extra limits to 0. Strategy-only changes keep
+both. Manual overrides show **Custom**.
 Switching strategies does not restart applications or the gateway, interrupt
 active requests, clear cooldowns, or move an opaque continuation to another account.
 Older version-two servers retain the two compatible choices without new presets.
@@ -611,8 +611,9 @@ Automatic compaction uses about 90% of the selected window, subject to known
 input/output limits; there is no separate compaction switch.
 
 **ChatGPT background tasks** allows automatic activity summaries and task titles.
-**WebSocket for ChatGPT** selects a persistent connection; disabling it uses HTTP.
-Enabling WebSocket requires confirmation to restart the application.
+**WebSocket for ChatGPT** controls ChatGPT → Relay; BPS and converted routes still
+use HTTP upstream. Changes ask to restart ChatGPT. Request details show
+**Client transport**.
 
 #### Claude Desktop
 
