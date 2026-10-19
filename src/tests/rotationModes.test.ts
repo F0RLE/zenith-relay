@@ -13,11 +13,23 @@ function policy(): PoolRoutingPolicy {
 }
 
 describe("rotation modes and presets", () => {
-  test("presets preserve shares, limits, inventory and relative order inside each group", () => {
+  test("equal automatic shares are recommended regardless of their scale", () => {
+    for (const weight of [1, 17, 100]) {
+      const plain = { ...policy(), members: policy().members.map((member) => ({ ...member, weight, maxConcurrency: 0 })) };
+      expect(currentRotationPreset(plain)).toBe("recommended");
+    }
+    expect(currentRotationPreset({ ...policy(), members: [] })).toBe("recommended");
+  });
+
+  test("presets restore controls while preserving inventory and relative order inside each group", () => {
     const saved = policy();
     for (const preset of ["recommended", "even", "accounts_first"] as const) {
       const applied = applyRotationPreset(saved, preset);
-      expect(new Map(applied.members.map((member) => [member.id, member]))).toEqual(new Map(saved.members.map((member) => [member.id, member])));
+      expect(new Map(applied.members.map((member) => [member.id, member]))).toEqual(new Map(saved.members.map((member) => [member.id, { ...member, weight: 1, maxConcurrency: 0 }])));
+      expect(applied.version).toBe(saved.version);
+      expect(currentRotationPreset(applied)).toBe(preset);
+      expect(applyRotationPreset(applied, preset)).toEqual(applied);
+      if (preset !== "accounts_first") expect(applied.members.map((member) => member.id)).toEqual(saved.members.map((member) => member.id));
       expect(saved).toEqual(policy());
     }
     const reserve = applyRotationPreset(saved, "accounts_first");
@@ -33,11 +45,20 @@ describe("rotation modes and presets", () => {
     saved.members.push({ kind: "account", id: "new", weight: 13, maxConcurrency: 7 });
     const edited = applyPoolRoutingEdits(saved, [{ type: "preset", preset: "accounts_first" }]);
     expect(edited.members.map((member) => member.id)).toEqual(["account-b", "new", "api-a", "api-b"]);
-    expect(edited.members[1]).toMatchObject({ weight: 13, maxConcurrency: 7 });
+    expect(edited.members[1]).toMatchObject({ weight: 1, maxConcurrency: 0 });
+  });
+
+  test("selected presets are recognized when the pool has only one member kind or is empty", () => {
+    const saved = policy();
+    for (const members of [[], saved.members.filter((member) => member.kind === "account"), saved.members.filter((member) => member.kind === "source")]) {
+      for (const preset of ["recommended", "even", "accounts_first"] as const) {
+        expect(currentRotationPreset(applyRotationPreset({ ...saved, members }, preset))).toBe(preset);
+      }
+    }
   });
 
   test("equal and weighted cycling are distinct without discarding stored shares", () => {
-    const saved = applyRotationPreset(policy(), "even");
+    const saved = { ...policy(), mode: "round_robin" as const };
     expect(usesRequestShares(saved.mode)).toBe(false);
     const weighted = applyPoolRoutingEdits(saved, [{ type: "mode", mode: "weighted_round_robin" }]);
     expect(usesRequestShares(weighted.mode)).toBe(true);

@@ -19,15 +19,16 @@ export function supportsRotationEditing(policy: PoolRoutingSnapshot | undefined,
 export function applyRotationPreset(policy: PoolRoutingPolicy, preset: RotationPreset): PoolRoutingPolicy {
   if (policy.version !== 3) return policy;
   const mode = preset === "recommended" ? "automatic" : preset === "even" ? "round_robin" : "failover";
+  const defaults = policy.members.map((member) => ({ ...member, weight: 1, maxConcurrency: 0 }));
   const members = preset === "accounts_first"
-    ? [...policy.members.filter((member) => member.kind === "account"), ...policy.members.filter((member) => member.kind === "source")]
-    : policy.members;
+    ? [...defaults.filter((member) => member.kind === "account"), ...defaults.filter((member) => member.kind === "source")]
+    : defaults;
   return { ...policy, mode, members };
 }
 
 export function currentRotationPreset(policy: PoolRoutingPolicy): RotationPreset | "custom" {
   if (policy.members.some((member) => member.maxConcurrency !== 0)) return "custom";
-  if (policy.mode === "automatic") return policy.members.every((member) => member.weight === 100) ? "recommended" : "custom";
+  if (policy.mode === "automatic") return policy.members.every((member) => member.weight === policy.members[0]?.weight) ? "recommended" : "custom";
   if (policy.mode === "round_robin" || policy.mode === "in_order") return "even";
   if (policy.mode === "failover") {
     let sourceSeen = false;
@@ -35,7 +36,7 @@ export function currentRotationPreset(policy: PoolRoutingPolicy): RotationPreset
       if (member.kind === "source") sourceSeen = true;
       else if (sourceSeen) return "custom";
     }
-    return policy.members.some((member) => member.kind === "account") && sourceSeen ? "accounts_first" : "custom";
+    return "accounts_first";
   }
   return "custom";
 }

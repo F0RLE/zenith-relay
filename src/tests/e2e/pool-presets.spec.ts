@@ -60,7 +60,40 @@ for (const theme of ["light", "dark"] as const) {
 }
 
 for (const mode of ["local", "remote"] as const) {
-  test(`${mode} rotation presets preserve controls and keep API as an explicit reserve`, async ({ page }) => {
+  test(`${mode} recommended preset restores defaults without changing membership or restarting the gateway`, async ({ page }) => {
+    await installTauriMock(page, { mode, locale: "en", accountCount: 2, sourceCount: 2, quotaAvailable: true });
+    await page.goto("/");
+    const dialog = await openPoolRotation(page);
+    const recommended = dialog.getByRole("button", { name: "Recommended", exact: true });
+    await expect(recommended).toHaveAttribute("aria-pressed", "true");
+    await expect(dialog.getByRole("button", { name: "Reset to defaults", exact: true })).toHaveCount(0);
+    await dialog.getByLabel("Request share: Personal Plus", { exact: true }).fill("17");
+    await dialog.getByLabel("Concurrent requests: Personal Plus", { exact: true }).fill("2");
+    await dialog.getByRole("radio", { name: "Primary & reserve", exact: true }).click();
+    await expect(dialog.locator(".pool-routing-editor")).toHaveAttribute("aria-busy", "false");
+    const readRuntime = () => page.evaluate(async (mode) => (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string) => Promise<RuntimeSnapshot> } }).__TAURI_INTERNALS__.invoke(mode === "local" ? "get_local_runtime_state" : "get_remote_server_state"), mode);
+    const before = await readRuntime();
+    expect(before.gateway.poolRouting?.members.find((member) => member.id === "account_synthetic")).toMatchObject({ weight: 17, maxConcurrency: 2 });
+    await recommended.click();
+    await expect(dialog.getByRole("radio", { name: "Automatic", exact: true })).toHaveAttribute("aria-checked", "true");
+    await expect(dialog.getByRole("button", { name: "Recommended", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(dialog.locator(".pool-routing-custom")).toHaveCount(0);
+    await expect(dialog.getByLabel("Request share: Personal Plus", { exact: true })).toHaveValue("1");
+    await expect(dialog.getByLabel("Concurrent requests: Personal Plus", { exact: true })).toHaveValue("");
+    await expect(dialog.locator(".pool-routing-editor")).toHaveAttribute("aria-busy", "false");
+    const after = await readRuntime();
+    expect(after.gateway.poolRouting).toEqual({ ...before.gateway.poolRouting, mode: "automatic", members: before.gateway.poolRouting!.members.map((member) => ({ ...member, weight: 1, maxConcurrency: 0 })) });
+    expect(after.accounts).toEqual(before.accounts);
+    expect(after.sources).toEqual(before.sources);
+    expect(after.gateway.maxRetryCandidates).toBe(before.gateway.maxRetryCandidates);
+    expect(after.gateway.defaultServiceTier).toBe(before.gateway.defaultServiceTier);
+    expect(after.gateway.running).toBe(true);
+    await dialog.getByRole("button", { name: "Close", exact: true }).click();
+    await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
+    await expect(dialog.getByRole("button", { name: "Recommended", exact: true })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  test(`${mode} accounts-first preset restores controls and keeps API as an explicit reserve`, async ({ page }) => {
     await installTauriMock(page, { mode, locale: "en", accountCount: 2, sourceCount: 2, quotaAvailable: true });
     await page.goto("/");
     const dialog = await openPoolRotation(page);
@@ -73,14 +106,16 @@ for (const mode of ["local", "remote"] as const) {
     await expect(presets.getByRole("button")).toHaveCount(3);
     await presets.getByRole("button", { name: "Accounts → API", exact: true }).click();
     await expect(dialog.getByRole("radio", { name: "Primary & reserve", exact: true })).toHaveAttribute("aria-checked", "true");
-    await expect(account.getByLabel("Concurrent requests: Personal Plus", { exact: true })).toHaveValue("2");
+    await expect(account.getByLabel("Concurrent requests: Personal Plus", { exact: true })).toHaveValue("");
+    await expect(presets.getByRole("button", { name: "Accounts → API", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(dialog.locator(".pool-routing-custom")).toHaveCount(0);
     await expect(dialog.getByLabel("Request share: Personal Plus", { exact: true })).toHaveCount(0);
     await expect(dialog.locator(".pool-routing-description")).toHaveCount(0);
     await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
     const runtime = await page.evaluate(async (mode) => (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string) => Promise<RuntimeSnapshot> } }).__TAURI_INTERNALS__.invoke(mode === "local" ? "get_local_runtime_state" : "get_remote_server_state"), mode);
     expect(runtime.gateway.poolRouting).toMatchObject({ version: 3, mode: "failover" });
     expect(runtime.gateway.poolRouting?.members.map((member) => member.kind)).toEqual(["account", "account", "source", "source"]);
-    expect(runtime.gateway.poolRouting?.members.find((member) => member.id === "account_synthetic")).toMatchObject({ weight: 17, maxConcurrency: 2 });
+    expect(runtime.gateway.poolRouting?.members.every((member) => member.weight === 1 && member.maxConcurrency === 0)).toBe(true);
     expect(runtime.gateway.running).toBe(true);
     await expect(page.getByRole("group", { name: "Connection priority", exact: true })).toBeVisible();
   });
@@ -95,14 +130,25 @@ for (const mode of ["local", "remote"] as const) {
     await weighted.check();
     const share = dialog.getByLabel("Request share: Personal Plus", { exact: true });
     await share.fill("23");
+    const limit = dialog.getByLabel("Concurrent requests: Personal Plus", { exact: true });
+    await limit.fill("2");
     await weighted.uncheck();
     await expect(share).toHaveCount(0);
     await weighted.check();
     await expect(share).toHaveValue("23");
+    await expect(limit).toHaveValue("2");
     await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
     await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
     await expect(weighted).toBeChecked();
     await expect(share).toHaveValue("23");
+    await expect(limit).toHaveValue("2");
+    await dialog.getByRole("button", { name: "Even distribution", exact: true }).click();
+    await expect(weighted).not.toBeChecked();
+    await expect(limit).toHaveValue("");
+    await expect(dialog.getByRole("button", { name: "Even distribution", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await dialog.getByRole("button", { name: "Close", exact: true }).click();
+    const runtime = await page.evaluate(async (mode) => (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string) => Promise<RuntimeSnapshot> } }).__TAURI_INTERNALS__.invoke(mode === "local" ? "get_local_runtime_state" : "get_remote_server_state"), mode);
+    expect(runtime.gateway.poolRouting?.members.every((member) => member.weight === 1 && member.maxConcurrency === 0)).toBe(true);
   });
 }
 
@@ -140,3 +186,23 @@ for (const locale of ["en", "ru"] as const) {
     await expect(helpButton).toBeFocused();
   });
 }
+
+test("Russian preset selection restores defaults without an extra reset action", async ({ page }) => {
+  await page.setViewportSize({ width: 840, height: 560 });
+  await installTauriMock(page, { locale: "ru", theme: "dark", quotaAvailable: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Пул", exact: true }).click();
+  await page.getByRole("button", { name: "Настройки ротации пула", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Ротация пула", exact: true });
+  const recommended = dialog.getByRole("button", { name: "Рекомендуемый", exact: true });
+  await expect(dialog.getByRole("button", { name: "По умолчанию", exact: true })).toHaveCount(0);
+  await dialog.getByLabel("Доля запросов: Personal Plus", { exact: true }).fill("17");
+  await dialog.getByLabel("Одновременных запросов: Personal Plus", { exact: true }).fill("2");
+  await expect(dialog.locator(".pool-routing-custom")).toHaveText("Свой");
+  await recommended.click();
+  await expect(recommended).toHaveAttribute("aria-pressed", "true");
+  await expect(dialog.locator(".pool-routing-custom")).toHaveCount(0);
+  await expect(dialog.getByLabel("Доля запросов: Personal Plus", { exact: true })).toHaveValue("1");
+  await expect(dialog.getByLabel("Одновременных запросов: Personal Plus", { exact: true })).toHaveValue("");
+  await page.screenshot({ path: "output/playwright/pool-rotation-presets-ru-dark-840x560.png" });
+});
