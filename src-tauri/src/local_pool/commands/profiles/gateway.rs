@@ -64,9 +64,6 @@ pub async fn attach_codex_to_local_gateway(
             store.gateway().codex_websockets_enabled,
         )
     };
-    let prepared = super::super::state::build_local_runtime_state(&state).await?;
-    let supports_websockets = supports_websockets
-        && zenith_relay_core::protocol::codex_catalog_supports_websockets(&prepared.gateway.models);
     if !key.enabled || !super::super::pool::has_usable_pool_candidate(&state)? {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
@@ -169,19 +166,11 @@ pub async fn attach_codex_to_remote_gateway(
         .profile_credential()
         .await
         .map_err(super::super::remote_server::remote_error)?;
-    let mut remote_state = client
+    let remote_state = client
         .state()
         .await
         .map_err(super::super::remote_server::remote_error)?;
-    zenith_relay_core::protocol::apply_model_protocol_routes(
-        &mut remote_state.gateway.models,
-        &remote_state.sources,
-        &remote_state.accounts,
-    );
-    let supports_websockets = remote_state.gateway.codex_websockets_enabled
-        && zenith_relay_core::protocol::codex_catalog_supports_websockets(
-            &remote_state.gateway.models,
-        );
+    let supports_websockets = remote_state.gateway.codex_websockets_enabled;
     let rotate_profile_key = capabilities.supports(Feature::ProfileKeyRotation);
     let profile_dir = default_codex_home();
     let sync_history =

@@ -153,35 +153,33 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     if (wasRunning) await relayCommands.launchManagedCodex();
   }, []);
 
-  const setCodexWebsocketsEnabled = useCallback((enabled: boolean) => perform(
-    "codex-websockets",
-    mode === "remote"
-      ? async () => {
-        const previousWebsocketSetting = codexWebsocketsEnabled;
+  const setCodexWebsocketsEnabled = useCallback(async (enabled: boolean) => {
+    const saved = await perform("codex-websockets", async () => {
+      if (mode === "local") {
+        return relayCommands.setCodexWebsockets(enabled);
+      }
+      if (mode === "remote") {
         await relayCommands.setRemoteCodexWebsockets(enabled);
         try {
-          const commandResult = await relayCommands.setCodexProfileWebsockets(enabled);
-          await restartManagedCodexIfRunning();
-          return commandResult;
+          await relayCommands.setCodexProfileWebsockets(enabled);
         } catch (error) {
           try {
-            await relayCommands.setRemoteCodexWebsockets(previousWebsocketSetting);
+            await relayCommands.setRemoteCodexWebsockets(codexWebsocketsEnabled);
           } catch {
             // Keep the original profile error; the remote action is best-effort rollback.
           }
           throw error;
         }
+        return;
       }
-      : mode === "local"
-        ? async () => {
-          const commandResult = await relayCommands.setCodexWebsockets(enabled);
-          await restartManagedCodexIfRunning();
-          return commandResult;
-        }
-        : () => Promise.reject(new Error(t("errors.chatgpt_websockets_unavailable"))),
-    "feedback.saved",
-    { backgroundRefresh: true, uiLock: false },
-  ), [codexWebsocketsEnabled, mode, perform, restartManagedCodexIfRunning, t]);
+      throw new Error(t("errors.chatgpt_websockets_unavailable"));
+    }, undefined, { backgroundRefresh: true, uiLock: false });
+    if (!saved) return false;
+    // Restart failure must not undo a setting already saved in the server and profile.
+    await perform("codex-websockets-restart", restartManagedCodexIfRunning,
+      "feedback.saved", { skipRefresh: true, uiLock: false });
+    return true;
+  }, [codexWebsocketsEnabled, mode, perform, restartManagedCodexIfRunning, t]);
 
   const setRouteRecoveryEnabled = useCallback((enabled: boolean) => perform(
     "route-recovery",

@@ -142,7 +142,68 @@ async fn responses_websocket_falls_back_to_http_sse_upstream() {
     }
     assert!(saw_completed, "HTTP/SSE upstream was not bridged to WS");
     assert_eq!(state.requests.lock().unwrap().len(), 1);
-    assert!(events.lock().unwrap().iter().any(|event| event.success));
+    let events = events.lock().unwrap();
+    let completed = events.iter().find(|event| event.success).unwrap();
+    assert_eq!(
+        completed.transport,
+        zenith_relay_core::UsageTransport::Websocket
+    );
+}
+
+#[tokio::test]
+async fn responses_websocket_keeps_converted_continuation_and_client_transport() {
+    let (upstream, state) = spawn_messages_upstream().await;
+    let (gateway, events) =
+        spawn_messages_bridge_gateway(&upstream.base_url, &state, MessagesReasoningMode::Disabled)
+            .await;
+    let upgraded = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upgraded.status(), StatusCode::SWITCHING_PROTOCOLS);
+    let mut socket = upgraded.into_websocket().await.unwrap();
+    let mut previous_response_id = None::<String>;
+    for input in ["First turn", "Continue"] {
+        let mut request = json!({
+            "type": "response.create", "model": "claude-test",
+            "input": input, "max_output_tokens": 64,
+        });
+        if let Some(id) = &previous_response_id {
+            request["previous_response_id"] = id.clone().into();
+        }
+        socket
+            .send(ClientWsMessage::Text(request.to_string()))
+            .await
+            .unwrap();
+        let completed = tokio::time::timeout(Duration::from_secs(3), async {
+            while let Some(message) = socket.next().await {
+                let ClientWsMessage::Text(text) = message.unwrap() else {
+                    continue;
+                };
+                let event: Value = serde_json::from_str(text.as_ref()).unwrap();
+                assert_ne!(event["type"], "response.failed", "{event}");
+                if event["type"] == "response.completed" {
+                    return event;
+                }
+            }
+            panic!("converted response must complete without closing the client socket");
+        })
+        .await
+        .unwrap();
+        previous_response_id = Some(completed["response"]["id"].as_str().unwrap().to_owned());
+    }
+    let bodies = state.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(bodies[1]["messages"].as_array().unwrap().len(), 3);
+    assert!(bodies.iter().all(|body| body["stream"] == true));
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|event| event.success
+        && event.transport == zenith_relay_core::UsageTransport::Websocket
+        && event.wire_api == WireApi::Responses));
 }
 
 #[tokio::test]

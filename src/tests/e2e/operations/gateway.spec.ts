@@ -12,36 +12,67 @@ test("application chrome is not text-selectable", async ({ page }) => {
   await expect(page.locator("input").first()).toHaveCSS("user-select", "text");
 });
 
-test("Gateway exposes an explicit Codex WebSocket switch", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+for (const mode of ["local", "remote"] as const) {
+test(`${mode} WebSocket changes require confirmation in both directions`, async ({ page }) => {
+  await installTauriMock(page, { mode, locale: "en", populated: true, remoteFeatures: ["codex_websockets"] });
   await page.goto("/");
   await openGatewayApplication(page);
 
   const settings = page.locator(".gateway-settings-panel");
   await expect(settings).toBeVisible();
-  await expect(settings.getByRole("heading", { name: "ChatGPT background tasks" })).toBeVisible();
   await expect(settings.getByRole("heading", { name: "WebSocket for ChatGPT" })).toBeVisible();
 
   const websocket = settings.getByRole("checkbox", { name: "Use WebSocket in ChatGPT" });
   await expect(websocket).toBeChecked();
-  await websocket.uncheck();
+  await websocket.click();
+  const restartDialog = page.getByRole("dialog", { name: "Restart ChatGPT" });
+  await expect(restartDialog).toBeVisible();
+  await restartDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(websocket).toBeChecked();
+  await websocket.click();
+  await restartDialog.getByRole("button", { name: "Apply and restart" }).click();
   await expect(websocket).not.toBeChecked();
   await expect(settings.getByText("Disabled · HTTP is used", { exact: true })).toBeVisible();
 
   await websocket.click();
-  const restartDialog = page.getByRole("dialog", { name: "Restart ChatGPT" });
   await expect(restartDialog).toBeVisible();
-  await restartDialog.getByRole("button", { name: "Restart and enable" }).click();
+  await restartDialog.getByRole("button", { name: "Apply and restart" }).click();
   await expect(websocket).toBeChecked();
   await expect(settings.getByText("Enabled", { exact: true })).toBeVisible();
 
   const websocketCalls = await page.evaluate(() => (window as unknown as {
-    __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { enabled?: boolean } } }>;
+    __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { enabled?: boolean; action?: { type: string }; payload?: { enabled: boolean } } } }>;
   }).__TAURI_TEST_INVOKES__
-    .filter((call) => call.command === "set_local_codex_websockets")
-    .map((call) => call.args.input?.enabled));
+    .filter((call) => call.command === "set_local_codex_websockets"
+      || call.command === "execute_remote_server_action" && call.args.input?.action?.type === "set_codex_websockets")
+    .map((call) => call.args.input?.enabled ?? call.args.input?.payload?.enabled));
   expect(websocketCalls).toEqual([false, true]);
+  const restarts = await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string }>;
+  }).__TAURI_TEST_INVOKES__.filter((call) => ["stop_managed_codex_profile", "launch_managed_codex_profile"].includes(call.command)).map((call) => call.command));
+  expect(restarts).toEqual(["stop_managed_codex_profile", "launch_managed_codex_profile", "stop_managed_codex_profile", "launch_managed_codex_profile"]);
 });
+}
+
+for (const failure of ["profile", "restart"] as const) {
+  test(`remote WebSocket ${failure} failure preserves consistent saved settings`, async ({ page }) => {
+    await installTauriMock(page, { mode: "remote", locale: "en", populated: true,
+      remoteFeatures: ["codex_websockets"], codexWebsocketsEnabled: false, codexWebsocketsFailure: failure });
+    await page.goto("/");
+    await openGatewayApplication(page);
+    const websocket = page.getByRole("checkbox", { name: "Use WebSocket in ChatGPT" });
+    await websocket.click();
+    await page.getByRole("dialog", { name: "Restart ChatGPT" }).getByRole("button", { name: "Apply and restart" }).click();
+    await expect(page.locator(".global-feedback.error")).toBeVisible();
+    await expect(websocket).toBeChecked({ checked: failure === "restart" });
+    const calls = await page.evaluate(() => (window as unknown as {
+      __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { action?: { type: string }; payload?: { enabled: boolean } } } }>;
+    }).__TAURI_TEST_INVOKES__);
+    expect(calls.filter((call) => call.command === "execute_remote_server_action" && call.args.input?.action?.type === "set_codex_websockets")
+      .map((call) => call.args.input?.payload?.enabled)).toEqual(failure === "profile" ? [true, false] : [true]);
+    expect(calls.some((call) => call.command === "stop_managed_codex_profile")).toBe(failure === "restart");
+  });
+}
 
 for (const mode of ["local", "remote"] as const) {
   test(`${mode} API route recovery switch saves and retains its state`, async ({ page }) => {

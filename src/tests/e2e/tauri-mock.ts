@@ -86,6 +86,7 @@ export type MockOptions = {
   rotationVersion?: 1 | 2 | 3;
   codexBackgroundTasksEnabled?: boolean;
   codexWebsocketsEnabled?: boolean;
+  codexWebsocketsFailure?: "profile" | "restart";
   basisPointsAvailable?: boolean;
   basisPointsEnabled?: boolean;
   chatgptRetryUntilAvailable?: boolean;
@@ -973,7 +974,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             localRuntime.gateway.codexWebsocketsEnabled = request.enabled;
             return structuredClone(localRuntime);
           }
-          case "set_codex_profile_websockets": return null;
+          case "set_codex_profile_websockets":
+            if (input.codexWebsocketsFailure === "profile") throw { code: "profile_restore_blocked", message: "Synthetic WebSocket profile failure" };
+            return null;
           case "set_local_chatgpt_retry_until_available": {
             const request = args.input as { enabled: boolean };
             localRuntime.gateway.chatgptRetryUntilAvailable = request.enabled;
@@ -1272,6 +1275,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "run_due_quota_wake_confirmations": return 1;
           case "test_quota_wake_automation": return { taskId: String(args.taskId), status: "ready", eligibleAccounts: 1 };
           case "launch_managed_codex_profile":
+            if (input.codexWebsocketsFailure === "restart") throw { code: "io", message: "Synthetic ChatGPT restart failure" };
+            return null;
           case "launch_saved_codex":
           case "restore_codex_profile":
           case "restore_codex_account_profile": return null;

@@ -38,9 +38,7 @@ pub use model_policy::{
     canonical_pool_model_id, complete_model_display_order, configured_source_model_ids,
     update_model_reasoning_policy, ModelPolicyError,
 };
-pub use model_protocols::{
-    apply_model_protocol_routes, codex_catalog_supports_websockets, ModelProtocolRoute,
-};
+pub use model_protocols::{apply_model_protocol_routes, ModelProtocolRoute};
 pub use routing::{
     account_candidate_enabled, account_operational_state, operational_status, pool_routing_summary,
     quota_refresh_status, AccountOperationalInput, AccountOperationalSource,

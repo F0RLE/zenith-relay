@@ -239,12 +239,9 @@ pub async fn set_local_codex_websockets(
     input: SetCodexWebsocketsInput,
     state: State<'_, DesktopState>,
 ) -> Result<LocalPoolSnapshot, CommandError> {
-    let websocket_settings = input;
+    let enabled = input.enabled;
     let _mutation = state.setup_guard().await;
     let previous_gateway = state.store()?.gateway().clone();
-    let snapshot = super::super::state::build_local_runtime_state(&state).await?;
-    let profile_websockets = websocket_settings.enabled
-        && zenith_relay_core::protocol::codex_catalog_supports_websockets(&snapshot.gateway.models);
     let profile_dir = crate::platform::default_codex_home();
     let backup_root = state.profile_backup_root();
     let local_keys = state.store()?.keys().to_vec();
@@ -265,7 +262,7 @@ pub async fn set_local_codex_websockets(
             crate::local_pool::profiles::codex::set_local_gateway_websockets_with_previous(
                 &profile_dir,
                 &backup_root,
-                profile_websockets,
+                enabled,
                 Some(&binding.credential_id),
             )
         })
@@ -288,13 +285,13 @@ pub async fn set_local_codex_websockets(
     };
     let previous_enabled = previous_gateway.codex_websockets_enabled;
     let mut gateway = previous_gateway.clone();
-    gateway.codex_websockets_enabled = websocket_settings.enabled;
+    gateway.codex_websockets_enabled = enabled;
     if let Err(error) = state.store()?.replace_gateway(gateway) {
         let _ = restore_profile();
         return Err(error.into());
     }
     if let Some(runtime) = state.gateway.runtime().await {
-        runtime.set_codex_websockets_enabled(websocket_settings.enabled);
+        runtime.set_codex_websockets_enabled(enabled);
     }
     match state.snapshot().await {
         Ok(snapshot) => Ok(snapshot),
@@ -345,7 +342,7 @@ pub async fn set_codex_profile_websockets(
     input: SetCodexWebsocketsInput,
     state: State<'_, DesktopState>,
 ) -> Result<(), CommandError> {
-    let websocket_settings = input;
+    let enabled = input.enabled;
     let _mutation = state.setup_guard().await;
     let Some((_, client)) = super::super::remote_server::active_client(&state)? else {
         return Err(
@@ -361,17 +358,6 @@ pub async fn set_codex_profile_websockets(
         &state.profile_backup_root(),
         &credential.key_id,
     )?;
-    let mut snapshot = client
-        .state()
-        .await
-        .map_err(super::super::remote_server::remote_error)?;
-    zenith_relay_core::protocol::apply_model_protocol_routes(
-        &mut snapshot.gateway.models,
-        &snapshot.sources,
-        &snapshot.accounts,
-    );
-    let enabled = websocket_settings.enabled
-        && zenith_relay_core::protocol::codex_catalog_supports_websockets(&snapshot.gateway.models);
     crate::local_pool::profiles::codex::set_local_gateway_websockets_with_previous(
         &crate::platform::default_codex_home(),
         &state.profile_backup_root(),

@@ -10,7 +10,7 @@ export function CodexWebsocketsControl({ className = "" }: { className?: string 
   const { t } = useTranslation();
   const { mode, runtime, codexWebsocketsEnabled, setCodexWebsocketsEnabled } = useRelayState();
   const confirm = useConfirm();
-  const { checked, select } = usePendingFlag(codexWebsocketsEnabled);
+  const { checked, saving, select } = usePendingFlag(codexWebsocketsEnabled);
   const supported = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("codex_websockets"));
   if (!supported) return null;
   return <CodexFeatureToggleControl
@@ -22,9 +22,9 @@ export function CodexWebsocketsControl({ className = "" }: { className?: string 
     label={t("codex.websockets")}
     description={checked ? t("codex.websocketsEnabled") : t("codex.websocketsDisabled")}
     checked={checked}
-    disabled={!runtime}
+    disabled={!runtime || saving}
     onChange={async (enabled) => {
-      if (enabled && !await confirm(t("codex.websocketsRestartMessage"), {
+      if (!await confirm(t("codex.websocketsRestartMessage"), {
         title: t("codex.websocketsRestartTitle"),
         confirmLabel: t("codex.websocketsRestartAction"),
       })) return;

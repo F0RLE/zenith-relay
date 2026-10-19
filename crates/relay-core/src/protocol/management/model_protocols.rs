@@ -190,18 +190,6 @@ pub fn apply_model_protocol_routes(
     }
 }
 
-pub fn codex_catalog_supports_websockets(models: &[ModelSummary]) -> bool {
-    !models
-        .iter()
-        .filter(|model| model.enabled && model.codex_visible)
-        .any(|model| {
-            model.protocol_routes.iter().any(|route| {
-                route.client_wire_api == WireApi::Responses
-                    && route.upstream_wire_api != WireApi::Responses
-            })
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,31 +359,5 @@ mod tests {
             route.project_reasoning(&fallback);
             assert!(route.reasoning_efforts.is_empty());
         }
-    }
-
-    #[test]
-    fn codex_disables_websockets_when_a_visible_model_has_a_converted_fallback() {
-        let mut model: ModelSummary = serde_json::from_value(
-            json!({"id":"test","enabled":true,"memberCount":1,"codexVisible":true}),
-        )
-        .unwrap();
-        let route = ModelProtocolRoute {
-            client_wire_api: WireApi::Responses,
-            upstream_wire_api: WireApi::Responses,
-            features: BTreeMap::new(),
-            reasoning_efforts: Vec::new(),
-        };
-        model.protocol_routes.push(route.clone());
-        assert!(codex_catalog_supports_websockets(&[model.clone()]));
-        model.protocol_routes.push(ModelProtocolRoute {
-            upstream_wire_api: WireApi::Messages,
-            ..route
-        });
-        assert!(!codex_catalog_supports_websockets(&[model.clone()]));
-        model.enabled = false;
-        assert!(codex_catalog_supports_websockets(&[model.clone()]));
-        model.enabled = true;
-        model.codex_visible = false;
-        assert!(codex_catalog_supports_websockets(&[model]));
     }
 }

@@ -179,15 +179,7 @@ pub(in crate::local_pool) async fn refresh_active_codex_catalog(
                 return Ok(CodexCatalogRefreshStatus::Skipped);
             };
             let secret = super::super::pool::ensure_local_gateway_key_secret(&key)?;
-            let snapshot = super::super::state::build_local_runtime_state(state)
-                .await
-                .map_err(|error| LocalPoolError::new(error.code, error.message))?;
-            supports_websockets = Some(
-                snapshot.gateway.codex_websockets_enabled
-                    && zenith_relay_core::protocol::codex_catalog_supports_websockets(
-                        &snapshot.gateway.models,
-                    ),
-            );
+            supports_websockets = Some(state.store()?.gateway().codex_websockets_enabled);
             fetch_codex_model_catalog(&format!("http://{address}/v1"), &secret)
                 .await
                 .map_err(|error| LocalPoolError::new(error.code, error.message))?
