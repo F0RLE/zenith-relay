@@ -103,6 +103,8 @@ pub struct UsageLog {
 #[serde(rename_all = "camelCase")]
 pub struct CacheSession {
     pub client_context_id: String,
+    pub candidate_kind: String,
+    pub candidate_id: String,
     pub started_at: String,
     pub touched_at: String,
     pub model: Option<String>,

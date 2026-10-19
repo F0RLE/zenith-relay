@@ -441,6 +441,8 @@ fn cache_sessions_follow_the_latest_cache_touch_and_reported_window() {
         vec![
             CacheSession {
                 client_context_id: "client_bbbb".into(),
+                candidate_kind: "account".into(),
+                candidate_id: "account_b".into(),
                 started_at: "2026-09-27T11:00:00Z".into(),
                 touched_at: "2026-09-27T11:00:00Z".into(),
                 model: Some("gpt-6-astra".into()),
@@ -448,6 +450,8 @@ fn cache_sessions_follow_the_latest_cache_touch_and_reported_window() {
             },
             CacheSession {
                 client_context_id: "client_aaaa".into(),
+                candidate_kind: "source".into(),
+                candidate_id: write.source_id.clone(),
                 started_at: "2026-09-27T10:00:00Z".into(),
                 touched_at: "2026-09-27T10:40:00Z".into(),
                 model: Some("claude-sonnet".into()),
@@ -477,6 +481,135 @@ fn cache_sessions_follow_the_latest_cache_touch_and_reported_window() {
         .unwrap();
     assert_eq!(account.len(), 1);
     assert_eq!(account[0].client_context_id, "client_bbbb");
+    drop(database);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn cache_sessions_isolate_routes_and_ignore_misses_and_future_policies() {
+    let root =
+        std::env::temp_dir().join(format!("zenith-relay-cache-scope-{}", uuid::Uuid::new_v4()));
+    let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+    for (id, account, source, model, read, write, ttl, time) in [
+        (
+            "write",
+            Some("a"),
+            "provider",
+            "m1",
+            0,
+            8,
+            Some("30m"),
+            "12:00:00",
+        ),
+        (
+            "early-miss",
+            Some("a"),
+            "provider",
+            "m1",
+            0,
+            0,
+            Some("1h"),
+            "12:20:00",
+        ),
+        ("read", Some("a"), "provider", "m1", 8, 0, None, "12:25:00"),
+        (
+            "late-miss",
+            Some("a"),
+            "provider",
+            "m1",
+            0,
+            0,
+            Some("1h"),
+            "12:26:00",
+        ),
+        (
+            "model",
+            Some("a"),
+            "provider",
+            "m2",
+            0,
+            9,
+            Some("5m"),
+            "12:26:00",
+        ),
+        (
+            "account",
+            Some("b"),
+            "provider",
+            "m1",
+            0,
+            7,
+            Some("1h"),
+            "12:27:00",
+        ),
+        ("source", None, "a", "m1", 0, 2, Some("15m"), "12:28:00"),
+        (
+            "source-two",
+            None,
+            "source-b",
+            "m1",
+            0,
+            3,
+            Some("45m"),
+            "12:29:00",
+        ),
+        (
+            "future",
+            Some("a"),
+            "provider",
+            "m1",
+            0,
+            1,
+            Some("1h"),
+            "12:40:00",
+        ),
+    ] {
+        let mut event = aggregate_test_event(id, 1, 10, write, ttl.map(str::to_owned), 1);
+        event.client_context_id = Some("same_chat".into());
+        event.account_id = account.map(str::to_owned);
+        event.source_id = source.into();
+        event.requested_model = Some(model.into());
+        event.resolved_model = Some(model.into());
+        event.cached_input_tokens = Some(read);
+        database.record(&event).unwrap();
+        database
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE request_logs SET created_at = ?1 WHERE request_id = ?2",
+                [format!("2026-10-18 {time}"), id.to_owned()],
+            )
+            .unwrap();
+    }
+    let to_ms = chrono::DateTime::parse_from_rfc3339("2026-10-18T12:30:00Z")
+        .unwrap()
+        .timestamp_millis() as u64;
+    let sessions = database
+        .cache_sessions(&UsageQuery {
+            to_ms: Some(to_ms),
+            ..UsageQuery::default()
+        })
+        .unwrap();
+    assert_eq!(sessions.len(), 5);
+    for (kind, id, model, expected_ttl, expected_time) in [
+        ("account", "a", "m1", "30m", "12:25:00"),
+        ("account", "a", "m2", "5m", "12:26:00"),
+        ("account", "b", "m1", "1h", "12:27:00"),
+        ("source", "a", "m1", "15m", "12:28:00"),
+        ("source", "source-b", "m1", "45m", "12:29:00"),
+    ] {
+        let session = sessions
+            .iter()
+            .find(|session| {
+                session.candidate_kind == kind
+                    && session.candidate_id == id
+                    && session.model.as_deref() == Some(model)
+            })
+            .unwrap();
+        assert_eq!(session.cache_write_ttl.as_deref(), Some(expected_ttl));
+        assert_eq!(session.touched_at, format!("2026-10-18T{expected_time}Z"));
+    }
     drop(database);
     std::fs::remove_dir_all(root).unwrap();
 }
