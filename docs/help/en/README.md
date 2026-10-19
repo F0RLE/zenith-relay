@@ -196,44 +196,27 @@ the sign-in form. The **?** button opens this help and keeps the attempt active.
 
 **Using BPS**
 
-1. Start with one connection and one model. Enable the member in **Pool**,
-   start **Access → Local API**, then select **Pool → Connect → ChatGPT**
-   or **OpenCode**. Other clients use the API address and key from **Access**.
-2. Choose **Standard** speed and send a short text request. Then check a
-   tool call and return its result. **Fast** and **Ultrafast** are unavailable
-   for BPS. Text streams incrementally when the provider sends SSE; tools appear
-   only after the complete response validates. JSON replies remain buffered.
-3. To compare quality, keep the model, reasoning level and task the same.
-   A level's name does not guarantee a separate upstream mode. A single
-   answer or network error does not establish a loss of quality.
+Follow [pool setup](#connect-an-application-through-the-pool) with the Excel
+connection. Use **Standard** speed; **Fast** and **Ultrafast** are unavailable.
+Test text, then a tool call and its result. One sign-in works with all supported
+client protocols; a catalog does not expand account permissions or quota.
 
-Relay uses the native BPS route and translates the result to the client's
-protocol. You do not need to add the same sign-in again for another protocol.
-Model access depends on account permissions; importing a catalog does not
-extend them. BPS does not remove limits or guarantee response quality.
+BPS supports text, function/custom tools, and inline PNG, JPEG, GIF and WebP
+attachments in user messages and tool results. Remote image URLs, native web
+search, image generation, strict structured output and **Agent Identity** are
+unsupported. Search can use a tool supplied by the client.
 
-Text and function/custom tools are supported. For images in user messages and tool results,
-Relay uploads inline PNG, JPEG, GIF and WebP images as native attachments.
-It does not fetch remote image URLs. Native web search and image generation,
-native strict structured output and **Agent Identity** are unavailable.
+SSE text streams before a withheld tool; tools are released only after full
+validation. JSON replies and opt-in local output validation remain buffered.
+Local JSON validation checks the result, not provider-native decoding, and does
+not regenerate invalid answers. Developer options and limits are in the
+[BPS contract](../../project/PLANNING.md#excel--basis-points).
 
-Responses integrations can explicitly enable `relay_bps_output_validation: true`
-with `text.format` `json_object` or `json_schema` (`strict: false`). This validates
-the final answer locally, not with provider-native constrained decoding. It
-buffers the answer and rejects invalid output without automatic regeneration.
-It is off by default; `strict: true` is not supported on BPS.
-
-Developers can run a [manual quality observation](../../../CONTRIBUTING.md#manual-quality-observations)
-with an existing scoped local request key. It consumes quota, does not run in
-the background, and does not disable accounts. Transport/format failures are
-inconclusive, not evidence of degradation. Use the same model, effort and
-isolated routing; small samples do not prove quality or identify an account in
-a mixed pool.
-Search through a client tool is possible if the application declares it as
-a function/custom tool. The client must supply
-history: continuation with only `previous_response_id` is unsupported.
-If an old conversation contains encrypted agent messages from another route,
-start a new conversation or provide the relevant context as ordinary text.
+Clients must send history; `previous_response_id` alone is unsupported. For old
+encrypted agent messages from another route, start a new chat or supply plain
+text context. For [quality comparisons](../../../CONTRIBUTING.md#manual-quality-observations),
+use the same model, effort and isolated route. These tests consume quota;
+small samples and transport errors do not establish degradation.
 
 When a request fails, open it in **Usage**:
 
@@ -639,24 +622,18 @@ keeping other profiles. It launches Desktop again only when automatic launch is
 enabled. For explicit launch, use **Overview → Launch application → Claude Desktop**.
 Managed device inference policy can override the local profile.
 
-The model list keeps pool labels/order and one entry per enabled Messages-routable
-model. Internal Claude-compatible IDs still route to the real model. Desktop's
-native Effort control is capped at the highest supported, pool-allowed level.
-Claude cannot hide holes inside its scale: for Low/High/Max, selecting Medium
-uses Low and XHigh uses High; Max stays Max. If no lower level is available,
-the lowest allowed level is used: with only High/Max, Low means High.
-Disabled thinking is never enabled automatically. Usage retains both requested
-and effective efforts. This rule applies only to the internal Claude Desktop
-picker routes, not direct API requests or other applications.
-Reduce enabled models if Desktop's 200-model limit is exceeded. Relay rejects
-that setup before changing the old profile or closing Desktop.
+The list preserves pool names/order, with one entry per enabled Messages-routable
+model and at most 200 models. Excess models are rejected before changing profiles.
+Claude-compatible IDs route to the real model. Effort is capped at the highest
+allowed level; gaps use the nearest lower level, or the lowest allowed if none
+is lower. For Low/High/Max, Medium uses Low and XHigh uses High. Disabled thinking
+stays disabled. This applies only to Relay's Desktop picker routes; **Usage**
+shows both requested and effective levels.
 
-After updating the running Relay, reconnect Desktop and start a new conversation
-to refresh its profile and tool settings. **MCP tools** and **System tools** in
-Claude's context breakdown are definitions, not RAM or an exact bill. Relay
-enables on-demand MCP schemas; do not delete working tools, skills, or history
-to reduce that indicator. Native Messages routes still need provider support
-for the original tool-discovery feature.
+After updating Relay, reconnect Desktop and start a new chat. **MCP tools** and
+**System tools** measure definitions, not RAM or billing: keep working tools,
+skills and history. Relay enables on-demand MCP schemas; native Messages still
+requires provider support for discovery.
 
 Caching/prices follow the actual provider. Required features that cannot be
 converted return an error. `Claude-3p/configLibrary` is the profile directory,
@@ -724,36 +701,21 @@ or applied from public API documentation to BPS or another compatible service.
 Unknown windows stay unknown, and mixed windows describe separate prefixes,
 not one cache with the longest TTL. An elapsed estimate does not prove eviction.
 
-A short greeting can still have a large input: the client also sends instructions,
-history, and tool definitions. **Technical details → Context** compares
-client and prepared JSON sizes for all protocols; these are bytes, not estimated
-tokens. BPS embeds tools in instructions and its native application may add
-unobservable context. Cache hits do not shrink the context window. Where supported,
-use the client's on-demand tool loading. For large BPS catalogs Relay supplies
-an index of names grouped by kind and declared namespace. Previously used tools
-retain compact schemas after history; full descriptions, usage rules, and exact
-schemas load together through bounded local lookups. Smaller catalogs use compact
-schema descriptions. All tools remain available; client instructions, history,
-and schema constraints are unchanged. This is not provider-hosted tool search.
+A greeting also carries client instructions, history and tool definitions.
+**Technical details → Context** compares client and prepared JSON sizes in bytes,
+not tokens. BPS can add context Relay cannot observe. Cache hits do not free
+context-window space. Use on-demand tool loading where supported; Relay's BPS
+catalog lookup preserves all tools and schema constraints without sending every
+full schema up front. See the [BPS contract](../../project/PLANNING.md#excel--basis-points)
+for catalog options.
 
-The context details show catalog mode, schema sizes, loaded/available tools,
-and lookup input/output tokens. Lookups consume the request's dispatch budget
-and have separate usage attempts; the final response counters describe its last
-generation. Discovery buffers even a streaming answer, so first/last-token
-timing is unavailable. Responses clients may request `relay_bps_tool_catalog`
-with `compact` or `full` to avoid discovery, or `auto` for the default policy.
+SSE text can stream during tool discovery; buffered replies have no first/last-token
+timing. Debug context comparisons omit conversation text and do not prove the
+cause of a cache miss. Lookup usage appears as separate request attempts.
 
-In debug mode, supported new Responses requests have a context comparison
-under **Technical details**. This is additional diagnostics without
-conversation text, not proof of the cause of a cache miss.
-
-Each Relay request has one report record and one final result. For retries,
-**Request activity** shows saved sends, errors and decisions across
-connections, independently of report filters. Provider messages from earlier
-sends can be expanded without replacing the request's final result.
-The stop reason is shown only when it was recorded; missing history is identified.
-Separate client requests with different Relay IDs remain separate records.
-History follows the request log's retention period.
+Each Relay request ID has one record and final result. **Request activity** shows
+its attempts, provider errors and recorded stop reason regardless of report
+filters. Missing history is marked; attempts expire with the request log.
 
 ## 6. Recovery
 

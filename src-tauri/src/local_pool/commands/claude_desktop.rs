@@ -131,7 +131,7 @@ pub async fn launch_claude_desktop(state: State<'_, DesktopState>) -> Result<(),
         );
     }
     refresh_catalog(&state).await?;
-    tauri::async_runtime::spawn_blocking(crate::launcher::launch_claude_desktop)
+    tauri::async_runtime::spawn_blocking(|| crate::launcher::launch_claude_desktop(true))
         .await
         .map_err(|_| LocalPoolError::new(ErrorCode::Io, "Claude Desktop launch was interrupted"))?
         .map_err(|message| LocalPoolError::new(ErrorCode::Io, message).into())
