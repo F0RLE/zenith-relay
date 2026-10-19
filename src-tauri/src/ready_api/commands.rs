@@ -5,7 +5,7 @@ use crate::{
         provider_has_token, reset_provider,
     },
     key_storage::{load_saved_app_key, save_app_key},
-    launcher::{is_codex_running, launch_codex, launch_codex_with_profile},
+    launcher::{is_codex_running, launch_codex_with_profile},
     local_pool,
     platform::{default_codex_home, platform_name, system_locale},
     tray::close_main_window,
@@ -294,12 +294,14 @@ pub(super) fn profile_change_with_rollback(error: String, rollback: Result<(), S
 }
 
 #[tauri::command]
-pub(super) fn launch_saved_codex(app: AppHandle) -> Result<String, String> {
+pub(super) async fn launch_saved_codex(app: AppHandle) -> Result<String, String> {
     if !provider_has_token() {
         return Err("Сначала сохраните API key.".to_string());
     }
-    let message = launch_codex();
+    tauri::async_runtime::spawn_blocking(launch_codex_with_profile)
+        .await
+        .map_err(|_| "ChatGPT launch was interrupted".to_string())??;
     close_main_window(&app);
     let _ = app.emit("zenith-state-changed", ());
-    Ok(message)
+    Ok("ChatGPT запущен.".to_string())
 }

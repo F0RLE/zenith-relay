@@ -8,6 +8,31 @@ const resolvedError = (cause: unknown) => ({
 });
 
 describe("relay operation policy", () => {
+  for (const fails of [false, true]) {
+    test(`standalone launch ${fails ? "failure" : "success"} never depends on a runtime refresh`, async () => {
+      const events: string[] = [];
+      const result = await runRelayOperation({
+        work: async () => {
+          events.push("launch");
+          if (fails) throw new Error("application not found");
+        },
+        refresh: async () => {
+          events.push("refresh");
+          throw new Error("profile changed outside Relay");
+        },
+        isCurrent: () => true,
+        successKey: "feedback.launched",
+        options: { skipRefresh: true, backgroundRefresh: true },
+        resolveError: resolvedError,
+        setFeedback: (feedback) => events.push(`${feedback.kind}:${feedback.key}`),
+        settle: () => events.push("settled"),
+      });
+      await Promise.resolve();
+      expect(result).toBe(!fails);
+      expect(events).toEqual(["launch", fails ? "error:errors.general" : "success:feedback.launched", "settled"]);
+    });
+  }
+
   test("runs work, refreshes current state, and publishes success in order", async () => {
     const events: string[] = [];
     const result = await runRelayOperation({

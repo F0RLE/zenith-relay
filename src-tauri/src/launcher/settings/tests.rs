@@ -178,6 +178,75 @@ fn missing_selected_file_blocks_launch_instead_of_falling_back() {
 }
 
 #[test]
+fn explicit_environment_path_is_validated_without_fallback() {
+    let fixture = Fixture::new();
+    let application = Application::Opencode;
+    assert_eq!(environment_path(application, None).unwrap(), None);
+    assert_eq!(
+        environment_path(application, Some("".as_ref())).unwrap(),
+        None
+    );
+    let desktop = fixture.executable(application);
+    assert_eq!(
+        environment_path(application, Some(desktop.as_os_str())).unwrap(),
+        Some(fs::canonicalize(&desktop).unwrap())
+    );
+    let cli = fixture.root.join(if cfg!(target_os = "windows") {
+        "bin/opencode.exe"
+    } else {
+        "bin/opencode"
+    });
+    fs::create_dir_all(cli.parent().unwrap()).unwrap();
+    fs::copy(&desktop, &cli).unwrap();
+    for path in [Path::new("opencode"), cli.as_path(), fixture.root.as_path()] {
+        assert!(environment_path(application, Some(path.as_os_str())).is_err());
+    }
+    fs::remove_file(&desktop).unwrap();
+    assert!(environment_path(application, Some(desktop.as_os_str())).is_err());
+    assert!(!fixture.store.path.exists());
+}
+
+#[test]
+fn earlier_cli_on_path_does_not_hide_later_desktop() {
+    let fixture = Fixture::new();
+    let desktop = fixture.executable(Application::Opencode);
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let desktop = {
+        let installed = fixture.root.join("opt/opencode/opencode");
+        fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        fs::copy(desktop, &installed).unwrap();
+        installed
+    };
+    let cli_directory = fixture.root.join("bin");
+    let cli = cli_directory.join(desktop.file_name().unwrap());
+    fs::create_dir_all(&cli_directory).unwrap();
+    fs::copy(&desktop, &cli).unwrap();
+    let paths = std::env::join_paths([cli_directory.as_path(), desktop.parent().unwrap()]).unwrap();
+    #[cfg(target_os = "windows")]
+    let command = desktop.file_stem().unwrap();
+    #[cfg(not(target_os = "windows"))]
+    let command = desktop.file_name().unwrap();
+    let candidates =
+        super::super::process::find_commands_on_path(&paths, command.to_str().unwrap());
+    assert_eq!(candidates, vec![cli, desktop.clone()]);
+    assert_eq!(
+        super::super::opencode_desktop::first_desktop_executable(candidates),
+        Some(fs::canonicalize(desktop).unwrap())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn non_executable_autodetected_desktop_is_rejected_before_restart() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let desktop = fixture.executable(Application::Opencode);
+    fs::set_permissions(&desktop, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(super::super::opencode_desktop::first_desktop_executable([desktop.clone()]).is_none());
+    assert!(environment_path(Application::Opencode, Some(desktop.as_os_str())).is_err());
+}
+
+#[test]
 fn invalid_paths_do_not_replace_a_saved_path() {
     let fixture = Fixture::new();
     let path = fixture.executable(Application::Opencode);

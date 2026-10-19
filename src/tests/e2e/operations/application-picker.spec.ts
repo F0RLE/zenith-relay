@@ -2,9 +2,9 @@ import { expect, test, type Page } from "../../bun-playwright";
 import { installTauriMock } from "../tauri-mock";
 
 const applications = [
-  { name: "ChatGPT", connect: "attach_codex_to_local_gateway", launch: "launch_managed_codex_profile", feedback: "Client launched." },
-  { name: "Claude Desktop", connect: "connect_claude_desktop", launch: "launch_claude_desktop", feedback: "Client launched." },
-  { name: "OpenCode", connect: "connect_opencode_to_local_gateway", launch: "restart_opencode_app", feedback: "Client launched." },
+  { id: "chatgpt", name: "ChatGPT", connect: "attach_codex_to_local_gateway", launch: "launch_managed_codex_profile", feedback: "Client launched." },
+  { id: "claude-desktop", name: "Claude Desktop", connect: "connect_claude_desktop", launch: "launch_claude_desktop", feedback: "Client launched." },
+  { id: "opencode", name: "OpenCode", connect: "connect_opencode_to_local_gateway", launch: "restart_opencode_app", feedback: "Client launched." },
 ] as const;
 
 const launchPreferenceLabel = "Launch applications after connecting";
@@ -136,16 +136,93 @@ for (const application of applications) {
     expect((await commands(page)).filter((command) => command === application.launch)).toHaveLength(1);
   });
 
-  test(`explicit Overview launch opens ${application.name} with automatic launch disabled`, async ({ page }) => {
-    await installTauriMock(page, { mode: "local", locale: "en", populated: true });
-    await page.addInitScript(() => localStorage.setItem("relay.launchApplicationAfterConnect", "0"));
+  for (const gatewayRunning of [false, true]) {
+    test(`Overview opens ${application.name} without connecting with API ${gatewayRunning ? "running" : "stopped"}`, async ({ page }) => {
+      await installTauriMock(page, {
+        mode: "local", locale: "en", populated: gatewayRunning, gatewayRunning,
+        claudeDesktopConfigured: false, profileSwitchError: true,
+      });
+      await page.addInitScript(() => localStorage.setItem("relay.launchApplicationAfterConnect", "0"));
+      await page.goto("/");
+      const launch = page.getByRole("button", { name: "Launch application", exact: true });
+      await expect(launch).toBeEnabled();
+      await launch.click();
+      const picker = page.getByRole("dialog", { name: "Which application do you want to launch?" });
+      await expect(picker.getByRole("checkbox")).toHaveCount(0);
+      await picker.getByRole("button", { name: application.name, exact: true }).click();
+      await expect(picker).toHaveCount(0);
+      await expect(page.locator(".global-feedback.success")).toContainText(application.feedback);
+
+      const calls = await page.evaluate(() => (window as unknown as {
+        __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }>;
+      }).__TAURI_TEST_INVOKES__);
+      expect(calls.filter((call) => call.command === "launch_application").map((call) => call.args))
+        .toEqual([{ application: application.id }]);
+      const invoked = calls.map((call) => call.command);
+      for (const managed of applications) {
+        expect(invoked).not.toContain(managed.connect);
+        expect(invoked).not.toContain(managed.launch);
+      }
+      expect(invoked).not.toContain("stop_managed_codex_profile");
+      expect(invoked).not.toContain("start_local_gateway");
+      expect(invoked).not.toContain("stop_local_gateway");
+      expect(invoked).not.toContain("restart_local_gateway");
+      await expect(page.getByRole("button", { name: gatewayRunning ? "Stop API" : "Start API", exact: true })).toBeVisible();
+    });
+  }
+
+  test(`Overview opens ${application.name} after an external profile change without consulting Relay profiles`, async ({ page }) => {
+    await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: false });
     await page.goto("/");
-    await page.getByRole("button", { name: "Launch application", exact: true }).click();
-    const picker = page.getByRole("dialog", { name: "Which application do you want to launch?" });
-    await expect(picker.getByRole("checkbox")).toHaveCount(0);
-    await picker.getByRole("button", { name: application.name, exact: true }).click();
+    await expect(page.getByRole("button", { name: "Start API", exact: true })).toBeVisible();
+    await page.evaluate((managedCommands) => {
+      const state = window as unknown as {
+        __PROFILE_CHECKS__: string[];
+        __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> };
+      };
+      state.__PROFILE_CHECKS__ = [];
+      const invoke = state.__TAURI_INTERNALS__.invoke.bind(state.__TAURI_INTERNALS__);
+      state.__TAURI_INTERNALS__.invoke = (command, args, options) => {
+        if (managedCommands.includes(command)) {
+          state.__PROFILE_CHECKS__.push(command);
+          return Promise.reject({ code: "profile_restore_blocked", message: "Synthetic external profile change" });
+        }
+        return invoke(command, args, options);
+      };
+    }, [
+      ...applications.flatMap((managed) => [managed.connect, managed.launch]),
+      "get_local_runtime_state", "list_codex_account_bindings", "get_claude_desktop_status", "get_opencode_config_status",
+    ]);
+    const launch = page.getByRole("button", { name: "Launch application", exact: true });
+    await launch.click();
+    await page.getByRole("dialog").getByRole("button", { name: application.name, exact: true }).click();
     await expect(page.locator(".global-feedback.success")).toContainText(application.feedback);
-    expect((await commands(page)).filter((command) => command === application.launch)).toHaveLength(1);
+    await expect(launch).toBeEnabled();
+    expect(await page.evaluate(() => (window as unknown as { __PROFILE_CHECKS__: string[] }).__PROFILE_CHECKS__)).toEqual([]);
+    expect((await commands(page)).filter((command) => command === "launch_application")).toHaveLength(1);
+  });
+
+  test(`Overview reports ${application.name} launch errors without connecting as a fallback`, async ({ page }) => {
+    await installTauriMock(page, { mode: "local", locale: "en", populated: false, gatewayRunning: false });
+    await page.goto("/");
+    await page.evaluate(() => {
+      const internals = (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__;
+      const invoke = internals.invoke.bind(internals);
+      internals.invoke = (command, args, options) => command === "launch_application"
+        ? Promise.reject({ code: "io_error", message: "Synthetic application launch failure" })
+        : invoke(command, args, options);
+    });
+    await page.getByRole("button", { name: "Launch application", exact: true }).click();
+    await page.getByRole("dialog").getByRole("button", { name: application.name, exact: true }).click();
+    await expect(page.locator(".global-feedback.error")).toBeVisible();
+    await expect(page.locator(".global-feedback.success")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Launch application", exact: true })).toBeEnabled();
+    const calls = await commands(page);
+    expect(calls).not.toContain(application.connect);
+    expect(calls).not.toContain(application.launch);
+    expect(calls).not.toContain("start_local_gateway");
   });
 }
 

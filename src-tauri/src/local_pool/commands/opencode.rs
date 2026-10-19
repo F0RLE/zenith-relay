@@ -177,12 +177,7 @@ pub async fn launch_opencode_source(
         true,
     )?;
     write_config_with_model_order(&config_path, &config_document, &models)?;
-    restart_opencode().map_err(|error| {
-        LocalPoolError::new(
-            ErrorCode::Io,
-            format!("failed to restart OpenCode: {error}"),
-        )
-    })?;
+    restart_opencode_app().await?;
     Ok(OpenCodeConnectionResult {
         path: config_path.display().to_string(),
         model_count: models.len(),
@@ -215,14 +210,17 @@ fn source_opencode_models(source: &ProviderSourceRecord) -> Result<Vec<String>, 
 }
 
 #[tauri::command]
-pub fn restart_opencode_app() -> Result<(), CommandError> {
-    restart_opencode().map_err(|error| {
-        LocalPoolError::new(
-            ErrorCode::Io,
-            format!("failed to restart OpenCode: {error}"),
-        )
-        .into()
-    })
+pub async fn restart_opencode_app() -> Result<(), CommandError> {
+    tauri::async_runtime::spawn_blocking(restart_opencode)
+        .await
+        .map_err(|_| LocalPoolError::new(ErrorCode::Io, "OpenCode launch was interrupted"))?
+        .map_err(|error| {
+            LocalPoolError::new(
+                ErrorCode::Io,
+                format!("failed to restart OpenCode: {error}"),
+            )
+            .into()
+        })
 }
 
 #[tauri::command]

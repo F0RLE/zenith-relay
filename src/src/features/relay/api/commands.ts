@@ -84,6 +84,7 @@ export type UiState = {
 
 export const relayCommands = {
   readyState: () => invoke<UiState>("get_state"),
+  launchApplication: (application: LaunchApplication) => invoke<void>("launch_application", { application }),
   getApplicationLaunchPath: (application: LaunchApplication) => invoke<LaunchPathSetting>("get_application_launch_path", { application }),
   setApplicationLaunchPath: (application: LaunchApplication, path: string | null) => invoke<LaunchPathSetting>("set_application_launch_path", { application, path }),
   pickApplicationLaunchPath: (application: LaunchApplication) => invoke<string | null>("pick_application_launch_path", { application }),

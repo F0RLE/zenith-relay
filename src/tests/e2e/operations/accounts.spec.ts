@@ -101,7 +101,7 @@ test("ChatGPT recovery restores a selected manual snapshot", async ({ page }) =>
   expect(commands).toContain("restore_full_codex_profile_snapshot");
 });
 
-test("Overview connects and launches OpenCode from the launch action", async ({ page }) => {
+test("Overview launches OpenCode without attaching or restarting it", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Launch application" }).click();
@@ -111,8 +111,9 @@ test("Overview connects and launches OpenCode from the launch action", async ({ 
 
   await expect(page.locator(".global-feedback.success")).toContainText("Client launched.");
   const commands = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.map((call) => call.command));
-  expect(commands.filter((command) => ["connect_opencode_to_local_gateway", "restart_opencode_app"].includes(command)))
-    .toEqual(["connect_opencode_to_local_gateway", "restart_opencode_app"]);
+  expect(commands.filter((command) => command === "launch_application")).toHaveLength(1);
+  expect(commands).not.toContain("connect_opencode_to_local_gateway");
+  expect(commands).not.toContain("restart_opencode_app");
 });
 
 test("confirmed local reset delegates protected restoration to Rust", async ({ page }) => {

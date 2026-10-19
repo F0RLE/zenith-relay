@@ -1284,6 +1284,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             applicationLaunchPaths[String(args.application)] = args.path == null ? null : String(args.path);
             return { path: applicationLaunchPaths[String(args.application)], detectedPath: detectedApplicationPaths[String(args.application)] ?? null };
           }
+          case "launch_application": return null;
           case "pick_application_launch_path": return detectedApplicationPaths[String(args.application)] ?? null;
           case "get_opencode_config_status": return { configured: false, modelCount: 0, hasBackup: false, backupCreatedAtMs: null, backupName: null, path: "C:\\Users\\Test\\.config\\opencode\\opencode.json" };
           case "create_opencode_snapshot": return true;

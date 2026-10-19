@@ -2,12 +2,11 @@ import { startTransition, useCallback, useEffect, useMemo, useRef, useState } fr
 import { Activity, ArrowRight, CircleAlert, Play, RefreshCw, Server, Square, Users } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { SourceSummary } from "../../api/types";
+import type { LaunchApplication, SourceSummary } from "../../api/types";
 import { Button, EmptyState, OptionMenu, PageHeader } from "../../components/Ui";
 import { ApplicationPickerDialog } from "../../components/ApplicationPickerDialog";
 import { SourceStatsPanel } from "../../components/SourceStatsPanel";
 import { useSourceStats } from "../../hooks/useSourceStats";
-import { useClaudeDesktopLaunch } from "../../hooks/useClaudeDesktopLaunch";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { useSavedChoice } from "../../state/usePendingFlag";
 import { useRelayUsageContext } from "../../state/relayStateContext";
@@ -22,7 +21,6 @@ export function OverviewPage() {
   const { mode, runtime, setPage, perform, busy } = useRelayState();
   const { usageRevision } = useRelayUsageContext();
   const [applicationDialog, setApplicationDialog] = useState(false);
-  const claudeDesktop = useClaudeDesktopLaunch();
   const [range, setRange] = useState<Range>("today");
   const [analyticsScopeSelection, setAnalyticsScopeSelection] = useState<AnalyticsScope>(() => {
     const stored = localStorage.getItem("relay.overviewAnalyticsScope");
@@ -61,13 +59,8 @@ export function OverviewPage() {
     setAnalyticsScopeSelection(selectedScope);
     localStorage.setItem("relay.overviewAnalyticsScope", selectedScope);
   }, []);
-  const launchOpenCode = () => perform("opencode-launch", relayCommands.connectOpenCode, "feedback.launched", {
-    backgroundRefresh: true,
-    afterWork: relayCommands.restartOpenCode,
-  });
-  const launchClaudeDesktop = () => perform("claude-desktop-launch", relayCommands.connectClaudeDesktop, "feedback.launched", {
-    backgroundRefresh: true,
-    afterWork: claudeDesktop.launch,
+  const launchApplication = (application: LaunchApplication) => perform(`${application}-launch`, () => relayCommands.launchApplication(application), "feedback.launched", {
+    skipRefresh: true,
   });
 
   useEffect(() => {
@@ -177,8 +170,6 @@ export function OverviewPage() {
       variant={running ? "primary" : "secondary"}
       busy={busy === "chatgpt-launch" || busy === "opencode-launch" || busy === "claude-desktop-launch"}
       icon={<Play aria-hidden />}
-      disabled={!running}
-      title={!running ? t("gateway.start") : undefined}
       onClick={() => setApplicationDialog(true)}
     >
       {t("overview.launchApplication")}
@@ -219,9 +210,9 @@ export function OverviewPage() {
       <ApplicationPickerDialog
         title={t("overview.applicationPickerTitle")}
         onClose={() => setApplicationDialog(false)}
-        onChatGPT={() => { void perform("chatgpt-launch", relayCommands.launchManagedCodex, "feedback.launched", { backgroundRefresh: true }); }}
-        onOpenCode={() => void launchOpenCode()}
-        onClaudeDesktop={() => void launchClaudeDesktop()}
+        onChatGPT={() => void launchApplication("chatgpt")}
+        onOpenCode={() => void launchApplication("opencode")}
+        onClaudeDesktop={() => void launchApplication("claude-desktop")}
       />
     ) : null}
   </section>;

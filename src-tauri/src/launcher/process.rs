@@ -24,6 +24,9 @@ mod identity;
 use identity::claude_desktop_pids;
 #[cfg(target_os = "windows")]
 use identity::claude_desktop_pids_for;
+pub(super) use identity::is_claude_desktop_process;
+#[cfg(test)]
+pub(super) use identity::is_claude_desktop_process_identity;
 pub(crate) use identity::is_codex_process;
 pub(super) use identity::is_codex_process_identity;
 #[cfg(all(test, target_os = "windows"))]
@@ -231,6 +234,7 @@ pub(super) fn windows_taskkill_arguments(pid: u32, force: bool) -> Vec<String> {
 }
 
 pub(super) fn launch_codex_checked() -> Result<(), String> {
+    let executable = super::settings::configured_path(super::settings::Application::Chatgpt)?;
     // Opening an already running desktop app is a no-op. Besides avoiding a
     // duplicate process, this prevents Chromium from reinitializing its
     // profile and touching the large on-disk cache on every click.
@@ -238,9 +242,7 @@ pub(super) fn launch_codex_checked() -> Result<(), String> {
         return Ok(());
     }
 
-    if let Some(executable) =
-        super::settings::configured_path(super::settings::Application::Chatgpt)?
-    {
+    if let Some(executable) = executable {
         return launch_configured_chatgpt(&executable);
     }
 
@@ -337,8 +339,7 @@ pub(super) fn detected_chatgpt_launch_path() -> Option<String> {
     }
 }
 
-pub(super) fn find_command_on_path(command_name: &str) -> Option<PathBuf> {
-    let paths = env::var_os("PATH").or_else(|| env::var_os("Path"))?;
+pub(super) fn find_commands_on_path(paths: &std::ffi::OsStr, command_name: &str) -> Vec<PathBuf> {
     let names = if cfg!(target_os = "windows") {
         vec![
             command_name.to_string(),
@@ -349,9 +350,29 @@ pub(super) fn find_command_on_path(command_name: &str) -> Option<PathBuf> {
     } else {
         vec![command_name.to_string()]
     };
-    env::split_paths(&paths)
+    env::split_paths(paths)
         .flat_map(|directory| names.iter().map(move |entry| directory.join(entry)))
-        .find(|candidate| candidate.is_file())
+        .filter(|candidate| candidate.is_file())
+        .collect()
+}
+
+pub(super) fn wait_for_application_start(
+    mut running: impl FnMut() -> bool,
+    timeout: Duration,
+    product: &str,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if running() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "{product} did not start before the launch timeout; the saved profile was kept"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
 }
 
 #[cfg(target_os = "windows")]

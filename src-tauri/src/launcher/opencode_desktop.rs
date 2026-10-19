@@ -5,7 +5,9 @@ use std::process::Command;
 
 #[cfg(target_os = "windows")]
 use super::process::windows_hidden_command;
-use super::process::{find_command_on_path, is_opencode_running, stop_opencode_and_wait};
+use super::process::{
+    find_commands_on_path, is_opencode_running, stop_opencode_and_wait, wait_for_application_start,
+};
 
 #[cfg(target_os = "windows")]
 pub(super) fn spawn_opencode_windows(executable: &Path) -> Result<(), String> {
@@ -31,11 +33,6 @@ pub(super) fn spawn_opencode_windows(executable: &Path) -> Result<(), String> {
 
 pub(super) fn resolve_opencode_desktop_command() -> Option<PathBuf> {
     let mut candidates = Vec::new();
-    if let Some(configured) =
-        env::var_os("OPENCODE_BIN").filter(|configured_binary| !configured_binary.is_empty())
-    {
-        candidates.push(PathBuf::from(configured));
-    }
     let home = env::var_os("HOME")
         .or_else(|| env::var_os("USERPROFILE"))
         .map(PathBuf::from);
@@ -164,17 +161,23 @@ pub(super) fn resolve_opencode_desktop_command() -> Option<PathBuf> {
 
     // Homebrew exposes the desktop app as `opencode-desktop`, while the
     // terminal package and all distro packages expose `opencode`.
-    for command_name in ["opencode", "opencode-desktop", "ai.opencode.desktop"] {
-        if let Some(executable_path) = find_command_on_path(command_name) {
-            candidates.push(executable_path);
+    if let Some(paths) = env::var_os("PATH").or_else(|| env::var_os("Path")) {
+        for command_name in ["opencode", "opencode-desktop", "ai.opencode.desktop"] {
+            candidates.extend(find_commands_on_path(&paths, command_name));
         }
     }
 
-    candidates
-        .into_iter()
-        .filter(|candidate| candidate.is_file())
-        .map(|candidate| std::fs::canonicalize(&candidate).unwrap_or(candidate))
-        .find(|candidate| is_opencode_desktop_path(candidate))
+    first_desktop_executable(candidates)
+}
+
+pub(super) fn first_desktop_executable(
+    candidates: impl IntoIterator<Item = PathBuf>,
+) -> Option<PathBuf> {
+    candidates.into_iter().find_map(|candidate| {
+        let candidate = std::fs::canonicalize(candidate).ok()?;
+        super::settings::validate_path(super::settings::Application::Opencode, candidate.to_str()?)
+            .ok()
+    })
 }
 
 fn push_opencode_commands(candidates: &mut Vec<PathBuf>, directory: &Path) {
@@ -312,10 +315,7 @@ pub(super) fn is_linux_opencode_desktop_path(path: &Path) -> bool {
                 || (normalized_path.contains("/.mount_") && normalized_path.contains("opencode"))))
 }
 
-/// Restart OpenCode after changing its global configuration. OpenCode's
-/// desktop sidecar snapshots the provider catalog at startup, and launching
-/// a second instance only focuses the existing single-instance process.
-pub(super) fn restart_opencode() -> Result<(), String> {
+pub(super) fn launch_opencode(restart: bool) -> Result<(), String> {
     let executable = super::settings::configured_path(super::settings::Application::Opencode)?
         .or_else(resolve_opencode_desktop_command).ok_or_else(|| {
         "OpenCode desktop was not found. Install the desktop app or open it manually; Relay does not launch the terminal CLI without a terminal".to_string()
@@ -323,13 +323,13 @@ pub(super) fn restart_opencode() -> Result<(), String> {
 
     // Resolve the executable before stopping the current instance. A broken
     // installation must not leave a working OpenCode session closed.
-    if is_opencode_running() {
+    if restart && is_opencode_running() {
         stop_opencode_and_wait()?;
     }
 
     #[cfg(target_os = "windows")]
     {
-        spawn_opencode_windows(&executable)
+        spawn_opencode_windows(&executable)?;
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -350,7 +350,7 @@ pub(super) fn restart_opencode() -> Result<(), String> {
                         .success()
                         .then_some(())
                         .ok_or_else(|| "OpenCode desktop did not open".to_string())
-                })
+                })?;
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -358,7 +358,12 @@ pub(super) fn restart_opencode() -> Result<(), String> {
             Command::new(executable)
                 .spawn()
                 .map(|_| ())
-                .map_err(|error| format!("failed to start OpenCode: {error}"))
+                .map_err(|error| format!("failed to start OpenCode: {error}"))?;
         }
     }
+    wait_for_application_start(
+        is_opencode_running,
+        std::time::Duration::from_secs(10),
+        "OpenCode",
+    )
 }

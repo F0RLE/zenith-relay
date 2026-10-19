@@ -39,22 +39,28 @@ pub(in crate::launcher) fn claude_desktop_pids() -> Vec<u32> {
     system
         .processes()
         .values()
-        .filter(|process| {
-            process
-                .exe()
-                .is_some_and(super::super::claude_desktop::is_desktop_executable)
-        })
+        .filter(|process| is_claude_desktop_process(process))
         .map(|process| process.pid().as_u32())
         .collect()
 }
 
 #[cfg(target_os = "windows")]
 pub(super) fn claude_desktop_pids_for(targets: &[u32]) -> Vec<u32> {
-    matching_process_pids(targets, |process| {
-        process
-            .exe()
-            .is_some_and(super::super::claude_desktop::is_desktop_executable)
-    })
+    matching_process_pids(targets, is_claude_desktop_process)
+}
+
+pub(in crate::launcher) fn is_claude_desktop_process(process: &sysinfo::Process) -> bool {
+    is_claude_desktop_process_identity(process.exe(), process.cmd())
+}
+
+pub(in crate::launcher) fn is_claude_desktop_process_identity(
+    executable: Option<&Path>,
+    command: &[impl AsRef<std::ffi::OsStr>],
+) -> bool {
+    !command
+        .iter()
+        .any(|argument| argument.as_ref().to_string_lossy().starts_with("--type="))
+        && executable.is_some_and(super::super::claude_desktop::is_desktop_executable)
 }
 
 #[cfg(target_os = "windows")]
@@ -180,7 +186,12 @@ pub(in crate::launcher) fn is_codex_process_identity(
             return false;
         }
         let path = executable
-            .map(|executable_path| executable_path.to_string_lossy().to_ascii_lowercase())
+            .map(|executable_path| {
+                executable_path
+                    .to_string_lossy()
+                    .replace('/', "\\")
+                    .to_ascii_lowercase()
+            })
             .unwrap_or_default();
         // Keep this exclusion explicit. Relay may launch or own a process
         // tree that contains a compatible executable name in the future, but
@@ -200,7 +211,8 @@ pub(in crate::launcher) fn is_codex_process_identity(
             || path.contains("\\program files\\chatgpt\\")
             || path.contains("\\program files\\codex\\");
         (process_name.eq_ignore_ascii_case("OpenAI.Codex.exe")
-            || (process_name.eq_ignore_ascii_case("Codex.exe") && packaged_desktop))
+            || process_name.eq_ignore_ascii_case("Codex.exe"))
+            && packaged_desktop
             && !path.contains("\\resources\\codex.exe")
     }
 

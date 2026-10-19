@@ -35,12 +35,27 @@ impl Application {
     }
 
     fn detected_path(self) -> Option<String> {
+        if let Some(path) = self.environment_override() {
+            return environment_path(self, Some(&path))
+                .ok()
+                .flatten()
+                .map(|path| path.to_string_lossy().into_owned());
+        }
         match self {
             Self::Chatgpt => super::process::detected_chatgpt_launch_path(),
             Self::ClaudeDesktop => super::claude_desktop::detected_launch_path(),
             Self::Opencode => super::opencode_desktop::resolve_opencode_desktop_command()
                 .map(|path| path.to_string_lossy().into_owned()),
         }
+    }
+
+    fn environment_override(self) -> Option<std::ffi::OsString> {
+        let variable = match self {
+            Self::Chatgpt => return None,
+            Self::ClaudeDesktop => "CLAUDE_DESKTOP_BIN",
+            Self::Opencode => "OPENCODE_BIN",
+        };
+        std::env::var_os(variable).filter(|path| !path.is_empty())
     }
 }
 
@@ -144,7 +159,7 @@ fn settings_io_error() -> String {
     "Application launch settings could not be read or saved".to_string()
 }
 
-fn validate_path(application: Application, input: &str) -> Result<PathBuf> {
+pub(super) fn validate_path(application: Application, input: &str) -> Result<PathBuf> {
     let invalid = || {
         "Select an existing desktop application, not a terminal CLI, shortcut, or command with arguments".to_string()
     };
@@ -199,10 +214,30 @@ fn validate_path(application: Application, input: &str) -> Result<PathBuf> {
 pub(super) fn configured_path(
     application: Application,
 ) -> std::result::Result<Option<PathBuf>, String> {
-    let Some(store) = STORE.get() else {
-        return Ok(None);
-    };
-    configured_path_from(store, application)
+    let configured = STORE
+        .get()
+        .map(|store| configured_path_from(store, application))
+        .transpose()?
+        .flatten();
+    if configured.is_some() {
+        return Ok(configured);
+    }
+    environment_path(application, application.environment_override().as_deref())
+}
+
+fn environment_path(
+    application: Application,
+    path: Option<&std::ffi::OsStr>,
+) -> Result<Option<PathBuf>> {
+    path.filter(|path| !path.is_empty())
+        .map(|path| {
+            let path = path
+                .to_str()
+                .ok_or_else(|| "Application launch path is not valid text".to_string())?;
+            validate_path(application, path)
+                .and_then(|path| fs::canonicalize(path).map_err(|_| settings_io_error()))
+        })
+        .transpose()
 }
 
 fn configured_path_from(

@@ -1,18 +1,15 @@
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use std::time::Duration;
 use std::{
     env,
     path::{Path, PathBuf},
-};
-#[cfg(any(target_os = "windows", target_os = "macos", test))]
-use std::{
-    thread,
-    time::{Duration, Instant},
 };
 
 pub(crate) fn is_claude_desktop_running() -> bool {
     super::process::codex_process_system()
         .processes()
         .values()
-        .any(|process| process.exe().is_some_and(is_desktop_executable))
+        .any(super::process::is_claude_desktop_process)
 }
 
 pub(super) fn is_desktop_executable(path: &Path) -> bool {
@@ -29,9 +26,6 @@ pub(super) fn is_desktop_executable(path: &Path) -> bool {
 
 fn desktop_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    if let Some(path) = env::var_os("CLAUDE_DESKTOP_BIN").filter(|path| !path.is_empty()) {
-        candidates.push(path.into());
-    }
     if cfg!(target_os = "windows") {
         if let Some(local) = env::var_os("LOCALAPPDATA").map(PathBuf::from) {
             for root in [local.join("Claude"), local.join("Programs/Claude")] {
@@ -46,7 +40,7 @@ fn desktop_candidates() -> Vec<PathBuf> {
                             .is_some_and(|name| name.to_string_lossy().starts_with("app-"))
                     })
                     .collect::<Vec<_>>();
-                versions.sort();
+                versions.sort_by_cached_key(|path| desktop_version(path));
                 candidates.extend(
                     versions
                         .into_iter()
@@ -65,10 +59,28 @@ fn desktop_candidates() -> Vec<PathBuf> {
     candidates
 }
 
+fn desktop_version(path: &Path) -> Option<(Vec<u64>, bool, String)> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let version = name.strip_prefix("app-")?;
+    let (core, suffix) = version.split_once('-').unwrap_or((version, ""));
+    Some((
+        core.split('.')
+            .map(|part| part.parse().ok())
+            .collect::<Option<Vec<_>>>()?,
+        suffix.is_empty(),
+        suffix.to_owned(),
+    ))
+}
+
 fn desktop_executable() -> Option<PathBuf> {
-    desktop_candidates()
-        .into_iter()
-        .find(|path| path.is_file() && is_desktop_executable(path))
+    desktop_candidates().into_iter().find_map(|path| {
+        let path = super::settings::validate_path(
+            super::settings::Application::ClaudeDesktop,
+            path.to_str()?,
+        )
+        .ok()?;
+        std::fs::canonicalize(path).ok()
+    })
 }
 
 pub(super) fn detected_launch_path() -> Option<String> {
@@ -172,21 +184,11 @@ pub(crate) fn launch_claude_desktop(restart: bool) -> Result<(), String> {
             "Claude Desktop was not found. Install Claude Desktop, not the Claude Code CLI".into(),
         );
     }
-    wait_for_start(is_claude_desktop_running, Duration::from_secs(10))
-}
-
-#[cfg(any(target_os = "windows", target_os = "macos", test))]
-fn wait_for_start(mut running: impl FnMut() -> bool, timeout: Duration) -> Result<(), String> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if running() {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err("Claude Desktop did not start before the launch timeout; the saved profile was kept".into());
-        }
-        thread::sleep(Duration::from_millis(150));
-    }
+    super::process::wait_for_application_start(
+        is_claude_desktop_running,
+        Duration::from_secs(10),
+        "Claude Desktop",
+    )
 }
 
 #[cfg(test)]
@@ -203,9 +205,17 @@ mod tests {
     }
 
     #[test]
-    fn launch_confirmation_requires_a_running_desktop() {
-        assert!(wait_for_start(|| true, Duration::ZERO).is_ok());
-        assert!(wait_for_start(|| false, Duration::ZERO).is_err());
+    fn latest_installed_version_is_numeric_not_lexicographic() {
+        assert!(
+            desktop_version(Path::new("app-1.10.0")) > desktop_version(Path::new("app-1.9.99"))
+        );
+        assert!(desktop_version(Path::new("app-2.0.0")) > desktop_version(Path::new("app-1.99.0")));
+        assert!(
+            desktop_version(Path::new("app-1.10.0"))
+                > desktop_version(Path::new("app-1.10.0-beta"))
+        );
+        assert!(desktop_version(Path::new("app-1.invalid.10")).is_none());
+        assert!(desktop_version(Path::new("app-")).is_none());
     }
 
     #[test]

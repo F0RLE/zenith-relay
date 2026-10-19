@@ -149,6 +149,7 @@ fn desktop_commands() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send 
         get_state,
         get_platform,
         get_system_locale,
+        crate::launcher::launch_application,
         crate::launcher::settings::get_application_launch_path,
         crate::launcher::settings::set_application_launch_path,
         crate::launcher::settings::pick_application_launch_path,
