@@ -375,11 +375,11 @@
 .model-reasoning-options button:focus-visible {
   padding: 9px 11px;
   border-width: 2px;
-  border-color: var(--relay-accent);
+  border-color: color-mix(in srgb, var(--relay-accent) 30%, var(--relay-border));
 }
 
 .model-reasoning-options button.selected {
-  border-color: var(--relay-accent);
+  border-color: color-mix(in srgb, var(--relay-accent) 20%, var(--relay-border));
   background: var(--relay-accent-soft);
   color: var(--relay-accent);
 }
