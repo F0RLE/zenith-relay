@@ -87,6 +87,8 @@ mod http_continuation;
 mod http_rejection;
 #[path = "support/lite_and_wake.rs"]
 mod lite_and_wake;
+#[path = "support/mixed_rotation.rs"]
+mod mixed_rotation;
 #[path = "support/model_identity.rs"]
 mod model_identity;
 #[path = "support/route_capacity.rs"]

@@ -89,7 +89,7 @@ pub struct RotationEngine {
     recovery_in_flight: u32,
     successful_requests_since_recovery: u32,
     quota_stale_after_ms: u64,
-    manual_cursor: BTreeMap<String, ManualCursor>,
+    round_robin_cursor: BTreeMap<String, RoundRobinCursor>,
 }
 
 impl Default for RotationEngine {
@@ -116,7 +116,7 @@ impl Default for RotationEngine {
             successful_requests_since_recovery: 0,
             recovery_policy: policy,
             quota_stale_after_ms: super::super::QUOTA_STALE_AFTER_MS,
-            manual_cursor: BTreeMap::new(),
+            round_robin_cursor: BTreeMap::new(),
         }
     }
 }
@@ -136,7 +136,7 @@ struct ReadyCandidate {
 }
 
 #[derive(Clone, Debug)]
-struct ManualCursor {
+struct RoundRobinCursor {
     capacity_key: String,
     candidate_id: String,
     priority: i32,
@@ -150,6 +150,8 @@ mod registry;
 #[cfg(test)]
 use health::failure_backoff_ms;
 
+#[cfg(test)]
+mod load_tests;
 #[cfg(test)]
 mod regression;
 #[cfg(test)]

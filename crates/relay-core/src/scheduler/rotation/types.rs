@@ -57,9 +57,9 @@ pub enum RotationMode {
     #[default]
     Automatic,
     /// Cycle through ready members in the user-configured order.
-    Manual,
-    InOrder,
     RoundRobin,
+    WeightedRoundRobin,
+    Failover,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -288,14 +288,14 @@ fn upsert_and_equal_or_older_quota_revision_cannot_clear_provider_blocks() {
 }
 
 #[test]
-fn automatic_uses_normalized_load_and_in_order_skips_busy_members() {
+fn automatic_uses_normalized_load_and_failover_skips_busy_members() {
     let mut engine = engine(&[]);
     engine.upsert(member("a").with_capacity("a", 1)).unwrap();
     engine.upsert(member("b").with_capacity("b", 4)).unwrap();
     engine.reserve(&request(1).with_owner("a"), 0).unwrap();
     engine.reserve(&request(2).with_owner("b"), 0).unwrap();
     assert_eq!(engine.select(&request(3), 0).unwrap().candidate_id, "b");
-    engine.set_mode(RotationMode::InOrder);
+    engine.set_mode(RotationMode::Failover);
     assert_eq!(engine.select(&request(3), 0).unwrap().candidate_id, "b");
     assert_eq!(
         engine.select(
@@ -309,7 +309,7 @@ fn automatic_uses_normalized_load_and_in_order_skips_busy_members() {
 #[test]
 fn aliases_neither_double_weight_nor_accumulate_absent_debt() {
     let mut engine = engine(&["a", "b"]);
-    engine.set_mode(RotationMode::RoundRobin);
+    engine.set_mode(RotationMode::WeightedRoundRobin);
     engine
         .upsert(member("a-alias").with_capacity("a", 0))
         .unwrap();

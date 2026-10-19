@@ -58,6 +58,10 @@ impl RotationEngine {
 
     pub fn upsert(&mut self, mut candidate: RotationCandidate) -> Result<(), &'static str> {
         candidate.validate()?;
+        let routes_changed = self
+            .candidates
+            .get(&candidate.id)
+            .is_some_and(|runtime| runtime.candidate.routes != candidate.routes);
         let capacity_key = candidate.capacity_key.clone();
         let previous_capacity_key = self
             .candidates
@@ -91,7 +95,7 @@ impl RotationEngine {
             }
             if candidate.weight != runtime.candidate.weight
                 || candidate.capacity_key != runtime.candidate.capacity_key
-                || candidate.routes != runtime.candidate.routes
+                || routes_changed
             {
                 self.rotation_credit.clear();
             }
@@ -123,6 +127,9 @@ impl RotationEngine {
             if previous_capacity_key != capacity_key {
                 self.recompute_capacity_limit(&previous_capacity_key);
             }
+        }
+        if routes_changed {
+            self.prune_round_robin_cursors();
         }
         Ok(())
     }
@@ -212,7 +219,17 @@ impl RotationEngine {
         let capacity_key = runtime.candidate.capacity_key.clone();
         self.recompute_capacity_limit(&capacity_key);
         self.rotation_credit.clear();
+        self.prune_round_robin_cursors();
         Some(runtime.candidate)
+    }
+
+    fn prune_round_robin_cursors(&mut self) {
+        let candidates = &self.candidates;
+        self.round_robin_cursor.retain(|route, _| {
+            candidates
+                .values()
+                .any(|runtime| runtime.candidate.routes.contains_key(route))
+        });
     }
 
     pub(super) fn recompute_capacity_limit(&mut self, capacity_key: &str) {

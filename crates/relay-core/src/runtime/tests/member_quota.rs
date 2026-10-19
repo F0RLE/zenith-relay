@@ -439,6 +439,63 @@ fn refreshed_quota_snapshot_replaces_passive_state_before_header_merges() {
 }
 
 #[test]
+fn passive_windows_keep_admission_and_visible_headroom_in_sync() {
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    let scope = CandidateScope::default();
+    let tried = HashSet::new();
+    let now = current_time_ms().saturating_sub(100);
+    for (offset, (primary, secondary, reset_seconds, remaining)) in [
+        (20, 40, 600, Some(6_000)),
+        (20, 95, 600, Some(500)),
+        (100, 40, 600, None),
+        // A larger remainder cannot reopen the same exhausted provider cycle.
+        (35, 40, 600, None),
+        (35, 40, 7_200, Some(6_000)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let observed = now + u64::try_from(offset).unwrap();
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (name, value) in [
+            ("x-codex-primary-used-percent", primary),
+            ("x-codex-secondary-used-percent", secondary),
+            ("x-codex-primary-reset-after-seconds", reset_seconds),
+            ("x-codex-secondary-reset-after-seconds", reset_seconds),
+        ] {
+            headers.insert(name, value.to_string().parse().unwrap());
+        }
+        assert!(runtime.observe_codex_quota_headers(
+            "account-1",
+            reqwest::StatusCode::OK,
+            &headers,
+            observed,
+        ));
+        let snapshots = runtime.candidate_runtime_order();
+        let snapshot = snapshots
+            .iter()
+            .find(|member| member.candidate_id == "account-1")
+            .unwrap();
+        let displayed = snapshot
+            .resource_headroom
+            .as_ref()
+            .and_then(|headroom| headroom.quota_remaining_basis_points);
+        assert_eq!(displayed, remaining);
+        assert_eq!(snapshot.available, remaining.is_some());
+        let selected = runtime.lock_scheduler().select(crate::SelectionRequest {
+            model: "gpt-test",
+            allowed_protocols: &[WireApi::Responses],
+            scope: &scope,
+            tried: &tried,
+            response_affinity_key: None,
+            prompt_affinity_key: None,
+            now_ms: observed,
+        });
+        assert_eq!(selected.is_some(), remaining.is_some());
+    }
+}
+
+#[test]
 fn fresh_window_headers_do_not_revive_an_expired_credit_ledger() {
     let runtime = quota_runtime(QuotaSnapshot {
         limit_reached: true,

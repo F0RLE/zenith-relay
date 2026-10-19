@@ -55,29 +55,24 @@ impl RotationEngine {
         request: &RotationRequest,
         now_ms: u64,
     ) -> Result<RotationLease, AdmissionError> {
-        let selection = self
-            .select(request, now_ms)
-            .ok_or(AdmissionError::NoEligibleCandidate)?;
-        if !matches!(
-            self.candidate_availability(request, &selection.candidate_id, now_ms),
-            CandidateAvailability::Ready { .. }
-        ) {
-            return Err(AdmissionError::CandidateChanged);
-        }
-        let Some(runtime) = self.candidates.get(&selection.candidate_id) else {
-            return Err(AdmissionError::InvalidCandidate);
-        };
-        if runtime.candidate.max_concurrency > 0
-            && runtime.in_flight >= runtime.candidate.max_concurrency
-        {
-            return Err(AdmissionError::CandidateChanged);
-        }
+        // Exclusive access keeps this snapshot stable until the lease is inserted.
         let (ready, ordinary_alternatives) = self.selection_candidates(request, now_ms);
         let group = self.selection_group(&ready, request, now_ms);
         let selected = self
             .choose_for_request(request, &group)
             .ok_or(AdmissionError::NoEligibleCandidate)?;
-        if selected.id != selection.candidate_id {
+        if !matches!(
+            self.candidate_availability(request, &selected.id, now_ms),
+            CandidateAvailability::Ready { .. }
+        ) {
+            return Err(AdmissionError::CandidateChanged);
+        }
+        let Some(runtime) = self.candidates.get(&selected.id) else {
+            return Err(AdmissionError::InvalidCandidate);
+        };
+        if runtime.candidate.max_concurrency > 0
+            && runtime.in_flight >= runtime.candidate.max_concurrency
+        {
             return Err(AdmissionError::CandidateChanged);
         }
         let next_lease_id = self

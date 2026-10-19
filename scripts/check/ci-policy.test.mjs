@@ -55,6 +55,17 @@ describe("desktop CI", () => {
     );
   });
 
+  test("pool admission contention runs alongside the ordinary core suite", () => {
+    const steps = build.jobs.check.steps;
+    const core = steps.findIndex((step) => step.run === "cargo test --manifest-path crates/relay-core/Cargo.toml --locked");
+    const load = steps.findIndex((step) => step.name === "Bounded pool admission under contention");
+    expect(core).toBeGreaterThan(-1);
+    expect(load).toBeGreaterThan(core);
+    expect(steps[load].run).toBe("cargo test --manifest-path crates/relay-core/Cargo.toml --locked --lib large_mixed_queue_reaches_per_principal_limit_without_starvation -- --ignored");
+    expect(steps[load].if).toBeUndefined();
+    expect(steps[load]["continue-on-error"]).toBeUndefined();
+  });
+
   test("a manual run cannot publish, even from a tag", () => {
     expect(build.jobs["publish-release"].if).toBe(releasePush);
     expect(build.jobs["publish-updater-manifest"].if).toBe(`${releasePush} && !contains(github.ref_name, '-')`);

@@ -82,7 +82,7 @@ impl RotationEngine {
         if ready_candidates.len() == 1 {
             return RotationSelectionReason::OnlyEligible;
         }
-        if matches!(self.mode, RotationMode::InOrder | RotationMode::Manual) {
+        if matches!(self.mode, RotationMode::Failover | RotationMode::RoundRobin) {
             return RotationSelectionReason::ManualPriority;
         }
         if self.mode != RotationMode::Automatic {
@@ -149,13 +149,13 @@ impl RotationEngine {
                 return Some(preferred.clone());
             }
         }
-        if self.mode == RotationMode::Manual {
-            return self.choose_manual(&request.route_key, candidate_group);
+        if self.mode == RotationMode::RoundRobin {
+            return self.choose_round_robin(&request.route_key, candidate_group);
         }
         self.choose_weighted(&request.route_key, candidate_group)
     }
 
-    fn choose_manual(
+    fn choose_round_robin(
         &self,
         route_key: &str,
         candidates: &[ReadyCandidate],
@@ -171,7 +171,7 @@ impl RotationEngine {
             return None;
         }
 
-        let previous_cursor = self.manual_cursor.get(route_key).map(|cursor| {
+        let previous_cursor = self.round_robin_cursor.get(route_key).map(|cursor| {
             let priority = self
                 .candidates
                 .values()
@@ -265,11 +265,11 @@ impl RotationEngine {
             .iter()
             .filter(|candidate| candidate.recovery)
             .min_by_key(|candidate| (candidate.due_at_ms, &candidate.id));
-        if let Some(candidate) = recovery.filter(|_| self.mode != RotationMode::InOrder) {
+        if let Some(candidate) = recovery.filter(|_| self.mode != RotationMode::Failover) {
             return vec![candidate.clone()];
         }
         match self.mode {
-            RotationMode::InOrder => ready
+            RotationMode::Failover => ready
                 .iter()
                 .min_by(|left, right| {
                     right
@@ -280,8 +280,7 @@ impl RotationEngine {
                 .cloned()
                 .into_iter()
                 .collect(),
-            RotationMode::Manual => ready.to_vec(),
-            RotationMode::RoundRobin => ready.to_vec(),
+            RotationMode::RoundRobin | RotationMode::WeightedRoundRobin => ready.to_vec(),
             RotationMode::Automatic => {
                 // Spread independent concurrent work across the least-loaded
                 // physical members first. Quota and credit balances decide
@@ -482,7 +481,7 @@ impl RotationEngine {
                         .unwrap_or(self.max_in_flight)
                         .min(self.max_in_flight),
                     priority: runtime.candidate.priority,
-                    weight: if self.mode == RotationMode::Manual {
+                    weight: if self.mode == RotationMode::RoundRobin {
                         1
                     } else {
                         runtime.candidate.weight
@@ -554,7 +553,7 @@ impl RotationEngine {
                 left_rotation_credit
                     .cmp(&right_rotation_credit)
                     .then_with(|| {
-                        if self.mode == RotationMode::RoundRobin {
+                        if self.mode == RotationMode::WeightedRoundRobin {
                             left.priority.cmp(&right.priority)
                         } else {
                             std::cmp::Ordering::Equal
@@ -572,17 +571,17 @@ impl RotationEngine {
         route_key: &str,
         candidates: &[ReadyCandidate],
         selected_candidate_id: &str,
-        advance_manual_cursor: bool,
+        advance_round_robin_cursor: bool,
     ) {
-        if self.mode == RotationMode::Manual {
-            if advance_manual_cursor {
+        if self.mode == RotationMode::RoundRobin {
+            if advance_round_robin_cursor {
                 if let Some(candidate) = candidates
                     .iter()
                     .find(|candidate| candidate.id == selected_candidate_id)
                 {
-                    self.manual_cursor.insert(
+                    self.round_robin_cursor.insert(
                         route_key.to_owned(),
-                        ManualCursor {
+                        RoundRobinCursor {
                             capacity_key: candidate.capacity_key.clone(),
                             candidate_id: candidate.id.clone(),
                             priority: candidate.priority,

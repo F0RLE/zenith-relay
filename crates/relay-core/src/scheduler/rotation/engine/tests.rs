@@ -402,8 +402,8 @@ fn late_success_latency_cannot_update_a_readded_candidate() {
 }
 
 #[test]
-fn manual_and_in_order_modes_ignore_soft_health_signals() {
-    for mode in [RotationMode::Manual, RotationMode::InOrder] {
+fn round_robin_and_failover_ignore_soft_health_signals() {
+    for mode in [RotationMode::RoundRobin, RotationMode::Failover] {
         let mut engine = engine_with([candidate("a", 0, 1), candidate("b", 0, 1)]);
         engine.set_mode(mode);
         let before = engine.select(&request(1), 0).unwrap().candidate_id;
@@ -452,7 +452,7 @@ fn allowed_healthy_reserve_is_not_blocked_by_primary_priority() {
     primary.auth = AuthState::Ready;
     let reserve = candidate("reserve", 0, 1);
     let mut engine = engine_with([primary, reserve]);
-    engine.set_mode(RotationMode::InOrder);
+    engine.set_mode(RotationMode::Failover);
     let first_request = request(1);
     let lease = engine.reserve(&first_request, 0).unwrap();
     let budget = dispatch(&mut engine, &lease);
@@ -492,7 +492,7 @@ fn allowed_healthy_reserve_is_not_blocked_by_primary_priority() {
 #[test]
 fn failover_does_not_send_healthy_primary_traffic_to_a_recovering_reserve() {
     let mut engine = engine_with([candidate("primary", 100, 1), candidate("reserve", 0, 1)]);
-    engine.set_mode(RotationMode::InOrder);
+    engine.set_mode(RotationMode::Failover);
     settle_owner(
         &mut engine,
         "reserve",
@@ -512,7 +512,7 @@ fn failover_does_not_send_healthy_primary_traffic_to_a_recovering_reserve() {
 #[test]
 fn weighted_preview_is_side_effect_free_and_reservation_advances_state() {
     let mut engine = engine_with([candidate("a", 0, 1), candidate("b", 0, 3)]);
-    engine.set_mode(RotationMode::RoundRobin);
+    engine.set_mode(RotationMode::WeightedRoundRobin);
     let first_request = request(1);
     let preview = engine.select(&first_request, 0).unwrap();
     let second_preview = engine.select(&request(2), 0).unwrap();
