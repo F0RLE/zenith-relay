@@ -1,0 +1,13 @@
+# The server build only needs its Rust sources and the shared model catalog.
+**
+!catalog
+!catalog/**
+!crates
+!crates/relay-core
+!crates/relay-core/**
+!relay-server
+!relay-server/**
+**/target
+**/target-*
+**/.build
+**/.env*

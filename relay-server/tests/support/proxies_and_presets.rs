@@ -537,7 +537,7 @@ async fn configuration_presets_preview_apply_reject_stale_and_exclude_secrets() 
     assert_eq!(applied_state["configurationRevision"], applied["revision"]);
     assert_eq!(applied_state["gateway"]["maxRetryCandidates"], 4);
     let expected_pool_routing = json!({
-        "version": 2,
+        "version": 3,
         "mode": "round_robin",
         "members": [
             {"kind": "source", "id": source_id, "weight": 3, "maxConcurrency": 2},
