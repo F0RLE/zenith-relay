@@ -932,7 +932,7 @@
 }
 @media (max-width: 480px) {
   .pool-routing-modes button { flex-direction: column; flex-wrap: nowrap; padding-inline: 4px; }
-  .pool-routing-modes button span { display: grid; place-items: center; min-width: 0; max-width: 100%; min-height: 2.7em; line-height: 1.35; text-align: center; overflow-wrap: anywhere; }
+  .pool-routing-modes button span { display: grid; place-items: center; width: 100%; min-width: 0; max-width: 100%; min-height: 2.7em; line-height: 1.35; text-align: center; overflow-wrap: anywhere; }
   .pool-routing-modes button[data-mode="automatic"] .pool-routing-mode-full { display: none; }
   .pool-routing-modes .pool-routing-mode-compact { display: grid; }
 }

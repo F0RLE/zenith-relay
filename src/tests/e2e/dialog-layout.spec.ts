@@ -84,13 +84,18 @@ for (const theme of ["light", "dark"] as const) {
 
     await page.getByRole("button", { name: "Connections", exact: true }).click();
     await page.getByRole("tab", { name: "Sources", exact: true }).click();
-    await page.getByRole("button", { name: "Add source", exact: true }).click();
+    const addSource = page.getByRole("button", { name: "Add source", exact: true });
+    await expect(addSource).toBeEnabled();
+    await addSource.click();
     const dialog = page.getByRole("dialog");
-    await dialog.getByRole("button", { name: /^Proxy:/ }).click();
-    await expect(list).toBeVisible();
+    const proxy = dialog.getByRole("button", { name: /^Proxy:/ });
+    await proxy.click();
+    await expect(proxy).toHaveAttribute("aria-expanded", "true");
+    const sourceList = page.locator(".relay-option-list").last();
+    await expect(sourceList).toBeVisible();
     const body = dialog.locator(".relay-dialog-body");
     await body.evaluate((element) => { element.scrollTop = 0; });
-    await expect(list).toBeHidden();
+    await expect(sourceList).toBeHidden();
     await expect(dialog).toBeVisible();
   });
 

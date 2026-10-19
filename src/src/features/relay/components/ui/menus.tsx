@@ -181,6 +181,8 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
     if (!open) return;
     const selectedOption = listRef.current?.querySelector<HTMLElement>('[role="option"][aria-selected="true"]');
     selectedOption?.focus({ preventScroll: true });
+    let opening = true;
+    const openingFrame = window.requestAnimationFrame(() => { opening = false; });
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target as Node;
       if (!triggerRef.current?.contains(target) && !listRef.current?.contains(target)) close();
@@ -199,6 +201,7 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
     const dismiss = () => close();
     const dismissOnScroll = (event: Event) => {
       const target = event.target;
+      if (opening) return;
       if (target instanceof Node && listRef.current?.contains(target)) return;
       close();
     };
@@ -216,6 +219,7 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
       window.removeEventListener("resize", dismiss);
       window.removeEventListener("wheel", dismissOnScroll, true);
       window.removeEventListener("scroll", dismissOnScroll, true);
+      window.cancelAnimationFrame(openingFrame);
     };
   }, [open]);
 

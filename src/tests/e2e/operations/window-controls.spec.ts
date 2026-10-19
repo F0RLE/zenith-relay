@@ -29,6 +29,7 @@ for (const platform of ["windows", "linux"] as const) {
     await installTauriMock(page, { platform });
     await page.goto("/");
     const controls = page.locator(`.window-controls-${platform}`);
+    await expect(controls).toBeVisible();
     expect(await controls.getByRole("button").evaluateAll((items) => items.map((item) => item.className)))
       .toEqual(["minimize", "maximize", "close"]);
     await controls.getByRole("button", { name: "Close", exact: true }).click();

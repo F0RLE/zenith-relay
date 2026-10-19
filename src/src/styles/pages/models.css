@@ -203,7 +203,7 @@
 
 .model-group-row th strong {
   color: var(--relay-text);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .model-group-content {
@@ -230,7 +230,7 @@
   max-width: 100%;
   display: block;
   overflow: hidden;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 650;
   text-overflow: ellipsis;
 }
@@ -359,7 +359,7 @@
   background: var(--relay-surface);
   color: var(--relay-secondary);
   font: inherit;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
   line-height: 18px;
   text-align: center;

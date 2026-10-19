@@ -44,12 +44,18 @@ for (const [width, height] of [[1160, 844], [1160, 540], [820, 844], [600, 844],
       const dialog = page.getByRole("dialog", { name: "Ротация пула", exact: true });
       await expect(dialog.getByRole("listitem")).toHaveCount(8);
       await expect(dialog.getByRole("radio")).toHaveCount(3);
-      expect(await dialog.evaluate((element) => {
+      const layout = await dialog.evaluate((element) => {
         const rect = element.getBoundingClientRect();
-        return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight
-          && element.scrollWidth <= element.clientWidth + 1
-          && [...element.querySelectorAll<HTMLElement>(".pool-routing-member, .pool-routing-modes button, .pool-routing-preset, .pool-routing-content")].every((item) => item.scrollWidth <= item.clientWidth + 1);
-      })).toBe(true);
+        const overflow = [...element.querySelectorAll<HTMLElement>(".pool-routing-member, .pool-routing-modes button, .pool-routing-preset, .pool-routing-content")]
+          .filter((item) => item.scrollWidth > item.clientWidth + 1)
+          .map((item) => ({ className: item.className, clientWidth: item.clientWidth, scrollWidth: item.scrollWidth }));
+        return {
+          contained: rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight,
+          noDialogOverflow: element.scrollWidth <= element.clientWidth + 1,
+          overflow,
+        };
+      });
+      expect(layout, JSON.stringify(layout)).toEqual({ contained: true, noDialogOverflow: true, overflow: [] });
       await page.screenshot({ path: testInfo.outputPath("rotation.png"), animations: "disabled" });
       await expect(dialog.getByRole("listitem").first()).toHaveAttribute("data-status", "rotation");
       await dialog.getByRole("listitem").last().scrollIntoViewIfNeeded();
