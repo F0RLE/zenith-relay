@@ -1,4 +1,7 @@
 import { spawnSync } from "node:child_process";
+import { repoRoot } from "../lib/tauri-env.mjs";
+
+process.chdir(repoRoot());
 
 const ignore = [
   "**/tests/**",
