@@ -9,9 +9,10 @@ use std::fs;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 use zenith_relay_core::protocol::{
-    ConfigurationPreset, ConfigurationPresetApplyInput, ConfigurationPresetApplyResult,
-    ConfigurationPresetPreview, ConfigurationPresetPreviewInput,
+    Capabilities, ConfigurationPreset, ConfigurationPresetApplyInput,
+    ConfigurationPresetApplyResult, ConfigurationPresetPreview, ConfigurationPresetPreviewInput,
 };
+use zenith_relay_core::PoolRoutingPolicy;
 
 const MAX_CONFIGURATION_PRESET_BYTES: usize = 1024 * 1024;
 
@@ -112,14 +113,18 @@ async fn require_preset_protocol_contract(
         });
     let needs_tool_policy =
         preset.schema_version >= 5 || preset.settings.routing.tool_policy.is_some();
-    let needs_rotation = preset.schema_version >= 6
-        || preset
-            .settings
-            .routing
-            .pool_routing
-            .as_ref()
-            .is_some_and(zenith_relay_core::PoolRoutingPolicy::is_current_rotation);
+    let needs_rotation =
+        preset.schema_version >= 6 || preset.settings.routing.pool_routing.is_some();
     let capabilities = client.capabilities().await.map_err(remote_error)?;
+    if needs_rotation
+        && !supports_preset_rotation(&capabilities, preset.settings.routing.pool_routing.as_ref())
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::UnsupportedSchema,
+            "server does not support this configuration preset rotation version",
+        )
+        .into());
+    }
     for (needed, feature) in [
         (
             needs_contract,
@@ -128,10 +133,6 @@ async fn require_preset_protocol_contract(
         (
             needs_tool_policy,
             zenith_relay_core::protocol::Feature::ToolPolicy,
-        ),
-        (
-            needs_rotation,
-            zenith_relay_core::protocol::Feature::Rotation,
         ),
     ] {
         if needed && !capabilities.supports(feature) {
@@ -143,4 +144,119 @@ async fn require_preset_protocol_contract(
         }
     }
     Ok(())
+}
+
+fn supports_preset_rotation(
+    capabilities: &Capabilities,
+    policy: Option<&PoolRoutingPolicy>,
+) -> bool {
+    let version = match policy {
+        Some(policy) => {
+            if policy.validate().is_err() {
+                return false;
+            }
+            policy.version.max(2)
+        }
+        None => 2,
+    };
+    // Import migrates known legacy policies; direct policy updates remain version-exact.
+    capabilities.supports_rotation_policy(u64::from(version))
+        || (version == 2 && capabilities.supports_rotation_policy(3))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zenith_relay_core::{PoolMemberKind, PoolRoutingMember, PoolRoutingMode};
+
+    fn servers() -> [Capabilities; 2] {
+        let current = Capabilities::personal_server("server", "fingerprint");
+        let mut older = current.clone();
+        older.protocol_version = 2;
+        older.compatibility_min_client = 2;
+        older.features.remove("rotation_v3");
+        older.features.insert("rotation_v2".into());
+        [older, current]
+    }
+
+    fn policy(version: u8, mode: PoolRoutingMode) -> PoolRoutingPolicy {
+        PoolRoutingPolicy {
+            version,
+            mode,
+            members: vec![PoolRoutingMember {
+                kind: PoolMemberKind::Account,
+                id: "account".into(),
+                weight: 7,
+                max_concurrency: 4,
+            }],
+        }
+    }
+
+    #[test]
+    fn legacy_rotation_presets_import_on_both_server_generations_without_rewriting_them() {
+        for server in servers() {
+            assert!(supports_preset_rotation(&server, None));
+            for (version, mode) in [
+                (1, PoolRoutingMode::Smart),
+                (1, PoolRoutingMode::InOrder),
+                (1, PoolRoutingMode::RoundRobin),
+                (2, PoolRoutingMode::Automatic),
+                (2, PoolRoutingMode::InOrder),
+                (2, PoolRoutingMode::RoundRobin),
+            ] {
+                let policy = policy(version, mode);
+                let original = policy.clone();
+                assert!(supports_preset_rotation(&server, Some(&policy)));
+                assert_eq!(policy, original);
+            }
+        }
+    }
+
+    #[test]
+    fn current_presets_require_a_current_server_and_direct_updates_stay_version_exact() {
+        let [older, current] = servers();
+        for mode in [
+            PoolRoutingMode::Automatic,
+            PoolRoutingMode::InOrder,
+            PoolRoutingMode::RoundRobin,
+            PoolRoutingMode::WeightedRoundRobin,
+            PoolRoutingMode::Failover,
+        ] {
+            let policy = policy(3, mode);
+            assert!(supports_preset_rotation(&current, Some(&policy)));
+            assert!(!supports_preset_rotation(&older, Some(&policy)));
+        }
+        assert!(!current.supports_rotation_policy(2));
+        assert!(!older.supports_rotation_policy(3));
+    }
+
+    #[test]
+    fn invalid_policies_and_missing_rotation_capabilities_are_not_accepted() {
+        for server in servers() {
+            for (version, mode) in [
+                (0, PoolRoutingMode::Automatic),
+                (1, PoolRoutingMode::Automatic),
+                (2, PoolRoutingMode::Smart),
+                (2, PoolRoutingMode::WeightedRoundRobin),
+                (2, PoolRoutingMode::Failover),
+                (3, PoolRoutingMode::Smart),
+                (4, PoolRoutingMode::Automatic),
+            ] {
+                assert!(!supports_preset_rotation(
+                    &server,
+                    Some(&policy(version, mode))
+                ));
+            }
+            let mut invalid = policy(2, PoolRoutingMode::RoundRobin);
+            invalid.members[0].weight = 0;
+            assert!(!supports_preset_rotation(&server, Some(&invalid)));
+        }
+        let mut unsupported = servers()[1].clone();
+        unsupported.features.remove("rotation_v3");
+        assert!(!supports_preset_rotation(&unsupported, None));
+        assert!(!supports_preset_rotation(
+            &unsupported,
+            Some(&policy(2, PoolRoutingMode::RoundRobin))
+        ));
+    }
 }

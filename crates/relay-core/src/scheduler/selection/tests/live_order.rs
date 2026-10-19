@@ -7,6 +7,7 @@ fn runtime_snapshot_keeps_the_management_wire_shape() {
         kind: CandidateKind::ApiSource,
         available: true,
         next_for_new_request: false,
+        resource_headroom: None,
         activity_revision: 0,
         runtime_id: 0,
         in_flight: 0,
@@ -24,6 +25,55 @@ fn runtime_snapshot_keeps_the_management_wire_shape() {
     assert_eq!(value["activeModels"], serde_json::json!([]));
     assert_eq!(value["modelRetries"], serde_json::json!([]));
     assert!(value.get("active_request_count").is_none());
+    assert!(value.get("resourceHeadroom").is_none());
+    let restored: CandidateRuntimeSnapshot = serde_json::from_value(value).unwrap();
+    assert!(restored.resource_headroom.is_none());
+}
+
+#[test]
+fn runtime_headroom_uses_independent_admission_freshness_clocks() {
+    let mut scheduler = PoolScheduler::new();
+    scheduler.set_quota_stale_after_ms(10);
+    let mut member = candidate("member");
+    member.quota = CandidateQuota::Available(9_000);
+    member.quota_updated_at_ms = Some(100);
+    member.provider_credits_micro_units = Some(2_000_000);
+    member.provider_credits_observed_at_ms = Some(1);
+    scheduler.upsert(member);
+    let fresh = scheduler
+        .runtime_order(100)
+        .remove(0)
+        .resource_headroom
+        .unwrap();
+    assert_eq!(fresh.quota_remaining_basis_points, Some(9_000));
+    assert_eq!(fresh.provider_credits_micro_units, None);
+    assert!(!fresh.provider_credits_unlimited);
+    let member = scheduler.candidates.get_mut("member").unwrap();
+    member.provider_credits_observed_at_ms = Some(111);
+    let credit_only = scheduler
+        .runtime_order(111)
+        .remove(0)
+        .resource_headroom
+        .unwrap();
+    assert_eq!(credit_only.quota_remaining_basis_points, None);
+    assert_eq!(credit_only.provider_credits_micro_units, Some(2_000_000));
+    let member = scheduler.candidates.get_mut("member").unwrap();
+    member.provider_credits_unlimited = true;
+    let unlimited = scheduler
+        .runtime_order(111)
+        .remove(0)
+        .resource_headroom
+        .unwrap();
+    assert_eq!(unlimited.provider_credits_micro_units, None);
+    assert!(unlimited.provider_credits_unlimited);
+    let stale = scheduler
+        .runtime_order(122)
+        .remove(0)
+        .resource_headroom
+        .unwrap();
+    assert_eq!(stale.quota_remaining_basis_points, None);
+    assert_eq!(stale.provider_credits_micro_units, None);
+    assert!(!stale.provider_credits_unlimited);
 }
 #[test]
 fn runtime_order_uses_scheduler_preference_and_exposes_live_state() {

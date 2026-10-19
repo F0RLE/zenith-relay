@@ -42,25 +42,28 @@ pub async fn execute_remote_server_action(
         );
     };
     let (method, path, requires_payload) = action_request(&input.action)?;
-    let needs_rotation = matches!(input.action, RemoteServerAction::SetRoutingPolicy)
-        && input
+    let rotation_version = if matches!(input.action, RemoteServerAction::SetRoutingPolicy) {
+        input
             .payload
             .as_ref()
             .and_then(|request_payload| request_payload.pointer("/poolRouting/version"))
             .and_then(serde_json::Value::as_u64)
-            .is_some_and(|version| version >= 2);
-    if needs_rotation
-        && !client
+    } else {
+        None
+    };
+    if let Some(version) = rotation_version {
+        if !client
             .capabilities()
             .await
             .map_err(remote_error)?
-            .supports(zenith_relay_core::protocol::Feature::Rotation)
-    {
-        return Err(LocalPoolError::new(
-            ErrorCode::UnsupportedSchema,
-            "server does not support pool rotation",
-        )
-        .into());
+            .supports_rotation_policy(version)
+        {
+            return Err(LocalPoolError::new(
+                ErrorCode::UnsupportedSchema,
+                "server does not support this pool rotation policy version",
+            )
+            .into());
+        }
     }
     let policy_feature = match input.action {
         RemoteServerAction::ListAccountTrash

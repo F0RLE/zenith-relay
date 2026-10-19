@@ -17,6 +17,14 @@ pub struct ModelRetryRuntime {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CandidateResourceHeadroom {
+    pub quota_remaining_basis_points: Option<u64>,
+    pub provider_credits_micro_units: Option<u64>,
+    pub provider_credits_unlimited: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CandidateRuntimeSnapshot {
     pub candidate_id: String,
     pub kind: CandidateKind,
@@ -24,6 +32,9 @@ pub struct CandidateRuntimeSnapshot {
     /// True only when fresh text routes agree on the same physical member.
     #[serde(default)]
     pub next_for_new_request: bool,
+    /// Fresh resource evidence from admission, not a model-independent queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_headroom: Option<CandidateResourceHeadroom>,
     #[serde(default)]
     pub activity_revision: u64,
     #[serde(default)]
@@ -181,12 +192,22 @@ impl PoolScheduler {
                     .map(|(model, retry_at_ms)| ModelRetryRuntime { model, retry_at_ms })
                     .collect::<Vec<_>>();
                 model_retries.sort_by_key(|retry| retry.retry_at_ms);
+                let provider_credits = self.rotation.fresh_provider_credits(&candidate.id, now_ms);
                 CandidateRuntimeSnapshot {
                     candidate_id: candidate.id.clone(),
                     kind: candidate.kind,
                     available,
                     next_for_new_request: new_request_candidate_id.as_deref()
                         == Some(candidate.id.as_str()),
+                    resource_headroom: Some(CandidateResourceHeadroom {
+                        quota_remaining_basis_points: self
+                            .rotation
+                            .fresh_quota_remaining(&candidate.id, now_ms),
+                        provider_credits_micro_units: provider_credits
+                            .filter(|_| !candidate.provider_credits_unlimited),
+                        provider_credits_unlimited: provider_credits.is_some()
+                            && candidate.provider_credits_unlimited,
+                    }),
                     activity_revision: 0,
                     runtime_id: 0,
                     in_flight: self.in_flight_count(&candidate.id, InFlightLane::Text),

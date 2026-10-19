@@ -28,6 +28,7 @@ fn runtime_candidate(
         kind,
         available,
         next_for_new_request: false,
+        resource_headroom: None,
         activity_revision: 0,
         runtime_id: 0,
         in_flight: 0,

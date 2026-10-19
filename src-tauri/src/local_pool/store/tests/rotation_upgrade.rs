@@ -10,6 +10,39 @@ fn legacy_policy() -> PoolRoutingPolicy {
 }
 
 #[test]
+fn version_two_rotation_upgrades_safely_on_reopen() {
+    let root = std::env::temp_dir().join(format!("rotation-v2-{}", uuid::Uuid::new_v4()));
+    let mut store = LocalPoolStore::open(root.clone()).unwrap();
+    let mut gateway = store.gateway().clone();
+    gateway.enabled = true;
+    gateway.max_retry_candidates = 7;
+    gateway.pool_routing = Some(PoolRoutingPolicy {
+        version: 2,
+        mode: PoolRoutingMode::RoundRobin,
+        members: Vec::new(),
+    });
+    store.replace_gateway(gateway).unwrap();
+    drop(store);
+    let reopened = LocalPoolStore::open(root.clone()).unwrap();
+    let policy = reopened.gateway().pool_routing.as_ref().unwrap();
+    assert_eq!(policy.version, 3);
+    assert_eq!(policy.mode, PoolRoutingMode::RoundRobin);
+    assert!(reopened.gateway().enabled);
+    assert_eq!(reopened.gateway().max_retry_candidates, 7);
+    let saved: serde_json::Value = serde_json::from_str(
+        &reopened
+            .database
+            .state_json(STATE_GATEWAY)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(saved["poolRouting"]["version"], 3);
+    drop(reopened);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn startup_upgrades_old_gateway_settings_automatically_and_preserves_controls() {
     for enabled in [true, false] {
         for explicit in [true, false] {

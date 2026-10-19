@@ -108,21 +108,35 @@ fn configuration_preset_validation_normalizes_source_policy() {
 fn legacy_preset_rotation_upgrades_without_consent_or_losing_member_limits() {
     let mut current = valid_configuration_preset().settings;
     current.routing.pool_routing = Some(current.resolved_pool_routing());
-    let mut requested = current.clone();
-    let legacy_routing = requested.routing.pool_routing.as_mut().unwrap();
-    legacy_routing.version = 1;
-    legacy_routing.mode = crate::PoolRoutingMode::Smart;
-    legacy_routing.members.reverse();
-    for member in &mut legacy_routing.members {
-        member.weight = 7;
-        member.max_concurrency = 4;
+    for (version, mode, expected_mode) in [
+        (
+            1,
+            crate::PoolRoutingMode::Smart,
+            crate::PoolRoutingMode::Automatic,
+        ),
+        (
+            2,
+            crate::PoolRoutingMode::RoundRobin,
+            crate::PoolRoutingMode::RoundRobin,
+        ),
+    ] {
+        let mut requested = current.clone();
+        let legacy_routing = requested.routing.pool_routing.as_mut().unwrap();
+        legacy_routing.version = version;
+        legacy_routing.mode = mode;
+        legacy_routing.members.reverse();
+        for member in &mut legacy_routing.members {
+            member.weight = 7;
+            member.max_concurrency = 4;
+        }
+        let expected_members = legacy_routing.members.clone();
+        let merged = merge_configuration_preset_settings(&current, &requested).unwrap();
+        let policy = merged.routing.pool_routing.unwrap();
+        assert!(policy.is_current_rotation());
+        assert_eq!(policy.mode, expected_mode);
+        assert_eq!(policy.members, expected_members);
     }
-    let expected_members = legacy_routing.members.clone();
-    let merged = merge_configuration_preset_settings(&current, &requested).unwrap();
-    let policy = merged.routing.pool_routing.unwrap();
-    assert!(policy.is_current_rotation());
-    assert_eq!(policy.mode, crate::PoolRoutingMode::Automatic);
-    assert_eq!(policy.members, expected_members);
+    let mut requested = current.clone();
     requested.routing.pool_routing = None;
     assert_eq!(
         merge_configuration_preset_settings(&current, &requested)

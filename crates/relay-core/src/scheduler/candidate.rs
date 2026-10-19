@@ -61,8 +61,11 @@ impl CandidateQuotaState {
             quota: CandidateQuota::from_snapshot(snapshot, now_ms, stale_after_ms),
             updated_at_ms: snapshot.quota_observed_at_ms(),
             reset_at_ms: snapshot.limiting_reset_at_ms(),
-            provider_credits_micro_units: snapshot.available_credits_micro_units,
-            provider_credits_unlimited: snapshot.provider_credits_unlimited,
+            provider_credits_micro_units: snapshot
+                .available_credits_micro_units
+                .filter(|_| snapshot.has_usable_provider_credits()),
+            provider_credits_unlimited: snapshot.has_usable_provider_credits()
+                && snapshot.provider_credits_unlimited,
             provider_credits_observed_at_ms: snapshot.provider_credits_observed_at_ms,
         }
     }

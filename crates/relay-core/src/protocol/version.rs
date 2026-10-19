@@ -10,7 +10,8 @@ pub struct ClientProtocolRange {
 impl Default for ClientProtocolRange {
     fn default() -> Self {
         Self {
-            min: CURRENT_PROTOCOL_VERSION,
+            // Current clients can still read version-two servers without new rotation modes.
+            min: 2,
             max: CURRENT_PROTOCOL_VERSION,
         }
     }

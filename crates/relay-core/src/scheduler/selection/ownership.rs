@@ -168,10 +168,9 @@ impl PoolScheduler {
         self.prompt_affinity.invalidate(key)
     }
 
-    /// Automatic mode may leave a response owner when another ready member has
-    /// a better quota, or leads by the provider-credit switch margin when no
-    /// fresh quota ranks. The caller must materialize saved history before
-    /// clearing the binding; this predicate never moves the request.
+    /// Reuse ordinary automatic admission, preferring the current physical
+    /// owner on ties. The caller must materialize saved history before clearing
+    /// its binding; this predicate never moves the request or spends a trial.
     pub(crate) fn automatic_response_owner_should_yield(
         &mut self,
         affinity_key: &str,
@@ -200,28 +199,21 @@ impl PoolScheduler {
             prompt_affinity_key: None,
             now_ms,
         };
-        let Some(request) = self.prepare_rotation_request(&probe, RotationOperation::Text) else {
+        let Some(mut request) = self.prepare_rotation_request(&probe, RotationOperation::Text)
+        else {
             return false;
         };
-        let owner_quota = self.rotation.fresh_quota_remaining(&owner_id, now_ms);
-        let other_quota = self
-            .rotation
-            .best_other_ordinary_fresh_quota(&request, &owner_id, now_ms);
-        match (owner_quota, other_quota) {
-            (Some(owner), Some(other)) => return other > owner,
-            (None, Some(_)) => return true,
-            (Some(_), None) => return false,
-            (None, None) => {}
-        }
-
-        let Some(owner_credits) = self.rotation.fresh_provider_credits(&owner_id, now_ms) else {
+        let Some(owner_member) = self.member_key_for(&owner_id) else {
             return false;
         };
+        request.preferred = Some(owner_id);
         self.rotation
-            .best_other_ordinary_fresh_provider_credits(&request, &owner_id, now_ms)
-            .is_some_and(|best| {
-                best.saturating_sub(owner_credits)
-                    >= crate::scheduler::rotation::PROVIDER_CREDIT_SWITCH_MARGIN_MICRO_UNITS
+            .select(&request, now_ms)
+            .is_some_and(|selected| {
+                !selected.recovery
+                    && self
+                        .member_key_for(&selected.candidate_id)
+                        .is_some_and(|member| member != owner_member)
             })
     }
 }

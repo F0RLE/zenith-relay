@@ -69,6 +69,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unavailable_provider_ledger_cannot_rank_as_spendable_capacity() {
+        for available in [false, true] {
+            for unlimited in [false, true] {
+                let snapshot = QuotaSnapshot {
+                    provider_credits_available: available,
+                    provider_credits_unlimited: unlimited,
+                    available_credits_micro_units: Some(100_000_000),
+                    provider_credits_observed_at_ms: Some(100),
+                    updated_at_ms: Some(100),
+                    ..Default::default()
+                };
+                let state =
+                    crate::CandidateQuotaState::from_snapshot(&snapshot, 100, QUOTA_STALE_AFTER_MS);
+                assert_eq!(
+                    state.provider_credits_micro_units,
+                    available.then_some(100_000_000)
+                );
+                assert_eq!(state.provider_credits_unlimited, available && unlimited);
+                assert_eq!(
+                    state.quota,
+                    if available {
+                        CandidateQuota::CreditFallback
+                    } else {
+                        CandidateQuota::Unknown
+                    }
+                );
+                assert_eq!(snapshot.available_credits_micro_units, Some(100_000_000));
+            }
+        }
+    }
+
+    #[test]
     fn undated_or_future_credits_cannot_supply_fresh_capacity() {
         for updated_at_ms in [None, Some(2_000)] {
             let quota = QuotaSnapshot {

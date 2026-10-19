@@ -1134,9 +1134,16 @@ components:
       type: object
       additionalProperties: false
       required: [version, mode, members]
+      description: >
+        Runtime snapshots and direct updates use version 3. Direct updates must
+        match the current policy version and include expectedPoolRouting.
+        Preset imports accept valid version-1 and version-2 policies and migrate
+        them without changing member order, shares, or concurrency limits.
+        in_order and round_robin both retain equal cycling; weighted_round_robin
+        opts into request shares, and failover uses primary/reserve priority.
       properties:
-        version: { type: integer, enum: [1, 2] }
-        mode: { type: string, enum: [smart, automatic, in_order, round_robin] }
+        version: { type: integer, enum: [1, 2, 3] }
+        mode: { type: string, enum: [smart, automatic, in_order, round_robin, weighted_round_robin, failover] }
         members:
           type: array
           maxItems: 4096
@@ -1157,6 +1164,9 @@ components:
         - properties:
             version: { const: 2 }
             mode: { enum: [automatic, in_order, round_robin] }
+        - properties:
+            version: { const: 3 }
+            mode: { enum: [automatic, in_order, round_robin, weighted_round_robin, failover] }
     Health:
       type: object
       required: [status, version, serverId, startedAtMs]
@@ -1167,12 +1177,44 @@ components:
         startedAtMs: { type: integer, minimum: 0 }
     Capabilities:
       type: object
-      required: [serverId, protocolMin, protocolMax, features]
+      required: [protocolVersion, compatibilityMinClient, serverName, serverId, identityFingerprint, serverManagedByUser, features, supportedWireApis, supportsAccounts, supportsSources, supportsQuota, supportsUsage, supportsLocalGateway, supportsProfileAttach, supportsWakeTasks]
       properties:
+        protocolVersion: { type: integer, minimum: 1 }
+        compatibilityMinClient: { type: integer, minimum: 1 }
+        serverName: { type: string }
         serverId: { type: string, minLength: 1 }
-        protocolMin: { type: integer, minimum: 1 }
-        protocolMax: { type: integer, minimum: 1 }
-        features: { type: array, items: { type: string }, uniqueItems: true, description: "source_protocols_v1 enables endpoint evidence and automatic computed routes; the legacy diagnostic generation operation remains available explicitly for compatibility. route_recovery_v1 indicates that the existing recovery setting applies to all four text API inputs, unlike the older chatgpt_retry_until_available feature alone. tool_policy_v1 enables tool catalog policy and schema-5 presets; rotation_v2 is the compatibility token for the current pool rotation policy, automatic startup conversion and schema-6 presets. request_timezone_v1 enables persisted account IANA timezone bindings, the backend catalog, and compare-and-set updates without rebuilding the runtime; portable presets exclude these host-specific bindings." }
+        identityFingerprint: { type: string, minLength: 1 }
+        serverManagedByUser: { type: boolean }
+        features:
+          type: array
+          items: { type: string }
+          uniqueItems: true
+          description: >
+            source_protocols_v1 enables endpoint evidence and automatic computed
+            routes; the legacy diagnostic generation operation remains available
+            explicitly for compatibility. route_recovery_v1 indicates that the
+            existing recovery setting applies to all four text API inputs, unlike
+            the older chatgpt_retry_until_available feature alone.
+            tool_policy_v1 enables tool catalog policy and schema-5 presets.
+            rotation_v3 enables version-3 pool rotation with optional weighted
+            cycling and primary/reserve failover, including legacy-policy migration
+            in schema-6 presets. Older servers advertise rotation_v2 for version-2
+            policies; direct policy updates are version-exact. Management protocol
+            3 requires a version-3 client; current clients can still negotiate
+            protocol-2 servers without new strategies.
+            request_timezone_v1 enables persisted account IANA timezone bindings,
+            the backend catalog, and compare-and-set updates without rebuilding
+            the runtime; portable presets exclude these host-specific bindings.
+        supportedWireApis:
+          type: array
+          items: { type: string, enum: [responses, chat_completions, messages, gemini] }
+        supportsAccounts: { type: boolean }
+        supportsSources: { type: boolean }
+        supportsQuota: { type: boolean }
+        supportsUsage: { type: boolean }
+        supportsLocalGateway: { type: boolean }
+        supportsProfileAttach: { type: boolean }
+        supportsWakeTasks: { type: boolean }
     SourceProviderStats:
       type: object
       required: [provider, balanceMicroUsd, spentMicroUsd, requests, totalTokens]

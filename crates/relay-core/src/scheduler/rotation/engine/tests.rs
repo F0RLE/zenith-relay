@@ -25,6 +25,57 @@ fn preferred_request(id: u64, candidate_id: &str) -> RotationRequest {
     request
 }
 
+#[test]
+fn balanced_quota_margin_preserves_affinity_without_hiding_a_material_lead() {
+    let mut engine = engine_with([candidate("a", 0, 1), candidate("b", 0, 1)]);
+    for (id, remaining) in [("a", 8_100), ("b", 8_000)] {
+        assert!(engine.sync_candidate_state(
+            id,
+            true,
+            false,
+            AuthState::Ready,
+            QuotaState::Available,
+            RateState::Ready
+        ));
+        assert!(engine.set_quota_remaining(id, Some(remaining), Some(100)));
+    }
+    let selected = engine.select(&preferred_request(1, "b"), 100).unwrap();
+    assert_eq!(selected.candidate_id, "b");
+    assert_eq!(selected.reason, RotationSelectionReason::WeightedRotation);
+    assert!(engine.set_quota_remaining("a", Some(9_000), Some(100)));
+    assert_eq!(
+        engine
+            .select(&preferred_request(2, "b"), 100)
+            .unwrap()
+            .candidate_id,
+        "a"
+    );
+}
+
+#[test]
+fn balanced_small_quota_differences_do_not_starve_equal_request_shares() {
+    let mut engine = engine_with([candidate("a", 0, 1), candidate("b", 0, 1)]);
+    for (id, remaining) in [("a", 8_100), ("b", 8_000)] {
+        assert!(engine.sync_candidate_state(
+            id,
+            true,
+            false,
+            AuthState::Ready,
+            QuotaState::Available,
+            RateState::Ready
+        ));
+        assert!(engine.set_quota_remaining(id, Some(remaining), Some(100)));
+    }
+    let mut counts = BTreeMap::new();
+    for id in 1..=20 {
+        let lease = engine.reserve(&request(id), 100).unwrap();
+        *counts.entry(lease.candidate_id.clone()).or_insert(0) += 1;
+        assert!(engine.release_unstarted(lease.lease_id));
+    }
+    assert_eq!(counts.get("a"), Some(&10));
+    assert_eq!(counts.get("b"), Some(&10));
+}
+
 fn dispatch(engine: &mut RotationEngine, lease: &RotationLease) -> RequestBudget {
     let mut budget = RequestBudget::default_for(lease.request_id);
     engine.begin_dispatch(lease.lease_id, &mut budget).unwrap();
@@ -243,6 +294,27 @@ fn missing_and_stale_latency_do_not_block_ordinary_rotation() {
 }
 
 #[test]
+fn future_latency_observations_do_not_override_fresh_owner_preference() {
+    let mut engine = engine_with([candidate("a", 0, 1), candidate("b", 0, 1)]);
+    engine.observe_first_output_latency("a", "responses:gpt", 1, 101);
+    engine.observe_first_output_latency("b", "responses:gpt", 1_000, 100);
+    assert_eq!(
+        engine
+            .select(&preferred_request(1, "b"), 100)
+            .unwrap()
+            .candidate_id,
+        "b"
+    );
+    assert_eq!(
+        engine
+            .select(&preferred_request(2, "b"), 101)
+            .unwrap()
+            .candidate_id,
+        "a"
+    );
+}
+
+#[test]
 fn ignored_health_observations_do_not_mutate_the_failure_score() {
     let mut engine = engine_with([candidate("a", 0, 1)]);
     engine.observe_health(
@@ -415,6 +487,26 @@ fn allowed_healthy_reserve_is_not_blocked_by_primary_priority() {
         ),
         None
     );
+}
+
+#[test]
+fn failover_does_not_send_healthy_primary_traffic_to_a_recovering_reserve() {
+    let mut engine = engine_with([candidate("primary", 100, 1), candidate("reserve", 0, 1)]);
+    engine.set_mode(RotationMode::InOrder);
+    settle_owner(
+        &mut engine,
+        "reserve",
+        1,
+        0,
+        HealthObservation::CountableTransient {
+            provider_not_before_ms: None,
+        },
+    );
+    let selected = engine
+        .select(&request(2), FIRST_TRANSIENT_PACING_MS)
+        .unwrap();
+    assert_eq!(selected.candidate_id, "primary");
+    assert!(!selected.recovery);
 }
 
 #[test]

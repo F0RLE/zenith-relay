@@ -9,6 +9,8 @@ impl PoolScheduler {
             .as_ref()
             .map(|policy| match policy.mode {
                 crate::PoolRoutingMode::Automatic => RotationMode::Automatic,
+                crate::PoolRoutingMode::WeightedRoundRobin => RotationMode::RoundRobin,
+                crate::PoolRoutingMode::Failover => RotationMode::InOrder,
                 // Both previously exposed manual choices now use one cycling
                 // mode. Their saved member order remains the manual priority.
                 crate::PoolRoutingMode::InOrder | crate::PoolRoutingMode::RoundRobin => {

@@ -22,6 +22,7 @@ pub(crate) use selection::CooldownRequest;
 pub(crate) use selection::ReservationId;
 pub use selection::{
     account_member_key, source_member_key, ActiveModelRuntime, AttemptOutcome,
-    CandidateRuntimeSnapshot, ModelRetryRuntime, PoolScheduler, RoutingDiagnostics, Selection,
-    SelectionReason, SelectionRequest, PROMPT_AFFINITY_TTL_MS, RESPONSE_AFFINITY_TTL_MS,
+    CandidateResourceHeadroom, CandidateRuntimeSnapshot, ModelRetryRuntime, PoolScheduler,
+    RoutingDiagnostics, Selection, SelectionReason, SelectionRequest, PROMPT_AFFINITY_TTL_MS,
+    RESPONSE_AFFINITY_TTL_MS,
 };

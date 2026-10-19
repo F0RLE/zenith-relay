@@ -27,6 +27,9 @@ pub enum QuotaState {
 /// member based on provider-reported credits.
 pub(crate) const PROVIDER_CREDIT_SWITCH_MARGIN_MICRO_UNITS: u64 = 15_000_000;
 
+/// Five percentage points separate a material quota lead from normal jitter.
+pub(crate) const QUOTA_SWITCH_MARGIN_BASIS_POINTS: u64 = 500;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RateState {
     Ready,
@@ -349,7 +352,7 @@ pub enum RotationSelectionReason {
     Recovery,
     OnlyEligible,
     LeastLoaded,
-    /// Automatic mode kept the members with the greatest known remainder.
+    /// Automatic mode excluded members outside the fresh quota headroom band.
     QuotaHeadroom,
     /// Automatic mode used provider credits because no fresh quota ranked.
     ProviderCredits,

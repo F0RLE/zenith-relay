@@ -7,6 +7,32 @@ use zenith_relay_core::protocol::PresetRoutingPolicy;
 use zenith_relay_core::{ApiModelPriceOverride, ApiModelPriceSources, DefaultServiceTier};
 
 #[test]
+fn version_two_rotation_upgrades_safely_on_reopen() {
+    let root = test_root("rotation-v2");
+    let path = root.join("relay.sqlite");
+    let store = Store::open(path.clone()).unwrap();
+    store
+        .set_metadata(
+            "pool_routing",
+            &serde_json::json!({
+                "version": 2, "mode": "round_robin", "members": [],
+            })
+            .to_string(),
+        )
+        .unwrap();
+    store.set_metadata("max_retry_candidates", "7").unwrap();
+    drop(store);
+    let reopened = Store::open(path).unwrap();
+    let routing = reopened.routing_policy().unwrap();
+    let policy = routing.pool_routing.unwrap();
+    assert_eq!(policy.version, 3);
+    assert_eq!(policy.mode, zenith_relay_core::PoolRoutingMode::RoundRobin);
+    assert_eq!(routing.max_retry_candidates, 7);
+    drop(reopened);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn request_timezone_rejects_invalid_zones_and_persists_disabled_choices() {
     let root = test_root("request-timezone");
     let path = root.join("relay.sqlite");

@@ -107,7 +107,7 @@ fn old_policy_upgrade_is_idempotent_and_preserves_order_weights_and_limits() {
         };
         let inventory = vec![(PoolMemberKind::Source, "source".into(), -1_000_000, 2)];
         let upgraded = resolve_pool_routing(Some(&legacy_policy), inventory.clone());
-        assert_eq!(upgraded.version, 2);
+        assert_eq!(upgraded.version, 3);
         assert_eq!(upgraded.members, legacy_policy.members);
         assert_eq!(
             upgraded.mode,
@@ -142,4 +142,41 @@ fn pre_policy_inventory_upgrades_and_invalid_values_still_fail_validation() {
     assert!(resolve_pool_routing(Some(&future), vec![])
         .validate_activation()
         .is_err());
+}
+
+#[test]
+fn version_two_migration_keeps_effective_manual_behavior_and_saved_controls() {
+    for mode in [
+        PoolRoutingMode::Automatic,
+        PoolRoutingMode::InOrder,
+        PoolRoutingMode::RoundRobin,
+    ] {
+        let mut legacy = policy();
+        legacy.version = 2;
+        legacy.mode = mode;
+        legacy.members[0].weight = 17;
+        legacy.members[0].max_concurrency = 3;
+        let inventory = legacy
+            .members
+            .iter()
+            .map(|member| (member.kind, member.id.clone(), 0, 1))
+            .collect();
+        let current = resolve_pool_routing(Some(&legacy), inventory);
+        assert_eq!(current.version, 3);
+        assert_eq!(current.mode, legacy.mode);
+        assert_eq!(current.members, legacy.members);
+        assert!(current.validate_activation().is_ok());
+    }
+    for mode in [
+        PoolRoutingMode::Failover,
+        PoolRoutingMode::WeightedRoundRobin,
+    ] {
+        let mut current = policy();
+        current.mode = mode;
+        assert!(current.validate_activation().is_ok());
+        current.version = 2;
+        assert!(current.validate().is_err());
+        current.upgrade_legacy_format();
+        assert_eq!(current.version, 2);
+    }
 }

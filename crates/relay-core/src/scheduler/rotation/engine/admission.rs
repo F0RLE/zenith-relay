@@ -96,12 +96,15 @@ impl RotationEngine {
         if least_loaded.len() < ready_candidates.len() {
             return RotationSelectionReason::LeastLoaded;
         }
-        let selected_quota = self.fresh_quota_remaining(&selected.id, now_ms);
-        if selected_quota.is_some()
-            && least_loaded.iter().any(|candidate| {
-                self.fresh_quota_remaining(&candidate.id, now_ms) != selected_quota
-            })
-        {
+        let best_quota = least_loaded
+            .iter()
+            .filter_map(|candidate| self.fresh_quota_remaining(&candidate.id, now_ms))
+            .max();
+        if best_quota.is_some_and(|best| {
+            least_loaded
+                .iter()
+                .any(|candidate| !self.within_quota_band(&candidate.id, best, now_ms))
+        }) {
             return RotationSelectionReason::QuotaHeadroom;
         }
         let selected_credits = self.fresh_provider_credits(&selected.id, now_ms);
@@ -208,19 +211,6 @@ impl RotationEngine {
         Some(remaining)
     }
 
-    pub(crate) fn best_other_ordinary_fresh_quota(
-        &self,
-        request: &RotationRequest,
-        owner_id: &str,
-        now_ms: u64,
-    ) -> Option<u64> {
-        self.ready_candidates(request, now_ms)
-            .into_iter()
-            .filter(|candidate| !candidate.recovery && candidate.id != owner_id)
-            .filter_map(|candidate| self.fresh_quota_remaining(&candidate.id, now_ms))
-            .max()
-    }
-
     pub(crate) fn fresh_provider_credits(&self, candidate_id: &str, now_ms: u64) -> Option<u64> {
         let candidate = &self.candidates.get(candidate_id)?.candidate;
         if !crate::quota::observation_is_fresh(
@@ -238,17 +228,11 @@ impl RotationEngine {
             .filter(|credits| *credits > 0)
     }
 
-    pub(crate) fn best_other_ordinary_fresh_provider_credits(
-        &self,
-        request: &RotationRequest,
-        owner_id: &str,
-        now_ms: u64,
-    ) -> Option<u64> {
-        self.ready_candidates(request, now_ms)
-            .into_iter()
-            .filter(|candidate| !candidate.recovery && candidate.id != owner_id)
-            .filter_map(|candidate| self.fresh_provider_credits(&candidate.id, now_ms))
-            .max()
+    fn within_quota_band(&self, candidate_id: &str, best: u64, now_ms: u64) -> bool {
+        self.fresh_quota_remaining(candidate_id, now_ms)
+            .is_some_and(|remaining| {
+                best.saturating_sub(remaining) < QUOTA_SWITCH_MARGIN_BASIS_POINTS
+            })
     }
 
     fn least_loaded_group(&self, ready_candidates: &[ReadyCandidate]) -> Vec<ReadyCandidate> {
@@ -281,7 +265,7 @@ impl RotationEngine {
             .iter()
             .filter(|candidate| candidate.recovery)
             .min_by_key(|candidate| (candidate.due_at_ms, &candidate.id));
-        if let Some(candidate) = recovery {
+        if let Some(candidate) = recovery.filter(|_| self.mode != RotationMode::InOrder) {
             return vec![candidate.clone()];
         }
         match self.mode {
@@ -309,7 +293,7 @@ impl RotationEngine {
                     .max();
                 if let Some(best_quota) = best_quota {
                     candidates.retain(|candidate| {
-                        self.fresh_quota_remaining(&candidate.id, now_ms) == Some(best_quota)
+                        self.within_quota_band(&candidate.id, best_quota, now_ms)
                     });
                 } else if let Some(best_credits) = candidates
                     .iter()
@@ -477,16 +461,11 @@ impl RotationEngine {
         self.candidates
             .values()
             .filter_map(|runtime| {
-                if !matches!(
-                    self.candidate_availability(request, &runtime.candidate.id, now_ms),
-                    CandidateAvailability::Ready { .. }
-                ) {
+                let CandidateAvailability::Ready { recovery } =
+                    self.candidate_availability(request, &runtime.candidate.id, now_ms)
+                else {
                     return None;
-                }
-                let recovery = matches!(
-                    self.candidate_availability(request, &runtime.candidate.id, now_ms),
-                    CandidateAvailability::Ready { recovery: true }
-                );
+                };
                 let due_at_ms = self
                     .circuits
                     .get(&(runtime.candidate.id.clone(), request.route_key.clone()))
@@ -519,7 +498,8 @@ impl RotationEngine {
                         .get(&(runtime.candidate.id.clone(), request.route_key.clone()))
                         .filter(|health| {
                             health.latency_observed_at_ms.is_some_and(|observed_at_ms| {
-                                now_ms.saturating_sub(observed_at_ms) <= HEALTH_HALF_LIFE_MS
+                                observed_at_ms <= now_ms
+                                    && now_ms - observed_at_ms <= HEALTH_HALF_LIFE_MS
                             })
                         })
                         .and_then(|health| health.first_output_latency_ms),
@@ -573,6 +553,13 @@ impl RotationEngine {
                     .saturating_add(i64::from(right.weight));
                 left_rotation_credit
                     .cmp(&right_rotation_credit)
+                    .then_with(|| {
+                        if self.mode == RotationMode::RoundRobin {
+                            left.priority.cmp(&right.priority)
+                        } else {
+                            std::cmp::Ordering::Equal
+                        }
+                    })
                     // `max_by` wins the right-hand value on equality. Reverse the
                     // id order so the lexicographically smallest id is stable.
                     .then_with(|| right.id.cmp(&left.id))

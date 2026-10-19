@@ -136,10 +136,10 @@ pub use scheduler::rotation::{
 };
 pub use scheduler::{
     account_candidate_health, resolve_pool_routing, ActiveModelRuntime, AttemptOutcome,
-    CandidateHealth, CandidateKind, CandidateQuota, CandidateQuotaState, CandidateRuntimeSnapshot,
-    CandidateScope, ModelRetryRuntime, PoolMemberKind, PoolRoutingMember, PoolRoutingMode,
-    PoolRoutingPolicy, PoolScheduler, RoutingDiagnostics, RuntimeCandidate, Selection,
-    SelectionReason, SelectionRequest, PROMPT_AFFINITY_TTL_MS, QUOTA_STALE_AFTER_MS,
+    CandidateHealth, CandidateKind, CandidateQuota, CandidateQuotaState, CandidateResourceHeadroom,
+    CandidateRuntimeSnapshot, CandidateScope, ModelRetryRuntime, PoolMemberKind, PoolRoutingMember,
+    PoolRoutingMode, PoolRoutingPolicy, PoolScheduler, RoutingDiagnostics, RuntimeCandidate,
+    Selection, SelectionReason, SelectionRequest, PROMPT_AFFINITY_TTL_MS, QUOTA_STALE_AFTER_MS,
     RESPONSE_AFFINITY_TTL_MS,
 };
 pub use sources::{

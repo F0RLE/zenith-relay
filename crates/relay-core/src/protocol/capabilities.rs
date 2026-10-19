@@ -2,7 +2,7 @@ use crate::WireApi;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const CURRENT_PROTOCOL_VERSION: u16 = 2;
+pub const CURRENT_PROTOCOL_VERSION: u16 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Feature {
@@ -64,8 +64,8 @@ impl Feature {
             Self::Backups => "backups",
             Self::AccountProxies => "account_proxies",
             Self::RuntimeRouting => "runtime_routing",
-            // Existing servers and desktop clients negotiate this wire token.
-            Self::Rotation => "rotation_v2",
+            // Version three adds explicit failover and weighted cycling.
+            Self::Rotation => "rotation_v3",
             Self::ConfigurationPresets => "configuration_presets",
             Self::ProfileKeyRotation => "profile_key_rotation",
             Self::CodexBackgroundTasks => "codex_background_tasks",
@@ -180,6 +180,14 @@ impl Capabilities {
 
     pub fn supports(&self, feature: Feature) -> bool {
         self.features.contains(feature.as_str())
+    }
+
+    pub fn supports_rotation_policy(&self, version: u64) -> bool {
+        match version {
+            2 => self.features.contains("rotation_v2"),
+            3 => self.supports(Feature::Rotation),
+            _ => false,
+        }
     }
 }
 
