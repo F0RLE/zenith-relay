@@ -1,5 +1,4 @@
 import type {
-  DocumentedCacheRetentionMinimum,
   DefaultServiceTier,
   ErrorOrigin,
   LocalUsage,
@@ -14,7 +13,6 @@ import type {
 } from "../../api/types";
 import type { TokenSpeedSample } from "../../usageSpeed";
 import { totalsFromUsageSamples, type UsageTotalsSample } from "../../usageTotals";
-import { documentedCacheRetentionMinimum } from "./cacheLifetime";
 import { modelIdForDisplay } from "./usageModelIdentity";
 
 export type CodexRequestOrigin =
@@ -46,7 +44,6 @@ export type UsageRow = {
   cachedInputTokens: number | null;
   cacheWriteInputTokens: number | null;
   cacheWriteTtl: string | null;
-  documentedCacheRetentionMinimum: DocumentedCacheRetentionMinimum | null;
   clientContextId: string | null;
   reasoningTokens: number | null;
   outputTokens: number | null;
@@ -129,19 +126,6 @@ function usageRowFromEvent(
     cachedInputTokens: event.cachedInputTokens,
     cacheWriteInputTokens: event.cacheWriteInputTokens ?? null,
     cacheWriteTtl: event.cacheWriteTtl ?? null,
-    documentedCacheRetentionMinimum:
-      documentedCacheRetentionMinimum(
-        event.resolvedModel,
-        event.cachedInputTokens,
-        event.cacheWriteInputTokens,
-        event.cacheWriteTtl,
-      )
-      ?? documentedCacheRetentionMinimum(
-        event.requestedModel,
-        event.cachedInputTokens,
-        event.cacheWriteInputTokens,
-        event.cacheWriteTtl,
-      ),
     reasoningTokens: event.reasoningTokens,
     outputTokens: event.outputTokens,
     tokens: event.totalTokens,

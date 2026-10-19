@@ -62,7 +62,7 @@ test("pool places unavailable accounts after ready members", async ({ page }) =>
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
 
-  await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-member-label", "Backup account");
+  await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-member-label", "Pro account");
   await expect(page.locator(".pool-member-card").last()).toHaveAttribute("data-member-label", "Personal Plus");
 });
 
@@ -184,7 +184,7 @@ for (const mode of ["local", "remote"] as const) {
 
     const member = page.locator(".pool-member-card").filter({ hasText: "Failover API" });
     await expect(member).toContainText("Automatic");
-    for (const name of ["Manual"]) {
+    for (const name of ["Round robin"]) {
       await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
       const editor = page.getByRole("dialog", { name: "Pool rotation", exact: true });
       await editor.getByRole("radio", { name, exact: true }).click();
@@ -216,21 +216,21 @@ test("pool keeps access key management internal", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Create access key" })).toHaveCount(0);
 });
 
-test("pool preserves scheduler priority within availability groups", async ({ page }) => {
+test("pool ranks fresh resources within availability groups and marks the active member separately", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 4, usageAccountIndex: 3 });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await expect(page.locator(".pool-sort-menu")).toHaveCount(0);
   const priority = page.locator(".pool-controls");
-  await expect(priority).toContainText("Usage order");
+  await expect(priority).toContainText("Request distribution");
   await expect(priority).toContainText("Active now: Pro account");
   await expect(priority.locator("[data-active-models]")).toHaveAttribute("data-active-models", "gpt-5.4:1");
   await expect(priority.locator("[data-active-models]")).toHaveText("Active now (1): gpt-5.4");
-  await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-member-label", "Backup account");
+  await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-member-label", "Pro account");
   const current = page.locator('[data-member-label="Pro account"]');
   await expect(current).toHaveAttribute("data-current", "true");
   const names = () => page.locator(".pool-member-card").evaluateAll((items) => items.map((item) => item.getAttribute("data-member-label") ?? ""));
-  expect(await names()).toEqual(["Backup account", "Pro account", "Business Workspace", "Example compatible API", "Personal Plus"]);
+  expect(await names()).toEqual(["Pro account", "Business Workspace", "Example compatible API", "Backup account", "Personal Plus"]);
   await expect(page.locator(".pool-member-list")).not.toContainText("Priority 30");
 });
 
@@ -358,7 +358,7 @@ test("pool keeps the last completed route visible after its lease is released", 
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   const priority = page.locator(".pool-controls");
-  await expect(priority).toContainText("Usage order");
+  await expect(priority).toContainText("Request distribution");
   await expect(priority).toContainText("Next candidate: Pro account");
   await expect(priority.locator("[data-ready-route]")).toHaveCount(0);
   await expect(page.locator('.pool-member-card[data-member-label="Pro account"]')).toHaveAttribute("data-last-used", "true");
@@ -524,9 +524,9 @@ test("local pool saves adaptive distribution without chat pinning", async ({ pag
   await expect(dialog).not.toContainText("Request speed");
   await expect(dialog).not.toContainText("Keep one chat on one account");
   await expect(dialog).not.toContainText("Accounts tried after an error");
-  await expect(dialog.getByRole("radio")).toHaveCount(2);
+  await expect(dialog.getByRole("radio")).toHaveCount(3);
   await expect(dialog.getByRole("radio", { name: "Automatic", exact: true })).toHaveAttribute("aria-checked", "true");
-  await dialog.getByRole("radio", { name: "Manual", exact: true }).click();
+  await dialog.getByRole("radio", { name: "Round robin", exact: true }).click();
   await expect(dialog.getByLabel("Retry candidates")).toHaveCount(0);
   await expect(dialog.getByLabel("Failures before cooldown")).toHaveCount(0);
   await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
@@ -535,7 +535,7 @@ test("local pool saves adaptive distribution without chat pinning", async ({ pag
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   const routingInput = calls.findLast((call) => call.command === "update_local_routing")?.args.input;
-  expect(routingInput).toMatchObject({ poolRouting: { mode: "in_order" }, expectedPoolRouting: { mode: "automatic" }, maxRetryCandidates: 3, defaultServiceTier: "fast" });
+  expect(routingInput).toMatchObject({ poolRouting: { mode: "round_robin" }, expectedPoolRouting: { mode: "automatic" }, maxRetryCandidates: 3, defaultServiceTier: "fast" });
   expect(routingInput).not.toHaveProperty("cooldownAfterFailures");
   expect(routingInput).not.toHaveProperty("keepLastCandidateAvailable");
   expect(routingInput).not.toHaveProperty("routingStrategy");
@@ -579,7 +579,7 @@ test("closing mixed rotation retains the immediately applied order", async ({ pa
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Pool rotation", exact: true });
-  await dialog.getByRole("radio", { name: "Manual", exact: true }).click();
+  await dialog.getByRole("radio", { name: "Round robin", exact: true }).click();
   const ids = () => dialog.getByRole("listitem").evaluateAll((rows) => rows.map((row) => row.getAttribute("data-member-id")));
   const original = await ids();
   await dialog.getByRole("listitem").first().getByRole("button", { name: / down$/ }).click();
@@ -587,7 +587,7 @@ test("closing mixed rotation retains the immediately applied order", async ({ pa
   const reordered = await ids();
   await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
   await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
-  await expect(dialog.getByRole("radio", { name: "Manual", exact: true })).toHaveAttribute("aria-checked", "true");
+  await expect(dialog.getByRole("radio", { name: "Round robin", exact: true })).toHaveAttribute("aria-checked", "true");
   expect(await ids()).toEqual(reordered);
 });
 
@@ -602,13 +602,13 @@ test("remote pool saves distribution settings on the connected runtime", async (
   const dialog = page.getByRole("dialog", { name: "Pool rotation" });
   await expect(dialog).not.toContainText("Keep one chat on one account");
   await expect(dialog).not.toContainText("Request speed");
-  await dialog.getByRole("radio", { name: "Manual", exact: true }).click();
+  await dialog.getByRole("radio", { name: "Round robin", exact: true }).click();
   await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.findLast((call) => call.command === "execute_remote_server_action")?.args.input).toMatchObject({
     action: { type: "set_routing_policy" },
-    payload: { poolRouting: { mode: "in_order" }, expectedPoolRouting: { mode: "automatic" }, maxRetryCandidates: 3, defaultServiceTier: "fast" },
+    payload: { poolRouting: { mode: "round_robin" }, expectedPoolRouting: { mode: "automatic" }, maxRetryCandidates: 3, defaultServiceTier: "fast" },
   });
   const remoteRoutingPayload = calls.findLast((call) => call.command === "execute_remote_server_action")?.args.input as { payload: Record<string, unknown> };
   expect(remoteRoutingPayload.payload).not.toHaveProperty("cooldownAfterFailures");

@@ -353,7 +353,7 @@ for (const mode of ["local", "remote"] as const) {
     await page.getByRole("button", { name: "Pool", exact: true }).click();
     await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
     const dialog = page.getByRole("dialog", { name: "Pool rotation", exact: true });
-    await dialog.getByRole("radio", { name: "Manual", exact: true }).click();
+    await dialog.getByRole("radio", { name: "Round robin", exact: true }).click();
     const order = dialog.getByRole("list", { name: "Member order" });
     await expect(order.getByRole("listitem")).toHaveCount(3);
     const api = order.locator('[data-member-id="source:source_synthetic"]');
@@ -369,7 +369,7 @@ for (const mode of ["local", "remote"] as const) {
     await expect(dialog.getByRole("radio", { name: "Automatic", exact: true })).toHaveAttribute("aria-checked", "true");
     await expect(dialog.getByLabel("Request share: Example compatible API", { exact: true })).toHaveValue("3");
     await expect(dialog.getByLabel("Concurrent requests: Example compatible API", { exact: true })).toHaveValue("2");
-    await dialog.getByRole("radio", { name: "Manual", exact: true }).click();
+    await dialog.getByRole("radio", { name: "Round robin", exact: true }).click();
     await expect(order.getByRole("listitem").first()).toContainText("Example compatible API");
     await expect(dialog.getByLabel("Request share: Example compatible API", { exact: true })).toHaveCount(0);
     await dialog.getByRole("button", { name: "Close", exact: true }).last().click();

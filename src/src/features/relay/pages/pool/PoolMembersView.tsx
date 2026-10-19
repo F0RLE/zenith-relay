@@ -63,10 +63,11 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     [poolMembers, runtimeActivity, runtimeOrder],
   );
   const savedRoutingMembers = runtime?.gateway.poolRouting?.members;
-  const rotationMode = runtime?.gateway.poolRouting?.version === 2 ? runtime.gateway.poolRouting.mode : null;
+  const rotationMode = runtime?.gateway.poolRouting && runtime.gateway.poolRouting.version !== 1 ? runtime.gateway.poolRouting.mode : null;
+  const routingTitle = t(rotationMode === "automatic" ? "pool.distributionTitle" : rotationMode === "failover" ? "pool.failoverTitle" : "pool.priorityTitle");
   const members = useMemo(
-    () => orderedPoolMembers(poolMembers, runtimeOrder, savedRoutingMembers, rotationMode),
-    [poolMembers, rotationMode, runtimeOrder, savedRoutingMembers],
+    () => orderedPoolMembers(poolMembers, runtimeOrder, savedRoutingMembers, rotationMode, runtimeByMember),
+    [poolMembers, rotationMode, runtimeOrder, savedRoutingMembers, runtimeByMember],
   );
   const providerCredits = useMemo(() => poolProviderCreditsSummary(members), [members]);
   const providerCreditsValue = providerCredits == null
@@ -232,7 +233,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     );
   }
   return <>
-    <div className="pool-controls workspace-controls" role="group" aria-label={t("pool.priorityTitle")}>
+    <div className="pool-controls workspace-controls" role="group" aria-label={routingTitle}>
       <div className="pool-summary relay-status-summary" data-has-provider-credits={providerCreditsValue != null ? "true" : "false"}>
         <div data-tone={counts.rotation ? "ready" : "muted"}><CircleCheck aria-hidden /><strong>{counts.rotation}</strong><span>{t("pool.memberStatus.rotation")}</span></div>
         <div data-tone={counts.quotaWait ? "warning" : "muted"}><Clock3 aria-hidden /><strong>{counts.quotaWait}</strong><span>{t("pool.memberStatus.quotaWait")}</span></div>
@@ -248,7 +249,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
       </div>
       <div className="pool-member-toolbar">
         <div className="pool-priority-context">
-          <div className="pool-priority-label" data-relay-tooltip={t(rotationMode === "automatic" ? "pool.priorityHintAutomatic" : "pool.priorityHint")}><h2>{t("pool.priorityTitle")}</h2></div>
+          <div className="pool-priority-label" data-relay-tooltip={t(rotationMode === "automatic" ? "pool.priorityHintAutomatic" : rotationMode === "failover" ? "pool.priorityHintFailover" : "pool.priorityHint")}><h2>{routingTitle}</h2></div>
           <div className="pool-runtime-strip">
             <div className="pool-route-summary">
               <strong className="pool-current-route" data-active={activeRequestTotal > 0}>{routingSummary}</strong>

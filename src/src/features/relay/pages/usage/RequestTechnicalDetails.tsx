@@ -5,11 +5,12 @@ import { CacheContextDetails } from "./CacheContextDetails";
 import { RequestDisclosure } from "./RequestDisclosure";
 import { RequestSection } from "./RequestSection";
 import type { UsageRow } from "./usageData";
-import { formatContextBytes, formatEndpointKind, formatErrorOrigin, formatModelId, formatObservedServiceTier, formatToolChoice, formatTerminalOutput, missingRequiredToolCall } from "./usageReportFormat";
+import { formatContextBytes, formatEndpointKind, formatErrorOrigin, formatModelId, formatObservedServiceTier, formatToolChoice, formatTerminalOutput, missingRequiredToolCall, requestStatusKind } from "./usageReportFormat";
 
 export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; debugEnabled: boolean }) {
   const { t, i18n } = useTranslation();
   const routing = row.routing;
+  const requestFailed = !row.success && requestStatusKind(row) !== "pending";
   const toolUse = row.toolUse;
   const hasTools = toolUse && (toolUse.clientToolCount > 0 || toolUse.forwardedToolCount > 0 || toolUse.toolCallCount > 0);
   const toolWarning = row.success && missingRequiredToolCall(toolUse);
@@ -24,7 +25,7 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
     ? row.requestedModel : null;
   const unresolvedRetry = !row.success && routing?.attemptOutcome?.startsWith("retry_");
   const separateEndpoint = routing?.endpointKind && routing.endpointKind !== row.wireApi;
-  const hasErrorMetadata = !row.success && (row.httpStatus != null || row.errorOrigin || row.errorCategory
+  const hasErrorMetadata = requestFailed && (row.httpStatus != null || row.errorOrigin || row.errorCategory
     || row.upstreamError?.httpStatus != null || row.upstreamError?.code || row.upstreamError?.errorType);
   if (!row.requestId && !row.upstreamError?.requestId && !modelAlias && !hasErrorMetadata && !separateEndpoint && !observedTier && !routing && !hasTools && !hasContext) return null;
   return <RequestDisclosure title={t("usage.technicalDetails")} icon={<Braces />} className="request-technical-details">
@@ -50,7 +51,7 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
       </RequestSection> : null}
       {hasErrorMetadata || separateEndpoint || observedTier ? <RequestSection title={t(hasErrorMetadata ? "usage.requestSections.failure" : "usage.requestSections.response")} className="request-response-section">
         <dl className="request-details-list">
-          {!row.success ? <>
+          {requestFailed ? <>
             {row.httpStatus != null ? <div><dt>{t("usage.httpStatus")}</dt><dd>{row.httpStatus}</dd></div> : null}
             {row.errorOrigin ? <div><dt>{t("usage.errorOrigin")}</dt><dd>{formatErrorOrigin(row.errorOrigin, t)}</dd></div> : null}
             {row.errorCategory ? <div><dt>{t("usage.errorCategory")}</dt><dd><code>{row.errorCategory}</code></dd></div> : null}

@@ -1,6 +1,7 @@
 import { Clock3, Cloud, ListMinus, Loader2, Pencil, RefreshCw, UserRound } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { AccountSummary, CandidateRuntimeSnapshot, PoolRoutingMode } from "../../api/types";
+import { rotationModeName } from "./rotationModes";
 import { accountQuotaRefreshState, currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
 import { refreshOneAccountQuota } from "../../accountQuotaRefresh";
 import { ResetCreditsControl } from "../../components/ResetCreditsControl";
@@ -61,7 +62,7 @@ export function PoolMemberCard({
   const displayedErrorCode = quotaStatus === "refreshing" ? null : errorCode;
   const codexInterface = member.kind === "account" && codexPoolOauthSelection === member.id;
   const identity = member.kind === "source" ? member.name : member.identityHint || member.label;
-  const detail = member.kind === "source" ? `${member.wireApi} · ${member.baseUrl}` : member.label;
+  const detail = member.kind === "source" ? member.baseUrl : member.label;
   const isCurrent = activeRequestCount(runtimeState) > 0;
   const modelRetries = upcomingModelRetries(runtimeState, nowMs);
   const firstModelRetry = modelRetries[0];
@@ -176,7 +177,7 @@ export function PoolMemberCard({
       ) : (
         <div className="pool-member-context" data-kind="source">
           <div className="pool-member-runtime-meta">
-            {rotationMode ? <div><span>{t("pool.operationMode")}</span><strong>{t(`pool.rotationModes.${rotationMode === "automatic" ? "automatic" : "manual"}`)}</strong></div> : null}
+            {rotationMode ? <div><span>{t("pool.operationMode")}</span><strong>{t(`pool.rotationModes.${rotationModeName(rotationMode)}`)}</strong></div> : null}
             <div><span>{t("pool.activeRequestCount")}</span><strong>{activeRequests}</strong></div>
           </div>
         </div>

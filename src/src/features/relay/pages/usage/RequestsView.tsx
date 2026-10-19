@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Clock3 } from "lucide-react";
 import type { KeyboardEvent, PointerEvent, ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { EmptyState, StatusIcon } from "../../components/Ui";
@@ -8,7 +9,7 @@ import type { RequestColumnId, RequestTableLayout } from "./useColumnLayout";
 import { usageSpeedSample } from "./usageData";
 import type { UsageRow } from "./usageData";
 import { formatUsageApiEquivalent } from "./usageFormatting";
-import { compactRequestId, formatTiming, requestStatusLabel, formatServiceTier, formatWireApi } from "./usageReportFormat";
+import { compactRequestId, formatTiming, requestStatusKind, requestStatusLabel, formatServiceTier, formatWireApi } from "./usageReportFormat";
 import { SpeedValue, UsageModel, UsageConnection, CompactNumber } from "./usageReportParts";
 
 type RequestsViewProps = {
@@ -38,12 +39,13 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
     time: { label: t("usage.time"), cell: (row) => <time dateTime={row.time}>{formatTime(row.time)}</time> },
     status: {
       label: t("common.status"),
-      cell: (row) => (
-        <StatusIcon
-          status={row.requestOrigin?.startsWith("blocked_") ? "warning" : row.success ? "ready" : "error"}
+      cell: (row) => {
+        const status = requestStatusKind(row);
+        return <StatusIcon
+          status={status === "success" ? "ready" : status === "pending" ? "info" : status}
           label={requestStatusLabel(row, t)}
-        />
-      ),
+        >{status === "pending" ? <Clock3 aria-hidden /> : null}</StatusIcon>;
+      },
     },
     model: { label: t("common.model"), cell: (row) => <UsageModel row={row} /> },
     protocol: { label: t("usage.protocol"), cell: (row) => <code>{formatWireApi(row.wireApi, t)}</code> },

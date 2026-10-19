@@ -28,8 +28,8 @@ for (const theme of ["light", "dark"] as const) {
       await installTauriMock(page, { mode: "local", locale: "ru", theme, populated: true, accountCount: 3, providerCredits: 125.5, basisPointsAvailable: true });
       await page.goto("/");
       await page.getByRole("button", { name: "Пул", exact: true }).click();
-      const panel = page.getByRole("group", { name: "Порядок использования" });
-      await expect(panel.getByRole("heading", { name: "Порядок использования" })).toBeVisible();
+      const panel = page.getByRole("group", { name: "Распределение запросов" });
+      await expect(panel.getByRole("heading", { name: "Распределение запросов" })).toBeVisible();
       await expect(panel.locator(".pool-current-route")).toContainText("Работает сейчас: Personal Plus");
       await expect(panel.locator(".pool-next-route")).toContainText("Следующий кандидат");
       await expect(panel.locator("[data-active-models]")).toHaveAttribute("data-active-request-count", "1");
@@ -72,7 +72,7 @@ test("pool controls keep icon commands labelled and show quota refresh progress"
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  const panel = page.getByRole("group", { name: "Usage order" });
+  const panel = page.getByRole("group", { name: "Request distribution" });
   await panel.getByRole("button", { name: "Hide account calculation" }).click();
   await expect(panel.getByRole("button", { name: "Show account calculation" })).toHaveAttribute("aria-pressed", "false");
   await panel.getByRole("button", { name: "Pool rotation settings" }).click();
@@ -105,8 +105,32 @@ test("pool controls keep idle routes distinct from active requests", async ({ pa
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, usageActive: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  const panel = page.getByRole("group", { name: "Usage order" });
+  const panel = page.getByRole("group", { name: "Request distribution" });
   await expect(panel.locator(".pool-current-route")).toHaveAttribute("data-active", "false");
   await expect(panel.locator(".pool-current-route")).toContainText("Next candidate");
   await expect(panel.locator(".pool-active-models")).toHaveCount(0);
 });
+
+for (const mode of ["local", "remote"] as const) {
+  test(`pool cards use scheduler resource evidence without inventing the next route (${mode})`, async ({ page }) => {
+    await installTauriMock(page, {
+      mode, locale: "en", populated: true, accountCount: 2, quotaAvailable: true, nextCandidateId: null,
+      routingHeadroom: {
+        account_synthetic: { quotaRemainingBasisPoints: 1_000, providerCreditsMicroUnits: null, providerCreditsUnlimited: false },
+        account_synthetic_2: { quotaRemainingBasisPoints: 9_000, providerCreditsMicroUnits: null, providerCreditsUnlimited: false },
+      },
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Pool", exact: true }).click();
+    const cards = page.locator(".pool-member-card");
+    await expect(cards.first()).toHaveAttribute("data-member-label", "Business Workspace");
+    await expect(cards.nth(1)).toHaveAttribute("data-member-label", "Personal Plus");
+    await expect(page.locator('.pool-member-card[data-next="true"]')).toHaveCount(0);
+    await expect(page.locator(".pool-next-route")).toHaveCount(0);
+    await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Pool rotation", exact: true });
+    await dialog.getByRole("radio", { name: "Round robin", exact: true }).click();
+    await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
+    await expect(page.getByRole("group", { name: "Usage order", exact: true })).toBeVisible();
+  });
+}

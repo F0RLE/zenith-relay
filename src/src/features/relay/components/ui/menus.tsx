@@ -117,7 +117,7 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
   const triggerRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
-  const [position, setPosition] = useState<{ left: number; top: number; width: number } | null>(null);
+  const [position, setPosition] = useState<{ left: number; top: number; width: number; maxHeight: number } | null>(null);
   const selected = options.find((option) => option.value === value) ?? options[0];
 
   const close = (restoreFocus = false) => {
@@ -133,6 +133,8 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
     if (!trigger || !list) return;
     const margin = 8;
     const gap = 6;
+    const contentTop = 36 + margin;
+    list.style.maxHeight = "";
     const measuredWidth = () => {
       const labels = [...list.querySelectorAll<HTMLElement>("button > span")];
       const labelWidth = Math.max(0, ...labels.map((label) => {
@@ -166,10 +168,13 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
         : trigger.right - width;
     const left = Math.max(margin, Math.min(preferredLeft, window.innerWidth - width - margin));
     const below = trigger.bottom + gap;
-    const top = below + list.offsetHeight <= window.innerHeight - margin
-      ? below
-      : Math.max(margin, trigger.top - list.offsetHeight - gap);
-    setPosition({ left, top, width });
+    const spaceBelow = Math.max(0, window.innerHeight - margin - below);
+    const spaceAbove = Math.max(0, trigger.top - gap - contentTop);
+    const opensBelow = list.offsetHeight <= spaceBelow || spaceBelow >= spaceAbove;
+    const maxHeight = opensBelow ? spaceBelow : spaceAbove;
+    const height = Math.min(list.offsetHeight, maxHeight);
+    const top = opensBelow ? below : trigger.top - height - gap;
+    setPosition({ left, top: Math.max(contentTop, top), width, maxHeight });
   }, [align, fitContent, open, options.length, showSelectionIndicator]);
 
   useEffect(() => {
@@ -192,7 +197,7 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
       if (event.key === "Tab") close();
     };
     const dismiss = () => close();
-    const dismissOnWheel = (event: WheelEvent) => {
+    const dismissOnScroll = (event: Event) => {
       const target = event.target;
       if (target instanceof Node && listRef.current?.contains(target)) return;
       close();
@@ -203,12 +208,14 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
     // listbox closes.
     document.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("resize", dismiss);
-    window.addEventListener("wheel", dismissOnWheel, true);
+    window.addEventListener("wheel", dismissOnScroll, true);
+    window.addEventListener("scroll", dismissOnScroll, true);
     return () => {
       document.removeEventListener("pointerdown", onPointerDown);
       document.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("resize", dismiss);
-      window.removeEventListener("wheel", dismissOnWheel, true);
+      window.removeEventListener("wheel", dismissOnScroll, true);
+      window.removeEventListener("scroll", dismissOnScroll, true);
     };
   }, [open]);
 
@@ -259,7 +266,7 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
         aria-label={label}
         data-positioned={Boolean(position)}
         data-selection-indicator={showSelectionIndicator}
-        style={position ? { left: position.left, top: position.top, width: position.width } : undefined}
+        style={position ? { left: position.left, top: position.top, width: position.width, maxHeight: `min(280px, ${position.maxHeight}px)` } : undefined}
       >
         {options.map((option, index) => <button
           key={option.value}

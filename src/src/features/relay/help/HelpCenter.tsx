@@ -15,6 +15,7 @@ const guides = {
   en: enGuide,
   ru: ruGuide,
 } satisfies Record<"en" | "ru", string>;
+type HelpTopic = "sign-in" | "pool-rotation";
 
 export function HelpCenter() {
   const { t, i18n } = useTranslation();
@@ -27,11 +28,11 @@ export function HelpCenter() {
   </section>;
 }
 
-export function HelpTopicDialog({ topic, onClose }: { topic: "sign-in"; onClose: () => void }) {
+export function HelpTopicDialog({ topic, onClose }: { topic: HelpTopic; onClose: () => void }) {
   const { t, i18n } = useTranslation();
   const language = i18n.resolvedLanguage?.startsWith("ru") ? "ru" : "en";
   return <Dialog
-    title={t("accounts.signInHelp")}
+    title={t(topic === "sign-in" ? "accounts.signInHelp" : "pool.routingSettingsHelp")}
     onClose={onClose}
     layer="top"
     className="help-topic-dialog"
@@ -41,7 +42,7 @@ export function HelpTopicDialog({ topic, onClose }: { topic: "sign-in"; onClose:
   </Dialog>;
 }
 
-function HelpGuide({ language, topic }: { language: keyof typeof guides; topic?: "sign-in" }) {
+function HelpGuide({ language, topic }: { language: keyof typeof guides; topic?: HelpTopic }) {
   const { t } = useTranslation();
   const [markdown, setMarkdown] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);

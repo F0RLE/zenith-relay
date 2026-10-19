@@ -53,6 +53,10 @@ button {
   -webkit-user-select: none;
 }
 
+.app-workspace {
+  display: contents;
+}
+
 .app :is(input, textarea, [contenteditable="true"], .config-preview pre, .markdown-description) {
   user-select: text;
   -webkit-user-select: text;

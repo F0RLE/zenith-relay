@@ -29,7 +29,7 @@ for (const mode of ["local", "remote"] as const) {
         return invoke(command, args);
       };
     }, mode);
-    await dialog.getByRole("radio", { name: "Manual", exact: true }).click();
+    await dialog.getByRole("radio", { name: "Round robin", exact: true }).click();
     await expect(dialog.locator(".pool-routing-editor")).toHaveAttribute("aria-busy", "false");
     await expect(dialog.getByRole("alert")).toHaveCount(0);
     await expect(dialog.getByRole("listitem")).toHaveCount(2);
@@ -38,13 +38,13 @@ for (const mode of ["local", "remote"] as const) {
       return { runtime: await scope.__TAURI_INTERNALS__.invoke(mode === "local" ? "get_local_runtime_state" : "get_remote_server_state"), attempts: scope.__routingAttempts };
     }, mode);
     expect(saved.attempts).toBe(2);
-    expect(saved.runtime.gateway.poolRouting).toMatchObject({ mode: "in_order", members: [{ kind: "source", weight: 9 }, { kind: "source", weight: 9 }] });
+    expect(saved.runtime.gateway.poolRouting).toMatchObject({ mode: "round_robin", members: [{ kind: "source", weight: 9 }, { kind: "source", weight: 9 }] });
     expect(saved.runtime.gateway.maxRetryCandidates).toBe(5);
     expect(saved.runtime.gateway.defaultServiceTier).toBe("fast");
   });
 }
 
-test("rotation serializes rapid edits, preserves numeric focus and waits before closing", async ({ page }) => {
+test("rotation serializes rapid edits, preserves numeric focus and waits before header close", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   const dialog = await openPoolRotation(page);
@@ -71,7 +71,7 @@ test("rotation serializes rapid edits, preserves numeric focus and waits before 
   await expect(weight).toHaveValue("12");
   await expect(weight).toBeFocused();
   await dialog.getByLabel("Concurrent requests: Example compatible API", { exact: true }).fill("23");
-  await page.keyboard.press("Escape");
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
   await expect(dialog).toBeVisible();
   await page.evaluate(() => (window as unknown as { __releaseRouting: () => void }).__releaseRouting());
   await expect(dialog).toBeHidden();
@@ -97,20 +97,20 @@ test("rotation rolls back a failed save and accepts the next edit", async ({ pag
       return invoke(command, args);
     };
   });
-  await dialog.getByRole("radio", { name: "Manual", exact: true }).click();
+  await dialog.getByRole("radio", { name: "Round robin", exact: true }).click();
   await expect(dialog.getByRole("alert")).toBeVisible();
   await expect(dialog.getByRole("radio", { name: "Automatic", exact: true })).toHaveAttribute("aria-checked", "true");
-  await dialog.getByRole("radio", { name: "Manual", exact: true }).click();
+  await dialog.getByRole("radio", { name: "Round robin", exact: true }).click();
   await expect(dialog.locator(".pool-routing-editor")).toHaveAttribute("aria-busy", "false");
   await expect(dialog.getByRole("alert")).toHaveCount(0);
-  await expect(dialog.getByRole("radio", { name: "Manual", exact: true })).toHaveAttribute("aria-checked", "true");
+  await expect(dialog.getByRole("radio", { name: "Round robin", exact: true })).toHaveAttribute("aria-checked", "true");
 });
 
 test("pointer drag highlights the target and Escape cancels without saving", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   const dialog = await openPoolRotation(page);
-  await dialog.getByRole("radio", { name: "Manual", exact: true }).click();
+  await dialog.getByRole("radio", { name: "Round robin", exact: true }).click();
   await expect(dialog.locator(".pool-routing-editor")).toHaveAttribute("aria-busy", "false");
   const ids = () => dialog.getByRole("listitem").evaluateAll((rows) => rows.map((row) => row.getAttribute("data-member-id")));
   const before = await ids();
@@ -148,7 +148,7 @@ test("repeated routing conflicts stop after three attempts and restore stored va
       return invoke(command, args);
     };
   });
-  await dialog.getByRole("radio", { name: "Manual", exact: true }).click();
+  await dialog.getByRole("radio", { name: "Round robin", exact: true }).click();
   await expect(dialog.getByRole("alert")).toContainText("Current values are shown");
   await expect(dialog.locator(".pool-routing-editor")).toHaveAttribute("aria-busy", "false");
   await expect(dialog.getByRole("radio", { name: "Automatic", exact: true })).toHaveAttribute("aria-checked", "true");

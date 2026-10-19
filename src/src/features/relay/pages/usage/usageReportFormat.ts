@@ -55,10 +55,22 @@ export function formatDurationMs(elapsedMs: number | null, locale: string, t: TF
   return t("usage.durationMilliseconds", { value: Math.round(elapsedMs) });
 }
 
-export function requestStatusLabel(row: Pick<UsageRow, "success" | "requestOrigin">, t: TFunction): string {
-  if (row.requestOrigin?.startsWith("blocked_")) return t("codex.backgroundBlocked");
-  if (row.requestOrigin) return t("common.success");
-  return row.success ? t("common.success") : t("common.failed");
+type RequestStatusRow = Pick<UsageRow, "success" | "requestOrigin">
+  & Partial<Pick<UsageRow, "routing" | "errorCategory" | "httpStatus">>;
+
+export function requestStatusKind(row: RequestStatusRow) {
+  if (row.requestOrigin?.startsWith("blocked_")) return "warning";
+  if (row.requestOrigin || row.success) return "success";
+  if (row.routing?.attemptOutcome === "tool_discovery" && !row.errorCategory
+    && row.httpStatus != null && row.httpStatus >= 200 && row.httpStatus < 300) return "pending";
+  return "error";
+}
+
+export function requestStatusLabel(row: RequestStatusRow, t: TFunction): string {
+  const status = requestStatusKind(row);
+  if (status === "warning") return t("codex.backgroundBlocked");
+  if (status === "pending") return t("usage.execution.decisions.tool_discovery");
+  return status === "success" ? t("common.success") : t("common.failed");
 }
 
 export function formatRequestOrigin(origin: Exclude<CodexRequestOrigin, null>, t: TFunction): string {
@@ -164,15 +176,9 @@ export function aggregateRowFromTotals(rowLabel: string, totals: UsageTotals): A
   };
 }
 
-export type CacheTouch = {
-  model: string | null;
-  cacheWriteTtl: string | null;
-  touchedAt: string;
-};
-
 export function cacheRemainingLabel(life: ReturnType<typeof cacheLifetime>, translate: TFunction) {
+  if (life.windows.length > 1) return translate("usage.cacheReport.mixed", { windows: life.windows.join(", ") });
   if (life.expiry === "unknown") return translate("usage.cacheReport.unknown");
-  if (life.expiry === "minimum_elapsed") return translate("usage.cacheReport.minimumElapsed");
   if (life.expiry === "elapsed") return translate("usage.cacheReport.elapsed");
   const remaining = life.remainingMs ?? 0;
   if (remaining < 60_000) return translate("usage.cacheReport.soon");

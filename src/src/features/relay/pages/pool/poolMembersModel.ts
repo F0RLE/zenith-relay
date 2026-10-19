@@ -21,6 +21,7 @@ export type PoolMemberStatusCounts = {
 };
 
 export type PoolProviderCreditsSummary = ProviderCreditsSummary;
+type ResourceHeadroom = CandidateRuntimeSnapshot["resourceHeadroom"];
 
 export type PoolActivityState = {
   activeMembers: PoolMember[];
@@ -120,10 +121,11 @@ export function orderedPoolMembers(
   runtimeOrder: CandidateRuntimeSnapshot[],
   savedMembers?: readonly { id: string }[],
   mode?: PoolRoutingMode | null,
+  runtimeByMember: ReadonlyMap<string, CandidateRuntimeSnapshot | undefined> = poolMemberRuntimeStates(members, runtimeOrder),
 ) {
   const savedOrder = savedMemberPositions(savedMembers);
   const orderByMember = savedOrder.size > 0 ? savedOrder : routingOrderPositions(runtimeOrder);
-  return [...members].sort((left, right) => compareDisplayedPoolMembers(left, right, orderByMember, mode));
+  return [...members].sort((left, right) => compareDisplayedPoolMembers(left, right, orderByMember, mode, runtimeByMember));
 }
 
 function compareDisplayedPoolMembers(
@@ -131,11 +133,14 @@ function compareDisplayedPoolMembers(
   right: PoolMember,
   order: Map<string, number>,
   mode?: PoolRoutingMode | null,
+  runtimeByMember?: ReadonlyMap<string, CandidateRuntimeSnapshot | undefined>,
 ) {
   const status = compareOperationalStatus(left.operationalStatus, right.operationalStatus);
   if (status || mode !== "automatic") return status || comparePoolMembers(left, right, order);
-  return compareRoutingRemainder(left, right)
-    || compareCreditsWhenQuotaIsEmpty(left, right)
+  const leftHeadroom = runtimeByMember?.get(left.id)?.resourceHeadroom;
+  const rightHeadroom = runtimeByMember?.get(right.id)?.resourceHeadroom;
+  return compareRoutingRemainder(left, right, leftHeadroom, rightHeadroom)
+    || compareCreditsWhenQuotaIsEmpty(left, right, leftHeadroom, rightHeadroom)
     || compareRoutingOrder(left.id, right.id, order)
     || compareStableText(memberName(left), memberName(right));
 }
@@ -145,31 +150,36 @@ function compareDisplayedPoolMembers(
  * Provider credits are a separate display key when no positive window exists.
  * A source balance is not a routing remainder or provider credit balance.
  */
-export function memberRoutingRemainder(member: PoolMember): number | null {
-  if (member.kind !== "account") return null;
+export function memberRoutingRemainder(member: PoolMember, headroom?: ResourceHeadroom): number | null {
+  if (headroom) {
+    const remaining = headroom.quotaRemainingBasisPoints;
+    return remaining != null && Number.isInteger(remaining) && remaining > 0 && remaining <= 10_000 ? remaining : null;
+  }
+  if (member.kind !== "account" || member.refreshState?.quota !== "fresh" || member.quota.limitReached) return null;
   const windows = [member.quota?.primary, member.quota?.secondary]
     .map((window) => window?.availableBasisPoints)
-    .filter((basisPointRemainder): basisPointRemainder is number => basisPointRemainder != null);
+    .filter((basisPointRemainder): basisPointRemainder is number => basisPointRemainder != null
+      && Number.isInteger(basisPointRemainder) && basisPointRemainder >= 0 && basisPointRemainder <= 10_000);
   const remaining = windows.length ? Math.min(...windows) : null;
   return remaining != null && remaining > 0 ? remaining : null;
 }
 
-function compareRoutingRemainder(left: PoolMember, right: PoolMember) {
-  const leftRemainder = memberRoutingRemainder(left);
-  const rightRemainder = memberRoutingRemainder(right);
+function compareRoutingRemainder(left: PoolMember, right: PoolMember, leftHeadroom?: ResourceHeadroom, rightHeadroom?: ResourceHeadroom) {
+  const leftRemainder = memberRoutingRemainder(left, leftHeadroom);
+  const rightRemainder = memberRoutingRemainder(right, rightHeadroom);
   if (leftRemainder == null && rightRemainder == null) return 0;
   if (leftRemainder == null) return 1;
   if (rightRemainder == null) return -1;
   return rightRemainder - leftRemainder;
 }
 
-function compareCreditsWhenQuotaIsEmpty(left: PoolMember, right: PoolMember) {
+function compareCreditsWhenQuotaIsEmpty(left: PoolMember, right: PoolMember, leftHeadroom?: ResourceHeadroom, rightHeadroom?: ResourceHeadroom) {
   if (
-    memberRoutingRemainder(left) != null
-    || memberRoutingRemainder(right) != null
+    memberRoutingRemainder(left, leftHeadroom) != null
+    || memberRoutingRemainder(right, rightHeadroom) != null
   ) return 0;
-  const leftCredits = memberProviderCredits(left);
-  const rightCredits = memberProviderCredits(right);
+  const leftCredits = memberProviderCredits(left, leftHeadroom);
+  const rightCredits = memberProviderCredits(right, rightHeadroom);
   if (leftCredits === "unlimited" && rightCredits === "unlimited") return 0;
   if (leftCredits === "unlimited") return -1;
   if (rightCredits === "unlimited") return 1;
@@ -179,12 +189,17 @@ function compareCreditsWhenQuotaIsEmpty(left: PoolMember, right: PoolMember) {
   return rightCredits - leftCredits;
 }
 
-function memberProviderCredits(member: PoolMember): number | "unlimited" | null {
-  if (member.kind !== "account") return null;
-  if (member.refreshState?.quota !== "fresh") return null;
-  if (member.quota?.providerCreditsUnlimited === true) return "unlimited";
-  const credits = member.quota?.availableCreditsMicroUnits;
-  return credits != null && Number.isSafeInteger(credits) && credits >= 0
+function memberProviderCredits(member: PoolMember, headroom?: ResourceHeadroom): number | "unlimited" | null {
+  let credits: number | null | undefined;
+  if (headroom) {
+    if (headroom.providerCreditsUnlimited) return "unlimited";
+    credits = headroom.providerCreditsMicroUnits;
+  } else {
+    if (member.kind !== "account" || member.refreshState?.quota !== "fresh" || member.quota.providerCreditsAvailable !== true) return null;
+    if (member.quota.providerCreditsUnlimited === true) return "unlimited";
+    credits = member.quota.availableCreditsMicroUnits;
+  }
+  return credits != null && Number.isSafeInteger(credits) && credits > 0
     ? credits
     : null;
 }

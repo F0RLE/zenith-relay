@@ -5,13 +5,14 @@ import { relayCommands } from "../../api/commands";
 import { CopyButton, Dialog } from "../../components/Ui";
 import { tokenSpeed } from "../../usageSpeed";
 import { formatFullNumber } from "../../usageTotals";
-import { cacheLifetime } from "./cacheLifetime";
+import { cacheLifetime, cacheTouchForRow } from "./cacheLifetime";
+import type { CacheSessionRecord } from "../../api/types";
+import { useRelayUsageContext } from "../../state/relayStateContext";
 import { usageSpeedSample } from "./usageData";
 import type { UsageRow } from "./usageData";
 import { usageBreakdown } from "./usageBreakdown";
 import { formatUsageApiEquivalent } from "./usageFormatting";
-import { formatDurationMs, requestStatusLabel, formatErrorCategory, cacheRemainingLabel, prefixErrorOrigin } from "./usageReportFormat";
-import type { CacheTouch } from "./usageReportFormat";
+import { formatDurationMs, requestStatusKind, requestStatusLabel, formatErrorCategory, cacheRemainingLabel, prefixErrorOrigin } from "./usageReportFormat";
 import { RequestDetailMetric, SpeedValue } from "./usageReportParts";
 import { RequestExecution } from "./RequestExecution";
 import { RequestParameters } from "./RequestParameters";
@@ -24,9 +25,12 @@ export function RequestDetails({ row, local, onClose, loadAttempts }: {
   loadAttempts: AttemptPageLoader;
 }) {
   const { t, i18n } = useTranslation();
+  const { usageRevision } = useRelayUsageContext();
   const [debugEnabled, setDebugEnabled] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
-  const [cacheTouch, setCacheTouch] = useState<CacheTouch | null>(null);
+  const [cacheSessions, setCacheSessions] = useState<CacheSessionRecord[]>([]);
+  const cacheTouch = cacheTouchForRow(row, local ? cacheSessions : []);
+  const cacheStatus = cacheTouch ? cacheLifetime(cacheTouch, nowMs) : null;
   const routing = row.routing;
   const speed = usageSpeedSample(row);
   const generationSpeed = tokenSpeed(speed);
@@ -40,9 +44,8 @@ export function RequestDetails({ row, local, onClose, loadAttempts }: {
   });
   const formatTokens = (tokenCount: number | null) => tokenCount == null ? "—" : formatFullNumber(tokenCount, i18n.language);
   const hasTokenValue = (tokenCount: number | null): tokenCount is number => tokenCount != null && tokenCount > 0;
-  const hasCacheRead = hasTokenValue(breakdown.cacheRead);
-  const hasCacheWrite = hasTokenValue(breakdown.cacheWrite);
-  const showCacheClock = hasCacheRead || hasCacheWrite;
+  const showCacheCounters = breakdown.cacheRead != null || breakdown.cacheWrite != null || cacheTouch != null;
+  const showCacheClock = cacheStatus?.expiry === "open";
   useEffect(() => {
     let active = true;
     void relayCommands.diagnosticSettings()
@@ -56,27 +59,15 @@ export function RequestDetails({ row, local, onClose, loadAttempts }: {
     return () => window.clearInterval(timer);
   }, [showCacheClock]);
   useEffect(() => {
-    if (!showCacheClock) {
-      setCacheTouch(null);
-      return;
-    }
-    const own: CacheTouch = { model: row.model, cacheWriteTtl: row.cacheWriteTtl, touchedAt: row.time };
-    if (!local || !row.clientContextId) {
-      setCacheTouch(own);
-      return;
-    }
+    if (!local || !row.clientContextId) return;
     let active = true;
-    setCacheTouch(null);
-    relayCommands.localCacheSessions().then((sessions) => {
-      if (!active) return;
-      const session = sessions.find((cacheSession) => cacheSession.clientContextId === row.clientContextId);
-      setCacheTouch(session
-        ? { model: session.model ?? row.model, cacheWriteTtl: session.cacheWriteTtl ?? row.cacheWriteTtl, touchedAt: session.touchedAt }
-        : own);
-    }).catch(() => { if (active) setCacheTouch(own); });
+    void relayCommands.localCacheSessions()
+      .then((sessions) => { if (active) setCacheSessions(sessions); })
+      // A failed read cannot erase an earlier observation or extend its lifetime.
+      .catch(() => undefined);
     return () => { active = false; };
-  }, [local, row.cacheWriteTtl, row.clientContextId, row.model, row.time, showCacheClock]);
-  const cacheRemaining = cacheTouch ? cacheRemainingLabel(cacheLifetime(cacheTouch, nowMs), t) : null;
+  }, [local, row.clientContextId, row.candidateKind, row.candidateKey, row.routedModel, row.requestedModel, usageRevision]);
+  const cacheRemaining = cacheStatus ? cacheRemainingLabel(cacheStatus, t) : null;
   const providerMessage = row.upstreamError?.message?.trim();
   const upstreamErrorMessage = providerMessage
     ? prefixErrorOrigin(row.errorOrigin, providerMessage)
@@ -94,13 +85,13 @@ export function RequestDetails({ row, local, onClose, loadAttempts }: {
   const requestTime = Number.isFinite(requestTimestamp)
     ? new Intl.DateTimeFormat(i18n.resolvedLanguage ?? i18n.language, { dateStyle: "short", timeStyle: "medium" }).format(requestTimestamp)
     : null;
-  const requestStatus = row.requestOrigin?.startsWith("blocked_") ? "warning" : row.success ? "success" : "error";
+  const requestStatus = requestStatusKind(row);
   return <Dialog title={t("usage.requestDetails")} onClose={onClose} className="request-details-dialog">
     <div className="request-overview">
       <div className="request-details-header">
         <div className="request-details-identity">
           <span className="request-details-status" data-status={requestStatus}>
-            {requestStatus === "success" ? <CircleCheck aria-hidden /> : <CircleAlert aria-hidden />}
+            {requestStatus === "success" ? <CircleCheck aria-hidden /> : requestStatus === "pending" ? <Clock3 aria-hidden /> : <CircleAlert aria-hidden />}
             {requestStatusLabel(row, t)}
           </span>
           <div className="request-details-model">
@@ -119,7 +110,7 @@ export function RequestDetails({ row, local, onClose, loadAttempts }: {
         {requestCost !== "—" ? <RequestDetailMetric label={t("usage.requestCost")} value={<span className={costClassName} data-relay-tooltip={costHint}>{requestCost}</span>} /> : null}
       </dl>
     </div>
-    {!row.success ? <section className="request-details-error" aria-label={t("usage.errorDetails")}>
+    {!row.success && requestStatus !== "pending" ? <section className="request-details-error" aria-label={t("usage.errorDetails")}>
       <div className="request-outcome-heading">
         <CircleAlert aria-hidden />
         <h3>{row.errorCategory ? formatErrorCategory(row.errorCategory, t) : t("common.failed")}</h3>
@@ -142,18 +133,19 @@ export function RequestDetails({ row, local, onClose, loadAttempts }: {
       <div className="request-details-token-group">
         <div className="request-details-token-group-heading"><dt>{t("usage.inputTokens")}</dt><dd>{formatTokens(breakdown.inputTotal)}</dd></div>
         {hasTokenValue(breakdown.uncachedInput) ? <div className="request-details-token-child"><dt>{t("usage.uncachedInputTokens")}</dt><dd>{formatTokens(breakdown.uncachedInput)}</dd></div> : null}
-        {hasCacheRead ? (
+        {showCacheCounters ? <>
           <div className="request-details-token-child">
             <dt>{t("usage.cachedInputTokens")}</dt>
-            <dd>{formatTokens(breakdown.cacheRead)}{cacheRemaining ? <small>{cacheRemaining}</small> : null}</dd>
+            <dd>{formatTokens(breakdown.cacheRead)}</dd>
           </div>
-        ) : null}
-        {hasCacheWrite ? (
           <div className="request-details-token-child">
             <dt>{t("usage.cacheWriteInputTokens")}</dt>
-            <dd>{formatTokens(breakdown.cacheWrite)}{!hasCacheRead && cacheRemaining ? <small>{cacheRemaining}</small> : null}</dd>
+            <dd>{formatTokens(breakdown.cacheWrite)}</dd>
           </div>
-        ) : null}
+        </> : null}
+        {cacheRemaining ? <div className="request-details-token-child request-cache-retention">
+          <dt>{t("usage.cacheReport.retention")}</dt><dd>{cacheRemaining}</dd>
+        </div> : null}
       </div>
       <div className="request-details-token-group">
         <div className="request-details-token-group-heading"><dt>{t("usage.outputTokens")}</dt><dd>{formatTokens(breakdown.outputTotal)}</dd></div>

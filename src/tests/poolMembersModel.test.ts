@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { CandidateRuntimeSnapshot, RuntimeSnapshot } from "../src/features/relay/api/types";
 import type { PoolMember } from "../src/features/relay/poolHelpers";
-import { applyRuntimeActivities, compareRuntimeActivity, preferNewerRuntimeOrder, reconcileRuntimeActivityOverlay } from "../src/features/relay/routingOrder";
+import { applyRuntimeActivities, compareRuntimeActivity, preferNewerRuntimeOrder, reconcileRuntimeActivityOverlay, sameRuntimeOrder } from "../src/features/relay/routingOrder";
 import {
   orderedPoolMembers,
   poolActivityState,
@@ -181,7 +181,7 @@ describe("pool members model", () => {
     ]).map((item) => item.id)).toEqual(["first", "second"]);
   });
 
-  test("automatic mode places the largest remaining quota on the left and keeps an active card there", () => {
+  test("automatic cards rank fresh limiting quota independently of active requests and manual order", () => {
     const window = (availableBasisPoints: number) => ({ availableBasisPoints });
     const members = [
       member("source", "api", { name: "Zenith API" }),
@@ -195,8 +195,8 @@ describe("pool members model", () => {
         quota: { primary: window(0), providerCreditsAvailable: true, availableCreditsMicroUnits: 20_000_000 },
         refreshState: { models: "stale", quota: "fresh" },
       }),
-      member("account", "lower", { label: "Lower", quota: { primary: window(7_800), secondary: window(9_000) } }),
-      member("account", "leader", { label: "Leader", quota: { primary: window(8_300) } }),
+      member("account", "lower", { label: "Lower", quota: { primary: window(7_800), secondary: window(9_000) }, refreshState: { quota: "fresh" } }),
+      member("account", "leader", { label: "Leader", quota: { primary: window(8_300) }, refreshState: { quota: "fresh" } }),
     ];
     const live = [
       candidate("lower", { activeRequestCount: 1, nextForNewRequest: true }),
@@ -219,6 +219,59 @@ describe("pool members model", () => {
       "lower",
       "leader",
     ]);
+  });
+
+  test("automatic cards do not rank stale, undated or explicitly exhausted quota as fresh capacity", () => {
+    const fresh = member("account", "fresh", {
+      quota: { primary: { availableBasisPoints: 1_000 } }, refreshState: { quota: "fresh" },
+    });
+    for (const overrides of [
+      { refreshState: { quota: "stale" } },
+      { refreshState: undefined },
+      { quota: { primary: { availableBasisPoints: 10_000 }, limitReached: true } },
+      { quota: { primary: { availableBasisPoints: 20_000 } } },
+    ]) {
+      const outdated = member("account", "outdated", {
+        quota: { primary: { availableBasisPoints: 10_000 } }, refreshState: { quota: "fresh" }, ...overrides,
+      });
+      expect(orderedPoolMembers([outdated, fresh], [], [outdated, fresh], "automatic").map((item) => item.id))
+        .toEqual(["fresh", "outdated"]);
+    }
+  });
+
+  test("scheduler resource evidence overrides raw quotas and monitoring freshness", () => {
+    const members = [
+      member("account", "stale", { quota: { primary: { availableBasisPoints: 10_000 } }, refreshState: { quota: "fresh" } }),
+      member("account", "fresh", { quota: { primary: { availableBasisPoints: 1_000 } }, refreshState: { quota: "stale" } }),
+    ];
+    const order = [
+      candidate("stale", { resourceHeadroom: { quotaRemainingBasisPoints: null, providerCreditsMicroUnits: null, providerCreditsUnlimited: false } }),
+      candidate("fresh", { resourceHeadroom: { quotaRemainingBasisPoints: 1_000, providerCreditsMicroUnits: null, providerCreditsUnlimited: false } }),
+    ];
+    expect(orderedPoolMembers(members, order, members, "automatic").map((item) => item.id)).toEqual(["fresh", "stale"]);
+  });
+
+  test("credit ranking follows the independent scheduler ledger evidence", () => {
+    const members = [
+      member("account", "stale", { quota: { availableCreditsMicroUnits: 1_000_000_000, providerCreditsAvailable: true }, refreshState: { quota: "fresh" } }),
+      member("account", "fresh", { quota: { availableCreditsMicroUnits: 1_000_000 }, refreshState: { quota: "stale" } }),
+    ];
+    const order = [
+      candidate("stale", { resourceHeadroom: { quotaRemainingBasisPoints: null, providerCreditsMicroUnits: null, providerCreditsUnlimited: false } }),
+      candidate("fresh", { resourceHeadroom: { quotaRemainingBasisPoints: null, providerCreditsMicroUnits: 1_000_000, providerCreditsUnlimited: false } }),
+    ];
+    expect(orderedPoolMembers(members, order, members, "automatic").map((item) => item.id)).toEqual(["fresh", "stale"]);
+    const unlimited = { ...order[0], resourceHeadroom: { quotaRemainingBasisPoints: null, providerCreditsMicroUnits: null, providerCreditsUnlimited: true } };
+    expect(orderedPoolMembers(members, [unlimited, order[1]], members, "automatic").map((item) => item.id)).toEqual(["stale", "fresh"]);
+  });
+
+  test("resource-only snapshot changes are not discarded as unchanged activity", () => {
+    const before = candidate("account", { resourceHeadroom: { quotaRemainingBasisPoints: 1_000, providerCreditsMicroUnits: 2_000_000, providerCreditsUnlimited: false } });
+    expect(sameRuntimeOrder([before], [structuredClone(before)])).toBe(true);
+    for (const change of [{ quotaRemainingBasisPoints: null }, { providerCreditsMicroUnits: null }, { providerCreditsUnlimited: true }]) {
+      const after = { ...before, resourceHeadroom: { ...before.resourceHeadroom!, ...change } };
+      expect(sameRuntimeOrder([before], [after])).toBe(false);
+    }
   });
 
   test("derives active and last-used route state from runtime snapshots", () => {

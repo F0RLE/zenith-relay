@@ -14,6 +14,7 @@ import { ErrorsView } from "./ErrorsView";
 import { RequestDetails } from "./RequestDetails";
 import { RequestFilters } from "./RequestFilters";
 import { RequestsView } from "./RequestsView";
+import { requestStatusKind } from "./usageReportFormat";
 import { CompactNumber } from "./usageReportParts";
 import { UsageMetric } from "./UsageMetric";
 import { UsagePagination } from "./UsagePagination";
@@ -236,7 +237,7 @@ export function UsagePage() {
   const selectedAccount = mode !== "zenith"
     ? runtime?.accounts.find((account) => account.id === connectionQuery)
     : undefined;
-  const errorRows = useMemo(() => rows.filter((usageRow) => !usageRow.success), [rows]);
+  const errorRows = useMemo(() => rows.filter((usageRow) => !usageRow.success && requestStatusKind(usageRow) !== "pending"), [rows]);
   const clearFilters = () => {
     setRange("all"); setStatus("all"); setModelQuery(""); setConnectionQuery("");
     setWireApi(""); setTransport(""); setErrorQuery(""); setRequestQuery("");

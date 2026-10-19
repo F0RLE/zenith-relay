@@ -87,9 +87,9 @@ async function expectSecretGeometry(container: Locator) {
 }
 
 for (const theme of ["dark", "light"] as const) {
-  for (const width of [1160, 390]) {
+  for (const width of [1160, 840, 390]) {
     test(`notes use masked fields without clipping in ${theme} at ${width}px`, async ({ page }) => {
-      await page.setViewportSize({ width, height: 760 });
+      await page.setViewportSize({ width, height: width === 840 ? 560 : 760 });
       await installNotesMock(page, { theme });
       await page.goto("/");
       const dialog = await openNotes(page);
@@ -109,6 +109,22 @@ for (const theme of ["dark", "light"] as const) {
         return body.scrollWidth <= body.clientWidth && fields.scrollWidth <= fields.clientWidth
           && box.left >= 0 && box.right <= innerWidth && box.top >= 36 && box.bottom <= innerHeight;
       })).toBe(true);
+      const spacing = await dialog.evaluate((element) => {
+        const body = element.querySelector(".relay-dialog-body")!;
+        const fields = element.querySelector(".account-login-fields")!.getBoundingClientRect();
+        const footer = element.querySelector("footer")!;
+        const close = footer.querySelector("button")!.getBoundingClientRect();
+        return {
+          footerGap: footer.getBoundingClientRect().top - fields.bottom,
+          rightOffset: Math.abs(close.right - fields.right),
+          bodyScrolls: body.scrollHeight > body.clientHeight + 1,
+        };
+      });
+      expect(spacing.footerGap).toBeGreaterThanOrEqual(16);
+      expect(spacing.footerGap).toBeLessThanOrEqual(36);
+      expect(spacing.bodyScrolls).toBe(false);
+      expect(spacing.rightOffset).toBeLessThanOrEqual(1);
+      await page.mouse.move(0, 0);
       await page.screenshot({ path: `output/playwright/login-notes-${theme}-${width}.png` });
     });
   }

@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import type { PoolRoutingPolicy, PoolRoutingSnapshot } from "../../api/types";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { applyPoolRoutingEdits, persistPoolRoutingEdits, readRoutingRuntime, type PoolRoutingEdit } from "./poolRoutingEdits";
+import { supportsRotationEditing } from "./rotationModes";
 
-const EMPTY_POLICY: PoolRoutingPolicy = { version: 2, mode: "automatic", members: [] };
+const EMPTY_POLICY: PoolRoutingPolicy = { version: 3, mode: "automatic", members: [] };
 
 export function usePoolRoutingEditor(onClose: () => void) {
   const { mode, runtime, perform } = useRelayState();
@@ -15,7 +16,7 @@ export function usePoolRoutingEditor(onClose: () => void) {
   const [policy, setPolicy] = useState(base.current);
   const [saving, setSaving] = useState(false);
   const [errorKey, setErrorKey] = useState<string | null>(null);
-  const applyPending = (snapshot: PoolRoutingSnapshot): PoolRoutingSnapshot => snapshot.version === 2
+  const applyPending = (snapshot: PoolRoutingSnapshot): PoolRoutingSnapshot => snapshot.version !== 1
     ? applyPoolRoutingEdits(snapshot, pending.current)
     : snapshot;
   useEffect(() => {
@@ -28,9 +29,9 @@ export function usePoolRoutingEditor(onClose: () => void) {
   }, [currentPolicy]);
 
   const edit = (change: PoolRoutingEdit) => {
-    if (!currentPolicy || currentPolicy.version !== 2 || !runtime?.capabilities.features.includes("rotation_v2")) return;
+    if (!supportsRotationEditing(currentPolicy, runtime?.capabilities.features ?? [])) return;
     pending.current.push(change);
-    setPolicy((draftPolicy) => draftPolicy.version === 2 ? applyPoolRoutingEdits(draftPolicy, [change]) : draftPolicy);
+    setPolicy((draftPolicy) => draftPolicy.version !== 1 ? applyPoolRoutingEdits(draftPolicy, [change]) : draftPolicy);
     setErrorKey(null);
     if (task.current) return;
     setSaving(true);
@@ -68,5 +69,5 @@ export function usePoolRoutingEditor(onClose: () => void) {
     const ok = await task.current;
     if (ok !== false && mounted.current) onClose();
   };
-  return { policy, edit, saving, errorKey, available: currentPolicy?.version === 2 && Boolean(runtime?.capabilities.features.includes("rotation_v2")), close };
+  return { policy, edit, saving, errorKey, available: supportsRotationEditing(currentPolicy, runtime?.capabilities.features ?? []), close };
 }

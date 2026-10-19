@@ -11,12 +11,12 @@ import {
 } from "../src/features/relay/pages/usage/usageData";
 import {
   cacheLifetime,
+  cacheTouchForRow,
   cacheWriteDurationWindows,
-  documentedCacheRetentionMinimum,
 } from "../src/features/relay/pages/usage/cacheLifetime";
 import type { LocalUsage, RemoteUsage } from "../src/features/relay/api/types";
 import { formatUsageApiEquivalent } from "../src/features/relay/pages/usage/usageFormatting";
-import { compactRequestId, formatModelId, formatReasoningEffort, formatReasoningSummary, formatTiming, prefixErrorOrigin } from "../src/features/relay/pages/usage/usageReportFormat";
+import { compactRequestId, formatModelId, formatReasoningEffort, formatReasoningSummary, formatTiming, prefixErrorOrigin, requestStatusKind, requestStatusLabel } from "../src/features/relay/pages/usage/usageReportFormat";
 import { en } from "../src/i18n/locales/en";
 import { ru } from "../src/i18n/locales/ru";
 
@@ -42,7 +42,6 @@ const row = (overrides: Partial<UsageRow> = {}): UsageRow => ({
   cachedInputTokens: null,
   cacheWriteInputTokens: null,
   cacheWriteTtl: null,
-  documentedCacheRetentionMinimum: null,
   reasoningTokens: 5,
   outputTokens: 25,
   tokens: 45,
@@ -62,6 +61,27 @@ const row = (overrides: Partial<UsageRow> = {}): UsageRow => ({
 });
 
 describe("usage data", () => {
+  test("catalog discovery is pending, not a failed or successful logical request", async () => {
+    const pending = row({ success: false, routing: {
+      reason: "quota_headroom", eligibleCandidates: 1, quotaRemainingBasisPoints: null,
+      inFlightBefore: 0, dispatchesBefore: 0, attemptOutcome: "tool_discovery",
+    } });
+    expect(requestStatusKind(pending)).toBe("pending");
+    expect(requestStatusKind({ ...pending, httpStatus: 502 })).toBe("error");
+    expect(requestStatusKind({ ...pending, httpStatus: null })).toBe("error");
+    expect(requestStatusKind({ ...pending, errorCategory: "adapter_upstream_response_invalid" })).toBe("error");
+    expect(requestStatusKind({ ...pending, routing: null })).toBe("error");
+    expect(requestStatusKind({ ...pending, success: true })).toBe("success");
+    for (const [locale, translation, expected] of [
+      ["ru", ru, "Загрузка определений инструментов"],
+      ["en", en, "Loading tool contracts"],
+    ] as const) {
+      const i18n = createInstance();
+      await i18n.init({ lng: locale, resources: { [locale]: { translation } }, initImmediate: false });
+      expect(requestStatusLabel(pending, i18n.t.bind(i18n))).toBe(expected);
+    }
+  });
+
   test("timing keeps unknown first output distinct from total duration and known zero", async () => {
     for (const [locale, translation, unknown, zero, known] of [
       ["ru", ru, "— / 20,9 с", "0 мс / 428 мс", "128 мс / 428 мс"],
@@ -172,45 +192,49 @@ describe("usage data", () => {
     expect(prefixErrorOrigin(null, "historical request failed")).toBe("historical request failed");
   });
 
-  test("keeps documented model minimum separate from provider-reported cache windows", () => {
-    for (const model of ["gpt-5.6", "openai/gpt-5.6-2026-09-01", "gpt-6", "gpt-6-astra", "gpt-6-sol", "gpt-7-future"]) {
-      expect(documentedCacheRetentionMinimum(model, 0, 10)).toBe("30m");
-    }
-    expect(documentedCacheRetentionMinimum("gpt-6-luna", 12, 0)).toBe("30m");
-    expect(documentedCacheRetentionMinimum("gpt-6-astra", 12, 10, "1h")).toBeNull();
-    expect(documentedCacheRetentionMinimum("gpt-6-astra", 12, 10, "5m")).toBeNull();
-    expect(documentedCacheRetentionMinimum("gpt-6-astra", 0, 0)).toBeNull();
-    expect(documentedCacheRetentionMinimum("gpt-5.5", 12, 10)).toBeNull();
-    expect(documentedCacheRetentionMinimum("gpt-6x-preview", 12, 10)).toBeNull();
-    expect(documentedCacheRetentionMinimum("gpt-6.bad-suffix", 12, 10)).toBeNull();
-    expect(documentedCacheRetentionMinimum("claude-sonnet", 12, 10)).toBeNull();
-  });
-
-  test("keeps reported cache-write windows and uses 30 minutes only as the OpenAI fallback", () => {
-    expect(cacheWriteDurationWindows(null, "30m")).toEqual(["30m"]);
-    expect(cacheWriteDurationWindows("30m", null)).toEqual(["30m"]);
-    expect(cacheWriteDurationWindows("5m, 1h", null)).toEqual(["5m", "1h"]);
-    expect(cacheWriteDurationWindows("15m", "30m")).toEqual(["15m"]);
-    expect(cacheWriteDurationWindows(null, null)).toEqual([]);
+  test("uses only recorded windows, without inventing a provider policy", () => {
+    expect(cacheWriteDurationWindows(null)).toEqual([]);
+    expect(cacheWriteDurationWindows("30m")).toEqual(["30m"]);
+    expect(cacheWriteDurationWindows("5m, 1h, 5m")).toEqual(["5m", "1h"]);
+    expect(cacheWriteDurationWindows("15m")).toEqual(["15m"]);
+    expect(cacheWriteDurationWindows("0m, unknown")).toEqual([]);
   });
 
 
   test("estimates cache lifetime from the last touch and the reported window", () => {
     const now = Date.parse("2026-09-27T12:00:00.000Z");
-    expect(cacheLifetime({ model: "claude-sonnet-4", cacheWriteTtl: "1h", touchedAt: "2026-09-27T11:20:00.000Z" }, now)).toMatchObject({
+    expect(cacheLifetime({ cacheWriteTtl: "1h", touchedAt: "2026-09-27T11:20:00.000Z" }, now)).toMatchObject({
       windows: ["1h"], expiry: "open", remainingMs: 20 * 60_000,
     });
-    expect(cacheLifetime({ model: "claude-sonnet-4", cacheWriteTtl: "5m, 1h", touchedAt: "2026-09-27T11:10:00.000Z" }, now)).toMatchObject({
-      windows: ["5m", "1h"], expiry: "open", remainingMs: 10 * 60_000,
+    expect(cacheLifetime({ cacheWriteTtl: "5m, 1h", touchedAt: "2026-09-27T11:10:00.000Z" }, now)).toMatchObject({
+      windows: ["5m", "1h"], expiry: "unknown", remainingMs: null,
     });
-    expect(cacheLifetime({ model: "claude-opus", cacheWriteTtl: "5m", touchedAt: "2026-09-27T11:00:00.000Z" }, now).expiry).toBe("elapsed");
-    expect(cacheLifetime({ model: "claude-opus", cacheWriteTtl: null, touchedAt: "2026-09-27T11:50:00.000Z" }, now).expiry).toBe("unknown");
-    expect(cacheLifetime({ model: "gpt-6-astra", cacheWriteTtl: null, touchedAt: "2026-09-27T11:40:00.000Z" }, now)).toMatchObject({
+    expect(cacheLifetime({ cacheWriteTtl: "5m", touchedAt: "2026-09-27T11:00:00.000Z" }, now).expiry).toBe("elapsed");
+    expect(cacheLifetime({ cacheWriteTtl: null, touchedAt: "2026-09-27T11:50:00.000Z" }, now).expiry).toBe("unknown");
+    expect(cacheLifetime({ cacheWriteTtl: "30m", touchedAt: "2026-09-27T11:40:00.000Z" }, now)).toMatchObject({
       windows: ["30m"], expiry: "open", remainingMs: 10 * 60_000,
     });
-    expect(cacheLifetime({ model: "gpt-6-astra", cacheWriteTtl: null, touchedAt: "2026-09-27T11:00:00.000Z" }, now).expiry).toBe("minimum_elapsed");
-    expect(cacheLifetime({ model: "gpt-6", cacheWriteTtl: "30m", touchedAt: "2026-09-27T11:00:00.000Z" }, now).expiry).toBe("minimum_elapsed");
-    expect(cacheLifetime({ model: "gpt-6", cacheWriteTtl: "15m", touchedAt: "2026-09-27T11:40:00.000Z" }, now).expiry).toBe("elapsed");
+    expect(cacheLifetime({ cacheWriteTtl: "30m", touchedAt: "2026-09-27T11:00:00.000Z" }, now).expiry).toBe("elapsed");
+    expect(cacheLifetime({ cacheWriteTtl: "15m", touchedAt: "2026-09-27T11:40:00.000Z" }, now).expiry).toBe("elapsed");
+    expect(cacheLifetime({ cacheWriteTtl: "30m", touchedAt: "2026-09-27T12:10:00.000Z" }, now).remainingMs).toBe(30 * 60_000);
+    expect(cacheLifetime({ cacheWriteTtl: "30m", touchedAt: "invalid" }, now).expiry).toBe("unknown");
+  });
+
+  test("cache reads refresh the observed window without becoming writes or borrowing another route", () => {
+    const request = row({ model: "Display alias", routedModel: "upstream-model", clientContextId: "chat", time: "2026-10-18T12:25:00Z", cachedInputTokens: 100, cacheWriteInputTokens: 0 });
+    const session = { clientContextId: "chat", candidateKind: "account" as const, candidateId: "account", model: "upstream-model", startedAt: "2026-10-18T12:00:00Z", touchedAt: "2026-10-18T12:00:00Z", cacheWriteTtl: "30m" };
+    const touch = cacheTouchForRow(request, [session])!;
+    expect(touch.touchedAt).toBe(request.time);
+    expect(cacheLifetime(touch, Date.parse(request.time)).remainingMs).toBe(30 * 60_000);
+    expect(cacheTouchForRow({ ...request, time: "2026-10-18T12:26:00Z", cachedInputTokens: 0 }, [{ ...session, touchedAt: request.time }])?.touchedAt).toBe(request.time);
+    for (const foreign of [
+      { ...session, clientContextId: "other" }, { ...session, model: "other" },
+      { ...session, candidateId: "other" }, { ...session, candidateKind: "source" as const },
+    ]) expect(cacheTouchForRow({ ...request, cachedInputTokens: 0 }, [foreign])).toBeNull();
+    expect(cacheTouchForRow({ ...request, cachedInputTokens: 0 }, [])).toBeNull();
+    const unknown = cacheTouchForRow({ ...request, model: "gpt-6", routedModel: "gpt-6" }, [])!;
+    expect(cacheLifetime(unknown, Date.parse(request.time)).expiry).toBe("unknown");
+    expect(request.cacheWriteInputTokens).toBe(0);
   });
 
   test("normalizes known Codex background categories", () => {
@@ -309,7 +333,6 @@ describe("usage data", () => {
       ttft: 120,
       generationMs: 600,
       cacheWriteTtl: "45m",
-      documentedCacheRetentionMinimum: null,
       clientContextId: "client_0123456789abcdef01234567",
     });
     expect(usageRowsFromRemote([remote], {
@@ -324,7 +347,6 @@ describe("usage data", () => {
       candidateKey: "remote-account",
       appliedServiceTier: "flex",
       cacheWriteTtl: "45m",
-      documentedCacheRetentionMinimum: null,
       clientContextId: null,
       requestOrigin: null,
       ttft: 100,

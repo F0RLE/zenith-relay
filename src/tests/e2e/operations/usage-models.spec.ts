@@ -219,7 +219,7 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await expect(details).toContainText("Total tokens28");
   await expect(details).toContainText("Request cost≈$0.0001");
   await details.locator(".request-technical-details > summary").click();
-  await expect(details).toContainText("Selection reasonGreatest quota remaining");
+  await expect(details).toContainText("Selection reasonFresh quota headroom band");
   await expect(details).toContainText("Eligible participants4");
   await expect(details).toContainText("Quota at selection63.00%");
 });

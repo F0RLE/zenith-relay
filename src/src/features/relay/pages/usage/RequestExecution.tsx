@@ -64,7 +64,7 @@ export function RequestExecution({ row, loadPage }: { row: UsageRow; loadPage: A
         <div className="request-send-content">
           <div className="request-send-heading">
             <strong><span className="request-send-index">{send.attempt}.</span> {send.connection}</strong>
-            <span>{formatDurationMs(send.duration, i18n.resolvedLanguage ?? i18n.language, t)}{send.httpStatus != null ? ` · HTTP ${send.httpStatus}` : ""}</span>
+            <span>{t("usage.execution.elapsed", { duration: formatDurationMs(send.duration, i18n.resolvedLanguage ?? i18n.language, t) })}{send.httpStatus != null ? ` · HTTP ${send.httpStatus}` : ""}</span>
           </div>
           <p className={send.success || lookup ? "request-send-success" : "request-send-error"}>
             {lookup ? label : send.success ? t("common.success") : formatErrorCategory(send.errorCategory, t)}

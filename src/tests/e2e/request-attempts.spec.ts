@@ -3,6 +3,30 @@ import { installTauriMock } from "./tauri-mock";
 import { noOutputUsage, setUsageEventOverrides } from "./request-details-fixture";
 
 for (const mode of ["local", "remote"] as const) {
+  for (const locale of ["en", "ru"] as const) {
+    test(`${mode} ${locale} catalog discovery never displays an HTTP 200 failure`, async ({ page }) => {
+      const pendingLabel = locale === "en" ? "Loading tool contracts" : "Загрузка определений инструментов";
+      const detailsLabel = locale === "en" ? "Request details" : "Сведения о запросе";
+      await page.setViewportSize({ width: 390, height: 844 });
+      await installTauriMock(page, {
+        mode, locale, populated: true, usageAttemptOutcome: "tool_discovery",
+      });
+      await page.goto("/");
+      await setUsageEventOverrides(page, { success: false, httpStatus: 200, errorCategory: null, ttftMs: null });
+      await page.getByRole("button", { name: locale === "en" ? "Usage" : "Использование", exact: true }).click();
+      await expect(page.locator(".usage-request-table").getByRole("img", { name: pendingLabel })).toHaveAttribute("data-status", "info");
+      await page.getByRole("button", { name: `${detailsLabel}: req_synthetic_${mode}` }).click();
+      const details = page.getByRole("dialog", { name: detailsLabel });
+      await expect(details.locator(".request-details-status")).toHaveAttribute("data-status", "pending");
+      await expect(details.locator(".request-details-status")).toHaveText(pendingLabel);
+      await expect(details.locator(".request-details-error")).toHaveCount(0);
+      expect(await details.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      await details.screenshot({ path: `output/playwright/usage-discovery-${mode}-${locale}.png` });
+    });
+  }
+}
+
+for (const mode of ["local", "remote"] as const) {
   test(`${mode} shows all sends inside one request without changing its final result`, async ({ page }) => {
     await installTauriMock(page, { mode, locale: "en", populated: true, usageAttempts: true });
     await page.goto("/");
@@ -15,6 +39,7 @@ for (const mode of ["local", "remote"] as const) {
     await expect(sends).toHaveCount(3);
     await expect(sends.first()).toBeVisible();
     await expect(sends.nth(0)).toHaveAttribute("aria-label", "Send 1");
+    await expect(sends.nth(0).locator(".request-send-heading")).toContainText("Since request start:");
     await expect(sends.nth(0)).toContainText("HTTP 400");
     await expect(sends.nth(1)).toContainText("Selecting another connection");
     await expect(sends.nth(2)).toContainText("Success");

@@ -32,7 +32,6 @@ export type SourceProtocolConfig = {
 export type SourceProbeInput = { modelId: string; wireApi: SourceWireApi; expectedRevision: number };
 export type MessagesReasoningMode = "disabled" | "budget" | "adaptive";
 export type CacheWriteTtl = "provider" | "5m" | "1h";
-export type DocumentedCacheRetentionMinimum = "30m";
 
 export type SourceProtocolBinding = {
   wireApi: SourceWireApi;

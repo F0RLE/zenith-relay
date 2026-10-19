@@ -63,7 +63,7 @@ for (const viewport of viewports) {
     await page.screenshot({ path: `output/playwright/pool-header-actions-ru-dark-${viewport.width}x${viewport.height}.png` });
 
     await expect(page.locator(".pool-sort-menu")).toHaveCount(0);
-    await expect(page.locator(".pool-priority-label")).toContainText("Порядок использования");
+    await expect(page.locator(".pool-priority-label")).toContainText("Распределение запросов");
     await expect(page.getByRole("button", { name: "Настройки ротации пула", exact: true })).toBeVisible();
     const poolToolbarGroups = page.locator(".pool-quota-actions > .pool-control-group");
     await expect(poolToolbarGroups).toHaveCount(2);
@@ -99,7 +99,7 @@ for (const viewport of viewports) {
     await page.getByRole("button", { name: "Настройки ротации пула", exact: true }).click();
     const distribution = page.getByRole("dialog", { name: "Ротация пула" });
     await expect(distribution).not.toContainText("Скорость запроса");
-    await distribution.getByRole("radio", { name: "Вручную", exact: true }).click();
+    await distribution.getByRole("radio", { name: "По кругу", exact: true }).click();
     await expect(distribution.getByRole("listitem")).toHaveCount(6);
     expect(await distribution.evaluate((element) => element.scrollWidth <= element.clientWidth && element.getBoundingClientRect().bottom <= innerHeight)).toBe(true);
     await page.screenshot({ path: `output/playwright/pool-member-order-${viewport.width}x${viewport.height}.png` });
@@ -434,9 +434,9 @@ for (const viewport of viewports) {
       await page.getByRole("button", { name: "Пул", exact: true }).click();
       await page.getByRole("button", { name: "Настройки ротации пула", exact: true }).click();
       const dialog = page.getByRole("dialog", { name: "Ротация пула" });
-      await expect(dialog.getByRole("radio")).toHaveCount(2);
+      await expect(dialog.getByRole("radio")).toHaveCount(3);
       await expect(dialog.getByRole("radio", { name: "Автоматически", exact: true })).toHaveAttribute("aria-checked", "true");
-      await dialog.getByRole("radio", { name: "Вручную", exact: true }).click();
+      await dialog.getByRole("radio", { name: "По кругу", exact: true }).click();
       await expect(dialog).not.toContainText("Закреплять один чат за аккаунтом");
       await expect(dialog).not.toContainText("Аккаунтов для повтора при ошибке");
       await expect(dialog).not.toContainText("Скорость запроса");
@@ -532,7 +532,7 @@ for (const viewport of viewports) {
     dialog = page.getByRole("dialog", { name: "Request details" });
     await expect(dialog).toContainText("req_synthetic_local");
     await dialog.locator(".request-technical-details > summary").click();
-    await expect(dialog).toContainText("Selection reasonGreatest quota remaining");
+    await expect(dialog).toContainText("Selection reasonFresh quota headroom band");
     await expect(dialog).toContainText("Eligible participants4");
     await expect(dialog).toContainText("Quota at selection63.00%");
     expect(await dialog.locator(".request-details-list > div").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);

@@ -560,7 +560,7 @@
   min-width: 0;
   min-height: 82px;
   display: grid;
-  align-content: center;
+  align-content: start;
   padding: 10px 12px;
 }
 
@@ -846,59 +846,95 @@
 .pool-member-card-footer[data-kind="source"] .pool-member-actions > :not(:first-child).relay-disabled-tooltip-anchor > .relay-icon-button {
   border-left: 1px solid var(--relay-border);
 }
-.relay-dialog.wide.pool-routing-dialog { width: min(800px, 100%); }
-.pool-routing-editor { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
-.pool-routing-modes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-.pool-routing-modes button { display: flex; align-items: center; justify-content: center; gap: 8px; min-width: 0; min-height: 40px; padding: 8px; border: 1px solid transparent; border-radius: 6px; color: var(--relay-muted); background: transparent; font: inherit; font-size: 13px; cursor: pointer; }
+.relay-dialog.wide.pool-routing-dialog { width: min(940px, 100%); grid-template-rows: auto minmax(0, 1fr); }
+.pool-routing-dialog > header { padding-bottom: 20px; border-bottom: 1px solid var(--relay-border); }
+.pool-routing-dialog .relay-dialog-body { padding: 0; }
+.pool-routing-editor { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; }
+.pool-routing-editor[data-presets="true"] { grid-template-columns: 196px minmax(0, 1fr); }
+.pool-routing-content { display: grid; align-content: start; gap: 24px; min-width: 0; padding: 24px; }
+.pool-routing-content h3 { margin: 0; color: var(--relay-secondary); font-size: 12px; font-weight: 600; }
+.pool-routing-strategy { display: grid; gap: 12px; }
+.pool-routing-modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; padding: 4px; border-radius: 10px; background: var(--relay-subtle); }
+.pool-routing-modes[data-legacy="true"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.pool-routing-presets { display: flex; flex-direction: column; gap: 12px; padding: 24px 12px; border-right: 1px solid var(--relay-border); background: var(--relay-sidebar); }
+.pool-routing-preset-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 18px; padding-inline: 10px; font-size: 12px; font-weight: 600; color: var(--relay-muted); }
+.pool-routing-custom { padding: 2px 6px; border-radius: 4px; background: var(--relay-surface); color: var(--relay-secondary); font-size: 10px; font-weight: 500; }
+.pool-routing-preset-options { display: grid; gap: 6px; }
+.pool-routing-dialog .pool-routing-preset-options .pool-routing-preset { justify-content: flex-start; gap: 10px; min-width: 0; min-height: 46px; padding: 11px 10px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--relay-secondary); font-size: 12px; font-weight: 500; line-height: 1.4; white-space: normal; text-align: left; }
+.pool-routing-dialog .pool-routing-preset-options .pool-routing-preset:hover:not(:disabled) { border-color: var(--relay-border); color: var(--relay-text); background: var(--relay-surface); }
+.pool-routing-dialog .pool-routing-preset-options .pool-routing-preset[aria-pressed="true"],
+.pool-routing-dialog .pool-routing-preset-options .pool-routing-preset[aria-pressed="true"]:hover:not(:disabled) { border-color: transparent; color: var(--relay-accent-hover); background: var(--relay-accent-soft); font-weight: 600; }
+.pool-routing-preset-options .pool-routing-preset svg { width: 18px; height: 18px; flex-shrink: 0; }
+.pool-routing-shares { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0 0; color: var(--relay-secondary); font-size: 12px; }
+.pool-routing-modes button { display: flex; align-items: center; justify-content: center; gap: 7px; min-width: 0; min-height: 38px; padding: 8px 6px; border: 1px solid transparent; border-radius: 7px; color: var(--relay-muted); background: transparent; font: inherit; font-size: 12px; line-height: 1.4; cursor: pointer; }
 .pool-routing-modes button[aria-checked="false"]:hover:not(:disabled) { color: var(--relay-text); background: var(--relay-subtle); }
-.pool-routing-modes button[aria-checked="true"] { color: var(--relay-accent); background: var(--relay-accent-soft); border-color: transparent; }
+.pool-routing-modes button[aria-checked="true"] { color: var(--relay-accent-hover); background: var(--relay-accent-soft); border-color: transparent; }
 .pool-routing-modes button:disabled { cursor: not-allowed; opacity: .5; }
 .pool-routing-modes svg { width: 16px; height: 16px; flex-shrink: 0; }
-.pool-routing-columns, .pool-routing-member { display: grid; grid-template-columns: minmax(0, 1fr) 104px 156px; gap: 12px; align-items: center; }
+.pool-routing-modes .pool-routing-mode-compact { display: none; }
+.pool-routing-members { min-width: 0; }
+.pool-routing-members-heading { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pool-routing-members-heading > span { min-width: 22px; padding: 2px 6px; border-radius: 5px; background: var(--relay-subtle); color: var(--relay-muted); font-size: 11px; text-align: center; font-variant-numeric: tabular-nums; }
+.pool-routing-columns, .pool-routing-member { display: grid; grid-template-columns: minmax(0, 1fr) 78px 132px; gap: 12px; align-items: center; }
 .pool-routing-editor[data-manual-order="true"] .pool-routing-columns,
-.pool-routing-editor[data-manual-order="true"] .pool-routing-member { grid-template-columns: minmax(0, 1fr) 156px 68px; }
-.pool-routing-columns { padding: 0 8px; color: var(--relay-muted); font-size: 12px; }
+.pool-routing-editor[data-manual-order="true"] .pool-routing-member { grid-template-columns: minmax(0, 1fr) 132px 60px; }
+.pool-routing-editor[data-manual-order="true"][data-request-shares="true"] .pool-routing-columns,
+.pool-routing-editor[data-manual-order="true"][data-request-shares="true"] .pool-routing-member { grid-template-columns: minmax(0, 1fr) 64px 116px 60px; }
+.pool-routing-columns { min-height: 30px; padding: 0 12px 10px; color: var(--relay-muted); font-size: 11px; line-height: 1.4; }
 .pool-routing-columns > span:not(:first-child) { text-align: center; }
-.pool-routing-member { min-width: 0; padding: 12px 8px; border-bottom: 1px solid var(--relay-border); }
-.pool-routing-member:first-child { border-top: 1px solid var(--relay-border); }
+.pool-routing-order { display: grid; gap: 6px; }
+.pool-routing-member { min-width: 0; padding: 12px; border: 1px solid transparent; border-radius: 10px; background: var(--relay-subtle); }
+.pool-routing-member:focus-within { border-color: var(--relay-border); }
 .pool-routing-member[data-dragging] { background: var(--relay-accent-soft); }
 .pool-routing-member[data-drop-target] { outline: none; background: var(--relay-accent-soft); }
-.pool-routing-identity { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.pool-routing-identity > svg { width: 18px; height: 18px; flex-shrink: 0; color: var(--relay-muted); }
-.pool-routing-handle { display: grid; place-items: center; width: 24px; height: 32px; flex-shrink: 0; padding: 0; border: 0; background: transparent; color: var(--relay-muted); cursor: grab; touch-action: none; user-select: none; }
+.pool-routing-identity { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pool-routing-avatar { display: grid; place-items: center; width: 32px; height: 36px; flex-shrink: 0; border-radius: 8px; background: var(--relay-surface); color: var(--relay-muted); }
+.pool-routing-avatar svg { width: 17px; height: 17px; }
+.pool-routing-handle { display: grid; place-items: center; width: 18px; height: 32px; flex-shrink: 0; padding: 0; border: 0; background: transparent; color: var(--relay-muted); cursor: grab; touch-action: none; user-select: none; }
 .pool-routing-handle svg { width: 16px; height: 16px; }
-.pool-routing-rank { width: 20px; flex-shrink: 0; color: var(--relay-muted); font-size: 12px; text-align: center; font-variant-numeric: tabular-nums; }
+.pool-routing-rank { min-width: 12px; flex-shrink: 0; color: var(--relay-muted); font-size: 11px; text-align: center; font-variant-numeric: tabular-nums; }
 .pool-routing-name { display: grid; gap: 4px; flex: 1; min-width: 0; }
-.pool-routing-name strong { font-size: 13px; overflow-wrap: anywhere; }
+.pool-routing-name strong { font-size: 13px; font-weight: 550; overflow-wrap: anywhere; }
 .pool-routing-name small { color: var(--relay-muted); font-size: 11px; }
-.pool-routing-meta { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.pool-routing-meta { display: flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap; }
 .pool-routing-meta .relay-status { min-width: 0; font-size: 11px; gap: 4px; white-space: normal; }
 .pool-routing-meta .relay-status svg { width: 12px; height: 12px; }
 .pool-routing-number { min-width: 0; text-align: center; }
 .pool-routing-number > span { display: none; }
-.pool-routing-number input { box-sizing: border-box; width: 100%; height: 32px; padding: 4px 6px; border: 1px solid var(--relay-border); border-radius: 4px; background: var(--relay-bg); color: var(--relay-text); font: inherit; font-size: 13px; text-align: center; font-variant-numeric: tabular-nums; appearance: textfield; }
-.pool-routing-number input::placeholder { color: var(--relay-secondary); opacity: 1; }
+.pool-routing-number input { box-sizing: border-box; width: 100%; height: 34px; padding: 4px 6px; border: 1px solid var(--relay-border); border-radius: 6px; background: var(--relay-surface); color: var(--relay-text); font: inherit; font-size: 12px; text-align: center; font-variant-numeric: tabular-nums; appearance: textfield; }
+.pool-routing-number input::placeholder { color: var(--relay-muted); opacity: 1; }
 .pool-routing-number input::-webkit-inner-spin-button,
 .pool-routing-number input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 .pool-routing-member .inline-actions { gap: 4px; }
-.pool-routing-member .inline-actions button { width: 30px; height: 30px; }
-.pool-routing-retries { border-top: 1px solid var(--relay-border); padding-top: 16px; }
-.pool-routing-retries summary { cursor: pointer; font-size: 13px; color: var(--relay-secondary); }
-.pool-routing-retries .pool-policy-row { grid-template-columns: minmax(0, 1fr) 108px; margin-top: 16px; padding: 0; border: 0; background: transparent; }
-.pool-routing-retries .toggle-row { margin-top: 16px; }
+.pool-routing-member .inline-actions button { width: 28px; height: 30px; }
+@media (max-width: 800px) {
+  .pool-routing-editor[data-presets="true"] { grid-template-columns: minmax(0, 1fr); }
+  .pool-routing-presets { gap: 10px; padding: 16px 20px; border-right: 0; border-bottom: 1px solid var(--relay-border); }
+  .pool-routing-preset-heading { padding-inline: 0; }
+  .pool-routing-preset-options { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .pool-routing-dialog .pool-routing-preset-options .pool-routing-preset { justify-content: center; }
+  .pool-routing-content { padding: 20px; }
+}
 @media (max-width: 600px) {
-  .pool-routing-columns { display: none; }
-  .pool-routing-member { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .pool-routing-content { gap: 20px; padding: 16px; }
+  .pool-routing-presets { padding: 16px; }
+  .pool-routing-dialog .pool-routing-preset-options .pool-routing-preset { flex-direction: column; gap: 8px; padding: 12px 4px; text-align: center; }
+  .pool-routing-columns { display: flex; padding-inline: 0; }
+  .pool-routing-columns > span { display: none; }
+  .pool-routing-member { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
   .pool-routing-editor[data-manual-order="true"] .pool-routing-member { grid-template-columns: minmax(0, 1fr) 68px; }
+  .pool-routing-editor[data-manual-order="true"][data-request-shares="true"] .pool-routing-member { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 68px; }
   .pool-routing-identity { grid-column: 1 / -1; }
   .pool-routing-number { display: grid; gap: 6px; }
-  .pool-routing-number > span { display: flex; align-items: center; justify-content: center; min-height: 32px; font-size: 11px; color: var(--relay-muted); }
+  .pool-routing-number > span { display: flex; align-items: center; justify-content: center; min-height: 30px; font-size: 11px; color: var(--relay-muted); }
   .pool-routing-member .inline-actions { align-self: end; }
   .pool-routing-modes button { gap: 5px; font-size: 12px; flex-wrap: wrap; }
 }
 @media (max-width: 480px) {
   .pool-routing-modes button { flex-direction: column; flex-wrap: nowrap; padding-inline: 4px; }
   .pool-routing-modes button span { display: grid; place-items: center; min-width: 0; max-width: 100%; min-height: 2.7em; line-height: 1.35; text-align: center; overflow-wrap: anywhere; }
+  .pool-routing-modes button[data-mode="automatic"] .pool-routing-mode-full { display: none; }
+  .pool-routing-modes .pool-routing-mode-compact { display: grid; }
 }
 
 /* Add-to-pool browser: fixed navigation and actions, one scrolling result list. */

@@ -948,6 +948,11 @@
   background: color-mix(in srgb, var(--relay-warning) 10%, transparent);
 }
 
+.request-details-status[data-status="pending"] {
+  color: var(--relay-muted);
+  background: color-mix(in srgb, var(--relay-muted) 10%, transparent);
+}
+
 .request-details-status > svg {
   flex-shrink: 0;
   width: 14px;
@@ -1314,13 +1319,6 @@
   max-width: 155px;
   padding-block: 4px;
   font-size: 12px;
-}
-
-.request-details-token-child dd > small {
-  display: block;
-  margin-top: 2px;
-  color: var(--relay-muted);
-  font-size: 10px;
 }
 
 .request-details-token-child dt {

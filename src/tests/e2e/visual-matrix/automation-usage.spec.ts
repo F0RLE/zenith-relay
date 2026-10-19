@@ -161,7 +161,7 @@ test("ru compact disclosure labels stay readable", async ({ page }) => {
   await expect(dialog).toContainText("РазмышлениеМаксимальное→Низкое");
   await dialog.locator(".request-technical-details > summary").click();
   await expect(dialog).toContainText("req_synthetic_local");
-  await expect(dialog).toContainText("Причина выбораНаибольший остаток квоты");
+  await expect(dialog).toContainText("Причина выбораСвежий запас квоты в пределах порога");
   await expect(dialog).toContainText("Доступных участников4");
   await expect(dialog).toContainText("Квота при выборе63.00%");
   expect(await dialog.locator(".request-details-list > div").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);

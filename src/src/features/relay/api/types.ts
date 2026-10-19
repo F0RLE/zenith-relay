@@ -41,7 +41,6 @@ export type {
   SourceProbeInput,
   MessagesReasoningMode,
   CacheWriteTtl,
-  DocumentedCacheRetentionMinimum,
   SourceProtocolBinding,
   SourceSummary,
   SourceStats,

@@ -1,6 +1,6 @@
 import type { Page } from "../bun-playwright";
 import type { ApiModelPriceOverride, ModelSummary, SourceStats, UpstreamErrorDetails, SourceProtocolBinding, SourceProtocolConfig, SourceProbeInput, WakeTask, ToolPolicy, ToolPolicyUpdate, RequestTimezonePolicy, RequestTimezoneUpdate, AccountSummary } from "../../src/features/relay/api/types";
-import type { CacheContextDiagnostics, RoutingDiagnostics, ProxyPoolEntry } from "../../src/features/relay/api/types";
+import type { CacheContextDiagnostics, CacheSessionRecord, RoutingDiagnostics, ProxyPoolEntry } from "../../src/features/relay/api/types";
 
 export type MockOptions = {
   platform?: "windows" | "macos" | "linux";
@@ -10,6 +10,8 @@ export type MockOptions = {
   mode?: "local" | "remote" | "zenith";
   theme?: "system" | "light" | "dark";
   populated?: boolean;
+  runtimeState?: "ready" | "error" | "invalid";
+  runtimeStateDelayMs?: number;
   automation?: Partial<WakeTask>;
   profileSnapshots?: boolean;
   readyConnected?: boolean;
@@ -37,6 +39,7 @@ export type MockOptions = {
   accountModelCooldown?: boolean;
   usageAccountIndex?: number;
   nextCandidateId?: string | null;
+  routingHeadroom?: Record<string, NonNullable<import("../../src/features/relay/api/types").CandidateRuntimeSnapshot["resourceHeadroom"]>>;
   usagePresent?: boolean;
   usageActive?: boolean;
   usageFailure?: boolean;
@@ -57,6 +60,8 @@ export type MockOptions = {
   usageAttemptsPartial?: boolean;
   usageRepeatedRequests?: boolean;
   cachePreview?: boolean;
+  usageCache?: { cachedInputTokens?: number | null; cacheWriteInputTokens?: number | null; cacheWriteTtl?: string | null };
+  cacheSessions?: CacheSessionRecord[];
   accountAuthReason?: "invalid_grant" | "reused_refresh_token" | "expired_refresh_token" | "invalidated_refresh_token";
   codexBindings?: boolean;
   codexBindingActive?: boolean;
@@ -78,7 +83,7 @@ export type MockOptions = {
   quotaRefreshStatus?: "pending" | "refreshing" | "updated" | "failed" | "requires_reauth";
   freeAccountHealthy?: boolean;
   gatewayRunning?: boolean;
-  rotationVersion?: 1 | 2;
+  rotationVersion?: 1 | 2 | 3;
   codexBackgroundTasksEnabled?: boolean;
   codexWebsocketsEnabled?: boolean;
   basisPointsAvailable?: boolean;
@@ -163,11 +168,18 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       throw { code: "gateway_unavailable", message: "Synthetic context save failure" };
     };
     const locale = input.locale ?? "en";
+    const rotationVersion = input.rotationVersion ?? 3;
     const timezoneCatalog = input.timezoneCatalog ?? ["Etc/GMT+8", "Etc/GMT-3", "America/New_York", "UTC"];
     const populated = input.populated ?? true;
     const usagePresent = populated && input.usagePresent !== false;
     let sourceStatsIndex = 0;
     let sourceFollowupPending = false;
+    const readRuntimeState = async (snapshot: unknown) => {
+      if (input.runtimeStateDelayMs) await new Promise((resolve) => setTimeout(resolve, input.runtimeStateDelayMs));
+      if (input.runtimeState === "error") throw { code: "invalid_state", message: "Synthetic startup read failure" };
+      if (input.runtimeState === "invalid") return { ...(snapshot as object), accounts: null };
+      return structuredClone(snapshot);
+    };
     const distinctAccountIdentityHints = input.distinctAccountIdentityHints ?? false;
     const dayMs = 24 * 60 * 60_000;
     localStorage.setItem("relay.onboarding", input.onboarding === false ? "0" : "1");
@@ -292,6 +304,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       subscription: { planType: input.supplementalQuota ? "pro" : "plus", activeUntilMs: Date.now() + (input.subscriptionExpiresInMs ?? 37 * dayMs), status: "active", updatedAtMs: Date.now() },
       quota,
       quotaRefreshStatus: input.quotaRefreshStatus ?? "updated" as "pending" | "refreshing" | "updated" | "failed" | "requires_reauth",
+      refreshState: { models: "fresh", quota: "fresh" } as NonNullable<AccountSummary["refreshState"]>,
       secretAvailable: true,
       basisPointsAvailable: input.basisPointsAvailable ?? false,
       basisPointsEnabled: input.basisPointsEnabled ?? false,
@@ -352,12 +365,13 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       if (variant.secondary === null) item.quota.secondary = null;
       else if (item.quota.secondary) item.quota.secondary.availableBasisPoints = variant.secondary;
       item.quotaRefreshStatus = item.quota.error ? "failed" : item.quota.updatedAtMs == null ? "pending" : "updated";
+      item.refreshState.quota = item.quota.error || item.quota.updatedAtMs == null ? "stale" : "fresh";
       return item;
     });
       const systemCredentialId = "key_system";
       const profileDir = input.canonicalProfilePath ? "\\\\?\\C:\\Users\\Test\\.codex" : "C:\\Users\\Test\\.codex";
     type MockModelSummary = { id: string; enabled: boolean; memberCount: number; codexVisible: boolean; codexDisplayName: string; catalogProvider?: string | null; catalogFamily?: string | null; catalogName?: string | null; catalogReleaseDate?: string | null; catalogLastUpdated?: string | null; catalogStatus?: string | null; catalogContextLimit?: number | null; contextPolicy?: { mode: "short" } | { mode: "extended" } | { mode: "custom"; tokens: number }; contextConfigurable?: boolean; catalogInputLimit?: number | null; catalogOutputLimit?: number | null; inputMicroUsdPerMillion: number | null; cachedInputMicroUsdPerMillion: number | null; cacheWrite5mMicroUsdPerMillion?: number | null; cacheWrite1hMicroUsdPerMillion?: number | null; outputMicroUsdPerMillion: number | null; imageRequestPrices: Array<{ operation: "generation" | "edit"; quality: string; size: string; microUsd: number }>; customPrice: boolean; reasoningLevels: string[]; reasoningSupportedLevels: string[]; reasoningAllowedLevels: string[]; reasoningConfigurable: boolean; reasoningManualFallback?: boolean; speedTiers?: Array<"standard" | "fast" | "ultrafast">; speedSupported?: boolean; speedTier?: "standard" | "fast" | "ultrafast"; speedConfigurable?: boolean };
-    type MockCandidateRuntime = { candidateId: string; kind: "api_source" | "oauth_account"; available: boolean; nextForNewRequest?: boolean; activityRevision?: number; runtimeId?: number; inFlight: number; activeRequestCount: number; activeModels: Array<{ model: string; requestCount: number }>; modelRetries?: Array<{ model: string; retryAtMs: number }>; lastUsedAtMs: number | null; nextRetryAtMs: number | null; halfOpen: boolean; dispatches: number };
+    type MockCandidateRuntime = { candidateId: string; kind: "api_source" | "oauth_account"; available: boolean; nextForNewRequest?: boolean; resourceHeadroom?: import("../../src/features/relay/api/types").CandidateRuntimeSnapshot["resourceHeadroom"]; activityRevision?: number; runtimeId?: number; inFlight: number; activeRequestCount: number; activeModels: Array<{ model: string; requestCount: number }>; modelRetries?: Array<{ model: string; retryAtMs: number }>; lastUsedAtMs: number | null; nextRetryAtMs: number | null; halfOpen: boolean; dispatches: number };
     const modelPrices: Record<string, Pick<MockModelSummary, "inputMicroUsdPerMillion" | "cachedInputMicroUsdPerMillion" | "cacheWrite5mMicroUsdPerMillion" | "cacheWrite1hMicroUsdPerMillion" | "outputMicroUsdPerMillion">> = {
       "gpt-5.4": { inputMicroUsdPerMillion: 2_500_000, cachedInputMicroUsdPerMillion: 250_000, outputMicroUsdPerMillion: 15_000_000 },
       "gpt-5.4-mini": { inputMicroUsdPerMillion: 750_000, cachedInputMicroUsdPerMillion: 75_000, outputMicroUsdPerMillion: 4_500_000 },
@@ -408,9 +422,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       schemaVersion: 14,
       configurationRevision: null as string | null,
       runtimeTarget: { kind: "local", connected: true, origin: "http://127.0.0.1:14998", serverId: null, version: "1.1.0" },
-      gateway: { toolPolicy: defaultToolPolicy, requestTimezone: input.requestTimezone ?? { enabled: false, accountTimezones: {}, accountTimezoneBindings: {} } as RequestTimezonePolicy, modelCatalog: modelMetadata, poolRouting: { version: input.rotationVersion ?? 2, mode: input.rotationVersion === 1 ? "smart" : "automatic", members: [] } as import("../../src/features/relay/api/types").PoolRoutingSnapshot, running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, defaultServiceTier: "standard" as "standard" | "fast" | "ultrafast", basisPointsEnabled: input.basisPointsEnabled ?? false, models: [] as MockModelSummary[], commonProxyConfigured: true, commonProxyAvailable: true, accountProxyRequired: false, quotaRequestTimeoutSeconds: 20, chatgptInterfaceQuotaReserveBasisPoints: 100, codexBackgroundTasksEnabled: input.codexBackgroundTasksEnabled ?? true, codexWebsocketsEnabled: input.codexWebsocketsEnabled ?? true, chatgptRetryUntilAvailable: input.chatgptRetryUntilAvailable ?? false, blockDegradedRoutesEnabled: input.blockDegradedRoutesEnabled ?? true, routingOrder: [] as MockCandidateRuntime[] },
+      gateway: { toolPolicy: defaultToolPolicy, requestTimezone: input.requestTimezone ?? { enabled: false, accountTimezones: {}, accountTimezoneBindings: {} } as RequestTimezonePolicy, modelCatalog: modelMetadata, poolRouting: { version: rotationVersion, mode: rotationVersion === 1 ? "smart" : "automatic", members: [] } as import("../../src/features/relay/api/types").PoolRoutingSnapshot, running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, defaultServiceTier: "standard" as "standard" | "fast" | "ultrafast", basisPointsEnabled: input.basisPointsEnabled ?? false, models: [] as MockModelSummary[], commonProxyConfigured: true, commonProxyAvailable: true, accountProxyRequired: false, quotaRequestTimeoutSeconds: 20, chatgptInterfaceQuotaReserveBasisPoints: 100, codexBackgroundTasksEnabled: input.codexBackgroundTasksEnabled ?? true, codexWebsocketsEnabled: input.codexWebsocketsEnabled ?? true, chatgptRetryUntilAvailable: input.chatgptRetryUntilAvailable ?? false, blockDegradedRoutesEnabled: input.blockDegradedRoutesEnabled ?? true, routingOrder: [] as MockCandidateRuntime[] },
       platform: "windows",
-      capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies", "account_export", "account_identity_reveal", "runtime_routing", "rotation_v2", "source_protocols_v1"], supportedWireApis: ["responses", "chat_completions", "messages", "gemini"] as Array<"responses" | "chat_completions" | "messages" | "gemini"> },
+      capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies", "account_export", "account_identity_reveal", "runtime_routing", rotationVersion === 3 ? "rotation_v3" : "rotation_v2", "source_protocols_v1"], supportedWireApis: ["responses", "chat_completions", "messages", "gemini"] as Array<"responses" | "chat_completions" | "messages" | "gemini"> },
       sources: populated ? sources : [],
       accounts: populated ? accounts : [],
       automations: populated ? [automation] : [],
@@ -439,6 +453,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         kind: "baseUrl" in item ? "api_source" as const : "oauth_account" as const,
         available: false,
         nextForNewRequest: false,
+        resourceHeadroom: input.routingHeadroom?.[item.id],
         activityRevision: 0,
         inFlight: item.id === usageAccount.id ? activeRequestCount : 0,
         activeRequestCount: item.id === usageAccount.id ? activeRequestCount : 0,
@@ -467,7 +482,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     remoteRuntime.gateway.baseUrl = "https://relay.example.invalid/v1";
     remoteRuntime.platform = "linux";
     remoteRuntime.configurationRevision = "cfg_synthetic_current";
-    remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "account_batch_import_creation_status", "account_import_to_pool", "account_export", "account_identity_reveal", "quota", "models", "model_pricing", "usage", "local_gateway", "profile_attach", "profile_key_rotation", "diagnostics", "wake_tasks", "account_proxies", "runtime_routing", "rotation_v2", "configuration_presets", "images"], supportedWireApis: ["responses", "chat_completions", "messages", "gemini"] };
+    remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "account_batch_import_creation_status", "account_import_to_pool", "account_export", "account_identity_reveal", "quota", "models", "model_pricing", "usage", "local_gateway", "profile_attach", "profile_key_rotation", "diagnostics", "wake_tasks", "account_proxies", "runtime_routing", rotationVersion === 3 ? "rotation_v3" : "rotation_v2", "configuration_presets", "images"], supportedWireApis: ["responses", "chat_completions", "messages", "gemini"] };
     if (!input.remoteFeatures) remoteRuntime.capabilities.features.push("model_order_reset", "tool_policy_v1", "request_timezone_v1", "account_trash_v1");
     const configurationPreset = {
       format: "zenith-relay-configuration",
@@ -567,8 +582,34 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       textOutput: true,
       terminalOutput: "text",
     } : undefined;
-    let localUsage = usagePresent ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, sourceId: source.id, accountId: sourceUsage ? null : input.staleAccountReferences ? "account_deleted_internal" : usageAccount.id, clientContextId: input.cachePreview ? "client_a1b2c3d4e5f6" : null, requestedModel: input.cachePreview ? "gpt-6-astra" : requestedUsageModel, resolvedModel: input.cachePreview ? "gpt-6-astra" : resolvedUsageModel, requestedReasoningEffort: "max", effectiveReasoningEffort: "low", wireApi: "responses", transport: "http", serviceTier: "standard", success: !input.usageFailure, httpStatus: input.usageFailure ? 502 : 200, errorCategory: input.usageFailure ? "upstream_failure" : null, upstreamError: input.usageUpstreamError, latencyMs: 428, ttftMs: 128, generationMs: 300, inputTokens: input.cachePreview ? 74_905 : 20, cachedInputTokens: input.cachePreview ? 73_600 : 12, cacheWriteInputTokens: input.cachePreview ? null : 4, reasoningTokens: input.cachePreview ? 275 : 5, outputTokens: input.cachePreview ? 447 : 8, totalTokens: input.cachePreview ? 75_352 : 28, apiEquivalent: { microUsd: 148, pricedTokens: 28 - localUnpricedTokens, unpricedTokens: localUnpricedTokens }, toolUse, routing, ...input.usageTiming }] : [];
-    let remoteUsage = usagePresent ? [{ id: 2, requestId: "req_synthetic_remote", candidateKind: sourceUsage ? "source" : "account", candidateHint: sourceUsage ? source.id : input.remoteUsageLabelMissing ? "4f5c821a909b" : "a1b2c3d4e5f6", candidateLabel: sourceUsage ? source.name : input.remoteUsageLabelMissing ? null : usageAccount.label, requestedModel: requestedUsageModel, resolvedModel: resolvedUsageModel, requestedReasoningEffort: "max", effectiveReasoningEffort: "low", wireApi: "responses", transport: "websocket", serviceTier: "fast", appliedServiceTier: "standard", success: !input.usageFailure, httpStatus: input.usageFailure ? 502 : 200, errorCategory: input.usageFailure ? "upstream_failure" : null, upstreamError: input.usageUpstreamError, latencyMs: 512, ttftMs: 184, generationMs: 328, inputTokens: 18, cachedInputTokens: 10, reasoningTokens: 3, outputTokens: 7, totalTokens: 25, apiEquivalent: { microUsd: 148, pricedTokens: 25 - remoteUnpricedTokens, unpricedTokens: remoteUnpricedTokens }, createdAtMs: Date.now(), routing, ...input.usageTiming }] : [];
+    let localUsage = usagePresent ? [{
+      id: 1, createdAt: new Date(Date.now() - (input.cachePreview ? 12 * 60_000 : 0)).toISOString(),
+      requestId: "req_synthetic_local", attempt: 1, sourceId: source.id,
+      accountId: sourceUsage ? null : input.staleAccountReferences ? "account_deleted_internal" : usageAccount.id,
+      clientContextId: input.cachePreview ? "client_a1b2c3d4e5f6" : null,
+      requestedModel: input.cachePreview ? "gpt-6-astra" : requestedUsageModel,
+      resolvedModel: input.cachePreview ? "gpt-6-astra" : resolvedUsageModel,
+      requestedReasoningEffort: "max", effectiveReasoningEffort: "low", wireApi: "responses", transport: "http", serviceTier: "standard",
+      success: !input.usageFailure, httpStatus: input.usageFailure ? 502 : 200,
+      errorCategory: input.usageFailure ? "upstream_failure" : null, upstreamError: input.usageUpstreamError,
+      latencyMs: 428, ttftMs: 128, generationMs: 300, inputTokens: input.cachePreview ? 74_905 : 20,
+      cachedInputTokens: input.cachePreview ? 73_600 : 12, cacheWriteInputTokens: input.cachePreview ? null : 4,
+      reasoningTokens: input.cachePreview ? 275 : 5, outputTokens: input.cachePreview ? 447 : 8, totalTokens: input.cachePreview ? 75_352 : 28,
+      apiEquivalent: { microUsd: 148, pricedTokens: 28 - localUnpricedTokens, unpricedTokens: localUnpricedTokens },
+      toolUse, routing, ...input.usageTiming, ...input.usageCache,
+    }] : [];
+    let remoteUsage = usagePresent ? [{
+      id: 2, requestId: "req_synthetic_remote", candidateKind: sourceUsage ? "source" : "account",
+      candidateHint: sourceUsage ? source.id : input.remoteUsageLabelMissing ? "4f5c821a909b" : "a1b2c3d4e5f6",
+      candidateLabel: sourceUsage ? source.name : input.remoteUsageLabelMissing ? null : usageAccount.label,
+      requestedModel: requestedUsageModel, resolvedModel: resolvedUsageModel, requestedReasoningEffort: "max", effectiveReasoningEffort: "low",
+      wireApi: "responses", transport: "websocket", serviceTier: "fast", appliedServiceTier: "standard",
+      success: !input.usageFailure, httpStatus: input.usageFailure ? 502 : 200,
+      errorCategory: input.usageFailure ? "upstream_failure" : null, upstreamError: input.usageUpstreamError,
+      latencyMs: 512, ttftMs: 184, generationMs: 328, inputTokens: 18, cachedInputTokens: 10, reasoningTokens: 3, outputTokens: 7, totalTokens: 25,
+      apiEquivalent: { microUsd: 148, pricedTokens: 25 - remoteUnpricedTokens, unpricedTokens: remoteUnpricedTokens },
+      createdAtMs: Date.now(), routing, ...input.usageTiming, ...input.usageCache,
+    }] : [];
     if (input.usageAttempts) {
       localUsage = localUsage.map((event) => ({ ...event, attempt: 3 }));
       remoteUsage = remoteUsage.map((event) => ({ ...event, attempt: 3 }));
@@ -676,26 +717,27 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
               sourceFollowupPending = false;
               throw { code: "invalid_state", message: "Synthetic snapshot read failed after source creation" };
             }
-            return structuredClone(localRuntime);
+            return readRuntimeState(localRuntime);
           case "get_local_runtime_order": return structuredClone(localRuntime.gateway.routingOrder);
           case "export_local_configuration_preset": return "C:\\Temp\\zenith-relay-configuration.json";
           case "preview_local_configuration_preset": return { baseRevision: "cfg_synthetic_current", preset: structuredClone(configurationPreset), changes: [{ path: "/routing/maxRetryCandidates", before: 3, after: 4 }] };
           case "apply_local_configuration_preset": localRuntime.gateway.maxRetryCandidates = 4; localRuntime.configurationRevision = "cfg_synthetic_applied"; return { previousRevision: "cfg_synthetic_current", revision: localRuntime.configurationRevision, changes: [{ path: "/routing/maxRetryCandidates", before: 3, after: 4 }] };
-          case "get_remote_server_state": return input.remoteConnected === false ? null : structuredClone(remoteRuntime);
+          case "get_remote_server_state": return readRuntimeState(input.remoteConnected === false ? null : remoteRuntime);
           case "get_remote_runtime_order": return input.remoteConnected === false ? null : structuredClone(remoteRuntime.gateway.routingOrder);
           case "export_remote_configuration_preset": return "C:\\Temp\\zenith-relay-configuration.json";
           case "preview_remote_configuration_preset": return { baseRevision: "cfg_synthetic_current", preset: structuredClone(configurationPreset), changes: [{ path: "/routing/maxRetryCandidates", before: 3, after: 4 }] };
           case "apply_remote_configuration_preset": remoteRuntime.gateway.maxRetryCandidates = 4; remoteRuntime.configurationRevision = "cfg_synthetic_applied"; return { previousRevision: "cfg_synthetic_current", revision: remoteRuntime.configurationRevision, changes: [{ path: "/routing/maxRetryCandidates", before: 3, after: 4 }] };
           case "get_local_cache_sessions": {
+            if (input.cacheSessions) return structuredClone(input.cacheSessions);
             if (!input.cachePreview) return [];
             const now = Date.now();
             const at = (offsetMs: number) => new Date(now - offsetMs).toISOString();
             return [
-              { clientContextId: "client_a1b2c3d4e5f6", startedAt: at(2 * 60 * 60_000), touchedAt: at(12 * 60_000), model: "gpt-6-astra", cacheWriteTtl: null },
-              { clientContextId: "client_998877665544", startedAt: at(26 * 60 * 60_000), touchedAt: at(25 * 60_000), model: "claude-sonnet-4-6", cacheWriteTtl: "1h" },
-              { clientContextId: "client_aabbccddeeff", startedAt: at(3 * 60 * 60_000), touchedAt: at(8 * 60_000), model: "claude-opus-4-6", cacheWriteTtl: "5m" },
-              { clientContextId: "client_112233445566", startedAt: at(5 * 60 * 60_000), touchedAt: at(45 * 60_000), model: "gpt-6-sol", cacheWriteTtl: null },
-              { clientContextId: "client_ff00ff00ff00", startedAt: at(40 * 60_000), touchedAt: at(3 * 60_000), model: "claude-haiku-4-5", cacheWriteTtl: null },
+              { clientContextId: "client_a1b2c3d4e5f6", candidateKind: sourceUsage ? "source" : "account", candidateId: sourceUsage ? source.id : usageAccount.id, startedAt: at(2 * 60 * 60_000), touchedAt: at(12 * 60_000), model: "gpt-6-astra", cacheWriteTtl: "30m" },
+              { clientContextId: "client_998877665544", candidateKind: "account", candidateId: usageAccount.id, startedAt: at(26 * 60 * 60_000), touchedAt: at(25 * 60_000), model: "claude-sonnet-4-6", cacheWriteTtl: "1h" },
+              { clientContextId: "client_aabbccddeeff", candidateKind: "account", candidateId: usageAccount.id, startedAt: at(3 * 60 * 60_000), touchedAt: at(8 * 60_000), model: "claude-opus-4-6", cacheWriteTtl: "5m" },
+              { clientContextId: "client_112233445566", candidateKind: "account", candidateId: usageAccount.id, startedAt: at(5 * 60 * 60_000), touchedAt: at(45 * 60_000), model: "gpt-6-sol", cacheWriteTtl: null },
+              { clientContextId: "client_ff00ff00ff00", candidateKind: "account", candidateId: usageAccount.id, startedAt: at(40 * 60_000), touchedAt: at(3 * 60_000), model: "claude-haiku-4-5", cacheWriteTtl: null },
             ];
           }
           case "get_local_usage_page": {
@@ -1395,6 +1437,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             available: member.operationalStatus === "rotation",
             nextForNewRequest: member.operationalStatus === "rotation"
               && member.id === nextCandidateId,
+            resourceHeadroom: input.routingHeadroom?.[member.id] ?? previous?.resourceHeadroom,
             activityRevision: previous?.activityRevision ?? 0,
             inFlight: previous?.inFlight ?? memberActiveRequestCount,
             activeRequestCount: previous?.activeRequestCount ?? memberActiveRequestCount,

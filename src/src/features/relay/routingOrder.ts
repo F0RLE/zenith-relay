@@ -14,6 +14,9 @@ function sameRuntimeCandidate(left: CandidateRuntimeSnapshot | undefined, right:
     && left.kind === right.kind
     && left.available === right.available
     && left.nextForNewRequest === right.nextForNewRequest
+    && left.resourceHeadroom?.quotaRemainingBasisPoints === right.resourceHeadroom?.quotaRemainingBasisPoints
+    && left.resourceHeadroom?.providerCreditsMicroUnits === right.resourceHeadroom?.providerCreditsMicroUnits
+    && left.resourceHeadroom?.providerCreditsUnlimited === right.resourceHeadroom?.providerCreditsUnlimited
     && left.activityRevision === right.activityRevision
     && left.runtimeId === right.runtimeId
     && left.inFlight === right.inFlight

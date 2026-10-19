@@ -170,6 +170,8 @@ export type UsageBucket = {
 
 export type CacheSessionRecord = {
   clientContextId: string;
+  candidateKind: "account" | "source";
+  candidateId: string;
   startedAt: string;
   touchedAt: string;
   model: string | null;

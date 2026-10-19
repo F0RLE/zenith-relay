@@ -1,5 +1,5 @@
-/** Stored values; the editor presents both manual values as the Manual mode. */
-export type PoolRoutingMode = "automatic" | "in_order" | "round_robin";
+/** in_order is retained only to preserve an imported cycling policy. */
+export type PoolRoutingMode = "automatic" | "in_order" | "round_robin" | "weighted_round_robin" | "failover";
 export type LegacyPoolRoutingMode = "smart" | "in_order" | "round_robin";
 export type PoolRoutingMember = {
   kind: "account" | "source";
@@ -8,7 +8,7 @@ export type PoolRoutingMember = {
   maxConcurrency: number;
 };
 export type PoolRoutingPolicy = {
-  version: 2;
+  version: 2 | 3;
   mode: PoolRoutingMode;
   members: PoolRoutingMember[];
 };

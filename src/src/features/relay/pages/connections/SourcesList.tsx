@@ -284,7 +284,7 @@ export function SourcesList({ query, sourceStats, onEdit, onRefresh, onRefreshSe
                 onClick={() => setErrorDetails(failure.error)}
               />
               : <StatusIcon className="account-kind-icon" status={indicatorTone} label={indicatorLabel}><Cloud aria-hidden /></StatusIcon>}
-            details={<div className="source-card-host" data-relay-tooltip={source.baseUrl}><span>{source.wireApi} · {source.baseUrl}</span></div>}
+            details={<div className="source-card-host" data-relay-tooltip={source.baseUrl}><span>{source.baseUrl}</span></div>}
             menu={
               <ActionMenu className="account-row-menu">
                 <ActionMenuItem
