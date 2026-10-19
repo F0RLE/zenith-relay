@@ -166,6 +166,6 @@ function flatten(value: object, prefix = "", result: string[] = []) {
 function walk(directory: string): string[] {
   return readdirSync(directory).flatMap((name) => {
     const path = join(directory, name);
-    return statSync(path).isDirectory() ? walk(path) : path.endsWith(".tsx") ? [path] : [];
+    return statSync(path).isDirectory() ? walk(path) : /\.tsx?$/.test(path) ? [path] : [];
   });
 }
