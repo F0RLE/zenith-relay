@@ -143,6 +143,7 @@ test("main pages and model rules contain no browser tooltip attributes", async (
 test("shared navigation keeps keyboard focus without restoring a focus ring", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, theme: "dark" });
   await page.goto("/");
+  await expect(page.locator("#splash-screen")).toHaveCount(0);
 
   const usage = page.getByRole("button", { name: "Usage", exact: true });
   await usage.focus();

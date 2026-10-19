@@ -401,7 +401,7 @@ test("connections and pool share the current account status", async ({ page }) =
   await expect(member.locator('.relay-status-icon[aria-label="In rotation"]')).toBeVisible();
 });
 
-test("connections and pool group availability and preserve live order within each group", async ({ page }) => {
+test("connections group availability while the automatic pool ranks fresh headroom", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 6, sourceCount: 3, usageAccountIndex: 3 });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
@@ -417,7 +417,8 @@ test("connections and pool group availability and preserve live order within eac
   const poolAccounts = page.locator('.pool-member-card[data-member-kind="account"] .pool-member-name');
   await expect(poolAccounts).toHaveCount(connectionOrder.length);
   const poolAccountOrder = await poolAccounts.allTextContents();
-  expect(poolAccountOrder).toEqual(["Backup account", "Free reserve", "Pro account", "Business Workspace", "Quota pending", "Personal Plus"]);
+  // Backup has a failed quota refresh; its larger stale quota must not rank first.
+  expect(poolAccountOrder).toEqual(["Free reserve", "Pro account", "Business Workspace", "Backup account", "Quota pending", "Personal Plus"]);
 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("tab", { name: "Sources", exact: true }).click();
