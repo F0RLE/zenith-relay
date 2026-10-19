@@ -95,7 +95,7 @@ describe("server CI", () => {
 });
 
 describe("agent guardrails", () => {
-  test("checks a large patch through its last line and excludes test files", () => {
+  test("checks a large patch from root and nested directories and excludes test files", () => {
     const root = mkdtempSync(join(tmpdir(), "zenith-guardrails-test-"));
     const script = fileURLToPath(new URL("./check-agent-guardrails.mjs", import.meta.url));
     const env = { ...process.env };
@@ -120,17 +120,22 @@ describe("agent guardrails", () => {
       writeFileSync(join(root, "crates/tests/fixture.rs"), 'fn fixture() { panic!("synthetic"); }\n');
       const stage = spawnSync("git", ["add", "crates"], { cwd: root, env, windowsHide: true });
       expect(stage.status).toBe(0);
-      const run = () => spawnSync(process.execPath, [script, "HEAD"], {
-        cwd: root, env, encoding: "utf8", windowsHide: true,
+      const run = (cwd) => spawnSync(process.execPath, [script, "HEAD"], {
+        cwd, env, encoding: "utf8", windowsHide: true,
       });
-      const clean = run();
-      expect(clean.status, clean.stderr).toBe(0);
+      const directories = [root, join(root, "crates")];
+      for (const cwd of directories) {
+        const clean = run(cwd);
+        expect(clean.status, clean.stderr).toBe(0);
+      }
       writeFileSync(source, patch + 'fn failed() { panic!("synthetic"); }\n');
       expect(spawnSync("git", ["add", "crates"], { cwd: root, env, windowsHide: true }).status).toBe(0);
-      const rejected = run();
-      expect(rejected.status).toBe(1);
-      expect(rejected.stderr).toContain("[panic] crates/source.rs");
-      expect(rejected.stderr).not.toContain("ENOBUFS");
+      for (const cwd of directories) {
+        const rejected = run(cwd);
+        expect(rejected.status).toBe(1);
+        expect(rejected.stderr).toContain("[panic] crates/source.rs");
+        expect(rejected.stderr).not.toContain("ENOBUFS");
+      }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -1,7 +1,6 @@
-import { spawnSync } from "node:child_process";
-import { repoRoot } from "../lib/tauri-env.mjs";
+import { execFileSync, spawnSync } from "node:child_process";
 
-process.chdir(repoRoot());
+process.chdir(execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim());
 
 const ignore = [
   "**/tests/**",

@@ -1,8 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
-import { repoRoot } from "../lib/tauri-env.mjs";
 
-process.chdir(repoRoot());
+process.chdir(git(["rev-parse", "--show-toplevel"]).trim());
 
 const paths = ["crates", "relay-server", "src-tauri"];
 const rules = [
