@@ -148,7 +148,8 @@ fn sync_context_keys_locked(
                 }
                 let key = KEYS[index];
                 if *managed && table.contains_key(key) {
-                    return Err(LocalPoolError::new(ErrorCode::Conflict, "ChatGPT context was changed outside Relay; select default settings before applying a policy"));
+                    // A newer client override is user-owned, not a failed Relay operation.
+                    continue;
                 }
                 if !*managed {
                     *saved = table

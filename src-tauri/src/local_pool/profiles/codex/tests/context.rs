@@ -37,8 +37,20 @@ fn context_policy_removes_only_active_overrides_and_restores_previous_values() {
     );
     // Newer user values must survive a return to client-owned settings.
     active["model_context_window"] = value(180000);
+    active["profiles"]["active"]["model_auto_compact_token_limit"] = value(105000);
     fs::write(home.join(CONFIG_FILE), active.to_string()).unwrap();
-    assert!(sync_context_overrides(&home, &backups, true).is_err());
+    let config_before = fs::read(home.join(CONFIG_FILE)).unwrap();
+    let undo_before = fs::read(backups.join("codex-context-overrides.json")).unwrap();
+    for _ in 0..2 {
+        let change = context::sync_context_policy(&home, &backups).unwrap();
+        assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), config_before);
+        change.rollback().unwrap();
+        assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), config_before);
+        assert_eq!(
+            fs::read(backups.join("codex-context-overrides.json")).unwrap(),
+            undo_before
+        );
+    }
     sync_context_overrides(&home, &backups, false).unwrap();
     let restored = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
     assert_eq!(restored["model_context_window"].as_integer(), Some(180000));
@@ -49,6 +61,10 @@ fn context_policy_removes_only_active_overrides_and_restores_previous_values() {
     assert_eq!(
         restored["profiles"]["active"]["model_context_window"].as_integer(),
         Some(128000)
+    );
+    assert_eq!(
+        restored["profiles"]["active"]["model_auto_compact_token_limit"].as_integer(),
+        Some(105000)
     );
     fs::remove_dir_all(root).unwrap();
 }
