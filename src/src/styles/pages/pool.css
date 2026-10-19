@@ -865,6 +865,7 @@
 .pool-routing-dialog .pool-routing-preset-options .pool-routing-preset[aria-pressed="true"],
 .pool-routing-dialog .pool-routing-preset-options .pool-routing-preset[aria-pressed="true"]:hover:not(:disabled) { border-color: transparent; color: var(--relay-accent-hover); background: var(--relay-accent-soft); font-weight: 600; }
 .pool-routing-preset-options .pool-routing-preset svg { width: 18px; height: 18px; flex-shrink: 0; }
+.pool-routing-preset-options .pool-routing-preset > span { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .pool-routing-shares { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0 0; color: var(--relay-secondary); font-size: 12px; }
 .pool-routing-modes button { display: flex; align-items: center; justify-content: center; gap: 7px; min-width: 0; min-height: 38px; padding: 8px 6px; border: 1px solid transparent; border-radius: 7px; color: var(--relay-muted); background: transparent; font: inherit; font-size: 12px; line-height: 1.4; cursor: pointer; }
 .pool-routing-modes button[aria-checked="false"]:hover:not(:disabled) { color: var(--relay-text); background: var(--relay-subtle); }
