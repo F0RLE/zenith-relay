@@ -352,12 +352,14 @@ pub(in crate::protocol::adapter) fn validate_bridge_fields(
     field_container: &Value,
     allowed: &[&str],
 ) -> AdapterResult<()> {
-    let field_entries = field_container
-        .as_object()
-        .ok_or_else(AdapterError::invalid_request)?;
-    if let Some((field_name, _)) = field_entries.iter().find(|(field_name, field_value)| {
-        !allowed.contains(&field_name.as_str()) && !field_value.is_null()
-    }) {
+    let field_entries = field_container.as_object().ok_or_else(|| {
+        AdapterError::invalid_request().with_shape_diagnostic(field_container, None)
+    })?;
+    if let Some((field_name, field_value)) =
+        field_entries.iter().find(|(field_name, field_value)| {
+            !allowed.contains(&field_name.as_str()) && !field_value.is_null()
+        })
+    {
         // Expose only fixed contract names, never arbitrary payload keys/values.
         let parameter = [
             "metadata",
@@ -369,13 +371,22 @@ pub(in crate::protocol::adapter) fn validate_bridge_fields(
             "citations",
             "container",
             "mcp_servers",
+            "function_call",
+            "audio",
+            "reasoning_details",
+            "reasoning_signature",
         ]
         .into_iter()
         .find(|known| *known == field_name);
-        return Err(parameter.map_or_else(
-            AdapterError::parameter_unsupported,
-            AdapterError::parameter_unsupported_for,
-        ));
+        return Err(parameter
+            .map_or_else(
+                AdapterError::parameter_unsupported,
+                AdapterError::parameter_unsupported_for,
+            )
+            .with_shape_diagnostic(
+                field_container,
+                Some((parameter.unwrap_or("unrecognized"), field_value)),
+            ));
     }
     Ok(())
 }

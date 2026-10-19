@@ -156,7 +156,7 @@ async fn bootstrap_stream_impl(
                         completed_output_items = completed_output_items.saturating_add(1);
                     }
                     saw_output |= event.semantic_output;
-                    // An empty incomplete response is a source failure, but
+                    // An unexplained empty terminal is a source failure, but
                     // does not prove that generation was never accepted.
                     // Its execution stays unknown, so no automatic retry is safe.
                     // A non-empty incomplete response belongs to the client.

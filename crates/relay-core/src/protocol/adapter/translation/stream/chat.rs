@@ -6,9 +6,11 @@ impl TranslationStream {
         upstream_event: &Value,
     ) -> AdapterResult<bool> {
         let invalid = AdapterError::upstream_stream_invalid;
-        self.chat_completion
-            .observe(upstream_event)
-            .map_err(|_| invalid().with_parameter("choices"))?;
+        self.chat_completion.observe(upstream_event).map_err(|_| {
+            invalid()
+                .with_parameter("choices")
+                .with_shape_diagnostic(upstream_event.get("choices").unwrap_or(&Value::Null), None)
+        })?;
         let choices = upstream_event
             .get("choices")
             .and_then(Value::as_array)
@@ -41,7 +43,11 @@ impl TranslationStream {
                 "annotations",
             ],
         )
-        .map_err(|_| invalid().with_parameter("choices[].delta"))?;
+        .map_err(|cause| {
+            invalid()
+                .with_parameter("choices[].delta")
+                .with_diagnostics_from(cause)
+        })?;
         if let Some(annotations) = delta.get("annotations").filter(|value| !value.is_null()) {
             for annotation in annotations.as_array().ok_or_else(invalid)? {
                 if !self.chat_annotations.contains(annotation) {

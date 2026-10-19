@@ -280,9 +280,9 @@ impl TranslationStream {
         let message = match failure.parameter() {
             Some(parameter) => format!(
                 "Upstream stream conversion failed at {parameter}: {}",
-                failure.message()
+                failure
             ),
-            None => format!("Upstream stream conversion failed: {}", failure.message()),
+            None => format!("Upstream stream conversion failed: {failure}"),
         };
         let mut error = json!({"type":"api_error","code":crate::error_codes::ADAPTER_UPSTREAM_STREAM_INVALID,"message":message});
         if let Some(parameter) = failure.parameter() {

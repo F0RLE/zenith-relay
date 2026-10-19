@@ -16,7 +16,9 @@ pub(in crate::protocol::adapter::translation) fn decode(
             upstream_response,
         ) == crate::protocol::completion::ResponseCompletion::Invalid
     {
-        return Err(invalid());
+        return Err(invalid()
+            .with_parameter("response")
+            .with_shape_diagnostic(upstream_response, None));
     }
     let mut response = Response {
         id: upstream_response
@@ -90,7 +92,11 @@ fn decode_chat_completion(
             "annotations",
         ],
     )
-    .map_err(|_| invalid().with_parameter("choices[].message"))?;
+    .map_err(|cause| {
+        invalid()
+            .with_parameter("choices[].message")
+            .with_diagnostics_from(cause)
+    })?;
     if message
         .get("role")
         .is_some_and(|role| !role.is_null() && role.as_str() != Some("assistant"))

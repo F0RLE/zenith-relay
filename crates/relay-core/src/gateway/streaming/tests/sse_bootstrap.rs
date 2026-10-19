@@ -96,6 +96,38 @@ async fn bootstrap_does_not_commit_an_opaque_compaction_before_disconnect() {
 }
 
 #[tokio::test]
+async fn bootstrap_preserves_empty_known_incomplete_terminal_and_usage() {
+    for reason in ["max_output_tokens", "content_filter"] {
+        let payload = serde_json::json!({"type":"response.incomplete","response":{
+            "status":"incomplete","output":[],"incomplete_details":{"reason":reason},
+            "usage":{"input_tokens":23,"output_tokens":0,"total_tokens":23}
+        }});
+        let (upstream, server) = response_from_sse_event(format!("data: {payload}\n\n")).await;
+        let (headers, buffered, _) = bootstrap_stream(upstream, None)
+            .await
+            .unwrap_or_else(|_| panic!("a valid incomplete terminal is not a transport failure"));
+        server.await.unwrap();
+        assert!(headers.get("content-type").is_some());
+        let event = parse_sse_event(&buffered);
+        assert_eq!(event.outcome, Some(TerminalOutcome::Incomplete));
+        assert_eq!(event.error_category, Some("response_incomplete"));
+        let preserved: serde_json::Value = serde_json::from_slice(
+            buffered
+                .strip_prefix(b"data: ")
+                .unwrap()
+                .strip_suffix(b"\n\n")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(preserved["response"]["usage"]["input_tokens"], 23);
+        assert_eq!(
+            preserved["response"]["incomplete_details"]["reason"],
+            reason
+        );
+    }
+}
+
+#[tokio::test]
 async fn large_valid_bootstrap_event_is_not_rejected_at_the_old_limit() {
     let delta = "a".repeat(300 * 1024);
     let event =

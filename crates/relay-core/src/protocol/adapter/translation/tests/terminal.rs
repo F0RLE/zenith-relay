@@ -2,6 +2,104 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn chat_conversion_diagnostics_preserve_safe_shapes_in_json_and_streams() {
+    for (key, rejected_field) in [
+        ("reasoning_details", "reasoning_details"),
+        ("synthetic-private-key", "unrecognized"),
+    ] {
+        let extension = json!({"private":"synthetic-private-content"});
+        let mut payload = output(WireApi::ChatCompletions);
+        payload["choices"][0]["message"][key] = extension.clone();
+        let failure = prepare(
+            WireApi::Messages,
+            WireApi::ChatCompletions,
+            &input(WireApi::Messages),
+            false,
+        )
+        .translate_response_bytes(&serde_json::to_vec(&payload).unwrap())
+        .unwrap_err();
+        assert_eq!(failure.parameter(), Some("choices[].message"));
+        let diagnostic = failure.to_string();
+        assert!(diagnostic.contains(&format!("rejected_field={rejected_field}")));
+        assert!(diagnostic.contains("rejected_shape=object"));
+        assert!(!diagnostic.contains("synthetic-private"));
+
+        let mut bridge = prepare(
+            WireApi::Messages,
+            WireApi::ChatCompletions,
+            &input(WireApi::Messages),
+            true,
+        )
+        .into_stream_bridge()
+        .unwrap();
+        let mut event = json!({"choices":[{"index":0,"delta":{"content":"synthetic-private-content"},"finish_reason":null}]});
+        event["choices"][0]["delta"][key] = extension;
+        bridge.push(format!("data: {event}\n\n").as_bytes());
+        bridge.finish();
+        assert!(bridge.completed().is_none());
+        let wire = String::from_utf8(
+            std::iter::from_fn(|| bridge.pop_output())
+                .flatten()
+                .collect(),
+        )
+        .unwrap();
+        assert!(wire.contains("choices[].delta"));
+        assert!(wire.contains(&format!("rejected_field={rejected_field}")));
+        assert!(wire.contains("rejected_shape=object"));
+        assert!(!wire.contains("synthetic-private"));
+    }
+}
+
+#[test]
+fn chat_length_limits_preserve_messages_terminal_and_usage_in_json_and_streams() {
+    let mut payload = output(WireApi::ChatCompletions);
+    payload["choices"][0]["finish_reason"] = "length".into();
+    payload["usage"] = json!({"prompt_tokens":23,"completion_tokens":7,"total_tokens":30});
+    let result = prepare(
+        WireApi::Messages,
+        WireApi::ChatCompletions,
+        &input(WireApi::Messages),
+        false,
+    )
+    .translate_response_bytes(&serde_json::to_vec(&payload).unwrap())
+    .unwrap()
+    .expect("converted response must be available");
+    assert_eq!(result.response_body()["stop_reason"], "max_tokens");
+    assert_eq!(result.response_body()["usage"]["input_tokens"], 23);
+    assert_eq!(result.response_body()["usage"]["output_tokens"], 7);
+
+    let mut bridge = prepare(
+        WireApi::Messages,
+        WireApi::ChatCompletions,
+        &input(WireApi::Messages),
+        true,
+    )
+    .into_stream_bridge()
+    .unwrap();
+    for event in [
+        json!({"choices":[{"index":0,"delta":{"content":"Limited output"},"finish_reason":null}]}),
+        json!({"choices":[{"index":0,"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":23,"completion_tokens":7,"total_tokens":30}}),
+    ] {
+        bridge.push(format!("data: {event}\n\n").as_bytes());
+    }
+    bridge.push(b"data: [DONE]\n\n");
+    bridge.finish();
+    let result = bridge
+        .completed()
+        .expect("a length limit is a valid terminal");
+    assert_eq!(result.response_body["stop_reason"], "max_tokens");
+    assert_eq!(result.response_body["usage"]["output_tokens"], 7);
+    let wire = String::from_utf8(
+        std::iter::from_fn(|| bridge.pop_output())
+            .flatten()
+            .collect(),
+    )
+    .unwrap();
+    assert!(wire.contains("max_tokens"));
+    assert!(!wire.contains("adapter_upstream_stream_invalid"));
+}
+
+#[test]
 fn responses_stream_failures_name_the_stage_without_echoing_provider_content() {
     for (event, parameter) in [
         (

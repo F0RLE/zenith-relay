@@ -139,6 +139,20 @@ pub(in crate::gateway) fn is_empty_responses_terminal(
     {
         return false;
     }
+    // A documented limit/filter terminal is valid even without visible output.
+    if response_payload
+        .pointer("/response/status")
+        .and_then(Value::as_str)
+        == Some("incomplete")
+        && matches!(
+            response_payload
+                .pointer("/response/incomplete_details/reason")
+                .and_then(Value::as_str),
+            Some("max_output_tokens" | "content_filter")
+        )
+    {
+        return false;
+    }
     if response_payload
         .pointer("/response/output")
         .and_then(Value::as_array)

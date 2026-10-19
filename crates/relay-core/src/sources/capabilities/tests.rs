@@ -48,6 +48,40 @@ fn legacy_configuration_uses_automatic_routes() {
 }
 
 #[test]
+fn catalog_endpoint_exclusions_remove_stale_native_messages_routes() {
+    let model = "synthetic-model".to_string();
+    let base_url = "https://example.test/v1";
+    let legacy = [SourceProtocolBinding {
+        wire_api: WireApi::Messages,
+        adapter: SourceAdapter::Native,
+        reasoning_mode: MessagesReasoningMode::Disabled,
+        cache_write_ttl: CacheWriteTtl::Provider,
+        model_ids: vec![model.clone()],
+    }];
+    let mut config = SourceProtocolConfig::default();
+    config.merge_catalog(catalog_capabilities(
+        &json!({"data":[{"id":model,"supported_endpoint_types":["messages"]}]}),
+        1,
+    ));
+    config.merge_catalog(catalog_capabilities(
+        &json!({"data":[{"id":model,"supported_endpoint_types":["chat_completions","responses"]}]}),
+        2,
+    ));
+    let routes = config
+        .resolve(base_url, &[model], &legacy, WireApi::Messages)
+        .unwrap();
+    assert!(routes.iter().all(|route| {
+        route.adapter.upstream_protocol(route.wire_api).wire_api() != WireApi::Messages
+    }));
+    let messages = routes
+        .iter()
+        .filter(|route| route.wire_api == WireApi::Messages)
+        .collect::<Vec<_>>();
+    assert_eq!(messages.len(), 2);
+    assert!(messages.iter().all(|route| !route.adapter.is_passthrough()));
+}
+
+#[test]
 fn legacy_bridge_supplies_physical_protocol_without_restricting_clients() {
     let legacy = [SourceProtocolBinding {
         wire_api: WireApi::Responses,
