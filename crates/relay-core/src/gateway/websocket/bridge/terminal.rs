@@ -224,6 +224,9 @@ pub(super) fn finish_terminal(
         }
     }
     if terminal_success {
+        in_flight
+            .tool_call_capture
+            .bind(runtime, &state.local_key_id, &in_flight.route, now_ms());
         if let Some(response) = in_flight
             .native_replay_capture
             .finish(terminal.response.clone(), in_flight.response_id.as_deref())

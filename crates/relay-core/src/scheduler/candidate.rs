@@ -71,6 +71,29 @@ impl CandidateQuotaState {
     }
 }
 
+/// A linked connection's observation ranks work; it never grants capacity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CandidateQuotaReference {
+    pub source_account_id: String,
+    pub remaining_basis_points: u64,
+    pub observed_at_ms: u64,
+    pub valid_until_ms: Option<u64>,
+}
+
+impl CandidateQuotaReference {
+    pub(crate) fn fresh_remaining(&self, now_ms: u64, stale_after_ms: u64) -> Option<u64> {
+        (!self.source_account_id.is_empty()
+            && (1..=10_000).contains(&self.remaining_basis_points)
+            && crate::quota::observation_is_fresh(
+                Some(self.observed_at_ms),
+                now_ms,
+                stale_after_ms,
+            )
+            && self.valid_until_ms.is_none_or(|deadline| now_ms < deadline))
+        .then_some(self.remaining_basis_points)
+    }
+}
+
 pub fn account_candidate_health(
     auth_state: AccountAuthState,
     health: AccountHealthState,
@@ -230,18 +253,6 @@ impl RuntimeCandidate {
             && self.model_rules.allows(model)
             && scope.includes(self)
             && scope.model_rules.allows(model)
-    }
-
-    pub fn retry_at_if_configured(
-        &self,
-        model: &str,
-        allowed_protocols: &[WireApi],
-        scope: &CandidateScope,
-        now_ms: u64,
-    ) -> Option<u64> {
-        self.is_catalog_visible(model, allowed_protocols, scope)
-            .then(|| active_retry_at(&self.cooldowns, model, now_ms))
-            .flatten()
     }
 
     pub(crate) fn supports_model(&self, model: &str) -> bool {

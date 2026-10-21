@@ -51,16 +51,9 @@ pub(in crate::gateway::websocket) async fn send_request(
     request_payload: String,
     origin: ErrorOrigin,
 ) -> Result<(), GatewayFailure> {
-    let send = async {
-        upstream
-            .send(UpstreamMessage::Text(request_payload))
-            .await?;
-        upstream.flush().await
-    };
-    match timeout(UPSTREAM_CONNECT_TIMEOUT, send).await {
-        Ok(Ok(())) => Ok(()),
-        _ => Err(GatewayFailure::transport(origin)),
-    }
+    send_message(upstream, UpstreamMessage::Text(request_payload))
+        .await
+        .map_err(|_| GatewayFailure::transport(origin))
 }
 
 pub(super) async fn install_connected(
@@ -78,16 +71,20 @@ pub(super) async fn install_connected(
         initial_messages,
         route,
         request,
+        reasoning_effort,
+        tool_use,
         lease,
         attempt,
         started,
     } = connected;
-    let _ = upstream
-        .send(UpstreamMessage::Close {
+    let _ = send_message(
+        upstream,
+        UpstreamMessage::Close {
             code: UpstreamCloseCode::Normal,
             reason: String::new(),
-        })
-        .await;
+        },
+    )
+    .await;
     *upstream = next_upstream;
     install_in_flight(
         runtime,
@@ -98,6 +95,8 @@ pub(super) async fn install_connected(
             authorization_incarnation,
             request,
             route,
+            reasoning_effort,
+            tool_use,
             lease,
             attempt,
             started,
@@ -111,6 +110,8 @@ pub(super) struct InFlightInstall {
     pub(super) authorization_incarnation: AuthorizationIncarnation,
     pub(super) request: ClientRequest,
     pub(super) route: ExecutorRoute,
+    pub(super) reasoning_effort: crate::usage::ReasoningEffortDiagnostics,
+    pub(super) tool_use: crate::ToolUseDiagnostics,
     pub(super) lease: CandidateLease,
     pub(super) attempt: u16,
     pub(super) started: Instant,
@@ -127,6 +128,8 @@ pub(super) fn install_in_flight(
         authorization_incarnation,
         request,
         route,
+        reasoning_effort,
+        tool_use,
         lease,
         attempt,
         started,
@@ -137,9 +140,9 @@ pub(super) fn install_in_flight(
             attempt,
             local_key_id: &key.id,
             route: &route,
-            reasoning_effort: Some(&request.reasoning_effort_for(&route)),
+            reasoning_effort: Some(&reasoning_effort),
             requested_model: &request.requested_model,
-            tool_use: request.tool_use_for(&route),
+            tool_use,
         },
         true,
         StatusCode::OK.as_u16(),
@@ -164,6 +167,7 @@ pub(super) fn install_in_flight(
         prompt_affinity_key: request.prompt_affinity_key,
         client_visible_output: false,
         legacy_call_id_repair_attempted: false,
+        tool_call_capture: Default::default(),
         native_replay_capture: NativeReplayCapture::default(),
     });
 }

@@ -125,6 +125,8 @@ pub(in crate::runtime) fn runtime_client_builder(
         .pool_max_idle_per_host(MAX_IDLE_CONNECTIONS_PER_HOST)
         .pool_idle_timeout(Duration::from_secs(90))
         .tcp_nodelay(true)
+        // All wire retries must pass Relay's ownership and dispatch budget.
+        .retry(reqwest::retry::never())
         .redirect(reqwest::redirect::Policy::none());
     match proxy {
         Some(proxy) => proxy.apply(builder),
@@ -173,3 +175,6 @@ pub(in crate::runtime) fn strip_prefix_ignore_ascii_case<'a>(
         .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
         .then(|| &input_text[prefix.len()..])
 }
+
+#[cfg(test)]
+mod tests;

@@ -14,6 +14,10 @@ impl GatewayRuntime {
         headers: &HeaderMap,
         observed_at_ms: u64,
     ) -> bool {
+        // SIWC has no documented private Codex quota ledger/header contract.
+        if self.is_siwc_account(candidate_id) {
+            return false;
+        }
         if !(status.is_success()
             || status == StatusCode::SWITCHING_PROTOCOLS
             || status == StatusCode::TOO_MANY_REQUESTS)
@@ -220,7 +224,8 @@ impl GatewayRuntime {
             self.set_candidate_health(candidate_id, CandidateHealth::Healthy);
             return;
         }
-        if event.is_basis_points_transport_failure() {
+        if event.is_basis_points_transport_failure() || self.is_siwc_account(candidate_id) {
+            // SIWC admission failures do not prove revoked credentials or a spent plan.
             return;
         }
 

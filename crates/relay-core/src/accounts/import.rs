@@ -232,6 +232,7 @@ pub struct ImportSecretMaterial {
     agent_task_id: Option<RedactedValue>,
     basis_points_headers: Option<BasisPointsCapturedHeaders>,
     oauth_client_kind: Option<OAuthClientKind>,
+    siwc_registration: Option<crate::providers::chatgpt::SiwcRegistration>,
 }
 
 impl ImportSecretMaterial {
@@ -269,6 +270,10 @@ impl ImportSecretMaterial {
 
     pub fn oauth_client_kind(&self) -> Option<OAuthClientKind> {
         self.oauth_client_kind
+    }
+
+    pub fn siwc_registration(&self) -> Option<&crate::providers::chatgpt::SiwcRegistration> {
+        self.siwc_registration.as_ref()
     }
 }
 

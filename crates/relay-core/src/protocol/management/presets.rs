@@ -53,13 +53,6 @@ pub fn normalize_configuration_preset(
     }
     rules::normalize_source_preset_rules(&mut preset.settings.sources)?;
     rules::normalize_account_preset_rules(&mut preset.settings.accounts)?;
-    preset.settings.routing.tool_policy = preset
-        .settings
-        .routing
-        .tool_policy
-        .map(crate::ToolPolicy::normalized)
-        .transpose()
-        .map_err(str::to_string)?;
     if let Some(policy) = &preset.settings.routing.pool_routing {
         policy.validate().map_err(str::to_string)?;
     }

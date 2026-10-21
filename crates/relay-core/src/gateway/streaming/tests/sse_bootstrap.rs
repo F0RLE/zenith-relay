@@ -36,6 +36,48 @@ fn streaming_terminal_errors_keep_the_canonical_category() {
     assert!(terminal.cooldown_hint.global);
 }
 
+#[tokio::test]
+async fn bootstrap_bounds_unfinished_events_and_setup_only_prefixes_without_retry() {
+    let limit = 1024;
+    for data in [
+        "data: ".to_string() + &"x".repeat(limit),
+        ": ping\n\n".repeat(limit),
+    ] {
+        let (upstream, server) = response_from_sse_event(data).await;
+        let failure = super::super::bootstrap::bootstrap_stream_impl(upstream, None, false, limit)
+            .await
+            .err()
+            .expect("setup buffer must be bounded");
+        server.await.unwrap();
+        assert_eq!(
+            failure.failure.category,
+            error_codes::STREAM_EVENT_TOO_LARGE
+        );
+        assert_eq!(failure.partial_body.len(), limit);
+        assert_eq!(
+            failure.execution.certainty,
+            crate::scheduler::rotation::ExecutionCertainty::Unknown
+        );
+    }
+}
+
+#[tokio::test]
+async fn bootstrap_preserves_coalesced_bytes_beyond_the_prefix_budget() {
+    let first = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"synthetic\"}\n\n";
+    let input = first.repeat(10);
+    let (upstream, server) = response_from_sse_event(input.clone()).await;
+    let result =
+        super::super::bootstrap::bootstrap_stream_impl(upstream, None, false, first.len() + 5)
+            .await;
+    server.await.unwrap();
+    let (_, prefix, mut rest) = result.ok().expect("output within budget must stream");
+    let mut forwarded = prefix.to_vec();
+    while let Some(bytes) = rest.next().await {
+        forwarded.extend_from_slice(&bytes.unwrap());
+    }
+    assert_eq!(forwarded, input.as_bytes());
+}
+
 #[test]
 fn generic_gateway_rejection_sse_keeps_request_category_and_provider_details() {
     let terminal = parse_sse_event(
@@ -54,6 +96,40 @@ data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_re
         Some("invalid_request_error")
     );
     assert_eq!(upstream.http_status, None);
+}
+
+#[tokio::test]
+async fn bootstrap_failure_with_generated_usage_is_not_replayable() {
+    for usage in [
+        serde_json::json!({"output_tokens": 7}),
+        serde_json::json!({"output_tokens": 0, "output_tokens_details": {"reasoning_tokens": 7}}),
+        serde_json::json!({"completion_tokens": 7}),
+        serde_json::json!({"completion_tokens_details": {"reasoning_tokens": 7}}),
+    ] {
+        for terminal_usage in [false, true] {
+            let mut terminal = serde_json::json!({"type":"response.failed","response":{
+                "status":"failed","output":[],
+                "error":{"code":"model_capacity_exhausted","message":"Synthetic capacity refusal"}
+            }});
+            let mut events = String::new();
+            if terminal_usage {
+                terminal["response"]["usage"] = usage.clone();
+            } else {
+                let progress =
+                    serde_json::json!({"type":"response.in_progress","response":{"usage":usage}});
+                events.push_str(&format!("data: {progress}\n\n"));
+            }
+            events.push_str(&format!("data: {terminal}\n\n"));
+            let (upstream, server) = response_from_sse_event(events).await;
+            let failure = bootstrap_stream(upstream, None).await.err().unwrap();
+            server.await.unwrap();
+            assert_eq!(failure.failure.category, "upstream_model_capacity");
+            assert_eq!(
+                failure.execution.certainty,
+                crate::scheduler::rotation::ExecutionCertainty::Accepted
+            );
+        }
+    }
 }
 
 #[tokio::test]

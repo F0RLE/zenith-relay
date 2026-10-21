@@ -153,19 +153,8 @@ async fn spawn_gateway(
         sources,
         keys,
         GatewayRuntimeOptions {
-            model_metadata_catalog: None,
             max_retry_candidates,
-            tool_policy: Default::default(),
-            request_timezone: Default::default(),
-            pool_routing: None,
-            hidden_models: Vec::new(),
-            default_service_tier: Default::default(),
-            quota_stale_after_ms: zenith_relay_core::QUOTA_STALE_AFTER_MS,
-            image_base_model: None,
-            image_pricing_catalog: None,
-            model_reasoning_allowed_levels: Default::default(),
-            model_context_policies: Default::default(),
-            response_affinity_store: None,
+            ..Default::default()
         },
     )
     .await

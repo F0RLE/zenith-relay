@@ -93,7 +93,6 @@ fn quota_account(snapshot: QuotaSnapshot) -> RuntimeChatGptAccount {
         chatgpt_account_id: "account-1".to_string(),
         chatgpt_user_id: None,
         responses_url: "https://example.test/v1/responses".to_string(),
-        basis_points_enabled: false,
         basis_points_headers: None,
         models: vec!["gpt-test".to_string()],
         enabled: true,

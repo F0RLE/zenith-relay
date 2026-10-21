@@ -1,11 +1,16 @@
 //! Compact prompt presentation; argument validation always uses the original schema.
 use super::catalog::ClientTool;
+use crate::protocol::AdapterError;
 use serde_json::Value;
+
+mod validation;
+pub(super) use validation::validator;
 
 pub(super) const PROMPT_SCHEMA_NOTATION: &str = concat!(
     "Parameter notation: object{\"key\":type,\"optional\"?:type} marks required and optional keys; ",
     "[type] is an array; ... allows extra keys and ...:type constrains them. ",
     "Without ... extra keys are forbidden. @ followed by JSON preserves descriptions and constraints. ",
+    "Closed objects retain an explicit additionalProperties:false constraint. ",
     "Unfamiliar or complex schemas remain complete JSON Schema. Obey every constraint. ",
     "This notation describes arguments, not a different format for tool calls. ",
 );
@@ -18,16 +23,53 @@ pub(super) fn parameter_schema(tool: &ClientTool) -> Option<&Value> {
         .find_map(|key| tool.spec.get(key))
 }
 
-pub(super) fn validator(
-    schema: &Value,
-) -> Result<jsonschema::Validator, jsonschema::ValidationError<'_>> {
-    // Keep schemas self-contained even if another dependency enables retrieval
-    // through Cargo feature unification. Local $defs remain supported.
-    jsonschema::options().offline().build(schema)
-}
-
 pub(super) fn matches(arguments: &Value, schema: &Value) -> bool {
     validator(schema).is_ok_and(|validator| validator.is_valid(arguments))
+}
+
+pub(super) fn validate(arguments: &Value, schema: &Value) -> Result<(), AdapterError> {
+    let validator = validator(schema).map_err(|error| validation_error(&error, true))?;
+    validator
+        .validate(arguments)
+        .map_err(|error| validation_error(&error, false))
+}
+
+pub(super) fn validation_error(
+    error: &jsonschema::ValidationError<'_>,
+    compiling: bool,
+) -> AdapterError {
+    let path = error.schema_path().as_str();
+    // Schema property names, reference URLs and instance values are private.
+    let keyword = match path.rsplit('/').next().unwrap_or_default() {
+        "type" => "type",
+        "required" => "required",
+        "additionalProperties" => "additionalProperties",
+        "enum" => "enum",
+        "const" => "const",
+        "minimum" | "maximum" | "exclusiveMinimum" | "exclusiveMaximum" | "multipleOf" => "number",
+        "minLength" | "maxLength" | "pattern" | "format" => "string",
+        "minItems" | "maxItems" | "uniqueItems" | "contains" => "array",
+        "minProperties" | "maxProperties" | "propertyNames" => "object",
+        "anyOf" | "allOf" | "oneOf" | "not" => "composition",
+        "$ref" | "$dynamicRef" => "reference",
+        _ => "other",
+    };
+    let (error_result, phase) = if compiling {
+        (AdapterError::tool_schema_invalid(), "compile")
+    } else {
+        (AdapterError::upstream_tool_arguments_invalid(), "arguments")
+    };
+    error_result.with_schema_diagnostic(
+        phase,
+        keyword,
+        path.bytes().filter(|byte| *byte == b'/').count(),
+        error
+            .instance_path()
+            .as_str()
+            .bytes()
+            .filter(|byte| *byte == b'/')
+            .count(),
+    )
 }
 
 pub(super) fn prompt_schema(schema: &Value) -> String {
@@ -79,11 +121,10 @@ fn compact_schema(schema: &Value, depth: usize) -> Option<String> {
     }) {
         return None;
     }
-    let mut annotations = object.clone();
-    annotations.remove("type");
+    let kind = object.get("type")?.as_str()?;
     let child =
         |value: &Value| compact_schema(value, depth + 1).unwrap_or_else(|| value.to_string());
-    let mut rendered = match object.get("type")?.as_str()? {
+    let mut rendered = match kind {
         "object" => {
             let properties = match object.get("properties") {
                 Some(value) => Some(value.as_object()?),
@@ -128,9 +169,6 @@ fn compact_schema(schema: &Value, depth: usize) -> Option<String> {
                 Some(value @ Value::Object(_)) => fields.push(format!("...:{}", child(value))),
                 _ => return None,
             }
-            for key in ["properties", "required", "additionalProperties"] {
-                annotations.remove(key);
-            }
             format!("object{{{}}}", fields.join(","))
         }
         "array" => {
@@ -138,15 +176,27 @@ fn compact_schema(schema: &Value, depth: usize) -> Option<String> {
             if !items.is_object() && !items.is_boolean() {
                 return None;
             }
-            annotations.remove("items");
             format!("[{}]", child(items))
         }
         kind @ ("string" | "integer" | "number" | "boolean" | "null") => kind.to_string(),
         _ => return None,
     };
+    // Borrow annotations in stable order instead of cloning each nested schema.
+    let annotations: std::collections::BTreeMap<_, _> = object
+        .iter()
+        .filter(|(key, value)| match key.as_str() {
+            "type" => false,
+            "properties" | "required" if kind == "object" => false,
+            "additionalProperties" if kind == "object" => value.as_bool() == Some(false),
+            "items" if kind == "array" => false,
+            _ => true,
+        })
+        .collect();
     if !annotations.is_empty() {
         rendered.push_str(" @");
-        rendered.push_str(&Value::Object(annotations).to_string());
+        rendered.push_str(
+            &serde_json::to_string(&annotations).expect("JSON schema annotations are serializable"),
+        );
     }
     Some(rendered)
 }
@@ -155,6 +205,37 @@ fn compact_schema(schema: &Value, depth: usize) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    mod benchmark;
+
+    #[test]
+    fn schema_diagnostics_separate_compilation_and_arguments_without_private_data() {
+        let schema = json!({"type":"object","properties":{
+            "synthetic-private-key":{"type":"integer"}
+        }});
+        let error = validate(
+            &json!({"synthetic-private-key":"synthetic-private-value"}),
+            &schema,
+        )
+        .unwrap_err();
+        assert_eq!(error.parameter(), Some("output.run_officejs.args.schema"));
+        assert!(error.to_string().contains("schema_phase=arguments"));
+        assert!(error.to_string().contains("schema_keyword=type"));
+        assert!(error
+            .to_string()
+            .contains("schema_depth=3, instance_depth=1"));
+        let invalid = validate(
+            &json!({}),
+            &json!({"$ref":"https://synthetic-private.invalid/schema"}),
+        )
+        .unwrap_err();
+        assert_eq!(invalid.parameter(), Some("tools.parameters"));
+        assert!(invalid.to_string().contains("schema_phase=compile"));
+        for error in [error, invalid] {
+            assert!(!error.to_string().contains("synthetic-private"));
+            assert!(!format!("{error:?}").contains("synthetic-private"));
+        }
+    }
 
     #[test]
     fn compact_presentation_preserves_descriptions_constraints_and_validation() {
@@ -172,10 +253,72 @@ mod tests {
         assert!(prompt.contains("\"description\":\"Search text\""));
         assert!(prompt.contains("\"uniqueItems\":true"));
         assert!(!prompt.contains("..."));
+        assert!(prompt.contains("\"additionalProperties\":false"));
         assert!(prompt.len() < schema.to_string().len());
         assert!(matches(&json!({"query":"x","limit":2}), &schema));
         assert!(!matches(&json!({"query":"x","limit":2.5}), &schema));
         assert!(!matches(&json!({"query":""}), &schema));
+    }
+
+    #[test]
+    fn compact_presentation_is_stable_when_schema_keywords_are_reordered() {
+        let first = json!({
+            "type":"object","properties":{
+                "limit":{"type":"integer","description":"Synthetic limit","minimum":1,"maximum":10},
+                "enabled":{"type":"boolean","default":false}
+            },"required":["limit"],"description":"Synthetic tool","additionalProperties":false
+        });
+        let reordered = json!({
+            "description":"Synthetic tool","additionalProperties":false,"required":["limit"],
+            "properties":{
+                "enabled":{"default":false,"type":"boolean"},
+                "limit":{"description":"Synthetic limit","maximum":10,"minimum":1,"type":"integer"}
+            },"type":"object"
+        });
+        assert_ne!(first.to_string(), reordered.to_string());
+        assert!(prompt_schema(&first).starts_with("object{"));
+        assert_eq!(prompt_schema(&first), prompt_schema(&reordered));
+        for arguments in [
+            json!({"limit":1}),
+            json!({"limit":0}),
+            json!({"limit":2,"extra":true}),
+        ] {
+            assert_eq!(matches(&arguments, &first), matches(&arguments, &reordered));
+        }
+    }
+
+    #[test]
+    fn closed_objects_remain_explicit_at_every_compact_schema_depth() {
+        let schema = json!({
+            "type":"object","properties":{
+                "path":{"type":"string","description":"Synthetic file path"},
+                "options":{"type":"object","properties":{
+                    "enabled":{"type":"boolean"},"limit":{"type":"integer"}
+                },"required":["enabled"],"additionalProperties":false}
+            },"required":["path","options"],"additionalProperties":false
+        });
+        let before = schema.clone();
+        let prompt = prompt_schema(&schema);
+        assert!(prompt.starts_with("object{"));
+        assert_eq!(prompt.matches("\"additionalProperties\":false").count(), 2);
+        assert!(prompt.len() < schema.to_string().len());
+        assert_eq!(schema, before);
+        let valid = json!({"path":"synthetic.txt","options":{"enabled":true}});
+        assert!(matches(&valid, &schema));
+        for extra_at_root in [true, false] {
+            let mut invalid = valid.clone();
+            let target = if extra_at_root {
+                &mut invalid
+            } else {
+                &mut invalid["options"]
+            };
+            target["synthetic-private-extra"] = json!("synthetic-private-value");
+            let error = validate(&invalid, &schema).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("schema_keyword=additionalProperties"));
+            assert!(!format!("{error} {error:?}").contains("synthetic-private"));
+        }
     }
 
     #[test]

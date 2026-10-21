@@ -82,7 +82,7 @@ impl TranslationStream {
         if self.terminal {
             return;
         }
-        self.pending = crate::protocol::push_pending_sse_frames(
+        let pending = crate::protocol::push_pending_sse_frames(
             std::mem::take(&mut self.pending),
             bytes,
             self,
@@ -93,6 +93,11 @@ impl TranslationStream {
                 }
             },
         );
+        match pending {
+            Ok(pending) => self.pending = pending,
+            Err(()) => self
+                .fail(AdapterError::upstream_stream_invalid().with_parameter("stream.event_size")),
+        }
     }
 
     pub fn finish(&mut self) {

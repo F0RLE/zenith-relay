@@ -170,12 +170,18 @@ impl GatewayRuntime {
         Ok(PreparedAuthorization {
             header_name: AUTHORIZATION,
             authorization,
-            identity: Some(
-                account
-                    .identity
-                    .with_configured_client_version()
-                    .map_err(|_| ExecutorPrepareError::InvalidCredential)?,
-            ),
+            identity: if account.oauth_client_kind
+                == crate::providers::chatgpt::OAuthClientKind::Siwc
+            {
+                None
+            } else {
+                Some(
+                    account
+                        .identity
+                        .with_configured_client_version()
+                        .map_err(|_| ExecutorPrepareError::InvalidCredential)?,
+                )
+            },
             token_generation: Some(prepared.tokens.generation()),
             token_revision: Some(prepared.dispatch_revision),
             account_plan_supported: account

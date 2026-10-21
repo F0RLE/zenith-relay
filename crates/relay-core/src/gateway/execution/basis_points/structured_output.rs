@@ -2,6 +2,7 @@
 use super::schema::validator;
 use crate::protocol::AdapterError;
 use serde_json::Value;
+use std::sync::Arc;
 
 pub(super) const OPTION: &str = "relay_bps_output_validation";
 const MAX_SCHEMA_BYTES: usize = 1024 * 1024;
@@ -9,7 +10,7 @@ const MAX_ANSWER_BYTES: usize = 16 * 1024 * 1024;
 
 pub(super) struct StructuredOutput {
     format: Value,
-    schema: Option<jsonschema::Validator>,
+    schema: Option<Arc<jsonschema::Validator>>,
 }
 
 pub(super) fn prepare(request: &Value) -> Result<Option<StructuredOutput>, AdapterError> {

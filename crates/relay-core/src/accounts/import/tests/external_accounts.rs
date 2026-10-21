@@ -1,6 +1,32 @@
 use super::*;
 
 #[test]
+fn siwc_token_hints_cannot_be_imported_as_legacy_codex() {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    for claims in [
+        serde_json::json!({"scope":"openid chatgpt.tokens.use.direct"}),
+        serde_json::json!({"client_id":"oaiapp_synthetic"}),
+        serde_json::json!({"aud":["oaiapp_synthetic"]}),
+    ] {
+        let token = format!(
+            "e30.{}.synthetic",
+            URL_SAFE_NO_PAD.encode(claims.to_string())
+        );
+        let parsed = parse_import(
+            &serde_json::json!({"access_token":token}).to_string(),
+            None,
+            &[],
+        )
+        .unwrap();
+        assert!(parsed.items.is_empty());
+        assert_eq!(
+            parsed.preview.rows[0].error.as_ref().unwrap().code,
+            ImportIssueCode::UnsupportedValue
+        );
+    }
+}
+
+#[test]
 fn import_rejects_free_bps_but_keeps_native_free_and_paid_or_unknown_bps() {
     let input = serde_json::json!([
         {"oauth_client_kind":"codex","access_token":"synthetic-native","plan_type":"free"},

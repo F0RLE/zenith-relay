@@ -1,6 +1,78 @@
 use super::*;
 
 #[test]
+fn prompt_affinity_follows_the_admitted_native_route_of_the_same_member() {
+    let mut scheduler = PoolScheduler::new();
+    scheduler.upsert(candidate("other"));
+    scheduler.upsert(candidate("preferred"));
+    let mut alias = candidate("preferred::chat");
+    alias.source_id = "preferred".into();
+    alias.protocol = WireApi::ChatCompletions;
+    scheduler.upsert(alias);
+    scheduler.set_native_route("preferred", true);
+    scheduler.bind_prompt_affinity("cache:thread", "preferred::chat", 0);
+
+    for protocols in [
+        vec![WireApi::Responses, WireApi::ChatCompletions],
+        vec![WireApi::Responses],
+    ] {
+        let selected = scheduler
+            .select(SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &protocols,
+                scope: &CandidateScope::default(),
+                tried: &HashSet::new(),
+                response_affinity_key: None,
+                prompt_affinity_key: Some("cache:thread"),
+                now_ms: 1,
+            })
+            .unwrap();
+        assert_eq!(selected.candidate_id, "preferred");
+        assert_eq!(
+            selected.diagnostics.reason,
+            SelectionReason::PromptCacheAffinity
+        );
+    }
+
+    scheduler.bind_response_affinity("response", "preferred::chat", 0);
+    assert!(scheduler
+        .select(SelectionRequest {
+            model: "gpt-5",
+            allowed_protocols: &[WireApi::Responses],
+            scope: &CandidateScope::default(),
+            tried: &HashSet::new(),
+            response_affinity_key: Some("response"),
+            prompt_affinity_key: Some("cache:thread"),
+            now_ms: 1,
+        })
+        .is_none());
+}
+
+#[test]
+fn remapped_prompt_affinity_cannot_restore_an_excluded_member() {
+    let mut scheduler = PoolScheduler::new();
+    scheduler.upsert(candidate("other"));
+    scheduler.upsert(candidate("preferred"));
+    let mut alias = candidate("preferred::chat");
+    alias.source_id = "preferred".into();
+    alias.protocol = WireApi::ChatCompletions;
+    scheduler.upsert(alias);
+    scheduler.bind_prompt_affinity("cache:thread", "preferred::chat", 0);
+    let selected = scheduler
+        .select(SelectionRequest {
+            model: "gpt-5",
+            allowed_protocols: &[WireApi::Responses],
+            scope: &CandidateScope::default(),
+            tried: &HashSet::from(["preferred".to_string()]),
+            response_affinity_key: None,
+            prompt_affinity_key: Some("cache:thread"),
+            now_ms: 1,
+        })
+        .unwrap();
+    assert_eq!(selected.candidate_id, "other");
+}
+
+#[test]
 fn prompt_cache_affinity_does_not_keep_a_smaller_quota() {
     let mut scheduler = PoolScheduler::new();
     let mut cached = oauth_candidate("cached");

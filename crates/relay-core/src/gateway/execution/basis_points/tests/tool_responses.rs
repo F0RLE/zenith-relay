@@ -1,5 +1,235 @@
+use super::super::response::translate_response_value;
 use super::*;
 use serde_json::json;
+
+#[test]
+fn schema_preparation_timing_preserves_wire_body_and_rejection() {
+    for mode in ["compact", "full", "discovery"] {
+        let mut request = request_with_tool();
+        request["relay_bps_tool_catalog"] = json!(mode);
+        let expected = prepare_request(&request).unwrap();
+        let mut measured = None;
+        let actual =
+            super::super::prepare_request_with_timing(&request, &mut measured, true).unwrap();
+        assert_eq!(actual, expected);
+        assert!(measured.is_some());
+        request["tools"][0]["parameters"]["type"] = json!("invalid-synthetic-type");
+        let expected = prepare_request(&request).unwrap_err();
+        let actual =
+            super::super::prepare_request_with_timing(&request, &mut measured, true).unwrap_err();
+        assert_eq!(actual.to_string(), expected.to_string());
+        assert_eq!(measured, None);
+    }
+}
+
+#[test]
+fn reference_routing_recovers_only_exact_same_tool_legacy_envelopes() {
+    let mut request = request_with_tool();
+    request["tools"][0]["parameters"]["additionalProperties"] = false.into();
+    let arguments = json!({"cmd":"Write-Output \"quoted\"\r\nC:\\synthetic\\file 😀"});
+    for (name_key, args_key) in [
+        ("tool", "args"),
+        ("name", "arguments"),
+        ("tool", "arguments"),
+        ("name", "args"),
+    ] {
+        for encoded in [false, true] {
+            let nested = if encoded {
+                Value::String(arguments.to_string())
+            } else {
+                arguments.clone()
+            };
+            let response = json!({"status":"completed","output":[{
+                "type":"function_call","call_id":"call_legacy","name":TRANSPORT_TOOL,
+                "arguments":json!({"references":["exec_command"],"code":json!({(name_key):"exec_command",(args_key):nested}).to_string()}).to_string()
+            }]});
+            let translated = translate_response_value(response, &request).unwrap();
+            assert_eq!(translated["output"][0]["name"], "exec_command");
+            assert_eq!(translated["output"][0]["call_id"], "call_legacy");
+            assert_eq!(
+                serde_json::from_str::<Value>(
+                    translated["output"][0]["arguments"].as_str().unwrap()
+                )
+                .unwrap(),
+                arguments
+            );
+        }
+    }
+}
+
+#[test]
+fn legacy_envelope_recovery_never_drops_fields_or_bypasses_the_client_schema() {
+    let mut request = request_with_tool();
+    request["tools"][0]["parameters"]["additionalProperties"] = false.into();
+    for payload in [
+        json!({"tool":"different_tool","args":{"cmd":"synthetic"}}),
+        json!({"tool":"exec_command","args":{"cmd":"synthetic"},"extra":true}),
+        json!({"tool":"exec_command","args":{"cmd":"synthetic","extra":true}}),
+        json!({"tool":"exec_command","args":{"cmd":42}}),
+        json!({"tool":"exec_command","args":{}}),
+        json!({"tool":"exec_command","args":{"tool":"exec_command","args":{"cmd":"synthetic"}}}),
+        json!({"cmd":"synthetic","extra":true}),
+    ] {
+        let response = json!({"status":"completed","output":[{
+            "type":"function_call","call_id":"call_invalid","name":TRANSPORT_TOOL,
+            "arguments":json!({"references":["exec_command"],"code":payload.to_string()}).to_string()
+        }]});
+        assert_eq!(
+            translate_response_value(response, &request)
+                .unwrap_err()
+                .parameter(),
+            Some("output.run_officejs.args.schema")
+        );
+    }
+}
+
+#[test]
+fn recovered_namespaced_arguments_keep_stream_and_tool_result_roundtrips() {
+    let mut request = request_with_tool();
+    let mut tool = request["tools"][0].clone();
+    tool["parameters"]["additionalProperties"] = false.into();
+    request["tools"] = json!([{"type":"namespace","name":"repo","tools":[tool]}]);
+    let arguments = json!({"cmd":"synthetic command"});
+    let response = json!({"id":"resp_legacy","status":"completed","output":[{
+        "type":"function_call","call_id":"call_legacy_ns","name":TRANSPORT_TOOL,
+        "arguments":json!({"references":["repo.exec_command"],"code":json!({
+            "tool":"repo.exec_command","args":arguments
+        }).to_string()}).to_string()
+    }]});
+    let translated = translate_response_value(response, &request).unwrap();
+    assert_eq!(translated["output"][0]["namespace"], "repo");
+    let stream =
+        String::from_utf8(synthetic_stream(&serde_json::to_vec(&translated).unwrap()).unwrap())
+            .unwrap();
+    let events = stream
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .collect::<Vec<_>>();
+    let done = events
+        .iter()
+        .find(|event| event["type"] == "response.function_call_arguments.done")
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(done["arguments"].as_str().unwrap()).unwrap(),
+        arguments
+    );
+    request["input"] = json!([
+        translated["output"][0],
+        {"type":"function_call_output","call_id":"call_legacy_ns","output":"synthetic result"}
+    ]);
+    let upstream = prepare_request(&request).unwrap();
+    let replayed = upstream["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "function_call")
+        .unwrap();
+    let envelope: Value = serde_json::from_str(replayed["arguments"].as_str().unwrap()).unwrap();
+    assert_eq!(envelope["references"], json!(["repo.exec_command"]));
+    assert_eq!(
+        serde_json::from_str::<Value>(envelope["code"].as_str().unwrap()).unwrap(),
+        arguments
+    );
+}
+
+#[test]
+fn declared_envelope_shaped_function_arguments_are_never_unwrapped() {
+    let mut request = request_with_tool();
+    request["tools"][0]["parameters"] = json!({"type":"object","properties":{
+        "tool":{"type":"string"},"args":{"type":"object"}
+    },"required":["tool","args"],"additionalProperties":false});
+    let arguments = json!({"tool":"exec_command","args":{"cmd":"synthetic"}});
+    let response = json!({"status":"completed","output":[{
+        "type":"function_call","call_id":"call_literal","name":TRANSPORT_TOOL,
+        "arguments":json!({"references":["exec_command"],"code":arguments.to_string()}).to_string()
+    }]});
+    let translated = translate_response_value(response, &request).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(translated["output"][0]["arguments"].as_str().unwrap())
+            .unwrap(),
+        arguments
+    );
+}
+
+#[test]
+fn failed_declared_open_or_namespaced_arguments_are_not_reinterpreted() {
+    let arguments = json!({"tool":"exec_command","args":{"cmd":"synthetic"}});
+    let response = json!({"status":"completed","output":[{
+        "type":"function_call","call_id":"call_invalid","name":TRANSPORT_TOOL,
+        "arguments":json!({"references":["exec_command"],"code":arguments.to_string()}).to_string()
+    }]});
+    for schema in [
+        json!({"type":"object","properties":{
+            "cmd":{"type":"string"},"tool":{"type":"string"},"args":{"type":"object"}
+        },"required":["cmd"],"additionalProperties":false}),
+        json!({"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"]}),
+        json!({"type":"object","properties":{"cmd":{"type":"string"}},
+            "patternProperties":{"^(tool|args)$":{}},"required":["cmd"],"additionalProperties":false}),
+        json!({"type":"object","properties":{"cmd":{"type":"string"}},
+            "required":["cmd"],"additionalProperties":true}),
+        json!({"type":"object","required":["cmd"],"additionalProperties":false}),
+    ] {
+        let mut request = request_with_tool();
+        request["tools"][0]["parameters"] = schema;
+        assert_eq!(
+            translate_response_value(response.clone(), &request)
+                .unwrap_err()
+                .parameter(),
+            Some("output.run_officejs.args.schema")
+        );
+    }
+
+    let mut request = request_with_tool();
+    let mut tool = request["tools"][0].clone();
+    tool["parameters"]["additionalProperties"] = false.into();
+    request["tools"] = json!([{"type":"namespace","name":"repo","tools":[tool]}]);
+    for name in ["exec_command", "other.exec_command"] {
+        let mut response = response.clone();
+        response["output"][0]["arguments"] = json!({
+            "references":["repo.exec_command"],"code":json!({"tool":name,"args":{"cmd":"synthetic"}}).to_string()
+        }).to_string().into();
+        assert_eq!(
+            translate_response_value(response, &request)
+                .unwrap_err()
+                .parameter(),
+            Some("output.run_officejs.args.schema")
+        );
+    }
+}
+
+#[test]
+fn framed_headers_share_lossless_json_parsing_without_modifying_the_raw_body() {
+    use super::super::codec::function_arguments;
+
+    let raw = "Write-Output \"synthetic\"\r\n$x = 'C:\\synthetic\\q'\n\t";
+    let header = r#"{"field":"cmd","args":{"workdir":"C:\synthetic\q","label":"row\tvalue"}}"#;
+    for newline in ["\n", "\r\n"] {
+        let payload = json!(format!(
+            "{}{header}{newline}{raw}",
+            super::super::FUNCTION_STRING_PREFIX
+        ));
+        assert_eq!(
+            function_arguments(&payload).unwrap(),
+            json!({"cmd":raw,"workdir":r"C:\synthetic\q","label":"row\tvalue"})
+        );
+    }
+    for malformed in [
+        r#"{"field":"cmd","args":{"workdir":"synthetic\u12X4"}}"#,
+        r#"{"field":"cmd","args":{"workdir":"synthetic"}"#,
+    ] {
+        let payload = json!(format!(
+            "{}{malformed}\n{raw}",
+            super::super::FUNCTION_STRING_PREFIX
+        ));
+        let error = function_arguments(&payload).unwrap_err();
+        assert_eq!(
+            error.parameter(),
+            Some("output.run_officejs.args.frame.header")
+        );
+        assert!(!error.to_string().contains("synthetic"));
+    }
+}
 
 #[test]
 fn framed_function_strings_preserve_commands_and_validate_the_original_schema() {
@@ -25,19 +255,19 @@ fn framed_function_strings_preserve_commands_and_validate_the_original_schema() 
     for (header, parameter) in [
         (
             json!({"field":"cmd","args":{"cmd":"duplicate"}}),
-            "output.run_officejs.args.frame",
+            "output.run_officejs.args.frame.duplicate_field",
         ),
         (
             json!({"field":"cmd","args":[]}),
-            "output.run_officejs.args.frame",
+            "output.run_officejs.args.frame.args",
         ),
         (
             json!({"field":false,"args":{}}),
-            "output.run_officejs.args.frame",
+            "output.run_officejs.args.frame.field",
         ),
         (
             json!({"field":"cmd","args":{},"extra":true}),
-            "output.run_officejs.args.frame",
+            "output.run_officejs.args.frame.header",
         ),
         (
             json!({"field":"cmd","args":{"max_output_tokens":"wrong type"}}),
@@ -58,10 +288,19 @@ fn framed_function_strings_preserve_commands_and_validate_the_original_schema() 
             translate_response(&serde_json::to_vec(&invalid).unwrap(), &request).unwrap_err();
         assert_eq!(error.parameter(), Some(parameter));
     }
-    for malformed in [
-        "relay-function-string-v1 {\"field\":\"cmd\",\"args\":{}}",
-        "relay-function-string-v1 {invalid}\nsynthetic",
-        "relay-function-string-v1 []\nsynthetic",
+    for (malformed, parameter) in [
+        (
+            "relay-function-string-v1 {\"field\":\"cmd\",\"args\":{}}",
+            "output.run_officejs.args.frame.separator",
+        ),
+        (
+            "relay-function-string-v1 {invalid}\nsynthetic",
+            "output.run_officejs.args.frame.header",
+        ),
+        (
+            "relay-function-string-v1 []\nsynthetic",
+            "output.run_officejs.args.frame.header",
+        ),
     ] {
         let mut invalid = response.clone();
         invalid["output"][0]["arguments"] = json!({"references":["exec_command"],"code":malformed})
@@ -71,7 +310,7 @@ fn framed_function_strings_preserve_commands_and_validate_the_original_schema() 
             translate_response(&serde_json::to_vec(&invalid).unwrap(), &request)
                 .unwrap_err()
                 .parameter(),
-            Some("output.run_officejs.args.frame")
+            Some(parameter)
         );
     }
     request["tools"]
@@ -365,6 +604,36 @@ fn function_json_errors_keep_safe_parser_diagnostics_without_payload() {
         assert!(!diagnostic.contains("synthetic-private"));
         assert!(!format!("{error:?}").contains("synthetic-private"));
     }
+}
+
+#[test]
+fn schema_failures_identify_the_constraint_without_keys_or_values() {
+    let request = json!({
+        "model":"gpt-test","input":"Synthetic request",
+        "tools":[{"type":"function","name":"lookup","parameters":{
+            "type":"object","properties":{"synthetic-private-key":{"type":"integer"}},
+            "required":["synthetic-private-key"]
+        }}]
+    });
+    let response = json!({"status":"completed","output":[{
+        "type":"function_call","call_id":"call_schema","name":TRANSPORT_TOOL,
+        "arguments":json!({"references":["lookup"],"code":json!({
+            "synthetic-private-key":"synthetic-private-value"
+        }).to_string()}).to_string()
+    }]});
+    let error = translate_response(&serde_json::to_vec(&response).unwrap(), &request).unwrap_err();
+    assert_eq!(error.parameter(), Some("output.run_officejs.args.schema"));
+    assert!(error.to_string().contains("schema_phase=arguments"));
+    assert!(error.to_string().contains("schema_keyword=type"));
+    assert!(!format!("{error} {error:?}").contains("synthetic-private"));
+
+    let mut invalid = request;
+    invalid["tools"][0]["parameters"] = json!({"$ref":"https://synthetic-private.invalid/schema"});
+    let error = prepare_request(&invalid).unwrap_err();
+    assert_eq!(error.code(), crate::error_codes::ADAPTER_INVALID_REQUEST);
+    assert_eq!(error.parameter(), Some("tools.parameters"));
+    assert!(error.to_string().contains("schema_phase=compile"));
+    assert!(!format!("{error} {error:?}").contains("synthetic-private"));
 }
 
 #[test]
@@ -740,7 +1009,14 @@ fn parallel_responses_keep_repeated_tool_names_and_distinct_call_ids() {
 
 #[test]
 fn tool_call_identity_rejects_blank_values_without_normalizing_opaque_ids() {
-    for call_id in ["", "   ", "\t\r\n", "call_synthetic", " call_with_padding "] {
+    for call_id in [
+        "",
+        "   ",
+        "\t\r\n",
+        "call_synthetic",
+        "call_provider.1.0",
+        " call_with_padding ",
+    ] {
         let mut response: Value = serde_json::from_slice(&tool_response(
             r#"{"tool":"exec_command","args":{"cmd":"synthetic"}}"#,
         ))

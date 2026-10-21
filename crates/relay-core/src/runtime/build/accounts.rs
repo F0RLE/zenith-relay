@@ -39,7 +39,9 @@ pub(super) fn build_accounts(
         require_runtime_value("account source id", &account.source_id)?;
         require_runtime_value("ChatGPT account id", &account.chatgpt_account_id)?;
         let excel = account.oauth_client_kind == OAuthClientKind::ExcelBps;
-        if excel && account_auth.is_some_and(|auth| auth.agent_identities.contains_key(&account.id))
+        let siwc = account.oauth_client_kind == OAuthClientKind::Siwc;
+        if (excel || siwc)
+            && account_auth.is_some_and(|auth| auth.agent_identities.contains_key(&account.id))
         {
             return Err(Error::Validation(
                 "Excel OAuth cannot use ChatGPT Agent Identity".into(),
@@ -58,7 +60,11 @@ pub(super) fn build_accounts(
                 "runtime candidate ids must be unique".to_string(),
             ));
         }
-        let responses_url = normalized_responses_url(&account.responses_url)?;
+        let responses_url = normalized_responses_url(if siwc {
+            "https://api.openai.com/v1/responses"
+        } else {
+            &account.responses_url
+        })?;
         let basis_points_url = normalized_responses_url(BASIS_POINTS_RESPONSES_URL)?;
         passive_quotas.insert(
             account.id.clone(),
@@ -76,7 +82,7 @@ pub(super) fn build_accounts(
             .map_err(|message| Error::Validation(message.to_string()))?;
         let mut published_models = account.models.clone();
         let models = normalized_set(account.models.iter());
-        let image_main_model = (!excel)
+        let image_main_model = (!excel && !siwc)
             .then(|| {
                 select_image_main_model_with_catalog(
                     &models,

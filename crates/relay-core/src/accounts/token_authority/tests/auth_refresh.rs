@@ -245,6 +245,11 @@ async fn invalidated_access_is_expired_and_persisted_once() {
     let tokens = authority.tokens("local-account").await.unwrap();
     assert_eq!(tokens.expires_at_ms(), Some(10));
     assert_eq!(tokens.generation(), 8);
+    assert_eq!(tokens.refresh_token(), Some("refresh"));
+    assert_eq!(
+        authority.auth_state("local-account").await,
+        Some(AccountAuthState::Active)
+    );
     assert_eq!(persistence.token_calls.load(Ordering::SeqCst), 1);
 }
 

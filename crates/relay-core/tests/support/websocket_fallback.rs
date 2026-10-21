@@ -156,7 +156,7 @@ async fn managed_websocket_quota_failure_falls_back_to_http_api_source() {
         )])])
         .await;
     let authority = ready_authority("limited-account", "limited-access").await;
-    let (gateway, events, _, _) = spawn_mixed_gateway(
+    let (gateway, events, _, _) = spawn_mixed_gateway_with_options(
         vec![source("api-source", &source_upstream, "source-key", -100)],
         vec![account(
             "limited-account",
@@ -168,6 +168,10 @@ async fn managed_websocket_quota_failure_falls_back_to_http_api_source() {
         authority,
         refresh_adapter(),
         Arc::new(PersistenceAdapter::default()),
+        GatewayRuntimeOptions {
+            diagnostics_enabled: || true,
+            ..Default::default()
+        },
     )
     .await;
     gateway
@@ -212,6 +216,16 @@ async fn managed_websocket_quota_failure_falls_back_to_http_api_source() {
     );
     assert!(events[1].success);
     assert_eq!(events[1].candidate_id.as_deref(), Some("api-source"));
+    let transport = serde_json::to_value(&events[1].routing.as_ref().unwrap().transport).unwrap();
+    assert_eq!(
+        events[1].transport,
+        zenith_relay_core::UsageTransport::Websocket
+    );
+    assert_eq!(transport["upstream"], "http");
+    assert_eq!(transport["mode"], "native");
+    assert_eq!(transport["responseFormat"], "sse");
+    assert!(!transport["fallbackReason"].is_null());
+    assert!(transport["handshakeMs"].is_null());
 }
 
 #[tokio::test]

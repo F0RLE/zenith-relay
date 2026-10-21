@@ -1,6 +1,7 @@
 use super::super::errors::{upstream_failure_status, AttemptFailure};
 use super::super::streaming::{
-    parse_sse_event, StreamBootstrapFailure, TerminalEvent, TerminalOutcome,
+    has_generation_evidence, parse_sse_event, StreamBootstrapFailure, TerminalEvent,
+    TerminalOutcome,
 };
 use crate::error_codes;
 use crate::protocol::sse_event_end;
@@ -39,6 +40,13 @@ impl BufferedResponseTiming {
         }
         if let Some(finished_ms) = self.finished_ms {
             event.latency_ms = finished_ms;
+            if let Some(transport) = event
+                .routing
+                .as_mut()
+                .and_then(|routing| routing.transport.as_mut())
+            {
+                transport.upstream_response_ms = Some(finished_ms);
+            }
         }
         // On disconnect or malformed EOF, retain the raw first-output evidence
         // and use the stream settlement's elapsed time for the partial attempt.
@@ -202,9 +210,14 @@ pub(in crate::gateway) fn completed_upstream_response(
     }
     let mut offset = 0;
     let mut output_items = Vec::new();
-    let mut saw_output = false;
+    let mut saw_generation = false;
     while let Some(end) = sse_event_end(&bytes[offset..]) {
         let terminal = parse_sse_event(&bytes[offset..offset + end]);
+        saw_generation |= terminal.semantic_output
+            || terminal
+                .event_payload
+                .as_ref()
+                .is_some_and(super::has_generated_tokens);
         if expected_model.is_some_and(|expected| {
             terminal
                 .event_payload
@@ -214,7 +227,7 @@ pub(in crate::gateway) fn completed_upstream_response(
                 })
         }) {
             let mut failure = super::super::streaming::degraded_route_stream_failure();
-            if saw_output || terminal.semantic_output {
+            if saw_generation {
                 failure.execution = crate::scheduler::rotation::ExecutionObservation::accepted();
             }
             return Err(Box::new(failure));
@@ -241,7 +254,7 @@ pub(in crate::gateway) fn completed_upstream_response(
                     terminal.cooldown_hint,
                 );
                 return Err(Box::new(StreamBootstrapFailure {
-                    execution: if saw_output || terminal.semantic_output {
+                    execution: if saw_generation {
                         crate::scheduler::rotation::ExecutionObservation::accepted()
                     } else {
                         failure.execution
@@ -274,7 +287,6 @@ pub(in crate::gateway) fn completed_upstream_response(
             }
             None => {}
         }
-        saw_output |= terminal.semantic_output;
         offset += end;
     }
     Err(Box::new(
@@ -303,7 +315,7 @@ pub(in crate::gateway) fn validate_upstream_response(
     {
         let failure = AttemptFailure::status_with_body(StatusCode::BAD_GATEWAY, Some(&bytes));
         return Err(Box::new(StreamBootstrapFailure {
-            execution: if super::super::streaming::has_semantic_output(upstream_json, None) {
+            execution: if has_generation_evidence(upstream_json, None) {
                 crate::scheduler::rotation::ExecutionObservation::accepted()
             } else {
                 failure.execution
@@ -323,7 +335,7 @@ pub(in crate::gateway) fn validate_upstream_response(
         super::super::streaming::served_model_is_rejected(upstream_json, expected)
     }) {
         let mut failure = super::super::streaming::degraded_route_stream_failure();
-        if super::super::streaming::has_semantic_output(upstream_json, None) {
+        if has_generation_evidence(upstream_json, None) {
             failure.execution = crate::scheduler::rotation::ExecutionObservation::accepted();
         }
         return Err(Box::new(failure));

@@ -204,7 +204,7 @@ impl GatewayRuntime {
                 if self
                     .route_affinity(&key, now_ms)
                     .is_some_and(|owner| owner != fingerprint)
-                    && (previous.is_some() || !paired_tool_results.contains(call_id))
+                    && !paired_tool_results.contains(call_id)
                 {
                     return Err(AdapterError::continuation_mismatch());
                 }
@@ -288,9 +288,8 @@ fn tool_result_ids(request: &Value, client: WireApi) -> Vec<&str> {
 
 /// Result IDs whose matching tool call is present in this same request.
 ///
-/// A complete pair is portable across compatible routes when there is no
-/// opaque `previous_response_id`; orphan results remain bound to the route
-/// that created the call.
+/// A complete pair carries its own history. An opaque predecessor is checked
+/// separately; orphan results remain bound to the route that created the call.
 fn paired_tool_result_ids(request: &Value, client: WireApi) -> HashSet<&str> {
     match client {
         WireApi::Responses => {

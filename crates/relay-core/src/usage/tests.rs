@@ -3,6 +3,72 @@ use crate::{DefaultServiceTier, WireApi};
 use serde_json::json;
 
 #[test]
+fn upstream_model_declarations_are_bounded_and_do_not_change_routing_identity() {
+    let mut event = failed_usage_event("synthetic", None);
+    event.routing = Some(
+        serde_json::from_value(json!({
+            "reason":"only_eligible", "eligibleCandidates":1,
+            "quotaRemainingBasisPoints":null, "inFlightBefore":0, "dispatchesBefore":0
+        }))
+        .unwrap(),
+    );
+    let requested = event.requested_model.clone();
+    let resolved = event.resolved_model.clone();
+    for payload in [
+        json!({"model":"synthetic-snapshot"}),
+        json!({"response":{"model":"synthetic-snapshot"}}),
+        json!({"message":{"model":"synthetic-snapshot"}}),
+        json!({"modelVersion":"synthetic-snapshot"}),
+    ] {
+        event.observe_response_model(&payload);
+        assert_eq!(
+            event
+                .routing
+                .as_ref()
+                .unwrap()
+                .upstream_response_model
+                .as_deref(),
+            Some("synthetic-snapshot")
+        );
+    }
+    for model in [
+        "",
+        " ",
+        "synthetic\nprivate",
+        "synthetic private",
+        "sk-synthetic-secret",
+        "acct_synthetic",
+        "synthetic@example.test",
+        "https://example.test/private",
+        &"x".repeat(1025),
+    ] {
+        event.observe_response_model(&json!({"model":model}));
+        assert_eq!(
+            event
+                .routing
+                .as_ref()
+                .unwrap()
+                .upstream_response_model
+                .as_deref(),
+            Some("synthetic-snapshot")
+        );
+    }
+    assert_eq!(event.requested_model, requested);
+    assert_eq!(event.resolved_model, resolved);
+    let encoded = serde_json::to_value(event.routing.as_ref().unwrap()).unwrap();
+    assert_eq!(encoded["upstreamResponseModel"], "synthetic-snapshot");
+    let mut legacy = encoded;
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("upstreamResponseModel");
+    assert!(serde_json::from_value::<crate::RoutingDiagnostics>(legacy)
+        .unwrap()
+        .upstream_response_model
+        .is_none());
+}
+
+#[test]
 fn provider_cache_windows_are_normalized_without_guessing() {
     assert_eq!(
         normalize_reported_cache_ttls("1h, 5m, 5m"),
@@ -114,6 +180,27 @@ fn upstream_service_failures_do_not_mark_the_selected_account() {
         let event = failed_usage_event(category, Some("account"));
         assert_eq!(event.error_origin(), Some(ErrorOrigin::Account));
         assert!(!event.affects_account_state());
+    }
+}
+
+#[test]
+fn siwc_admission_failure_preserves_account_credentials_and_quota() {
+    for category in [
+        "upstream_unauthorized",
+        "upstream_forbidden",
+        "upstream_quota_exhausted",
+    ] {
+        let mut event = failed_usage_event(category, Some("synthetic-account"));
+        event.routing = Some(
+            serde_json::from_value(json!({
+                "reason":"only_eligible", "eligibleCandidates":1,
+                "quotaRemainingBasisPoints":null, "inFlightBefore":0, "dispatchesBefore":0,
+                "endpointKind":"chatgpt_siwc"
+            }))
+            .unwrap(),
+        );
+        assert!(!event.affects_account_state());
+        assert_eq!(event.error_origin(), Some(ErrorOrigin::Account));
     }
 }
 
@@ -359,4 +446,44 @@ fn tool_diagnostics_are_absent_without_a_tool_request_or_result() {
 
     assert_eq!(diagnostics.terminal_output, TerminalOutputKind::Text);
     assert!(!diagnostics.has_evidence());
+}
+
+#[test]
+fn parallel_diagnostics_keep_unknown_zero_and_call_readiness_distinct() {
+    let mut diagnostics = ToolUseDiagnostics::default();
+    let legacy = serde_json::to_value(&diagnostics).unwrap();
+    for key in [
+        "requestedParallelToolCalls",
+        "upstreamToolCallCount",
+        "toolCallsReadyMs",
+    ] {
+        assert!(legacy.get(key).is_none());
+    }
+    let restored: ToolUseDiagnostics = serde_json::from_value(legacy).unwrap();
+    assert_eq!(restored, diagnostics);
+    diagnostics.observe_upstream_response(&json!({"output":[]}));
+    assert_eq!(diagnostics.upstream_tool_call_count, None);
+    diagnostics.client_context = Some(Default::default());
+    diagnostics.observe_upstream_response(&json!({"output":[]}));
+    assert_eq!(diagnostics.upstream_tool_call_count, Some(0));
+    assert!(diagnostics.has_evidence());
+    diagnostics.tool_call_count = 1;
+    diagnostics.observe_tool_calls_ready(20);
+    assert_eq!(diagnostics.tool_calls_ready_ms, None);
+    diagnostics.basis_points_catalog = Some(
+        serde_json::from_value(json!({
+            "mode":"compact", "fullSchemaBytes":0, "renderedSchemaBytes":0,
+            "catalogPromptBytes":0, "loadedToolCount":0, "discoveryRounds":0
+        }))
+        .unwrap(),
+    );
+    diagnostics.observe_tool_calls_ready(0);
+    diagnostics.observe_tool_calls_ready(80);
+    assert_eq!(diagnostics.tool_calls_ready_ms, Some(0));
+    diagnostics.observe_upstream_response(&json!({"output":[{
+        "type":"function_call", "name":"synthetic-private-name", "arguments":"synthetic-private-value"
+    }]}));
+    assert_eq!(diagnostics.upstream_tool_call_count, Some(1));
+    let serialized = serde_json::to_string(&diagnostics).unwrap();
+    assert!(!serialized.contains("synthetic-private"));
 }

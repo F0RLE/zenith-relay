@@ -56,6 +56,7 @@ impl PoolScheduler {
             candidate.provider_credits_observed_at_ms;
         rotation_candidate.enabled = candidate.enabled;
         rotation_candidate.draining = candidate.draining;
+        rotation_candidate.quota_reference = self.quota_references.get(&candidate.id).cloned();
         rotation_candidate.routes.clear();
         rotation_candidate.route_rates.clear();
         for model in &candidate.models {
@@ -275,6 +276,14 @@ impl PoolScheduler {
                 *preferred_candidate = candidate;
             }
         }
+        // Soft cache affinity follows the admitted physical member, not a
+        // protocol alias removed by deduplication. Opaque ownership stays exact.
+        let prompt_preferred = selection_request
+            .prompt_affinity_key
+            .and_then(|key| self.prompt_affinity.get(key, selection_request.now_ms))
+            .and_then(|candidate_id| self.candidates.get(candidate_id))
+            .and_then(|candidate| members.get(&members::member_key(candidate)))
+            .map(|candidate| candidate.id.clone());
         if affinity_candidate_id.is_none() {
             allowed_candidate_ids = members
                 .into_values()
@@ -288,11 +297,7 @@ impl PoolScheduler {
             operation,
             allowed_candidate_ids,
         );
-        rotation_request.preferred = selection_request.prompt_affinity_key.and_then(|key| {
-            self.prompt_affinity
-                .get(key, selection_request.now_ms)
-                .map(str::to_owned)
-        });
+        rotation_request.preferred = prompt_preferred;
         Some(rotation_request)
     }
 

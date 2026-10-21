@@ -72,6 +72,7 @@ pub struct Selection {
 #[derive(Clone, Debug)]
 pub struct PoolScheduler {
     candidates: BTreeMap<String, RuntimeCandidate>,
+    quota_references: BTreeMap<String, crate::CandidateQuotaReference>,
     cooldown_reasons: BTreeMap<(String, String), CooldownReason>,
     response_affinity: AffinityCache,
     prompt_affinity: AffinityCache,
@@ -107,6 +108,7 @@ impl PoolScheduler {
     pub fn new() -> Self {
         Self {
             candidates: BTreeMap::new(),
+            quota_references: BTreeMap::new(),
             cooldown_reasons: BTreeMap::new(),
             response_affinity: AffinityCache::new(
                 RESPONSE_AFFINITY_MAX_ENTRIES,

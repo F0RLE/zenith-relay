@@ -148,23 +148,28 @@ pub(in crate::gateway) fn incompatible_routes(
                 tier_policy.selected_tier(),
                 client,
             );
-            route
-                .adapter
-                .prepare_request_with_capabilities(
-                    AdapterRequestContext {
-                        client_wire_api: client,
-                        request: &candidate_request,
-                        model: &route.source_model,
-                        stream,
-                        reasoning_mode: route.reasoning_mode,
-                        cache_write_ttl: route.cache_write_ttl,
-                        previous: continuation_state,
-                        response_scope: &route.candidate_id,
-                        response_id_seed: "admission",
-                    },
-                    &capability,
-                )
-                .map(drop)
+            let prepared = route.adapter.prepare_request_with_capabilities(
+                AdapterRequestContext {
+                    client_wire_api: client,
+                    request: &candidate_request,
+                    model: &route.source_model,
+                    stream,
+                    reasoning_mode: route.reasoning_mode,
+                    cache_write_ttl: route.cache_write_ttl,
+                    previous: continuation_state,
+                    response_scope: &route.candidate_id,
+                    response_id_seed: "admission",
+                },
+                &capability,
+            )?;
+            if route.account_transport == AccountTransport::ExcelBasisPoints {
+                if let Some(error) =
+                    super::basis_points::output_format_error(prepared.upstream_body())
+                {
+                    return Err(error);
+                }
+            }
+            Ok(())
         };
         match validate() {
             Err(error) => {
@@ -181,7 +186,7 @@ pub(in crate::gateway) fn incompatible_routes(
 }
 
 pub(super) fn basis_points_route_error(
-    _request: &Value,
+    request: &Value,
     _stream: bool,
     tier_policy: &ServiceTierPolicy,
     selected_tier: DefaultServiceTier,
@@ -191,7 +196,7 @@ pub(super) fn basis_points_route_error(
     {
         return Some(AdapterError::parameter_unsupported_for("service_tier"));
     }
-    None
+    super::basis_points::output_format_error(request)
 }
 
 /// Shared pre-dispatch rejection for a Basis Points account.
@@ -351,6 +356,41 @@ mod tests {
         assert!(features.contains(&ProtocolFeature::StructuredOutput));
         assert!(features.contains(&ProtocolFeature::Reasoning));
         assert!(features.contains(&ProtocolFeature::Streaming));
+    }
+
+    #[test]
+    fn basis_points_output_format_is_checked_before_admission() {
+        let tier = ServiceTierPolicy::pool_owned(&json!({}));
+        let mut request = json!({"text":{"format":{
+            "type":"json_schema","name":"command_review","strict":false,
+            "schema":{"type":"object","properties":{"approved":{"type":"boolean"}},
+                "required":["approved"],"additionalProperties":false}
+        }}});
+        for stream in [false, true] {
+            assert_eq!(
+                basis_points_route_error(&request, stream, &tier, DefaultServiceTier::Standard)
+                    .and_then(|error| error.parameter()),
+                Some("text.format")
+            );
+        }
+        request["relay_bps_output_validation"] = json!(true);
+        assert!(
+            basis_points_route_error(&request, false, &tier, DefaultServiceTier::Standard)
+                .is_none()
+        );
+        request["text"]["format"]["strict"] = json!(true);
+        assert_eq!(
+            basis_points_route_error(&request, false, &tier, DefaultServiceTier::Standard)
+                .and_then(|error| error.parameter()),
+            Some("text.format.strict")
+        );
+        assert!(basis_points_route_error(
+            &json!({"text":{"format":{"type":"text"}}}),
+            false,
+            &tier,
+            DefaultServiceTier::Standard,
+        )
+        .is_none());
     }
 
     #[test]

@@ -1,6 +1,9 @@
 use super::*;
+use crate::protocol::take_sse_event;
 
+mod batch;
 mod messages_bridge;
+mod throughput;
 
 fn request() -> Value {
     json!({"model":"test","metadata":{"user_id":"synthetic"},"tools":[{"type":"function","name":"inspect","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}}]})
@@ -417,35 +420,42 @@ fn invalid_json_arguments_keep_their_cause_without_releasing_a_valid_subset() {
 }
 
 #[test]
-fn stream_accepts_referenced_direct_function_calls_only_after_completion() {
-    let mut function = call("inspect");
-    function["arguments"] = json!({
-        "references":["inspect"],"code":r#"return await inspect({"path":"synthetic"})"#
-    })
-    .to_string()
-    .into();
-    let mut translator = Translator::new(request());
-    translator.push(&frame(
-        json!({"type":"response.output_item.done","item":function}),
-    ));
-    assert!(!output(&mut translator).contains("function_call_arguments"));
-    translator.push(&frame(completed(json!([function]))));
-    let body = output(&mut translator);
-    let events: Vec<Value> = body
-        .lines()
-        .filter_map(|line| line.strip_prefix("data: "))
-        .map(|data| serde_json::from_str(data).unwrap())
-        .collect();
-    assert!(!events.iter().any(|event| event["type"] == "error"));
-    let response = events
-        .iter()
-        .find(|event| event["type"] == "response.completed")
-        .unwrap();
-    assert_eq!(response["response"]["output"][0]["name"], "inspect");
-    assert_eq!(
-        response["response"]["output"][0]["arguments"],
-        r#"{"path":"synthetic"}"#
-    );
+fn stream_accepts_referenced_compatibility_calls_only_after_completion() {
+    for code in [
+        r#"return await inspect({"path":"synthetic"})"#.to_string(),
+        json!({"tool":"inspect","args":{"path":"synthetic"}}).to_string(),
+        json!({"name":"inspect","arguments":r#"{"path":"synthetic"}"#}).to_string(),
+    ] {
+        let mut function = call("inspect");
+        function["arguments"] = json!({"references":["inspect"],"code":code})
+            .to_string()
+            .into();
+        let mut translator = Translator::new(request());
+        translator.push(&frame(
+            json!({"type":"response.output_item.done","item":function}),
+        ));
+        assert!(!output(&mut translator).contains("function_call_arguments"));
+        for chunk in frame(completed(json!([function]))).chunks(7) {
+            translator.push(chunk);
+        }
+        let body = output(&mut translator);
+        let events: Vec<Value> = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .map(|data| serde_json::from_str(data).unwrap())
+            .collect();
+        assert!(!events.iter().any(|event| event["type"] == "error"));
+        let response = events
+            .iter()
+            .find(|event| event["type"] == "response.completed")
+            .unwrap();
+        assert_eq!(response["response"]["output"][0]["name"], "inspect");
+        assert_eq!(response["response"]["output"][0]["call_id"], "call_1");
+        assert_eq!(
+            response["response"]["output"][0]["arguments"],
+            r#"{"path":"synthetic"}"#
+        );
+    }
 }
 
 #[test]
@@ -547,6 +557,59 @@ fn schema_failure_reports_safe_cause_in_persisted_diagnostics() {
 }
 
 #[test]
+fn streamed_schema_diagnostics_withhold_tools_and_preserve_the_safe_constraint() {
+    for (arguments, keyword) in [
+        (json!({"path":42}), "type"),
+        (
+            json!({"path":"test","synthetic-private-extra":"synthetic-private-value"}),
+            "additionalProperties",
+        ),
+    ] {
+        let invalid = json!({
+            "type":"function_call","call_id":"call_schema","name":"run_officejs",
+            "arguments":json!({"references":["inspect"],"code":arguments.to_string()}).to_string()
+        });
+        let event = completed(json!([call("inspect"), invalid]));
+        let response = &event["response"];
+        let json_error = crate::gateway::execution::basis_points::translate_response(
+            &serde_json::to_vec(response).unwrap(),
+            &request(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            json_error.parameter(),
+            Some("output.run_officejs.args.schema")
+        );
+        assert!(json_error
+            .to_string()
+            .contains(&format!("schema_keyword={keyword}")));
+
+        let wire = frame(event);
+        for size in [1, 7, wire.len()] {
+            let mut translator = Translator::new(request());
+            for chunk in wire.chunks(size) {
+                translator.push(chunk);
+            }
+            let body = output(&mut translator);
+            assert!(body.contains("schema_phase=arguments"));
+            assert!(body.contains(&format!("schema_keyword={keyword}")));
+            assert!(!body.contains("response.function_call_arguments.done"));
+            assert!(!body.contains("response.output_item.added"));
+            assert!(!body.contains("response.completed"));
+            assert!(!body.contains("synthetic-private"));
+            assert!(translator.terminal);
+            let parsed = super::super::parse_sse_event(body.as_bytes());
+            assert!(parsed
+                .upstream_error
+                .unwrap()
+                .message
+                .unwrap()
+                .contains(&format!("schema_keyword={keyword}")));
+        }
+    }
+}
+
+#[test]
 fn raw_model_rejection_keeps_its_category_and_tool_tracking_is_bounded() {
     let mut translator = Translator::new(request());
     translator.push(&frame(
@@ -559,10 +622,10 @@ fn raw_model_rejection_keeps_its_category_and_tool_tracking_is_bounded() {
     let mut translator = Translator::new(request());
     for index in 0..MAX_TOOLS {
         translator
-            .remember_tool(&format!("fc_{index}"), None)
+            .event(json!({"type":"response.function_call_arguments.delta","item_id":format!("fc_{index}"),"delta":"{"}))
             .unwrap();
     }
-    assert!(translator.remember_tool("overflow", None).is_err());
+    assert!(translator.event(json!({"type":"response.function_call_arguments.delta","item_id":"overflow","delta":"{"})).is_err());
     let mut translator = Translator::new(request());
     translator.push(&vec![b'x'; MAX_FRAME_BYTES + 1]);
     assert!(translator.terminal);

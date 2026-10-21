@@ -4,7 +4,7 @@ use super::recovery::adapter_error_response;
 use crate::protocol::BridgedCompaction;
 use crate::runtime::{DefaultServiceTier, ExecutorRoute};
 use crate::scheduler::RoutingDiagnostics;
-use crate::usage::ToolUseDiagnostics;
+use crate::usage::{RequestPreparationDiagnostics, ToolUseDiagnostics};
 
 pub(super) enum RequestPrepare {
     Continue,
@@ -13,6 +13,7 @@ pub(super) enum RequestPrepare {
 }
 
 pub(super) struct PreparedRequestAttempt {
+    pub(super) preparation: RequestPreparationDiagnostics,
     pub(super) route: ExecutorRoute,
     pub(super) source_model: String,
     pub(super) selected_error_origin: ErrorOrigin,
@@ -93,6 +94,7 @@ pub(super) fn prepare_request_attempt(
     debug_assert_eq!(client_wire_api, route.client_wire_api);
     let account_route = route.account_id.is_some();
     let basis_points_route = route.account_transport == AccountTransport::ExcelBasisPoints;
+    let siwc_route = route.account_transport == AccountTransport::Siwc;
     if basis_points_route {
         if let Some(step) = reject_basis_points_admission(
             request,
@@ -106,7 +108,7 @@ pub(super) fn prepare_request_attempt(
     }
     // Lite item catalogs can arrive on BPS too, but serial execution is a
     // native transport restriction, not a property of the client item format.
-    let route_responses_lite = if basis_points_route {
+    let route_responses_lite = if basis_points_route || siwc_route {
         None
     } else {
         route_responses_lite_header(
@@ -143,7 +145,7 @@ pub(super) fn prepare_request_attempt(
     let client_stream = stream;
     let compaction_plan = match prepare_attempt_compaction(
         client_wire_api,
-        route.adapter.is_passthrough(),
+        &route,
         request,
         request_id,
         last_adapter_error,
@@ -171,7 +173,7 @@ pub(super) fn prepare_request_attempt(
         Ok(adapter_request) => adapter_request,
         Err(step) => return step,
     };
-    if account_route {
+    if account_route && !siwc_route {
         normalize_prepared_account_body(
             &mut adapter_request,
             route_responses_lite.is_some(),
@@ -184,11 +186,23 @@ pub(super) fn prepare_request_attempt(
     if let Some(step) = apply_prepared_tool_policy(tool_policy, &mut adapter_request) {
         return step;
     }
-    let basis_points_request = basis_points_route.then(|| adapter_request.upstream_body().clone());
-    if basis_points_route {
-        if let Some(step) =
-            rewrite_basis_points_body(&mut adapter_request, request_id, last_adapter_error)
+    if siwc_route {
+        if let Err(error) =
+            crate::providers::chatgpt::prepare_siwc_request(adapter_request.upstream_body_mut())
         {
+            return RequestPrepare::Respond(super::adapter_error_response(error, Some(request_id)));
+        }
+    }
+    let basis_points_request = basis_points_route.then(|| adapter_request.upstream_body().clone());
+    let mut preparation = RequestPreparationDiagnostics::default();
+    if basis_points_route {
+        if let Some(step) = rewrite_basis_points_body(
+            &mut adapter_request,
+            request_id,
+            last_adapter_error,
+            &mut preparation.schema_validation_ms,
+            tool_policy.diagnostics.client_context.is_some(),
+        ) {
             return step;
         }
     }
@@ -215,11 +229,9 @@ pub(super) fn prepare_request_attempt(
         ));
     };
     tool_policy.observe_cache_context(runtime, &mut route, adapter_request.upstream_body());
-    if basis_points_route {
-        tool_policy.record_upstream_context(adapter_request.upstream_body());
-    }
     let tool_use = tool_policy.diagnostics.clone();
     RequestPrepare::Ready(Box::new(PreparedRequestAttempt {
+        preparation,
         route,
         source_model,
         selected_error_origin,
@@ -317,16 +329,21 @@ fn load_prepared_continuation(
 #[allow(clippy::result_large_err)]
 fn prepare_attempt_compaction(
     client_wire_api: WireApi,
-    passthrough: bool,
+    route: &ExecutorRoute,
     request: &Value,
     request_id: &str,
     last_adapter_error: &mut Option<AdapterError>,
 ) -> Result<BridgedCompaction, RequestPrepare> {
-    if client_wire_api != WireApi::Responses || passthrough {
+    let siwc_route = route.account_transport == AccountTransport::Siwc;
+    if client_wire_api != WireApi::Responses || (route.adapter.is_passthrough() && !siwc_route) {
         return Ok(BridgedCompaction::Unchanged);
     }
     match crate::protocol::prepare_bridged_compaction(request) {
         Ok(compaction) => Ok(compaction),
+        Err(error) if siwc_route => Err(RequestPrepare::Respond(adapter_error_response(
+            error,
+            Some(request_id),
+        ))),
         Err(error) => Err(stop_for_adapter_error(
             error,
             request_id,
@@ -429,8 +446,14 @@ fn rewrite_basis_points_body(
     adapter_request: &mut PreparedAdapterRequest,
     request_id: &str,
     last_adapter_error: &mut Option<AdapterError>,
+    schema_validation_ms: &mut Option<u64>,
+    diagnostics_enabled: bool,
 ) -> Option<RequestPrepare> {
-    match super::super::basis_points::prepare_request(adapter_request.upstream_body()) {
+    match super::super::basis_points::prepare_request_with_timing(
+        adapter_request.upstream_body(),
+        schema_validation_ms,
+        diagnostics_enabled,
+    ) {
         Ok(prepared) => {
             *adapter_request.upstream_body_mut() = prepared;
             None

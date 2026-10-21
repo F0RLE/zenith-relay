@@ -3,6 +3,31 @@
 use super::*;
 
 impl PoolScheduler {
+    pub fn invalidate_quota_reference_source(&mut self, account_id: &str) -> bool {
+        let previous = self.quota_references.len();
+        self.quota_references
+            .retain(|_, reference| reference.source_account_id != account_id);
+        self.quota_references.len() != previous
+    }
+
+    pub fn set_quota_references(
+        &mut self,
+        mut references: BTreeMap<String, crate::CandidateQuotaReference>,
+    ) -> bool {
+        references.retain(|id, reference| {
+            id != &reference.source_account_id
+                && self.candidates.get(id).is_some_and(|candidate| {
+                    candidate.kind == CandidateKind::OAuthAccount
+                        && !self.retired_candidates.contains(id)
+                })
+        });
+        if self.quota_references == references {
+            return false;
+        }
+        self.quota_references = references;
+        true
+    }
+
     pub fn set_quota_stale_after_ms(&mut self, stale_after_ms: u64) {
         self.quota_stale_after_ms = stale_after_ms.max(1);
     }
@@ -51,6 +76,9 @@ impl PoolScheduler {
     }
 
     pub fn remove(&mut self, candidate_id: &str) -> Option<RuntimeCandidate> {
+        self.quota_references.retain(|id, reference| {
+            id != candidate_id && reference.source_account_id != candidate_id
+        });
         let existing = self.candidates.get(candidate_id).cloned()?;
         // The rotation engine retains old leases itself. Retire its identity now,
         // not after drain, so a same-id re-add cannot inherit a late outcome.

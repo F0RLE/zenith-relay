@@ -1,10 +1,8 @@
 mod account_trash;
 mod adapter;
-mod capabilities;
 pub(crate) mod completion;
 mod management;
 pub(crate) mod sse;
-mod version;
 
 pub use account_trash::TrashedAccountSummary;
 pub use adapter::AdapterStreamBridge;
@@ -22,7 +20,6 @@ pub(crate) use adapter::{
     remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
     repair_custom_tool_item_ids, wrap_compaction_response_bytes, BridgedCompaction,
 };
-pub use capabilities::{Capabilities, Feature, CURRENT_PROTOCOL_VERSION};
 #[cfg(test)]
 pub use management::pool_model_summaries;
 pub use management::{
@@ -38,28 +35,27 @@ pub use management::{
     pool_candidate_count, pool_model_summaries_with_pricing, pool_pricing_source_summary,
     pool_routing_summary, pooled_source_runtime_available, quota_refresh_status,
     quota_request_timeout_in_range, source_runtime_available, update_model_reasoning_policy,
-    valid_generated_id, validate_resolved_configuration_preset_members, AccountOperationalInput,
+    validate_resolved_configuration_preset_members, AccountOperationalInput,
     AccountOperationalSource, AccountOperationalState, AccountPresetRule, AccountRefreshState,
-    AccountRoutingBlockReason, AccountSummary, ApiError, ClientWireApi, ConfigurationPreset,
+    AccountRoutingBlockReason, AccountSummary, ClientWireApi, ConfigurationPreset,
     ConfigurationPresetApplyInput, ConfigurationPresetApplyResult, ConfigurationPresetChange,
     ConfigurationPresetDocument, ConfigurationPresetPreview, ConfigurationPresetPreviewInput,
     ConfigurationPresetSettings, CredentialDiagnostics, CredentialRecovery, CredentialStatus,
-    ErrorEnvelope, GatewayDiagnostic, GatewaySummary, HealthResponse, ModelCatalogIdentity,
-    ModelPolicyError, ModelProtocolRoute, ModelSummary, OperationalStatus, PoolMembershipInput,
-    PoolModelConfigurationInput, PresetQuotaPolicy, PresetRoutingPolicy, ProfileKeyRotation,
-    ProxyMode, QuotaRefreshStatus, QuotaWindowUsage, RefreshStatus, RemoteAccountLocation,
-    RevealedAccountIdentity, RuntimeStateSnapshot, RuntimeTargetSummary, SetModelContextInput,
-    SetModelEnabledInput, SetModelOrderInput, SetModelPriceInput, SetModelReasoningInput,
-    SetModelServiceTierInput, SourcePresetRule, SourceRefreshState, SourceSummary,
-    SourceSummaryRecord, UsageBucket, UsageGroup, UsagePage, UsageQuery, UsageRange, UsageSummary,
-    UsageTokenBreakdown, UsageTotals, CONFIGURATION_PRESET_FORMAT,
+    DesktopCapabilities, GatewayDiagnostic, GatewaySummary, ModelCatalogIdentity, ModelPolicyError,
+    ModelProtocolRoute, ModelSummary, OperationalStatus, PoolMembershipInput,
+    PoolModelConfigurationInput, PresetQuotaPolicy, PresetRoutingPolicy, ProxyMode,
+    QuotaRefreshStatus, QuotaWindowUsage, RefreshStatus, RevealedAccountIdentity,
+    RuntimeStateSnapshot, SetModelContextInput, SetModelEnabledInput, SetModelOrderInput,
+    SetModelReasoningInput, SetModelServiceTierInput, SourcePresetRule, SourceRefreshState,
+    SourceSummary, SourceSummaryRecord, UsageBucket, UsageGroup, UsagePage, UsageQuery, UsageRange,
+    UsageSummary, UsageTokenBreakdown, UsageTotals, CONFIGURATION_PRESET_FORMAT,
     CONFIGURATION_PRESET_SCHEMA_VERSION, DEFAULT_MAX_RETRY_CANDIDATES,
     DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS, MAX_MAX_RETRY_CANDIDATES,
     MAX_QUOTA_REQUEST_TIMEOUT_SECONDS, MIN_MAX_RETRY_CANDIDATES, MIN_QUOTA_REQUEST_TIMEOUT_SECONDS,
-    PROFILE_KEY_ROTATION_SCHEMA_VERSION,
 };
+#[cfg(test)]
+pub(crate) use sse::take_event as take_sse_event;
 pub(crate) use sse::{
     event_data as sse_data, event_end as sse_event_end, lines as sse_lines,
-    push_pending_frames as push_pending_sse_frames, take_event as take_sse_event,
+    push_pending_frames as push_pending_sse_frames,
 };
-pub use version::{negotiate, ClientProtocolRange, NegotiatedProtocol, ProtocolError};

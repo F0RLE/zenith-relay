@@ -147,7 +147,9 @@ pub(super) async fn complete_buffered_response(
         Ok(bytes) => bytes,
         Err(step) => return step,
     };
-    let completion = serde_json::from_slice::<Value>(&bytes)
+    let completion_body = serde_json::from_slice::<Value>(&bytes).ok();
+    let completion = completion_body
+        .as_ref()
         .map(|body| {
             crate::protocol::completion::ResponseCompletion::for_protocol(
                 if account_route {
@@ -155,7 +157,7 @@ pub(super) async fn complete_buffered_response(
                 } else {
                     route.adapter.upstream_protocol(client_wire_api).wire_api()
                 },
-                &body,
+                body,
             )
         })
         .unwrap_or(crate::protocol::completion::ResponseCompletion::Invalid);
@@ -165,17 +167,24 @@ pub(super) async fn complete_buffered_response(
         status.as_u16(),
         (!completed).then(|| error_codes::RESPONSE_INCOMPLETE.to_string()),
     );
-    if !tool_use
-        .basis_points_catalog
-        .as_ref()
-        .is_some_and(|catalog| catalog.mode == "discovery")
-    {
+    if let Some(body) = completion_body {
+        if basis_points_request.is_some() && event.tool_use.upstream_tool_call_count.is_none() {
+            event.tool_use.observe_upstream_response(&body);
+        }
+    }
+    if !route.basis_points_discovery {
         // Catalog discovery has already buffered upstream bytes. A synthetic
         // final body is not evidence of first/last-token arrival.
         timing.apply(&mut event);
     }
     // Accounting reads the actual upstream counters before translation.
     populate_tokens(&mut event, &bytes);
+    if basis_points_request.is_some() {
+        // Raw provider calls are not executable client output before validation.
+        event.tool_use.tool_call_count = 0;
+        event.tool_use.text_output = false;
+        event.tool_use.finish();
+    }
     if completion == crate::protocol::completion::ResponseCompletion::Invalid {
         let error = AdapterError::upstream_response_invalid();
         emit_usage(runtime, mark_adapter_failure(event, &error));
@@ -222,6 +231,23 @@ pub(super) async fn complete_buffered_response(
                 selected_error_origin,
                 Some(request_id),
             ));
+        }
+    }
+    if basis_points_request.is_some() {
+        if let Ok(response) = serde_json::from_slice::<Value>(&bytes) {
+            event.tool_use.set_terminal_response(&response);
+            event
+                .tool_use
+                .observe_tool_calls_ready(started.elapsed().as_millis() as u64);
+        }
+    }
+    if completed {
+        if let Some(transport) = event
+            .routing
+            .as_mut()
+            .and_then(|routing| routing.transport.as_mut())
+        {
+            transport.client_response_ready_ms = Some(started.elapsed().as_millis() as u64);
         }
     }
     if completed {

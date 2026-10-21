@@ -110,6 +110,12 @@ pub(crate) fn wrap_compaction_response_bytes(bytes: &mut Vec<u8>) -> AdapterResu
 }
 
 pub(crate) fn wrap_compaction_response(upstream_response: &mut Value) -> AdapterResult<()> {
+    if upstream_response
+        .get("status")
+        .is_some_and(|status| status != "completed")
+    {
+        return Err(AdapterError::upstream_response_invalid());
+    }
     let response_id = upstream_response
         .get("id")
         .and_then(Value::as_str)
@@ -208,6 +214,18 @@ mod tests {
     use super::*;
     use crate::error_codes;
     use serde_json::json;
+
+    #[test]
+    fn unfinished_summary_never_becomes_a_compaction_checkpoint() {
+        for status in ["incomplete", "failed", "in_progress"] {
+            let mut response = json!({"status":status,"output":[{
+                "type":"message","content":[{"type":"output_text","text":"Partial summary"}]
+            }]});
+            let original = response.clone();
+            assert!(wrap_compaction_response(&mut response).is_err());
+            assert_eq!(response, original);
+        }
+    }
 
     #[test]
     fn trigger_becomes_a_tool_free_summary_and_round_trips() {

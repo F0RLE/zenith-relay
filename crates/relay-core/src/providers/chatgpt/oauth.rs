@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+pub const SIWC_BOOTSTRAP_CLIENT_ID: &str = "dynamic_agent_client";
+pub const SIWC_RESOURCE: &str = "https://api.openai.com/v1";
 pub const BASIS_POINTS_OAUTH_CLIENT_ID: &str = "app_fnr0pYvVwwFDocDumLG3H2Bp";
 pub const BASIS_POINTS_OAUTH_REDIRECT_URI: &str =
     "https://bps.openai.com/basispoints/extension/360590d7-f8f9-4d88-bf75-0edfe0a4b9f3/auth/callback";
@@ -14,6 +16,7 @@ pub const BASIS_POINTS_FREE_ACCOUNT_MESSAGE: &str =
 pub enum OAuthClientKind {
     #[default]
     Codex,
+    Siwc,
     #[serde(alias = "excel")]
     ExcelBps,
 }
@@ -57,6 +60,8 @@ impl OAuthClientKind {
     pub const fn client_id(self) -> &'static str {
         match self {
             Self::Codex => CODEX_OAUTH_CLIENT_ID,
+            // Only the first authorization uses this ID; exchange/refresh require the issued ID.
+            Self::Siwc => SIWC_BOOTSTRAP_CLIENT_ID,
             Self::ExcelBps => BASIS_POINTS_OAUTH_CLIENT_ID,
         }
     }
@@ -112,7 +117,7 @@ impl OAuthClientKind {
     pub const fn authorize_path(self) -> &'static str {
         match self {
             Self::Codex => "/oauth/authorize",
-            Self::ExcelBps => "/api/accounts/authorize",
+            Self::Siwc | Self::ExcelBps => "/api/accounts/authorize",
         }
     }
 
@@ -122,18 +127,21 @@ impl OAuthClientKind {
                 "openid profile email offline_access api.connectors.read api.connectors.invoke"
             }
             Self::ExcelBps => "openid offline_access email profile organization.read",
+            Self::Siwc => {
+                "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
+            }
         }
     }
 
     pub const fn is_local_callback(self) -> bool {
-        matches!(self, Self::Codex)
+        matches!(self, Self::Codex | Self::Siwc)
     }
 
     /// Keep legacy Codex keys stable while separating token sets from another client.
     pub fn scope_identity_key(self, key: &str) -> String {
         match self {
             Self::Codex => key.to_string(),
-            Self::ExcelBps => {
+            Self::ExcelBps | Self::Siwc => {
                 let mut digest = Sha256::new();
                 digest.update(self.client_id());
                 digest.update(b"\0");

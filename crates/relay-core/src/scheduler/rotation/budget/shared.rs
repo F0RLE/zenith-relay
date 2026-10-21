@@ -39,6 +39,20 @@ impl SharedRequestBudget {
         crate::poison::mutex(&self.budget).dispatches()
     }
 
+    pub(crate) fn http_headers_deadline(
+        &self,
+        timeout: std::time::Duration,
+    ) -> tokio::time::Instant {
+        self.with_budget(|budget| {
+            let proposed = tokio::time::Instant::now() + timeout;
+            let deadline = budget
+                .http_headers_deadline
+                .map_or(proposed, |current| current.min(proposed));
+            budget.http_headers_deadline = Some(deadline);
+            deadline
+        })
+    }
+
     pub(crate) fn request_id(&self) -> RequestId {
         crate::poison::mutex(&self.budget).request_id()
     }

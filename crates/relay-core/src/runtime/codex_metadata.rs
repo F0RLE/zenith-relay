@@ -123,36 +123,4 @@ impl GatewayRuntime {
             })
             .collect()
     }
-    /// Returns whether a cached native Codex model card confirms a larger
-    /// window for the requested model.  Reference catalog metadata is not
-    /// always available for native account models, so the management
-    /// projection may use this stale-but-confirmed transport evidence when
-    /// deciding whether to expose the Short/Extended selector.
-    #[allow(dead_code)]
-    pub(crate) fn cached_codex_model_supports_extended_context<'a>(
-        &self,
-        model: &str,
-        candidate_ids: impl IntoIterator<Item = &'a str>,
-    ) -> bool {
-        let model_id = crate::model_id_key(model);
-        self.stale_codex_model_manifests(candidate_ids)
-            .into_iter()
-            .flat_map(|(_, manifest)| {
-                manifest
-                    .get("models")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default()
-            })
-            .filter_map(|entry| entry.as_object().cloned())
-            .any(|entry| {
-                let Some(slug) = entry.get("slug").and_then(Value::as_str) else {
-                    return false;
-                };
-                if crate::model_id_key(slug) != model_id {
-                    return false;
-                }
-                crate::catalog::context_policy::entry_has_long_window(&Value::Object(entry))
-            })
-    }
 }

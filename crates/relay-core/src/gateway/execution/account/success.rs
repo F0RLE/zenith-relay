@@ -83,7 +83,12 @@ pub(super) fn complete_account_response(
     let expected_model = runtime
         .block_degraded_routes_enabled()
         .then_some(route.source_model.as_str());
-    let (bytes, completion) = match account_response(&bytes, endpoint, expected_model) {
+    let (bytes, completion) = match account_response(
+        &bytes,
+        endpoint,
+        expected_model,
+        route.account_transport == crate::runtime::AccountTransport::Siwc,
+    ) {
         Ok(response) => response,
         Err(rejected) => {
             let mut failure = rejected.failure;
@@ -183,6 +188,7 @@ fn account_response(
     bytes: &[u8],
     endpoint: AccountEndpoint,
     expected_model: Option<&str>,
+    siwc_route: bool,
 ) -> Result<
     (Vec<u8>, ResponseCompletion),
     Box<super::super::super::streaming::StreamBootstrapFailure>,
@@ -190,21 +196,29 @@ fn account_response(
     use super::super::super::errors::AttemptFailure;
     use super::super::super::response::{completed_upstream_response, validate_upstream_response};
 
-    let bytes = if matches!(endpoint, AccountEndpoint::Wake)
+    let mut bytes = if matches!(endpoint, AccountEndpoint::Wake)
         || serde_json::from_slice::<Value>(bytes).is_err()
     {
         completed_upstream_response(bytes, true, expected_model)?
     } else {
         bytes.to_vec()
     };
+    if siwc_route && endpoint == AccountEndpoint::Compact {
+        crate::protocol::wrap_compaction_response_bytes(&mut bytes).map_err(|_| {
+            Box::new(AttemptFailure::stream(crate::error_codes::COMPACTION_RESPONSE_INVALID).into())
+        })?;
+    }
     let body = serde_json::from_slice::<Value>(&bytes)
         .map_err(|_| Box::new(AttemptFailure::stream(crate::error_codes::STREAM_INVALID).into()))?;
     validate_upstream_response(&body, expected_model)?;
     let completion = match endpoint {
         AccountEndpoint::Wake => ResponseCompletion::for_protocol(crate::WireApi::Responses, &body),
         AccountEndpoint::Compact => {
-            super::super::super::compaction::compaction_document(&body)
+            let compacted = super::super::super::compaction::compaction_document(&body)
                 .map_err(|failure| Box::new(failure.into()))?;
+            if siwc_route {
+                bytes = compacted;
+            }
             ResponseCompletion::Completed
         }
         AccountEndpoint::AlphaSearch => ResponseCompletion::Completed,

@@ -80,8 +80,7 @@ pub struct ApiModelPriceSources {
 
 /// Per-source price provenance indexed by source id and normalized model id.
 ///
-/// This remains a storage-neutral representation so desktop telemetry and the
-/// user-managed server apply the same pricing policy without sharing a schema.
+/// Storage-neutral price evidence used by Desktop telemetry.
 pub type SourceModelPriceOverrides = BTreeMap<String, BTreeMap<String, ApiModelPriceSources>>;
 
 /// Which published token schedule applies to a usage group.
@@ -249,7 +248,7 @@ macro_rules! cache_write_ttl_bucket_sums_sql {
 /// Priced cache-write buckets in a stable order: 5 minutes, 1 hour, then unknown.
 pub const CACHE_WRITE_TTL_BUCKET_SUMS_SQL: &str = cache_write_ttl_bucket_sums_sql!();
 
-/// SQL aggregate shared by the desktop log and the user-managed server.
+/// SQL aggregate used by Desktop telemetry.
 /// Column order is part of the contract: input, cached input, total cache
 /// write, then the 5-minute, 1-hour, and unknown write buckets, then output,
 /// total, and the sample counts those buckets need.
@@ -261,12 +260,10 @@ pub const API_EQUIVALENT_AGGREGATE_SQL: &str = concat!(
      COUNT(output_tokens), COUNT(total_tokens)"
 );
 
-/// Usage totals shared by desktop logs and the user-managed server.
-/// `speed_guard` stays local: the server uses `MAX(COALESCE(output_tokens, 0), 0)`
-/// and desktop logs use `COALESCE(output_tokens, 0)`.
+/// Usage totals for Desktop telemetry.
 #[macro_export]
 macro_rules! usage_total_columns_sql {
-    ($speed_guard:literal) => {
+    () => {
         concat!(
             "COUNT(*), \
     COALESCE(SUM(CASE WHEN success != 0 THEN 1 ELSE 0 END), 0), \
@@ -289,9 +286,9 @@ macro_rules! usage_total_columns_sql {
     COALESCE(SUM(output_tokens), 0), \
     COALESCE(SUM(total_tokens), 0)",
             ", COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 AND ",
-            $speed_guard,
+            "COALESCE(output_tokens, 0) <= latency_ms",
             " THEN MAX(COALESCE(output_tokens, 0), 0) ELSE 0 END), 0), COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 AND ",
-            $speed_guard,
+            "COALESCE(output_tokens, 0) <= latency_ms",
             " THEN latency_ms ELSE 0 END), 0)"
         )
     };

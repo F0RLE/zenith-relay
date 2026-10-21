@@ -25,6 +25,7 @@ pub(super) struct InFlight {
     prompt_affinity_key: Option<String>,
     client_visible_output: bool,
     legacy_call_id_repair_attempted: bool,
+    tool_call_capture: crate::gateway::request::ToolCallCapture,
     native_replay_capture: NativeReplayCapture,
 }
 
@@ -133,9 +134,9 @@ pub(super) async fn bridge(
             attempt: connected.attempt,
             local_key_id: &key.id,
             route: &connected.route,
-            reasoning_effort: Some(&connected.request.reasoning_effort_for(&connected.route)),
+            reasoning_effort: Some(&connected.reasoning_effort),
             requested_model: &connected.request.requested_model,
-            tool_use: connected.request.tool_use_for(&connected.route),
+            tool_use: connected.tool_use,
         },
         true,
         StatusCode::OK.as_u16(),
@@ -160,6 +161,7 @@ pub(super) async fn bridge(
             prompt_affinity_key,
             client_visible_output: false,
             legacy_call_id_repair_attempted: false,
+            tool_call_capture: Default::default(),
             native_replay_capture: NativeReplayCapture::default(),
         }),
         stream_id: connected.request.stream_id.clone(),
@@ -187,18 +189,18 @@ pub(super) async fn bridge(
         tokio::select! {
             // Reap an unused connection, never a provider's active generation.
             _ = sleep_until(idle_deadline), if bridge_state.in_flight.is_none() => {
-                let _ = downstream.send(Message::Close(Some(CloseFrame {
+                let _ = send_message(&mut downstream, Message::Close(Some(CloseFrame {
                     code: close_code::AWAY,
                     reason: "idle timeout".into(),
                 }))).await;
                 break;
             }
             _ = heartbeat.tick() => {
-                if downstream.send(Message::Ping(Default::default())).await.is_err() {
+                if send_message(&mut downstream, Message::Ping(Default::default())).await.is_err() {
                     finish_incomplete(&runtime, &mut bridge_state, error_codes::CLIENT_CANCELLED);
                     break;
                 }
-                if upstream.send(UpstreamMessage::Ping(Default::default())).await.is_err() {
+                if send_message(&mut upstream, UpstreamMessage::Ping(Default::default())).await.is_err() {
                     let active_request = bridge_state.in_flight.is_some()
                         && bridge_state.can_send_gateway_error();
                     let request_id = bridge_state.request_id().map(str::to_owned);

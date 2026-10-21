@@ -20,7 +20,7 @@ pub(super) async fn upgrade_with_authorization_refresh(
     runtime: &GatewayRuntime,
     client_headers: &HeaderMap,
     key: &AuthenticatedKey,
-    route: &ExecutorRoute,
+    route: &mut ExecutorRoute,
     request: &ClientRequest,
     lease: &CandidateLease,
     attempt: u16,
@@ -71,7 +71,12 @@ pub(super) async fn upgrade_with_authorization_refresh(
             .get(route.upstream_url.clone())
             .headers(headers)
             .upgrade();
-        let Ok(Ok(upgrade)) = timeout(UPSTREAM_CONNECT_TIMEOUT, upgrade.send()).await else {
+        let handshake_started = Instant::now();
+        route.observe_websocket_dispatch(None);
+        let upgrade = timeout(UPSTREAM_CONNECT_TIMEOUT, upgrade.send()).await;
+        let elapsed_ms = handshake_started.elapsed().as_millis() as u64;
+        let Ok(Ok(upgrade)) = upgrade else {
+            route.observe_websocket_handshake(elapsed_ms, false);
             return continue_candidate(
                 runtime,
                 lease,
@@ -84,6 +89,10 @@ pub(super) async fn upgrade_with_authorization_refresh(
                 last_failure,
             );
         };
+        route.observe_websocket_handshake(
+            elapsed_ms,
+            upgrade.status() == StatusCode::SWITCHING_PROTOCOLS,
+        );
         if let Some(cookies) = cookies {
             cookies.observe(&route.upstream_url, upgrade.headers());
         }

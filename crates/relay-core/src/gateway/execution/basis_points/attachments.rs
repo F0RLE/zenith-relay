@@ -14,12 +14,13 @@ use reqwest::StatusCode;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 const MAX_UPLOAD_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_FILE_ID_LEN: usize = 512;
 const MAX_ATTACHMENT_CACHE: usize = 512;
 
+#[derive(Clone, Copy)]
 pub(in crate::gateway::execution) enum AttachmentFailure {
     Reject(AttemptFailure),
     Retry(AttemptFailure),
@@ -42,9 +43,28 @@ struct LocatedJob {
     job: ImageJob,
 }
 
+#[derive(Default)]
 struct AttachmentCache {
     order: VecDeque<[u8; 32]>,
     entries: HashMap<[u8; 32], String>,
+    pending: HashMap<[u8; 32], Weak<AttachmentUpload>>,
+}
+
+type AttachmentUpload = tokio::sync::OnceCell<Result<String, AttachmentFailure>>;
+
+impl AttachmentCache {
+    fn pending_upload(&mut self, key: [u8; 32]) -> Arc<AttachmentUpload> {
+        self.pending.retain(|_, upload| upload.strong_count() != 0);
+        if let Some(pending) = self.pending.get(&key).and_then(Weak::upgrade) {
+            return pending;
+        }
+        let pending = Arc::new(AttachmentUpload::new());
+        // Bound coalescing metadata; overflow keeps ordinary upload behavior.
+        if self.pending.len() < MAX_ATTACHMENT_CACHE {
+            self.pending.insert(key, Arc::downgrade(&pending));
+        }
+        pending
+    }
 }
 
 pub(in crate::gateway::execution) async fn attach_input_images(
@@ -94,13 +114,10 @@ pub(in crate::gateway::execution) async fn attach_input_images(
             image.media_type,
             &image.bytes,
         );
-        let file_id = if let Some(file_id) = cached_file_id(&key) {
-            file_id
-        } else {
-            let file_id = upload_image(runtime, candidate_id, &endpoint, headers, &image).await?;
-            remember_file_id(key, file_id.clone());
-            file_id
-        };
+        let file_id = cached_upload(key, || {
+            upload_image(runtime, candidate_id, &endpoint, headers, &image)
+        })
+        .await?;
         set_image_part(
             &mut request_fields,
             job.input_index,
@@ -446,12 +463,32 @@ fn attachment_key(
 
 fn attachment_cache() -> &'static Mutex<AttachmentCache> {
     static CACHE: OnceLock<Mutex<AttachmentCache>> = OnceLock::new();
-    CACHE.get_or_init(|| {
-        Mutex::new(AttachmentCache {
-            order: VecDeque::new(),
-            entries: HashMap::new(),
+    CACHE.get_or_init(|| Mutex::new(AttachmentCache::default()))
+}
+
+async fn cached_upload<F>(
+    key: [u8; 32],
+    upload: impl FnOnce() -> F,
+) -> Result<String, AttachmentFailure>
+where
+    F: std::future::Future<Output = Result<String, AttachmentFailure>>,
+{
+    if let Some(file_id) = cached_file_id(&key) {
+        return Ok(file_id);
+    }
+    let pending = crate::poison::mutex(attachment_cache()).pending_upload(key);
+    pending
+        .get_or_init(|| async {
+            // Another upload may have completed between the cache check and joining.
+            if let Some(file_id) = cached_file_id(&key) {
+                return Ok(file_id);
+            }
+            let file_id = upload().await?;
+            remember_file_id(key, file_id.clone());
+            Ok(file_id)
         })
-    })
+        .await
+        .clone()
 }
 
 fn cached_file_id(key: &[u8; 32]) -> Option<String> {

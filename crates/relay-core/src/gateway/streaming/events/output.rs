@@ -44,6 +44,15 @@ pub(in crate::gateway) fn has_semantic_output(
             }))
 }
 
+/// Reported generation also forbids replay, but is not first-token timing evidence.
+pub(in crate::gateway) fn has_generation_evidence(
+    event_payload: &Value,
+    event_type: Option<&str>,
+) -> bool {
+    has_semantic_output(event_payload, event_type)
+        || crate::gateway::response::has_generated_tokens(event_payload)
+}
+
 /// Known lifecycle and compaction frames are safe to buffer while selecting a
 /// route. Anything else is left to the caller's conservative fallback.
 pub(in crate::gateway) fn is_known_non_output_event(
@@ -77,7 +86,7 @@ pub(in crate::gateway) fn has_output_delta(
     }
     if event_type == Some("content_block_delta")
         && event_payload.get("delta").is_some_and(|delta| {
-            ["text", "partial_json"].into_iter().any(|key| {
+            ["text", "partial_json", "thinking"].into_iter().any(|key| {
                 delta
                     .get(key)
                     .and_then(Value::as_str)

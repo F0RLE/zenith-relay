@@ -62,6 +62,7 @@ impl GatewayRuntime {
     }
 
     pub fn remove_candidate(&self, candidate_id: &str) -> bool {
+        self.invalidate_account_quota_reference_source(candidate_id);
         let candidate_ids = {
             let source_routes = self
                 .source_candidate_bindings

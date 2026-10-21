@@ -4,6 +4,7 @@ mod context_size;
 mod event;
 mod reasoning;
 mod tools;
+mod transport;
 mod upstream_error;
 
 pub use api_equivalent::{
@@ -30,6 +31,10 @@ pub use reasoning::normalize_reasoning_effort;
 pub(crate) use reasoning::ReasoningEffortDiagnostics;
 pub use tools::{
     BasisPointsCatalogDiagnostics, TerminalOutputKind, ToolChoiceMode, ToolUseDiagnostics,
+};
+pub use transport::{
+    RequestPreparationDiagnostics, TransportDiagnostics, TransportFallbackReason, TransportMode,
+    TransportResponseFormat,
 };
 pub use upstream_error::UpstreamErrorDetails;
 

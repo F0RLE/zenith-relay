@@ -20,8 +20,6 @@ pub struct RuntimeChatGptAccount {
     pub chatgpt_account_id: String,
     pub chatgpt_user_id: Option<String>,
     pub responses_url: String,
-    /// Legacy input, ignored. Only the issuing OAuth client selects the transport.
-    pub basis_points_enabled: bool,
     pub basis_points_headers: Option<BasisPointsCapturedHeaders>,
     pub models: Vec<String>,
     pub enabled: bool,
@@ -59,7 +57,6 @@ impl fmt::Debug for RuntimeChatGptAccount {
                 "responses_url",
                 &crate::sources::redact_url(&self.responses_url),
             )
-            .field("basis_points_enabled", &self.basis_points_enabled)
             .field(
                 "basis_points_headers",
                 &self.basis_points_headers.as_ref().map(|_| "[redacted]"),

@@ -41,6 +41,7 @@ pub(in crate::gateway) fn usage_event(
                 .route_suffix(route.client_wire_api)
                 .to_string(),
             AccountTransport::ExcelBasisPoints => "excel_basis_points".to_string(),
+            AccountTransport::Siwc => "chatgpt_siwc".to_string(),
         });
     }
     let mut event = UsageEvent {
@@ -98,6 +99,7 @@ pub(in crate::gateway) fn populate_tokens(event: &mut UsageEvent, response_body:
         while let Some(end) = crate::protocol::sse::event_end(&response_body[offset..]) {
             let data = crate::protocol::sse::event_data(&response_body[offset..offset + end]);
             if let Ok(payload) = serde_json::from_slice::<Value>(&data) {
+                event.observe_response_model(&payload);
                 if let Some(usage) = find_usage(&payload) {
                     crate::protocol::merge_usage(&mut usage_snapshot, usage);
                 }
@@ -110,6 +112,7 @@ pub(in crate::gateway) fn populate_tokens(event: &mut UsageEvent, response_body:
         return;
     };
     event.tool_use.set_terminal_response(&response_payload);
+    event.observe_response_model(&response_payload);
     event.applied_service_tier = response_service_tier(&response_payload);
     let Some(usage) = find_usage(&response_payload) else {
         return;
@@ -195,21 +198,7 @@ pub(in crate::gateway) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
         } else {
             reported_input_tokens
         };
-    let mut output_tokens = usage
-        .get("output_tokens")
-        .or_else(|| usage.get("completion_tokens"))
-        .or_else(|| gemini_usage_metadata.get("candidatesTokenCount"))
-        .and_then(Value::as_u64);
-    if gemini_usage_metadata.get("candidatesTokenCount").is_some() {
-        output_tokens = output_tokens.and_then(|output_token_count| {
-            output_token_count.checked_add(
-                gemini_usage_metadata
-                    .get("thoughtsTokenCount")
-                    .and_then(Value::as_u64)
-                    .unwrap_or_default(),
-            )
-        });
-    }
+    let (output_tokens, reasoning_tokens) = generated_token_counts(usage);
     if reported_input_tokens.is_some() {
         event.input_tokens = input_tokens;
     }
@@ -244,20 +233,6 @@ pub(in crate::gateway) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
     }
     event.cache_write_ttl =
         cache_write_ttl_from_usage(usage).or_else(|| event.cache_write_ttl.clone());
-    let reasoning_tokens = usage
-        .get("reasoning_tokens")
-        .or_else(|| {
-            usage
-                .get("output_tokens_details")
-                .and_then(|details| details.get("reasoning_tokens"))
-        })
-        .or_else(|| {
-            usage
-                .get("completion_tokens_details")
-                .and_then(|details| details.get("reasoning_tokens"))
-        })
-        .or_else(|| gemini_usage_metadata.get("thoughtsTokenCount"))
-        .and_then(Value::as_u64);
     if let Some(reasoning_tokens) = reasoning_tokens {
         event.reasoning_tokens = Some(reasoning_tokens);
     }
@@ -276,6 +251,47 @@ pub(in crate::gateway) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
         .zip(event.output_tokens)
         .and_then(|(input, output)| input.checked_add(output));
     event.total_tokens = reported_total.or(derived_total);
+}
+
+fn generated_token_counts(usage: &Value) -> (Option<u64>, Option<u64>) {
+    let gemini_usage_metadata = usage.get("usageMetadata").unwrap_or(usage);
+    let mut output_tokens = usage
+        .get("output_tokens")
+        .or_else(|| usage.get("completion_tokens"))
+        .or_else(|| gemini_usage_metadata.get("candidatesTokenCount"))
+        .and_then(Value::as_u64);
+    if gemini_usage_metadata.get("candidatesTokenCount").is_some() {
+        output_tokens = output_tokens.and_then(|output_token_count| {
+            output_token_count.checked_add(
+                gemini_usage_metadata
+                    .get("thoughtsTokenCount")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default(),
+            )
+        });
+    }
+    let reasoning_tokens = usage
+        .get("reasoning_tokens")
+        .or_else(|| {
+            usage
+                .get("output_tokens_details")
+                .and_then(|details| details.get("reasoning_tokens"))
+        })
+        .or_else(|| {
+            usage
+                .get("completion_tokens_details")
+                .and_then(|details| details.get("reasoning_tokens"))
+        })
+        .or_else(|| gemini_usage_metadata.get("thoughtsTokenCount"))
+        .and_then(Value::as_u64);
+    (output_tokens, reasoning_tokens)
+}
+
+pub(in crate::gateway) fn has_generated_tokens(response_payload: &Value) -> bool {
+    find_usage(response_payload).is_some_and(|usage| {
+        let (output, reasoning) = generated_token_counts(usage);
+        output.is_some_and(|tokens| tokens > 0) || reasoning.is_some_and(|tokens| tokens > 0)
+    })
 }
 
 pub(in crate::gateway) fn find_usage(response_payload: &Value) -> Option<&Value> {

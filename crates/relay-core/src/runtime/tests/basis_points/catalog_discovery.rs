@@ -1,7 +1,9 @@
 use super::*;
 
+mod batch;
 mod lookup_recovery;
 mod streaming;
+mod text_only;
 
 fn catalog_request(stream: bool) -> Value {
     json!({"model":"gpt-test","input":"Inspect the synthetic file","stream":stream,
@@ -25,7 +27,21 @@ fn final_response() -> Value {
 
 #[tokio::test]
 async fn catalog_discovery_uses_one_budget_and_preserves_client_tool_roundtrip() {
-    for stream in [false, true] {
+    for (stream, batched, debug) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (true, true, false),
+        (false, false, true),
+        (true, false, true),
+        (false, true, true),
+        (true, true, true),
+    ] {
+        let mut request = catalog_request(stream);
+        request["tools"].as_array_mut().unwrap().push(json!({
+            "type":"function","name":"later","description":"Previously discovered but not called",
+            "parameters":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}
+        }));
         let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
         server
             .state
@@ -38,23 +54,32 @@ async fn catalog_discovery_uses_one_budget_and_preserves_client_tool_roundtrip()
         crate::poison::mutex(&server.state.generation_replies).extend([
             (
                 StatusCode::OK,
-                tool_response("relay.catalog", "call_catalog", json!({"names":["lookup"]})),
+                tool_response(
+                    "relay.catalog",
+                    "call_catalog",
+                    json!({"names":["lookup", "later"]}),
+                ),
             ),
             (
                 StatusCode::OK,
-                tool_response("lookup", "call_client", json!({"path":"synthetic.txt"})),
+                if batched {
+                    batch::batch_response()
+                } else {
+                    tool_response("lookup", "call_client", json!({"path":"synthetic.txt"}))
+                },
             ),
         ]);
         let events = Arc::new(Mutex::new(Vec::<crate::UsageEvent>::new()));
         let captured = events.clone();
         let mut runtime = runtime(&server).await;
+        runtime.diagnostics_enabled = if debug { || true } else { || false };
         runtime.usage = Arc::new(move |event| crate::poison::mutex(&captured).push(event));
         let runtime = Arc::new(runtime);
         let (base, task) = recovery::gateway(runtime.clone()).await;
         let response = reqwest::Client::new()
             .post(format!("{base}/v1/responses"))
             .bearer_auth("local-secret")
-            .json(&catalog_request(stream))
+            .json(&request)
             .send()
             .await
             .unwrap();
@@ -95,7 +120,10 @@ async fn catalog_discovery_uses_one_budget_and_preserves_client_tool_roundtrip()
             serde_json::from_slice(&bytes).unwrap()
         };
         assert_eq!(body["output"][0]["name"], "lookup");
-        assert_eq!(body["output"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            body["output"].as_array().unwrap().len(),
+            if batched { 2 } else { 1 }
+        );
         assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 2);
         {
             let events = crate::poison::mutex(&events);
@@ -116,10 +144,16 @@ async fn catalog_discovery_uses_one_budget_and_preserves_client_tool_roundtrip()
                 // Buffered discovery does not fabricate token timestamps.
                 assert_eq!(events[1].ttft_ms, None);
             }
-            let catalog = events[1].tool_use.basis_points_catalog.as_ref().unwrap();
-            assert_eq!(catalog.discovery_rounds, 1);
-            assert_eq!(catalog.loaded_tool_count, 1);
-            assert_eq!(catalog.discovery_input_tokens, Some(100));
+            let catalog = events[1].tool_use.basis_points_catalog.as_ref();
+            assert_eq!(catalog.is_some(), debug);
+            assert_eq!(events[1].tool_use.client_context.is_some(), debug);
+            assert_eq!(events[1].tool_use.upstream_context.is_some(), debug);
+            if let Some(catalog) = catalog {
+                assert_eq!(catalog.discovery_rounds, 1);
+                assert_eq!(catalog.loaded_tool_count, 2);
+                assert_eq!(catalog.discovery_input_tokens, Some(100));
+                assert_eq!(catalog.discovery_latency_ms, Some(events[0].latency_ms));
+            }
         }
         let bodies = crate::poison::mutex(&server.state.generation_bodies).clone();
         assert_eq!(
@@ -142,12 +176,15 @@ async fn catalog_discovery_uses_one_budget_and_preserves_client_tool_roundtrip()
             catalog_request(false)["tools"][0]["parameters"]
         );
         *crate::poison::mutex(&server.state.generation_body) = final_response();
-        let mut next = catalog_request(false);
-        next["input"] = json!([
-            {"role":"user","content":"Inspect the synthetic file"},
-            body["output"][0],
-            {"type":"function_call_output","call_id":"call_client","output":"Synthetic file contents"}
-        ]);
+        let mut next = request;
+        next["stream"] = json!(false);
+        let calls = body["output"].as_array().unwrap();
+        let mut history = vec![json!({"role":"user","content":"Inspect the synthetic file"})];
+        history.extend(calls.clone());
+        for call in calls.iter().rev() {
+            history.push(json!({"type":"function_call_output","call_id":call["call_id"],"output":"Synthetic file contents"}));
+        }
+        next["input"] = json!(history);
         let response = reqwest::Client::new()
             .post(format!("{base}/v1/responses"))
             .bearer_auth("local-secret")
@@ -161,6 +198,22 @@ async fn catalog_discovery_uses_one_budget_and_preserves_client_tool_roundtrip()
             "Ready"
         );
         assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 3);
+        let bodies = crate::poison::mutex(&server.state.generation_bodies);
+        let next_input = bodies.last().unwrap()["input"].to_string();
+        assert!(next_input.contains("Previously discovered but not called"));
+        let events = crate::poison::mutex(&events);
+        let catalog = events
+            .last()
+            .unwrap()
+            .tool_use
+            .basis_points_catalog
+            .as_ref();
+        assert_eq!(catalog.is_some(), debug);
+        if let Some(catalog) = catalog {
+            assert_eq!(catalog.loaded_tool_count, 2);
+            assert_eq!(catalog.discovery_rounds, 0);
+            assert_eq!(catalog.discovery_latency_ms, None);
+        }
         task.abort();
     }
 }
@@ -243,6 +296,119 @@ async fn incomplete_discovery_answer_keeps_usage_and_never_retries_partial_calls
 }
 
 #[tokio::test]
+async fn parallel_call_diagnostics_separate_native_calls_from_validated_client_calls() {
+    for (stream, discovery) in [(false, false), (true, false), (false, true), (true, true)] {
+        for parallel in [None, Some(false), Some(true)] {
+            let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+            server
+                .state
+                .strict_request_schema
+                .store(true, Ordering::SeqCst);
+            server
+                .state
+                .stream_generations
+                .store(stream, Ordering::SeqCst);
+            let mut reply = if discovery {
+                tool_response("relay.catalog", "call_catalog", json!({"names":["lookup"]}))
+            } else {
+                tool_response("lookup", "call_client_0", json!({"path":"synthetic-0.txt"}))
+            };
+            for index in (if discovery { 0 } else { 1 })..2 {
+                reply["output"].as_array_mut().unwrap().push(
+                    tool_response(
+                        "lookup",
+                        &format!("call_client_{index}"),
+                        json!({"path":format!("synthetic-{index}.txt")}),
+                    )["output"][0]
+                        .clone(),
+                );
+            }
+            crate::poison::mutex(&server.state.generation_replies)
+                .push_back((StatusCode::OK, reply));
+            let events = Arc::new(Mutex::new(Vec::<crate::UsageEvent>::new()));
+            let captured = events.clone();
+            let mut runtime = runtime(&server).await;
+            runtime.usage = Arc::new(move |event| crate::poison::mutex(&captured).push(event));
+            let (base, task) = recovery::gateway(Arc::new(runtime)).await;
+            let mut request = catalog_request(stream);
+            request["relay_bps_tool_catalog"] =
+                json!(if discovery { "discovery" } else { "compact" });
+            if let Some(parallel) = parallel {
+                request["parallel_tool_calls"] = json!(parallel);
+            }
+            let response = reqwest::Client::new()
+                .post(format!("{base}/v1/responses"))
+                .bearer_auth("local-secret")
+                .json(&request)
+                .send()
+                .await
+                .unwrap();
+            let bytes = response.bytes().await.unwrap();
+            assert!(!bytes.is_empty());
+            let events = crate::poison::mutex(&events);
+            let event = events
+                .last()
+                .expect("completed request records diagnostics");
+            assert_eq!(event.tool_use.requested_parallel_tool_calls, parallel);
+            assert_eq!(
+                event.tool_use.upstream_tool_call_count,
+                Some(if discovery { 3 } else { 2 })
+            );
+            assert_eq!(
+                event.tool_use.tool_call_count,
+                if parallel == Some(false) { 0 } else { 2 }
+            );
+            assert_eq!(
+                event.tool_use.tool_calls_ready_ms.is_some(),
+                parallel != Some(false)
+            );
+            assert_eq!(event.success, parallel != Some(false));
+            assert!(event
+                .tool_use
+                .upstream_context
+                .as_ref()
+                .is_some_and(|context| {
+                    context.body_bytes > 0 && context.instruction_bytes > 0
+                }));
+            if parallel == Some(false) {
+                assert!(!event.tool_use.text_output);
+                assert_eq!(
+                    event.tool_use.terminal_output,
+                    crate::usage::TerminalOutputKind::Empty
+                );
+            }
+            let transport = event.routing.as_ref().unwrap().transport.as_ref().unwrap();
+            assert!(transport.response_headers_ms.is_some());
+            assert!(transport.request_preparation_ms.is_some());
+            let preparation = transport.request_preparation.as_ref().unwrap();
+            let body = preparation.body_ms.unwrap();
+            assert!(preparation.schema_validation_ms.unwrap() <= body);
+            assert!(
+                body + preparation.catalog_ms.unwrap() + preparation.attachments_ms.unwrap()
+                    <= transport.request_preparation_ms.unwrap()
+            );
+            assert_eq!(transport.client_response_ready_ms.is_some(), event.success);
+            assert_eq!(
+                transport.client_first_output_ms.is_some(),
+                stream && event.success
+            );
+            if !discovery {
+                assert!(transport.upstream_response_ms.is_some());
+            }
+            if let Some(ready) = transport.client_response_ready_ms {
+                assert!(ready >= transport.response_headers_ms.unwrap());
+                assert!(ready >= event.tool_use.tool_calls_ready_ms.unwrap());
+                if let Some(upstream) = transport.upstream_response_ms {
+                    assert!(ready >= upstream);
+                }
+            }
+            assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 1);
+            task.abort();
+        }
+    }
+}
+
+#[tokio::test]
 async fn catalog_discovery_does_not_replay_failures_or_make_greeting_probes() {
     for failure in [false, true] {
         let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
@@ -289,7 +455,8 @@ async fn catalog_discovery_does_not_replay_failures_or_make_greeting_probes() {
 async fn catalog_discovery_respects_small_budget_before_first_generation() {
     let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
     *crate::poison::mutex(&server.state.generation_body) = final_response();
-    let runtime = runtime(&server).await;
+    let mut runtime = runtime(&server).await;
+    runtime.diagnostics_enabled = || false;
     runtime.max_retry_candidates.store(1, Ordering::SeqCst);
     let (base, task) = recovery::gateway(Arc::new(runtime)).await;
     let response = reqwest::Client::new()

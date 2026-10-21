@@ -1,6 +1,6 @@
 use super::prelude::*;
 use crate::runtime::ExecutorRoute;
-use crate::usage::ToolUseDiagnostics;
+use crate::usage::{RequestPreparationDiagnostics, ToolUseDiagnostics};
 
 pub(super) enum RequestDispatch {
     Continue,
@@ -19,6 +19,8 @@ pub(super) struct DispatchedRequestAttempt {
 }
 
 pub(super) struct RequestDispatchInput<'a> {
+    pub(super) preparation_started: Option<Instant>,
+    pub(super) preparation: RequestPreparationDiagnostics,
     pub(super) runtime: &'a GatewayRuntime,
     pub(super) key: &'a AuthenticatedKey,
     pub(super) lease: &'a CandidateLease,
@@ -49,6 +51,8 @@ pub(super) async fn dispatch_request_attempt(
     request_dispatch_input: RequestDispatchInput<'_>,
 ) -> RequestDispatch {
     let RequestDispatchInput {
+        preparation_started,
+        mut preparation,
         runtime,
         key,
         lease,
@@ -72,30 +76,44 @@ pub(super) async fn dispatch_request_attempt(
         last_failure,
         last_failure_origin,
     } = request_dispatch_input;
+    let catalog_started = preparation_started.map(|_| Instant::now());
+    preparation.body_ms = preparation_started
+        .zip(catalog_started)
+        .map(|(start, end)| end.duration_since(start).as_millis() as u64);
     let mut discovery_body = None;
+    let mut discovery_session = None;
     let request_body = if let Some(original) = basis_points_request {
-        let body = match super::super::basis_points::discovery::execution::prepare_dispatch(
-            original,
-            adapter_request.upstream_body(),
-            budget,
-            tool_use,
-        ) {
-            Ok(body) => body,
-            Err(error) => {
-                return RequestDispatch::Respond(super::adapter_error_response_for_origin(
-                    error,
-                    selected_error_origin,
-                    Some(request_id),
-                ))
-            }
-        };
-        tool_use.upstream_context = Some(crate::usage::RequestContextSize::capture(&body));
+        let (body, session) =
+            match super::super::basis_points::discovery::execution::prepare_dispatch(
+                original,
+                adapter_request.upstream_body(),
+                budget,
+                tool_use,
+                runtime,
+                &key.id,
+                route.client_context_id.as_deref(),
+            ) {
+                Ok(body) => body,
+                Err(error) => {
+                    return RequestDispatch::Respond(super::adapter_error_response_for_origin(
+                        error,
+                        selected_error_origin,
+                        Some(request_id),
+                    ))
+                }
+            };
+        tool_use.capture_upstream_context(&body);
         let encoded = serde_json::to_vec(&body).expect("prepared JSON is serializable");
         discovery_body = Some(body);
+        discovery_session = session;
         encoded
     } else {
         request_body
     };
+    if basis_points_request.is_some() {
+        preparation.catalog_ms = catalog_started.map(|start| start.elapsed().as_millis() as u64);
+    }
+    let attachments_started = preparation_started.map(|_| Instant::now());
     let request_body = if basis_points_route {
         match super::super::basis_points::attach_input_images(
             runtime,
@@ -124,12 +142,22 @@ pub(super) async fn dispatch_request_attempt(
     } else {
         request_body
     };
+    if basis_points_route {
+        preparation.attachments_ms =
+            attachments_started.map(|start| start.elapsed().as_millis() as u64);
+    }
     if discovery_body.is_some() {
         discovery_body =
             Some(serde_json::from_slice(&request_body).expect("prepared JSON is valid"));
     }
     let upstream_stream = stream || (account_route && !basis_points_route);
     let started = Instant::now();
+    if let Some(preparation_started) = preparation_started {
+        route.observe_request_preparation(
+            started.duration_since(preparation_started).as_millis() as u64,
+            preparation,
+        );
+    }
     let request_client = runtime.request_client(&route.candidate_id);
     let mut upstream_headers = upstream_headers_for_route(
         account_route,
@@ -224,18 +252,23 @@ pub(super) async fn dispatch_request_attempt(
     let upstream = match upstream {
         Ok(upstream) => {
             route.account_token_generation = upstream.account_token_generation;
+            route.observe_http_response(
+                upstream.response.headers(),
+                started.elapsed().as_millis() as u64,
+            );
             if let (Some(original), Some(body)) = (basis_points_request, discovery_body) {
                 match super::super::basis_points::discovery::resolve(
                     upstream,
                     original,
                     body,
                     super::super::basis_points::discovery::DiscoveryExecution {
+                        session: discovery_session,
                         allow_streaming: stream,
                         runtime,
                         key,
                         lease,
                         budget,
-                        route: &route,
+                        route: &mut route,
                         request_id,
                         requested_model,
                         reasoning_effort,
@@ -279,7 +312,10 @@ pub(super) async fn dispatch_request_attempt(
             // Unknown remote acceptance is neither a health vote nor a
             // replayable error. A local exhausted budget is not a source
             // failure either.
-            if uncertain || exhausted {
+            if uncertain
+                || exhausted
+                || route.account_transport == crate::runtime::AccountTransport::Siwc
+            {
                 if let Some(routing) = event.routing.as_mut() {
                     routing.attempt_outcome = Some(if uncertain {
                         crate::AttemptOutcome::ExecutionUncertain

@@ -39,7 +39,10 @@ fn runtime() -> GatewayRuntime {
             excluded_models: Vec::new(),
             model_prefix: Some("relay".into()),
         }],
-        GatewayRuntimeOptions::default(),
+        GatewayRuntimeOptions {
+            diagnostics_enabled: || true,
+            ..Default::default()
+        },
         Arc::new(|_| {}),
     )
     .unwrap()

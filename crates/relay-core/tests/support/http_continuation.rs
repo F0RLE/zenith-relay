@@ -866,6 +866,96 @@ async fn portable_tool_history_yields_to_fresh_quota_but_unpaired_outputs_keep_t
 }
 
 #[tokio::test]
+async fn websocket_plaintext_quota_handoff_reuses_opaque_owner_connections() {
+    for opaque in [false, true] {
+        let mut output = json!([{"type":"message", "role":"assistant", "content":[{
+            "type":"output_text", "text":"synthetic answer"
+        }]}]);
+        if opaque {
+            output.as_array_mut().unwrap().push(json!({
+                "type":"reasoning", "encrypted_content":"synthetic-owner-state", "summary":[]
+            }));
+        }
+        let (owner, owner_state) =
+            spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![
+                json!({"type":"response.completed", "response":{
+                    "id":"quota-response", "status":"completed", "model":MODEL, "output":output
+                }}),
+            ])))
+            .await;
+        let (other, other_state) = spawn_websocket_upstream().await;
+        let authority = Arc::new(TokenAuthority::new(4).unwrap());
+        register_ready(&authority, "owner-account", "synthetic-access").await;
+        register_ready(&authority, "other-account", "synthetic-access").await;
+        let (gateway, _, _, _) = spawn_mixed_gateway(
+            Vec::new(),
+            vec![
+                account("owner-account", "provider-owner", &owner, 100),
+                account("other-account", "provider-other", &other, 100),
+            ],
+            vec![mixed_key(None, None)],
+            authority,
+            refresh_adapter(),
+            Arc::new(PersistenceAdapter::default()),
+        )
+        .await;
+        let runtime = gateway.runtime.as_ref().unwrap();
+        set_account_remainder(runtime, "owner-account", 9_800);
+        set_account_remainder(runtime, "other-account", 3_300);
+        let mut socket = reqwest::Client::new()
+            .get(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .upgrade()
+            .send()
+            .await
+            .unwrap()
+            .into_websocket()
+            .await
+            .unwrap();
+        let initial_input = json!([{"role":"user", "content":"synthetic question"}]);
+        socket
+            .send(ClientWsMessage::Text(
+                json!({
+                    "type":"response.create", "model":MODEL, "input":initial_input
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        let first = receive_websocket_completion(&mut socket).await;
+        set_account_remainder(runtime, "owner-account", 2_000);
+        set_account_remainder(runtime, "other-account", 8_000);
+        let next_input = json!([{"role":"user", "content":"continue"}]);
+        socket
+            .send(ClientWsMessage::Text(
+                json!({
+                    "type":"response.create", "model":MODEL,
+                    "previous_response_id":first["response"]["id"], "input":next_input
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        receive_websocket_completion(&mut socket).await;
+        let owner_requests = owner_state.requests.lock().unwrap();
+        let other_requests = other_state.requests.lock().unwrap();
+        assert_eq!(owner_requests.len(), if opaque { 2 } else { 1 });
+        assert_eq!(other_requests.len(), usize::from(!opaque));
+        assert_eq!(owner_state.headers.lock().unwrap().len(), 1);
+        if opaque {
+            assert_eq!(owner_requests[1]["previous_response_id"], "quota-response");
+            assert_eq!(owner_requests[1]["input"], next_input);
+        } else {
+            assert!(other_requests[0].get("previous_response_id").is_none());
+            assert_eq!(
+                other_requests[0]["input"],
+                json!([initial_input[0], output[0], next_input[0]])
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn websocket_portable_tool_history_yields_to_fresh_quota_without_losing_the_input() {
     for reconnect in [false, true] {
         let call = json!({

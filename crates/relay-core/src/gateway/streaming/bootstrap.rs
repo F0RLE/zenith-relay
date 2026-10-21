@@ -54,20 +54,33 @@ pub(in crate::gateway) async fn bootstrap_stream(
     upstream: reqwest::Response,
     expected_model: Option<&str>,
 ) -> Result<(reqwest::header::HeaderMap, Bytes, UpstreamStream), Box<StreamBootstrapFailure>> {
-    bootstrap_stream_impl(upstream, expected_model, false).await
+    bootstrap_stream_impl(
+        upstream,
+        expected_model,
+        false,
+        crate::protocol::sse::MAX_EVENT_BYTES,
+    )
+    .await
 }
 
 pub(in crate::gateway) async fn bootstrap_basis_points_stream(
     upstream: reqwest::Response,
     expected_model: Option<&str>,
 ) -> Result<(reqwest::header::HeaderMap, Bytes, UpstreamStream), Box<StreamBootstrapFailure>> {
-    bootstrap_stream_impl(upstream, expected_model, true).await
+    bootstrap_stream_impl(
+        upstream,
+        expected_model,
+        true,
+        crate::protocol::sse::MAX_EVENT_BYTES,
+    )
+    .await
 }
 
-async fn bootstrap_stream_impl(
+pub(super) async fn bootstrap_stream_impl(
     upstream: reqwest::Response,
     expected_model: Option<&str>,
     basis_points: bool,
+    max_buffered_bytes: usize,
 ) -> Result<(reqwest::header::HeaderMap, Bytes, UpstreamStream), Box<StreamBootstrapFailure>> {
     let headers = upstream.headers().clone();
     let mut stream: UpstreamStream = Box::pin(upstream.bytes_stream());
@@ -80,6 +93,7 @@ async fn bootstrap_stream_impl(
     let mut buffered = Vec::new();
     let mut inspected = 0;
     let mut saw_output = false;
+    let mut saw_generation = false;
     let mut completed_output_items = 0_usize;
     let mut gemini_completion = GeminiStreamCompletion::default();
     let mut native_gemini = false;
@@ -91,11 +105,18 @@ async fn bootstrap_stream_impl(
     loop {
         match stream.next().await {
             Some(Ok(chunk)) => {
-                buffered.extend_from_slice(&chunk);
+                let available = max_buffered_bytes.saturating_sub(buffered.len());
+                let prefix_len = available.min(chunk.len());
+                buffered.extend_from_slice(&chunk[..prefix_len]);
                 let mut ready_to_forward = false;
                 while let Some(end) = sse_event_end(&buffered[inspected..]) {
                     let absolute_end = inspected + end;
                     let event = parse_sse_event(&buffered[inspected..absolute_end]);
+                    saw_generation |= event.semantic_output
+                        || event
+                            .event_payload
+                            .as_ref()
+                            .is_some_and(crate::gateway::response::has_generated_tokens);
                     if expected_model.is_some_and(|expected| {
                         event.event_payload.as_ref().is_some_and(|served_model| {
                             super::served_model_is_rejected(served_model, expected)
@@ -105,7 +126,7 @@ async fn bootstrap_stream_impl(
                         // reached the client. Drop the attempt, including a
                         // later delta that arrived in the same chunk.
                         let mut failure = degraded_route_stream_failure();
-                        if saw_output || event.semantic_output {
+                        if saw_generation {
                             failure.execution =
                                 crate::scheduler::rotation::ExecutionObservation::accepted();
                         }
@@ -131,7 +152,7 @@ async fn bootstrap_stream_impl(
                             event.cooldown_hint,
                         );
                         return Err(Box::new(StreamBootstrapFailure {
-                            execution: if saw_output || event.semantic_output {
+                            execution: if saw_generation {
                                 crate::scheduler::rotation::ExecutionObservation::accepted()
                             } else {
                                 failure.execution
@@ -203,7 +224,21 @@ async fn bootstrap_stream_impl(
                     }
                 }
                 if ready_to_forward {
+                    if prefix_len < chunk.len() {
+                        stream = Box::pin(
+                            futures_util::stream::once(
+                                async move { Ok(chunk.slice(prefix_len..)) },
+                            )
+                            .chain(stream),
+                        );
+                    }
                     return Ok((headers, Bytes::from(buffered), stream));
+                }
+                if prefix_len < chunk.len() {
+                    return Err(Box::new(StreamBootstrapFailure {
+                        partial_body: buffered,
+                        ..AttemptFailure::stream(error_codes::STREAM_EVENT_TOO_LARGE).into()
+                    }));
                 }
             }
             Some(Err(error)) => {

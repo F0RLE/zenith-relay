@@ -1,6 +1,36 @@
 use super::*;
 
 #[test]
+fn translating_large_tool_results_reuses_the_owned_output_buffer() {
+    use super::super::history::translate_input_items;
+
+    let output = json!({
+        "type":"custom_tool_call_output", "call_id":"call_buffer_reuse",
+        "name":"old_name", "namespace":"old_namespace",
+        "output":"synthetic output\n".repeat(64 * 1024)
+    });
+    let original = output["output"].as_str().unwrap();
+    let pointer = original.as_ptr();
+    let length = original.len();
+    let translated = translate_input_items(
+        vec![
+            json!({"type":"function_call","name":"run_officejs", "call_id":"call_buffer_reuse","arguments":"{}"}),
+            output,
+        ],
+        &[],
+    )
+    .unwrap();
+    let result = &translated[1];
+    assert_eq!(result["type"], "function_call_output");
+    assert_eq!(result["call_id"], "call_buffer_reuse");
+    assert!(result.get("name").is_none());
+    assert!(result.get("namespace").is_none());
+    let retained = result["output"].as_str().unwrap();
+    assert_eq!(retained.as_ptr(), pointer);
+    assert_eq!(retained.len(), length);
+}
+
+#[test]
 fn standalone_named_function_outputs_keep_their_native_identity() {
     for call_id in [None, Some(Value::Null)] {
         for stream in [false, true] {

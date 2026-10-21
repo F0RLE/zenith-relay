@@ -27,8 +27,6 @@ pub struct GatewaySummary {
     pub tool_policy: crate::ToolPolicy,
     #[serde(default)]
     pub request_timezone: crate::RequestTimezonePolicy,
-    #[serde(default)]
-    pub basis_points_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_routing: Option<crate::PoolRoutingPolicy>,
     pub running: bool,
@@ -207,9 +205,7 @@ pub fn apply_model_speed_summary(
     };
 }
 
-/// Applies the same configured pool policy to every runtime snapshot. Local
-/// desktop and user-managed server snapshots share this projection, while
-/// their storage and runtime lifecycle remain separate.
+/// Applies the configured pool policy to the local runtime snapshot.
 pub fn apply_pool_model_configuration(
     models: &mut [ModelSummary],
     sources: &[SourceSummary],
@@ -424,26 +420,12 @@ pub fn apply_model_reasoning_summary(
     model.reasoning_configurable = has_pool_route && !model.reasoning_supported_levels.is_empty();
 }
 
-/// Model-setting bodies shared by the desktop commands and the management API.
-///
-/// Names stay camelCase and unknown fields are rejected, so both hosts keep the
-/// same request contract.
+/// Model-setting bodies accepted by the desktop commands.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetModelEnabledInput {
     pub model_id: String,
     pub enabled: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SetModelPriceInput {
-    pub model_id: String,
-    pub input_micro_usd_per_million: Option<u64>,
-    pub cached_input_micro_usd_per_million: Option<u64>,
-    pub cache_write_5m_micro_usd_per_million: Option<u64>,
-    pub cache_write_1h_micro_usd_per_million: Option<u64>,
-    pub output_micro_usd_per_million: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -12,10 +12,23 @@ fn named_catalog(count: usize) -> Value {
 }
 
 #[test]
+fn disabled_diagnostics_skip_sizes_without_changing_the_catalog() {
+    let request = named_catalog(73);
+    for enabled in [false, true] {
+        let mut forwarded = request.clone();
+        let result = apply_tool_policy(&mut forwarded, &ToolPolicy::default(), enabled).unwrap();
+        assert_eq!(forwarded, request);
+        assert_eq!(result.after.count, 73);
+        assert_eq!(result.context.is_some(), enabled);
+        assert_eq!(result.after.bytes > 0, enabled);
+    }
+}
+
+#[test]
 fn standard_mode_is_transparent() {
     let mut request = named_catalog(73);
     let original = request.clone();
-    let result = apply_tool_policy(&mut request, &ToolPolicy::default()).unwrap();
+    let result = apply_tool_policy(&mut request, &ToolPolicy::default(), true).unwrap();
 
     assert_eq!(request, original);
     assert_eq!(result.before.count, 73);
@@ -30,7 +43,7 @@ fn automatic_mode_forwards_even_a_small_catalog_unchanged() {
     let policy = ToolPolicy {
         mode: ToolPolicyMode::Automatic,
     };
-    let result = apply_tool_policy(&mut request, &policy).unwrap();
+    let result = apply_tool_policy(&mut request, &policy, true).unwrap();
     assert_eq!(request, original);
     assert_eq!(result.outcome, ToolPolicyOutcome::Unchanged);
 }
@@ -48,7 +61,7 @@ fn existing_client_or_provider_deferred_catalog_is_left_untouched() {
         mode: ToolPolicyMode::Automatic,
     };
 
-    let result = apply_tool_policy(&mut request, &policy).unwrap();
+    let result = apply_tool_policy(&mut request, &policy, true).unwrap();
     assert_eq!(request, original);
     assert_eq!(result.outcome, ToolPolicyOutcome::Unchanged);
 }
@@ -71,7 +84,7 @@ fn deferred_search_evidence_requires_both_control_and_deferred_definitions() {
     let function = json!({"type":"function","name":"fixture","defer_loading":true,"parameters":{"type":"object"}});
     let request = json!({"tools":[{"type":"tool_search"}, function]});
     let mut forwarded = request.clone();
-    let result = apply_tool_policy(&mut forwarded, &ToolPolicy::default()).unwrap();
+    let result = apply_tool_policy(&mut forwarded, &ToolPolicy::default(), true).unwrap();
     assert!(result.after.deferred_search);
     assert_eq!(forwarded, request);
     assert!(!catalog_stats(&json!({"tools":[function]})).deferred_search);
@@ -102,7 +115,6 @@ fn legacy_name_filtering_settings_are_read_as_standard_and_not_serialized() {
 
 #[test]
 fn policy_ignores_retired_threshold_values() {
-    assert!(ToolPolicy::default().normalized().is_ok());
     let legacy: ToolPolicy = serde_json::from_value(json!({
         "mode":"automatic",
         "automaticToolCountThreshold":0,
@@ -110,5 +122,15 @@ fn policy_ignores_retired_threshold_values() {
     }))
     .unwrap();
     assert_eq!(legacy.mode, ToolPolicyMode::Automatic);
-    assert!(legacy.normalized().is_ok());
+}
+
+#[test]
+fn policy_rejects_unknown_modes_and_fields() {
+    for value in [
+        json!({"mode":"unsupported"}),
+        json!({"mode":true}),
+        json!({"mode":"pass_through","unknownSetting":true}),
+    ] {
+        assert!(serde_json::from_value::<ToolPolicy>(value).is_err());
+    }
 }

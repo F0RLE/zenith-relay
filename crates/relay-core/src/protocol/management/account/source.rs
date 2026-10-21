@@ -139,14 +139,6 @@ impl SourceSummary {
         !self.models_for_any_wire_api().is_empty()
     }
 
-    /// Returns models that have at least one confirmed Anthropic-style
-    /// Messages upstream route. Cache creation tariffs are valid only for
-    /// those routes, even when the same model is also exposed by Responses or
-    /// another generic API route.
-    pub fn models_with_cache_write_pricing(&self) -> BTreeSet<String> {
-        crate::cache_write_model_ids(self.routed_bindings())
-    }
-
     /// Builds the shared summary fields from a stored source record.
     /// `last_error_code` and `refresh_revision` stay with the caller because
     /// the desktop and server records do not use the same column names.

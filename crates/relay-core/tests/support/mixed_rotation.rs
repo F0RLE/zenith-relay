@@ -63,6 +63,116 @@ async fn repeated_http_sse_websocket_and_image_waves_release_shared_capacity() {
     run_mixed_waves(12).await;
 }
 
+#[tokio::test]
+async fn http_to_websocket_continuation_preserves_owner_and_portable_tool_history() {
+    for api_source in [false, true] {
+        let call = json!({
+            "type": "function_call", "call_id": "call_earlier",
+            "name": "lookup", "arguments": "{}"
+        });
+        let (earlier, earlier_http) = spawn_upstream(vec![Reply::Json(
+            StatusCode::OK,
+            json!({"id": "earlier-response", "status": "completed", "model": MODEL, "output": [call.clone()]}),
+        )])
+        .await;
+        let current_http = UpstreamState {
+            replies: Arc::new(Mutex::new(VecDeque::from([success_reply(
+                "current-response",
+            )]))),
+            model_catalog: default_upstream_model_catalog(),
+            ..Default::default()
+        };
+        let current_ws = WebSocketUpstreamState::default();
+        let current = spawn(
+            Router::new()
+                .route("/v1/models", get(upstream_models))
+                .route("/v1/responses", post(upstream))
+                .with_state(current_http.clone())
+                .merge(
+                    Router::new()
+                        .route("/v1/responses", get(upstream_websocket))
+                        .with_state(current_ws.clone()),
+                ),
+        )
+        .await;
+        let authority = Arc::new(TokenAuthority::new(4).unwrap());
+        let mut sources = Vec::new();
+        let mut accounts = Vec::new();
+        for (id, upstream) in [("earlier", &earlier), ("current", &current)] {
+            if api_source {
+                sources.push(source(id, upstream, "synthetic-secret", 100));
+            } else {
+                register_ready(&authority, id, "synthetic-access").await;
+                accounts.push(account(id, id, upstream, 100));
+            }
+        }
+        let (gateway, _, _, _) = spawn_mixed_gateway(
+            sources,
+            accounts,
+            vec![mixed_key(None, None)],
+            authority,
+            refresh_adapter(),
+            Arc::new(PersistenceAdapter::default()),
+        )
+        .await;
+        let runtime = gateway.runtime.as_ref().unwrap();
+        assert!(runtime.set_candidate_health("current", CandidateHealth::Unhealthy));
+        let first: Value = request(&gateway, false).await.json().await.unwrap();
+        assert_eq!(first["id"], "earlier-response");
+        assert!(runtime.set_candidate_health("current", CandidateHealth::Healthy));
+        assert!(runtime.set_candidate_health("earlier", CandidateHealth::Unhealthy));
+        let input = json!([
+            call,
+            {"type": "function_call_output", "call_id": "call_earlier", "output": "synthetic result"},
+            {"role": "user", "content": "continue"}
+        ]);
+        let client = reqwest::Client::new();
+        let url = format!("{}/v1/responses", gateway.base_url);
+        let second = client
+            .post(&url)
+            .bearer_auth(LOCAL_KEY)
+            .json(&json!({"model": MODEL, "input": input, "stream": false}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+        let second: Value = second.json().await.unwrap();
+        assert_eq!(second["id"], "current-response");
+        let mut socket = client
+            .get(&url)
+            .bearer_auth(LOCAL_KEY)
+            .upgrade()
+            .send()
+            .await
+            .unwrap()
+            .into_websocket()
+            .await
+            .unwrap();
+        for predecessor in ["current-response", "ws-response"] {
+            socket
+                .send(ClientWsMessage::Text(
+                    json!({
+                        "type": "response.create", "model": MODEL,
+                        "previous_response_id": predecessor, "input": input
+                    })
+                    .to_string(),
+                ))
+                .await
+                .unwrap();
+            let completed = receive_websocket_completion(&mut socket).await;
+            assert_eq!(completed["response"]["id"], "ws-response");
+        }
+        assert_eq!(earlier_http.requests.lock().unwrap().len(), 1);
+        assert_eq!(current_http.requests.lock().unwrap().len(), 1);
+        let forwarded = current_ws.requests.lock().unwrap();
+        assert_eq!(forwarded.len(), 2);
+        for (request, predecessor) in forwarded.iter().zip(["current-response", "ws-response"]) {
+            assert_eq!(request["previous_response_id"], predecessor);
+            assert_eq!(request["input"], input);
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "extended local mixed-transport soak; no provider requests"]
 async fn extended_mixed_transport_soak() {

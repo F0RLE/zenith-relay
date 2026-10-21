@@ -1,6 +1,74 @@
 use super::*;
 
 #[tokio::test]
+async fn normalized_output_timing_survives_raw_timing_settlement_without_inventing_readiness() {
+    for outcome in ["completed", "empty", "invalid", "cancelled"] {
+        let mut event = test_usage_event();
+        event.routing = Some(
+            serde_json::from_value(json!({
+                "reason":"only_eligible", "eligibleCandidates":1,
+                "inFlightBefore":0, "dispatchesBefore":0,
+                "transport":{"upstream":"http", "mode":"basis_points"}
+            }))
+            .unwrap(),
+        );
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let mut input = vec![Bytes::from_static(b": heartbeat\n\n")];
+        if outcome != "empty" {
+            input.push(Bytes::from_static(
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"synthetic\"}\n\n",
+            ));
+        }
+        if outcome == "invalid" {
+            input.push(Bytes::from_static(b"data: invalid\n\n"));
+        } else if outcome != "cancelled" {
+            input.push(Bytes::from_static(
+                b"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n",
+            ));
+        }
+        let chunks = input.len();
+        let mut stream = UsageStream::new(
+            stream::iter(input.into_iter().map(Ok::<Bytes, Infallible>)),
+            Arc::new(move |event| captured.lock().unwrap().push(event)),
+            event,
+            Instant::now() - std::time::Duration::from_millis(100),
+            Arc::new(|event, _, _| {
+                let mut raw = crate::gateway::response::BufferedResponseTiming::default();
+                raw.observe(&parse_sse_event(b"data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{}\"}\n\n"), 5);
+                raw.finish(50);
+                raw.apply(event);
+            }),
+        );
+        for _ in 0..chunks {
+            assert!(stream.next().await.unwrap().is_ok());
+        }
+        drop(stream);
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.ttft_ms, Some(5));
+        assert_eq!(event.latency_ms, 50);
+        let transport = event.routing.as_ref().unwrap().transport.as_ref().unwrap();
+        assert_eq!(transport.upstream_response_ms, Some(50));
+        assert_eq!(
+            transport.client_first_output_ms.is_some(),
+            outcome != "empty"
+        );
+        if let Some(first) = transport.client_first_output_ms {
+            assert!(first >= 100);
+        }
+        assert_eq!(
+            transport.client_response_ready_ms.is_some(),
+            matches!(outcome, "completed" | "empty")
+        );
+        if let Some(ready) = transport.client_response_ready_ms {
+            assert!(ready >= transport.client_first_output_ms.unwrap_or(100));
+        }
+    }
+}
+
+#[tokio::test]
 async fn native_gemini_continuation_retains_its_private_checkpoint_and_late_usage() {
     let terminal = Bytes::from_static(b"data: {\"candidates\":[{\"index\":0,\"finishReason\":\"CONTINUATION\",\"continuationToken\":\"c3ludGhldGlj\",\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Partial answer\"}]}}]}\n\n");
     let usage = Bytes::from_static(b"data: {\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":2,\"totalTokenCount\":7}}\n\n");

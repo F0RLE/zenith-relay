@@ -12,11 +12,9 @@ mod tool_repair;
 
 fn automatic_tool_policy_test_runtime() -> GatewayRuntime {
     let runtime = capability_test_runtime(&["synthetic"], GatewayRuntimeOptions::default());
-    runtime
-        .set_tool_policy(crate::ToolPolicy {
-            mode: crate::ToolPolicyMode::Automatic,
-        })
-        .unwrap();
+    runtime.set_tool_policy(crate::ToolPolicy {
+        mode: crate::ToolPolicyMode::Automatic,
+    });
     runtime
 }
 

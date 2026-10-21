@@ -63,12 +63,14 @@ pub(super) async fn handle_upstream_item<E>(
                 .await;
             }
         } else if active_request {
-            let _ = downstream
-                .send(Message::Close(Some(CloseFrame {
+            let _ = send_message(
+                downstream,
+                Message::Close(Some(CloseFrame {
                     code: close_code::ERROR,
                     reason: "upstream stream ended after output".into(),
-                })))
-                .await;
+                })),
+            )
+            .await;
         }
         return false;
     };

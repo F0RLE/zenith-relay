@@ -111,9 +111,10 @@ pub(super) fn settle_collected_rejection(
     if cache_write_rejected {
         runtime.invalidate_prompt_affinity(prompt_affinity_key.as_deref());
     }
-    if affinity_miss
-        || (cache_write_rejected && !route_forbids_fallback(route, status, failure.category))
-        || retryable_route_failure(route, status, failure.category, has_previous_response_id)
+    if failure.execution.certainty == ExecutionCertainty::NotSent
+        && (affinity_miss
+            || (cache_write_rejected && !route_forbids_fallback(route, status, failure.category))
+            || retryable_route_failure(route, status, failure.category, has_previous_response_id))
     {
         if affinity_miss {
             *confirmed_response_missing |= response_missing;

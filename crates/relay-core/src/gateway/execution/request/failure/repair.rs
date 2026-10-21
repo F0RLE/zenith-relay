@@ -4,6 +4,7 @@ use super::super::recovery::{
     replay_native_tool_continuation, try_repair_legacy_responses_call_ids, LegacyCallIdRepair,
 };
 use super::FailureStep;
+use axum::response::IntoResponse;
 
 pub(super) enum AfterRepair<'a> {
     Step(FailureStep),
@@ -71,10 +72,23 @@ pub(super) fn repair_collected_rejection(
         response_headers,
     ));
     event.error_category = Some(failure.category.to_string());
-    if failure.category == error_codes::UPSTREAM_TURN_RATE_LIMITED {
+    if (route.account_transport == crate::runtime::AccountTransport::Siwc
+        && route_forbids_fallback(route, failure.status, failure.category))
+        || failure.category == error_codes::UPSTREAM_TURN_RATE_LIMITED
+    {
         let state = settle_route_failure(runtime, lease, route, &failure, response_headers);
         apply_failure_state(event, state);
         emit_usage(runtime, event.clone());
+        if route.account_transport == crate::runtime::AccountTransport::Siwc {
+            // Direct admission can return {"detail":...}; keep the provider's error contract.
+            let mut response = (status, bytes).into_response();
+            for name in ["content-type", "x-request-id", "retry-after"] {
+                if let Some(value) = response_headers.get(name) {
+                    response.headers_mut().insert(name, value.clone());
+                }
+            }
+            return AfterRepair::Step(FailureStep::Respond(response));
+        }
         return AfterRepair::Step(FailureStep::Respond(attempt_error_response(
             failure,
             last_preserved_upstream_error.as_ref(),
@@ -222,7 +236,8 @@ pub(super) fn repair_collected_rejection(
     // Keep encrypted context intact for the first attempt. After a ChatGPT
     // account explicitly rejects it, remove encrypted reasoning and permit one
     // pre-output retry; visible summaries remain. Compaction blocks this repair.
-    if client_wire_api == WireApi::Responses
+    if failure.execution.certainty == ExecutionCertainty::NotSent
+        && client_wire_api == WireApi::Responses
         && route.account_id.is_some()
         && super::super::super::repair_once(
             encrypted_context_attempted,

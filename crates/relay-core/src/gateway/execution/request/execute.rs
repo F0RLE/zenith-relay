@@ -29,6 +29,7 @@ pub(in crate::gateway::execution) async fn execute_request(
         attempt_offset,
         budget,
         transport,
+        transport_fallback,
     } = context;
     let mut tried: HashSet<String> = Default::default();
     // Local preparation failures belong to this request, not provider health.
@@ -217,6 +218,7 @@ pub(in crate::gateway::execution) async fn execute_request(
             key: &key,
             budget: &budget,
             transport,
+            transport_fallback,
             resolved_model: &resolved_model,
             client_wire_api,
             stream,
@@ -317,6 +319,7 @@ pub(in crate::gateway::execution) async fn execute_request(
                 attempt_offset: attempt,
                 budget,
                 transport,
+                transport_fallback,
             }))
             .await;
         }

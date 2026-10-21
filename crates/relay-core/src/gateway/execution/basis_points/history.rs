@@ -80,10 +80,11 @@ pub(super) fn translate_input_items(
     input_items: Vec<Value>,
     tools: &[ClientTool],
 ) -> Result<Vec<Value>, AdapterError> {
+    let input_items = super::batch::collapse_history(input_items, tools)?;
     let mut translated_items = Vec::with_capacity(input_items.len());
     let mut transport_call_ids = std::collections::HashSet::new();
     for input_item in input_items {
-        let input_item = messages::normalize_message(input_item)?;
+        let mut input_item = messages::normalize_message(input_item)?;
         let Some(input_object) = input_item.as_object() else {
             translated_items.push(input_item);
             continue;
@@ -138,18 +139,16 @@ pub(super) fn translate_input_items(
                         AdapterError::invalid_request().with_parameter("input.call_id")
                     })?;
                 if transport_call_ids.contains(call_id) {
-                    let mut translated_output = input_object.clone();
+                    let output_id = function_transport_id(call_id);
+                    let translated_output = input_item.as_object_mut().unwrap();
                     translated_output.insert(
                         "type".to_string(),
                         Value::String("function_call_output".to_string()),
                     );
-                    translated_output.insert(
-                        "id".to_string(),
-                        Value::String(function_transport_id(call_id)),
-                    );
+                    translated_output.insert("id".to_string(), Value::String(output_id));
                     translated_output.remove("name");
                     translated_output.remove("namespace");
-                    translated_items.push(Value::Object(translated_output));
+                    translated_items.push(input_item);
                 } else {
                     // Keep outputs for calls that were not created by this
                     // transport. They may belong to a native account route.

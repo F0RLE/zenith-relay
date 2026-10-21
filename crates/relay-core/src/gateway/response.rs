@@ -14,8 +14,9 @@ pub(super) use http::{
     CompletionCallback,
 };
 pub(super) use usage::{
-    apply_usage, emit_callback, emit_repair, emit_usage, find_usage, populate_tokens, response_id,
-    response_id_from_bytes, response_service_tier, usage_event, UsageAttempt,
+    apply_usage, emit_callback, emit_repair, emit_usage, find_usage, has_generated_tokens,
+    populate_tokens, response_id, response_id_from_bytes, response_service_tier, usage_event,
+    UsageAttempt,
 };
 
 #[cfg(test)]

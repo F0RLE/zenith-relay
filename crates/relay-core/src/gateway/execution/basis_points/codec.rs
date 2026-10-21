@@ -85,7 +85,7 @@ pub(super) fn encode_function_arguments(arguments: &Value) -> Result<String, Ada
     ))
 }
 
-fn parse_function_json(text: &str) -> Result<Value, serde_json::Error> {
+pub(super) fn parse_payload_json(text: &str) -> Result<Value, serde_json::Error> {
     serde_json::from_str(text).or_else(|error| {
         if !text.contains(['\n', '\r', '\t', '\\']) {
             return Err(error);
@@ -130,7 +130,7 @@ fn parse_function_json(text: &str) -> Result<Value, serde_json::Error> {
     })
 }
 
-fn json_argument_error(text: &str, error: &serde_json::Error) -> AdapterError {
+pub(super) fn json_argument_error(text: &str, error: &serde_json::Error) -> AdapterError {
     let (failure, parameter) = if error.is_eof() {
         (
             AdapterError::upstream_tool_arguments_json_incomplete(),
@@ -192,25 +192,45 @@ pub(super) fn function_arguments(payload: &Value) -> Result<Value, AdapterError>
         Value::String(text) => {
             if let Some(frame) = text.strip_prefix(super::FUNCTION_STRING_PREFIX) {
                 let invalid = AdapterError::upstream_tool_arguments_frame_invalid();
-                let (header, raw) = frame.split_once('\n').ok_or(invalid)?;
-                let header: serde_json::Map<String, Value> =
-                    serde_json::from_str(header).map_err(|_| invalid)?;
-                if header.len() != 2 {
-                    return Err(invalid);
-                }
-                let field = header.get("field").and_then(Value::as_str).ok_or(invalid)?;
-                let mut arguments = header
+                let (header, raw) = frame.split_once('\n').ok_or_else(|| {
+                    invalid.with_parameter("output.run_officejs.args.frame.separator")
+                })?;
+                let header = parse_payload_json(header).map_err(|error| {
+                    invalid
+                        .with_parameter("output.run_officejs.args.frame.header")
+                        .with_diagnostics_from(json_argument_error(header, &error))
+                })?;
+                let fields = header
+                    .as_object()
+                    .filter(|fields| fields.len() == 2)
+                    .ok_or_else(|| {
+                        invalid
+                            .with_parameter("output.run_officejs.args.frame.header")
+                            .with_shape_diagnostic(&header, None)
+                    })?;
+                let field = fields.get("field").and_then(Value::as_str).ok_or_else(|| {
+                    invalid
+                        .with_parameter("output.run_officejs.args.frame.field")
+                        .with_shape_diagnostic(&header, Some(("field", &header["field"])))
+                })?;
+                let mut arguments = fields
                     .get("args")
                     .and_then(Value::as_object)
                     .cloned()
-                    .ok_or(invalid)?;
+                    .ok_or_else(|| {
+                        invalid
+                            .with_parameter("output.run_officejs.args.frame.args")
+                            .with_shape_diagnostic(&header, Some(("args", &header["args"])))
+                    })?;
                 if arguments.contains_key(field) {
-                    return Err(invalid);
+                    return Err(
+                        invalid.with_parameter("output.run_officejs.args.frame.duplicate_field")
+                    );
                 }
                 arguments.insert(field.to_owned(), Value::String(raw.to_owned()));
                 Value::Object(arguments)
             } else {
-                parse_function_json(text).map_err(|error| json_argument_error(text, &error))?
+                parse_payload_json(text).map_err(|error| json_argument_error(text, &error))?
             }
         }
         _ => {

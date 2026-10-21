@@ -52,6 +52,11 @@ fn failure(code: ModelDiscoveryFailureCode, retryable: bool) -> ModelDiscoveryFa
 }
 
 impl GatewayRuntime {
+    pub(crate) fn is_siwc_account(&self, candidate_id: &str) -> bool {
+        self.chatgpt_accounts
+            .get(candidate_id)
+            .is_some_and(|account| account.oauth_client_kind == OAuthClientKind::Siwc)
+    }
     pub fn is_basis_points_account(&self, candidate_id: &str) -> bool {
         self.chatgpt_accounts
             .get(candidate_id)

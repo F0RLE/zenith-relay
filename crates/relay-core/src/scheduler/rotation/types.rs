@@ -107,6 +107,7 @@ pub struct RotationCandidate {
     /// `Available`; zero and missing values do not outrank anyone.
     pub quota_remaining_basis_points: Option<u64>,
     pub quota_observed_at_ms: Option<u64>,
+    pub quota_reference: Option<crate::CandidateQuotaReference>,
     /// Provider-reported balance in millionths of one credit. This is a
     /// separate fallback signal and never changes percentage-quota state.
     pub provider_credits_micro_units: Option<u64>,
@@ -145,6 +146,7 @@ impl RotationCandidate {
             quota: QuotaState::Unknown,
             quota_remaining_basis_points: None,
             quota_observed_at_ms: None,
+            quota_reference: None,
             provider_credits_micro_units: None,
             provider_credits_unlimited: false,
             provider_credits_observed_at_ms: None,
@@ -325,11 +327,6 @@ impl RotationRequest {
 
     pub fn with_owner(mut self, owner: impl Into<String>) -> Self {
         self.owner = Some(owner.into());
-        self
-    }
-
-    pub fn with_tried(mut self, candidate_id: impl Into<String>) -> Self {
-        self.tried.insert(candidate_id.into());
         self
     }
 

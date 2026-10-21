@@ -9,18 +9,6 @@ use crate::{
 use std::collections::BTreeMap;
 
 impl ApiModelPriceOverride {
-    /// Replace the legacy base fields without losing separately configured schedules.
-    pub fn with_base_prices(self, base: Self) -> Self {
-        Self {
-            input_micro_usd_per_million: base.input_micro_usd_per_million,
-            cached_input_micro_usd_per_million: base.cached_input_micro_usd_per_million,
-            cache_write_5m_micro_usd_per_million: base.cache_write_5m_micro_usd_per_million,
-            cache_write_1h_micro_usd_per_million: base.cache_write_1h_micro_usd_per_million,
-            output_micro_usd_per_million: base.output_micro_usd_per_million,
-            ..self
-        }
-    }
-
     pub fn from_optional_fields(
         input_price: Option<u64>,
         cache_read_price: Option<u64>,

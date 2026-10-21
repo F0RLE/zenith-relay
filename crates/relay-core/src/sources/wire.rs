@@ -64,12 +64,4 @@ impl CacheWriteTtl {
             Self::OneHour => Some("1h"),
         }
     }
-
-    pub fn from_anthropic_ttl(ttl_text: &str) -> Option<Self> {
-        match ttl_text.trim() {
-            "5m" => Some(Self::FiveMinutes),
-            "1h" => Some(Self::OneHour),
-            _ => None,
-        }
-    }
 }

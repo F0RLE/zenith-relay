@@ -156,7 +156,7 @@ async fn incompatible_bps_pool_does_not_block_a_later_compatible_request() {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(events.load(Ordering::SeqCst), 10);
+        assert_eq!(events.load(Ordering::SeqCst), 0);
         assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 0);
         assert_eq!(server.state.access_requests.load(Ordering::SeqCst), 5);
         {
@@ -186,26 +186,73 @@ async fn incompatible_bps_pool_does_not_block_a_later_compatible_request() {
 
 #[tokio::test]
 async fn incompatible_bps_route_can_fall_back_to_a_compatible_native_account() {
-    let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
-    let runtime = Arc::new(pool_runtime(&server, 1, true).await);
-    runtime.set_route_recovery_enabled(true);
-    let events = observe_reservations(&runtime);
-    let (base, task) = super::recovery::gateway(runtime.clone()).await;
-    let response = bounded_client()
-        .post(format!("{base}/v1/responses"))
-        .bearer_auth("local-secret")
-        .json(&json!({
-            "model":"gpt-test", "input":"Synthetic input",
-            "text":{"format":{"type":"json_object"}}
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 1);
-    assert!(events.load(Ordering::SeqCst) <= 4);
-    assert!(!runtime.lock_scheduler().is_retired());
-    task.abort();
+    for bps_count in [1, 16] {
+        for client in [WireApi::Responses, WireApi::ChatCompletions] {
+            let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+            *crate::poison::mutex(&server.state.generation_body) = json!({
+                "id":"synthetic-review","model":"gpt-test","status":"completed",
+                "output":[{"type":"message","role":"assistant","content":[{
+                    "type":"output_text","text":"{\"approved\":false}"
+                }]}]
+            });
+            let runtime = Arc::new(pool_runtime(&server, bps_count, true).await);
+            runtime.set_route_recovery_enabled(true);
+            let events = observe_reservations(&runtime);
+            let (base, task) = super::recovery::gateway(runtime.clone()).await;
+            let schema = json!({
+                "name":"command_review","strict":true,"schema":{
+                    "type":"object","properties":{"approved":{"type":"boolean"}},
+                    "required":["approved"],"additionalProperties":false
+                }
+            });
+            let mut format = schema.clone();
+            format["type"] = json!("json_schema");
+            let (path, request) = match client {
+                WireApi::Responses => (
+                    "/v1/responses",
+                    json!({
+                        "model":"gpt-test","input":"Review a synthetic command",
+                        "text":{"format":format}
+                    }),
+                ),
+                _ => (
+                    "/v1/chat/completions",
+                    json!({
+                        "model":"gpt-test","messages":[{"role":"user","content":"Review a synthetic command"}],
+                        "response_format":{"type":"json_schema","json_schema":schema}
+                    }),
+                ),
+            };
+            let response = bounded_client()
+                .post(format!("{base}{path}"))
+                .bearer_auth("local-secret")
+                .json(&request)
+                .send()
+                .await
+                .unwrap();
+            let status = response.status();
+            let body: Value = response.json().await.unwrap();
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let answer = match client {
+                WireApi::Responses => &body["output"][0]["content"][0]["text"],
+                _ => &body["choices"][0]["message"]["content"],
+            };
+            assert_eq!(answer, "{\"approved\":false}");
+            {
+                let bodies = crate::poison::mutex(&server.state.generation_bodies);
+                assert_eq!(bodies.len(), 1);
+                assert_eq!(bodies[0]["text"]["format"], format);
+            }
+            assert_eq!(events.load(Ordering::SeqCst), 2);
+            // Catalog discovery is independent of execution admission.
+            assert_eq!(
+                server.state.access_requests.load(Ordering::SeqCst),
+                bps_count
+            );
+            assert!(!runtime.lock_scheduler().is_retired());
+            task.abort();
+        }
+    }
 }
 
 #[tokio::test]

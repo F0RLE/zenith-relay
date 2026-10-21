@@ -150,6 +150,28 @@ pub struct UsageEvent {
 }
 
 impl UsageEvent {
+    pub(crate) fn observe_response_model(&mut self, payload: &serde_json::Value) {
+        let model = [
+            "/response/model",
+            "/message/model",
+            "/model",
+            "/modelVersion",
+        ]
+        .into_iter()
+        .find_map(|path| payload.pointer(path).and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|model| crate::catalog::is_valid_model_token(model));
+        if let (Some(routing), Some(model)) = (self.routing.as_mut(), model) {
+            if routing.upstream_response_model.as_deref() == Some(model) {
+                return;
+            }
+            let (sanitized, redacted, truncated) = super::upstream_error::sanitize_message(model);
+            if !redacted && !truncated && sanitized == model {
+                routing.upstream_response_model = Some(sanitized);
+            }
+        }
+    }
+
     /// A successful wake remains owned by its automation until quota verification.
     pub fn is_natural_account_use(&self) -> bool {
         self.success
@@ -174,7 +196,15 @@ impl UsageEvent {
     }
 
     pub fn affects_account_state(&self) -> bool {
-        if self.account_id.is_none() || self.success || self.is_basis_points_transport_failure() {
+        if self.account_id.is_none()
+            || self.success
+            || self.is_basis_points_transport_failure()
+            || self
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.endpoint_kind.as_deref())
+                == Some("chatgpt_siwc")
+        {
             return false;
         }
         self.error_category
@@ -200,6 +230,7 @@ fn relay_error_category(category: &str) -> bool {
     matches!(
         category,
         error_codes::INVALID_REQUEST
+            | error_codes::HTTP_HEADERS_TIMEOUT
             | error_codes::MODEL_NOT_FOUND
             | error_codes::NO_ELIGIBLE_SOURCE
             | error_codes::ALL_SOURCES_TEMPORARILY_UNAVAILABLE

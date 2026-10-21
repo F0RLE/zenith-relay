@@ -34,7 +34,7 @@ impl StreamCompletionSettlement {
         &self,
         event: &mut crate::UsageEvent,
         response_id: Option<&str>,
-        hint: crate::gateway::errors::RateLimitBodyHint,
+        mut hint: crate::gateway::errors::RateLimitBodyHint,
     ) {
         if let Some(capture) = &self.upstream_usage {
             crate::poison::mutex(capture).apply_to(event);
@@ -52,6 +52,14 @@ impl StreamCompletionSettlement {
                 .upstream_context
                 .clone_from(&progress.tool_use.upstream_context);
             discovery_headers.clone_from(&progress.headers);
+            // Canonical client errors omit the original provider's retry fields.
+            hint.retry_after_ms = hint
+                .retry_after_ms
+                .max(progress.cooldown_hint.retry_after_ms);
+            hint.global |= progress.cooldown_hint.global;
+            if let Some(details) = &progress.upstream_error {
+                event.upstream_error = Some(details.clone());
+            }
         }
         if self.route.client_wire_api == crate::WireApi::Gemini
             && self.route.adapter.is_passthrough()

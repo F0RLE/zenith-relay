@@ -35,6 +35,8 @@ pub struct BasisPointsCatalogDiagnostics {
     pub loaded_tool_count: u16,
     pub discovery_rounds: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_latency_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discovery_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discovery_output_tokens: Option<u64>,
@@ -72,6 +74,15 @@ pub struct ToolUseDiagnostics {
     pub deferred_tool_search: bool,
     #[serde(default)]
     pub tool_choice: ToolChoiceMode,
+    /// The client's explicit policy; absent is not an observed permission or denial.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_parallel_tool_calls: Option<bool>,
+    /// Final native BPS generation, before catalog consumption and client translation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_tool_call_count: Option<u16>,
+    /// Elapsed from upstream dispatch until the first validated client call is ready.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls_ready_ms: Option<u64>,
     pub tool_call_count: u16,
     pub text_output: bool,
     #[serde(default)]
@@ -79,6 +90,28 @@ pub struct ToolUseDiagnostics {
 }
 
 impl ToolUseDiagnostics {
+    pub(crate) fn capture_upstream_context(&mut self, request: &Value) {
+        // Paired context measurements are opted into when the request is admitted.
+        if self.client_context.is_some() {
+            self.upstream_context = Some(super::RequestContextSize::capture(request));
+        }
+    }
+
+    pub(crate) fn observe_upstream_response(&mut self, response: &Value) {
+        if self.client_context.is_none() {
+            return;
+        }
+        let observation = output_observation(response);
+        self.upstream_tool_call_count =
+            observation.inspected.then_some(observation.tool_call_count);
+    }
+
+    pub(crate) fn observe_tool_calls_ready(&mut self, elapsed_ms: u64) {
+        if self.basis_points_catalog.is_some() && self.tool_call_count > 0 {
+            self.tool_calls_ready_ms.get_or_insert(elapsed_ms);
+        }
+    }
+
     pub fn observe_output_item(&mut self, output_item: &Value) {
         let item_observation = output_observation_from_item(output_item);
         self.tool_call_count = self
@@ -144,6 +177,9 @@ impl ToolUseDiagnostics {
             || self.policy_fallback
             || self.deferred_tool_search
             || self.tool_call_count > 0
+            || self.requested_parallel_tool_calls.is_some()
+            || self.upstream_tool_call_count.is_some()
+            || self.tool_calls_ready_ms.is_some()
             || !matches!(self.tool_choice, ToolChoiceMode::Unspecified)
     }
 }

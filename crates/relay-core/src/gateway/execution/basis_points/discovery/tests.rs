@@ -20,6 +20,61 @@ fn response(name: &str, arguments: Value) -> Value {
 }
 
 #[test]
+fn batch_parent_cannot_be_replayed_as_a_catalog_lookup() {
+    let mut request = request();
+    request["input"] = json!([{"type":"function_call_output","call_id":"call_rb1.2.0.Y2FsbF9zeW50aGV0aWM","output":"synthetic"}]);
+    let mut session = DiscoverySession::new(&request, true).unwrap().unwrap();
+    let lookup = response(LOOKUP_TOOL, json!({"names":["files.read"]}));
+    assert_eq!(
+        session
+            .advance(&lookup, &mut json!({}))
+            .unwrap_err()
+            .parameter(),
+        Some("output.relay.catalog.call_id")
+    );
+}
+
+#[test]
+fn noncompleted_native_items_never_advance_catalog() {
+    for name in [LOOKUP_TOOL, "files.read"] {
+        for status in ["in_progress", "incomplete"] {
+            let request = request();
+            let mut upstream = prepare_request(&request).unwrap();
+            let before = upstream.clone();
+            let mut session = DiscoverySession::new(&request, true).unwrap().unwrap();
+            let loaded = session.loaded.clone();
+            let mut reply = response(LOOKUP_TOOL, json!({"names":["files.read"]}));
+            reply["output"][0]["call_id"] = json!("call_ready");
+            let mut unfinished = response(
+                name,
+                if name == LOOKUP_TOOL {
+                    json!({"names":["files.write"]})
+                } else {
+                    json!({"path":"synthetic"})
+                },
+            );
+            unfinished["output"][0]["status"] = json!(status);
+            reply["output"]
+                .as_array_mut()
+                .unwrap()
+                .push(unfinished["output"][0].clone());
+            assert_eq!(
+                session
+                    .advance(&reply, &mut upstream)
+                    .unwrap_err()
+                    .parameter(),
+                Some("output.run_officejs.status")
+            );
+            assert_eq!(upstream, before);
+            assert_eq!(session.loaded, loaded);
+            assert!(session.call_ids.is_empty());
+            assert!(session.lookup_contracts.is_empty());
+            assert_eq!(session.rounds, 0);
+        }
+    }
+}
+
+#[test]
 fn index_omits_schemas_and_preserves_all_identities_then_loads_original_contract() {
     let request = request();
     let mut upstream = prepare_request(&request).unwrap();
@@ -35,7 +90,7 @@ fn index_omits_schemas_and_preserves_all_identities_then_loads_original_contract
     assert!(!text.contains("Read a file"));
     assert!(!text.contains("Argument names:"));
     assert!(!text.contains("\"minLength\":1"));
-    let mut session = DiscoverySession::new(&request).unwrap().unwrap();
+    let mut session = DiscoverySession::new(&request, true).unwrap().unwrap();
     let lookup = response(LOOKUP_TOOL, json!({"names":["files.read","patch"]}));
     assert!(session.advance(&lookup, &mut upstream).unwrap());
     let result = upstream["input"].as_array().unwrap().last().unwrap();
@@ -71,15 +126,109 @@ fn ordinary_text_never_starts_another_generation() {
     let request = request();
     let mut upstream = prepare_request(&request).unwrap();
     let before = upstream.clone();
-    let mut session = DiscoverySession::new(&request).unwrap().unwrap();
+    let mut session = DiscoverySession::new(&request, true).unwrap().unwrap();
     assert!(!session.advance(&json!({"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}]}), &mut upstream).unwrap());
     assert_eq!(upstream, before);
     assert_eq!(session.rounds, 0);
 }
 
 #[test]
+fn working_tools_are_ready_without_loading_the_entire_catalog() {
+    let mut request = request();
+    request["tools"].as_array_mut().unwrap().extend([
+        json!({"type":"function","name":"exec_command","description":"Run a command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"]}}),
+        json!({"type":"custom","name":"apply_patch","description":"Apply a patch"}),
+        json!({"type":"function","name":"write_stdin","parameters":{"type":"object"}}),
+    ]);
+    let session = DiscoverySession::new(&request, true).unwrap().unwrap();
+    assert_eq!(
+        session.loaded,
+        BTreeSet::from([
+            "exec_command".into(),
+            "apply_patch".into(),
+            "write_stdin".into()
+        ])
+    );
+    let upstream = prepare_request(&request).unwrap();
+    let contracts = upstream["input"].as_array().unwrap().last().unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(contracts.contains("no catalog lookup needed"));
+    assert!(contracts.contains("Run a command"));
+    assert!(!contracts.contains("Read a file"));
+    request["tool_choice"] = json!({"type":"function","name":"files.read"});
+    let selected = DiscoverySession::new(&request, true).unwrap().unwrap();
+    assert!(!selected.loaded.contains("exec_command"));
+    let error = translate_response(
+        &serde_json::to_vec(&response("exec_command", json!({"cmd":"echo synthetic"}))).unwrap(),
+        &request,
+    )
+    .unwrap_err();
+    assert_eq!(error.parameter(), Some("output.run_officejs.tool_choice"));
+}
+
+#[test]
+fn eager_catalog_has_byte_and_count_limits_and_respects_explicit_deferral() {
+    let mut request = request();
+    request["tools"] = json!([
+        {"type":"function","name":"exec_command","defer_loading":true,"parameters":{"type":"object"}},
+        {"type":"function","name":"apply_patch","description":"x".repeat(17 * 1024),"parameters":{"type":"object"}}
+    ]);
+    request["tools"].as_array_mut().unwrap().extend((0..10).map(|n| json!({
+        "type":"function","name":format!("eager_{n}"),"defer_loading":false,"parameters":{"type":"object"}
+    })));
+    let session = DiscoverySession::new(&request, true).unwrap().unwrap();
+    assert_eq!(session.loaded.len(), 8);
+    assert!(!session.loaded.contains("exec_command"));
+    assert!(!session.loaded.contains("apply_patch"));
+}
+
+#[test]
+fn remembered_names_use_current_schemas_and_never_restore_removed_or_disallowed_tools() {
+    let mut request = request();
+    request["tools"][0]["tools"][1]["parameters"]["properties"]["text"]["minLength"] = json!(7);
+    let names = BTreeSet::from(["files.write".to_string(), "removed.tool".to_string()]);
+    let mut session = DiscoverySession::new(&request, true).unwrap().unwrap();
+    let mut upstream = prepare_request(&request).unwrap();
+    session.preload(&names, &mut upstream).unwrap();
+    assert_eq!(session.loaded, BTreeSet::from(["files.write".to_string()]));
+    let contracts = upstream["input"].as_array().unwrap().last().unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(contracts.contains("\"minLength\":7"));
+    assert!(!contracts.contains("removed.tool"));
+    assert!(translate_response(
+        &serde_json::to_vec(&response("files.write", json!({"text":"short"}))).unwrap(),
+        &request
+    )
+    .is_err());
+    request["tool_choice"] = json!({"type":"function","name":"files.read"});
+    let mut session = DiscoverySession::new(&request, true).unwrap().unwrap();
+    let mut upstream = prepare_request(&request).unwrap();
+    let before = upstream.clone();
+    session.preload(&names, &mut upstream).unwrap();
+    assert!(session.loaded.is_empty());
+    assert_eq!(upstream, before);
+}
+
+#[test]
+fn remembered_contracts_do_not_expand_the_prompt_without_a_bound() {
+    let mut request = request();
+    request["tools"][0]["tools"][1]["description"] = json!("x".repeat(17 * 1024));
+    let names = BTreeSet::from(["files.read".to_string(), "files.write".to_string()]);
+    let mut session = DiscoverySession::new(&request, true).unwrap().unwrap();
+    let mut upstream = prepare_request(&request).unwrap();
+    session.preload(&names, &mut upstream).unwrap();
+    assert_eq!(session.loaded, BTreeSet::from(["files.read".to_string()]));
+    let loaded = upstream["input"].as_array().unwrap().last().unwrap();
+    assert_eq!(loaded["type"], "message");
+    assert_eq!(loaded["role"], "developer");
+    assert!(loaded["content"][0]["text"].as_str().unwrap().len() < 16 * 1024);
+}
+
+#[test]
 fn catalog_round_limit_bounds_cached_and_new_queries() {
-    let mut session = DiscoverySession::new(&request()).unwrap().unwrap();
+    let mut session = DiscoverySession::new(&request(), true).unwrap().unwrap();
     let mut upstream = prepare_request(&request()).unwrap();
     for round in 0..MAX_LOOKUP_ROUNDS {
         let mut lookup = response(
@@ -99,7 +248,7 @@ fn catalog_round_limit_bounds_cached_and_new_queries() {
         Some("output.relay.catalog.limit")
     );
 
-    let mut session = DiscoverySession::new(&request()).unwrap().unwrap();
+    let mut session = DiscoverySession::new(&request(), true).unwrap().unwrap();
     let mut lookup = response(LOOKUP_TOOL, json!({"names":["patch"]}));
     session.advance(&lookup, &mut upstream).unwrap();
     lookup["output"][0]["call_id"] = json!("lookup_new_identity");
@@ -107,7 +256,11 @@ fn catalog_round_limit_bounds_cached_and_new_queries() {
     let output = upstream["input"].as_array().unwrap().last().unwrap();
     let result: Value = serde_json::from_str(output["output"].as_str().unwrap()).unwrap();
     assert_eq!(result["cached"], true);
-    assert_eq!(result["tools"][0]["name"], "patch");
+    assert_eq!(result["tools"], json!([]));
+    assert_eq!(
+        result["reused"],
+        json!([{"name":"patch","call_id":"call_synthetic"}])
+    );
 }
 
 #[test]
@@ -120,7 +273,7 @@ fn invalid_local_lookups_return_bounded_tool_errors_without_executing_client_too
         json!({"names":["patch"],"query":"patch"}),
         json!({"query":"read","extra":true}),
     ] {
-        let mut session = DiscoverySession::new(&request()).unwrap().unwrap();
+        let mut session = DiscoverySession::new(&request(), true).unwrap().unwrap();
         let mut upstream = prepare_request(&request()).unwrap();
         assert!(session
             .advance(&response(LOOKUP_TOOL, args), &mut upstream)
@@ -134,8 +287,47 @@ fn invalid_local_lookups_return_bounded_tool_errors_without_executing_client_too
 }
 
 #[test]
+fn overlapping_lookups_reuse_each_contract_at_its_original_call_id() {
+    let request = request();
+    let mut session = DiscoverySession::new(&request, true).unwrap().unwrap();
+    let mut upstream = prepare_request(&request).unwrap();
+    for (call_id, names, new_count, reused) in [
+        ("lookup_first", json!(["files.read"]), 1, json!([])),
+        (
+            "lookup_second",
+            json!(["files.read", "files.write", "patch"]),
+            2,
+            json!([{"name":"files.read","call_id":"lookup_first"}]),
+        ),
+        (
+            "lookup_third",
+            json!(["patch", "files.read", "files.write"]),
+            0,
+            json!([
+                {"name":"patch","call_id":"lookup_second"},
+                {"name":"files.read","call_id":"lookup_first"},
+                {"name":"files.write","call_id":"lookup_second"}
+            ]),
+        ),
+    ] {
+        let mut lookup = response(LOOKUP_TOOL, json!({"names":names}));
+        lookup["output"][0]["call_id"] = json!(call_id);
+        assert!(session.advance(&lookup, &mut upstream).unwrap());
+        let output = upstream["input"].as_array().unwrap().last().unwrap();
+        assert_eq!(output["call_id"], call_id);
+        let result: Value = serde_json::from_str(output["output"].as_str().unwrap()).unwrap();
+        assert_eq!(result["tools"].as_array().unwrap().len(), new_count);
+        assert_eq!(result["reused"], reused);
+        assert_eq!(result["cached"], new_count == 0);
+    }
+    assert_eq!(upstream.to_string().matches("Read a file").count(), 1);
+    assert_eq!(upstream.to_string().matches("Write a file").count(), 1);
+    assert_eq!(session.loaded.len(), 3);
+}
+
+#[test]
 fn reused_lookup_call_ids_are_rejected() {
-    let mut session = DiscoverySession::new(&request()).unwrap().unwrap();
+    let mut session = DiscoverySession::new(&request(), true).unwrap().unwrap();
     let mut upstream = prepare_request(&request()).unwrap();
     let lookup = response(LOOKUP_TOOL, json!({"names":["patch"]}));
     assert!(session.advance(&lookup, &mut upstream).unwrap());
@@ -150,7 +342,7 @@ fn lookup_call_ids_cannot_reuse_single_item_history() {
         "type":"function_call_output", "call_id":lookup["output"][0]["call_id"],
         "output":"synthetic prior result"
     });
-    let mut session = DiscoverySession::new(&request).unwrap().unwrap();
+    let mut session = DiscoverySession::new(&request, true).unwrap().unwrap();
     let mut upstream = prepare_request(&request).unwrap();
     let error = session.advance(&lookup, &mut upstream).unwrap_err();
     assert_eq!(error.parameter(), Some("output.relay.catalog.call_id"));
@@ -166,7 +358,7 @@ fn legacy_local_lookup_objects_use_the_same_validated_catalog_contract() {
     })
     .to_string()
     .into();
-    let mut session = DiscoverySession::new(&request).unwrap().unwrap();
+    let mut session = DiscoverySession::new(&request, true).unwrap().unwrap();
     assert!(session.advance(&lookup, &mut upstream).unwrap());
     let output: Value = serde_json::from_str(
         upstream["input"].as_array().unwrap().last().unwrap()["output"]
@@ -182,7 +374,7 @@ fn discovery_budget_excludes_admitted_history_but_bounds_added_state() {
     let mut request = request();
     request["input"] = json!("x".repeat(MAX_CONTINUATION_BYTES));
     let mut upstream = prepare_request(&request).unwrap();
-    let mut session = DiscoverySession::new(&request).unwrap().unwrap();
+    let mut session = DiscoverySession::new(&request, true).unwrap().unwrap();
     assert!(session
         .advance(
             &response(LOOKUP_TOOL, json!({"names":["files.read"]})),
@@ -222,7 +414,7 @@ fn incomplete_tool_fragments_preserve_text_and_usage_without_continuing() {
     incomplete["output"].as_array_mut().unwrap().insert(0, json!({
         "type":"message","role":"assistant","content":[{"type":"output_text","text":"Partial answer"}]
     }));
-    let mut session = DiscoverySession::new(&request).unwrap().unwrap();
+    let mut session = DiscoverySession::new(&request, true).unwrap().unwrap();
     assert!(!session.advance(&incomplete, &mut upstream).unwrap());
     assert_eq!(upstream, before);
     session.finish(&mut incomplete);
@@ -251,7 +443,7 @@ fn client_calls_cannot_reuse_a_history_or_local_lookup_identity() {
         {"type":"function_call_output","call_id":"call_history","output":"synthetic"}
     ]);
     let mut upstream = prepare_request(&request).unwrap();
-    let mut session = DiscoverySession::new(&request).unwrap().unwrap();
+    let mut session = DiscoverySession::new(&request, true).unwrap().unwrap();
     assert!(session
         .advance(
             &response(LOOKUP_TOOL, json!({"names":["files.read"]})),
@@ -285,8 +477,8 @@ fn mixed_catalog_and_client_calls_finish_without_another_generation() {
     client["call_id"] = json!("call_client");
     client["id"] = json!("fc_client");
     mixed["output"].as_array_mut().unwrap().push(client);
-    let mut session = DiscoverySession::new(&request).unwrap().unwrap();
-    let mut diagnostic = ToolUseDiagnostics::default();
+    let mut session = DiscoverySession::new(&request, true).unwrap().unwrap();
+    let mut diagnostic = crate::gateway::request::tool_use_diagnostics(&request, true);
     capture(&request, &mut diagnostic);
     let initial = diagnostic.basis_points_catalog.clone().unwrap();
     assert!(!session.advance(&mixed, &mut upstream).unwrap());
@@ -324,7 +516,7 @@ fn opaque_reasoning_and_text_replay_unchanged_inside_the_owned_turn() {
         .as_array_mut()
         .unwrap()
         .insert(1, text.clone());
-    let mut session = DiscoverySession::new(&request).unwrap().unwrap();
+    let mut session = DiscoverySession::new(&request, true).unwrap().unwrap();
     session.advance(&lookup, &mut upstream).unwrap();
     assert!(upstream["input"].as_array().unwrap().contains(&reasoning));
     let mut final_response = json!({"output":[]});
@@ -341,13 +533,13 @@ fn opaque_reasoning_and_text_replay_unchanged_inside_the_owned_turn() {
 fn choices_scope_lookup_and_small_catalogs_stay_compact() {
     let mut request = request();
     request["tool_choice"] = json!({"type":"allowed_tools","mode":"auto","tools":[{"type":"function","name":"files.read"}]});
-    let session = DiscoverySession::new(&request).unwrap().unwrap();
+    let session = DiscoverySession::new(&request, true).unwrap().unwrap();
     assert!(lookup(&session.tools, &json!({"names":["files.write"]})).is_err());
     request["tool_choice"] = json!("none");
-    assert!(DiscoverySession::new(&request).unwrap().is_none());
+    assert!(DiscoverySession::new(&request, true).unwrap().is_none());
     request.as_object_mut().unwrap().remove("tool_choice");
     request.as_object_mut().unwrap().remove(OPTION);
-    assert!(DiscoverySession::new(&request).unwrap().is_none());
+    assert!(DiscoverySession::new(&request, true).unwrap().is_none());
     assert_eq!(prepare_request(&request).unwrap()["stream"], true);
     for mode in [json!(true), json!("unsupported"), json!(null)] {
         request[OPTION] = mode;
@@ -365,7 +557,7 @@ fn synthetic_large_catalog_reduces_initial_prompt_without_removing_tools() {
     }})).collect::<Vec<_>>();
     let mut request = json!({"model":"synthetic","input":"hello","tools":tools});
     let automatic = prepare_request(&request).unwrap().to_string().len();
-    assert!(DiscoverySession::new(&request).unwrap().is_some());
+    assert!(DiscoverySession::new(&request, true).unwrap().is_some());
     request[OPTION] = json!("compact");
     let compact = prepare_request(&request).unwrap().to_string().len();
     request[OPTION] = json!("full");
@@ -454,9 +646,9 @@ fn automatic_discovery_counts_descriptions_and_custom_formats_not_just_parameter
             })
             .collect::<Vec<_>>();
         let mut request = json!({"model":"synthetic","input":"hello","tools":tools});
-        assert!(DiscoverySession::new(&request).unwrap().is_some());
+        assert!(DiscoverySession::new(&request, true).unwrap().is_some());
         request["tools"].as_array_mut().unwrap().pop();
-        assert!(DiscoverySession::new(&request).unwrap().is_none());
+        assert!(DiscoverySession::new(&request, true).unwrap().is_none());
     }
 }
 
@@ -499,7 +691,7 @@ fn grouped_index_preserves_nested_namespaces_custom_kinds_and_flat_dotted_names(
         .reverse();
     let reordered = prepare_request(&request).unwrap();
     assert_eq!(prepared["input"][0], reordered["input"][0]);
-    let mut session = DiscoverySession::new(&request).unwrap().unwrap();
+    let mut session = DiscoverySession::new(&request, true).unwrap().unwrap();
     let mut upstream = reordered;
     assert!(session
         .advance(
@@ -544,6 +736,7 @@ fn known_contracts_use_lossless_compact_schemas_after_unchanged_history_and_pref
     assert!(known.contains("Parameter notation:"));
     assert!(known.contains("files.read (function): Read a file"));
     assert!(known.contains("Parameters: object"));
+    assert!(known.contains("\"additionalProperties\":false"));
     assert!(known.contains("\"minLength\":1"));
     assert!(!known.contains("Write a file"));
     assert!(!known.contains("patch (custom)"));
@@ -560,7 +753,7 @@ fn known_contracts_use_lossless_compact_schemas_after_unchanged_history_and_pref
 }
 
 #[test]
-fn rendered_schema_diagnostics_count_compact_preloads_and_each_full_lookup() {
+fn rendered_schema_diagnostics_count_compact_preloads_and_unique_full_lookups() {
     let mut request = request();
     request["input"] = json!([
         {"type":"function_call","name":"read","namespace":"files","call_id":"known_read","arguments":"{\"path\":\"synthetic.txt\"}"},
@@ -569,7 +762,7 @@ fn rendered_schema_diagnostics_count_compact_preloads_and_each_full_lookup() {
     let schema = &request["tools"][0]["tools"][0]["parameters"];
     let compact_bytes = super::super::schema::prompt_schema(schema).len() as u64;
     let full_bytes = schema.to_string().len() as u64;
-    let mut diagnostic = ToolUseDiagnostics::default();
+    let mut diagnostic = crate::gateway::request::tool_use_diagnostics(&request, true);
     capture(&request, &mut diagnostic);
     assert_eq!(
         diagnostic
@@ -579,7 +772,7 @@ fn rendered_schema_diagnostics_count_compact_preloads_and_each_full_lookup() {
             .rendered_schema_bytes,
         compact_bytes
     );
-    let mut session = DiscoverySession::new(&request).unwrap().unwrap();
+    let mut session = DiscoverySession::new(&request, true).unwrap().unwrap();
     let mut upstream = prepare_request(&request).unwrap();
     for (round, arguments) in [
         json!({"names":["files.read"]}),
@@ -593,11 +786,20 @@ fn rendered_schema_diagnostics_count_compact_preloads_and_each_full_lookup() {
         assert!(session.advance(&lookup, &mut upstream).unwrap());
         session.record(&mut diagnostic);
         let catalog = diagnostic.basis_points_catalog.as_ref().unwrap();
-        assert_eq!(
-            catalog.rendered_schema_bytes,
-            compact_bytes + full_bytes * (round as u64 + 1)
-        );
+        assert_eq!(catalog.rendered_schema_bytes, compact_bytes + full_bytes);
         assert_eq!(catalog.loaded_tool_count, 1);
+        let result = upstream["input"].as_array().unwrap().last().unwrap();
+        let result: Value = serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            result["tools"].as_array().unwrap().len(),
+            usize::from(round == 0)
+        );
+        if round != 0 {
+            assert_eq!(
+                result["reused"],
+                json!([{"name":"files.read","call_id":"lookup_0"}])
+            );
+        }
     }
 }
 

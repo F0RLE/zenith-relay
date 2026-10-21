@@ -1,6 +1,29 @@
 use super::*;
 
 #[test]
+fn messages_thinking_counts_as_output_without_counting_an_opaque_signature() {
+    for (delta, expected) in [
+        (
+            serde_json::json!({"type":"thinking_delta","thinking":"Synthetic reasoning"}),
+            true,
+        ),
+        (
+            serde_json::json!({"type":"thinking_delta","thinking":""}),
+            false,
+        ),
+        (
+            serde_json::json!({"type":"signature_delta","signature":"synthetic-signature"}),
+            false,
+        ),
+    ] {
+        let payload = serde_json::json!({"type":"content_block_delta","index":0,"delta":delta});
+        let parsed = parse_sse_event(format!("data: {payload}\n\n").as_bytes());
+        assert_eq!(parsed.has_output_delta, expected);
+        assert_eq!(parsed.semantic_output, expected);
+    }
+}
+
+#[test]
 fn multiline_json_keeps_data_lines_with_all_sse_line_endings() {
     for ending in ["\n", "\r\n", "\r"] {
         let frame = format!("event: response.output_text.delta{ending}data: {{\"type\":{ending}data: \"response.output_text.delta\",{ending}data: \"delta\":\"synthetic\"}}{ending}{ending}");
@@ -260,20 +283,25 @@ fn provider_policy_rejection_is_not_reclassified_as_model_mismatch() {
 
 #[test]
 fn translated_errors_keep_the_original_code_in_each_client_protocol() {
-    let rejection = serde_json::json!({"error": {"code": "upstream_route_degraded", "message": "Upstream served a different model"}});
-    let preserved = super::preserved_stream_error(&rejection).unwrap();
-    for payload in [
-        serde_json::json!({"type": "response.failed", "response": {"error": {"code": "adapter_upstream_stream_invalid"}}}),
-        serde_json::json!({"type": "error", "error": {"code": "adapter_upstream_stream_invalid"}}),
-        serde_json::json!({"error": {"code": "adapter_upstream_stream_invalid"}}),
+    for code in [
+        crate::error_codes::UPSTREAM_ROUTE_DEGRADED,
+        crate::error_codes::STREAM_EVENT_TOO_LARGE,
     ] {
-        let bytes = format!("data: {payload}\n\n").into_bytes();
-        let result = super::rewrite_bridge_failure(bytes, Some(&preserved));
-        assert_eq!(
-            result.starts_with(b"event: "),
-            payload.get("type").is_some()
-        );
-        let terminal = super::parse_sse_event(&result);
-        assert_eq!(terminal.error_category, Some("upstream_route_degraded"));
+        let rejection = serde_json::json!({"error": {"type":"stream_error", "code":code, "message":"Synthetic stream rejection"}});
+        let preserved = super::preserved_stream_error(&rejection).unwrap();
+        for payload in [
+            serde_json::json!({"type": "response.failed", "response": {"error": {"code": "adapter_upstream_stream_invalid"}}}),
+            serde_json::json!({"type": "error", "error": {"code": "adapter_upstream_stream_invalid"}}),
+            serde_json::json!({"error": {"code": "adapter_upstream_stream_invalid"}}),
+        ] {
+            let bytes = format!("data: {payload}\n\n").into_bytes();
+            let result = super::rewrite_bridge_failure(bytes, Some(&preserved));
+            assert_eq!(
+                result.starts_with(b"event: "),
+                payload.get("type").is_some()
+            );
+            let terminal = super::parse_sse_event(&result);
+            assert_eq!(terminal.error_category, Some(code));
+        }
     }
 }

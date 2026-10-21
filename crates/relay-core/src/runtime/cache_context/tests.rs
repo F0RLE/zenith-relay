@@ -45,6 +45,8 @@ fn event(
             in_flight_before: 0,
             dispatches_before: 0,
             endpoint_kind: Some("responses".into()),
+            upstream_response_model: None,
+            transport: None,
             cache_context: Some(diagnostics),
             attempt_outcome: None,
         }),

@@ -149,6 +149,10 @@ impl GatewayRuntime {
             return Ok(self.accept_authorized_response(candidate_id, upstream_response, &prepared));
         }
 
+        if self.is_siwc_account(candidate_id) {
+            // Direct-plan 401 can mean missing permission: do not replay or change billing.
+            return Ok(self.accept_authorized_response(candidate_id, upstream_response, &prepared));
+        }
         if self.is_basis_points_account(candidate_id) {
             let account =
                 self.chatgpt_accounts
@@ -348,6 +352,9 @@ impl GatewayRuntime {
         } = dispatch;
         let (client, mut authorized_request) =
             apply_prepared_authorization(request, prepared, client_version, identity_policy)?;
+        if self.is_siwc_account(candidate_id) {
+            crate::providers::chatgpt::sanitize_siwc_headers(authorized_request.headers_mut());
+        }
         if self.is_basis_points_account(candidate_id) {
             self.validate_basis_points_plan(candidate_id, Some(prepared))
                 .map_err(AuthorizedRequestError::ModelAccess)?;
@@ -382,12 +389,25 @@ impl GatewayRuntime {
             }
         }
         let url = authorized_request.url().clone();
-        let cookies = self.routing_cookies(candidate_id, prepared);
+        let cookies = if self.is_siwc_account(candidate_id) {
+            None
+        } else {
+            self.routing_cookies(candidate_id, prepared)
+        };
         if let Some(cookies) = &cookies {
             cookies.apply(&url, authorized_request.headers_mut());
         }
         let stale_authorization =
             || AuthorizedRequestError::Prepare(ExecutorPrepareError::Transient);
+        let headers_deadline = budget
+            .filter(|_| !self.is_basis_points_account(candidate_id))
+            .and_then(|budget| {
+                crate::transport::http_headers_timeout()
+                    .map(|timeout| budget.http_headers_deadline(timeout))
+            });
+        if headers_deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) {
+            return Err(AuthorizedRequestError::HeadersTimeout);
+        }
         if let Some(budget) = budget {
             if let Some(lease) = lease {
                 lease
@@ -422,17 +442,22 @@ impl GatewayRuntime {
                 .dispatch_guard(self, candidate_id)
                 .ok_or_else(stale_authorization)?;
         }
-        let upstream_response = match self
-            .is_basis_points_account(candidate_id)
-            .then(crate::transport::basis_points_progress_timeout)
-            .flatten()
-        {
-            Some(timeout) => tokio::time::timeout(timeout, client.execute(authorized_request))
-                .await
-                .map_err(|_| AuthorizedRequestError::ProgressTimeout)?,
-            None => client.execute(authorized_request).await,
-        }
-        .map_err(AuthorizedRequestError::Transport)?;
+        let upstream_response = if let Some(deadline) = headers_deadline {
+            crate::transport::execute_with_headers_deadline(&client, authorized_request, deadline)
+                .await?
+        } else {
+            match self
+                .is_basis_points_account(candidate_id)
+                .then(crate::transport::basis_points_progress_timeout)
+                .flatten()
+            {
+                Some(timeout) => tokio::time::timeout(timeout, client.execute(authorized_request))
+                    .await
+                    .map_err(|_| AuthorizedRequestError::ProgressTimeout)?,
+                None => client.execute(authorized_request).await,
+            }
+            .map_err(AuthorizedRequestError::Transport)?
+        };
         if let Some(cookies) = cookies {
             cookies.observe(&url, upstream_response.headers());
         }

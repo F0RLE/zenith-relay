@@ -8,7 +8,7 @@ use crate::error_codes;
 use crate::protocol::AdapterError;
 use crate::runtime::{AccountTransport, AuthenticatedKey, DefaultServiceTier, ExecutorRoute};
 use crate::scheduler::RoutingDiagnostics;
-use crate::usage::{ReasoningEffortDiagnostics, ToolUseDiagnostics};
+use crate::usage::{ReasoningEffortDiagnostics, RequestPreparationDiagnostics, ToolUseDiagnostics};
 use crate::{ErrorOrigin, GatewayRuntime};
 use axum::body::Body;
 use axum::http::{HeaderValue, Response, StatusCode};
@@ -21,6 +21,7 @@ pub(super) enum AccountPrepare {
 }
 
 pub(super) struct PreparedAccountAttempt {
+    pub(super) preparation: RequestPreparationDiagnostics,
     pub(super) route: ExecutorRoute,
     pub(super) basis_points_route: bool,
     pub(super) route_responses_lite: Option<HeaderValue>,
@@ -109,6 +110,13 @@ pub(super) fn prepare_account_attempt(
         crate::WireApi::Responses,
     );
     let basis_points_route = route.account_transport == AccountTransport::ExcelBasisPoints;
+    let siwc_route = route.account_transport == AccountTransport::Siwc;
+    if siwc_route && endpoint == AccountEndpoint::AlphaSearch {
+        return AccountPrepare::Respond(super::super::request::adapter_error_response(
+            AdapterError::parameter_unsupported_for("endpoint"),
+            Some(request_id),
+        ));
+    }
     if basis_points_route {
         if let Some(step) = reject_account_basis_points(
             request,
@@ -122,7 +130,7 @@ pub(super) fn prepare_account_attempt(
     }
     // BPS accepts the item-level catalog without inheriting native Lite's
     // serial execution restriction.
-    let route_responses_lite = if basis_points_route {
+    let route_responses_lite = if basis_points_route || siwc_route {
         None
     } else {
         super::super::responses_lite_header(
@@ -152,14 +160,50 @@ pub(super) fn prepare_account_attempt(
         Ok(upstream_response_body) => upstream_response_body,
         Err(step) => return step,
     };
-    runtime.apply_request_timezone(candidate_id, &mut upstream_body);
-    // Saved tool optimization is not applied. Wake, compact, and alpha/search
-    // all keep the catalog the client sent.
+    if !siwc_route {
+        runtime.apply_request_timezone(candidate_id, &mut upstream_body);
+    }
+    if siwc_route && endpoint == AccountEndpoint::Compact {
+        let fields = upstream_body
+            .as_object_mut()
+            .expect("validated account request");
+        if !super::super::super::compaction::prepare_routed_compaction_request(fields) {
+            return AccountPrepare::Respond(super::super::request::adapter_error_response(
+                AdapterError::invalid_request(),
+                Some(request_id),
+            ));
+        }
+        match crate::protocol::prepare_bridged_compaction(&upstream_body) {
+            Ok(compaction) => upstream_body = compaction.request(&upstream_body).clone(),
+            Err(error) => {
+                return AccountPrepare::Respond(super::super::request::adapter_error_response(
+                    error,
+                    Some(request_id),
+                ));
+            }
+        }
+    }
+    // Only a text-summary bridge omits tools; ordinary account requests keep them.
     if let Some(step) = apply_account_tool_policy(tool_policy, &mut upstream_body) {
         return step;
     }
+    if siwc_route {
+        if let Err(error) = crate::providers::chatgpt::prepare_siwc_request(&mut upstream_body) {
+            return AccountPrepare::Respond(super::super::request::adapter_error_response(
+                error,
+                Some(request_id),
+            ));
+        }
+    }
+    let mut preparation = RequestPreparationDiagnostics::default();
     if basis_points_route {
-        match rewrite_account_basis_points_body(&upstream_body, request_id, last_adapter_error) {
+        match rewrite_account_basis_points_body(
+            &upstream_body,
+            request_id,
+            last_adapter_error,
+            &mut preparation.schema_validation_ms,
+            tool_policy.diagnostics.client_context.is_some(),
+        ) {
             Ok(prepared) => upstream_body = prepared,
             Err(step) => return step,
         }
@@ -185,11 +229,9 @@ pub(super) fn prepare_account_attempt(
             error_codes::INVALID_REQUEST,
         ));
     };
-    if basis_points_route {
-        tool_policy.record_upstream_context(&upstream_body);
-    }
     let tool_use = tool_policy.diagnostics.clone();
     AccountPrepare::Ready(Box::new(PreparedAccountAttempt {
+        preparation,
         route,
         basis_points_route,
         route_responses_lite,
@@ -226,7 +268,7 @@ fn account_upstream_url(
     basis_points_route: bool,
     last_failure: &mut Option<AttemptFailure>,
 ) -> Option<url::Url> {
-    if basis_points_route {
+    if basis_points_route || route.account_transport == AccountTransport::Siwc {
         return Some(route.upstream_url.clone());
     }
     let upstream_url = account_endpoint_url(route.upstream_url.clone(), endpoint);
@@ -304,8 +346,14 @@ fn rewrite_account_basis_points_body(
     upstream_body: &Value,
     request_id: &str,
     last_adapter_error: &mut Option<AdapterError>,
+    schema_validation_ms: &mut Option<u64>,
+    diagnostics_enabled: bool,
 ) -> Result<Value, AccountPrepare> {
-    match super::super::basis_points::prepare_request(upstream_body) {
+    match super::super::basis_points::prepare_request_with_timing(
+        upstream_body,
+        schema_validation_ms,
+        diagnostics_enabled,
+    ) {
         Ok(prepared) => Ok(prepared),
         Err(error) if error.is_route_incompatible() => {
             *last_adapter_error = Some(error);

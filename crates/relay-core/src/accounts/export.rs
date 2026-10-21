@@ -101,6 +101,7 @@ impl fmt::Debug for AccountExportRequest {
 #[derive(Clone)]
 pub struct AccountExportCredential {
     pub oauth_client_kind: crate::providers::chatgpt::OAuthClientKind,
+    pub siwc_registration: Option<crate::providers::chatgpt::SiwcRegistration>,
     pub basis_points_headers: Option<crate::providers::chatgpt::BasisPointsCapturedHeaders>,
     pub label: String,
     pub email: Option<String>,

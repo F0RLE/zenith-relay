@@ -1,6 +1,114 @@
 use super::*;
 use crate::PoolRoutingMode;
 
+fn reference_quota_scheduler() -> PoolScheduler {
+    let mut scheduler = policy::mixed(PoolRoutingMode::Automatic);
+    let member = scheduler.candidates.get_mut("api-a").unwrap();
+    member.quota = CandidateQuota::Available(1_200);
+    member.quota_updated_at_ms = Some(100);
+    scheduler.set_quota_references(BTreeMap::from([(
+        "account".into(),
+        crate::CandidateQuotaReference {
+            source_account_id: "linked-bps".into(),
+            remaining_basis_points: 9_700,
+            observed_at_ms: 100,
+            valid_until_ms: Some(1_000),
+        },
+    )]));
+    scheduler
+}
+
+#[test]
+fn automatic_ranks_linked_quota_without_changing_own_capacity() {
+    let mut scheduler = reference_quota_scheduler();
+    assert_eq!(rotation::dispatch(&mut scheduler, 100, None), "account");
+    assert_eq!(
+        scheduler.candidates["account"].quota,
+        CandidateQuota::Unknown
+    );
+    assert_eq!(scheduler.candidates["account"].quota_updated_at_ms, None);
+    scheduler.set_quota_references(BTreeMap::new());
+    assert_eq!(rotation::dispatch(&mut scheduler, 100, None), "api-a");
+}
+
+#[test]
+fn reference_quota_never_overrides_own_observation_or_auth() {
+    for quota in [
+        CandidateQuota::Available(100),
+        CandidateQuota::Available(0),
+        CandidateQuota::Exhausted,
+        CandidateQuota::Stale,
+    ] {
+        let mut scheduler = reference_quota_scheduler();
+        let member = scheduler.candidates.get_mut("account").unwrap();
+        member.quota = quota;
+        member.quota_updated_at_ms = Some(100);
+        assert_eq!(
+            rotation::dispatch(&mut scheduler, 100, None),
+            "api-a",
+            "{quota:?}"
+        );
+    }
+    let mut scheduler = reference_quota_scheduler();
+    scheduler.candidates.get_mut("account").unwrap().health = CandidateHealth::ReauthRequired;
+    assert_eq!(rotation::dispatch(&mut scheduler, 100, None), "api-a");
+}
+
+#[test]
+fn reference_quota_expires_and_rejects_future_zero_or_invalid_observations() {
+    for (remaining, observed, deadline) in [
+        (0, 100, 1_000),
+        (10_001, 100, 1_000),
+        (9_700, 101, 1_000),
+        (9_700, 100, 100),
+        (9_700, 1, 1_000),
+    ] {
+        let mut scheduler = reference_quota_scheduler();
+        scheduler.set_quota_stale_after_ms(50);
+        let reference = scheduler.quota_references.get_mut("account").unwrap();
+        reference.remaining_basis_points = remaining;
+        reference.observed_at_ms = observed;
+        reference.valid_until_ms = Some(deadline);
+        assert_eq!(rotation::dispatch(&mut scheduler, 100, None), "api-a");
+    }
+}
+
+#[test]
+fn reference_quota_zero_is_not_an_execution_block_and_removal_clears_reference() {
+    let mut scheduler = reference_quota_scheduler();
+    scheduler
+        .quota_references
+        .get_mut("account")
+        .unwrap()
+        .remaining_basis_points = 0;
+    scheduler.remove("api-a");
+    scheduler.remove("api-b");
+    assert_eq!(rotation::dispatch(&mut scheduler, 100, None), "account");
+    scheduler.remove("account");
+    scheduler.upsert(oauth_candidate("account"));
+    assert!(scheduler.quota_references.is_empty());
+}
+
+#[test]
+fn reference_source_invalidation_removes_ranking_without_blocking_siwc() {
+    let mut scheduler = reference_quota_scheduler();
+    assert_eq!(rotation::dispatch(&mut scheduler, 100, None), "account");
+    assert!(scheduler.invalidate_quota_reference_source("linked-bps"));
+    assert!(!scheduler.invalidate_quota_reference_source("linked-bps"));
+    assert_eq!(rotation::dispatch(&mut scheduler, 100, None), "api-a");
+    scheduler.remove("api-a");
+    scheduler.remove("api-b");
+    assert_eq!(rotation::dispatch(&mut scheduler, 100, None), "account");
+}
+
+#[test]
+fn removing_an_inactive_reference_source_clears_its_ranking() {
+    let mut scheduler = reference_quota_scheduler();
+    assert!(scheduler.remove("linked-bps").is_none());
+    assert!(scheduler.quota_references.is_empty());
+    assert_eq!(rotation::dispatch(&mut scheduler, 100, None), "api-a");
+}
+
 #[test]
 fn automatic_uses_the_largest_known_quota_before_credits_or_recency() {
     let mut scheduler = policy::mixed(PoolRoutingMode::Automatic);

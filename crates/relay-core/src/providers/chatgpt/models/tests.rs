@@ -7,6 +7,32 @@ use serde_json::json;
 
 mod recovery;
 
+#[tokio::test]
+async fn siwc_catalog_uses_only_bearer_and_preserves_visible_server_order() {
+    let router = Router::new().route("/v1/models", get(|headers: HeaderMap, uri: axum::http::Uri| async move {
+        assert_eq!(headers.get("authorization").unwrap(), "Bearer synthetic-token");
+        assert!(!headers.contains_key("chatgpt-account-id"));
+        assert!(!headers.contains_key("originator"));
+        assert!(uri.query().is_none());
+        Json(json!({"models":[{"slug":"z-model","display_name":"Z model","visibility":"list"},{"slug":"hidden","visibility":"hide"},{"slug":"a-model","visibility":"list"}]}))
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = Url::parse(&format!(
+        "http://{}/v1/models",
+        listener.local_addr().unwrap()
+    ))
+    .unwrap();
+    let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let models = AccountModelsClient::with_endpoint(endpoint)
+        .unwrap()
+        .with_oauth_client_kind(super::super::OAuthClientKind::Siwc)
+        .discover("synthetic-token", "synthetic-registration", "ignored")
+        .await
+        .unwrap();
+    assert_eq!(models, vec!["z-model", "a-model"]);
+    task.abort();
+}
+
 #[test]
 fn discovery_failure_codes_keep_the_management_contract_stable() {
     let cases = [

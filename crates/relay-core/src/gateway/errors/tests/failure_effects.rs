@@ -1,6 +1,103 @@
 use super::*;
 
 #[test]
+fn local_http_headers_deadline_keeps_unknown_execution_without_account_penalty_or_replay() {
+    let error = AuthorizedRequestError::HeadersTimeout;
+    assert_eq!(
+        error.execution_certainty(),
+        crate::scheduler::rotation::ExecutionCertainty::Unknown
+    );
+    let failure = AttemptFailure::authorized_request(error);
+    assert_eq!(failure.status, StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(failure.category, error_codes::HTTP_HEADERS_TIMEOUT);
+    assert!(!failure_category_requires_cooldown(failure.category));
+    assert!(!failure_category_affects_account_state(failure.category));
+    assert!(!retryable_failure(failure.status, failure.category, false));
+    assert_eq!(
+        crate::ErrorOrigin::Account.for_category(failure.category),
+        crate::ErrorOrigin::Relay
+    );
+}
+
+#[test]
+fn tpm_request_too_large_preserves_safe_rate_limit_failover() {
+    let error = json!({
+        "code": "rate_limit_exceeded",
+        "type": "tokens",
+        "message": "Request too large for synthetic-model on tokens per min (TPM): Limit 1000000, Requested 5000. The input or output tokens must be reduced in order to run successfully."
+    });
+    let mut bodies: Vec<Vec<u8>> = [
+        json!({"error": error}),
+        json!({"response": {"error": error}}),
+        json!({"body": {"error": error}}),
+    ]
+    .iter()
+    .map(|body| serde_json::to_vec(body).unwrap())
+    .collect();
+    bodies.push(error["message"].as_str().unwrap().as_bytes().to_vec());
+    for body in bodies {
+        let failure = AttemptFailure::status_with_body(StatusCode::TOO_MANY_REQUESTS, Some(&body));
+        assert_eq!(failure.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(failure.category, error_codes::UPSTREAM_RATE_LIMITED);
+        assert!(failure_category_requires_cooldown(failure.category));
+        assert!(retryable_failure(failure.status, failure.category, false));
+    }
+    let frame = format!(
+        "data: {}\n\n",
+        json!({"type": "response.failed", "response": {"status": "failed", "error": error}})
+    );
+    let event = crate::gateway::streaming::parse_sse_event(frame.as_bytes());
+    assert_eq!(
+        event.error_category,
+        Some(error_codes::UPSTREAM_RATE_LIMITED)
+    );
+    assert!(!event.semantic_output);
+
+    let payload = br#"{"error":{"code":"request_too_large","message":"Request too large"}}"#;
+    let failure = AttemptFailure::status_with_body(StatusCode::PAYLOAD_TOO_LARGE, Some(payload));
+    assert_eq!(failure.status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(failure.category, error_codes::UPSTREAM_PAYLOAD_TOO_LARGE);
+    assert!(!failure_category_requires_cooldown(failure.category));
+    assert!(!retryable_failure(failure.status, failure.category, false));
+}
+
+#[test]
+fn frozen_upstream_session_never_cools_an_account_or_rotates_the_request() {
+    let error = json!({
+        "type": "permission_error",
+        "code": "session_blocked_by_cyber_policy",
+        "message": "Synthetic conversation policy rejection"
+    });
+    for body in [
+        json!({"error": error}),
+        json!({"response": {"error": error}}),
+    ] {
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let failure = AttemptFailure::status_with_body(StatusCode::FORBIDDEN, Some(&bytes));
+        assert_eq!(failure.category, error_codes::UPSTREAM_CONTENT_POLICY);
+        assert!(!failure_category_requires_cooldown(failure.category));
+        assert!(!failure_category_affects_account_state(failure.category));
+        for opaque_predecessor in [false, true] {
+            assert!(!retryable_failure(
+                failure.status,
+                failure.category,
+                opaque_predecessor
+            ));
+        }
+    }
+    let frame = format!(
+        "data: {}\n\n",
+        json!({"type": "response.failed", "response": {"status": "failed", "error": error}})
+    );
+    let event = crate::gateway::streaming::parse_sse_event(frame.as_bytes());
+    assert_eq!(
+        event.error_category,
+        Some(error_codes::UPSTREAM_CONTENT_POLICY)
+    );
+    assert!(!event.semantic_output);
+}
+
+#[test]
 fn invalid_body_422_does_not_retry_or_penalize_accounts_even_with_server_error_type() {
     let body = br#"{"error":{"type":"server_error","message":"422: Invalid request body."}}"#;
     let failure = AttemptFailure::status_with_body(StatusCode::UNPROCESSABLE_ENTITY, Some(body));
@@ -323,5 +420,32 @@ async fn mixed_cooldowns_are_not_reported_as_rate_limit() {
     assert_eq!(
         value.pointer("/error/code").unwrap(),
         "all_sources_temporarily_unavailable"
+    );
+}
+#[test]
+fn http_rejections_with_generated_usage_do_not_authorize_replay() {
+    for payload in [
+        serde_json::json!({"usage":{"output_tokens":7}}),
+        serde_json::json!({"usage":{"output_tokens_details":{"reasoning_tokens":7}}}),
+        serde_json::json!({"message":{"usage":{"output_tokens":7}}}),
+        serde_json::json!({"usage":{"completion_tokens":7}}),
+        serde_json::json!({"usageMetadata":{"thoughtsTokenCount":7}}),
+    ] {
+        let failure = AttemptFailure::status_with_body(
+            StatusCode::TOO_MANY_REQUESTS,
+            Some(&serde_json::to_vec(&payload).unwrap()),
+        );
+        assert_eq!(
+            failure.execution.certainty,
+            crate::scheduler::rotation::ExecutionCertainty::Accepted
+        );
+    }
+    let failure = AttemptFailure::status_with_body(
+        StatusCode::TOO_MANY_REQUESTS,
+        Some(br#"{"usage":{"input_tokens":50,"output_tokens":0}}"#),
+    );
+    assert_eq!(
+        failure.execution.certainty,
+        crate::scheduler::rotation::ExecutionCertainty::NotSent
     );
 }

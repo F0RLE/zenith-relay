@@ -43,16 +43,14 @@ pub(in crate::gateway::websocket) async fn await_while_client_connected<F: std::
         tokio::select! {
             connection_result = &mut future => return Ok(connection_result),
             _ = heartbeat.tick() => {
-                downstream
-                    .send(Message::Ping(Default::default()))
+                send_message(downstream, Message::Ping(Default::default()))
                     .await
                     .map_err(|_| GatewayFailure::client_closed())?;
             }
             message = downstream.recv() => {
                 match message {
                     Some(Ok(Message::Ping(ping_payload))) => {
-                        downstream
-                            .send(Message::Pong(ping_payload))
+                        send_message(downstream, Message::Pong(ping_payload))
                             .await
                             .map_err(|_| GatewayFailure::client_closed())?;
                     }

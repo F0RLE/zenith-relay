@@ -59,7 +59,7 @@ async fn capture_native_cache_request(
 /// of Relay's saved history. Cache controls and tool order are client-owned
 /// even when HTTP/SSE continuations have local replay state available.
 #[tokio::test]
-async fn native_responses_preserves_cache_prefix_and_does_not_duplicate_history() {
+async fn debug_off_preserves_native_requests_and_usage_without_context_telemetry() {
     for stream in [false, true] {
         let observed = Arc::new(Mutex::new(Vec::<Value>::new()));
         let upstream = spawn(
@@ -69,6 +69,57 @@ async fn native_responses_preserves_cache_prefix_and_does_not_duplicate_history(
         )
         .await;
         let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-cache-test"]).await;
+        let request = json!({
+            "model":"gpt-cache-test", "stream":stream,
+            "instructions":"Synthetic stable instructions",
+            "input":[{"role":"user","content":"Synthetic request"}],
+            "tools":[{"type":"function","name":"fixture","parameters":{"type":"object"}}]
+        });
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        response.bytes().await.unwrap();
+        assert_eq!(observed.lock().unwrap()[0]["input"], request["input"]);
+        assert_eq!(observed.lock().unwrap()[0]["tools"], request["tools"]);
+        let events = events.lock().unwrap();
+        let event = events.last().unwrap();
+        assert!(event.success);
+        assert_eq!(event.input_tokens, Some(164_283));
+        assert_eq!(event.cached_input_tokens, Some(138_971));
+        assert_eq!(event.output_tokens, Some(515));
+        assert!(event.tool_use.client_context.is_none());
+        assert!(event.tool_use.upstream_context.is_none());
+        assert!(event.tool_use.upstream_tool_call_count.is_none());
+        let routing = event.routing.as_ref().unwrap();
+        assert!(routing.cache_context.is_none());
+        assert!(routing.transport.is_none());
+    }
+}
+
+#[tokio::test]
+async fn native_responses_preserves_cache_prefix_and_does_not_duplicate_history() {
+    for stream in [false, true] {
+        let observed = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let upstream = spawn(
+            Router::new()
+                .fallback(post(capture_native_cache_request))
+                .with_state(observed.clone()),
+        )
+        .await;
+        let (gateway, events) = spawn_gateway_with_options(
+            &upstream.base_url,
+            vec!["gpt-cache-test"],
+            GatewayRuntimeOptions {
+                diagnostics_enabled: || true,
+                ..Default::default()
+            },
+        )
+        .await;
 
         let tools = (0..90)
             .map(|index| {
@@ -239,7 +290,15 @@ async fn native_responses_reports_client_prefix_changes_without_blame_on_relay()
             .with_state(observed.clone()),
     )
     .await;
-    let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-cache-test"]).await;
+    let (gateway, events) = spawn_gateway_with_options(
+        &upstream.base_url,
+        vec!["gpt-cache-test"],
+        GatewayRuntimeOptions {
+            diagnostics_enabled: || true,
+            ..Default::default()
+        },
+    )
+    .await;
     let first = json!({
         "model": "gpt-cache-test",
         "instructions": "Synthetic stable instructions.",
@@ -310,7 +369,15 @@ async fn native_compaction_does_not_replace_conversation_comparison_baseline() {
             .with_state(observed),
     )
     .await;
-    let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-cache-test"]).await;
+    let (gateway, events) = spawn_gateway_with_options(
+        &upstream.base_url,
+        vec!["gpt-cache-test"],
+        GatewayRuntimeOptions {
+            diagnostics_enabled: || true,
+            ..Default::default()
+        },
+    )
+    .await;
     let first = json!({
         "model": "gpt-cache-test",
         "input": [{"role": "user", "content": "Synthetic first turn."}]
@@ -412,7 +479,15 @@ async fn native_responses_websocket_http_fallback_preserves_cache_controls_and_c
             .with_state(observed.clone()),
     )
     .await;
-    let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-cache-test"]).await;
+    let (gateway, events) = spawn_gateway_with_options(
+        &upstream.base_url,
+        vec!["gpt-cache-test"],
+        GatewayRuntimeOptions {
+            diagnostics_enabled: || true,
+            ..Default::default()
+        },
+    )
+    .await;
     let first = json!({
         "model": "gpt-cache-test",
         "stream": true,

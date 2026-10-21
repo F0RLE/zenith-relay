@@ -16,7 +16,43 @@ fn tool_prompt_is_compact_but_keeps_the_original_schema_for_validation() {
     assert!(instructions.contains(". Parameters: "));
     assert!(instructions.contains("\"path\":string @"));
     assert!(instructions.contains("\"minLength\":1"));
+    assert_eq!(
+        instructions
+            .matches("\"additionalProperties\":false")
+            .count(),
+        2
+    );
+    assert!(instructions.contains("not options borrowed from another tool or a historical call"));
     assert_eq!(request, original);
+}
+
+#[test]
+fn reordered_schema_keywords_keep_compact_and_discovery_prompts_identical() {
+    let first = json!({
+        "type":"object","properties":{
+            "limit":{"type":"integer","description":"Synthetic limit","minimum":1,"maximum":10}
+        },"required":["limit"],"description":"Synthetic tool","additionalProperties":false
+    });
+    let reordered = json!({
+        "description":"Synthetic tool","additionalProperties":false,"required":["limit"],
+        "properties":{
+            "limit":{"description":"Synthetic limit","maximum":10,"minimum":1,"type":"integer"}
+        },"type":"object"
+    });
+    for mode in ["compact", "discovery"] {
+        let mut request = json!({
+            "model":"gpt-test","relay_bps_tool_catalog":mode,
+            "input":[
+                {"role":"user","content":"Synthetic request"},
+                {"type":"function_call","name":"lookup","call_id":"synthetic_call","arguments":"{\"limit\":1}"},
+                {"type":"function_call_output","call_id":"synthetic_call","output":"Synthetic result"}
+            ],
+            "tools":[{"type":"function","name":"lookup","parameters":first}]
+        });
+        let prepared = prepare_request(&request).unwrap();
+        request["tools"][0]["parameters"] = reordered.clone();
+        assert_eq!(prepare_request(&request).unwrap(), prepared, "mode={mode}");
+    }
 }
 
 #[test]
@@ -178,6 +214,11 @@ fn turn_tool_controls_preserve_the_prepared_history_prefix() {
         .remove("parallel_tool_calls");
     let baseline = prepare_request(&request).unwrap();
     let prefix = baseline["input"].as_array().unwrap();
+    let instructions = prefix[0]["content"][0]["text"].as_str().unwrap();
+    assert!(instructions
+        .contains("related read-only shell inspections in one declared shell-tool invocation"));
+    assert!(instructions.contains("preserve each command's output and failure"));
+    assert!(instructions.contains("Do not batch across approval boundaries"));
     for choice in ["auto", "required"] {
         for parallel in [false, true] {
             let mut changed = request.clone();
@@ -202,6 +243,95 @@ fn turn_tool_controls_preserve_the_prepared_history_prefix() {
             assert_eq!(policy.contains("at most one client tool"), !parallel);
             assert!(prepared.get("parallel_tool_calls").is_none());
         }
+    }
+}
+
+#[test]
+fn text_only_prefix_keeps_history_but_never_restores_callable_tools() {
+    let mut request = request_with_tool();
+    request["instructions"] = json!("Preserve synthetic project constraints.");
+    request["reasoning"] = json!({"effort":"xhigh"});
+    request["prompt_cache_key"] = json!("synthetic-session");
+    request["input"] = json!([
+        {"role":"developer","content":"Synthetic project rules"},
+        {"role":"user","content":"Inspect synthetic data"},
+        {"type":"function_call","call_id":"call_synthetic","name":"exec_command","arguments":"{\"cmd\":\"echo synthetic\"}"},
+        {"type":"function_call_output","call_id":"call_synthetic","output":"synthetic"}
+    ]);
+    let regular = prepare_request(&request).unwrap();
+    let prefix = regular["input"][1]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    request.as_object_mut().unwrap().remove("tools");
+    let mut summary = prepare_request(&request).unwrap();
+    super::super::prepare::restore_text_only_prefix(&request, &mut summary, prefix);
+    let items = summary["input"].as_array().unwrap();
+    assert_eq!(
+        &items[..items.len() - 1],
+        regular["input"].as_array().unwrap()
+    );
+    assert!(items.last().unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("No client tools are available"));
+    assert_eq!(summary["reasoning_effort"], regular["reasoning_effort"]);
+    assert_eq!(summary["metadata"], regular["metadata"]);
+    assert_eq!(summary["prompt_cache_key"], regular["prompt_cache_key"]);
+    assert!(summary.get("tools").is_none());
+    let call = json!({"status":"completed","output":[{"type":"function_call","name":"run_officejs","call_id":"call_not_allowed","arguments":json!({"references":["exec_command"],"code":"{\"cmd\":\"echo synthetic\"}"}).to_string()}]});
+    assert!(translate_response(&serde_json::to_vec(&call).unwrap(), &request).is_err());
+}
+
+#[test]
+fn grouped_shell_inspections_keep_one_call_and_replay_without_rewriting_commands() {
+    let arguments = json!({"cmd":"Get-Location\nGet-ChildItem -LiteralPath . -Name"});
+    let code = super::super::codec::encode_function_arguments(&arguments).unwrap();
+    let native = json!({"status":"completed","output":[{
+        "type":"function_call", "name":"run_officejs", "call_id":"call_inspections",
+        "arguments":json!({"references":["exec_command"],"code":code}).to_string()
+    }]});
+    for parallel in [None, Some(false), Some(true)] {
+        let mut request = request_with_tool();
+        if let Some(parallel) = parallel {
+            request["parallel_tool_calls"] = json!(parallel);
+        }
+        let translated: Value = serde_json::from_slice(
+            &translate_response(&serde_json::to_vec(&native).unwrap(), &request).unwrap(),
+        )
+        .unwrap();
+        let calls = translated["output"].as_array().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["call_id"], "call_inspections");
+        assert_eq!(calls[0]["name"], "exec_command");
+        assert_eq!(
+            serde_json::from_str::<Value>(calls[0]["arguments"].as_str().unwrap()).unwrap(),
+            arguments
+        );
+        let result = json!({
+            "type":"function_call_output", "call_id":"call_inspections",
+            "output":"Synthetic location output\nSynthetic directory listing"
+        });
+        request["input"] = json!([
+            {"role":"user","content":"Inspect the repo"}, calls[0], result,
+            {"role":"user","content":"Continue"}
+        ]);
+        let prepared = prepare_request(&request).unwrap();
+        let replayed = prepared["input"].as_array().unwrap();
+        let call = replayed
+            .iter()
+            .find(|item| item["type"] == "function_call")
+            .unwrap();
+        assert_eq!(call["call_id"], "call_inspections");
+        let envelope: Value = serde_json::from_str(call["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(envelope["references"], json!(["exec_command"]));
+        assert_eq!(envelope["code"], code);
+        let output = replayed
+            .iter()
+            .find(|item| item["type"] == "function_call_output")
+            .unwrap();
+        assert_eq!(output["call_id"], result["call_id"]);
+        assert_eq!(output["output"], result["output"]);
     }
 }
 

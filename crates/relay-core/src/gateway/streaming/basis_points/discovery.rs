@@ -2,11 +2,11 @@
 //! Text before a withheld tool streams immediately; executable calls never do.
 
 use super::*;
-use crate::gateway::errors::AttemptFailure;
+use crate::gateway::errors::{AttemptFailure, RateLimitBodyHint};
 use crate::gateway::execution::basis_points::discovery::execution::{
     dispatch_continuation, record_lookup, StreamingDiscovery,
 };
-use crate::gateway::response::{completed_upstream_response, populate_tokens};
+use crate::gateway::response::{completed_upstream_response, emit_usage, populate_tokens};
 use crate::gateway::streaming::completion::StreamCompletionSettlement;
 use crate::{AdapterError, ToolUseDiagnostics, UsageEvent};
 use axum::http::{HeaderMap, StatusCode};
@@ -16,6 +16,8 @@ use std::time::Instant;
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 pub(in crate::gateway::streaming) struct DiscoveryProgress {
+    pub upstream_error: Option<crate::usage::UpstreamErrorDetails>,
+    pub cooldown_hint: RateLimitBodyHint,
     pub budget: crate::scheduler::rotation::SharedRequestBudget,
     pub tool_use: ToolUseDiagnostics,
     pub headers: Option<HeaderMap>,
@@ -41,6 +43,7 @@ struct DiscoveryStream {
     tool_use: ToolUseDiagnostics,
     started: Instant,
     pending: Vec<u8>,
+    tools: NativeTools,
     raw: Vec<u8>,
     output: VecDeque<Bytes>,
     response_id: Option<String>,
@@ -87,70 +90,88 @@ impl DiscoveryStream {
         if !self.sse {
             return Ok(());
         }
-        self.pending.extend_from_slice(&bytes);
-        while let Some(frame) = take_sse_event(&mut self.pending) {
-            let data = sse_event_data(&frame);
-            if data.is_empty() {
-                continue;
-            }
-            let mut event: Value = serde_json::from_slice(&data).map_err(|_| {
-                AdapterError::upstream_stream_invalid().with_parameter("stream.event.json")
-            })?;
-            let kind = event["type"]
-                .as_str()
-                .or_else(|| {
-                    crate::protocol::sse_lines(&frame)
-                        .find_map(|line| line.strip_prefix(b"event:"))
-                        .and_then(|kind| std::str::from_utf8(kind.trim_ascii()).ok())
-                })
-                .ok_or_else(AdapterError::upstream_stream_invalid)?
-                .to_owned();
-            event["type"] = json!(kind);
-            if matches!(
-                kind.as_str(),
-                "response.completed"
-                    | "response.done"
-                    | "response.incomplete"
-                    | "response.failed"
-                    | "response.cancelled"
-                    | "response.canceled"
-                    | "error"
-            ) || event["error"].is_object()
-            {
-                self.round_terminal = true;
-                self.pending.clear();
-                break;
-            }
-            if matches!(kind.as_str(), "response.created" | "response.in_progress") {
-                if self.offset == 0 && self.response_id.is_none() {
-                    self.response_id = event["response"]["id"].as_str().map(str::to_owned);
-                    let mut event = event;
-                    event["type"] = json!(kind);
-                    event["response"]["output"] = json!([]);
-                    self.emit(event);
+        let mut pending = std::mem::take(&mut self.pending);
+        let mut result = Ok(());
+        crate::protocol::sse::consume_frames(
+            &mut pending,
+            &bytes,
+            self,
+            |state| state.round_terminal,
+            |state, frame| {
+                if let Err(error) = state.ingest_frame(frame) {
+                    result = Err(error);
+                    state.round_terminal = true;
                 }
-                continue;
+            },
+        );
+        self.pending = pending;
+        result
+    }
+
+    fn ingest_frame(&mut self, frame: &[u8]) -> Result<(), AdapterError> {
+        let data = sse_event_data(frame);
+        if data.is_empty() {
+            return Ok(());
+        }
+        let mut event: Value = serde_json::from_slice(&data).map_err(|_| {
+            AdapterError::upstream_stream_invalid().with_parameter("stream.event.json")
+        })?;
+        if event.get("type").is_none() && event["error"].is_object() {
+            event["type"] = json!("error");
+        }
+        let kind = event["type"]
+            .as_str()
+            .or_else(|| {
+                crate::protocol::sse_lines(frame)
+                    .find_map(|line| line.strip_prefix(b"event:"))
+                    .and_then(|kind| std::str::from_utf8(kind.trim_ascii()).ok())
+            })
+            .ok_or_else(AdapterError::upstream_stream_invalid)?
+            .to_owned();
+        event["type"] = json!(kind);
+        if matches!(
+            kind.as_str(),
+            "response.completed"
+                | "response.done"
+                | "response.incomplete"
+                | "response.failed"
+                | "response.cancelled"
+                | "response.canceled"
+                | "error"
+        ) || event["error"].is_object()
+        {
+            self.round_terminal = true;
+            return Ok(());
+        }
+        if matches!(kind.as_str(), "response.created" | "response.in_progress") {
+            if self.offset == 0 && self.response_id.is_none() {
+                self.response_id = event["response"]["id"].as_str().map(str::to_owned);
+                let mut event = event;
+                event["type"] = json!(kind);
+                event["response"]["output"] = json!([]);
+                self.emit(event);
             }
-            // Removing a hidden lookup can shift later output indices. Do not
-            // publish those indices speculatively: flush the suffix at terminal.
-            if matches!(
-                event["item"]["type"].as_str(),
-                Some("function_call" | "custom_tool_call")
-            ) || kind.starts_with("response.function_call_arguments.")
-                || kind.starts_with("response.custom_tool_call_input.")
-            {
-                self.blocked = true;
-            }
-            if !self.blocked {
-                if let Some(index) = event["output_index"].as_u64() {
-                    let index = usize::try_from(index)
-                        .map_err(|_| AdapterError::upstream_stream_invalid())?;
-                    if index >= MAX_TOOLS {
-                        return Err(AdapterError::upstream_stream_invalid());
-                    }
-                    self.seen.insert(index);
-                    self.emit(event);
+            return Ok(());
+        }
+        // Removing a hidden lookup can shift later output indices. Do not
+        // publish those indices speculatively: flush the suffix at terminal.
+        if self
+            .tools
+            .observe(&event)
+            .map_err(|parameter| AdapterError::upstream_stream_invalid().with_parameter(parameter))?
+            .is_some()
+        {
+            self.blocked = true;
+        }
+        if !self.blocked {
+            if let Some(index) = event["output_index"].as_u64() {
+                let index =
+                    usize::try_from(index).map_err(|_| AdapterError::upstream_stream_invalid())?;
+                if index >= MAX_TOOLS {
+                    return Err(AdapterError::upstream_stream_invalid());
                 }
+                self.seen.insert(index);
+                self.emit(event);
             }
         }
         Ok(())
@@ -165,7 +186,12 @@ impl DiscoveryStream {
         self.update_progress();
         self.output.push_back(match error {
             DiscoveryFailure::Adapter(error) => adapter_failure(error),
-            DiscoveryFailure::Upstream(error) => failure(error.category, None),
+            DiscoveryFailure::Upstream(error) => {
+                crate::poison::mutex(&self.progress).cooldown_hint = error.cooldown_hint;
+                let mut event = failure_event(error.category, None);
+                event["message"] = json!(error.message);
+                failure_frame(event)
+            }
         });
         self.terminal = true;
     }
@@ -185,16 +211,36 @@ impl DiscoveryStream {
             .block_degraded_routes_enabled()
             .then_some(self.settlement.route.source_model.as_str());
         if !self.status.is_success() {
+            crate::poison::mutex(&self.progress).upstream_error =
+                Some(crate::usage::UpstreamErrorDetails::from_response(
+                    Some(self.status.as_u16()),
+                    &self.raw,
+                    &self.headers,
+                ));
             return Err(DiscoveryFailure::Upstream(
                 AttemptFailure::status_with_body(self.status, Some(&self.raw))
                     .with_retry_headers(&self.headers),
             ));
         }
-        let bytes = completed_upstream_response(&self.raw, true, expected)
-            .map_err(|failure| DiscoveryFailure::Upstream(failure.failure))?;
+        let bytes = completed_upstream_response(&self.raw, true, expected).map_err(|failure| {
+            crate::poison::mutex(&self.progress).upstream_error =
+                failure.upstream_error.map(|mut details| {
+                    details.http_status = Some(self.status.as_u16());
+                    details
+                });
+            DiscoveryFailure::Upstream(failure.failure)
+        })?;
         let mut terminal: Value = serde_json::from_slice(&bytes)
             .map_err(|_| AdapterError::upstream_response_invalid())?;
         populate_tokens(&mut event, &self.raw);
+        if terminal["status"] == "completed" {
+            let items = terminal["output"]
+                .as_array()
+                .ok_or_else(AdapterError::upstream_response_invalid)?;
+            self.tools.complete(items).map_err(|parameter| {
+                AdapterError::upstream_stream_invalid().with_parameter(parameter)
+            })?;
+        }
         let next = self
             .discovery
             .session
@@ -205,6 +251,11 @@ impl DiscoveryStream {
         }
         if !next {
             self.discovery.session.finish(&mut terminal);
+            self.discovery.session.remember(
+                &self.settlement.runtime,
+                &self.event.local_key_id,
+                &terminal,
+            );
             if let Some(id) = &self.response_id {
                 terminal["id"] = json!(id);
             }
@@ -234,23 +285,23 @@ impl DiscoveryStream {
         let seen = std::mem::take(&mut self.seen);
         emit_unseen_output(&terminal, &seen, |event| self.emit(event));
         self.offset += count;
-        if !self.discovery.budget.can_dispatch() {
-            return Err(AdapterError::upstream_response_invalid()
-                .with_parameter("output.relay.catalog.budget")
-                .into());
-        }
         record_lookup(
             &self.settlement.runtime,
             &self.discovery.session,
             &mut self.tool_use,
             &mut event,
         );
+        if !self.discovery.budget.can_dispatch() {
+            return Err(AdapterError::upstream_response_invalid()
+                .with_parameter("output.relay.catalog.budget")
+                .into());
+        }
+        emit_usage(&self.settlement.runtime, event);
         self.discovery.budget.retain_input_bytes(
             crate::gateway::request_body::retained_request_bytes(&self.discovery.upstream),
         );
-        self.tool_use.upstream_context = Some(crate::usage::RequestContextSize::capture(
-            &self.discovery.upstream,
-        ));
+        self.tool_use
+            .capture_upstream_context(&self.discovery.upstream);
         self.update_progress();
         if let Some(capture) = &self.settlement.upstream_usage {
             crate::poison::mutex(capture).reset_generation();
@@ -321,6 +372,7 @@ pub(in crate::gateway::streaming) fn translate_stream(
         event,
         started,
         pending: Vec::new(),
+        tools: NativeTools::default(),
         raw: Vec::new(),
         output: VecDeque::new(),
         response_id: None,

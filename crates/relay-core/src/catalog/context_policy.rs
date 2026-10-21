@@ -160,15 +160,6 @@ pub fn normalize_model_context_policies(
     Ok(normalized)
 }
 
-/// A model has a provider-published long window.
-pub fn entry_has_long_window(entry: &Value) -> bool {
-    let windows = ModelContextWindows::from_entry(entry);
-    matches!(
-        (windows.default_tokens, windows.maximum_tokens),
-        (Some(default), Some(maximum)) if maximum > default
-    )
-}
-
 /// Context windows apply only to models that produce text output.
 ///
 /// Multimodal models that also return text remain eligible. Unknown models

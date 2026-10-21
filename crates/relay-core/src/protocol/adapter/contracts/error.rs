@@ -19,9 +19,18 @@ struct JsonParseDiagnostic {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SchemaDiagnostic {
+    phase: &'static str,
+    keyword: &'static str,
+    schema_depth: usize,
+    instance_depth: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AdapterDiagnostic {
     Json(JsonParseDiagnostic),
     Shape(ShapeDiagnostic),
+    Schema(SchemaDiagnostic),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -74,6 +83,22 @@ impl AdapterError {
 
     pub(crate) const fn with_diagnostics_from(mut self, cause: Self) -> Self {
         self.diagnostic = cause.diagnostic;
+        self
+    }
+
+    pub(crate) const fn with_schema_diagnostic(
+        mut self,
+        phase: &'static str,
+        keyword: &'static str,
+        schema_depth: usize,
+        instance_depth: usize,
+    ) -> Self {
+        self.diagnostic = Some(AdapterDiagnostic::Schema(SchemaDiagnostic {
+            phase,
+            keyword,
+            schema_depth,
+            instance_depth,
+        }));
         self
     }
 
@@ -209,6 +234,14 @@ impl AdapterError {
         }
     }
 
+    pub(crate) const fn tool_schema_invalid() -> Self {
+        Self {
+            message: "function tool parameters contain an invalid or unsupported JSON Schema",
+            parameter: Some("tools.parameters"),
+            ..Self::invalid_request()
+        }
+    }
+
     pub(crate) const fn upstream_tool_arguments_json_invalid() -> Self {
         Self {
             code: error_codes::ADAPTER_UPSTREAM_RESPONSE_INVALID,
@@ -254,6 +287,24 @@ impl AdapterError {
 impl fmt::Display for AdapterError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.message)?;
+        if let Some(parameter) = self
+            .parameter
+            .filter(|parameter| parameter.starts_with("output.run_officejs"))
+        {
+            let stage = if parameter.starts_with("output.run_officejs.args") {
+                "tool_arguments"
+            } else if parameter == "output.run_officejs.tool"
+                || parameter == "output.run_officejs.call_id"
+            {
+                "tool_identity"
+            } else {
+                "tool_envelope"
+            };
+            write!(
+                formatter,
+                " (failure_stage={stage}, repair_skipped=executable_tool)"
+            )?;
+        }
         if let Some(AdapterDiagnostic::Json(diagnostic)) = self.diagnostic {
             write!(formatter, " (json_reason={}, payload_shape={}, parse_line={}, parse_column={}, payload_bytes={})",
                 diagnostic.reason, diagnostic.shape, diagnostic.line, diagnostic.column, diagnostic.bytes)?;
@@ -266,6 +317,16 @@ impl fmt::Display for AdapterError {
                 diagnostic.fields,
                 diagnostic.rejected_field,
                 diagnostic.rejected_shape
+            )?;
+        }
+        if let Some(AdapterDiagnostic::Schema(diagnostic)) = self.diagnostic {
+            write!(
+                formatter,
+                " (schema_phase={}, schema_keyword={}, schema_depth={}, instance_depth={})",
+                diagnostic.phase,
+                diagnostic.keyword,
+                diagnostic.schema_depth,
+                diagnostic.instance_depth
             )?;
         }
         Ok(())

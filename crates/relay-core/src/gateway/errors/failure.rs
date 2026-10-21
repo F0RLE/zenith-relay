@@ -119,6 +119,13 @@ impl AttemptFailure {
             AuthorizedRequestError::ProgressTimeout => {
                 Self::stream(error_codes::STREAM_IDLE_TIMEOUT)
             }
+            AuthorizedRequestError::HeadersTimeout => Self {
+                execution: ExecutionObservation::unknown(),
+                status: StatusCode::GATEWAY_TIMEOUT,
+                category: error_codes::HTTP_HEADERS_TIMEOUT,
+                message: "The configured HTTP response-header deadline expired; execution may have started, so the request was not repeated",
+                cooldown_hint: Default::default(),
+            },
         }
     }
 
@@ -186,7 +193,15 @@ impl AttemptFailure {
     pub(crate) fn status_with_body(status: StatusCode, response_body: Option<&[u8]>) -> Self {
         let classification = classify_upstream_error(status, response_body);
         Self {
-            execution: rejection_execution(status, classification.category),
+            execution: if response_body
+                .and_then(|body| serde_json::from_slice::<Value>(body).ok())
+                .is_some_and(|payload| {
+                    crate::gateway::streaming::has_generation_evidence(&payload, None)
+                }) {
+                ExecutionObservation::accepted()
+            } else {
+                rejection_execution(status, classification.category)
+            },
             status: canonical_upstream_status(status, classification.category),
             category: classification.category,
             message: classification.message,

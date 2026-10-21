@@ -170,6 +170,7 @@ enum WebSocketBehavior {
     #[default]
     Success,
     GatedSuccess(Arc<Barrier>),
+    StopReadingAfterSuccess(Arc<Notify>),
     Events(Arc<Vec<Value>>),
     Sequence(Arc<Mutex<VecDeque<Vec<Value>>>>),
     Hold(Arc<Notify>),
@@ -275,7 +276,6 @@ fn account(
         chatgpt_account_id: chatgpt_account_id.to_string(),
         chatgpt_user_id: None,
         responses_url: format!("{}/v1/responses", server.base_url),
-        basis_points_enabled: false,
         basis_points_headers: None,
         models: vec![MODEL.to_string()],
         enabled: true,
@@ -915,6 +915,7 @@ async fn upstream_websocket(
             let events = match &state.behavior {
                 WebSocketBehavior::Success
                 | WebSocketBehavior::GatedSuccess(_)
+                | WebSocketBehavior::StopReadingAfterSuccess(_)
                 | WebSocketBehavior::UnauthorizedOnce(_) => vec![
                     json!({"type": "response.output_text.delta", "delta": "hello"}),
                     json!({
@@ -998,6 +999,10 @@ async fn upstream_websocket(
                 {
                     return;
                 }
+            }
+            if let WebSocketBehavior::StopReadingAfterSuccess(release) = &state.behavior {
+                release.notified().await;
+                return;
             }
             if setup_only {
                 tokio::time::sleep(Duration::from_millis(10)).await;

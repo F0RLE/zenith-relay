@@ -10,7 +10,7 @@ impl super::ClientRequest {
         &mut self,
         runtime: &GatewayRuntime,
         local_key_id: &str,
-    ) {
+    ) -> bool {
         if continuation::prepare_response_owner_change(
             runtime,
             local_key_id,
@@ -24,6 +24,9 @@ impl super::ClientRequest {
                 &mut self.requires_affinity_owner,
                 &mut self.has_unpaired_tool_output,
             );
+            true
+        } else {
+            false
         }
     }
 

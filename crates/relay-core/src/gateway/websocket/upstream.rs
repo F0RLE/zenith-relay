@@ -77,6 +77,8 @@ pub(super) struct Connected {
     pub(super) initial_messages: Vec<UpstreamMessage>,
     pub(super) route: ExecutorRoute,
     pub(super) request: ClientRequest,
+    pub(super) reasoning_effort: crate::usage::ReasoningEffortDiagnostics,
+    pub(super) tool_use: crate::ToolUseDiagnostics,
     pub(super) lease: CandidateLease,
     pub(super) attempt: u16,
     pub(super) started: Instant,

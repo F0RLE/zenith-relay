@@ -53,10 +53,10 @@ use bridge::bridge_adapter_stream;
 pub(super) use replay::NativeReplayCapture;
 
 pub(super) use events::{
-    has_output_delta, has_semantic_output, is_compaction_payload, is_empty_responses_terminal,
-    is_known_non_output_event, is_responses_output_delta_type, parse_sse_event,
-    preserved_stream_error, rewrite_bridge_failure, served_model_is_rejected, TerminalEvent,
-    TerminalOutcome,
+    has_generation_evidence, has_output_delta, has_semantic_output, is_compaction_payload,
+    is_empty_responses_terminal, is_known_non_output_event, is_responses_output_delta_type,
+    parse_sse_event, preserved_stream_error, rewrite_bridge_failure, served_model_is_rejected,
+    TerminalEvent, TerminalOutcome,
 };
 
 mod bootstrap;
@@ -184,6 +184,8 @@ impl StreamExecution {
         let completion_local_key = local_key_id.clone();
         let discovery_progress = discovery.as_ref().map(|discovery| {
             Arc::new(Mutex::new(basis_points::discovery::DiscoveryProgress {
+                upstream_error: None,
+                cooldown_hint: Default::default(),
                 budget: discovery.budget.clone(),
                 tool_use: initial_event.tool_use.clone(),
                 headers: None,

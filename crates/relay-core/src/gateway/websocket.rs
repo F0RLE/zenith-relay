@@ -12,8 +12,8 @@ use super::request::{
 };
 use super::response::{apply_usage, emit_usage, route_error_origin, usage_event, UsageAttempt};
 use super::streaming::{
-    has_output_delta, has_semantic_output, is_compaction_payload, is_empty_responses_terminal,
-    is_known_non_output_event, parse_sse_event, NativeReplayCapture,
+    has_generation_evidence, has_output_delta, has_semantic_output, is_compaction_payload,
+    is_empty_responses_terminal, is_known_non_output_event, parse_sse_event, NativeReplayCapture,
 };
 use super::turn_state::request_scope;
 use crate::error_codes;
@@ -27,7 +27,7 @@ use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpg
 use axum::extract::State;
 use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use reqwest_websocket::{
     CloseCode as UpstreamCloseCode, Message as UpstreamMessage, Upgrade,
     WebSocket as UpstreamWebSocket,
@@ -41,6 +41,7 @@ mod bridge;
 mod events;
 mod failure;
 mod fallback;
+mod io;
 mod request;
 mod upstream;
 
@@ -60,7 +61,8 @@ use events::{
     terminal_failure_status, EventTerminal, EventTerminalOutcome,
 };
 use failure::{send_gateway_error, GatewayFailure};
-use request::ClientRequest;
+use io::send_message;
+use request::{ClientRequest, PreparedPayload};
 
 const MAX_WEBSOCKET_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_WEBSOCKET_ERROR_BYTES: usize = 1024 * 1024;
@@ -129,16 +131,29 @@ async fn handle_connection(
             if let Some(stream_id) = client_request.stream_id.as_deref() {
                 blocked_response_payload["stream_id"] = json!(stream_id);
             }
-            let _ = downstream
-                .send(Message::Text(blocked_response_payload.to_string().into()))
-                .await;
-            let _ = downstream.send(Message::Close(None)).await;
+            if send_message(
+                &mut downstream,
+                Message::Text(blocked_response_payload.to_string().into()),
+            )
+            .await
+            .is_ok()
+            {
+                let _ = send_message(&mut downstream, Message::Close(None)).await;
+            }
             return;
         }
     }
     let fallback_request = client_request.clone();
     if !runtime.codex_websockets_enabled() {
-        bridge_http_fallback(downstream, runtime, key, headers, fallback_request).await;
+        bridge_http_fallback(
+            downstream,
+            runtime,
+            key,
+            headers,
+            fallback_request,
+            crate::usage::TransportFallbackReason::WebsocketDisabled,
+        )
+        .await;
         return;
     }
     let connected = match connect_upstream_while_client_connected(
@@ -154,7 +169,15 @@ async fn handle_connection(
     {
         Ok(connected) => connected,
         Err(failure) if failure.category == error_codes::UPSTREAM_WEBSOCKET_UNSUPPORTED => {
-            bridge_http_fallback(downstream, runtime, key, headers, fallback_request).await;
+            bridge_http_fallback(
+                downstream,
+                runtime,
+                key,
+                headers,
+                fallback_request,
+                crate::usage::TransportFallbackReason::WebsocketUnavailable,
+            )
+            .await;
             return;
         }
         Err(failure) => {
@@ -206,7 +229,10 @@ async fn read_initial_request(
                     .map_err(|failure| (failure, ClientRequest::error_stream_id(&bytes)));
             }
             Message::Ping(payload) => {
-                if downstream.send(Message::Pong(payload)).await.is_err() {
+                if send_message(downstream, Message::Pong(payload))
+                    .await
+                    .is_err()
+                {
                     return Err((GatewayFailure::client_closed(), None));
                 }
             }

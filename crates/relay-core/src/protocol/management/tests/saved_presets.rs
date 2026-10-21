@@ -26,14 +26,13 @@ fn legacy_preset_without_pricing_identity_round_trips_without_new_fields() {
         routing: PresetRoutingPolicy {
             tool_policy: None,
             pool_routing: None,
-            basis_points_enabled: false,
             max_retry_candidates: 3,
             default_service_tier: DefaultServiceTier::Standard,
             image_base_model: None,
         },
         quota: PresetQuotaPolicy {
             request_timeout_seconds: 30,
-            account_proxy_required: false,
+            account_proxy_required: true,
             common_proxy_id: None,
         },
         hidden_models: Vec::new(),
@@ -59,6 +58,7 @@ fn legacy_preset_without_pricing_identity_round_trips_without_new_fields() {
     source.insert("protocolMode".into(), serde_json::json!("manual"));
 
     let decoded: ConfigurationPreset = serde_json::from_value(legacy).unwrap();
+    assert!(decoded.settings.quota.account_proxy_required);
     assert_eq!(decoded.settings.sources[0].pricing_provider, None);
     assert_eq!(decoded.settings.sources[0].official_provider_family, None);
     assert_eq!(
@@ -71,6 +71,7 @@ fn legacy_preset_without_pricing_identity_round_trips_without_new_fields() {
     assert_eq!(decoded.settings.sources, settings.sources);
 
     let encoded = serde_json::to_value(decoded).unwrap();
+    assert_eq!(encoded["settings"]["quota"]["accountProxyRequired"], true);
     let source = encoded["settings"]["sources"][0].as_object().unwrap();
     assert!(!source.contains_key("pricingProvider"));
     assert!(!source.contains_key("officialProviderFamily"));
@@ -194,12 +195,13 @@ fn resolved_configuration_preset_rejects_duplicate_local_members() {
 #[test]
 fn legacy_preset_routing_fields_are_read_but_not_exported() {
     let policy: PresetRoutingPolicy = serde_json::from_str(
-            r#"{"maxRetryCandidates":3,"routingStrategy":"adaptive","subscriptionPlanOrder":["business"],"cooldownAfterFailures":7,"keepLastCandidateAvailable":false,"defaultServiceTier":"standard","imageBaseModel":null}"#,
+            r#"{"basisPointsEnabled":true,"maxRetryCandidates":3,"routingStrategy":"adaptive","subscriptionPlanOrder":["business"],"cooldownAfterFailures":7,"keepLastCandidateAvailable":false,"defaultServiceTier":"standard","imageBaseModel":null}"#,
         )
         .unwrap();
     assert_eq!(policy.max_retry_candidates, 3);
     let saved = serde_json::to_value(policy).unwrap();
     for legacy_field in [
+        "basisPointsEnabled",
         "cooldownAfterFailures",
         "keepLastCandidateAvailable",
         "routingStrategy",

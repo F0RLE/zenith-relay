@@ -60,9 +60,8 @@ impl HttpSendError {
     }
 }
 
-/// One gate per provider-facing process. Desktop and Relay Server run in
-/// separate processes; every management path, including login/import paths
-/// outside the periodic scheduler, joins the same budget within its process.
+/// One gate per provider-facing process. Every management path, including
+/// login/import paths outside the periodic scheduler, joins the same budget.
 pub fn management_http_gate() -> Arc<ManagementHttpGate> {
     static GATE: OnceLock<Arc<ManagementHttpGate>> = OnceLock::new();
     GATE.get_or_init(|| ManagementHttpGate::new(HttpLimits::default()).expect("valid HTTP limits"))

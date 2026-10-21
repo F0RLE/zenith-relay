@@ -78,11 +78,16 @@ pub(super) fn retryable_recovery_wait(
 
 /// Basis Points returns credential and permission refusals without replaying
 /// the generation. Token recovery happens before a subsequent client request.
+/// SIWC permits quota fallback only; callers still require proven non-execution.
 pub(super) fn route_forbids_fallback(
     route: &ExecutorRoute,
     status: StatusCode,
     category: &str,
 ) -> bool {
+    if route.account_transport == crate::runtime::AccountTransport::Siwc {
+        return status != StatusCode::TOO_MANY_REQUESTS
+            || category != error_codes::UPSTREAM_QUOTA_EXHAUSTED;
+    }
     route.account_transport == crate::runtime::AccountTransport::ExcelBasisPoints
         && (matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
             || category == error_codes::UPSTREAM_MODEL_UNAVAILABLE)

@@ -17,7 +17,7 @@ use crate::runtime::{
 };
 use crate::scheduler::rotation::{ExecutionCertainty, RotationOperation, SharedRequestBudget};
 use crate::usage::UsageEvent;
-use crate::usage::{ReasoningEffortDiagnostics, ToolUseDiagnostics};
+use crate::usage::{ReasoningEffortDiagnostics, RequestPreparationDiagnostics, ToolUseDiagnostics};
 use crate::{ErrorOrigin, GatewayRuntime, WireApi};
 use axum::body::Body;
 use axum::http::header::{ACCEPT, CONTENT_TYPE};
@@ -46,6 +46,8 @@ pub(super) struct DispatchedAccountAttempt {
 }
 
 pub(super) struct AccountDispatchInput<'a> {
+    pub(super) preparation_started: Option<Instant>,
+    pub(super) preparation: RequestPreparationDiagnostics,
     pub(super) runtime: &'a GatewayRuntime,
     pub(super) key: &'a AuthenticatedKey,
     pub(super) lease: &'a CandidateLease,
@@ -78,6 +80,8 @@ pub(super) async fn dispatch_account_attempt(
     account_attempt_input: AccountDispatchInput<'_>,
 ) -> AccountDispatch {
     let AccountDispatchInput {
+        preparation_started,
+        mut preparation,
         runtime,
         key,
         lease,
@@ -103,29 +107,44 @@ pub(super) async fn dispatch_account_attempt(
         last_failure,
         last_failure_origin,
     } = account_attempt_input;
+    let catalog_started = preparation_started.map(|_| Instant::now());
+    preparation.body_ms = preparation_started
+        .zip(catalog_started)
+        .map(|(start, end)| end.duration_since(start).as_millis() as u64);
+    let mut discovery_session = None;
     let request_body = if basis_points_route {
-        upstream_body = match super::super::basis_points::discovery::execution::prepare_dispatch(
-            original_request,
-            &upstream_body,
-            budget,
-            &mut tool_use,
-        ) {
-            Ok(body) => body,
-            Err(error) => {
-                return AccountDispatch::Respond(
-                    super::super::request::adapter_error_response_for_origin(
-                        error,
-                        selected_error_origin,
-                        Some(request_id),
-                    ),
-                )
-            }
-        };
-        tool_use.upstream_context = Some(crate::usage::RequestContextSize::capture(&upstream_body));
+        let (body, session) =
+            match super::super::basis_points::discovery::execution::prepare_dispatch(
+                original_request,
+                &upstream_body,
+                budget,
+                &mut tool_use,
+                runtime,
+                &key.id,
+                route.client_context_id.as_deref(),
+            ) {
+                Ok(body) => body,
+                Err(error) => {
+                    return AccountDispatch::Respond(
+                        super::super::request::adapter_error_response_for_origin(
+                            error,
+                            selected_error_origin,
+                            Some(request_id),
+                        ),
+                    )
+                }
+            };
+        upstream_body = body;
+        discovery_session = session;
+        tool_use.capture_upstream_context(&upstream_body);
         serde_json::to_vec(&upstream_body).expect("prepared JSON is serializable")
     } else {
         request_body
     };
+    if basis_points_route {
+        preparation.catalog_ms = catalog_started.map(|start| start.elapsed().as_millis() as u64);
+    }
+    let attachments_started = preparation_started.map(|_| Instant::now());
     let request_body = if basis_points_route {
         match super::super::basis_points::attach_input_images(
             runtime,
@@ -154,6 +173,10 @@ pub(super) async fn dispatch_account_attempt(
     } else {
         request_body
     };
+    if basis_points_route {
+        preparation.attachments_ms =
+            attachments_started.map(|start| start.elapsed().as_millis() as u64);
+    }
     let started = Instant::now();
     let failure_tool_use = tool_use.clone();
     let failed_usage = |route: &ExecutorRoute, attempt, failure: AttemptFailure| {
@@ -217,6 +240,13 @@ pub(super) async fn dispatch_account_attempt(
                 upstream_request.header(CODEX_RESPONSES_LITE_HEADER, responses_lite_header.clone());
         }
     }
+    route.observe_http_dispatch(None);
+    if let Some(preparation_started) = preparation_started {
+        route.observe_request_preparation(
+            started.duration_since(preparation_started).as_millis() as u64,
+            preparation,
+        );
+    }
     let authorization_event = usage_event(
         UsageAttempt {
             request_id,
@@ -256,18 +286,23 @@ pub(super) async fn dispatch_account_attempt(
     let upstream = match upstream {
         Ok(upstream) => {
             route.account_token_generation = upstream.account_token_generation;
+            route.observe_http_response(
+                upstream.response.headers(),
+                started.elapsed().as_millis() as u64,
+            );
             if basis_points_route {
                 match super::super::basis_points::discovery::resolve(
                     upstream,
                     original_request,
                     upstream_body.clone(),
                     super::super::basis_points::discovery::DiscoveryExecution {
+                        session: discovery_session,
                         allow_streaming: false,
                         runtime,
                         key,
                         lease,
                         budget,
-                        route: &route,
+                        route: &mut route,
                         request_id,
                         requested_model,
                         reasoning_effort: &reasoning_effort,
@@ -336,6 +371,7 @@ pub(super) async fn dispatch_account_attempt(
         }
     };
     if endpoint == AccountEndpoint::Compact
+        && route.account_transport != crate::runtime::AccountTransport::Siwc
         && budget.can_dispatch()
         && super::super::super::compaction::missing_legacy_endpoint(status, &bytes)
     {
@@ -397,7 +433,7 @@ fn reject_authorized_dispatch(
     let exhausted = matches!(error, AuthorizedRequestError::DispatchBudgetExhausted);
     let failure = AttemptFailure::authorized_request(error);
     let mut event = failed_usage(route, attempt, failure);
-    if uncertain || exhausted {
+    if uncertain || exhausted || route.account_transport == crate::runtime::AccountTransport::Siwc {
         if uncertain {
             lease.settle_rotation_unknown(now_ms());
         }

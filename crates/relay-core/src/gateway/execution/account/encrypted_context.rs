@@ -16,11 +16,19 @@ use serde_json::{Map, Value};
 /// with no visible summary are removed. Ordinary messages and tool history stay.
 /// A compaction checkpoint can be the only copy of earlier context: when one is
 /// encrypted, refuse the repair without changing any of the request history.
+/// Multiple encrypted reasoning items do not identify which ciphertext was rejected.
 pub(in crate::gateway::execution) fn drop_rejected_encrypted_context(request: &mut Value) -> bool {
     let Some(input_items) = request.get_mut("input").and_then(Value::as_array_mut) else {
         return false;
     };
-    if input_items.iter().any(is_encrypted_compaction) {
+    if input_items.iter().any(is_encrypted_compaction)
+        || input_items
+            .iter()
+            .filter(|item| is_encrypted_history_item(item))
+            .take(2)
+            .count()
+            > 1
+    {
         return false;
     }
     let mut changed = false;

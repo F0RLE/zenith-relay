@@ -25,7 +25,7 @@ pub(super) async fn open_upgraded_socket(
     route: ExecutorRoute,
     lease: CandidateLease,
     upgrade: reqwest_websocket::UpgradeResponse,
-    request_payload: String,
+    prepared_request: PreparedPayload,
     prepared: PreparedAuthorization,
     attempt: &mut u16,
     started: Instant,
@@ -76,9 +76,9 @@ pub(super) async fn open_upgraded_socket(
                 attempt: *attempt,
                 local_key_id: &key.id,
                 route: &route,
-                reasoning_effort: Some(&request.reasoning_effort_for(&route)),
+                reasoning_effort: Some(&prepared_request.reasoning_effort),
                 requested_model: &request.requested_model,
-                tool_use: request.tool_use_for(&route),
+                tool_use: prepared_request.tool_use.clone(),
             },
             false,
             200,
@@ -87,7 +87,7 @@ pub(super) async fn open_upgraded_socket(
         )),
         started,
     };
-    if send_request(&mut upstream, request_payload, source_error_origin)
+    if send_request(&mut upstream, prepared_request.payload, source_error_origin)
         .await
         .is_err()
     {
@@ -201,6 +201,8 @@ pub(super) async fn open_upgraded_socket(
         initial_messages,
         route,
         request,
+        reasoning_effort: prepared_request.reasoning_effort,
+        tool_use: prepared_request.tool_use,
         lease,
         attempt: *attempt,
         started,

@@ -70,11 +70,12 @@ pub(super) async fn drive_selected_candidate(
     // native Responses socket is rejected with 502 Invalid request body, so
     // this client socket must go through the HTTP executor instead.
     let basis_points = route.account_transport == AccountTransport::ExcelBasisPoints;
-    if basis_points || !route.adapter.is_passthrough() {
+    let siwc = route.account_transport == AccountTransport::Siwc;
+    if basis_points || siwc || !route.adapter.is_passthrough() {
         drop(lease);
         *websocket_http_fallback_origin = Some(source_error_origin);
         *last_failure = Some(GatewayFailure::websocket_http_fallback(source_error_origin));
-        return Ok(if basis_points {
+        return Ok(if basis_points || siwc {
             DrivenConnect::Break(request)
         } else {
             DrivenConnect::Continue(request)
@@ -121,7 +122,7 @@ pub(super) async fn drive_selected_candidate(
         runtime,
         client_headers,
         key,
-        &route,
+        &mut route,
         &request,
         &lease,
         *attempt,

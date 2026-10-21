@@ -109,6 +109,106 @@ pub async fn execute_account_wake(
     .await
 }
 
+/// Publish inference with one explicitly selected request key, never a management key.
+/// The caller owns network admission; internal handlers retain their loopback Host policy.
+pub fn network_router(runtime: Arc<GatewayRuntime>, key_id: &'static str) -> Router {
+    router(runtime.clone()).layer(axum::middleware::from_fn(
+        move |mut request: axum::extract::Request, next: axum::middleware::Next| {
+            let runtime = runtime.clone();
+            async move {
+                let key = runtime
+                    .authenticate(request.headers().get(axum::http::header::AUTHORIZATION))
+                    .or_else(|| {
+                        ["x-api-key", "x-goog-api-key"]
+                            .into_iter()
+                            .find_map(|header| {
+                                request
+                                    .headers()
+                                    .get(header)
+                                    .and_then(|value| value.to_str().ok())
+                                    .and_then(|secret| runtime.authenticate_secret(secret))
+                            })
+                    });
+                if !key.is_some_and(|key| key.id == key_id) {
+                    return auth::unauthorized();
+                }
+                request.headers_mut().insert(
+                    axum::http::header::HOST,
+                    axum::http::HeaderValue::from_static("127.0.0.1"),
+                );
+                next.run(request).await
+            }
+        },
+    ))
+}
+
+#[cfg(test)]
+mod network_access_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn network_router_accepts_only_its_selected_key_and_never_exposes_management() {
+        for principal in ["lan", "local"] {
+            let runtime = Arc::new(
+                GatewayRuntime::new(
+                    crate::ProviderSource {
+                        id: "synthetic".into(),
+                        name: "Synthetic".into(),
+                        base_url: "http://127.0.0.1:9/v1".into(),
+                        api_key: "synthetic-provider".into(),
+                        wire_api: crate::WireApi::Responses,
+                        models: vec!["synthetic-model".into()],
+                        proxy_url: None,
+                    },
+                    crate::LocalGatewayKey {
+                        id: principal.into(),
+                        secret: "synthetic-key".into(),
+                    },
+                    Arc::new(|_| {}),
+                )
+                .unwrap(),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let router = network_router(runtime, "lan");
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap();
+            for (path, expected) in [
+                ("/v1/models", StatusCode::OK),
+                ("/management/state", StatusCode::NOT_FOUND),
+            ] {
+                let response = client
+                    .get(format!("http://{address}{path}"))
+                    .header("host", "192.168.1.10")
+                    .bearer_auth("synthetic-key")
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    if principal == "lan" {
+                        expected
+                    } else {
+                        StatusCode::UNAUTHORIZED
+                    }
+                );
+            }
+            let missing = client
+                .get(format!("http://{address}/v1/models"))
+                .header("host", "192.168.1.10")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+            server.abort();
+            let _ = server.await;
+        }
+    }
+}
+
 pub fn router(runtime: Arc<GatewayRuntime>) -> Router {
     Router::new()
         .route("/v1/models", get(models))

@@ -45,6 +45,11 @@ pub(super) fn build_account_export(
     exported_at_ms: u64,
     exported_at: &str,
 ) -> Result<Value> {
+    if account.oauth_client_kind == crate::providers::chatgpt::OAuthClientKind::Siwc
+        && format != AccountExportFormat::Zenith
+    {
+        return Err(super::build::validation("SIWC credentials require a Zenith export; Codex formats cannot retain the registration"));
+    }
     if account.oauth_client_kind == crate::providers::chatgpt::OAuthClientKind::ExcelBps
         && !matches!(
             format,
@@ -75,8 +80,23 @@ pub(super) fn build_account_export(
         if let Some(metadata) = metadata.and_then(Value::as_object_mut) {
             metadata.insert(
                 "client_id".into(),
-                account.oauth_client_kind.client_id().into(),
+                account
+                    .siwc_registration
+                    .as_ref()
+                    .map_or(account.oauth_client_kind.client_id(), |r| {
+                        r.client_id.as_str()
+                    })
+                    .into(),
             );
+            if format == AccountExportFormat::Zenith {
+                metadata.insert(
+                    "oauth_client_kind".into(),
+                    serde_json::json!(account.oauth_client_kind),
+                );
+            }
+            if let Some(registration) = account.siwc_registration.as_ref() {
+                metadata.insert("siwc".into(), serde_json::json!(registration));
+            }
             if let Some(headers) = account.basis_points_headers.as_ref() {
                 metadata.insert("basis_points_headers".into(), serde_json::json!(headers));
             }

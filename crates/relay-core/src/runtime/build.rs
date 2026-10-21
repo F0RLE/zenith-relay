@@ -218,11 +218,6 @@ impl GatewayRuntime {
         usage: UsageCallback,
     ) -> Result<Self> {
         validate_runtime_options(&options)?;
-        let tool_policy = options
-            .tool_policy
-            .clone()
-            .normalized()
-            .map_err(|message| Error::Validation(message.to_string()))?;
         let model_reasoning_allowed_levels = normalize_model_reasoning_allowed_levels(
             options.model_reasoning_allowed_levels.clone(),
         )
@@ -374,7 +369,8 @@ impl GatewayRuntime {
         }
 
         Ok(Self {
-            tool_policy: RwLock::new(tool_policy),
+            diagnostics_enabled: options.diagnostics_enabled,
+            tool_policy: RwLock::new(options.tool_policy.clone()),
             request_timezone: RwLock::new(options.request_timezone.clone()),
             clients,
             discovery_client,
@@ -411,6 +407,7 @@ impl GatewayRuntime {
             native_responses_replay_store: Mutex::new(NativeResponsesReplayStore::default()),
             cache_context_store: super::cache_context::CacheContextStore::default(),
             codex_turn_state_store: CodexTurnStateStore::default(),
+            basis_points_catalog_store: super::tool_catalog::ToolCatalogStore::default(),
             control: RuntimeControl::default(),
             max_retry_candidates: std::sync::atomic::AtomicUsize::new(options.max_retry_candidates),
             quota_stale_after_ms: options.quota_stale_after_ms,

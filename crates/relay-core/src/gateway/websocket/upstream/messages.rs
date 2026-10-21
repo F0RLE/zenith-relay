@@ -32,8 +32,8 @@ pub(super) async fn initial_application_messages(
                 origin,
             ));
         }
-        let (has_output, terminal) = initial_message_state(&message);
-        let committed = has_output || terminal.outcome.is_some();
+        let (has_generation, terminal) = initial_message_state(&message);
+        let committed = has_generation || terminal.outcome.is_some();
         messages.push(message);
         if committed {
             return Ok(messages);
@@ -53,8 +53,7 @@ async fn first_application_message(
     loop {
         tokio::select! {
             _ = heartbeat.tick() => {
-                upstream
-                    .send(UpstreamMessage::Ping(Default::default()))
+                send_message(upstream, UpstreamMessage::Ping(Default::default()))
                     .await
                     .map_err(|_| GatewayFailure::transport(origin))?;
             }
@@ -64,8 +63,7 @@ async fn first_application_message(
                         return Ok(message);
                     }
                     Some(Ok(UpstreamMessage::Ping(ping_payload))) => {
-                        upstream
-                            .send(UpstreamMessage::Pong(ping_payload))
+                        send_message(upstream, UpstreamMessage::Pong(ping_payload))
                             .await
                             .map_err(|_| GatewayFailure::transport(origin))?;
                     }
@@ -118,7 +116,7 @@ pub(super) fn initial_message_state(message: &UpstreamMessage) -> (bool, EventTe
     };
     let event_type = upstream_message_value.get("type").and_then(Value::as_str);
     (
-        has_semantic_output(&upstream_message_value, event_type),
+        has_generation_evidence(&upstream_message_value, event_type),
         event_terminal(&upstream_message_value),
     )
 }

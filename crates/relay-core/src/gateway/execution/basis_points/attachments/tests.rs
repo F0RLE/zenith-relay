@@ -221,3 +221,110 @@ fn attachment_cache_reuses_the_file_id_without_storing_bytes() {
     remember_file_id(key, "file-cached".to_string());
     assert_eq!(cached_file_id(&key).as_deref(), Some("file-cached"));
 }
+
+#[tokio::test]
+async fn concurrent_uploads_share_success_and_failure_without_caching_failures() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for succeeds in [false, true] {
+        let key = attachment_key(
+            "synthetic-concurrent",
+            "account",
+            &[0; 32],
+            "image/png",
+            &[u8::from(succeeds)],
+        );
+        let uploads = AtomicUsize::new(0);
+        let release = tokio::sync::Notify::new();
+        let mut pending = Box::pin(futures_util::future::join_all((0..8).map(|_| {
+            cached_upload(key, || async {
+                uploads.fetch_add(1, Ordering::SeqCst);
+                release.notified().await;
+                if succeeds {
+                    Ok("file-shared".to_string())
+                } else {
+                    Err(upload_failed())
+                }
+            })
+        })));
+        assert!(futures_util::poll!(&mut pending).is_pending());
+        assert_eq!(uploads.load(Ordering::SeqCst), 1);
+        release.notify_one();
+        let results = pending.await;
+        assert_eq!(results.len(), 8);
+        assert!(results.iter().all(|result| result.is_ok() == succeeds));
+        if succeeds {
+            assert!(results
+                .iter()
+                .all(|result| result.as_ref().is_ok_and(|id| id == "file-shared")));
+        }
+        let retried = cached_upload(key, || async {
+            uploads.fetch_add(1, Ordering::SeqCst);
+            Ok("file-explicit-retry".to_string())
+        })
+        .await;
+        assert!(retried.is_ok());
+        assert_eq!(uploads.load(Ordering::SeqCst), if succeeds { 1 } else { 2 });
+    }
+}
+
+#[tokio::test]
+async fn cancelled_upload_does_not_leave_waiters_or_detached_work() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let key = attachment_key(
+        "synthetic-cancel",
+        "account",
+        &[0; 32],
+        "image/png",
+        b"image",
+    );
+    let uploads = AtomicUsize::new(0);
+    let mut owner = Box::pin(cached_upload(key, || async {
+        uploads.fetch_add(1, Ordering::SeqCst);
+        std::future::pending::<Result<String, AttachmentFailure>>().await
+    }));
+    assert!(futures_util::poll!(&mut owner).is_pending());
+    let mut waiter = Box::pin(cached_upload(key, || async {
+        uploads.fetch_add(1, Ordering::SeqCst);
+        Ok("file-waiter".to_string())
+    }));
+    assert!(futures_util::poll!(&mut waiter).is_pending());
+    drop(owner);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+        .await
+        .unwrap();
+    assert!(result.as_ref().is_ok_and(|id| id == "file-waiter"));
+    assert_eq!(uploads.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn pending_uploads_are_bounded_released_and_scoped() {
+    let mut cache = AttachmentCache::default();
+    let key = attachment_key("endpoint", "account", &[0; 32], "image/png", b"image");
+    let first = cache.pending_upload(key);
+    assert!(Arc::ptr_eq(&first, &cache.pending_upload(key)));
+    for other in [
+        attachment_key("other-endpoint", "account", &[0; 32], "image/png", b"image"),
+        attachment_key("endpoint", "other-account", &[0; 32], "image/png", b"image"),
+        attachment_key("endpoint", "account", &[1; 32], "image/png", b"image"),
+        attachment_key("endpoint", "account", &[0; 32], "image/png", b"other-image"),
+    ] {
+        assert!(!Arc::ptr_eq(&first, &cache.pending_upload(other)));
+    }
+    let held: Vec<_> = (0..MAX_ATTACHMENT_CACHE + 1)
+        .map(|i| {
+            cache.pending_upload(attachment_key(
+                "bounded",
+                "account",
+                &[0; 32],
+                "image/png",
+                &i.to_be_bytes(),
+            ))
+        })
+        .collect();
+    assert_eq!(cache.pending.len(), MAX_ATTACHMENT_CACHE);
+    assert!(Arc::ptr_eq(&first, &cache.pending_upload(key)));
+    drop(held);
+    drop(first);
+    let _next = cache.pending_upload(key);
+    assert_eq!(cache.pending.len(), 1);
+}

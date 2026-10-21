@@ -1,8 +1,18 @@
+// Relay's per-event memory budget, not a limit on the whole response.
+pub(crate) const MAX_EVENT_BYTES: usize = 64 * 1024 * 1024;
+
 pub(crate) fn event_end(bytes: &[u8]) -> Option<usize> {
-    let mut offset = 0;
+    event_end_from(bytes, 0)
+}
+
+fn event_end_from(bytes: &[u8], mut offset: usize) -> Option<usize> {
     while let Some((length, end)) = line_end(&bytes[offset..]) {
+        let position = offset + length;
         offset += end;
-        if length == 0 {
+        if position == 0
+            || bytes[position - 1] == b'\n'
+            || (bytes[position - 1] == b'\r' && bytes[position] != b'\n')
+        {
             return Some(offset);
         }
     }
@@ -10,6 +20,7 @@ pub(crate) fn event_end(bytes: &[u8]) -> Option<usize> {
 }
 
 /// Removes the next complete SSE event, including its blank-line terminator.
+#[cfg(test)]
 pub(crate) fn take_event(pending: &mut Vec<u8>) -> Option<Vec<u8>> {
     let end = event_end(pending)?;
     Some(pending.drain(..end).collect())
@@ -51,6 +62,7 @@ fn line_end(bytes: &[u8]) -> Option<(usize, usize)> {
 }
 
 /// Delivers each complete SSE event until `stop` is true.
+/// `pending` must be empty or the incomplete tail returned by a previous call.
 /// Bytes after the stopping event are discarded. An already stopped caller
 /// does not append `bytes`.
 pub(crate) fn consume_frames<T>(
@@ -63,17 +75,30 @@ pub(crate) fn consume_frames<T>(
     if stop(state) {
         return;
     }
-    pending.extend_from_slice(bytes);
+    // The old tail has no complete event; revisit its last byte for split CRLF.
+    let mut scan_from = pending.len().saturating_sub(1);
+    let direct = pending.is_empty();
+    let frames = if direct {
+        bytes
+    } else {
+        pending.extend_from_slice(bytes);
+        pending.as_slice()
+    };
     let mut consumed = 0;
-    while let Some(end) = event_end(&pending[consumed..]) {
-        handle(state, &pending[consumed..consumed + end]);
+    while let Some(end) = event_end_from(&frames[consumed..], scan_from) {
+        handle(state, &frames[consumed..consumed + end]);
         consumed += end;
+        scan_from = 0;
         if stop(state) {
             pending.clear();
             return;
         }
     }
-    pending.drain(..consumed);
+    if direct {
+        pending.extend_from_slice(&bytes[consumed..]);
+    } else {
+        pending.drain(..consumed);
+    }
 }
 
 /// Feeds `bytes` through an SSE buffer that cannot be borrowed with its owner.
@@ -84,14 +109,43 @@ pub(crate) fn push_pending_frames<T>(
     state: &mut T,
     stop: impl Fn(&T) -> bool,
     handle: impl FnMut(&mut T, &[u8]),
-) -> Vec<u8> {
-    consume_frames(&mut pending, bytes, state, stop, handle);
-    pending
+) -> Result<Vec<u8>, ()> {
+    consume_bounded_frames(&mut pending, bytes, MAX_EVENT_BYTES, state, stop, handle)?;
+    Ok(pending)
+}
+
+pub(crate) fn consume_bounded_frames<T>(
+    pending: &mut Vec<u8>,
+    mut bytes: &[u8],
+    limit: usize,
+    state: &mut T,
+    stop: impl Fn(&T) -> bool,
+    mut handle: impl FnMut(&mut T, &[u8]),
+) -> Result<(), ()> {
+    while !bytes.is_empty() && !stop(state) {
+        let available = limit.saturating_sub(pending.len());
+        if available == 0 {
+            pending.clear();
+            return Err(());
+        }
+        let count = available.min(bytes.len());
+        consume_frames(pending, &bytes[..count], state, &stop, &mut handle);
+        bytes = &bytes[count..];
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 #[path = "sse/throughput_tests.rs"]
 mod throughput_tests;
+
+#[cfg(test)]
+#[path = "sse/limits_tests.rs"]
+mod limits_tests;
+
+#[cfg(test)]
+#[path = "sse/fragmentation_tests.rs"]
+mod fragmentation_tests;
 
 #[cfg(test)]
 mod tests {
@@ -251,13 +305,13 @@ mod tests {
     }
 
     #[test]
-    fn consume_frames_borrows_coalesced_events_without_moving_the_tail() {
+    fn consume_frames_borrows_complete_events_directly_from_the_input() {
         let first = b"data: first\n\n";
         let second = b"data: second\r\n\r\n";
         let tail = b"data: partial";
         let input = [first.as_slice(), second, tail].concat();
-        let mut pending = Vec::with_capacity(input.len());
-        let start = pending.as_ptr();
+        let mut pending = Vec::new();
+        let start = input.as_ptr();
         let mut seen = Vec::new();
         consume_frames(
             &mut pending,
@@ -269,5 +323,23 @@ mod tests {
         assert_eq!(seen[0], (start, first.to_vec()));
         assert_eq!(seen[1], (start.wrapping_add(first.len()), second.to_vec()));
         assert_eq!(pending, tail);
+    }
+
+    #[test]
+    fn complete_frame_chunks_never_allocate_a_pending_buffer() {
+        let mut pending = Vec::new();
+        let mut delivered = 0;
+        for frame in [b"data: one\n\n".as_slice(), b"data: two\r\n\r\n"] {
+            consume_frames(
+                &mut pending,
+                frame,
+                &mut delivered,
+                |_| false,
+                |total, event| *total += event.len(),
+            );
+            assert!(pending.is_empty());
+            assert_eq!(pending.capacity(), 0);
+        }
+        assert_eq!(delivered, 24);
     }
 }

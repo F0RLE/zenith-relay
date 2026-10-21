@@ -29,6 +29,9 @@ pub struct CandidateRuntimeSnapshot {
     pub candidate_id: String,
     pub kind: CandidateKind,
     pub available: bool,
+    /// All usable routes are waiting for quota or a provider rate limit.
+    #[serde(default)]
+    pub quota_wait: bool,
     /// True only when fresh text routes agree on the same physical member.
     #[serde(default)]
     pub next_for_new_request: bool,
@@ -88,6 +91,11 @@ pub struct RoutingDiagnostics {
     /// credential, or provider response data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint_kind: Option<String>,
+    /// Upstream's declaration, not independently verified model identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_response_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<crate::usage::TransportDiagnostics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_context: Option<crate::usage::CacheContextDiagnostics>,
     /// The executor's actual disposition, never inferred from HTTP status.
@@ -147,6 +155,7 @@ impl PoolScheduler {
             .values()
             .map(|candidate| {
                 let mut available = false;
+                let mut quota_wait = false;
                 let mut half_open = false;
                 let mut retries = BTreeMap::<String, u64>::new();
                 for model in &candidate.models {
@@ -177,13 +186,23 @@ impl PoolScheduler {
                                 || self.lane_allows(candidate, InFlightLane::Image);
                         }
                         super::super::rotation::CandidateAvailability::WaitUntil {
-                            at_ms, ..
+                            at_ms,
+                            reason,
                         } => {
+                            quota_wait |= reason
+                                == super::super::rotation::CandidateBlockReason::QuotaExhausted
+                                || (reason
+                                    == super::super::rotation::CandidateBlockReason::RateLimited
+                                    && self.cooldown_reason_for(candidate, model, now_ms)
+                                        == CooldownReason::RateLimit);
                             retries
                                 .entry(model.clone())
                                 .and_modify(|at| *at = (*at).max(at_ms))
                                 .or_insert(at_ms);
                         }
+                        super::super::rotation::CandidateAvailability::Blocked(
+                            super::super::rotation::CandidateBlockReason::QuotaExhausted,
+                        ) => quota_wait = true,
                         _ => {}
                     }
                 }
@@ -197,6 +216,7 @@ impl PoolScheduler {
                     candidate_id: candidate.id.clone(),
                     kind: candidate.kind,
                     available,
+                    quota_wait: quota_wait && !available,
                     next_for_new_request: new_request_candidate_id.as_deref()
                         == Some(candidate.id.as_str()),
                     resource_headroom: Some(CandidateResourceHeadroom {
@@ -316,6 +336,8 @@ impl PoolScheduler {
             in_flight_before: self.in_flight_count(candidate_id, lane),
             dispatches_before: self.dispatch_count(candidate_id, lane),
             endpoint_kind: None,
+            upstream_response_model: None,
+            transport: None,
             cache_context: None,
             attempt_outcome: None,
         })

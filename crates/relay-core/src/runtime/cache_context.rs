@@ -194,6 +194,14 @@ impl CacheContextStore {
     }
 
     fn finish(&self, event: &mut UsageEvent, now_ms: u64) {
+        if event
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.cache_context.as_ref())
+            .is_none()
+        {
+            return;
+        }
         let Some(salt) = self.inner.salt.as_ref() else {
             return;
         };

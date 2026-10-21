@@ -1,4 +1,4 @@
-use super::catalog::{client_tools, requires_tool_call, selected_tools, tool_spec};
+use super::catalog::{client_tools, requires_tool_call, selected_tools, tool_spec, ClientTool};
 use super::codec::{json_text, parse_json_object};
 use super::history::fit_item_id;
 use super::is_transport_tool;
@@ -21,6 +21,51 @@ pub(super) fn invalid_tool_output(parameter: &'static str) -> AdapterError {
         _ => AdapterError::upstream_response_invalid(),
     };
     error.with_parameter(parameter)
+}
+
+fn validate_function_arguments(arguments: Value, tool: &ClientTool) -> Result<Value, AdapterError> {
+    let Some(schema) = super::schema::parameter_schema(tool) else {
+        return Ok(arguments);
+    };
+    let Err(original_error) = super::schema::validate(&arguments, schema) else {
+        return Ok(arguments);
+    };
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+        return Err(original_error);
+    };
+    let Some(envelope) = arguments.as_object().filter(|object| object.len() == 2) else {
+        return Err(original_error);
+    };
+    let name_key = if envelope.contains_key("tool") {
+        "tool"
+    } else {
+        "name"
+    };
+    let args_key = if envelope.contains_key("args") {
+        "args"
+    } else {
+        "arguments"
+    };
+    // A stale transport envelope is not a client's argument object. Unwrap only
+    // an exact, same-tool envelope that the closed client schema cannot describe.
+    if schema.get("type").and_then(Value::as_str) != Some("object")
+        || schema.get("additionalProperties") != Some(&Value::Bool(false))
+        || schema.get("patternProperties").is_some()
+        || properties.contains_key(name_key)
+        || properties.contains_key(args_key)
+        || envelope.get(name_key).and_then(Value::as_str) != Some(tool.key().as_str())
+    {
+        return Err(original_error);
+    }
+    let Some(nested) = envelope.get(args_key) else {
+        return Err(original_error);
+    };
+    let recovered = super::codec::function_arguments(nested)?;
+    if !recovered.is_object() {
+        return Err(invalid_tool_output("output.run_officejs.args.object"));
+    }
+    super::schema::validate(&recovered, schema)?;
+    Ok(recovered)
 }
 
 fn parse_direct_tool_call(code: &str) -> Option<Map<String, Value>> {
@@ -68,6 +113,17 @@ fn parse_direct_tool_call(code: &str) -> Option<Map<String, Value>> {
     ]))
 }
 
+pub(super) fn validate_tool_completion(item: &Value) -> Result<(), AdapterError> {
+    // BPS may omit item status, but an explicit unfinished call is not executable.
+    if item
+        .get("status")
+        .is_some_and(|status| status != "completed")
+    {
+        return Err(invalid_tool_output("output.run_officejs.status"));
+    }
+    Ok(())
+}
+
 pub(super) fn parse_transport_envelope(
     tool_call_item: &Map<String, Value>,
 ) -> Result<(Map<String, Value>, bool), AdapterError> {
@@ -85,9 +141,8 @@ pub(super) fn parse_transport_envelope(
         .get("code")
         .ok_or_else(|| invalid_tool_output("output.run_officejs.code"))?;
 
-    // v0.1.14 and newer identify the client tool in the outer envelope. The
-    // code field is the exact function JSON text or custom raw input; it must
-    // not be parsed as another wrapper.
+    // Explicit references route the client payload. Function-wrapper recovery
+    // is considered later, only after original-schema validation fails.
     if let Some(references) = outer.get("references") {
         let references = references
             .as_array()
@@ -184,6 +239,7 @@ pub(in crate::gateway) fn translate_response_value(
         });
     }
     let all_tools = client_tools(request_body)?;
+    super::batch::expand_output(output_items, request_body, &all_tools)?;
     let tools = selected_tools(request_body, &all_tools);
     let mut call_ids = std::collections::HashSet::new();
     let history_call_ids = request_body
@@ -278,11 +334,7 @@ pub(in crate::gateway) fn translate_response_value(
             if !function_arguments.is_object() {
                 return Err(invalid_tool_output("output.run_officejs.args.object"));
             }
-            if super::schema::parameter_schema(tool)
-                .is_some_and(|schema| !super::schema::matches(&function_arguments, schema))
-            {
-                return Err(invalid_tool_output("output.run_officejs.args.schema"));
-            }
+            let function_arguments = validate_function_arguments(function_arguments, tool)?;
             translated.insert(
                 "arguments".to_string(),
                 Value::String(json_text(&function_arguments)?),

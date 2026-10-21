@@ -5,12 +5,68 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::HeaderValue;
 
 #[test]
+fn generation_evidence_uses_protocol_usage_without_inventing_a_first_token() {
+    for payload in [
+        serde_json::json!({"usage":{"output_tokens":7}}),
+        serde_json::json!({"response":{"usage":{"output_tokens_details":{"reasoning_tokens":7}}}}),
+        serde_json::json!({"message":{"usage":{"output_tokens":7}}}),
+        serde_json::json!({"usage":{"completion_tokens":7}}),
+        serde_json::json!({"usage":{"completion_tokens_details":{"reasoning_tokens":7}}}),
+        serde_json::json!({"usageMetadata":{"candidatesTokenCount":7}}),
+        serde_json::json!({"usageMetadata":{"candidatesTokenCount":0,"thoughtsTokenCount":7}}),
+    ] {
+        assert!(has_generated_tokens(&payload));
+        assert!(!crate::gateway::streaming::has_output_delta(&payload, None));
+    }
+    for usage in [
+        serde_json::json!({"input_tokens":50,"input_tokens_details":{"cached_tokens":20,"cache_write_tokens":30}}),
+        serde_json::json!({"output_tokens":0,"output_tokens_details":{"reasoning_tokens":0}}),
+        serde_json::json!({"output_tokens":null}),
+        serde_json::json!({"output_tokens":-1}),
+        serde_json::json!({"output_tokens":"7"}),
+        serde_json::json!({}),
+    ] {
+        assert!(!has_generated_tokens(&serde_json::json!({"usage":usage})));
+    }
+}
+
+#[test]
+fn generated_usage_prevents_replaying_json_and_buffered_stream_failures() {
+    for usage in [
+        serde_json::json!({"output_tokens": 7}),
+        serde_json::json!({"output_tokens": 0, "output_tokens_details": {"reasoning_tokens": 7}}),
+        serde_json::json!({"completion_tokens": 7}),
+        serde_json::json!({"reasoning_tokens": 7}),
+    ] {
+        let response = serde_json::json!({"status":"failed","output":[],"usage":usage,
+            "error":{"code":"model_capacity_exhausted","message":"Synthetic capacity refusal"}
+        });
+        let failure = validate_upstream_response(&response, None).err().unwrap();
+        assert_eq!(
+            failure.execution.certainty,
+            crate::scheduler::rotation::ExecutionCertainty::Accepted
+        );
+        let terminal = serde_json::json!({"type":"response.failed","response":response});
+        let failure =
+            completed_upstream_response(format!("data: {terminal}\n\n").as_bytes(), true, None)
+                .err()
+                .unwrap();
+        assert_eq!(
+            failure.execution.certainty,
+            crate::scheduler::rotation::ExecutionCertainty::Accepted
+        );
+    }
+}
+
+#[test]
 fn buffered_timing_ignores_lifecycle_empty_invalid_and_terminal_snapshots() {
     let mut timing = BufferedResponseTiming::default();
     for bytes in [
         b": heartbeat\n\n".as_slice(),
         b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\"}}\n\n",
         b"data: {\"type\":\"response.in_progress\"}\n\n",
+        b"data: {\"type\":\"response.in_progress\",\"response\":{\"usage\":{\"output_tokens\":7}}}\n\n",
+        b"data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"signature_delta\",\"signature\":\"opaque\"}}\n\n",
         b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"\"}\n\n",
         b"data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\",\"id\":\"msg_test\"}}\n\n",
         b"data: {\"type\":\"response.compaction.delta\",\"delta\":\"opaque\"}\n\n",
@@ -32,6 +88,7 @@ fn buffered_timing_keeps_first_output_through_completion_and_failure() {
     for output in [
         serde_json::json!({"type":"response.output_text.delta","delta":"synthetic"}),
         serde_json::json!({"type":"response.reasoning_text.delta","delta":"synthetic"}),
+        serde_json::json!({"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"synthetic"}}),
         serde_json::json!({"type":"response.function_call_arguments.delta","delta":"{}"}),
         serde_json::json!({"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_test","name":"test"}}),
     ] {
@@ -56,6 +113,17 @@ fn buffered_timing_keeps_first_output_through_completion_and_failure() {
 #[test]
 fn buffered_timing_preserves_unobserved_transports_and_known_zero() {
     let mut event = test_usage_event();
+    event.routing = Some(
+        serde_json::from_value(serde_json::json!({
+            "reason":"only_eligible", "eligibleCandidates":1,
+            "inFlightBefore":0, "dispatchesBefore":0,
+            "transport":{
+                "upstream":"http", "mode":"basis_points", "requestPreparationMs":0,
+                "clientFirstOutputMs":60, "clientResponseReadyMs":130
+            }
+        }))
+        .unwrap(),
+    );
     event.latency_ms = 120;
     event.ttft_ms = Some(30);
     event.generation_ms = Some(90);
@@ -63,6 +131,8 @@ fn buffered_timing_preserves_unobserved_transports_and_known_zero() {
     assert_eq!(event.latency_ms, 120);
     assert_eq!(event.ttft_ms, Some(30));
     assert_eq!(event.generation_ms, Some(90));
+    let transport = event.routing.as_ref().unwrap().transport.as_ref().unwrap();
+    assert_eq!(transport.upstream_response_ms, None);
 
     let mut timing = BufferedResponseTiming::default();
     timing.observe(
@@ -75,6 +145,11 @@ fn buffered_timing_preserves_unobserved_transports_and_known_zero() {
     timing.apply(&mut event);
     assert_eq!(event.ttft_ms, Some(0));
     assert_eq!(event.generation_ms, Some(120));
+    let transport = event.routing.as_ref().unwrap().transport.as_ref().unwrap();
+    assert_eq!(transport.upstream_response_ms, Some(120));
+    assert_eq!(transport.request_preparation_ms, Some(0));
+    assert_eq!(transport.client_first_output_ms, Some(60));
+    assert_eq!(transport.client_response_ready_ms, Some(130));
 }
 
 #[tokio::test]

@@ -1,12 +1,24 @@
 use super::*;
 
-pub(in crate::gateway) fn tool_use_diagnostics(request_payload: &Value) -> ToolUseDiagnostics {
-    let stats = crate::tool_policy::catalog_stats(request_payload);
+pub(in crate::gateway) fn tool_use_diagnostics(
+    request_payload: &Value,
+    diagnostics_enabled: bool,
+) -> ToolUseDiagnostics {
+    let stats = crate::tool_policy::catalog_stats_with_sizes(request_payload, diagnostics_enabled);
     ToolUseDiagnostics {
         client_tool_count: stats.count,
-        client_schema_bytes: Some(stats.bytes),
-        client_context: Some(crate::usage::RequestContextSize::capture(request_payload)),
+        client_schema_bytes: diagnostics_enabled.then_some(stats.bytes),
+        client_context: diagnostics_enabled.then(|| {
+            crate::usage::RequestContextSize::capture_with_catalog_bytes(
+                request_payload,
+                stats.bytes,
+            )
+        }),
         tool_choice: tool_choice_mode(request_payload),
+        requested_parallel_tool_calls: request_payload
+            .get("parallel_tool_calls")
+            .or_else(|| request_payload.get("response")?.get("parallel_tool_calls"))
+            .and_then(Value::as_bool),
         ..ToolUseDiagnostics::default()
     }
 }
@@ -29,7 +41,7 @@ impl RequestToolPolicy {
         Self {
             configured_mode: policy.mode,
             policy,
-            diagnostics: tool_use_diagnostics(request),
+            diagnostics: tool_use_diagnostics(request, runtime.diagnostics_enabled()),
             cache_context: None,
         }
     }
@@ -43,7 +55,7 @@ impl RequestToolPolicy {
         client_context: Option<&str>,
     ) {
         // Keep the original capture on WS -> HTTP fallback and route repairs.
-        if self.cache_context.is_none() {
+        if self.diagnostics.client_context.is_some() && self.cache_context.is_none() {
             self.cache_context =
                 Some(runtime.begin_cache_context(request, key_id, request_id, client_context));
         }
@@ -68,7 +80,11 @@ impl RequestToolPolicy {
         &mut self,
         request: &mut Value,
     ) -> Result<(), &'static str> {
-        let policy_result = crate::tool_policy::apply_tool_policy(request, &self.policy)?;
+        let policy_result = crate::tool_policy::apply_tool_policy(
+            request,
+            &self.policy,
+            self.diagnostics.client_context.is_some(),
+        )?;
         self.record(policy_result);
         Ok(())
     }
@@ -77,7 +93,8 @@ impl RequestToolPolicy {
         &mut self,
         request: &mut crate::PreparedAdapterRequest,
     ) -> Result<(), &'static str> {
-        let policy_result = request.apply_tool_policy(&self.policy)?;
+        let policy_result =
+            request.apply_tool_policy(&self.policy, self.diagnostics.client_context.is_some())?;
         self.record(policy_result);
         Ok(())
     }
@@ -89,19 +106,17 @@ impl RequestToolPolicy {
         // deserialize the entire conversation again just to count its catalog.
         // Usage rows describe one attempt, not the maximum across other routes.
         self.diagnostics.forwarded_tool_count = policy_result.after.count;
-        self.diagnostics.forwarded_schema_bytes = Some(policy_result.after.bytes);
+        self.diagnostics.forwarded_schema_bytes = policy_result
+            .context
+            .as_ref()
+            .map(|_| policy_result.after.bytes);
         self.diagnostics.deferred_tool_search = policy_result.after.deferred_search;
-        self.diagnostics.upstream_context = Some(policy_result.context);
+        self.diagnostics.upstream_context = policy_result.context;
         self.diagnostics.filtered_tool_count = policy_result
             .before
             .count
             .saturating_sub(policy_result.after.count);
         self.diagnostics.policy_outcome = Some(policy_result.outcome);
-    }
-
-    pub(in crate::gateway) fn record_upstream_context(&mut self, request: &Value) {
-        self.diagnostics.upstream_context =
-            Some(crate::usage::RequestContextSize::capture(request));
     }
 }
 

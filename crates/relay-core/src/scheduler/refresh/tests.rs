@@ -63,6 +63,54 @@ fn quota_reset_delay_uses_the_earliest_future_window_and_stable_jitter() {
 }
 
 #[test]
+fn quota_verification_accelerates_only_the_last_positive_percent() {
+    let mut quota = QuotaSnapshot {
+        primary: Some(QuotaWindow {
+            kind: QuotaWindowKind::Primary,
+            provider_cycle_id: None,
+            window_start_ms: None,
+            available_basis_points: Some(100),
+            explicitly_full: Some(false),
+            reset_at_ms: Some(7_200_000),
+            window_minutes: Some(300),
+            observed_at_ms: 100_000,
+            full_transition_fingerprint: None,
+            exhaustion_transition_fingerprint: None,
+        }),
+        ..QuotaSnapshot::default()
+    };
+    for remaining in [None, Some(0), Some(1), Some(100), Some(101), Some(5_000)] {
+        quota.primary.as_mut().unwrap().available_basis_points = remaining;
+        let expected = match remaining {
+            Some(1..=100) => Some(60_000),
+            _ => quota_reset_delay("synthetic", &quota, 100_000),
+        };
+        assert_eq!(
+            quota_verification_delay("synthetic", &quota, 100_000),
+            expected
+        );
+    }
+    quota.primary.as_mut().unwrap().available_basis_points = Some(100);
+    quota.secondary = quota.primary.clone();
+    quota.secondary.as_mut().unwrap().available_basis_points = Some(0);
+    assert_eq!(
+        quota_verification_delay("synthetic", &quota, 100_000),
+        quota_reset_delay("synthetic", &quota, 100_000)
+    );
+    quota.secondary = None;
+    quota.primary.as_mut().unwrap().reset_at_ms = Some(110_000);
+    assert_eq!(
+        quota_verification_delay("synthetic", &quota, 100_000),
+        quota_reset_delay("synthetic", &quota, 100_000)
+    );
+    quota.primary.as_mut().unwrap().reset_at_ms = None;
+    assert_eq!(
+        quota_verification_delay("synthetic", &quota, 100_000),
+        Some(60_000)
+    );
+}
+
+#[test]
 fn passive_quota_requires_a_recent_window_not_only_an_updated_timestamp() {
     let mut quota = QuotaSnapshot {
         provider_credits_observed_at_ms: Some(99_000),

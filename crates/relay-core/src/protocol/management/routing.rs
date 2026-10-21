@@ -181,9 +181,13 @@ pub enum OperationalStatus {
 impl OperationalStatus {
     /// Runtime availability can narrow rotation eligibility, but cannot erase
     /// a persisted disable, quota wait, or configuration failure.
-    pub fn with_runtime_available(self, available: Option<bool>) -> Self {
+    pub fn with_runtime_available(self, available: Option<bool>, quota_wait: bool) -> Self {
         if self == Self::Rotation && available == Some(false) {
-            Self::Unavailable
+            if quota_wait {
+                Self::QuotaWait
+            } else {
+                Self::Unavailable
+            }
         } else {
             self
         }
@@ -199,19 +203,29 @@ fn live_availability_only_narrows_rotation_status() {
         OperationalStatus::Unavailable,
     ] {
         for available in [None, Some(false), Some(true)] {
-            assert_eq!(status.with_runtime_available(available), status);
+            for quota_wait in [false, true] {
+                assert_eq!(status.with_runtime_available(available, quota_wait), status);
+            }
         }
     }
     assert_eq!(
-        OperationalStatus::Rotation.with_runtime_available(Some(false)),
+        OperationalStatus::Rotation.with_runtime_available(Some(false), false),
         OperationalStatus::Unavailable
     );
     assert_eq!(
-        OperationalStatus::Rotation.with_runtime_available(None),
+        OperationalStatus::Rotation.with_runtime_available(None, false),
         OperationalStatus::Rotation
     );
     assert_eq!(
-        OperationalStatus::Rotation.with_runtime_available(Some(true)),
+        OperationalStatus::Rotation.with_runtime_available(Some(true), false),
+        OperationalStatus::Rotation
+    );
+    assert_eq!(
+        OperationalStatus::Rotation.with_runtime_available(Some(false), true),
+        OperationalStatus::QuotaWait
+    );
+    assert_eq!(
+        OperationalStatus::Rotation.with_runtime_available(Some(true), true),
         OperationalStatus::Rotation
     );
 }

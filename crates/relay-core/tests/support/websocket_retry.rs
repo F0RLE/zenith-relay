@@ -10,6 +10,27 @@ async fn failed_initial_websocket_response_with_output_is_not_retried() {
             "output": [{"type": "message", "content": [{"type": "output_text", "text": "already generated"}]}]
         }
     });
+    assert_failed_initial_response_is_not_retried(failure).await;
+}
+
+#[tokio::test]
+async fn failed_initial_websocket_response_with_generated_usage_is_not_retried() {
+    for usage in [
+        json!({"output_tokens": 7}),
+        json!({"output_tokens": 0, "output_tokens_details": {"reasoning_tokens": 7}}),
+    ] {
+        assert_failed_initial_response_is_not_retried(json!({
+            "type": "response.failed",
+            "response": {
+                "status": "failed", "output": [], "usage": usage,
+                "error": {"code": "insufficient_quota", "message": "Account: synthetic quota refusal"}
+            }
+        }))
+        .await;
+    }
+}
+
+async fn assert_failed_initial_response_is_not_retried(failure: Value) {
     let (first, first_state) =
         spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![
             failure.clone()

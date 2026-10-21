@@ -1,6 +1,98 @@
 use super::*;
 
 #[test]
+fn capacity_exhaustion_is_model_scoped_in_json_and_stream_terminals() {
+    let body = serde_json::json!({"error":{
+        "code":"model_capacity_exhausted","type":"api_error",
+        "message":"Synthetic capacity refusal"
+    }});
+    let failure = AttemptFailure::status_with_body(
+        StatusCode::BAD_GATEWAY,
+        Some(&serde_json::to_vec(&body).unwrap()),
+    );
+    assert_eq!(failure.category, error_codes::UPSTREAM_MODEL_CAPACITY);
+    assert_eq!(failure.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!failure_category_affects_account_state(failure.category));
+    let frame = format!(
+        "data: {}\n\n",
+        serde_json::json!({
+            "type":"response.failed","response":{
+                "id":"resp_synthetic","status":"failed","error":body["error"]
+            }
+        })
+    );
+    let terminal = crate::gateway::streaming::parse_sse_event(frame.as_bytes());
+    assert_eq!(
+        terminal.error_category,
+        Some(error_codes::UPSTREAM_MODEL_CAPACITY)
+    );
+    assert_eq!(terminal.error_status, Some(StatusCode::SERVICE_UNAVAILABLE));
+    assert!(!terminal.semantic_output);
+    let quota = AttemptFailure::status_with_body(
+        StatusCode::TOO_MANY_REQUESTS,
+        Some(br#"{"error":{"code":"insufficient_quota","message":"model_capacity_exhausted"}}"#),
+    );
+    assert_eq!(quota.category, error_codes::UPSTREAM_QUOTA_EXHAUSTED);
+}
+
+#[test]
+fn siwc_usage_limit_without_an_error_code_is_a_pre_execution_quota_rejection() {
+    let body = serde_json::json!({"error":{
+        "type":"invalid_request_error",
+        "message":"The ChatGPT user has reached their Subscription Sharing usage limit."
+    }});
+    let failure = AttemptFailure::status_with_body(
+        StatusCode::TOO_MANY_REQUESTS,
+        Some(&serde_json::to_vec(&body).unwrap()),
+    );
+    assert_eq!(failure.category, error_codes::UPSTREAM_QUOTA_EXHAUSTED);
+    assert_eq!(
+        failure.execution.certainty,
+        crate::scheduler::rotation::ExecutionCertainty::NotSent
+    );
+    let frame = format!(
+        "data: {}\n\n",
+        serde_json::json!({
+            "type":"response.failed","response":{"status":"failed","error":body["error"]}
+        })
+    );
+    let terminal = crate::gateway::streaming::parse_sse_event(frame.as_bytes());
+    assert_eq!(
+        terminal.error_category,
+        Some(error_codes::UPSTREAM_QUOTA_EXHAUSTED)
+    );
+    assert_eq!(terminal.error_status, Some(StatusCode::TOO_MANY_REQUESTS));
+}
+
+#[test]
+fn normalized_rate_limit_stream_errors_keep_their_category() {
+    let error = serde_json::json!({
+        "code": error_codes::UPSTREAM_RATE_LIMITED,
+        "message": "Basis Points stream could not be completed safely"
+    });
+    for body in [
+        serde_json::json!({"type":"error","code":error["code"],"message":error["message"]}),
+        serde_json::json!({"type":"response.failed","response":{"status":"failed","error":error}}),
+    ] {
+        assert_eq!(
+            classify_upstream_error_value(StatusCode::BAD_GATEWAY, &body).category,
+            error_codes::UPSTREAM_RATE_LIMITED
+        );
+        let frame = format!("data: {body}\n\n");
+        let terminal = crate::gateway::streaming::parse_sse_event(frame.as_bytes());
+        assert_eq!(
+            terminal.error_category,
+            Some(error_codes::UPSTREAM_RATE_LIMITED)
+        );
+        assert_eq!(terminal.error_status, Some(StatusCode::TOO_MANY_REQUESTS));
+        assert_eq!(
+            classify_upstream_error_value(StatusCode::UNAUTHORIZED, &body).category,
+            error_codes::UPSTREAM_UNAUTHORIZED
+        );
+    }
+}
+
+#[test]
 fn typed_adapter_stream_errors_keep_their_category_without_authorizing_replay() {
     for code in [
         error_codes::ADAPTER_UPSTREAM_RESPONSE_INVALID,
@@ -57,6 +149,46 @@ fn basis_points_access_and_policy_refusals_are_not_quota_errors() {
         assert_eq!(failure.status, StatusCode::FORBIDDEN);
         assert!(!failure_category_affects_account_state(category));
         assert_eq!(retryable_failure(failure.status, category, false), category == error_codes::UPSTREAM_MODEL_UNAVAILABLE);
+    }
+}
+
+#[test]
+fn typed_stream_size_errors_keep_their_category_without_authorizing_replay() {
+    let code = error_codes::STREAM_EVENT_TOO_LARGE;
+    let error = serde_json::json!({"type":error_codes::STREAM_ERROR,"code":code});
+    for body in [
+        serde_json::json!({"error":error}),
+        serde_json::json!({"type":"response.failed","response":{"error":error}}),
+    ] {
+        let failure = AttemptFailure::status_with_body(
+            StatusCode::BAD_GATEWAY,
+            Some(&serde_json::to_vec(&body).unwrap()),
+        );
+        assert_eq!(failure.category, code);
+        assert_eq!(
+            failure.execution.certainty,
+            crate::scheduler::rotation::ExecutionCertainty::Unknown
+        );
+        assert!(!retryable_failure(failure.status, code, false));
+        assert!(!failure_category_requires_cooldown(code));
+        assert!(!failure_category_affects_account_state(code));
+        assert_eq!(
+            classify_upstream_error_value(StatusCode::UNAUTHORIZED, &body).category,
+            error_codes::UPSTREAM_UNAUTHORIZED
+        );
+    }
+    for error in [
+        serde_json::json!({"code":code}),
+        serde_json::json!({"type":error_codes::STREAM_ERROR,"code":"synthetic_unknown"}),
+    ] {
+        assert_eq!(
+            classify_upstream_error_value(
+                StatusCode::BAD_GATEWAY,
+                &serde_json::json!({"error":error}),
+            )
+            .category,
+            error_codes::UPSTREAM_BAD_GATEWAY
+        );
     }
 }
 

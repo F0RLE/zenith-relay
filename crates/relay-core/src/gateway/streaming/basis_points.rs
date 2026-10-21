@@ -1,21 +1,23 @@
 //! BPS wire normalization before the existing client protocol bridge.
-//! Text is incremental; executable tools are released atomically at completion.
+//! Leading text is incremental; tools and their tail wait for atomic validation.
 
 use super::UpstreamStream;
 use crate::gateway::execution::basis_points::response::stream::emit_unseen_output;
 use crate::gateway::execution::basis_points::response::translate_response_value;
 use crate::protocol::completion::ResponseCompletion;
-use crate::protocol::{sse_data as sse_event_data, take_sse_event};
+use crate::protocol::sse_data as sse_event_data;
 use axum::body::Bytes;
 use futures_util::{stream, StreamExt};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
 
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TOOLS: usize = 1024;
 
 pub(super) mod discovery;
+mod tools;
+use tools::NativeTools;
 
 fn failure_event(code: &str, parameter: Option<&str>) -> Value {
     let message = match parameter {
@@ -109,7 +111,8 @@ struct Translator {
     request: Value,
     pending: Vec<u8>,
     output: VecDeque<Bytes>,
-    tools: HashMap<String, Option<String>>,
+    tools: NativeTools,
+    tool_barrier: Option<usize>,
     seen: HashSet<usize>,
     sequence: u64,
     terminal: bool,
@@ -121,7 +124,8 @@ impl Translator {
             request,
             pending: Vec::new(),
             output: VecDeque::new(),
-            tools: HashMap::new(),
+            tools: NativeTools::default(),
+            tool_barrier: None,
             seen: HashSet::new(),
             sequence: 0,
             terminal: false,
@@ -150,20 +154,6 @@ impl Translator {
         self.pending.clear();
     }
 
-    fn remember_tool(&mut self, id: &str, call_id: Option<&str>) -> Result<(), ()> {
-        if id.is_empty() || (!self.tools.contains_key(id) && self.tools.len() >= MAX_TOOLS) {
-            return Err(());
-        }
-        let recorded = self.tools.entry(id.to_owned()).or_default();
-        if let Some(call_id) = call_id {
-            if call_id.is_empty() || recorded.as_deref().is_some_and(|before| before != call_id) {
-                return Err(());
-            }
-            *recorded = Some(call_id.to_owned());
-        }
-        Ok(())
-    }
-
     fn event(&mut self, mut event: Value) -> Result<(), &'static str> {
         if event.get("type").is_none() && event["error"].is_object() {
             // The raw served-model guard uses the common untyped SSE error
@@ -187,42 +177,18 @@ impl Translator {
         if ResponseCompletion::from_responses_event(&event) == Some(ResponseCompletion::Invalid) {
             return Err("response.status");
         }
-        let tool = matches!(
-            event["item"]["type"].as_str(),
-            Some("function_call" | "custom_tool_call")
-        );
-        if kind.starts_with("response.function_call_arguments.")
-            || kind.starts_with("response.custom_tool_call_input.")
-        {
-            self.remember_tool(
-                event["item_id"].as_str().ok_or("stream.tool.item_id")?,
-                None,
-            )
-            .map_err(|_| "stream.tool.identity")?;
-            return Ok(());
-        }
-        if tool {
-            if !matches!(
-                kind.as_str(),
-                "response.output_item.added" | "response.output_item.done"
-            ) {
-                return Err("stream.tool.event");
-            }
-            let call_id = event["item"]["call_id"].as_str();
-            if kind == "response.output_item.done" && call_id.is_none() {
-                return Err("stream.tool.call_id");
-            }
-            self.remember_tool(
-                event["item"]["id"].as_str().ok_or("stream.tool.item_id")?,
-                call_id,
-            )
-            .map_err(|_| "stream.tool.identity")?;
+        if let Some(index) = self.tools.observe(&event)? {
+            // Expansion is unknown until terminal validation; later indexes may shift.
+            self.tool_barrier = Some(self.tool_barrier.map_or(index, |before| before.min(index)));
             return Ok(());
         }
         if let Some(index) = event["output_index"].as_u64() {
             let index = usize::try_from(index).map_err(|_| "stream.output_index")?;
             if index >= MAX_TOOLS {
                 return Err("stream.output_index");
+            }
+            if self.tool_barrier.is_some_and(|barrier| index >= barrier) {
+                return Ok(());
             }
             self.seen.insert(index);
         }
@@ -232,23 +198,13 @@ impl Translator {
                 .filter(|response| response["status"] == "completed")
                 .ok_or("response.status")?;
             let items = response["output"].as_array().ok_or("response.output")?;
-            for item in items.iter().filter(|item| {
-                matches!(
-                    item["type"].as_str(),
-                    Some("function_call" | "custom_tool_call")
-                )
-            }) {
-                if let Some(id) = item["id"].as_str() {
-                    if let Some(recorded) = self.tools.remove(id).flatten() {
-                        if item["call_id"].as_str() != Some(recorded.as_str()) {
-                            return Err("stream.tool.call_id");
-                        }
-                    }
-                }
-            }
-            if !self.tools.is_empty() || items.len() > MAX_TOOLS {
-                return Err("stream.tool.output");
-            }
+            self.tools.complete(items)?;
+            // Terminal-only or out-of-order tools must not renumber emitted text.
+            let seen_items: Vec<_> = self
+                .seen
+                .iter()
+                .map(|&index| (index, items.get(index).cloned()))
+                .collect();
             let response = event["response"].take();
             let translated = match translate_response_value(response, &self.request) {
                 Ok(translated) => translated,
@@ -259,6 +215,16 @@ impl Translator {
                     return Ok(());
                 }
             };
+            for (index, native) in seen_items {
+                if native.as_ref()
+                    != translated["output"]
+                        .as_array()
+                        .and_then(|items| items.get(index))
+                    || native.is_none()
+                {
+                    return Err("stream.output_index");
+                }
+            }
             let seen = std::mem::take(&mut self.seen);
             emit_unseen_output(&translated, &seen, |event| self.emit(event));
             event["response"] = translated;
@@ -298,57 +264,59 @@ impl Translator {
         if self.terminal {
             return;
         }
-        self.pending.extend_from_slice(bytes);
-        while let Some(frame) = take_sse_event(&mut self.pending) {
-            if frame.len() > MAX_FRAME_BYTES {
-                self.reject("stream.frame_size");
-                return;
-            }
-            let data = sse_event_data(&frame);
-            if data.is_empty() {
-                continue;
-            }
-            if data.trim_ascii() == b"[DONE]" {
-                self.reject("stream.terminal");
-                return;
-            }
-            match serde_json::from_slice::<Value>(&data) {
-                Ok(mut event) if event.is_object() => {
-                    if event.get("type").is_none() {
-                        // Match the shared reader's named terminal envelopes.
-                        // Never infer success from an unrelated SSE event.
-                        if let Some(kind) = crate::protocol::sse_lines(&frame)
-                            .find_map(|line| line.strip_prefix(b"event:"))
-                            .and_then(|kind| std::str::from_utf8(kind.trim_ascii()).ok())
-                            .filter(|kind| {
-                                matches!(
-                                    *kind,
-                                    "response.completed"
-                                        | "response.done"
-                                        | "response.incomplete"
-                                        | "response.failed"
-                                        | "response.cancelled"
-                                        | "response.canceled"
-                                        | "error"
-                                )
-                            })
-                        {
-                            event["type"] = json!(kind);
-                        }
-                    }
-                    if let Err(parameter) = self.event(event) {
-                        self.reject(parameter);
+        let mut pending = std::mem::take(&mut self.pending);
+        let result = crate::protocol::sse::consume_bounded_frames(
+            &mut pending,
+            bytes,
+            MAX_FRAME_BYTES,
+            self,
+            |state| state.terminal,
+            Self::frame,
+        );
+        self.pending = pending;
+        if result.is_err() {
+            self.reject("stream.frame_size");
+        }
+    }
+
+    fn frame(&mut self, frame: &[u8]) {
+        let data = sse_event_data(frame);
+        if data.is_empty() {
+            return;
+        }
+        if data.trim_ascii() == b"[DONE]" {
+            self.reject("stream.terminal");
+            return;
+        }
+        match serde_json::from_slice::<Value>(&data) {
+            Ok(mut event) if event.is_object() => {
+                if event.get("type").is_none() {
+                    // Match the shared reader's named terminal envelopes.
+                    // Never infer success from an unrelated SSE event.
+                    if let Some(kind) = crate::protocol::sse_lines(frame)
+                        .find_map(|line| line.strip_prefix(b"event:"))
+                        .and_then(|kind| std::str::from_utf8(kind.trim_ascii()).ok())
+                        .filter(|kind| {
+                            matches!(
+                                *kind,
+                                "response.completed"
+                                    | "response.done"
+                                    | "response.incomplete"
+                                    | "response.failed"
+                                    | "response.cancelled"
+                                    | "response.canceled"
+                                    | "error"
+                            )
+                        })
+                    {
+                        event["type"] = json!(kind);
                     }
                 }
-                _ => self.reject("stream.event.json"),
+                if let Err(parameter) = self.event(event) {
+                    self.reject(parameter);
+                }
             }
-            if self.terminal {
-                self.pending.clear();
-                return;
-            }
-        }
-        if self.pending.len() > MAX_FRAME_BYTES {
-            self.reject("stream.frame_size");
+            _ => self.reject("stream.event.json"),
         }
     }
 }

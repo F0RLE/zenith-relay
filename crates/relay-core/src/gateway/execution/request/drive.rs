@@ -38,6 +38,7 @@ pub(super) struct DriveAttemptInput<'a> {
     pub(super) key: &'a AuthenticatedKey,
     pub(super) budget: &'a SharedRequestBudget,
     pub(super) transport: crate::UsageTransport,
+    pub(super) transport_fallback: Option<crate::usage::TransportFallbackReason>,
     pub(super) resolved_model: &'a str,
     pub(super) client_wire_api: WireApi,
     pub(super) stream: bool,
@@ -92,6 +93,7 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
         key,
         budget,
         transport,
+        transport_fallback,
         resolved_model,
         client_wire_api,
         stream,
@@ -118,6 +120,7 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
     } = drive_input;
     tried.insert(selected.candidate_id.clone());
     let response_affinity_hit = selected.response_affinity_hit;
+    let preparation_started = route.diagnostics_enabled.then(Instant::now);
     let prepared = match prepare_request_attempt(RequestPrepareInput {
         route,
         runtime,
@@ -151,7 +154,8 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
         RequestPrepare::Ready(prepared) => *prepared,
     };
     let PreparedRequestAttempt {
-        route,
+        preparation,
+        mut route,
         source_model,
         selected_error_origin,
         account_route,
@@ -167,8 +171,11 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
         request_body,
         mut tool_use,
     } = prepared;
+    route.observe_http_dispatch(transport_fallback);
     let dispatches_before = budget.dispatches();
     let dispatched = match dispatch_request_attempt(RequestDispatchInput {
+        preparation_started,
+        preparation,
         runtime,
         key,
         lease: &lease,

@@ -35,6 +35,7 @@ pub(super) struct RequestExecution {
     pub(super) attempt_offset: u16,
     pub(super) budget: SharedRequestBudget,
     pub(super) transport: UsageTransport,
+    pub(super) transport_fallback: Option<crate::usage::TransportFallbackReason>,
 }
 
 mod completion;

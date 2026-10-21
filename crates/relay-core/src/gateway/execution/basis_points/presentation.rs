@@ -11,6 +11,8 @@ pub(super) const OPTION: &str = "relay_bps_tool_catalog";
 pub(super) const LOOKUP_TOOL: &str = "relay.catalog";
 const DISCOVERY_MIN_TOOLS: usize = 24;
 const DISCOVERY_MIN_CATALOG_BYTES: u64 = 24 * 1024;
+pub(super) const PRELOAD_MAX_BYTES: usize = 16 * 1024;
+const EAGER_TOOL_LIMIT: usize = 8;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum CatalogMode {
@@ -54,7 +56,7 @@ fn discovery_for_refs(tools: &[&ClientTool], request: &Value) -> bool {
 
 pub(super) fn loaded_names(tools: &[&ClientTool], request: &Value) -> BTreeSet<String> {
     let available: BTreeSet<_> = tools.iter().map(|tool| tool.key()).collect();
-    request
+    let mut loaded: BTreeSet<_> = request
         .get("input")
         .and_then(Value::as_array)
         .into_iter()
@@ -68,7 +70,29 @@ pub(super) fn loaded_names(tools: &[&ClientTool], request: &Value) -> BTreeSet<S
         .filter_map(|item| item.as_object())
         .map(client_tool_call_name)
         .filter(|name| available.contains(name))
-        .collect()
+        .collect();
+    let mut eager_bytes = 0;
+    let mut eager_count = 0;
+    let mut ordered = tools.to_vec();
+    ordered.sort_by_cached_key(|tool| tool.key());
+    for tool in ordered {
+        let deferred = tool.spec.get("defer_loading").and_then(Value::as_bool);
+        let core_tool = tool.namespace.is_none()
+            && matches!(
+                tool.name.as_str(),
+                "exec_command" | "apply_patch" | "write_stdin"
+            );
+        if deferred == Some(true) || !(deferred == Some(false) || core_tool) {
+            continue;
+        }
+        let bytes = describe_tools(&[tool], false).len();
+        if eager_count < EAGER_TOOL_LIMIT && eager_bytes + bytes <= PRELOAD_MAX_BYTES {
+            loaded.insert(tool.key());
+            eager_bytes += bytes;
+            eager_count += 1;
+        }
+    }
+    loaded
 }
 
 pub(super) fn describe_catalog(tools: &[&ClientTool], request: &Value) -> String {
@@ -80,10 +104,12 @@ pub(super) fn describe_catalog(tools: &[&ClientTool], request: &Value) -> String
          Index JSON groups tools as {{kind:{{namespace:[names]}}}}. An empty namespace means each name is complete; \
          otherwise the exact callable name is namespace + '.' + name. These are not aliases. \
          Descriptions, usage rules, and argument schemas are loaded on demand. \
-         Before first using a tool whose full contract is not loaded in this conversation, load it \
+         Contracts supplied in Loaded tool contracts are ready to call: do not look them up again. \
+         Before using any other tool whose full contract is not loaded in this conversation, load it \
          through native run_officejs with references=[\"{LOOKUP_TOOL}\"] and code containing JSON \
          {{\"names\":[\"exact.qualified.name\"]}} (up to 8 names), or {{\"query\":\"keywords\",\"limit\":5}}. \
          Query searches original names, descriptions, and schema text; use catalog-language keywords when names are unclear. \
+         A lookup result's reused entries reference names and earlier lookup call_id values whose full contracts remain in this conversation; use those definitions instead of looking them up again. \
          This read-only lookup runs inside Relay, never in the client or Excel, and does not satisfy required client tool choice. \
          After lookup, call the real client tool using its original identity. No lookup is needed for a text-only answer. \
          Catalog lookups may share a response with client calls; Relay consumes only the local lookups. Tool index:\n"
@@ -117,6 +143,10 @@ pub(super) fn loaded_contracts(tools: &[ClientTool], request: &Value) -> Option<
         .into_iter()
         .filter(|tool| loaded.contains(&tool.key()))
         .collect::<Vec<_>>();
+    describe_loaded_contracts(&known)
+}
+
+pub(super) fn describe_loaded_contracts(known: &[&ClientTool]) -> Option<String> {
     (!known.is_empty()).then(|| {
         let notation = if known.iter().any(|tool| parameter_schema(tool).is_some()) {
             PROMPT_SCHEMA_NOTATION
@@ -124,8 +154,8 @@ pub(super) fn loaded_contracts(tools: &[ClientTool], request: &Value) -> Option<
             ""
         };
         format!(
-            "{notation}Loaded contracts for client tools already used in this conversation:\n{}",
-            describe_tools(&known, false)
+            "{notation}Loaded tool contracts (ready to call; no catalog lookup needed):\n{}",
+            describe_tools(known, false)
         )
     })
 }

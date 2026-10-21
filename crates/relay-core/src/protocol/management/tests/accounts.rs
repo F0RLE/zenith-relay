@@ -113,23 +113,7 @@ fn runtime_and_native_account_helpers_keep_summary_rules_shared() {
     assert!(!model_has_native_account_route(&accounts, "other"));
 }
 #[test]
-fn generated_ids_require_the_expected_prefix_and_hex_suffix() {
-    assert!(valid_generated_id(
-        "batch_0123456789abcdef0123456789ABCDEF",
-        "batch_"
-    ));
-    assert!(!valid_generated_id("batch_0123456789abcdef", "batch_"));
-    assert!(!valid_generated_id(
-        "batch_0123456789abcdef0123456789abcdeg",
-        "batch_"
-    ));
-    assert!(!valid_generated_id(
-        "import_0123456789abcdef0123456789abcdef",
-        "batch_"
-    ));
-}
-#[test]
-fn usage_summary_accepts_servers_without_reasoning_telemetry() {
+fn usage_summary_accepts_saved_rows_without_reasoning_telemetry() {
     let summary: UsageSummary = serde_json::from_str(
             r#"{"id":1,"requestId":"req","localKeyId":"key","candidateKind":"source","candidateHint":"abc","requestedModel":null,"resolvedModel":null,"wireApi":"responses","success":true,"httpStatus":200,"errorCategory":null,"latencyMs":1,"inputTokens":2,"cachedInputTokens":null,"outputTokens":3,"totalTokens":5,"createdAtMs":1}"#,
         )

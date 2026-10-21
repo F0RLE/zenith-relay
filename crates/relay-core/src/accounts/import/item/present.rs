@@ -98,12 +98,47 @@ fn oauth_client_kind_from_import(
     tokens: Option<&Map<String, Value>>,
     id_token: Option<&str>,
     access_token: Option<&str>,
+    siwc: Option<&crate::providers::chatgpt::SiwcRegistration>,
 ) -> Result<Option<OAuthClientKind>, ImportIssue> {
+    for token in [id_token, access_token].into_iter().flatten() {
+        let Some(claims) = crate::accounts::decode_unverified_jwt_payload::<Value>(token) else {
+            continue;
+        };
+        let direct_scope = claims.get("scope").is_some_and(|scope| {
+            scope.as_str().is_some_and(|scope| {
+                scope
+                    .split_whitespace()
+                    .any(|scope| scope == "chatgpt.tokens.use.direct")
+            }) || scope.as_array().is_some_and(|scopes| {
+                scopes
+                    .iter()
+                    .any(|scope| scope == "chatgpt.tokens.use.direct")
+            })
+        });
+        let issued_client = ["aud", "client_id"]
+            .iter()
+            .filter_map(|field| claims.get(*field))
+            .any(|value| {
+                std::iter::once(value)
+                    .chain(value.as_array().into_iter().flatten())
+                    .filter_map(Value::as_str)
+                    .any(|client| {
+                        client.starts_with("oaiapp_")
+                            || client == crate::providers::chatgpt::SIWC_BOOTSTRAP_CLIENT_ID
+                    })
+            });
+        if (direct_scope || issued_client) && siwc.is_none() {
+            return Err(ImportIssue::new(
+                ImportIssueCode::UnsupportedValue,
+                "SIWC import requires its complete registration; tokens cannot be imported as Codex",
+            ));
+        }
+    }
     let mut containers = vec![import_object, credentials];
     if let Some(tokens) = tokens {
         containers.push(tokens);
     }
-    let mut selected = None;
+    let mut selected = siwc.map(|_| OAuthClientKind::Siwc);
     for container in containers {
         for source in std::iter::once(container).chain(
             ["oauth", "oauth_client", "oauthClient"]
@@ -134,11 +169,15 @@ fn oauth_client_kind_from_import(
                         ) {
                             match text.trim() {
                                 "codex" => Some(OAuthClientKind::Codex),
+                                "siwc" if siwc.is_some() => Some(OAuthClientKind::Siwc),
                                 "excel" | "excel_bps" => Some(OAuthClientKind::ExcelBps),
                                 _ => None,
                             }
                         } else {
-                            OAuthClientKind::from_client_id(text.trim())
+                            OAuthClientKind::from_client_id(text.trim()).or_else(|| {
+                                siwc.filter(|r| r.client_id == text.trim())
+                                    .map(|_| OAuthClientKind::Siwc)
+                            })
                         }
                     })
                     .ok_or_else(|| {
@@ -233,6 +272,7 @@ pub(super) struct PresentedImport<'a> {
     pub(super) tags_value: Option<&'a Value>,
     pub(super) basis_points_headers: Option<BasisPointsCapturedHeaders>,
     pub(super) oauth_client_kind: Option<OAuthClientKind>,
+    pub(super) siwc_registration: Option<crate::providers::chatgpt::SiwcRegistration>,
     pub(super) api_key: Option<String>,
     pub(super) access_token: Option<String>,
     pub(super) refresh_token: Option<String>,
@@ -310,6 +350,42 @@ pub(super) fn present_import_item<'a>(
     let id_token = credential_string(import_object, credentials, tokens, ID_TOKEN_FIELDS);
     let header_account_id = chatgpt_account_id_header(import_object, credentials);
     let basis_points_headers = basis_points_headers_from_import(import_object, credentials)?;
+    let mut siwc_registration = None;
+    for value in [import_object.get("siwc"), credentials.get("siwc")]
+        .into_iter()
+        .flatten()
+    {
+        let mut registration: crate::providers::chatgpt::SiwcRegistration =
+            serde_json::from_value(value.clone()).map_err(|_| {
+                ImportIssue::new(
+                    ImportIssueCode::InvalidCredentials,
+                    "SIWC registration is invalid",
+                )
+            })?;
+        registration
+            .validate()
+            .map_err(|message| ImportIssue::new(ImportIssueCode::InvalidCredentials, message))?;
+        // Imported grants may have rotated elsewhere. Only a fresh sign-in may activate them.
+        registration.requires_reauthentication = true;
+        if siwc_registration
+            .as_ref()
+            .is_some_and(|r| r != &registration)
+        {
+            return Err(ImportIssue::new(
+                ImportIssueCode::AmbiguousCredentials,
+                "SIWC registrations conflict",
+            ));
+        }
+        siwc_registration = Some(registration);
+    }
+    if siwc_registration.is_some()
+        && (access_token.is_none() || basis_points_headers.is_some() || header_account_id.is_some())
+    {
+        return Err(ImportIssue::new(
+            ImportIssueCode::InvalidCredentials,
+            "SIWC import requires its own access token and cannot use Codex or Excel headers",
+        ));
+    }
     let oauth_client_kind = if access_token.is_some() || refresh_token.is_some() {
         oauth_client_kind_from_import(
             import_object,
@@ -317,6 +393,7 @@ pub(super) fn present_import_item<'a>(
             tokens,
             id_token.as_deref(),
             access_token.as_deref(),
+            siwc_registration.as_ref(),
         )?
     } else {
         None
@@ -337,12 +414,14 @@ pub(super) fn present_import_item<'a>(
         .and_then(|agent_identity_object| string_field(agent_identity_object, AGENT_TASK_ID_FIELDS))
         .map(str::to_string)
         .or_else(|| credential_string(import_object, credentials, None, AGENT_TASK_ID_FIELDS));
-    if oauth_client_kind == Some(OAuthClientKind::ExcelBps)
-        && (agent_private_key.is_some() || agent_runtime_id.is_some() || agent_task_id.is_some())
+    if matches!(
+        oauth_client_kind,
+        Some(OAuthClientKind::ExcelBps | OAuthClientKind::Siwc)
+    ) && (agent_private_key.is_some() || agent_runtime_id.is_some() || agent_task_id.is_some())
     {
         return Err(ImportIssue::new(
             ImportIssueCode::AmbiguousCredentials,
-            "Excel OAuth cannot use Agent Identity",
+            "Excel and SIWC OAuth cannot use Agent Identity",
         ));
     }
     let named_auth_mode = string_field(credentials, AUTH_MODE_FIELDS)
@@ -371,6 +450,7 @@ pub(super) fn present_import_item<'a>(
         tags_value,
         basis_points_headers,
         oauth_client_kind,
+        siwc_registration,
         api_key,
         access_token,
         refresh_token,

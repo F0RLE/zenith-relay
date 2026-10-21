@@ -9,19 +9,24 @@ pub(super) async fn send_gateway_error(
     stream_id: Option<&str>,
 ) {
     let event = gateway_error_event(failure, request_id, stream_id);
-    let _ = downstream
-        .send(Message::Text(event.to_string().into()))
-        .await;
-    let _ = downstream
-        .send(Message::Close(Some(CloseFrame {
+    if send_message(downstream, Message::Text(event.to_string().into()))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let _ = send_message(
+        downstream,
+        Message::Close(Some(CloseFrame {
             code: if failure.status.is_client_error() {
                 close_code::POLICY
             } else {
                 close_code::ERROR
             },
             reason: "request failed".into(),
-        })))
-        .await;
+        })),
+    )
+    .await;
 }
 
 pub(super) fn gateway_error_event(

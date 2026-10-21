@@ -104,6 +104,7 @@ impl AccountModelsClient {
             self.endpoint = Url::parse(match kind {
                 super::OAuthClientKind::ExcelBps => BASIS_POINTS_ACCESS_ENDPOINT,
                 super::OAuthClientKind::Codex => CODEX_MODELS_ENDPOINT,
+                super::OAuthClientKind::Siwc => "https://api.openai.com/v1/models",
             })
             .expect("constant HTTPS endpoint");
         }
@@ -159,12 +160,13 @@ impl AccountModelsClient {
             })?;
         parse::validate_account_id(chatgpt_account_id)?;
         let basis_points = self.client_kind == super::OAuthClientKind::ExcelBps;
+        let siwc = self.client_kind == super::OAuthClientKind::Siwc;
         let mut request_url = self.endpoint.clone();
         if basis_points {
             request_url
                 .query_pairs_mut()
                 .append_pair("include_models", "true");
-        } else {
+        } else if !siwc {
             parse::validate_client_version(client_version)?;
             request_url
                 .query_pairs_mut()
@@ -178,6 +180,8 @@ impl AccountModelsClient {
             request
                 .headers(super::basis_points_headers(chatgpt_account_id, None, None))
                 .timeout(Duration::from_secs(5))
+        } else if siwc {
+            request
         } else {
             CodexIdentityEnvelope::new(chatgpt_account_id, client_version)
                 .map_err(|_| {
@@ -212,6 +216,8 @@ impl AccountModelsClient {
 
         if basis_points {
             parse_basis_points_model_access(&models_response_body).map(|access| access.model_ids())
+        } else if siwc {
+            parse::parse_siwc_models(&models_response_body)
         } else {
             parse::parse_models(&models_response_body)
         }

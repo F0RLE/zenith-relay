@@ -13,7 +13,7 @@ fn provider_image_metadata_does_not_change_unknown_model_capabilities() {
 }
 
 #[test]
-fn cached_native_card_confirms_extended_context_only_for_the_exact_model() {
+fn cached_native_context_windows_belong_to_the_exact_model_and_account() {
     let runtime = quota_runtime(QuotaSnapshot::default());
     runtime.remember_codex_model_manifest(
         "account-1",
@@ -38,10 +38,24 @@ fn cached_native_card_confirms_extended_context_only_for_the_exact_model() {
         current_time_ms(),
     );
 
-    assert!(runtime.cached_codex_model_supports_extended_context("GPT-TEST", ["account-1"]));
-    assert!(runtime.cached_codex_model_supports_extended_context("gpt-medium", ["account-1"]));
-    assert!(!runtime.cached_codex_model_supports_extended_context("gpt-short", ["account-1"]));
-    assert!(!runtime.cached_codex_model_supports_extended_context("gpt-test", ["missing-account"]));
+    for (model, default_tokens, maximum_tokens) in [
+        ("GPT-TEST", Some(272_000), Some(872_000)),
+        ("gpt-medium", Some(128_000), Some(256_000)),
+        ("gpt-short", Some(272_000), None),
+        ("missing", None, None),
+    ] {
+        assert_eq!(
+            runtime.model_context_windows(model, ["account-1"]),
+            crate::catalog::context_policy::ModelContextWindows {
+                default_tokens,
+                maximum_tokens,
+            }
+        );
+    }
+    assert_eq!(
+        runtime.model_context_windows("gpt-test", ["missing-account"]),
+        Default::default()
+    );
 }
 #[test]
 fn client_reasoning_projection_respects_source_scope_and_adapter_limits() {

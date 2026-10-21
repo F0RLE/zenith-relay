@@ -99,10 +99,18 @@ async fn spawn_gateway(
     upstream_base_url: &str,
     models: Vec<&str>,
 ) -> (TestServer, Arc<Mutex<Vec<UsageEvent>>>) {
+    spawn_gateway_with_options(upstream_base_url, models, GatewayRuntimeOptions::default()).await
+}
+
+async fn spawn_gateway_with_options(
+    upstream_base_url: &str,
+    models: Vec<&str>,
+    options: GatewayRuntimeOptions,
+) -> (TestServer, Arc<Mutex<Vec<UsageEvent>>>) {
     let events = Arc::new(Mutex::new(Vec::new()));
     let usage_events = events.clone();
-    let runtime = GatewayRuntime::new(
-        ProviderSource {
+    let runtime = GatewayRuntime::from_pool(
+        vec![RuntimeSource::unrestricted(ProviderSource {
             id: "source-1".to_string(),
             name: "Synthetic upstream".to_string(),
             base_url: format!("{upstream_base_url}/v1"),
@@ -110,11 +118,12 @@ async fn spawn_gateway(
             proxy_url: None,
             wire_api: WireApi::Responses,
             models: models.into_iter().map(str::to_string).collect(),
-        },
-        LocalGatewayKey {
+        })],
+        vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
             id: "local-key-1".to_string(),
             secret: LOCAL_KEY.to_string(),
-        },
+        })],
+        options,
         Arc::new(move |event| usage_events.lock().unwrap().push(event)),
     )
     .unwrap();

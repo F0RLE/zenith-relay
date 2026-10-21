@@ -49,16 +49,13 @@ pub struct AccountRefreshState {
     pub quota: RefreshStatus,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RemoteAccountLocation {
-    pub server_id: String,
-    pub remote_account_id: String,
-}
-
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_group_id: Option<String>,
+    #[serde(default)]
+    pub route_inactive: bool,
     #[serde(default)]
     pub oauth_client_kind: crate::providers::chatgpt::OAuthClientKind,
     pub id: String,
@@ -102,8 +99,8 @@ pub struct AccountSummary {
     #[serde(default)]
     pub refresh_state: AccountRefreshState,
     pub secret_available: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote_location: Option<RemoteAccountLocation>,
+    #[serde(default)]
+    pub recovery_required: bool,
     #[serde(default)]
     pub proxy_mode: ProxyMode,
     #[serde(default)]

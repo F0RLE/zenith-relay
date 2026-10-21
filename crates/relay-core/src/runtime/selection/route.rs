@@ -99,11 +99,7 @@ impl GatewayRuntime {
         let Some(source_model) = account.canonical_model(model) else {
             return Vec::new();
         };
-        vec![Self::account_executor_route(
-            account,
-            source_model,
-            allowed_protocols,
-        )]
+        vec![self.account_executor_route(account, source_model, allowed_protocols)]
     }
 
     pub(crate) fn image_executor_route(
@@ -135,13 +131,15 @@ impl GatewayRuntime {
         if account.oauth_client_kind == crate::providers::chatgpt::OAuthClientKind::ExcelBps {
             return None;
         }
-        Some(Self::account_executor_route(
-            account,
-            crate::poison::read(&account.model_inventory)
-                .image_main_model
-                .clone()?,
-            allowed_protocols,
-        ))
+        Some(
+            self.account_executor_route(
+                account,
+                crate::poison::read(&account.model_inventory)
+                    .image_main_model
+                    .clone()?,
+                allowed_protocols,
+            ),
+        )
     }
 
     fn source_executor_route(
@@ -186,6 +184,8 @@ impl GatewayRuntime {
             source_model,
             route_capability,
             half_open_probe: false,
+            diagnostics_enabled: self.diagnostics_enabled(),
+            basis_points_discovery: false,
             routing: None,
             cache_context_observation: None,
         })
@@ -202,6 +202,7 @@ impl GatewayRuntime {
     }
 
     fn account_executor_route(
+        &self,
         account: &ChatGptAccountExecutor,
         source_model: String,
         allowed_protocols: &[WireApi],
@@ -212,12 +213,15 @@ impl GatewayRuntime {
             .unwrap_or(WireApi::Responses);
         let adapter =
             SourceAdapter::between(wire_api, WireApi::Responses).expect("registered account route");
-        let account_transport =
-            if account.oauth_client_kind == crate::providers::chatgpt::OAuthClientKind::ExcelBps {
-                AccountTransport::ExcelBasisPoints
-            } else {
-                AccountTransport::NativeResponses
-            };
+        let account_transport = if account.oauth_client_kind
+            == crate::providers::chatgpt::OAuthClientKind::ExcelBps
+        {
+            AccountTransport::ExcelBasisPoints
+        } else if account.oauth_client_kind == crate::providers::chatgpt::OAuthClientKind::Siwc {
+            AccountTransport::Siwc
+        } else {
+            AccountTransport::NativeResponses
+        };
         ExecutorRoute {
             candidate_id: account.id.clone(),
             source_id: account.source_id.clone(),
@@ -235,11 +239,13 @@ impl GatewayRuntime {
             reasoning_effort_override: None,
             service_tier: DefaultServiceTier::Standard,
             upstream_url: match account_transport {
-                AccountTransport::NativeResponses => account.responses_url.clone(),
+                AccountTransport::NativeResponses | AccountTransport::Siwc => {
+                    account.responses_url.clone()
+                }
                 AccountTransport::ExcelBasisPoints => account.basis_points_url.clone(),
             },
             upstream_headers: match account_transport {
-                AccountTransport::NativeResponses => HeaderMap::new(),
+                AccountTransport::NativeResponses | AccountTransport::Siwc => HeaderMap::new(),
                 AccountTransport::ExcelBasisPoints => basis_points_headers(
                     &account.chatgpt_account_id,
                     account.chatgpt_user_id.as_deref(),
@@ -251,6 +257,8 @@ impl GatewayRuntime {
             source_model,
             route_capability: None,
             half_open_probe: false,
+            diagnostics_enabled: self.diagnostics_enabled(),
+            basis_points_discovery: false,
             routing: None,
             cache_context_observation: None,
         }

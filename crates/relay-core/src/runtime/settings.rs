@@ -3,6 +3,10 @@
 use super::*;
 
 impl GatewayRuntime {
+    pub(crate) fn diagnostics_enabled(&self) -> bool {
+        (self.diagnostics_enabled)()
+    }
+
     pub fn set_request_timezone(&self, policy: crate::RequestTimezonePolicy) -> Result<()> {
         policy
             .validate()
@@ -83,12 +87,8 @@ impl GatewayRuntime {
         crate::poison::read(&self.tool_policy).clone()
     }
 
-    pub fn set_tool_policy(&self, policy: crate::ToolPolicy) -> Result<()> {
-        let policy = policy
-            .normalized()
-            .map_err(|message| Error::Validation(message.to_string()))?;
+    pub fn set_tool_policy(&self, policy: crate::ToolPolicy) {
         *crate::poison::write(&self.tool_policy) = policy;
-        Ok(())
     }
 
     pub fn set_codex_background_tasks_enabled(&self, enabled: bool) {

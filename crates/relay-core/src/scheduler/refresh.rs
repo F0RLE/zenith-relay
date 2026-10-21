@@ -165,6 +165,26 @@ pub fn quota_reset_delay(
         .min()
 }
 
+/// Verify the last positive 1% before the ordinary quota poll, without treating
+/// a truly exhausted window as available or bypassing the coordinator's backoff.
+pub fn quota_verification_delay(
+    account_id: &str,
+    quota: &crate::quota::QuotaSnapshot,
+    now_ms: u64,
+) -> Option<u64> {
+    let reset_delay = quota_reset_delay(account_id, quota, now_ms);
+    let remaining = quota
+        .primary
+        .iter()
+        .chain(quota.secondary.iter())
+        .filter_map(|window| window.available_basis_points)
+        .min();
+    match remaining {
+        Some(1..=100) => earliest(reset_delay, Some(REFRESH_FAILURE_RETRY_MS)),
+        _ => reset_delay,
+    }
+}
+
 /// Only a recent provider window can replace a quota poll. A carried-forward
 /// window from an older read is not new evidence for the whole quota scope.
 pub fn passive_quota_age_ms(quota: &crate::quota::QuotaSnapshot, now_ms: u64) -> Option<u64> {

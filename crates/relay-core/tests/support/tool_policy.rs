@@ -134,7 +134,7 @@ async fn saved_automatic_policy_forwards_the_original_catalog_and_records_usage(
         )
         .unwrap(),
     );
-    runtime.set_tool_policy(automatic_policy()).unwrap();
+    runtime.set_tool_policy(automatic_policy());
     let gateway = spawn(gateway::router(runtime)).await;
 
     let response = reqwest::Client::new()
@@ -203,7 +203,7 @@ async fn saved_automatic_policy_does_not_retry_for_deferred_tool_search() {
         )
         .unwrap(),
     );
-    runtime.set_tool_policy(automatic_policy()).unwrap();
+    runtime.set_tool_policy(automatic_policy());
     let gateway = spawn(gateway::router(runtime)).await;
 
     let response = reqwest::Client::new()
@@ -264,7 +264,7 @@ async fn saved_automatic_policy_streams_the_original_catalog_once() {
         )
         .unwrap(),
     );
-    runtime.set_tool_policy(automatic_policy()).unwrap();
+    runtime.set_tool_policy(automatic_policy());
     let gateway = spawn(gateway::router(runtime)).await;
     let mut body = request();
     body["stream"] = json!(true);
@@ -321,7 +321,7 @@ async fn tool_policy_forwards_the_complete_catalog_across_http_sse_and_websocket
         )
         .unwrap(),
     );
-    runtime.set_tool_policy(policy()).unwrap();
+    runtime.set_tool_policy(policy());
     let gateway = spawn(gateway::router(runtime.clone())).await;
     let client = reqwest::Client::new();
     for stream in [false, true] {
@@ -406,7 +406,7 @@ async fn tool_policy_forwards_the_complete_catalog_across_http_sse_and_websocket
 
     // A hot update to the retired automatic mode does not rewrite the catalog
     // or require restarting the listener.
-    runtime.set_tool_policy(automatic_policy()).unwrap();
+    runtime.set_tool_policy(automatic_policy());
     assert!(client
         .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
@@ -422,7 +422,7 @@ async fn tool_policy_forwards_the_complete_catalog_across_http_sse_and_websocket
         assert!(!has_deferred_tool_search(body));
         assert_eq!(body["tools"].as_array().unwrap().len(), 73);
     }
-    runtime.set_tool_policy(ToolPolicy::default()).unwrap();
+    runtime.set_tool_policy(ToolPolicy::default());
     assert!(client
         .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
@@ -442,7 +442,7 @@ async fn tool_policy_forwards_the_complete_catalog_across_http_sse_and_websocket
 
     // A specific client choice no longer conflicts with a Relay-side selector:
     // Relay does not remove the selected tool or any other declaration.
-    runtime.set_tool_policy(automatic_policy()).unwrap();
+    runtime.set_tool_policy(automatic_policy());
     let mut conflict = request();
     conflict["tool_choice"] = json!({"type":"function","name":"tool_72"});
     assert_eq!(

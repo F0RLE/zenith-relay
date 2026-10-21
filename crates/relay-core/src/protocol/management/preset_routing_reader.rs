@@ -34,7 +34,6 @@ impl<'de> Deserialize<'de> for PresetRoutingPolicy {
         Ok(Self {
             tool_policy: reader.tool_policy,
             pool_routing: reader.pool_routing,
-            basis_points_enabled: false,
             max_retry_candidates: reader.max_retry_candidates,
             default_service_tier: reader.default_service_tier,
             image_base_model: reader.image_base_model,

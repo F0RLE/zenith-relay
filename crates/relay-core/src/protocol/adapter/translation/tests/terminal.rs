@@ -2,6 +2,41 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn oversized_sse_events_terminate_each_upstream_protocol_without_false_completion() {
+    let oversized = vec![b'x'; crate::protocol::sse::MAX_EVENT_BYTES + 1];
+    for upstream in [
+        WireApi::Responses,
+        WireApi::ChatCompletions,
+        WireApi::Messages,
+        WireApi::Gemini,
+    ] {
+        let client = if upstream == WireApi::Responses {
+            WireApi::Messages
+        } else {
+            WireApi::Responses
+        };
+        let mut bridge = prepare(client, upstream, &input(client), true)
+            .into_stream_bridge()
+            .unwrap();
+        bridge.push(&oversized);
+        assert!(bridge.is_terminal());
+        assert!(bridge.completed().is_none());
+        let wire = String::from_utf8(
+            std::iter::from_fn(|| bridge.pop_output())
+                .flatten()
+                .collect(),
+        )
+        .unwrap();
+        assert!(wire.contains("adapter_upstream_stream_invalid"));
+        assert!(wire.contains("stream.event_size"));
+        bridge.push(b"data: [DONE]\n\n");
+        bridge.finish();
+        assert!(bridge.pop_output().is_none());
+        assert!(bridge.completed().is_none());
+    }
+}
+
+#[test]
 fn chat_conversion_diagnostics_preserve_safe_shapes_in_json_and_streams() {
     for (key, rejected_field) in [
         ("reasoning_details", "reasoning_details"),

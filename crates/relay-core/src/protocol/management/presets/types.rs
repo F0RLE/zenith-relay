@@ -225,9 +225,6 @@ pub struct PresetRoutingPolicy {
     pub tool_policy: Option<crate::ToolPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_routing: Option<crate::PoolRoutingPolicy>,
-    /// Legacy storage field, ignored and omitted from portable presets.
-    #[serde(skip_serializing)]
-    pub basis_points_enabled: bool,
     pub max_retry_candidates: u8,
     pub default_service_tier: DefaultServiceTier,
     pub image_base_model: Option<String>,

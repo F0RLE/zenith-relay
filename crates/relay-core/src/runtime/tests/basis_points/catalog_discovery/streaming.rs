@@ -23,6 +23,64 @@ async fn read_prefix(response: &mut reqwest::Response, text: &str) -> String {
 }
 
 #[tokio::test]
+async fn discovery_rejects_conflicting_or_unfinished_parallel_tool_identity() {
+    for mode in ["single", "batch", "catalog"] {
+        for invalid in ["changed", "orphan", "delta"] {
+            let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+            server
+                .state
+                .stream_generations
+                .store(true, Ordering::SeqCst);
+            let reply = match mode {
+                "batch" => super::batch::batch_response(),
+                "catalog" => {
+                    tool_response("relay.catalog", "call_catalog", json!({"names":["lookup"]}))
+                }
+                _ => tool_response("lookup", "call_client", json!({"path":"synthetic"})),
+            };
+            let mut item = reply["output"][0].clone();
+            item["call_id"] = json!("call_unfinished");
+            if invalid != "changed" {
+                item["id"] = json!("fc_unfinished");
+            }
+            let prefix = if invalid == "delta" {
+                json!({"type":"response.function_call_arguments.delta","output_index":0,"item_id":item["id"],"delta":"{"})
+            } else {
+                json!({"type":"response.output_item.added","output_index":0,"item":item})
+            };
+            crate::poison::mutex(&server.state.stream_prefixes)
+                .push_back(format!("data: {prefix}\n\n").into_bytes());
+            *crate::poison::mutex(&server.state.generation_body) = reply;
+            let events = Arc::new(Mutex::new(Vec::<crate::UsageEvent>::new()));
+            let captured = events.clone();
+            let mut runtime = runtime(&server).await;
+            runtime.usage = Arc::new(move |event| crate::poison::mutex(&captured).push(event));
+            let (base, task) = recovery::gateway(Arc::new(runtime)).await;
+            let body = reqwest::Client::new()
+                .post(format!("{base}/v1/responses"))
+                .bearer_auth("local-secret")
+                .json(&catalog_request(true))
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
+            assert!(body.contains("stream.tool."), "{mode}/{invalid}: {body}");
+            assert!(!body.contains("event: response.completed"));
+            assert!(!body.contains("event: response.function_call_arguments.delta"));
+            assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 1);
+            let events = crate::poison::mutex(&events);
+            assert_eq!(events.len(), 1);
+            assert!(!events[0].success);
+            assert_eq!(events[0].tool_use.tool_call_count, 0);
+            assert!(events[0].tool_use.tool_calls_ready_ms.is_none());
+            task.abort();
+        }
+    }
+}
+
+#[tokio::test]
 async fn discovery_streams_text_before_completion_with_and_without_a_lookup() {
     for (lookup, reported, json_fallback) in [
         (false, true, false),
@@ -118,6 +176,215 @@ async fn discovery_streams_text_before_completion_with_and_without_a_lookup() {
         if lookup {
             assert_eq!(completed[0]["output"][1]["name"], "lookup");
         }
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn discovery_preserves_rate_limits_after_output_without_replaying() {
+    for (stream, untyped) in [(true, false), (true, true), (false, false), (false, true)] {
+        let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+        server
+            .state
+            .stream_generations
+            .store(true, Ordering::SeqCst);
+        let gate = Arc::new(Semaphore::new(usize::from(!stream)));
+        crate::poison::mutex(&server.state.stream_gates).push_back(gate.clone());
+        let error = json!({
+            "code":"rate_limit_exceeded","type":"tokens",
+            "message":"synthetic-private-provider-detail","retry_after":120
+        });
+        let usage = json!({"input_tokens":17,"output_tokens":3,"total_tokens":20});
+        let terminal = if untyped {
+            json!({"error":error,"usage":usage})
+        } else {
+            json!({"type":"response.failed","response":{
+                "id":"resp_limited","status":"failed","output":[],
+                "error":error,"usage":usage
+            }})
+        };
+        let prefix = [
+            json!({"type":"response.created","response":{"id":"resp_limited","status":"in_progress","output":[]}}),
+            json!({"type":"response.output_text.delta","output_index":0,"delta":"Before the limit"}),
+            terminal,
+        ]
+        .into_iter()
+        .map(|event| format!("data: {event}\n\n"))
+        .collect::<String>();
+        crate::poison::mutex(&server.state.stream_prefixes).push_back(prefix.into_bytes());
+        // A later terminal must not replace the first failure or release more output.
+        *crate::poison::mutex(&server.state.generation_body) = final_response();
+        let events = Arc::new(Mutex::new(Vec::<crate::UsageEvent>::new()));
+        let captured = events.clone();
+        let finished = Arc::new(Notify::new());
+        let notified = finished.clone();
+        let mut runtime = runtime(&server).await;
+        runtime.usage = Arc::new(move |event| {
+            crate::poison::mutex(&captured).push(event);
+            notified.notify_one();
+        });
+        let runtime = Arc::new(runtime);
+        let (base, task) = recovery::gateway(runtime.clone()).await;
+        let before = runtime_now_ms();
+        let mut response = reqwest::Client::new()
+            .post(format!("{base}/v1/responses"))
+            .bearer_auth("local-secret")
+            .json(&catalog_request(stream))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            if stream {
+                StatusCode::OK
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            }
+        );
+        let prefix = if stream {
+            let prefix = read_prefix(&mut response, "Before the limit").await;
+            gate.add_permits(1);
+            prefix
+        } else {
+            String::new()
+        };
+        let body = prefix + &response.text().await.unwrap();
+        assert!(body.contains("rate limit was reached"), "{body}");
+        assert!(!body.contains("Basis Points stream could not be completed safely"));
+        assert!(!body.contains("synthetic-private-provider-detail"));
+        assert!(!body.contains("response.completed"));
+        assert!(!body.contains("Ready"));
+        tokio::time::timeout(std::time::Duration::from_secs(3), finished.notified())
+            .await
+            .unwrap();
+        assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 1);
+        let retry_at = runtime
+            .lock_scheduler()
+            .candidate("account-1")
+            .unwrap()
+            .cooldowns["*"];
+        assert!(
+            retry_at >= before + 120_000,
+            "provider pause was shortened: stream={stream}, untyped={untyped}"
+        );
+        assert!(retry_at <= runtime_now_ms() + 120_000);
+        let events = crate::poison::mutex(&events);
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert!(!event.success);
+        assert_eq!(event.http_status, 429);
+        assert_eq!(
+            event.error_category.as_deref(),
+            Some(crate::error_codes::UPSTREAM_RATE_LIMITED)
+        );
+        assert_eq!(event.input_tokens, Some(17));
+        assert_eq!(event.output_tokens, Some(3));
+        let details = event.upstream_error.as_ref().unwrap();
+        assert_eq!(details.http_status, Some(200));
+        assert_eq!(details.code.as_deref(), Some("rate_limit_exceeded"));
+        assert_eq!(details.error_type.as_deref(), Some("tokens"));
+        assert_eq!(
+            details.message.as_deref(),
+            Some("synthetic-private-provider-detail")
+        );
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn discovery_continuation_retains_redacted_provider_error_without_replay() {
+    for stream in [false, true] {
+        let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+        server
+            .state
+            .stream_generations
+            .store(true, Ordering::SeqCst);
+        crate::poison::mutex(&server.state.generation_replies).extend([
+            (
+                StatusCode::OK,
+                tool_response("relay.catalog", "call_catalog", json!({"names":["lookup"]})),
+            ),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                json!({"error":{
+                    "code":"rate_limit_exceeded","type":"tokens",
+                    "retry_after":120,
+                    "request_id":"req_synthetic_discovery_limit",
+                    "message":"TPM limit reached; contact synthetic-private@example.invalid at https://example.invalid/private"
+                }}),
+            ),
+        ]);
+        let events = Arc::new(Mutex::new(Vec::<crate::UsageEvent>::new()));
+        let captured = events.clone();
+        let finished = Arc::new(Notify::new());
+        let notified = finished.clone();
+        let mut runtime = runtime(&server).await;
+        runtime.usage = Arc::new(move |event| {
+            crate::poison::mutex(&captured).push(event);
+            notified.notify_one();
+        });
+        let runtime = Arc::new(runtime);
+        let (base, task) = recovery::gateway(runtime.clone()).await;
+        let before = runtime_now_ms();
+        let response = reqwest::Client::new()
+            .post(format!("{base}/v1/responses"))
+            .bearer_auth("local-secret")
+            .json(&catalog_request(stream))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            if stream {
+                StatusCode::OK
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            }
+        );
+        let body = response.text().await.unwrap();
+        assert!(body.contains("rate limit was reached"), "{body}");
+        assert!(!body.contains("synthetic-private"));
+        assert!(!body.contains("response.completed"));
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let notified = finished.notified();
+                if crate::poison::mutex(&events).len() == 2 {
+                    break;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 2);
+        let retry_at = runtime
+            .lock_scheduler()
+            .candidate("account-1")
+            .unwrap()
+            .cooldowns["*"];
+        assert!(retry_at >= before + 120_000, "stream={stream}");
+        assert!(retry_at <= runtime_now_ms() + 120_000);
+        let events = crate::poison::mutex(&events);
+        assert_eq!(
+            events[0].routing.as_ref().unwrap().attempt_outcome,
+            Some(crate::AttemptOutcome::ToolDiscovery)
+        );
+        let event = &events[1];
+        assert!(!event.success);
+        assert_eq!(event.http_status, 429);
+        let details = event.upstream_error.as_ref().unwrap();
+        assert_eq!(details.http_status, Some(429));
+        assert_eq!(details.code.as_deref(), Some("rate_limit_exceeded"));
+        assert_eq!(details.error_type.as_deref(), Some("tokens"));
+        assert_eq!(
+            details.request_id.as_deref(),
+            Some("req_synthetic_discovery_limit")
+        );
+        let message = details.message.as_deref().unwrap();
+        assert!(message.contains("TPM limit reached"));
+        assert!(details.redacted);
+        assert!(!message.contains("synthetic-private@example.invalid"));
+        assert!(!message.contains("https://example.invalid/private"));
         task.abort();
     }
 }

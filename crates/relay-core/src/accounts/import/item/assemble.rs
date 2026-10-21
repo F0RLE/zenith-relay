@@ -12,6 +12,7 @@ pub(super) struct AssembleImport<'a> {
     pub(super) tags_value: Option<&'a Value>,
     pub(super) basis_points_headers: Option<crate::providers::chatgpt::BasisPointsCapturedHeaders>,
     pub(super) oauth_client_kind: Option<OAuthClientKind>,
+    pub(super) siwc_registration: Option<crate::providers::chatgpt::SiwcRegistration>,
     pub(super) use_api_key: bool,
     pub(super) use_tokens: bool,
     pub(super) use_agent_identity: bool,
@@ -40,6 +41,7 @@ pub(super) fn assemble_parsed_item(
         tags_value,
         basis_points_headers,
         oauth_client_kind,
+        siwc_registration,
         use_api_key,
         use_tokens,
         use_agent_identity,
@@ -193,6 +195,7 @@ pub(super) fn assemble_parsed_item(
             None
         },
         oauth_client_kind: if use_tokens { oauth_client_kind } else { None },
+        siwc_registration,
     };
     let preview = ImportPreviewRow {
         item_id: item_id.clone(),

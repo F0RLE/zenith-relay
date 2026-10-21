@@ -44,12 +44,21 @@ pub(super) fn tool_instructions(tools: &[ClientTool], request: &Value) -> String
          Native {TRANSPORT_TOOL} is intercepted as a transport endpoint; it never runs Office code or changes a workbook. \
          Other native server-injected Excel, Office, connector, workbook, list_skills, and web-search tools are unavailable. \
          For shell, filesystem, workspace, or repository access, invoke a suitable catalog tool rather than claiming access is unavailable. \
-         Use exactly one outer native {TRANSPORT_TOOL} call for each client tool invocation. \
+         Reduce model roundtrips by combining related read-only shell inspections in one declared shell-tool invocation when its contract and the task allow it. \
+         Use the client's configured shell and preserve each command's output and failure; shell-native concurrency is appropriate only for independent reads. \
+         Do not batch across approval boundaries, dependent operations, edits, or shared mutable state, and never bypass tool restrictions. \
+         For a single client tool, use one outer native {TRANSPORT_TOOL} call. \
          Independent client tools may use multiple outer calls in one response unless the client disables parallel calls. \
+         Prefer one native batch call for 2-8 independent client invocations when parallel calls are allowed: references lists their exact tool names in order (repeated names allowed), and code is relay-tool-batch-v1 followed by a newline and a JSON array with one payload per reference, at most 1 MiB total. \
+         In a batch, each function payload is its argument object or an encoded function-payload string; each custom payload is a JSON string whose decoded value is the unchanged raw input. Do not include transport fields or child call IDs. \
+         Never batch dependent actions, shared-state operations, calls across approval boundaries, or relay.catalog lookups; load every required contract first. The entire batch is validated before any client call is released. \
+         Batch results return together, labeled by their original position and client call ID. Do not repeat calls already present in history. \
          Respect tool-specific ordering and shared browser/session state. \
-         Set references to an array containing exactly one fully qualified client tool name from the catalog; references is the routing field, not a list of files or cells. \
-         Put only that tool payload in code. \
+         Outside an explicit batch, set references to an array containing exactly one fully qualified client tool name from the catalog; references is the routing field, not a list of files or cells. \
+         Outside a batch, put only that tool payload in code. \
          Parameters describes the tool's complete argument contract: pass one JSON object matching it. \
+         Use the current tool's declared keys, not options borrowed from another tool or a historical call. \
+         Transport fields belong to the outer envelope, not to the client arguments unless that tool declares them. \
          {notation}\
          {FUNCTION_RELAY_ENCODING} \
          For a custom tool, code contains the exact raw input text, not JSON: preserve every quote, backslash, newline and space without another encoding layer. \
@@ -58,7 +67,7 @@ pub(super) fn tool_instructions(tools: &[ClientTool], request: &Value) -> String
          Do not put a tool/args wrapper, JavaScript, Markdown fence, or another {TRANSPORT_TOOL} envelope in code, and do not route references to {TRANSPORT_TOOL} or {TRANSPORT_TOOL_ALIAS}. \
          Do not merely say you will act; make the tool call. \
          Historical calls may contain the old tool/args envelope; do not copy that format into new calls.{examples} \
-         The proxy converts this native call into the real client tool call, then replays the original {TRANSPORT_TOOL} identity with the client tool result on the next request. \
+         The proxy converts the native call into the real client call or calls, then restores the original {TRANSPORT_TOOL} identity and the associated results on the next request. \
          Interpret that result as the named client tool output. \
          Do not replay completed client calls merely to reconstruct history. \
          Repeated observations or new calls to the same tool are allowed when the task needs them; use a fresh invocation, not a replay of an old call. \
@@ -164,10 +173,46 @@ fn is_named_tool(tool: &ClientTool, bare: &str) -> bool {
     tool.name == bare || tool.name.ends_with(&suffix)
 }
 
+/// Keep a scoped historical catalog in context without restoring tool authority.
+pub(super) fn restore_text_only_prefix(request: &Value, upstream: &mut Value, prefix: String) {
+    let index = usize::from(
+        request["instructions"]
+            .as_str()
+            .is_some_and(|text| !text.trim().is_empty()),
+    );
+    let guard = tool_instructions(&[], request);
+    let expected = text_message("developer", "input_text", guard.clone());
+    let Some(input) = upstream["input"].as_array_mut() else {
+        return;
+    };
+    if input.get(index) != Some(&expected) {
+        return;
+    }
+    // The current empty catalog, not this historical text, still validates output.
+    input[index] = text_message("developer", "input_text", prefix);
+    input.push(text_message(
+        "developer",
+        "input_text",
+        format!(
+            "{guard} Earlier client tool declarations are historical context only. \
+             No client tools are available for this request. Do not call any tools."
+        ),
+    ));
+}
+
 /// Prepare a client Responses request for the Basis Points executor.
 pub(in crate::gateway::execution) fn prepare_request(
     request: &Value,
 ) -> Result<Value, AdapterError> {
+    prepare_request_with_timing(request, &mut None, false)
+}
+
+pub(in crate::gateway::execution) fn prepare_request_with_timing(
+    request: &Value,
+    schema_validation_ms: &mut Option<u64>,
+    diagnostics_enabled: bool,
+) -> Result<Value, AdapterError> {
+    *schema_validation_ms = None;
     let request_object = request
         .as_object()
         .ok_or_else(AdapterError::invalid_request)?;
@@ -186,6 +231,7 @@ pub(in crate::gateway::execution) fn prepare_request(
             "input.agent_message.encrypted_content",
         ));
     }
+    let schema_started = diagnostics_enabled.then(std::time::Instant::now);
     let structured = super::structured_output::prepare(request)?;
     if structured.is_none() {
         validate_text_format(request_object.get("text"))?;
@@ -199,12 +245,11 @@ pub(in crate::gateway::execution) fn prepare_request(
     for tool in &callable {
         if tool.kind == "function" {
             if let Some(schema) = parameter_schema(tool) {
-                validator(schema).map_err(|_| {
-                    AdapterError::invalid_request().with_parameter("tools.parameters")
-                })?;
+                validator(schema).map_err(|error| super::schema::validation_error(&error, true))?;
             }
         }
     }
+    *schema_validation_ms = schema_started.map(|start| start.elapsed().as_millis() as u64);
     let tool_choice_requires_call = requires_tool_call(request_object.get("tool_choice"));
     if tool_choice_requires_call && callable.is_empty() {
         return Err(AdapterError::invalid_request().with_parameter("tool_choice"));
@@ -329,6 +374,14 @@ pub(in crate::gateway::execution) fn prepare_request(
 
 /// Structured `text.format` is not implemented on this transport. Dropping it
 /// and returning ordinary text would look like a successful JSON response.
+pub(in crate::gateway::execution) fn output_format_error(request: &Value) -> Option<AdapterError> {
+    match super::structured_output::prepare(request) {
+        Ok(Some(_)) => None,
+        Ok(None) => validate_text_format(request.get("text")).err(),
+        Err(error) => Some(error),
+    }
+}
+
 fn validate_text_format(text_value: Option<&Value>) -> Result<(), AdapterError> {
     let Some(text_value) = text_value.filter(|text_config| !text_config.is_null()) else {
         return Ok(());

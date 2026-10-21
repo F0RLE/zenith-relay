@@ -30,12 +30,24 @@ pub(in crate::gateway) fn classify_upstream_error_value(
     status: StatusCode,
     error_payload: &Value,
 ) -> UpstreamErrorClassification {
-    // BPS normalization emits a typed local adapter failure into the stream.
+    // Normalization and stream guards emit typed local failures into the stream.
     // Keep its exact category instead of falling back to upstream_terminal.
     // Only these representation failures are accepted, never arbitrary codes
     // or origin claims, and an HTTP authorization refusal still owns its status.
     if status == StatusCode::BAD_GATEWAY {
         for path in ["", "/error", "/response/error", "/body/error"] {
+            if !path.is_empty()
+                && error_payload.pointer(path).is_some_and(|error| {
+                    error.get("type").and_then(Value::as_str) == Some(error_codes::STREAM_ERROR)
+                        && error.get("code").and_then(Value::as_str)
+                            == Some(error_codes::STREAM_EVENT_TOO_LARGE)
+                })
+            {
+                return UpstreamErrorClassification {
+                    category: error_codes::STREAM_EVENT_TOO_LARGE,
+                    message: "Upstream streaming event exceeded Relay's size limit",
+                };
+            }
             if let Some(error) = error_payload.pointer(path).filter(|error| {
                 let kind = error.get("type").and_then(Value::as_str);
                 kind == Some(if path.is_empty() {

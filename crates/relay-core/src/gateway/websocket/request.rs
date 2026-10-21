@@ -11,6 +11,12 @@ use std::collections::{BTreeMap, HashSet};
 mod continuation;
 mod parse;
 
+pub(super) struct PreparedPayload {
+    pub(super) payload: String,
+    pub(super) reasoning_effort: ReasoningEffortDiagnostics,
+    pub(super) tool_use: ToolUseDiagnostics,
+}
+
 #[derive(Clone)]
 pub(super) struct ClientRequest {
     local_key_id: String,
@@ -110,7 +116,7 @@ impl ClientRequest {
         route: &mut ExecutorRoute,
         client_headers: &HeaderMap,
         prepared: &crate::runtime::PreparedAuthorization,
-    ) -> Result<String, GatewayFailure> {
+    ) -> Result<PreparedPayload, GatewayFailure> {
         runtime
             .validate_continuation_route(
                 route,
@@ -122,7 +128,7 @@ impl ClientRequest {
         if !GatewayRuntime::route_supports_service_tier(route, self.service_tier()) {
             return Err(GatewayFailure::unsupported_service_tier());
         }
-        let (mut filtered_request, _) = self.filtered_value_for(route)?;
+        let (mut filtered_request, mut tool_use) = self.filtered_value_for(route)?;
         runtime.apply_request_timezone(&route.candidate_id, &mut filtered_request);
         let turn_scope = request_scope(
             &self.local_key_id,
@@ -132,11 +138,22 @@ impl ClientRequest {
             route.upstream_url.as_str(),
         );
         runtime.guard_codex_payload(&mut filtered_request, turn_scope.as_ref(), prepared);
+        let reasoning_effort = ReasoningEffortDiagnostics::from_bodies(
+            &self.request_body,
+            &filtered_request,
+            WireApi::Responses,
+            WireApi::Responses,
+        );
         let payload = serde_json::to_string(&filtered_request)
             .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))?;
+        tool_use.capture_upstream_context(&filtered_request);
         self.tool_policy
             .observe_cache_context(runtime, route, &filtered_request);
-        Ok(payload)
+        Ok(PreparedPayload {
+            payload,
+            reasoning_effort,
+            tool_use,
+        })
     }
 
     fn filtered_value_for(

@@ -194,6 +194,15 @@ impl RotationEngine {
 
     pub(crate) fn fresh_quota_remaining(&self, candidate_id: &str, now_ms: u64) -> Option<u64> {
         let runtime = self.candidates.get(candidate_id)?;
+        if runtime.candidate.quota == QuotaState::Unknown {
+            return runtime
+                .candidate
+                .quota_reference
+                .as_ref()
+                .and_then(|reference| {
+                    reference.fresh_remaining(now_ms, self.quota_stale_after_ms)
+                });
+        }
         if runtime.candidate.quota != QuotaState::Available {
             return None;
         }

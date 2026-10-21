@@ -54,13 +54,6 @@ impl PreparedAdapterRequest {
         }
     }
 
-    pub fn native_upstream_body_mut(&mut self) -> Option<&mut Value> {
-        match self {
-            Self::Native { upstream_body } => Some(upstream_body),
-            Self::Translated { .. } => None,
-        }
-    }
-
     pub fn upstream_body_mut(&mut self) -> &mut Value {
         match self {
             Self::Native { upstream_body } => upstream_body,
@@ -106,7 +99,8 @@ impl PreparedAdapterRequest {
     pub(crate) fn apply_tool_policy(
         &mut self,
         policy: &ToolPolicy,
+        diagnostics_enabled: bool,
     ) -> Result<ToolPolicyResult, &'static str> {
-        apply_tool_policy(self.upstream_body_mut(), policy)
+        apply_tool_policy(self.upstream_body_mut(), policy, diagnostics_enabled)
     }
 }

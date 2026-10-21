@@ -62,6 +62,13 @@ fn visit_array(tool_array: &Value, depth: usize, visit_tool: &mut impl FnMut(&Va
 }
 
 pub(crate) fn catalog_stats(request_payload: &Value) -> CatalogStats {
+    catalog_stats_with_sizes(request_payload, true)
+}
+
+pub(crate) fn catalog_stats_with_sizes(
+    request_payload: &Value,
+    measure_sizes: bool,
+) -> CatalogStats {
     let mut stats = CatalogStats::default();
     let mut search = false;
     let mut deferred = false;
@@ -77,6 +84,9 @@ pub(crate) fn catalog_stats(request_payload: &Value) -> CatalogStats {
         }
     });
     stats.deferred_search = search && deferred;
+    if !measure_sizes {
+        return stats;
+    }
     arrays(request_payload, &mut |tool_array| {
         if tool_array.is_array() {
             let mut counter = ByteCounter(0);

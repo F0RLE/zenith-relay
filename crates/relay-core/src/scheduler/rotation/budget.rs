@@ -39,6 +39,7 @@ pub struct RequestBudget {
     admission_stopped: bool,
     retry_started_at: Option<tokio::time::Instant>,
     retry_deadline: Option<tokio::time::Instant>,
+    http_headers_deadline: Option<tokio::time::Instant>,
     retry_window_ms: Option<u64>,
 }
 
@@ -79,6 +80,7 @@ impl RequestBudget {
             admission_stopped: false,
             retry_started_at: None,
             retry_deadline: None,
+            http_headers_deadline: None,
             retry_window_ms: None,
         })
     }

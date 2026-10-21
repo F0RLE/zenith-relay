@@ -186,6 +186,7 @@ const RULES: &[Rule] = &[
     Rule::Phrases(
         &[
             "model_at_capacity",
+            "model_capacity_exhausted",
             "selected model is at capacity",
             "model is at capacity",
         ],
@@ -208,6 +209,7 @@ const RULES: &[Rule] = &[
     ),
     Rule::Phrases(
         &[
+            error_codes::UPSTREAM_RATE_LIMITED,
             "rate_limit_exceeded",
             "rate_limit_error",
             "rate_limit_reached",
@@ -313,7 +315,8 @@ fn quota_exhausted(status: StatusCode, text: &str) -> Option<&'static str> {
             "out of credits",
             "add credits to continue",
         ],
-    ) || status == StatusCode::PAYMENT_REQUIRED)
+    ) || (text.contains("has reached") && text.contains("subscription sharing usage limit"))
+        || status == StatusCode::PAYMENT_REQUIRED)
         .then_some(error_codes::UPSTREAM_QUOTA_EXHAUSTED)
 }
 

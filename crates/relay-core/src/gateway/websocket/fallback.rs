@@ -7,6 +7,7 @@ pub(super) async fn bridge_http_fallback(
     key: AuthenticatedKey,
     headers: HeaderMap,
     mut client_request: ClientRequest,
+    mut transport_fallback: crate::usage::TransportFallbackReason,
 ) {
     let mut stream_id = client_request.stream_id.clone();
     loop {
@@ -17,6 +18,7 @@ pub(super) async fn bridge_http_fallback(
             &key,
             &headers,
             &client_request,
+            transport_fallback,
             &mut client_visible_output,
         )
         .await
@@ -31,16 +33,19 @@ pub(super) async fn bridge_http_fallback(
                 )
                 .await;
             } else if failure.category != "client_closed" {
-                let _ = downstream
-                    .send(Message::Close(Some(CloseFrame {
+                let _ = send_message(
+                    &mut downstream,
+                    Message::Close(Some(CloseFrame {
                         code: close_code::ERROR,
                         reason: "upstream stream ended after output".into(),
-                    })))
-                    .await;
+                    })),
+                )
+                .await;
             }
             return;
         }
 
+        transport_fallback = crate::usage::TransportFallbackReason::ExistingHttpBridge;
         let next_request_result = timeout(WEBSOCKET_IDLE_TIMEOUT, async {
             loop {
                 let message = downstream.recv().await?;
@@ -51,13 +56,16 @@ pub(super) async fn bridge_http_fallback(
                     Message::Text(text) => return Some(Some(text.to_string().into_bytes())),
                     Message::Binary(bytes) => return Some(Some(bytes.to_vec())),
                     Message::Ping(ping_payload) => {
-                        if downstream.send(Message::Pong(ping_payload)).await.is_err() {
+                        if send_message(&mut downstream, Message::Pong(ping_payload))
+                            .await
+                            .is_err()
+                        {
                             return None;
                         }
                     }
                     Message::Pong(_) => {}
                     Message::Close(frame) => {
-                        let _ = downstream.send(Message::Close(frame)).await;
+                        let _ = send_message(&mut downstream, Message::Close(frame)).await;
                         return None;
                     }
                 }
@@ -106,6 +114,7 @@ async fn serve_http_fallback_request(
     _key: &AuthenticatedKey,
     client_headers: &HeaderMap,
     client_request: &ClientRequest,
+    transport_fallback: crate::usage::TransportFallbackReason,
     client_visible_output: &mut bool,
 ) -> Result<(), GatewayFailure> {
     let mut headers = client_headers.clone();
@@ -139,6 +148,7 @@ async fn serve_http_fallback_request(
             request_id: client_request.request_id.clone(),
             budget: client_request.budget.clone(),
             transport: crate::UsageTransport::Websocket,
+            transport_fallback: Some(transport_fallback),
             service_tier_policy: client_request.service_tier_policy.clone(),
         });
     let upstream_response = await_while_client_connected(
@@ -195,8 +205,7 @@ async fn serve_http_fallback_request(
                 stream_origin,
             )? {
                 *client_visible_output |= fallback_message.semantic_output;
-                downstream
-                    .send(fallback_message.message)
+                send_message(downstream, fallback_message.message)
                     .await
                     .map_err(|_| GatewayFailure::client_closed())?;
             }

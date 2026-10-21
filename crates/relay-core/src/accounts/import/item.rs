@@ -51,6 +51,7 @@ pub(super) fn parse_item(
         tags_value,
         basis_points_headers,
         oauth_client_kind,
+        siwc_registration,
         api_key,
         access_token,
         refresh_token,
@@ -90,7 +91,7 @@ pub(super) fn parse_item(
         warnings.push(ImportWarning::new(ImportWarningCode::ConcurrencyIgnored));
     }
 
-    let profile = read_import_profile(
+    let mut profile = read_import_profile(
         ImportFieldSources {
             import_object,
             credentials,
@@ -107,6 +108,18 @@ pub(super) fn parse_item(
         jwt,
     );
 
+    if let Some(registration) = siwc_registration.as_ref() {
+        if !use_tokens || use_agent_identity || use_api_key {
+            return Err(ImportIssue::new(
+                ImportIssueCode::AmbiguousCredentials,
+                "SIWC registration requires OAuth credentials",
+            ));
+        }
+        profile.account_id = Some(registration.identity_key());
+        profile.chatgpt_user_id = Some(registration.subject.clone());
+        profile.organization_id = None;
+        profile.account_is_fedramp = false;
+    }
     if use_tokens {
         oauth_client_kind
             .unwrap_or_default()
@@ -129,6 +142,7 @@ pub(super) fn parse_item(
         tags_value,
         basis_points_headers,
         oauth_client_kind,
+        siwc_registration,
         use_api_key,
         use_tokens,
         use_agent_identity,

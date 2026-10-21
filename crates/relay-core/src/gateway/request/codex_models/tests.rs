@@ -91,7 +91,6 @@ fn native_catalog_test_runtime_with_accounts(
                 chatgpt_account_id: "chatgpt-account".into(),
                 chatgpt_user_id: None,
                 responses_url: "https://example.test/v1/responses".into(),
-                basis_points_enabled: false,
                 basis_points_headers: None,
                 models: models.iter().map(|model| (*model).into()).collect(),
                 enabled: true,

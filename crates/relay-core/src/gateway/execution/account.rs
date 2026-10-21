@@ -259,6 +259,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         );
         tried.insert(selected_candidate.candidate_id.clone());
         let response_affinity_hit = selected_candidate.response_affinity_hit;
+        let preparation_started = runtime.diagnostics_enabled().then(std::time::Instant::now);
         let prepared_attempt = match prepare_account_attempt(AccountPrepareInput {
             runtime: &runtime,
             key: &key,
@@ -300,6 +301,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             AccountPrepare::Ready(prepared) => *prepared,
         };
         let PreparedAccountAttempt {
+            preparation,
             route,
             basis_points_route,
             route_responses_lite,
@@ -313,6 +315,8 @@ pub(in crate::gateway) async fn execute_account_endpoint(
 
         let dispatches_before = budget.dispatches();
         let dispatched_attempt = match dispatch_account_attempt(AccountDispatchInput {
+            preparation_started,
+            preparation,
             runtime: &runtime,
             key: &key,
             lease: &lease,

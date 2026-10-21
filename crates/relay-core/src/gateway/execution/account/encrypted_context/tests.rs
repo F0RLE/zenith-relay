@@ -11,7 +11,6 @@ fn rejected_ciphertext_is_removed_without_losing_visible_or_ordinary_history() {
                 "encrypted_content": "synthetic-reasoning-ciphertext",
                 "summary": [{"type": "summary_text", "text": "visible reasoning"}]
             },
-            {"id": "rs_untyped", "encrypted_content": "synthetic-untyped-ciphertext"},
             {"id": "rs_empty", "type": "reasoning", "encrypted_content": "  ", "summary": []},
             {"id": "cmp_plain", "type": "compaction", "summary": []},
             {"role": "assistant", "content": [{"type": "output_text", "text": "previous answer"}]},
@@ -37,9 +36,36 @@ fn rejected_ciphertext_is_removed_without_losing_visible_or_ordinary_history() {
     assert!(items
         .iter()
         .any(|item| item["type"] == "function_call_output"));
-    assert!(items
-        .iter()
-        .all(|item| item.get("id").and_then(serde_json::Value::as_str) != Some("rs_untyped")));
+}
+
+#[test]
+fn ambiguous_rejected_ciphertext_preserves_the_entire_request() {
+    let mut request = json!({
+        "previous_response_id": "resp_original",
+        "input": [
+            {"id":"rs_first", "type":"reasoning", "encrypted_content":"synthetic-first", "summary":[]},
+            {"id":"rs_second", "encrypted_content":"synthetic-second"},
+            {"type":"function_call", "call_id":"call_original", "name":"inspect", "arguments":"{}"},
+            {"type":"function_call_output", "call_id":"call_original", "output":"synthetic-result"},
+            {"role":"user", "content":"Continue"}
+        ]
+    });
+    let original = request.clone();
+    assert!(!drop_rejected_encrypted_context(&mut request));
+    assert_eq!(request, original);
+}
+
+#[test]
+fn a_single_untyped_reasoning_item_can_be_removed_after_rejection() {
+    let mut request = json!({"input":[
+        {"id":"rs_untyped", "encrypted_content":"synthetic-ciphertext"},
+        {"role":"user", "content":"Continue"}
+    ]});
+    assert!(drop_rejected_encrypted_context(&mut request));
+    assert_eq!(
+        request["input"],
+        json!([{"role":"user", "content":"Continue"}])
+    );
 }
 
 #[test]

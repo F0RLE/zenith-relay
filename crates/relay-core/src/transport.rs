@@ -4,6 +4,37 @@ use std::time::Duration;
 
 pub(crate) const MAX_MODEL_CATALOG_BODY_BYTES: usize = 4 * 1024 * 1024;
 
+/// Opt-in native HTTP connect/upload/headers bound, not a generation or body timeout.
+pub(crate) fn http_headers_timeout() -> Option<Duration> {
+    parse_http_headers_timeout(
+        std::env::var("ZENITH_RELAY_HTTP_HEADERS_TIMEOUT_SECONDS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn parse_http_headers_timeout(value: Option<&str>) -> Option<Duration> {
+    value?
+        .parse::<u64>()
+        .ok()
+        .filter(|seconds| (1..=1800).contains(seconds))
+        .map(Duration::from_secs)
+}
+
+pub(crate) async fn execute_with_headers_deadline(
+    client: &reqwest::Client,
+    request: reqwest::Request,
+    deadline: tokio::time::Instant,
+) -> std::result::Result<reqwest::Response, crate::runtime::AuthorizedRequestError> {
+    if deadline <= tokio::time::Instant::now() {
+        return Err(crate::runtime::AuthorizedRequestError::HeadersTimeout);
+    }
+    tokio::time::timeout_at(deadline, client.execute(request))
+        .await
+        .map_err(|_| crate::runtime::AuthorizedRequestError::HeadersTimeout)?
+        .map_err(crate::runtime::AuthorizedRequestError::Transport)
+}
+
 /// Defaults to a BPS-only read-progress deadline. Native generation has no
 /// total or idle deadline. Zero explicitly disables the BPS guard.
 pub(crate) fn basis_points_progress_timeout() -> Option<Duration> {
@@ -186,6 +217,95 @@ pub async fn collect_limited(response: reqwest::Response, limit: usize) -> Resul
 mod progress_tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn native_http_headers_timeout_is_opt_in_and_bounded() {
+        for value in [None, Some("0"), Some("-1"), Some("invalid"), Some("1801")] {
+            assert_eq!(parse_http_headers_timeout(value), None);
+        }
+        assert_eq!(
+            parse_http_headers_timeout(Some("1")),
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(
+            parse_http_headers_timeout(Some("1800")),
+            Some(Duration::from_secs(1800))
+        );
+    }
+
+    async fn headers_request(
+        headers_delay: Duration,
+        body_delay: Duration,
+    ) -> (reqwest::Client, reqwest::Request, AbortServer) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            tokio::time::sleep(headers_delay).await;
+            if socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n")
+                .await
+                .is_err()
+            {
+                return;
+            }
+            tokio::time::sleep(body_delay).await;
+            let _ = socket.write_all(b"hello").await;
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let request = client.get(format!("http://{address}/")).build().unwrap();
+        (client, request, AbortServer(task))
+    }
+
+    #[tokio::test]
+    async fn http_headers_deadline_stops_silent_headers_but_not_a_long_response_body() {
+        let (client, request, _server) =
+            headers_request(Duration::ZERO, Duration::from_millis(700)).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+        let response = execute_with_headers_deadline(&client, request, deadline)
+            .await
+            .unwrap();
+        assert_eq!(response.text().await.unwrap(), "hello");
+        assert!(tokio::time::Instant::now() > deadline);
+
+        let (client, request, _silent_server) =
+            headers_request(Duration::from_secs(5), Duration::ZERO).await;
+        let error = execute_with_headers_deadline(
+            &client,
+            request,
+            tokio::time::Instant::now() + Duration::from_millis(50),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::runtime::AuthorizedRequestError::HeadersTimeout
+        ));
+    }
+
+    #[tokio::test]
+    async fn expired_http_headers_deadline_does_not_submit_another_request() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let request = client
+            .get(format!("http://{}/", listener.local_addr().unwrap()))
+            .build()
+            .unwrap();
+        let error = execute_with_headers_deadline(&client, request, tokio::time::Instant::now())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::runtime::AuthorizedRequestError::HeadersTimeout
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), listener.accept())
+                .await
+                .is_err()
+        );
+    }
 
     struct AbortServer(tokio::task::JoinHandle<()>);
 

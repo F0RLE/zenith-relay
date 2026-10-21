@@ -12,6 +12,7 @@
 //! relay back into the client protocol.
 
 mod attachments;
+mod batch;
 mod catalog;
 mod codec;
 pub(in crate::gateway) mod discovery;
@@ -23,7 +24,9 @@ mod schema;
 pub(in crate::gateway::execution) mod structured_output;
 
 pub(in crate::gateway::execution) use attachments::{attach_input_images, AttachmentFailure};
-pub(in crate::gateway::execution) use prepare::prepare_request;
+pub(in crate::gateway::execution) use prepare::{
+    output_format_error, prepare_request, prepare_request_with_timing,
+};
 pub(in crate::gateway) use response::{synthetic_stream, translate_response};
 
 pub(super) const TRANSPORT_TOOL: &str = "run_officejs";

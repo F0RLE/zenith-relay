@@ -81,10 +81,6 @@ impl TokenSet {
     pub fn is_access_usable(&self, now_ms: u64, refresh_skew_ms: u64) -> bool {
         access_token_is_usable(self.expires_at_ms, now_ms, refresh_skew_ms)
     }
-
-    pub fn refresh_eligible(&self, now_ms: u64, refresh_skew_ms: u64) -> bool {
-        self.refresh_token.is_some() && !self.is_access_usable(now_ms, refresh_skew_ms)
-    }
 }
 
 impl fmt::Debug for TokenSet {

@@ -58,6 +58,7 @@ mod session_state;
 mod settings;
 mod source_metadata;
 mod support;
+mod tool_catalog;
 
 pub(in crate::runtime) use support::{
     all_native_wire_apis, apply_candidate_policy, client_wire_apis_to_native, model_rules,
@@ -108,6 +109,7 @@ const CHATGPT_TEAM_BREAKER_DEDUP_MS: u64 = 60 * 1_000;
 static NEXT_ACTIVITY_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct GatewayRuntime {
+    diagnostics_enabled: fn() -> bool,
     tool_policy: RwLock<crate::ToolPolicy>,
     request_timezone: RwLock<crate::RequestTimezonePolicy>,
     clients: RuntimeHttpClients,
@@ -147,6 +149,7 @@ pub struct GatewayRuntime {
     native_responses_replay_store: Mutex<NativeResponsesReplayStore>,
     cache_context_store: cache_context::CacheContextStore,
     codex_turn_state_store: CodexTurnStateStore,
+    pub(crate) basis_points_catalog_store: tool_catalog::ToolCatalogStore,
     control: RuntimeControl,
     max_retry_candidates: std::sync::atomic::AtomicUsize,
     quota_stale_after_ms: u64,
@@ -262,6 +265,8 @@ pub(crate) struct ExecutorRoute {
     /// unset until the account endpoint reports model capabilities.
     pub(crate) route_capability: Option<crate::ModelEndpointCapability>,
     pub(crate) half_open_probe: bool,
+    pub(crate) diagnostics_enabled: bool,
+    pub(crate) basis_points_discovery: bool,
     pub(crate) routing: Option<RoutingDiagnostics>,
     pub(crate) cache_context_observation: Option<cache_context::CacheContextObservation>,
 }
@@ -332,6 +337,7 @@ pub(crate) enum AuthorizedRequestError {
     ModelUnavailable,
     ReasoningUnavailable,
     ProgressTimeout,
+    HeadersTimeout,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -404,6 +410,7 @@ impl GatewayRuntime {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AccountTransport {
     NativeResponses,
+    Siwc,
     ExcelBasisPoints,
 }
 

@@ -30,14 +30,12 @@ pub(super) async fn handle_downstream_message(
                 .await;
         }
         Message::Ping(ping_payload) => {
-            upstream
-                .send(UpstreamMessage::Ping(ping_payload))
+            send_message(upstream, UpstreamMessage::Ping(ping_payload))
                 .await
                 .map_err(|_| GatewayFailure::transport(state.upstream_origin))?;
         }
         Message::Pong(pong_payload) => {
-            upstream
-                .send(UpstreamMessage::Pong(pong_payload))
+            send_message(upstream, UpstreamMessage::Pong(pong_payload))
                 .await
                 .map_err(|_| GatewayFailure::transport(state.upstream_origin))?;
         }
@@ -50,8 +48,8 @@ pub(super) async fn handle_downstream_message(
                     )
                 })
                 .unwrap_or((UpstreamCloseCode::Normal, String::new()));
-            let _ = upstream.send(UpstreamMessage::Close { code, reason }).await;
-            let _ = downstream.send(Message::Close(None)).await;
+            let _ = send_message(upstream, UpstreamMessage::Close { code, reason }).await;
+            let _ = send_message(downstream, Message::Close(None)).await;
             finish_incomplete(runtime, state, error_codes::CLIENT_CANCELLED);
             return Ok(false);
         }
@@ -115,7 +113,20 @@ async fn start_next_request(
         clear_transient_response_affinity(runtime, state);
         state.last_response_id = None;
     }
-    if same_response_id && !model_switch_reset {
+    let quota_yield = response_affinity_key
+        .as_deref()
+        .is_some_and(|affinity_key| {
+            runtime.automatic_response_owner_should_yield(
+                key,
+                affinity_key,
+                &client_request.resolved_model,
+                WEBSOCKET_PROTOCOLS,
+                &Default::default(),
+                now_ms(),
+            )
+        })
+        && client_request.yield_response_owner(runtime, &key.id);
+    if same_response_id && !model_switch_reset && !quota_yield {
         let (tried, mut admitted) = client_request.compatible_routes(runtime, key)?;
         let selected = runtime
             .select_and_reserve_with_budget(
@@ -222,12 +233,14 @@ async fn start_next_request(
         route.half_open_probe = selected.half_open_probe;
         route.account_token_generation = prepared.token_generation;
         route.routing = Some(selected.diagnostics);
+        route.observe_websocket_dispatch(None);
+        route.observe_websocket_response();
         route.client_context_id = client_request.client_context_id.clone();
         client_request.apply_service_tier();
         route.service_tier = client_request.service_tier();
         let started = Instant::now();
         let upstream_origin = route_error_origin(&route);
-        let request_payload =
+        let prepared_request =
             client_request.observed_payload_for(runtime, &mut route, headers, &prepared)?;
         client_request.budget.configure_retry_window(
             runtime.route_recovery_window_ms(),
@@ -237,18 +250,15 @@ async fn start_next_request(
             .begin_rotation_dispatch_for(&prepared, runtime)
             .map_err(|_| GatewayFailure::unavailable())?;
         let attempt = u16::try_from(dispatch.0).unwrap_or(u16::MAX);
-        // A failed WebSocket flush does not prove that remote execution never
-        // started. Do not convert it into a health vote or retry.
-        send_request(upstream, request_payload, upstream_origin).await?;
         let event = usage_event(
             UsageAttempt {
                 request_id: &client_request.request_id,
                 attempt,
                 local_key_id: &key.id,
                 route: &route,
-                reasoning_effort: Some(&client_request.reasoning_effort_for(&route)),
+                reasoning_effort: Some(&prepared_request.reasoning_effort),
                 requested_model: &client_request.requested_model,
-                tool_use: client_request.tool_use_for(&route),
+                tool_use: prepared_request.tool_use,
             },
             true,
             StatusCode::OK.as_u16(),
@@ -267,8 +277,11 @@ async fn start_next_request(
             prompt_affinity_key: client_request.prompt_affinity_key,
             client_visible_output: false,
             legacy_call_id_repair_attempted: false,
+            tool_call_capture: Default::default(),
             native_replay_capture: NativeReplayCapture::default(),
         });
+        // Track the attempt before I/O so a failed write is audited as uncertain.
+        send_request(upstream, prepared_request.payload, upstream_origin).await?;
         return Ok(true);
     }
     let connected = connect_upstream_while_client_connected(

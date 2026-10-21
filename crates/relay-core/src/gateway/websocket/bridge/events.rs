@@ -94,7 +94,7 @@ pub(super) async fn handle_upstream_message(
                 Some(rewritten) => Message::Text(rewritten.into()),
                 None => Message::Text(text.into()),
             };
-            if downstream.send(forwarded_message).await.is_err() {
+            if send_message(downstream, forwarded_message).await.is_err() {
                 finish_incomplete(runtime, state, error_codes::CLIENT_CANCELLED);
                 return false;
             }
@@ -118,8 +118,7 @@ pub(super) async fn handle_upstream_message(
             let forwarded_payload =
                 prefix_websocket_error_payload(bytes.as_ref(), &terminal, state.upstream_origin)
                     .map_or_else(|| bytes, Into::into);
-            if downstream
-                .send(Message::Binary(forwarded_payload))
+            if send_message(downstream, Message::Binary(forwarded_payload))
                 .await
                 .is_err()
             {
@@ -129,10 +128,14 @@ pub(super) async fn handle_upstream_message(
             finish_terminal(runtime, state, terminal)
         }
         UpstreamMessage::Ping(ping_payload) => {
-            downstream.send(Message::Ping(ping_payload)).await.is_ok()
+            send_message(downstream, Message::Ping(ping_payload))
+                .await
+                .is_ok()
         }
         UpstreamMessage::Pong(pong_payload) => {
-            downstream.send(Message::Pong(pong_payload)).await.is_ok()
+            send_message(downstream, Message::Pong(pong_payload))
+                .await
+                .is_ok()
         }
         UpstreamMessage::Close { code, reason } => {
             let active_request = state.in_flight.is_some() && state.can_send_gateway_error();
@@ -148,12 +151,14 @@ pub(super) async fn handle_upstream_message(
                 )
                 .await;
             } else {
-                let _ = downstream
-                    .send(Message::Close(Some(CloseFrame {
+                let _ = send_message(
+                    downstream,
+                    Message::Close(Some(CloseFrame {
                         code: u16::from(code),
                         reason: reason.into(),
-                    })))
-                    .await;
+                    })),
+                )
+                .await;
             }
             false
         }
@@ -295,7 +300,11 @@ pub(super) fn inspect_upstream_event(
 fn inspect_parsed_event(event_payload: &Value, state: &mut BridgeState) -> EventTerminal {
     let event_type = event_payload.get("type").and_then(Value::as_str);
     if let Some(in_flight) = state.in_flight.as_mut() {
+        in_flight.event.observe_response_model(event_payload);
         in_flight.native_replay_capture.observe(event_payload);
+        in_flight
+            .tool_call_capture
+            .observe(event_payload, WireApi::Responses);
         in_flight
             .event
             .tool_use

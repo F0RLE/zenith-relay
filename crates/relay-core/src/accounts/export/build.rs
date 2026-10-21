@@ -84,6 +84,22 @@ pub fn build_account_export(
     Ok(document)
 }
 fn validate_account(account: &AccountExportCredential) -> Result<()> {
+    if (account.oauth_client_kind == crate::providers::chatgpt::OAuthClientKind::Siwc)
+        != account.siwc_registration.is_some()
+    {
+        return Err(validation(
+            "account export SIWC registration is missing or conflicts with its client",
+        ));
+    }
+    if let Some(registration) = &account.siwc_registration {
+        registration.validate().map_err(validation)?;
+        if account.basis_points_headers.is_some()
+            || account.account_id.as_deref() != Some(registration.identity_key().as_str())
+            || account.user_id.as_deref() != Some(registration.subject.as_str())
+        {
+            return Err(validation("account export SIWC identity is inconsistent"));
+        }
+    }
     validate_text(
         &account.label,
         "account export label",

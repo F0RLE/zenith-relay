@@ -208,7 +208,7 @@ fn safe_request_id(request_id: &str) -> Option<String> {
     .then(|| request_id.to_string())
 }
 
-fn sanitize_message(raw_message: &str) -> (String, bool, bool) {
+pub(super) fn sanitize_message(raw_message: &str) -> (String, bool, bool) {
     static SENSITIVE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         [
             r#"(?i)\b(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|api[_ -]?key|access[_ -]?token|refresh[_ -]?token|id[_ -]?token|password|secret)\b[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\n,;]+)"#,

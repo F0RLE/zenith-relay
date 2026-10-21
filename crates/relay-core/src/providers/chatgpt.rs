@@ -8,6 +8,10 @@ mod passive_quota;
 mod quota_subscription;
 mod quota_usage;
 mod runtime;
+mod siwc;
+mod siwc_registration;
+pub(crate) use siwc::{prepare_siwc_request, sanitize_siwc_headers};
+pub use siwc_registration::{valid_siwc_client_id, SiwcRegistration, SIWC_ISSUER};
 mod token_errors;
 
 use futures_util::StreamExt;
@@ -36,7 +40,8 @@ pub use models::{
 };
 pub use oauth::{
     OAuthClientKind, BASIS_POINTS_FREE_ACCOUNT_MESSAGE, BASIS_POINTS_OAUTH_CLIENT_ID,
-    BASIS_POINTS_OAUTH_REDIRECT_URI, CODEX_OAUTH_CLIENT_ID,
+    BASIS_POINTS_OAUTH_REDIRECT_URI, CODEX_OAUTH_CLIENT_ID, SIWC_BOOTSTRAP_CLIENT_ID,
+    SIWC_RESOURCE,
 };
 pub use passive_quota::merge_codex_quota_headers;
 pub use quota_subscription::{

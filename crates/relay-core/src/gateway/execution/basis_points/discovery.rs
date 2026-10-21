@@ -3,11 +3,11 @@ use super::catalog::{client_tools, selected_tools, ClientTool};
 use super::presentation::{
     diagnostics, loaded_names, loaded_schema_bytes, uses_discovery, LOOKUP_TOOL,
 };
-use super::response::{invalid_tool_output, parse_transport_envelope};
+use super::response::{invalid_tool_output, parse_transport_envelope, validate_tool_completion};
 use crate::protocol::AdapterError;
 use crate::usage::ToolUseDiagnostics;
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(in crate::gateway) mod execution;
 pub(in crate::gateway::execution) use execution::{resolve, DiscoveryExecution};
@@ -17,6 +17,9 @@ const MAX_LOOKUP_TOOLS: usize = 8;
 const MAX_CONTINUATION_BYTES: usize = 4 * 1024 * 1024;
 
 pub(in crate::gateway::execution) fn capture(request: &Value, tool_use: &mut ToolUseDiagnostics) {
+    if tool_use.client_context.is_none() {
+        return;
+    }
     if let Ok(tools) = client_tools(request) {
         tool_use.basis_points_catalog =
             Some(diagnostics(&selected_tools(request, &tools), request));
@@ -25,26 +28,31 @@ pub(in crate::gateway::execution) fn capture(request: &Value, tool_use: &mut Too
 }
 
 pub(in crate::gateway) struct DiscoverySession {
+    model: String,
     tools: Vec<ClientTool>,
     loaded: BTreeSet<String>,
-    rendered_schema_bytes: u64,
-    queries: BTreeSet<String>,
+    rendered_schema_bytes: Option<u64>,
+    lookup_contracts: BTreeMap<String, String>,
     call_ids: BTreeSet<String>,
     rounds: u8,
     continuation_bytes: usize,
     prior_messages: Vec<Value>,
+    prompt_prefix: Option<([u8; 32], String)>,
+    preload_checkpoint: Option<[u8; 32]>,
 }
 
 impl DiscoverySession {
     pub(in crate::gateway::execution) fn new(
         request: &Value,
+        diagnostics_enabled: bool,
     ) -> Result<Option<Self>, AdapterError> {
         let tools = selected_tools(request, &client_tools(request)?);
         if !uses_discovery(&tools, request) {
             return Ok(None);
         }
         let loaded = loaded_names(&tools.iter().collect::<Vec<_>>(), request);
-        let rendered_schema_bytes = loaded_schema_bytes(&tools, &loaded);
+        let rendered_schema_bytes =
+            diagnostics_enabled.then(|| loaded_schema_bytes(&tools, &loaded));
         let call_ids = request
             .get("input")
             .into_iter()
@@ -58,17 +66,80 @@ impl DiscoverySession {
                     .and_then(Value::as_str)
                     .map(str::to_owned)
             })
+            .flat_map(|id| {
+                let parent = super::batch::parent_call_id(&id);
+                std::iter::once(id).chain(parent)
+            })
             .collect();
         Ok(Some(Self {
+            model: request["model"].as_str().unwrap_or_default().to_string(),
             tools,
             loaded,
             rendered_schema_bytes,
-            queries: BTreeSet::new(),
+            lookup_contracts: BTreeMap::new(),
             call_ids,
             rounds: 0,
             continuation_bytes: 0,
             prior_messages: Vec::new(),
+            prompt_prefix: None,
+            preload_checkpoint: None,
         }))
+    }
+
+    fn preload(
+        &mut self,
+        names: &BTreeSet<String>,
+        upstream: &mut Value,
+    ) -> Result<(), AdapterError> {
+        let mut tools: Vec<_> = self
+            .tools
+            .iter()
+            .filter(|tool| names.contains(&tool.key()) && !self.loaded.contains(&tool.key()))
+            .collect();
+        tools.sort_by_cached_key(|tool| tool.key());
+        let mut bytes = 0;
+        tools.retain(|tool| {
+            let size = super::prepare::describe_tools(&[tool], false).len();
+            if bytes + size > super::presentation::PRELOAD_MAX_BYTES {
+                return false;
+            }
+            bytes += size;
+            true
+        });
+        if let Some(contracts) = super::presentation::describe_loaded_contracts(&tools) {
+            upstream
+                .get_mut("input")
+                .and_then(Value::as_array_mut)
+                .ok_or_else(|| invalid_tool_output("input"))?
+                .push(super::codec::text_message(
+                    "developer",
+                    "input_text",
+                    contracts,
+                ));
+            self.loaded.extend(tools.iter().map(|tool| tool.key()));
+            if let Some(bytes) = self.rendered_schema_bytes.as_mut() {
+                *bytes = loaded_schema_bytes(&self.tools, &self.loaded);
+            }
+        }
+        Ok(())
+    }
+
+    pub(in crate::gateway) fn remember(
+        &self,
+        runtime: &crate::GatewayRuntime,
+        local_key_id: &str,
+        response: &Value,
+    ) {
+        runtime.basis_points_catalog_store.remember(
+            local_key_id,
+            &self.model,
+            response,
+            &self.loaded,
+            self.prompt_prefix
+                .as_ref()
+                .map(|(scope, text)| (scope, text.as_str())),
+            crate::gateway::now_ms(),
+        );
     }
 
     pub(in crate::gateway) fn advance(
@@ -94,6 +165,7 @@ impl DiscoverySession {
                 Some("function_call" | "custom_tool_call")
             )
         }) {
+            validate_tool_completion(item)?;
             let call_id = item["call_id"]
                 .as_str()
                 .filter(|id| !id.trim().is_empty())
@@ -141,18 +213,16 @@ impl DiscoverySession {
             let arguments = envelope
                 .get("args")
                 .and_then(|arguments| super::codec::function_arguments(arguments).ok());
-            let selected = arguments.as_ref().and_then(|arguments| {
-                lookup(&self.tools, arguments)
-                    .ok()
-                    .map(|selected| (arguments, selected))
-            });
+            let selected = arguments
+                .as_ref()
+                .and_then(|arguments| lookup(&self.tools, arguments).ok());
             if client_calls != 0 {
                 // These definitions will not be rendered or sent to another
                 // generation. Validate the lookup without cloning its schemas
                 // or marking unseen contracts as loaded in diagnostics.
                 continue;
             }
-            let (arguments, selected) = match selected {
+            let selected = match selected {
                 Some(selected) => selected,
                 None => {
                     // A recognized local read has no side effects. Return its
@@ -170,24 +240,30 @@ impl DiscoverySession {
                     continue;
                 }
             };
-            let cached = !self.queries.insert(arguments.to_string());
             self.loaded.extend(selected.iter().map(|tool| tool.key()));
-            self.rendered_schema_bytes += selected
-                .iter()
-                .filter_map(|tool| super::schema::parameter_schema(tool))
-                .map(crate::tool_policy::serialized_bytes)
-                .sum::<u64>();
-            let contracts = selected
-                .iter()
-                .map(|tool| {
-                    let mut contract = Value::Object(tool.spec.clone());
-                    contract["name"] = json!(tool.key());
-                    contract
-                })
-                .collect::<Vec<_>>();
+            let mut contracts = Vec::new();
+            let mut reused = Vec::new();
+            for tool in selected {
+                let name = tool.key();
+                if let Some(prior_call) = self.lookup_contracts.get(&name) {
+                    reused.push(json!({"name":name,"call_id":prior_call}));
+                    continue;
+                }
+                self.lookup_contracts
+                    .insert(name.clone(), call_id.to_string());
+                if let Some(bytes) = self.rendered_schema_bytes.as_mut() {
+                    *bytes += super::schema::parameter_schema(tool)
+                        .map(crate::tool_policy::serialized_bytes)
+                        .unwrap_or(0);
+                }
+                let mut contract = Value::Object(tool.spec.clone());
+                contract["name"] = json!(name);
+                contracts.push(contract);
+            }
+            let cached = contracts.is_empty() && !reused.is_empty();
             outputs.push(json!({
                 "type":"function_call_output", "call_id":call_id, "id":item_id,
-                "output": json!({"tools":contracts,"cached":cached,"remainingLookups":MAX_LOOKUP_ROUNDS.saturating_sub(self.rounds + 1)}).to_string()
+                "output": json!({"tools":contracts,"reused":reused,"cached":cached,"remainingLookups":MAX_LOOKUP_ROUNDS.saturating_sub(self.rounds + 1)}).to_string()
             }));
         }
         if client_calls != 0 {
@@ -254,7 +330,9 @@ impl DiscoverySession {
         if let Some(catalog) = tool_use.basis_points_catalog.as_mut() {
             catalog.discovery_rounds = self.rounds;
             catalog.loaded_tool_count = self.loaded.len().min(u16::MAX as usize) as u16;
-            catalog.rendered_schema_bytes = self.rendered_schema_bytes;
+            if let Some(bytes) = self.rendered_schema_bytes {
+                catalog.rendered_schema_bytes = bytes;
+            }
         }
     }
 }

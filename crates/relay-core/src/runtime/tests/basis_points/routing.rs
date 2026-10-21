@@ -87,7 +87,13 @@ async fn websocket_routes_a_bps_only_model_through_http_without_trying_native_re
     bps.state
         .strict_request_schema
         .store(true, Ordering::SeqCst);
-    let runtime = bps_only_runtime(&bps, &native).await;
+    let mut runtime = bps_only_runtime(&bps, &native).await;
+    let events = Arc::new(Mutex::new(Vec::<crate::UsageEvent>::new()));
+    Arc::get_mut(&mut runtime).unwrap().diagnostics_enabled = || true;
+    let captured = events.clone();
+    Arc::get_mut(&mut runtime).unwrap().usage = Arc::new(move |event| {
+        crate::poison::mutex(&captured).push(event);
+    });
     let (base, task) = recovery::gateway(runtime.clone()).await;
     let mut socket = retry_admission::bounded_client()
         .get(format!("{base}/v1/responses"))
@@ -149,6 +155,24 @@ async fn websocket_routes_a_bps_only_model_through_http_without_trying_native_re
     assert_eq!(bps.state.access_requests.load(Ordering::SeqCst), 3);
     assert_eq!(bps.state.generation_requests.load(Ordering::SeqCst), 2);
     assert_eq!(native.state.generation_requests.load(Ordering::SeqCst), 0);
+    let recorded = crate::poison::mutex(&events);
+    assert_eq!(recorded.len(), 2);
+    for event in recorded.iter() {
+        assert_eq!(event.transport, crate::UsageTransport::Websocket);
+        let transport = event.routing.as_ref().unwrap().transport.as_ref().unwrap();
+        assert_eq!(transport.upstream, crate::UsageTransport::Http);
+        assert_eq!(transport.mode, crate::usage::TransportMode::BasisPoints);
+        assert_eq!(
+            transport.fallback_reason,
+            Some(crate::usage::TransportFallbackReason::BasisPointsHttp)
+        );
+        assert_eq!(
+            transport.response_format,
+            Some(crate::usage::TransportResponseFormat::Sse)
+        );
+        assert_eq!(transport.handshake_ms, None);
+    }
+    drop(recorded);
     drop(socket);
     task.abort();
 }

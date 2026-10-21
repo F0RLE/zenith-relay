@@ -4,6 +4,7 @@ use std::convert::Infallible;
 use std::sync::Mutex;
 
 mod sse_bootstrap;
+mod sse_limits;
 mod terminal_markers;
 mod usage_forwarding;
 

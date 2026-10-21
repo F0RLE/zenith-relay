@@ -136,11 +136,11 @@ pub use scheduler::rotation::{
 };
 pub use scheduler::{
     account_candidate_health, resolve_pool_routing, ActiveModelRuntime, AttemptOutcome,
-    CandidateHealth, CandidateKind, CandidateQuota, CandidateQuotaState, CandidateResourceHeadroom,
-    CandidateRuntimeSnapshot, CandidateScope, ModelRetryRuntime, PoolMemberKind, PoolRoutingMember,
-    PoolRoutingMode, PoolRoutingPolicy, PoolScheduler, RoutingDiagnostics, RuntimeCandidate,
-    Selection, SelectionReason, SelectionRequest, PROMPT_AFFINITY_TTL_MS, QUOTA_STALE_AFTER_MS,
-    RESPONSE_AFFINITY_TTL_MS,
+    CandidateHealth, CandidateKind, CandidateQuota, CandidateQuotaReference, CandidateQuotaState,
+    CandidateResourceHeadroom, CandidateRuntimeSnapshot, CandidateScope, ModelRetryRuntime,
+    PoolMemberKind, PoolRoutingMember, PoolRoutingMode, PoolRoutingPolicy, PoolScheduler,
+    RoutingDiagnostics, RuntimeCandidate, Selection, SelectionReason, SelectionRequest,
+    PROMPT_AFFINITY_TTL_MS, QUOTA_STALE_AFTER_MS, RESPONSE_AFFINITY_TTL_MS,
 };
 pub use sources::{
     apply_source_priorities, cache_write_model_ids, discover_source_models,
@@ -164,7 +164,7 @@ pub use sources::{
     SourceTransportIdentity, SourceTransportRecord, WireApi, MAX_SOURCE_RECOVERY_DELAY_SECONDS,
 };
 pub use time::{unix_time_ms, unix_time_ms_at, unix_time_ms_from_rfc3339};
-pub use tool_policy::{ToolPolicy, ToolPolicyMode, ToolPolicyOutcome, ToolPolicyUpdate};
+pub use tool_policy::{ToolPolicy, ToolPolicyMode, ToolPolicyOutcome};
 pub use transport::collect_limited;
 pub use usage::{
     estimate_api_equivalent_with_catalog, estimate_api_equivalent_with_token_price,

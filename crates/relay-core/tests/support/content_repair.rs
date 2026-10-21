@@ -2,11 +2,21 @@ use super::*;
 
 #[tokio::test]
 async fn invalid_foreign_reasoning_retries_a_native_account_without_ciphertext() {
+    assert_foreign_reasoning_repair(false).await;
+}
+
+#[tokio::test]
+async fn invalid_foreign_reasoning_with_generated_usage_does_not_repeat_the_turn() {
+    assert_foreign_reasoning_repair(true).await;
+}
+
+async fn assert_foreign_reasoning_repair(generated: bool) {
+    let mut failure = json!({"error":{"message":"Encrypted content for item rs_1 could not be verified. Reason: Encrypted content could not be decrypted or parsed."}});
+    if generated {
+        failure["usage"] = json!({"input_tokens":5,"output_tokens":7});
+    }
     let (upstream, state) = spawn_upstream(vec![
-        Reply::Json(
-            StatusCode::BAD_REQUEST,
-            json!({"error":{"message":"Encrypted content for item rs_1 could not be verified. Reason: Encrypted content could not be decrypted or parsed."}}),
-        ),
+        Reply::Json(StatusCode::BAD_REQUEST, failure),
         success_reply("recovered-response"),
     ])
     .await;
@@ -35,15 +45,29 @@ async fn invalid_foreign_reasoning_retries_a_native_account_without_ciphertext()
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.status(),
+        if generated {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::OK
+        }
+    );
 
     let requests = state.requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), if generated { 1 } else { 2 });
     assert_eq!(
         requests[0].body["input"][0]["encrypted_content"],
         "foreign-ciphertext"
     );
     assert_eq!(requests[0].body["input"][0]["id"], "rs_1");
+    if generated {
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].output_tokens, Some(7));
+        assert!(!events[0].success);
+        return;
+    }
     let retry_input = requests[1].body["input"].as_array().unwrap();
     assert_eq!(retry_input.len(), 3);
     assert_eq!(retry_input[0]["type"], "reasoning");

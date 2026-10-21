@@ -163,20 +163,6 @@ impl PricingCatalog {
         self.resolve_account(model, Some(provider_family)).quote
     }
 
-    /// Returns whether at least one non-conflicting token record matches the
-    /// model. It is useful for capability checks where provenance is not
-    /// needed.
-    pub fn has_token_price(&self, model: &str) -> bool {
-        self.entries.values().any(|candidate_entry| {
-            candidate_entry.token.is_some()
-                && !self
-                    .conflicts
-                    .contains(&super::normalize(&candidate_entry.model_id))
-                && (super::normalize(&candidate_entry.model_id) == super::normalize(model)
-                    || super::unqualified(&candidate_entry.model_id) == super::normalize(model))
-        })
-    }
-
     pub fn handle(self) -> PricingCatalogHandle {
         PricingCatalogHandle::new(self)
     }

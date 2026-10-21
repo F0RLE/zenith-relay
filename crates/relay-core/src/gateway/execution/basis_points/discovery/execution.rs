@@ -46,29 +46,68 @@ pub(in crate::gateway::execution) fn prepare_dispatch(
     upstream: &Value,
     budget: &SharedRequestBudget,
     tool_use: &mut ToolUseDiagnostics,
-) -> Result<Value, crate::AdapterError> {
+    runtime: &GatewayRuntime,
+    local_key_id: &str,
+    client_context_id: Option<&str>,
+) -> Result<(Value, Option<DiscoverySession>), crate::AdapterError> {
     capture(original, tool_use);
-    let discovery = tool_use
-        .basis_points_catalog
-        .as_ref()
-        .is_some_and(|catalog| catalog.mode == "discovery");
-    if discovery && budget.with_budget(|budget| budget.remaining()) < 2 {
+    let mut session = DiscoverySession::new(original, tool_use.client_context.is_some())?;
+    if session.is_some() && budget.with_budget(|budget| budget.remaining()) < 2 {
         let mut fallback = original.clone();
         fallback[super::super::presentation::OPTION] = serde_json::json!("compact");
         fallback["model"] = upstream["model"].clone();
         capture(&fallback, tool_use);
-        return super::super::prepare_request(&fallback);
+        return super::super::prepare_request(&fallback).map(|body| (body, None));
     }
-    Ok(upstream.clone())
+    let mut upstream = upstream.clone();
+    let model = original["model"].as_str().unwrap_or_default();
+    let prefix_scope = runtime
+        .basis_points_catalog_store
+        .prefix_scope(original, client_context_id);
+    if let Some(session) = &mut session {
+        session.preload_checkpoint = runtime.basis_points_catalog_store.checkpoint_for_history(
+            local_key_id,
+            model,
+            &upstream["input"],
+        );
+        session.prompt_prefix = prefix_scope.map(|scope| {
+            (
+                scope,
+                super::super::prepare::tool_instructions(&session.tools, original),
+            )
+        });
+        let loaded = runtime.basis_points_catalog_store.load(
+            local_key_id,
+            model,
+            &upstream["input"],
+            crate::gateway::now_ms(),
+        );
+        session.preload(&loaded, &mut upstream)?;
+        session.record(tool_use);
+    } else if original["tools"].as_array().is_none_or(Vec::is_empty) {
+        if let Some(prefix) = prefix_scope.and_then(|scope| {
+            runtime.basis_points_catalog_store.load_prefix(
+                local_key_id,
+                model,
+                &upstream["input"],
+                &scope,
+                crate::gateway::now_ms(),
+            )
+        }) {
+            super::super::prepare::restore_text_only_prefix(original, &mut upstream, prefix);
+        }
+    }
+    Ok((upstream, session))
 }
 
 pub(in crate::gateway::execution) struct DiscoveryExecution<'a> {
+    pub session: Option<DiscoverySession>,
     pub allow_streaming: bool,
     pub runtime: &'a GatewayRuntime,
     pub key: &'a AuthenticatedKey,
     pub lease: &'a CandidateLease,
     pub budget: &'a SharedRequestBudget,
-    pub route: &'a ExecutorRoute,
+    pub route: &'a mut ExecutorRoute,
     pub request_id: &'a str,
     pub requested_model: &'a str,
     pub reasoning_effort: &'a ReasoningEffortDiagnostics,
@@ -85,28 +124,14 @@ pub(in crate::gateway::execution) async fn resolve(
     first: AuthorizedResponse,
     original: &Value,
     mut upstream: Value,
-    context: DiscoveryExecution<'_>,
+    mut context: DiscoveryExecution<'_>,
 ) -> Result<DiscoveryResponse, Response<Body>> {
-    if !first.response.status().is_success()
-        || !context
-            .tool_use
-            .basis_points_catalog
-            .as_ref()
-            .is_some_and(|catalog| catalog.mode == "discovery")
-    {
+    context.route.basis_points_discovery = context.session.is_some();
+    if !first.response.status().is_success() {
         return Ok(first.response.into());
     }
-    let mut session = match DiscoverySession::new(original) {
-        Ok(Some(session)) => session,
-        Ok(None) => {
-            return Err(context.adapter_failure(
-                context.event(first.response.status()),
-                crate::AdapterError::invalid_request().with_parameter("output.relay.catalog.mode"),
-            ))
-        }
-        Err(error) => {
-            return Err(context.adapter_failure(context.event(first.response.status()), error))
-        }
+    let Some(mut session) = context.session.take() else {
+        return Ok(first.response.into());
     };
     let streamed = first
         .response
@@ -141,6 +166,10 @@ pub(in crate::gateway::execution) async fn resolve(
     loop {
         let status = response.status();
         let headers = response.headers().clone();
+        context
+            .route
+            .observe_http_response(&headers, context.started.elapsed().as_millis() as u64);
+        context.tool_use.upstream_tool_call_count = None;
         let mut event = context.event(status);
         let expected_model = context
             .runtime
@@ -171,11 +200,22 @@ pub(in crate::gateway::execution) async fn resolve(
             // request. Do not replay earlier accepted generations elsewhere.
             let failure =
                 AttemptFailure::status_with_body(status, Some(&raw)).with_retry_headers(&headers);
+            event.upstream_error = Some(crate::usage::UpstreamErrorDetails::from_response(
+                Some(status.as_u16()),
+                &raw,
+                &headers,
+            ));
             return Err(context.fail(event, failure, &headers));
         }
         let bytes = match completed_upstream_response(&raw, true, expected_model) {
             Ok(bytes) => bytes,
-            Err(failure) => return Err(context.fail(event, failure.failure, &headers)),
+            Err(failure) => {
+                event.upstream_error = failure.upstream_error.map(|mut details| {
+                    details.http_status = Some(status.as_u16());
+                    details
+                });
+                return Err(context.fail(event, failure.failure, &headers));
+            }
         };
         let mut terminal: Value = match serde_json::from_slice(&bytes) {
             Ok(value) => value,
@@ -184,6 +224,11 @@ pub(in crate::gateway::execution) async fn resolve(
                     .adapter_failure(event, crate::AdapterError::upstream_response_invalid()))
             }
         };
+        event.tool_use.observe_upstream_response(&terminal);
+        context.tool_use.upstream_tool_call_count = event.tool_use.upstream_tool_call_count;
+        event.tool_use.tool_call_count = 0;
+        event.tool_use.text_output = false;
+        event.tool_use.finish();
         let continue_lookup = match session.advance(&terminal, &mut upstream) {
             Ok(continue_lookup) => continue_lookup,
             Err(error) => return Err(context.adapter_failure(event, error)),
@@ -191,6 +236,7 @@ pub(in crate::gateway::execution) async fn resolve(
         session.record(context.tool_use);
         if !continue_lookup {
             session.finish(&mut terminal);
+            session.remember(context.runtime, &context.key.id, &terminal);
             // Keep the final generation's actual counters. Earlier lookup
             // usage has its own charged attempt and explicit diagnostics.
             let bytes = serde_json::to_vec(&terminal).map_err(|_| {
@@ -222,13 +268,13 @@ pub(in crate::gateway::execution) async fn resolve(
                 super::super::response::invalid_tool_output("output.relay.catalog.budget"),
             ));
         }
+        emit_usage(context.runtime, event.clone());
         context
             .budget
             .retain_input_bytes(crate::gateway::request_body::retained_request_bytes(
                 &upstream,
             ));
-        context.tool_use.upstream_context =
-            Some(crate::usage::RequestContextSize::capture(&upstream));
+        context.tool_use.capture_upstream_context(&upstream);
         let before = context.budget.dispatches();
         response = match dispatch_continuation(
             context.runtime,
@@ -298,6 +344,7 @@ pub(in crate::gateway) fn record_lookup(
     event: &mut UsageEvent,
 ) {
     if let Some(catalog) = tool_use.basis_points_catalog.as_mut() {
+        catalog.discovery_latency_ms = Some(event.latency_ms);
         catalog.discovery_input_tokens = add_reported(
             catalog.discovery_input_tokens,
             event.input_tokens,
@@ -312,11 +359,21 @@ pub(in crate::gateway) fn record_lookup(
     event.tool_use = tool_use.clone();
     event.tool_use.tool_call_count = 0;
     event.tool_use.finish();
+    if let Some(checkpoint) = session.preload_checkpoint {
+        runtime.basis_points_catalog_store.remember_checkpoint(
+            checkpoint,
+            &session.loaded,
+            session
+                .prompt_prefix
+                .as_ref()
+                .map(|(scope, text)| (scope, text.as_str())),
+            crate::gateway::now_ms(),
+        );
+    }
     event.success = false;
     if let Some(routing) = event.routing.as_mut() {
         routing.attempt_outcome = Some(crate::AttemptOutcome::ToolDiscovery);
     }
-    emit_usage(runtime, event.clone());
 }
 
 fn add_reported(total: Option<u64>, observed: Option<u64>, round: u8) -> Option<u64> {

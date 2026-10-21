@@ -14,90 +14,72 @@ pub struct RequestContextSize {
 
 impl RequestContextSize {
     pub(crate) fn capture(request: &Value) -> Self {
-        let bytes = crate::tool_policy::serialized_bytes;
+        Self::capture_with_catalog_bytes(request, crate::tool_policy::catalog_stats(request).bytes)
+    }
+
+    pub(crate) fn capture_with_catalog_bytes(request: &Value, tool_catalog_bytes: u64) -> Self {
+        use crate::tool_policy::serialized_bytes;
+
         let mut size = Self {
-            body_bytes: bytes(request),
-            tool_catalog_bytes: crate::tool_policy::catalog_stats(request).bytes,
+            tool_catalog_bytes,
             ..Self::default()
         };
-        for field in [
-            "instructions",
-            "system",
-            "systemInstruction",
-            "system_instruction",
-        ] {
-            if let Some(value) = request.get(field).filter(|value| !value.is_null()) {
-                size.instruction_bytes = size.instruction_bytes.saturating_add(bytes(value));
-            }
-        }
-        for field in ["input", "messages", "contents"] {
-            let Some(value) = request.get(field).filter(|value| !value.is_null()) else {
-                continue;
-            };
-            if let Some(items) = value.as_array() {
-                for item in items {
-                    if matches!(
-                        item.get("role").and_then(Value::as_str),
-                        Some("system" | "developer")
-                    ) {
-                        size.instruction_bytes = size.instruction_bytes.saturating_add(bytes(item));
-                    } else if item.get("type").and_then(Value::as_str) != Some("additional_tools") {
-                        size.conversation_bytes =
-                            size.conversation_bytes.saturating_add(bytes(item));
-                    }
-                }
+        let Some(fields) = request.as_object() else {
+            size.body_bytes = serialized_bytes(request);
+            return size;
+        };
+        // Reuse each value's exact JSON size for the body and its category;
+        // only braces, commas, keys and colons need separate accounting.
+        size.body_bytes = 2 + fields.len().saturating_sub(1) as u64;
+        for (field, value) in fields {
+            let value_bytes = if matches!(field.as_str(), "input" | "messages" | "contents") {
+                size.capture_conversation(value)
             } else {
-                size.conversation_bytes = size.conversation_bytes.saturating_add(bytes(value));
-            }
+                let value_bytes = serialized_bytes(value);
+                if !value.is_null()
+                    && matches!(
+                        field.as_str(),
+                        "instructions" | "system" | "systemInstruction" | "system_instruction"
+                    )
+                {
+                    size.instruction_bytes = size.instruction_bytes.saturating_add(value_bytes);
+                }
+                value_bytes
+            };
+            size.body_bytes = size
+                .body_bytes
+                .saturating_add(serialized_bytes(field))
+                .saturating_add(1)
+                .saturating_add(value_bytes);
         }
         size
+    }
+
+    fn capture_conversation(&mut self, value: &Value) -> u64 {
+        let bytes = crate::tool_policy::serialized_bytes;
+        let Some(items) = value.as_array() else {
+            let value_bytes = bytes(value);
+            if !value.is_null() {
+                self.conversation_bytes = self.conversation_bytes.saturating_add(value_bytes);
+            }
+            return value_bytes;
+        };
+        let mut array_bytes = 2 + items.len().saturating_sub(1) as u64;
+        for item in items {
+            let item_bytes = bytes(item);
+            array_bytes = array_bytes.saturating_add(item_bytes);
+            if matches!(
+                item.get("role").and_then(Value::as_str),
+                Some("system" | "developer")
+            ) {
+                self.instruction_bytes = self.instruction_bytes.saturating_add(item_bytes);
+            } else if item.get("type").and_then(Value::as_str) != Some("additional_tools") {
+                self.conversation_bytes = self.conversation_bytes.saturating_add(item_bytes);
+            }
+        }
+        array_bytes
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn all_protocols_separate_instructions_history_and_tools_without_mutation() {
-        let requests = [
-            json!({"instructions":"synthetic policy","input":"hello","tools":[{"type":"function","name":"fixture","parameters":{"type":"object"}}]}),
-            json!({"messages":[{"role":"system","content":"synthetic policy"},{"role":"user","content":"hello"}],"tools":[{"type":"function","function":{"name":"fixture","parameters":{"type":"object"}}}]}),
-            json!({"system":[{"type":"text","text":"synthetic policy"}],"messages":[{"role":"user","content":"hello"}],"tools":[{"name":"fixture","input_schema":{"type":"object"}}]}),
-            json!({"systemInstruction":{"parts":[{"text":"synthetic policy"}]},"contents":[{"role":"user","parts":[{"text":"hello"}]}],"tools":[{"functionDeclarations":[{"name":"fixture","parameters":{"type":"OBJECT"}}]}]}),
-        ];
-        for request in requests {
-            let original = request.clone();
-            let size = RequestContextSize::capture(&request);
-            assert_eq!(
-                size.body_bytes,
-                serde_json::to_vec(&request).unwrap().len() as u64
-            );
-            assert!(size.instruction_bytes > 0);
-            assert!(size.conversation_bytes > 0);
-            assert!(size.tool_catalog_bytes > 0);
-            assert_eq!(request, original);
-            let serialized = serde_json::to_string(&size).unwrap();
-            assert!(!serialized.contains("synthetic"));
-            assert!(!serialized.contains("fixture"));
-            assert!(!serialized.contains("hello"));
-        }
-    }
-
-    #[test]
-    fn additional_tools_are_not_counted_again_as_conversation() {
-        let request = json!({"input":[{"type":"additional_tools","tools":[{"type":"function","name":"fixture","parameters":{"type":"object"}}]}]});
-        let size = RequestContextSize::capture(&request);
-        assert!(size.tool_catalog_bytes > 0);
-        assert_eq!(size.conversation_bytes, 0);
-    }
-
-    #[test]
-    fn ordinary_text_has_no_invented_instructions_or_tools() {
-        let size = RequestContextSize::capture(&json!({"input":"hello"}));
-        assert_eq!(size.instruction_bytes, 0);
-        assert_eq!(size.tool_catalog_bytes, 0);
-        assert_eq!(size.conversation_bytes, 7);
-    }
-}
+mod tests;

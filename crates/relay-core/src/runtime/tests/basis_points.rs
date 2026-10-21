@@ -16,6 +16,7 @@ mod recovery;
 mod request_timezone;
 mod retry_admission;
 mod routing;
+mod siwc;
 
 struct AccessReply {
     status: StatusCode,
@@ -33,6 +34,7 @@ struct AccessState {
     generation_status: Mutex<StatusCode>,
     strict_request_schema: AtomicBool,
     stream_generations: AtomicBool,
+    stream_prefixes: Mutex<std::collections::VecDeque<Vec<u8>>>,
     stream_gates: Mutex<std::collections::VecDeque<Arc<Semaphore>>>,
     first_started: Notify,
     first_release: Semaphore,
@@ -69,6 +71,7 @@ impl AccessServer {
             generation_status: Mutex::new(StatusCode::OK),
             strict_request_schema: AtomicBool::new(false),
             stream_generations: AtomicBool::new(false),
+            stream_prefixes: Mutex::new(Default::default()),
             stream_gates: Mutex::new(Default::default()),
             first_started: Notify::new(),
             first_release: Semaphore::new(0),
@@ -183,8 +186,12 @@ fn generation_reply(
         return (status, Json(body)).into_response();
     }
     use futures_util::StreamExt;
-    let wire =
-        crate::gateway::test_support::basis_points_stream(&serde_json::to_vec(&body).unwrap());
+    let mut wire = crate::poison::mutex(&state.stream_prefixes)
+        .pop_front()
+        .unwrap_or_default();
+    wire.extend(crate::gateway::test_support::basis_points_stream(
+        &serde_json::to_vec(&body).unwrap(),
+    ));
     let mut pending = wire.clone();
     let mut split = wire.len();
     while let Some(frame) = crate::protocol::take_sse_event(&mut pending) {
@@ -307,6 +314,7 @@ async fn bps_401_retains_refresh_token_and_recovers_only_on_the_next_request() {
 
 async fn runtime(server: &AccessServer) -> GatewayRuntime {
     let mut runtime = quota_runtime(QuotaSnapshot::default());
+    runtime.diagnostics_enabled = || true;
     let account = runtime.chatgpt_accounts.get_mut("account-1").unwrap();
     account.oauth_client_kind = OAuthClientKind::ExcelBps;
     account.basis_points_url = server.responses_url.clone();

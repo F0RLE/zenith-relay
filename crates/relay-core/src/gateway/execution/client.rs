@@ -28,6 +28,7 @@ pub(in crate::gateway) struct RoutedRequestIdentity {
     pub(in crate::gateway) request_id: String,
     pub(in crate::gateway) budget: SharedRequestBudget,
     pub(in crate::gateway) transport: UsageTransport,
+    pub(in crate::gateway) transport_fallback: Option<crate::usage::TransportFallbackReason>,
     pub(in crate::gateway) service_tier_policy: ServiceTierPolicy,
 }
 
@@ -149,6 +150,9 @@ async fn execute_client_request_inner(
         .as_ref()
         .map(|identity| identity.transport)
         .unwrap_or(UsageTransport::Http);
+    let transport_fallback = identity
+        .as_ref()
+        .and_then(|identity| identity.transport_fallback);
     let (request_id, budget) = identity.map_or_else(
         || {
             (
@@ -294,6 +298,7 @@ async fn execute_client_request_inner(
         attempt_offset: 0,
         budget,
         transport,
+        transport_fallback,
     })
     .await
 }
