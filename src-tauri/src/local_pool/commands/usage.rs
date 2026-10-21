@@ -4,7 +4,6 @@ use crate::local_pool::{
     state::DesktopState,
     store::telemetry_db::{CacheSession, LocalUsagePage},
 };
-use chrono::{DateTime, Days, Local, Utc};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
 use zenith_relay_core::protocol::{UsageQuery, UsageRange};
@@ -80,60 +79,58 @@ fn normalize_usage_query_at(mut query: UsageQuery, now: u64) -> UsageQuery {
         }
     }
     query.from_ms = match query.range {
-        Some(UsageRange::Daily) => local_calendar_day_bounds(now).map(|bounds| bounds.0),
+        Some(UsageRange::Daily) => Some(now.saturating_sub(24 * 60 * 60 * 1_000)),
         Some(UsageRange::Weekly) => Some(now.saturating_sub(7 * 24 * 60 * 60 * 1_000)),
         Some(UsageRange::Monthly) => Some(now.saturating_sub(30 * 24 * 60 * 60 * 1_000)),
         Some(UsageRange::Custom) | None => query.from_ms,
     };
     if matches!(query.range, Some(UsageRange::Daily)) {
-        query.to_ms = local_calendar_day_bounds(now).map(|bounds| bounds.1.saturating_sub(1));
+        query.to_ms = Some(now);
     }
     query
-}
-
-fn local_calendar_day_bounds(now_ms: u64) -> Option<(u64, u64)> {
-    let now =
-        DateTime::<Utc>::from_timestamp_millis(i64::try_from(now_ms).ok()?)?.with_timezone(&Local);
-    let start = now
-        .date_naive()
-        .and_hms_opt(0, 0, 0)?
-        .and_local_timezone(Local)
-        .earliest()?;
-    let end = now
-        .date_naive()
-        .checked_add_days(Days::new(1))?
-        .and_hms_opt(0, 0, 0)?
-        .and_local_timezone(Local)
-        .earliest()?;
-    Some((
-        u64::try_from(start.timestamp_millis()).ok()?,
-        u64::try_from(end.timestamp_millis()).ok()?,
-    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Timelike;
 
     #[test]
-    fn daily_usage_uses_local_calendar_day() {
-        let now = 1_784_201_430_000;
-        let query = normalize_usage_query_at(
-            UsageQuery {
-                range: Some(UsageRange::Daily),
-                ..Default::default()
-            },
-            now,
-        );
-        let from = query.from_ms.unwrap();
-        let to = query.to_ms.unwrap();
+    fn daily_usage_uses_a_rolling_24_hour_window() {
+        for timestamp in [
+            "2026-10-22T02:20:58+03:00",
+            "2026-10-22T23:59:59+03:00",
+            "2026-03-08T03:30:00-04:00",
+            "2026-11-01T01:30:00-05:00",
+        ] {
+            let now = chrono::DateTime::parse_from_rfc3339(timestamp)
+                .unwrap()
+                .timestamp_millis() as u64;
+            let query = normalize_usage_query_at(
+                UsageQuery {
+                    range: Some(UsageRange::Daily),
+                    from_ms: Some(1),
+                    to_ms: Some(2),
+                    ..Default::default()
+                },
+                now,
+            );
+            assert_eq!(query.from_ms, Some(now - 86_400_000), "{timestamp}");
+            assert_eq!(query.to_ms, Some(now), "{timestamp}");
+        }
+    }
 
-        assert!(from <= now && now <= to);
-        assert!((23 * 60 * 60 * 1_000 - 1..=25 * 60 * 60 * 1_000 - 1).contains(&(to - from)));
-        let start = DateTime::<Utc>::from_timestamp_millis(from as i64)
-            .unwrap()
-            .with_timezone(&Local);
-        assert_eq!((start.hour(), start.minute(), start.second()), (0, 0, 0));
+    #[test]
+    fn daily_usage_window_advances_and_saturates_at_the_epoch() {
+        for now in [0, 1_000, 1_784_201_430_000, 1_784_205_030_000] {
+            let query = normalize_usage_query_at(
+                UsageQuery {
+                    range: Some(UsageRange::Daily),
+                    ..Default::default()
+                },
+                now,
+            );
+            assert_eq!(query.from_ms, Some(now.saturating_sub(86_400_000)));
+            assert_eq!(query.to_ms, Some(now));
+        }
     }
 }
