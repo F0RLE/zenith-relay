@@ -245,7 +245,9 @@ test("dense status rows use accessible icons without repeated labels", async ({ 
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   const requestStatus = page.locator(".usage-request-table tbody tr td").nth(1);
   await expect(requestStatus.locator(".relay-status-icon")).toHaveAttribute("aria-label", "Success");
-  await expect(requestStatus).toHaveText("Success");
+  await expect(requestStatus.locator(".relay-status-icon")).toHaveAttribute("data-status", "ready");
+  await expect(requestStatus).toHaveText("");
+  await expect(requestStatus.locator(".usage-request-result")).toHaveAttribute("data-relay-tooltip", "Success");
 
   await page.getByRole("button", { name: "Recovery", exact: true }).click();
   await expect(page.getByRole("button", { name: "Restore Before switch" })).toBeVisible();
