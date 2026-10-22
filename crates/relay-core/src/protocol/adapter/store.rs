@@ -101,17 +101,15 @@ impl<T> BoundedStateStore<T> {
         T: Serialize,
     {
         self.prune(now_ms);
-        let Some(size_bytes) = serialized_size_bytes(&state) else {
-            return false;
-        };
-        if self.max_entries == 0
-            || self.max_entry_bytes == 0
-            || self.max_total_bytes == 0
-            || size_bytes > self.max_entry_bytes
-            || size_bytes > self.max_total_bytes
-        {
+        if self.max_entries == 0 || self.max_entry_bytes == 0 || self.max_total_bytes == 0 {
             return false;
         }
+        let Some(size_bytes) = crate::json_size::serialized_len(
+            &state,
+            self.max_entry_bytes.min(self.max_total_bytes),
+        ) else {
+            return false;
+        };
         let key = (local_key_id.to_string(), response_id.to_string());
         if let Some(existing) = self.entries.remove(&key) {
             self.total_bytes = self.total_bytes.saturating_sub(existing.size_bytes);
@@ -316,10 +314,4 @@ impl NativeResponsesReplayStore {
             now_ms,
         );
     }
-}
-
-fn serialized_size_bytes(serializable: &impl Serialize) -> Option<usize> {
-    serde_json::to_vec(serializable)
-        .ok()
-        .map(|serialized| serialized.len())
 }

@@ -39,6 +39,7 @@ pub mod error_codes;
 pub mod gateway;
 mod ids;
 mod json_fingerprint;
+mod json_size;
 pub mod model_metadata;
 mod paths;
 pub mod poison;

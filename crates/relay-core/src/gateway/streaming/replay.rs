@@ -31,8 +31,11 @@ impl NativeReplayCapture {
                 self.unindexed_output = true;
                 return;
             };
-            let item_size =
-                serde_json::to_vec(output_item).map_or(MAX_CAPTURE_BYTES + 1, |bytes| bytes.len());
+            let Some(item_size) = crate::json_size::serialized_len(output_item, MAX_CAPTURE_BYTES)
+            else {
+                self.disable();
+                return;
+            };
             self.retained_bytes = self.retained_bytes.saturating_add(item_size);
             if self.retained_bytes > MAX_CAPTURE_BYTES
                 || self.captured_items.len() >= MAX_CAPTURE_ITEMS
@@ -136,8 +139,8 @@ impl NativeReplayCapture {
                 ),
             );
         }
-        let response_size = serde_json::to_vec(&replay_response).ok()?.len();
-        (response_size <= MAX_CAPTURE_BYTES).then_some(replay_response)
+        crate::json_size::serialized_len(&replay_response, MAX_CAPTURE_BYTES)?;
+        Some(replay_response)
     }
 }
 
