@@ -3,6 +3,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Mutex};
 
 mod bindings;
 mod context;
+mod memory_model;
 mod model_catalog;
 mod reasoning;
 mod recovery;

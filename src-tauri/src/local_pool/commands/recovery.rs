@@ -15,9 +15,22 @@ use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 use zenith_relay_core::{DefaultServiceTier, ErrorOrigin, ObservedServiceTier};
 
+#[tauri::command]
+pub async fn recover_local_account(
+    account_id: String,
+    confirm_external_owner_stopped: bool,
+    state: State<'_, DesktopState>,
+) -> Result<(), CommandError> {
+    let _mutation = state.setup_guard().await;
+    state
+        .store()?
+        .recover_account_locally(&account_id, confirm_external_owner_stopped)?;
+    Ok(())
+}
+
 mod export;
 pub(crate) use export::write_account_export;
-use export::{invalid_export_row, support_bundle, write_export};
+use export::{invalid_export_row, write_export};
 
 const MAX_EXPORT_ROWS: usize = 500;
 const MAX_EXPORT_TEXT: usize = 512;
@@ -65,52 +78,6 @@ pub struct UsageExportRow {
     pub(super) error_origin: Option<ErrorOrigin>,
     pub(super) service_tier: Option<DefaultServiceTier>,
     pub(super) applied_service_tier: Option<ObservedServiceTier>,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct SupportBundle {
-    pub(super) generated_at: String,
-    pub(super) app_version: &'static str,
-    pub(super) platform: &'static str,
-    pub(super) mode: SupportMode,
-    pub(super) schema_version: Option<u32>,
-    pub(super) gateway_running: bool,
-    pub(super) source_count: usize,
-    pub(super) account_count: usize,
-    pub(super) key_count: usize,
-    pub(super) automation_count: usize,
-    pub(super) usage_count: usize,
-    pub(super) warning_count: usize,
-}
-
-#[derive(Clone, Copy, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SupportMode {
-    Local,
-    Remote,
-    Zenith,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SupportContext {
-    pub(super) mode: SupportMode,
-    pub(super) schema_version: Option<u32>,
-    pub(super) gateway_running: bool,
-    pub(super) source_count: usize,
-    pub(super) account_count: usize,
-    pub(super) key_count: usize,
-    pub(super) automation_count: usize,
-    pub(super) usage_count: usize,
-    pub(super) warning_count: usize,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SupportBundlePreview {
-    bundle: SupportBundle,
-    excluded: [&'static str; 5],
 }
 
 #[derive(Serialize)]
@@ -225,29 +192,6 @@ pub fn export_usage(
     write_export("usage", &rows, &app)
 }
 
-#[tauri::command]
-pub fn export_support_bundle(
-    context: SupportContext,
-    app: AppHandle,
-) -> Result<Option<String>, CommandError> {
-    let bundle = support_bundle(context);
-    write_export("support", &bundle, &app)
-}
-
-#[tauri::command]
-pub fn preview_support_bundle(context: SupportContext) -> SupportBundlePreview {
-    SupportBundlePreview {
-        bundle: support_bundle(context),
-        excluded: [
-            "secrets",
-            "prompts",
-            "responses",
-            "raw_identities",
-            "raw_headers",
-        ],
-    }
-}
-
 fn remove_transient_dir(path: impl AsRef<Path>, failed: &mut bool) {
     let path = path.as_ref();
     if path.exists() {
@@ -325,29 +269,5 @@ mod tests {
         row.connection = "account".into();
         row.effective_reasoning_effort = Some("untrusted".into());
         assert!(invalid_export_row(&row));
-    }
-
-    #[test]
-    fn support_preview_contains_only_redacted_aggregate_fields() {
-        let preview = preview_support_bundle(SupportContext {
-            mode: SupportMode::Local,
-            schema_version: Some(4),
-            gateway_running: true,
-            source_count: 1,
-            account_count: 2,
-            key_count: 1,
-            automation_count: 1,
-            usage_count: 5,
-            warning_count: 0,
-        });
-        let encoded = serde_json::to_string(&preview).unwrap();
-        assert!(encoded.contains("raw_identities"));
-        for secret in [
-            "synthetic-access-token",
-            "private prompt",
-            "generated response",
-        ] {
-            assert!(!encoded.contains(secret));
-        }
     }
 }

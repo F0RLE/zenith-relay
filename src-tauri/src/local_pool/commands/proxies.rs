@@ -19,8 +19,7 @@ pub(crate) use apply::set_account_proxy_inner;
 use apply::{apply_choices, load_reconciled_pool, normalize_ids};
 use types::{
     AssignFreeProxiesInput, AssignStoredProxyInput, DeleteStoredProxiesInput, ImportProxyPoolInput,
-    ProxyChoice, ProxyPoolImportResult, SetStoredProxyAccountsInput, SetStoredProxyTimezoneInput,
-    StoredProxyAssignmentResult,
+    ProxyChoice, ProxyPoolImportResult, SetStoredProxyAccountsInput, StoredProxyAssignmentResult,
 };
 
 #[tauri::command]
@@ -139,21 +138,6 @@ pub async fn set_local_stored_proxy_accounts(
     apply::set_proxy_accounts(&state, &proxy_id, account_ids)
         .await
         .map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn set_local_stored_proxy_timezone(
-    input: SetStoredProxyTimezoneInput,
-    state: State<'_, DesktopState>,
-) -> std::result::Result<ProxyPoolSummary, CommandError> {
-    let _mutation = state.setup_guard().await;
-    let mut pool = ProxyPool::load()?;
-    let changed = pool.set_timezone(input.proxy_id.trim(), input.timezone)?;
-    if !changed {
-        return Ok(pool.summary());
-    }
-    timezone::save_pool(&state, &pool, input.proxy_id.trim()).await?;
-    Ok(pool.summary())
 }
 
 #[tauri::command]

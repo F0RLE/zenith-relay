@@ -105,6 +105,7 @@ pub(in crate::local_pool::store::telemetry_db) fn usage_log_from_row(
         output_tokens: optional_u64(output_tokens),
         total_tokens: optional_u64(total_tokens),
         api_equivalent: ApiEquivalentSummary::default(),
+        api_equivalent_breakdown: Default::default(),
     })
 }
 

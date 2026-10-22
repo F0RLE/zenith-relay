@@ -23,6 +23,7 @@ pub use refresh::CredentialRefresh;
 pub struct StoredCodexCredentials {
     version: u32,
     oauth_client_kind: OAuthClientKind,
+    siwc: Option<crate::local_pool::accounts::oauth::siwc::SiwcRegistration>,
     local_account_id: String,
     access_token: String,
     refresh_token: Option<String>,
@@ -71,9 +72,15 @@ impl StoredCodexCredentials {
         validate_optional(provider_user_id.as_deref(), MAX_ID_BYTES)?;
         validate_optional(organization_id.as_deref(), MAX_ID_BYTES)?;
         validate_optional(plan_type.as_deref(), MAX_PLAN_BYTES)?;
+        let expires_at_ms = expires_at_ms.or_else(|| {
+            let claims: serde_json::Value =
+                zenith_relay_core::accounts::decode_unverified_jwt_payload(&access_token)?;
+            claims.get("exp")?.as_u64()?.checked_mul(1_000)
+        });
         Ok(Self {
             version: CREDENTIAL_VERSION,
             oauth_client_kind: OAuthClientKind::Codex,
+            siwc: None,
             local_account_id: local_account_id.to_string(),
             access_token,
             refresh_token: omit_blank(refresh_token),
@@ -119,6 +126,7 @@ impl StoredCodexCredentials {
         Ok(Self {
             version: CREDENTIAL_VERSION,
             oauth_client_kind: OAuthClientKind::Codex,
+            siwc: None,
             local_account_id: local_account_id.to_string(),
             access_token: String::new(),
             refresh_token: None,
@@ -148,6 +156,34 @@ impl StoredCodexCredentials {
 
     pub fn oauth_client_kind(&self) -> OAuthClientKind {
         self.oauth_client_kind
+    }
+
+    pub fn siwc_registration(
+        &self,
+    ) -> Option<&crate::local_pool::accounts::oauth::siwc::SiwcRegistration> {
+        self.siwc.as_ref()
+    }
+
+    pub fn with_siwc_registration(
+        mut self,
+        registration: Option<crate::local_pool::accounts::oauth::siwc::SiwcRegistration>,
+    ) -> Result<Self, CredentialError> {
+        if (self.oauth_client_kind == OAuthClientKind::Siwc) != registration.is_some()
+            || registration.as_ref().is_some_and(|r| {
+                r.validate().is_err()
+                    || self.agent_identity.is_some()
+                    || self.basis_points_headers.is_some()
+                    || self.provider_account_id.as_deref() != Some(r.identity_key().as_str())
+                    || self.provider_user_id.as_deref() != Some(r.subject.as_str())
+            })
+        {
+            return Err(CredentialError::new(
+                CredentialErrorCode::InvalidSecret,
+                "SIWC registration does not match the stored connection",
+            ));
+        }
+        self.siwc = registration;
+        Ok(self)
     }
 
     pub fn with_oauth_client_kind(mut self, kind: OAuthClientKind) -> Self {
@@ -214,6 +250,16 @@ impl StoredCodexCredentials {
     }
 
     pub fn authorization(&self, now_ms: u64) -> Result<HeaderValue, CredentialError> {
+        if self
+            .siwc
+            .as_ref()
+            .is_some_and(|r| r.requires_reauthentication)
+        {
+            return Err(CredentialError::new(
+                CredentialErrorCode::InvalidSecret,
+                "Imported SIWC registrations require sign-in before use",
+            ));
+        }
         if let Some(agent) = self.agent_identity.as_ref() {
             return agent.authorization(now_ms).map_err(|_| {
                 CredentialError::new(
@@ -339,6 +385,7 @@ impl From<&StoredCodexCredentials> for CredentialWire {
         Self {
             version: credentials.version,
             oauth_client_kind: credentials.oauth_client_kind,
+            siwc: credentials.siwc.clone(),
             local_account_id: credentials.local_account_id.clone(),
             access_token: credentials.access_token.clone(),
             refresh_token: credentials.refresh_token.clone(),
@@ -416,6 +463,7 @@ impl StoredCodexCredentials {
     pub fn matches_snapshot(&self, other: &Self) -> bool {
         self.version == other.version
             && self.oauth_client_kind == other.oauth_client_kind
+            && self.siwc == other.siwc
             && self.local_account_id == other.local_account_id
             && self.access_token == other.access_token
             && self.refresh_token == other.refresh_token
@@ -444,6 +492,18 @@ impl StoredCodexCredentials {
                 }
                 _ => false,
             }
+    }
+
+    pub(in crate::local_pool::accounts) fn matches_siwc_grant(&self, other: &Self) -> bool {
+        self.siwc.is_some()
+            && self.siwc == other.siwc
+            && self.local_account_id == other.local_account_id
+            && self.oauth_client_kind == other.oauth_client_kind
+            && self.generation == other.generation
+            && self.issued_at_ms == other.issued_at_ms
+            && self.access_token == other.access_token
+            && self.refresh_token == other.refresh_token
+            && self.id_token == other.id_token
     }
 
     pub fn snapshots_match(stored: Option<&Self>, expected: Option<&Self>) -> bool {

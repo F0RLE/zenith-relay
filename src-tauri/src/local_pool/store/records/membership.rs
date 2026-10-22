@@ -127,6 +127,7 @@ impl LocalPoolStore {
             keys,
             automations,
             account_ids,
+            None,
         )
     }
 

@@ -14,19 +14,15 @@ use crate::{
         error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
         models::LocalPoolSnapshot,
         profiles::{codex, snapshots},
-        remote::client::RemoteProfileCredential,
         state::DesktopState,
         store::secret_store,
     },
     platform::default_codex_home,
 };
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tauri::State;
-use zenith_relay_core::{
-    protocol::{Feature, ProfileKeyRotation},
-    DefaultServiceTier, QUOTA_STALE_AFTER_MS,
-};
+use zenith_relay_core::QUOTA_STALE_AFTER_MS;
 
 pub(crate) mod actions;
 mod catalog;
@@ -36,7 +32,9 @@ mod policy;
 mod process;
 
 pub(in crate::local_pool) use catalog::CodexCatalogRefreshStatus;
-use catalog::{fetch_codex_model_catalog, load_direct_source_api_key, validate_direct_source};
+use catalog::{
+    fetch_local_codex_model_catalog, load_direct_source_api_key, validate_direct_source,
+};
 
 pub(in crate::local_pool) async fn refresh_active_client_catalogs(
     state: &DesktopState,
@@ -50,17 +48,9 @@ pub(in crate::local_pool) async fn refresh_active_client_catalogs(
     claude?;
     other_clients
 }
-pub(in crate::local_pool::commands) use actions::verify_remote_profile_binding;
-use actions::{
-    append_profile_rollback_error, append_remote_cleanup_error, profile_rotation_commit_state,
-    set_runtime_pool_interface_reserve,
-};
-pub(crate) use actions::{prepare_ready_api_profile, restore_managed_profiles_before_reset};
-pub(crate) use history::{
-    discard_codex_history_backup, history_provider_changed, synchronize_codex_history,
-    CodexHistoryProvider,
-};
-use history::{rollback_history_on_error, synchronize_history_for_command};
+pub(crate) use actions::restore_managed_profiles_before_reset;
+use actions::set_runtime_pool_interface_reserve;
+use history::{rollback_history_on_error, synchronize_history_for_command, CodexHistoryProvider};
 use policy::{
     gateway_oauth_binding_request, prioritize_account_candidates, profile_quota_rank,
     GatewayOAuthBindingRequest,
@@ -99,11 +89,5 @@ pub struct UpdateChatgptQuotaReserveInput {
     reserve_basis_points: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ProfileRotationCommitState {
-    Committed,
-    NotCommitted,
-    Unknown,
-}
 #[cfg(test)]
 mod tests;

@@ -137,6 +137,7 @@ async fn batch_confirm_persists_every_selected_account_and_credential() {
                     "refresh_token": format!("synthetic-refresh-{index}"),
                     "chatgpt_account_id": format!("synthetic-provider-{index}"),
                     "email": format!("member-{index}@example.test"),
+                    "expires_at": "2026-10-19T14:17:45Z",
                     "subscription_expires_at": format!("2026-08-0{index}T00:00:00Z")
                 }
             })
@@ -192,6 +193,7 @@ async fn batch_confirm_persists_every_selected_account_and_credential() {
     let mut provider_ids = HashSet::new();
     for account in &accounts {
         let credentials = credential_store.require(&account.account.id).unwrap();
+        assert_eq!(credentials.expires_at_ms(), Some(1_792_419_465_000));
         provider_ids.insert(credentials.provider_account_id().unwrap().to_string());
         credential_store.delete(&account.account.id).unwrap();
     }
@@ -199,7 +201,7 @@ async fn batch_confirm_persists_every_selected_account_and_credential() {
     assert!(accounts
         .iter()
         .all(|account| account.account.subscription.active_until_ms.is_some()));
-    assert!(accounts.iter().all(|account| account.account.in_pool));
+    assert!(accounts.iter().all(|account| !account.account.in_pool));
     assert!(state
         .store()
         .unwrap()

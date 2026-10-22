@@ -1,4 +1,4 @@
-use super::super::oauth::OAuthPendingSession;
+use super::super::oauth::{OAuthClientKind, OAuthPendingSession};
 use super::{
     OAuthFlowError, OAuthFlowErrorCode, OAuthFlowStatus, PendingSnapshot, CALLBACK_PATH,
     SNAPSHOT_VERSION,
@@ -79,6 +79,10 @@ pub(super) fn validate_snapshot(
         .for_login(expected_login_id));
     }
     if snapshot.login_id != expected_login_id
+        || (snapshot.target_account_id.is_some() && snapshot.notes_account_id.is_some())
+        || snapshot.notes_account_id.as_deref().is_some_and(|id| {
+            id.trim().is_empty() || id.len() > 256 || id.chars().any(char::is_control)
+        })
         || snapshot.callback_secret_ref != callback_secret_ref(expected_login_id)
         || !matches!(
             snapshot.status,
@@ -181,8 +185,13 @@ pub(super) fn validate_login_id(login_id: &str) -> Result<String, OAuthFlowError
 
 pub(super) fn callback_port(pending: &OAuthPendingSession) -> Result<u16, OAuthFlowError> {
     let redirect = Url::parse(pending.redirect_uri()).map_err(|_| recovery_required())?;
+    let expected_host = match pending.client_kind() {
+        OAuthClientKind::Codex => "localhost",
+        OAuthClientKind::Siwc => "127.0.0.1",
+        OAuthClientKind::ExcelBps => return Err(recovery_required()),
+    };
     if redirect.scheme() != "http"
-        || redirect.host_str() != Some("localhost")
+        || redirect.host_str() != Some(expected_host)
         || redirect.path() != CALLBACK_PATH
         || redirect.query().is_some()
         || redirect.fragment().is_some()

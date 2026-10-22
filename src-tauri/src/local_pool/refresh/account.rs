@@ -33,7 +33,7 @@ pub(super) async fn reconcile(state: &DesktopState) -> Result<()> {
     for account in store
         .accounts()
         .iter()
-        .filter(|account| account.remote_location.is_none())
+        .filter(|account| account.recovery.is_none())
     {
         let (_, fence) = store.account_refresh_scope(&account.account.id)?;
         active_fence_ids.insert(fence.identity());
@@ -58,10 +58,10 @@ pub(crate) async fn request(
         let activity = super::active_members(state).await;
         let store = state.store()?;
         let (account, fence) = store.account_refresh_scope(account_id)?;
-        if account.remote_location.is_some() {
+        if account.recovery.is_some() {
             return Err(LocalPoolError::new(
                 ErrorCode::Conflict,
-                "account is managed by a remote server",
+                "account requires local recovery before use",
             ));
         }
         if kind != RefreshKind::Auth {
@@ -162,7 +162,7 @@ pub(super) async fn prepare_authorization(
     fence: &AccountRefreshFence,
 ) -> Result<PreparedAccountAuthorization> {
     let scope = AccountRefreshScope::capture(state, &fence.account_id).await?;
-    if scope.fence != *fence || scope.initial_account.remote_location.is_some() {
+    if scope.fence != *fence || scope.initial_account.recovery.is_some() {
         return Err(super::wait_error(RefreshWaitError::Stale));
     }
     let prepared = prepare_account_request_authorization(state, &fence.account_id).await?;
@@ -214,7 +214,7 @@ pub(super) async fn execute(
 ) -> RefreshReadResult {
     let scope = AccountRefreshScope::capture(state, &fence.account_id).await?;
     if scope.fence != *fence
-        || scope.initial_account.remote_location.is_some()
+        || scope.initial_account.recovery.is_some()
         || (!job.manual
             && (!super::automatic_eligible(&scope.initial_account)
                 || !state.background_session_active()))
@@ -283,7 +283,7 @@ pub(in crate::local_pool) fn reset_due_delay(
     if !matches!(response.quota, AccountQuotaOutcome::Updated { .. }) {
         return None;
     }
-    zenith_relay_core::scheduler::refresh::quota_reset_delay(
+    zenith_relay_core::scheduler::refresh::quota_verification_delay(
         &response.account.account.id,
         &response.account.account.quota,
         now_ms,

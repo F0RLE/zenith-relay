@@ -1,4 +1,86 @@
 use super::*;
+use crate::local_pool::{models::GatewaySettings, state::AccountCredentialFacts};
+use std::collections::{BTreeSet, HashMap};
+use zenith_relay_core::providers::chatgpt::OAuthClientKind;
+
+pub(in crate::local_pool) fn quota_refresh_source(
+    settings: &GatewaySettings,
+    accounts: &[LocalAccountRecord],
+    credentials: &HashMap<String, Option<AccountCredentialFacts>>,
+    account_id: &str,
+) -> String {
+    let own = accounts
+        .iter()
+        .find(|account| account.account.id == account_id);
+    let siwc = credentials
+        .get(account_id)
+        .and_then(Option::as_ref)
+        .is_some_and(|facts| facts.oauth_client_kind == OAuthClientKind::Siwc);
+    let Some(group) = settings.account_route_group(account_id).filter(|_| {
+        siwc && own.is_some_and(|account| {
+            account.recovery.is_none() && !account.account.auth_state.requires_fresh_login()
+        })
+    }) else {
+        return account_id.to_string();
+    };
+    let score = |account: &LocalAccountRecord| {
+        (
+            account.account.quota.error.is_none(),
+            account
+                .account
+                .quota
+                .primary
+                .iter()
+                .chain(account.account.quota.secondary.iter())
+                .map(|window| window.observed_at_ms)
+                .min()
+                .unwrap_or(0),
+        )
+    };
+    accounts
+        .iter()
+        .filter(|account| {
+            account.account.id != account_id
+                && group.account_ids.contains(&account.account.id)
+                && account.recovery.is_none()
+                && account.account.is_automatic_quota_monitoring_eligible()
+                && !account.account.draining
+                && credentials
+                    .get(&account.account.id)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|facts| {
+                        matches!(
+                            facts.oauth_client_kind,
+                            OAuthClientKind::Codex | OAuthClientKind::ExcelBps
+                        ) && (facts.has_oauth || facts.agent_identity)
+                    })
+        })
+        .reduce(|current, next| {
+            if score(next) > score(current) {
+                next
+            } else {
+                current
+            }
+        })
+        .map_or_else(
+            || account_id.to_string(),
+            |source| source.account.id.clone(),
+        )
+}
+
+pub(in crate::local_pool::accounts) fn quota_refresh_targets(
+    state: &DesktopState,
+    account_ids: &[String],
+) -> LocalResult<Vec<String>> {
+    let store = state.store()?;
+    let facts = state.cached_account_credential_facts(store.accounts())?;
+    let mut seen = BTreeSet::new();
+    Ok(account_ids
+        .iter()
+        .map(|id| quota_refresh_source(store.gateway(), store.accounts(), &facts, id))
+        .filter(|id| seen.insert(id.clone()))
+        .collect())
+}
 
 pub(in crate::local_pool::accounts) async fn refresh_account_quotas(
     state: &DesktopState,
@@ -18,7 +100,7 @@ async fn refresh_account_quota_item(
     state: &DesktopState,
     account_id: String,
 ) -> AccountQuotaRefreshItemResult {
-    let quota_result = refresh_manual_account_quota(state, &account_id).await;
+    let quota_result = refresh_account_quota_once(state, &account_id).await;
     match quota_result {
         Ok(response) => AccountQuotaRefreshItemResult {
             account_id,
@@ -39,38 +121,27 @@ pub(in crate::local_pool::accounts) async fn refresh_manual_account_quota(
     state: &DesktopState,
     account_id: &str,
 ) -> LocalResult<AccountQuotaRefreshResponse> {
-    refresh_account_quota_once(state, account_id).await
+    let target = quota_refresh_targets(state, &[account_id.to_string()])?
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| account_id.to_string());
+    refresh_account_quota_once(state, &target).await
 }
 
 pub(crate) async fn prepare_account_credentials(
     state: &DesktopState,
     account_id: &str,
 ) -> LocalResult<PreparedAccountCredentials> {
-    prepare_account_credentials_with_remote_policy(state, account_id, false).await
-}
-
-pub(crate) async fn prepare_preserved_remote_account_credentials(
-    state: &DesktopState,
-    account_id: &str,
-) -> LocalResult<PreparedAccountCredentials> {
-    prepare_account_credentials_with_remote_policy(state, account_id, true).await
-}
-
-pub(in crate::local_pool::accounts) async fn prepare_account_credentials_with_remote_policy(
-    state: &DesktopState,
-    account_id: &str,
-    allow_remote_location: bool,
-) -> LocalResult<PreparedAccountCredentials> {
-    let remote_location = state
+    let recovery_required = state
         .store()?
         .account(account_id)
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?
-        .remote_location
-        .clone();
-    if remote_location.is_some() && !allow_remote_location {
+        .recovery
+        .is_some();
+    if recovery_required {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
-            "account is managed by a remote server",
+            "account requires local recovery before use",
         ));
     }
     super::profile::sync_managed_account_profile(state, account_id).await?;
@@ -134,7 +205,8 @@ pub(in crate::local_pool::accounts) async fn prepare_account_credentials_with_re
     let prepared = match prepared {
         Ok(prepared) => prepared,
         Err(zenith_relay_core::accounts::TokenAuthorityError::AccessTokenExpired) => {
-            mark_access_only_reauthentication(state, account_id).await?;
+            let rejected_tokens = stored.to_token_set().map_err(credential_local_error)?;
+            mark_access_only_reauthentication(state, account_id, &rejected_tokens).await?;
             return Err(LocalPoolError::new(
                 ErrorCode::InvalidState,
                 "account access token expired and cannot be refreshed",

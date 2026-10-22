@@ -99,10 +99,6 @@ impl StoragePaths {
             .join("history-repair")
     }
 
-    pub(crate) fn ready_api_backup_root(&self) -> PathBuf {
-        self.profile_backup_root().join("client-config")
-    }
-
     pub(crate) fn claude_desktop_recovery_file(&self) -> PathBuf {
         self.claude_desktop_backup_root().join("connection.json")
     }

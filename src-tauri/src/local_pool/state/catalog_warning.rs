@@ -46,7 +46,6 @@ fn catalog_refresh_error_code(code: ErrorCode) -> &'static str {
         ErrorCode::Conflict => error_codes::CONFLICT,
         ErrorCode::GatewayUnavailable => error_codes::GATEWAY_UNAVAILABLE,
         ErrorCode::SourceTestFailed => error_codes::SOURCE_TEST_FAILED,
-        ErrorCode::SourceProbeStale => error_codes::SOURCE_PROBE_STALE,
         ErrorCode::InvalidState => error_codes::INVALID_STATE,
         ErrorCode::NotFound => error_codes::NOT_FOUND,
         ErrorCode::ProfileRestoreBlocked => error_codes::PROFILE_RESTORE_BLOCKED,

@@ -8,7 +8,6 @@ mod host;
 mod models;
 pub(crate) mod profiles;
 mod refresh;
-mod remote;
 mod response_affinity;
 mod state;
 mod store;

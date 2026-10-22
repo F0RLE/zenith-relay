@@ -97,15 +97,6 @@ pub struct FrontendDiagnosticInput {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DiagnosticPaths {
-    pub logs_path: String,
-    pub error_logs_path: String,
-    pub crash_logs_path: String,
-    pub operation_logs_path: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct DiagnosticSettings {
     pub debug_enabled: bool,
 }
@@ -118,16 +109,11 @@ pub(crate) use lifecycle::{initialize, install_panic_hook, shutdown};
 pub(crate) use record::{
     breadcrumb, hash_identifier, record_error, record_frontend_error, record_operation,
 };
-pub(crate) use settings::{paths, set_debug_enabled, settings};
+pub(crate) use settings::{is_debug_enabled, set_debug_enabled, settings};
 
 #[tauri::command]
 pub fn record_frontend_diagnostic(input: FrontendDiagnosticInput) {
     record_frontend_error(input);
-}
-
-#[tauri::command]
-pub fn get_diagnostic_paths() -> DiagnosticPaths {
-    paths()
 }
 
 #[tauri::command]

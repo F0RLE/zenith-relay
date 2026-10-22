@@ -8,8 +8,8 @@ use std::time::Instant;
 use zenith_relay_core::protocol::{
     apply_model_display_order_with_catalog, apply_model_metadata,
     apply_pool_model_configuration_with_context, pool_candidate_count,
-    pool_model_summaries_with_pricing, pool_pricing_source_summary, Capabilities, GatewaySummary,
-    PoolModelConfigurationInput, RuntimeStateSnapshot, RuntimeTargetSummary,
+    pool_model_summaries_with_pricing, pool_pricing_source_summary, DesktopCapabilities,
+    GatewaySummary, PoolModelConfigurationInput, RuntimeStateSnapshot,
 };
 use zenith_relay_core::{unix_time_ms, PricingMetadata};
 
@@ -130,21 +130,9 @@ pub(crate) async fn build_local_runtime_state(
     );
     let response = RuntimeStateSnapshot {
         schema_version: crate::local_pool::models::CURRENT_SCHEMA_VERSION,
-        configuration_revision: None,
-        runtime_target: RuntimeTargetSummary {
-            kind: "local".to_string(),
-            connected: running,
-            origin: Some(format!(
-                "http://{}:{}",
-                inputs.gateway.client_host, inputs.gateway.port
-            )),
-            server_id: None,
-            version: Some(env!("CARGO_PKG_VERSION").to_string()),
-        },
         gateway: GatewaySummary {
             tool_policy: inputs.gateway.tool_policy.clone(),
             request_timezone: inputs.gateway.request_timezone.clone(),
-            basis_points_enabled: false,
             pool_routing: Some(zenith_relay_core::protocol::pool_routing_summary(
                 inputs.gateway.pool_routing.as_ref(),
                 &source_summaries,
@@ -173,13 +161,15 @@ pub(crate) async fn build_local_runtime_state(
                 inputs.gateway.chatgpt_interface_quota_reserve_basis_points,
             ),
             codex_background_tasks_enabled: inputs.gateway.codex_background_tasks_enabled,
+            codex_memory_extraction_enabled: inputs.gateway.codex_memory_extraction_enabled,
+            codex_memory_consolidation_enabled: inputs.gateway.codex_memory_consolidation_enabled,
             codex_websockets_enabled: inputs.gateway.codex_websockets_enabled,
             chatgpt_retry_until_available: inputs.gateway.chatgpt_retry_until_available,
             block_degraded_routes_enabled: inputs.gateway.block_degraded_routes_enabled,
             routing_order,
         },
         platform: platform::platform_name().to_string(),
-        capabilities: Capabilities::desktop_local(),
+        capabilities: DesktopCapabilities::current(),
         sources: source_summaries,
         accounts: account_summaries,
         automations: inputs.automations.tasks,

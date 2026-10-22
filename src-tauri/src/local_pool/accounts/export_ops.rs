@@ -7,14 +7,12 @@ use crate::local_pool::accounts::exports::{
 use crate::local_pool::accounts::NativeSecretBackend;
 use crate::local_pool::commands::current_time_ms;
 use crate::local_pool::error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult};
-use crate::local_pool::models::LocalAccountRecord;
 use crate::local_pool::state::DesktopState;
-use std::collections::HashMap;
 use tauri::{AppHandle, State};
 use zenith_relay_core::accounts::{
     build_account_export, AccountExportCredential, AccountExportDocument, AccountExportFormat,
 };
-use zenith_relay_core::protocol::{RemoteAccountLocation, RevealedAccountIdentity};
+use zenith_relay_core::protocol::RevealedAccountIdentity;
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
 
@@ -100,6 +98,7 @@ pub(crate) fn build_local_account_export_document(
                 .map_err(credential_local_error)?;
             Ok(AccountExportCredential {
                 oauth_client_kind: credentials.oauth_client_kind(),
+                siwc_registration: credentials.siwc_registration().cloned(),
                 basis_points_headers: credentials.basis_points_headers().cloned(),
                 label: export_account_label(&account_record.account.label, &credentials),
                 email: credentials.email().map(str::to_string),
@@ -131,26 +130,4 @@ pub(crate) fn build_local_account_export_document(
     let document = build_account_export(format, &accounts, current_time_ms(), description)
         .map_err(LocalPoolError::invalid_state)?;
     Ok(document)
-}
-
-pub(crate) fn mark_local_accounts_moved(
-    accounts: &mut [LocalAccountRecord],
-    remote_locations: &HashMap<String, RemoteAccountLocation>,
-) -> LocalResult<()> {
-    let mut updated = 0;
-    for account in accounts {
-        if let Some(location) = remote_locations.get(&account.account.id) {
-            account.account.enabled = false;
-            account.account.in_pool = false;
-            account.remote_location = Some(location.clone());
-            updated += 1;
-        }
-    }
-    if updated != remote_locations.len() {
-        return Err(LocalPoolError::new(
-            ErrorCode::NotFound,
-            "an account selected for transfer was not found",
-        ));
-    }
-    Ok(())
 }

@@ -14,6 +14,8 @@ pub(super) struct AuthorizationCodeRequest<'a> {
     pub(super) redirect_uri: &'a str,
     pub(super) client_id: &'a str,
     pub(super) code_verifier: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) resource: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -82,6 +84,8 @@ pub(super) fn parse_token_response(
         .map(|seconds| now_ms.saturating_add(seconds.saturating_mul(1_000)))
         .or_else(|| jwt_expiration_ms(&access_token).ok().flatten());
     Ok(OAuthTokenSet {
+        verified_identity: None,
+        siwc: None,
         access_token,
         refresh_token: omit_blank(token_response.refresh_token),
         id_token: omit_blank(token_response.id_token),

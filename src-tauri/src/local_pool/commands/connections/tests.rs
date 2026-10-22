@@ -155,14 +155,14 @@ fn mixed_binding_normalization_keeps_the_legacy_protocol_default_stable() {
 }
 
 #[test]
-fn source_probe_rejects_configuration_changes_but_ignores_runtime_status() {
+fn source_dispatch_fence_rejects_model_changes_but_ignores_runtime_status() {
     let before = source_record();
     let mut current = before.clone();
     current.last_test_status = Some("ok".into());
-    assert!(source_probe_matches(&before, &current));
+    assert!(!source_dispatch_configuration_changed(&before, &current));
 
     current.models.push("model-b".into());
-    assert!(!source_probe_matches(&before, &current));
+    assert!(source_dispatch_configuration_changed(&before, &current));
 }
 
 #[test]

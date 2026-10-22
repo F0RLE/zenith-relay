@@ -49,6 +49,9 @@ pub(super) fn reconcile_imported_credentials(
         .as_ref()
         .map(|account| account.account.id.clone())
         .unwrap_or_else(|| format!("account_{}", Uuid::new_v4().simple()));
+    if existing_account.is_some() && material.siwc_registration.is_some() {
+        return Err(ImportItemError::new(error_codes::DUPLICATE_ITEM, "SIWC registration already exists; sign in again on the existing connection instead of replacing its tokens"));
+    }
     let old_credential = credential_store
         .load(&local_account_id)
         .map_err(credential_item_error)?;

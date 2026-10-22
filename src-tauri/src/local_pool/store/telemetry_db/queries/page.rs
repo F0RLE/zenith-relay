@@ -229,7 +229,7 @@ impl TelemetryDb {
                 .resolved_model
                 .as_deref()
                 .or(event.requested_model.as_deref());
-            event.api_equivalent = resolver.estimate(
+            (event.api_equivalent, event.api_equivalent_breakdown) = resolver.estimate_breakdown(
                 candidate_kind,
                 candidate_id,
                 model_id,

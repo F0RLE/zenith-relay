@@ -58,18 +58,11 @@ pub(super) fn empty_source_discovery(
     })
 }
 
-pub(super) fn source_probe_matches(
-    before: &ProviderSourceRecord,
-    updated_source: &ProviderSourceRecord,
-) -> bool {
-    before.transport_identity() == updated_source.transport_identity()
-}
-
 pub(super) fn source_dispatch_configuration_changed(
     previous_source: &ProviderSourceRecord,
     updated_source: &ProviderSourceRecord,
 ) -> bool {
-    !source_probe_matches(previous_source, updated_source)
+    previous_source.transport_identity() != updated_source.transport_identity()
         || zenith_relay_core::pool_dispatch_permission_changed(
             previous_source.pool_access(),
             updated_source.pool_access(),

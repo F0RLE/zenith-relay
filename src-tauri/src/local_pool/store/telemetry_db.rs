@@ -97,6 +97,7 @@ pub struct UsageLog {
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
     pub api_equivalent: ApiEquivalentSummary,
+    pub api_equivalent_breakdown: zenith_relay_core::usage::ApiEquivalentBreakdown,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]

@@ -193,25 +193,6 @@ impl ProxyPool {
             .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "stored proxy not found"))
     }
 
-    pub(crate) fn set_timezone(
-        &mut self,
-        proxy_id: &str,
-        timezone: Option<String>,
-    ) -> Result<bool> {
-        let timezone = zenith_relay_core::normalize_timezone(timezone)
-            .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
-        let stored_proxy = self
-            .entries
-            .iter_mut()
-            .find(|stored_proxy| stored_proxy.id == proxy_id)
-            .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "stored proxy not found"))?;
-        if stored_proxy.timezone == timezone {
-            return Ok(false);
-        }
-        stored_proxy.timezone = timezone;
-        Ok(true)
-    }
-
     pub(crate) fn summary(&self) -> ProxyPoolSummary {
         let proxy_summaries = self
             .entries

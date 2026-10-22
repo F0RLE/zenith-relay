@@ -58,7 +58,7 @@ pub(in crate::local_pool::accounts) fn merge_existing_account(
     account.account.quota = existing.account.quota.clone();
     account.account.subscription = existing.account.subscription.clone();
     account.account.last_error_code = existing.account.last_error_code.clone();
-    account.remote_location = existing.remote_location.clone();
+    account.recovery = existing.recovery.clone();
     account.allowed_models = existing.allowed_models.clone();
     account.excluded_models = existing.excluded_models.clone();
     account.priority = existing.priority;

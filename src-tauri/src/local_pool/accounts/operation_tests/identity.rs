@@ -10,14 +10,12 @@ fn refresh_only_without_explicit_account_id_updates_after_exchange_identity() {
     existing.account.enabled = false;
     existing.account.in_pool = false;
     existing.priority = 9;
-    existing.remote_location = Some(RemoteAccountLocation {
-        server_id: "server-one".into(),
-        remote_account_id: "account-remote".into(),
-    });
+    existing.recovery = Some(serde_json::json!({ "reason": "recovery_required" }));
     existing.cooldowns.insert("gpt-test".into(), 900);
     existing.consecutive_failures = 2;
     let resolved = existing.clone();
     let credentials = ImportedCredentialMaterial {
+        siwc_registration: None,
         access_token: "access-rotated".into(),
         agent_identity: None,
         refresh_token: Some("refresh-rotated".into()),
@@ -57,7 +55,7 @@ fn refresh_only_without_explicit_account_id_updates_after_exchange_identity() {
     assert!(!updated.account.enabled);
     assert!(!updated.account.in_pool);
     assert_eq!(updated.priority, 9);
-    assert_eq!(updated.remote_location, existing.remote_location);
+    assert_eq!(updated.recovery, existing.recovery);
     assert!(updated.cooldowns.is_empty());
     assert_eq!(updated.consecutive_failures, 0);
     assert_ne!(
@@ -174,6 +172,36 @@ fn imported_identity_prefers_the_access_token_workspace() {
         Some("workspace-live")
     );
 }
+
+#[tokio::test]
+async fn import_retains_token_expiry_and_authenticated_subscription_metadata() {
+    let (endpoint, server) = spawn_import_account_check_payload(serde_json::json!({
+        "accounts": [{
+            "account": {"id": "expiry-account"},
+            "entitlement": {
+                "subscription_plan": "plus",
+                "expires_at": "2026-10-19T14:17:45Z"
+            }
+        }]
+    }))
+    .await;
+    let mut parsed = parse_import(
+        r#"{"account_id":"expiry-account","access_token":"synthetic-opaque-token","expires_at":"2026-10-19T14:17:45Z"}"#,
+        None, &[],
+    ).unwrap();
+    let material =
+        build_import_credential_material(parsed.items.remove(0), 1, None, None, None, 2, &endpoint)
+            .await
+            .unwrap();
+    assert_eq!(material.expires_at_ms, Some(1_792_419_465_000));
+    assert_eq!(material.plan_type.as_deref(), Some("plus"));
+    assert_eq!(
+        material.subscription_active_until_ms,
+        Some(1_792_419_465_000)
+    );
+    server.abort();
+}
+
 #[tokio::test]
 async fn account_check_recovers_an_id_from_an_access_only_session() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

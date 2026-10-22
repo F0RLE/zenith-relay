@@ -29,10 +29,9 @@ fn registration_events_exclude_usage_but_include_auth_eligibility_and_bulk_repla
         .unwrap();
     account.account.auth_state = AccountAuthState::Active;
     store
-        .replace_accounts_keys_and_ownership_operation(
+        .replace_accounts_and_keys(
             vec![account, store.account("account-b").unwrap().clone()],
             Vec::new(),
-            None,
         )
         .unwrap();
     assert!(changes.has_changed().unwrap());
@@ -84,12 +83,7 @@ fn account_scope_changes_retire_reads_even_if_the_record_is_restored() {
         |account| account.account.auth_mode = AccountAuthMode::ImportedToken,
         |account| account.account.secret_refs = vec!["different-secret-ref".into()],
         |account| account.account.created_at_ms += 1,
-        |account| {
-            account.remote_location = Some(zenith_relay_core::protocol::RemoteAccountLocation {
-                server_id: "test-server".into(),
-                remote_account_id: "test-remote-account".into(),
-            })
-        },
+        |account| account.recovery = Some(serde_json::json!({ "reason": "recovery_required" })),
     ];
     for mutate_account in account_mutations {
         let (root, mut store) = seeded();
@@ -166,10 +160,10 @@ fn ownership_transaction_and_reset_invalidate_account_reads() {
     let (root, mut store) = seeded();
     let (account, fence) = store.account_refresh_scope("account-a").unwrap();
     store
-        .replace_accounts_keys_and_ownership_operation(Vec::new(), Vec::new(), None)
+        .replace_accounts_and_keys(Vec::new(), Vec::new())
         .unwrap();
     store
-        .replace_accounts_keys_and_ownership_operation(vec![account.clone()], Vec::new(), None)
+        .replace_accounts_and_keys(vec![account.clone()], Vec::new())
         .unwrap();
     assert!(store.ensure_account_refresh_current(&fence).is_err());
     let (_, next) = store.account_refresh_scope("account-a").unwrap();

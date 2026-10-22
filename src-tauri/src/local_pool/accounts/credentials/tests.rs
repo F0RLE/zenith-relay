@@ -12,8 +12,150 @@ const EMAIL: &str = "stored.user@example.test";
 const PROVIDER_ACCOUNT: &str = "provider-account-secret-id";
 const PROXY: &str = "http://proxy-user:proxy-pass@proxy.example:8080/";
 
+fn siwc_fixture() -> StoredCodexCredentials {
+    use crate::local_pool::accounts::oauth::{siwc::SiwcRegistration, OAuthClientKind};
+    let registration = SiwcRegistration {
+        client_id: "oaiapp_synthetic".into(),
+        host_id: "urn:uuid:synthetic-host".into(),
+        issuer: "https://auth.openai.com".into(),
+        subject: "synthetic-subject".into(),
+        scopes: vec!["resource.invoke".into(), "chatgpt.tokens.use.direct".into()],
+        earliest_refresh_at_ms: None,
+        requires_reauthentication: false,
+    };
+    StoredCodexCredentials::new(
+        "siwc_synthetic",
+        ACCESS.into(),
+        Some(REFRESH.into()),
+        Some(ID_TOKEN.into()),
+        Some(10),
+        1,
+        1,
+        Some(EMAIL.into()),
+        Some(registration.identity_key()),
+        Some(registration.subject.clone()),
+        None,
+        None,
+        false,
+    )
+    .unwrap()
+    .with_oauth_client_kind(OAuthClientKind::Siwc)
+    .with_siwc_registration(Some(registration))
+    .unwrap()
+}
+
+#[test]
+fn siwc_rotation_recovers_after_restart_without_reusing_the_old_grant() {
+    let backend = Arc::new(MemorySecrets::default());
+    let store = CredentialStore::new(backend.clone());
+    let before = siwc_fixture();
+    let after = before
+        .with_token_set(
+            &TokenSet::new(
+                "rotated-access",
+                Some("rotated-refresh".into()),
+                Some(ID_TOKEN.into()),
+                Some(1_000_000),
+                10,
+                2,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    store.save(&before).unwrap();
+    store.checkpoint_siwc_rotation(&before, None).unwrap();
+    assert!(store.recover_siwc_rotation(&before).is_err());
+    assert!(store
+        .require("siwc_synthetic")
+        .unwrap()
+        .matches_snapshot(&before));
+    store
+        .checkpoint_siwc_rotation(&before, Some(&after))
+        .unwrap();
+    drop(store);
+    let restarted = CredentialStore::new(backend);
+    let recovered = restarted.recover_siwc_rotation(&before).unwrap().unwrap();
+    assert!(recovered.matches_snapshot(&after));
+    assert!(restarted
+        .require("siwc_synthetic")
+        .unwrap()
+        .matches_snapshot(&after));
+    assert!(restarted.recover_siwc_rotation(&after).unwrap().is_none());
+    assert_eq!(recovered.siwc_registration(), before.siwc_registration());
+}
+
+#[test]
+fn siwc_rotation_cannot_overwrite_a_newer_sign_in_or_survive_deletion() {
+    let store = CredentialStore::from_backend(MemorySecrets::default());
+    let before = siwc_fixture();
+    store.save(&before).unwrap();
+    store.checkpoint_siwc_rotation(&before, None).unwrap();
+    let newer = before
+        .with_token_set(
+            &TokenSet::new(
+                "new-login-access",
+                Some("new-login-refresh".into()),
+                Some(ID_TOKEN.into()),
+                Some(1_000_000),
+                20,
+                3,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    store.save(&newer).unwrap();
+    assert!(store.recover_siwc_rotation(&newer).unwrap().is_none());
+    assert!(store
+        .require("siwc_synthetic")
+        .unwrap()
+        .matches_snapshot(&newer));
+    store.checkpoint_siwc_rotation(&newer, None).unwrap();
+    store.delete("siwc_synthetic").unwrap();
+    assert!(store.load("siwc_synthetic").unwrap().is_none());
+    assert!(store.recover_siwc_rotation(&newer).unwrap().is_none());
+}
+
+#[test]
+fn siwc_rotation_survives_proxy_changes_without_restoring_old_settings() {
+    let store = CredentialStore::from_backend(MemorySecrets::default());
+    let before = siwc_fixture();
+    store.save(&before).unwrap();
+    store.checkpoint_siwc_rotation(&before, None).unwrap();
+    let changed = before.clone().with_proxy_url(Some(PROXY.into())).unwrap();
+    store.save(&changed).unwrap();
+    assert!(store.recover_siwc_rotation(&changed).is_err());
+    assert!(store.recover_siwc_rotation(&changed).is_err());
+    let rotated = before
+        .with_token_set(
+            &TokenSet::new(
+                "rotated-access",
+                Some("rotated-refresh".into()),
+                Some(ID_TOKEN.into()),
+                Some(1_000_000),
+                10,
+                2,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    store
+        .checkpoint_siwc_rotation(&before, Some(&rotated))
+        .unwrap();
+    let recovered = store.recover_siwc_rotation(&changed).unwrap().unwrap();
+    assert_eq!(recovered.refresh_token(), Some("rotated-refresh"));
+    assert_eq!(recovered.proxy_url(), Some(PROXY));
+    assert_eq!(recovered.generation(), 2);
+    assert!(store
+        .require("siwc_synthetic")
+        .unwrap()
+        .matches_snapshot(&recovered));
+}
+
 #[derive(Default)]
-struct MemorySecrets(Mutex<HashMap<String, String>>);
+struct MemorySecrets(
+    Mutex<HashMap<String, String>>,
+    std::sync::atomic::AtomicBool,
+);
 
 impl SecretBackend for MemorySecrets {
     fn save(&self, secret_ref: &str, secret_value: &str) -> Result<(), SecretBackendError> {
@@ -29,9 +171,32 @@ impl SecretBackend for MemorySecrets {
     }
 
     fn delete(&self, secret_ref: &str) -> Result<(), SecretBackendError> {
+        if self.1.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(SecretBackendError);
+        }
         self.0.lock().unwrap().remove(secret_ref);
         Ok(())
     }
+}
+
+#[test]
+fn failed_primary_delete_retains_the_siwc_rotation_barrier() {
+    let backend = Arc::new(MemorySecrets::default());
+    let store = CredentialStore::new(backend.clone());
+    let before = siwc_fixture();
+    store.save(&before).unwrap();
+    store.checkpoint_siwc_rotation(&before, None).unwrap();
+    backend.1.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(store.delete(before.local_account_id()).is_err());
+    assert!(store
+        .require(before.local_account_id())
+        .unwrap()
+        .matches_snapshot(&before));
+    assert!(store.recover_siwc_rotation(&before).is_err());
+    backend.1.store(false, std::sync::atomic::Ordering::SeqCst);
+    store.delete(before.local_account_id()).unwrap();
+    assert!(store.load(before.local_account_id()).unwrap().is_none());
+    assert!(backend.0.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -89,6 +254,33 @@ fn token_set_merge_preserves_private_identity_metadata() {
     assert_eq!(updated.provider_account_id(), Some(PROVIDER_ACCOUNT));
     assert_eq!(updated.proxy_url(), Some(PROXY));
     assert_eq!(updated.generation(), 8);
+}
+
+#[test]
+fn missing_stored_expiry_is_recovered_only_from_the_current_access_token() {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    let token = format!(
+        "header.{}.signature",
+        URL_SAFE_NO_PAD.encode(serde_json::json!({"exp": 2_000}).to_string()),
+    );
+    let mut secret: serde_json::Value =
+        serde_json::from_str(&fixture().to_secret_json().unwrap()).unwrap();
+    secret["accessToken"] = token.into();
+    secret["expiresAtMs"] = serde_json::Value::Null;
+    let restored = StoredCodexCredentials::from_secret_json(&secret.to_string()).unwrap();
+    assert_eq!(restored.expires_at_ms(), Some(2_000_000));
+    assert_eq!(
+        restored.to_token_set().unwrap().expires_at_ms(),
+        Some(2_000_000)
+    );
+    assert_eq!(restored.generation(), fixture().generation());
+    secret["expiresAtMs"] = 3_000_000.into();
+    let explicit = StoredCodexCredentials::from_secret_json(&secret.to_string()).unwrap();
+    assert_eq!(explicit.expires_at_ms(), Some(3_000_000));
+    let rotated = restored
+        .with_token_set(&TokenSet::new("opaque-rotated-token", None, None, None, 1_000, 8).unwrap())
+        .unwrap();
+    assert_eq!(rotated.expires_at_ms(), None);
 }
 
 #[test]

@@ -46,7 +46,7 @@ pub(in crate::local_pool) fn require_pool_account(account: &LocalAccountRecord) 
     let credentials = CredentialStore::from_backend(NativeSecretBackend)
         .require(&account.account.id)
         .map_err(credential_error)?;
-    validate_account_plan(
+    validate_pool_account(
         &credentials,
         account.account.subscription.plan_type.as_deref(),
     )
@@ -56,11 +56,44 @@ pub(in crate::local_pool) fn can_account_join_pool(account: &LocalAccountRecord)
     let credentials = CredentialStore::from_backend(NativeSecretBackend)
         .require(&account.account.id)
         .map_err(credential_error)?;
-    Ok(validate_account_plan(
+    Ok(validate_pool_account(
         &credentials,
         account.account.subscription.plan_type.as_deref(),
     )
     .is_ok())
+}
+
+pub(in crate::local_pool) fn validate_pool_account(
+    credentials: &StoredCodexCredentials,
+    plan_type: Option<&str>,
+) -> Result<()> {
+    if credentials.oauth_client_kind()
+        == zenith_relay_core::providers::chatgpt::OAuthClientKind::Codex
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "Codex connections are for account switching and quota display. Use SIWC or Excel / BPS for the pool.",
+        ));
+    }
+    require_plan_permission(credentials)?;
+    validate_account_plan(credentials, plan_type)
+}
+
+pub(in crate::local_pool) fn require_plan_permission(
+    credentials: &StoredCodexCredentials,
+) -> Result<()> {
+    if credentials.oauth_client_kind()
+        == zenith_relay_core::providers::chatgpt::OAuthClientKind::Siwc
+        && !credentials
+            .siwc_registration()
+            .is_some_and(|r| r.plan_use_enabled())
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "ChatGPT plan use is disabled. Sign in again to authorize plan usage.",
+        ));
+    }
+    Ok(())
 }
 
 pub fn new_account_record(
@@ -143,7 +176,7 @@ pub fn new_account_record(
         },
         provider_family: Some("openai".to_string()),
         purchase_cost_micro_usd: None,
-        remote_location: None,
+        recovery: None,
         wire_api: WireApi::Responses,
         models,
         discovered_models: None,
@@ -325,6 +358,21 @@ mod tests {
         let paid_bps = credentials().with_oauth_client_kind(OAuthClientKind::ExcelBps);
         assert!(validate_account_plan(&paid_bps, Some("free")).is_err());
         assert!(validate_account_plan(&paid_bps, Some("plus")).is_ok());
+    }
+
+    #[test]
+    fn codex_pool_restriction_preserves_storage_and_refresh_permission() {
+        use zenith_relay_core::providers::chatgpt::OAuthClientKind;
+        for plan in ["free", "plus", "pro"] {
+            let native = credentials_for_plan(plan);
+            assert!(validate_pool_account(&native, Some(plan)).is_err());
+            assert!(validate_account_plan(&native, Some(plan)).is_ok());
+            assert!(require_plan_permission(&native).is_ok());
+            assert!(new_account_record(&native, AccountAuthMode::OAuth, Vec::new(), 0, 1).is_ok());
+        }
+        let bps = credentials().with_oauth_client_kind(OAuthClientKind::ExcelBps);
+        assert!(validate_pool_account(&bps, Some("plus")).is_ok());
+        assert!(validate_pool_account(&bps, Some("free")).is_err());
     }
 
     #[test]

@@ -17,29 +17,6 @@ pub(in crate::local_pool::accounts) fn ensure_accounts_exist(
     Ok(())
 }
 
-pub(super) fn ensure_accounts_not_in_ownership_operation(
-    state: &DesktopState,
-    account_ids: &[String],
-) -> CommandResult<()> {
-    if state
-        .store()?
-        .ownership_operation()
-        .is_some_and(|operation| {
-            operation
-                .local_account_ids
-                .iter()
-                .any(|account_id| account_ids.contains(account_id))
-        })
-    {
-        return Err(LocalPoolError::new(
-            ErrorCode::RecoveryRequired,
-            "account ownership recovery must finish before deleting this local record",
-        )
-        .into());
-    }
-    Ok(())
-}
-
 pub(super) async fn delete_local_account_inner(
     account_id: &str,
     state: &DesktopState,
@@ -108,6 +85,7 @@ pub(super) async fn acquire_delete_credential_guards(
 }
 
 pub(in crate::local_pool::accounts) struct PreparedAccountDelete {
+    pub(in crate::local_pool::accounts) provider_revoked: bool,
     pub(in crate::local_pool::accounts) old_credential: Option<StoredCodexCredentials>,
     pub(in crate::local_pool::accounts) previous_wake:
         zenith_relay_core::automations::WakeCoordinator,
@@ -176,6 +154,7 @@ async fn prepare_account_removal(
             Err(error) => return Err(error),
         };
     let mut prepared = PreparedAccountDelete {
+        provider_revoked: false,
         old_credential,
         previous_wake,
         old_automations,
@@ -191,6 +170,15 @@ async fn prepare_account_removal(
             return rollback_failed_delete_step(state, credentials, &prepared, error).await;
         }
     };
+    if delete_credentials {
+        let revocation = revoke_siwc_before_delete(state, prepared.old_credential.as_ref()).await;
+        match revocation {
+            Ok(revoked) => prepared.provider_revoked = revoked,
+            Err(error) => {
+                return rollback_failed_delete_step(state, credentials, &prepared, error).await
+            }
+        }
+    }
     let credential_result = if delete_credentials {
         credentials
             .delete(account_id)
@@ -202,6 +190,38 @@ async fn prepare_account_removal(
         return rollback_failed_delete_step(state, credentials, &prepared, error).await;
     }
     Ok(prepared)
+}
+
+async fn revoke_siwc_before_delete(
+    state: &DesktopState,
+    secret: Option<&StoredCodexCredentials>,
+) -> LocalResult<bool> {
+    let Some(secret) = secret else {
+        return Ok(false);
+    };
+    let Some(registration) = secret.siwc_registration() else {
+        return Ok(false);
+    };
+    // An unactivated import does not own the source host's authorization grant.
+    if registration.requires_reauthentication {
+        return Ok(false);
+    }
+    let proxy =
+        super::super::super::proxy::effective_proxy_config(state.store()?.gateway(), secret)?;
+    let client = super::super::super::oauth::CodexOAuthClient::new_with_proxy(proxy.as_ref())
+        .map_err(LocalPoolError::invalid_state)?;
+    let token = secret.refresh_token().ok_or_else(|| {
+        LocalPoolError::invalid_state("SIWC revocation requires the saved refresh token")
+    })?;
+    client.revoke_siwc(registration, token).await.map_err(|_| LocalPoolError::new(ErrorCode::InvalidState, "SIWC revocation could not be confirmed; connection retained. Retry when OpenAI is reachable."))?;
+    Ok(true)
+}
+
+pub(super) fn ensure_provider_rollback_possible(revoked: bool) -> LocalResult<()> {
+    if revoked {
+        return Err(LocalPoolError::new(ErrorCode::RecoveryRequired, "SIWC was revoked but local deletion failed. Sign in again before restarting the gateway."));
+    }
+    Ok(())
 }
 
 /// Keep the dispatch fence held until an incomplete delete rollback has
@@ -266,7 +286,7 @@ pub(super) fn rollback_batch_delete(
     previous_proxy_pool
         .save()
         .map_err(|error| cleanup::recovery_after_delete(cause, "proxy assignment", error))?;
-    Ok(())
+    ensure_provider_rollback_possible(deleted.iter().any(|account| account.provider_revoked))
 }
 
 pub(super) fn release_account_proxy(account_id: &str) -> LocalResult<Option<ProxyPool>> {

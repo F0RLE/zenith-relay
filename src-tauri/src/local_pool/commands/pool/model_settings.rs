@@ -5,13 +5,11 @@ use crate::local_pool::{
     state::DesktopState,
 };
 use tauri::{AppHandle, State};
-use zenith_relay_core::{
-    protocol::complete_model_display_order, ApiModelPriceOverride, DefaultServiceTier,
-};
+use zenith_relay_core::{protocol::complete_model_display_order, DefaultServiceTier};
 
 pub(super) use zenith_relay_core::protocol::{
     SetModelContextInput, SetModelEnabledInput, SetModelOrderInput as SetModelDisplayOrderInput,
-    SetModelPriceInput, SetModelServiceTierInput,
+    SetModelServiceTierInput,
 };
 
 pub(super) async fn set_local_model_enabled(
@@ -35,39 +33,6 @@ pub(super) async fn set_local_model_enabled(
     state.store()?.replace_gateway(gateway)?;
     if let Some(runtime) = state.gateway.runtime().await {
         runtime.set_hidden_models(hidden);
-    }
-    Ok(())
-}
-
-pub(super) async fn set_local_model_price(
-    input: SetModelPriceInput,
-    state: State<'_, DesktopState>,
-) -> CommandResult<()> {
-    let price = ApiModelPriceOverride::from_optional_fields(
-        input.input_micro_usd_per_million,
-        input.cached_input_micro_usd_per_million,
-        input.cache_write_5m_micro_usd_per_million,
-        input.cache_write_1h_micro_usd_per_million,
-        input.output_micro_usd_per_million,
-    )
-    .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
-    let _mutation = state.setup_guard().await;
-    let canonical = super::canonical_pool_model(&state, &input.model_id)?;
-    let old_gateway = state.store()?.gateway().clone();
-    let mut gateway = old_gateway.clone();
-    let key = zenith_relay_core::model_id_key(&canonical);
-    if let Some(price) = price {
-        let price = gateway
-            .model_price_overrides
-            .get(&key)
-            .map_or(price, |previous| previous.with_base_prices(price));
-        gateway.model_price_overrides.insert(key, price);
-    } else {
-        gateway.model_price_overrides.remove(&key);
-    }
-    if gateway != old_gateway {
-        let mut store = state.store()?;
-        store.replace_gateway(gateway)?;
     }
     Ok(())
 }

@@ -11,6 +11,37 @@ use uuid::Uuid;
 
 const SYSTEM_GATEWAY_KEY_LABEL: &str = "ChatGPT pool";
 pub(in crate::local_pool) const SYSTEM_GATEWAY_KEY_ID: &str = "key_system";
+pub(in crate::local_pool) const LAN_GATEWAY_KEY_ID: &str = "key_lan";
+
+pub(in crate::local_pool::commands) fn ensure_lan_gateway_key(
+    state: &DesktopState,
+) -> LocalResult<LocalGatewayKeyRecord> {
+    if let Some(key) = state
+        .store()?
+        .keys()
+        .iter()
+        .find(|key| key.id == LAN_GATEWAY_KEY_ID)
+        .cloned()
+    {
+        ensure_local_gateway_key_secret(&key)?;
+        return Ok(key);
+    }
+    let key = LocalGatewayKeyRecord {
+        id: LAN_GATEWAY_KEY_ID.into(),
+        secret_ref: system_gateway_secret_ref(LAN_GATEWAY_KEY_ID),
+        label: "LAN pool".into(),
+        enabled: true,
+        system: true,
+        created_at: Utc::now().to_rfc3339(),
+        last_used_at: None,
+    };
+    ensure_local_gateway_key_secret(&key)?;
+    if let Err(error) = state.store()?.upsert_key(key.clone()) {
+        cleanup_created_secret(&key.secret_ref, &error)?;
+        return Err(error);
+    }
+    Ok(key)
+}
 
 pub(in crate::local_pool::commands) fn new_local_gateway_api_key() -> String {
     format!("zlr_{}", Uuid::new_v4().simple())
@@ -34,7 +65,10 @@ pub(in crate::local_pool::commands) fn ensure_system_gateway_key(
         let keys = state.store()?.keys().to_vec();
         keys.iter()
             .find(|key| key.id == SYSTEM_GATEWAY_KEY_ID)
-            .or_else(|| keys.iter().find(|key| key.system))
+            .or_else(|| {
+                keys.iter()
+                    .find(|key| key.system && key.id != LAN_GATEWAY_KEY_ID)
+            })
             .cloned()
     };
     if let Some(mut key) = existing {
@@ -84,24 +118,35 @@ pub(crate) fn retire_user_gateway_keys(state: &DesktopState) -> LocalResult<()> 
         let canonical_id = keys
             .iter()
             .find(|key| key.id == SYSTEM_GATEWAY_KEY_ID)
-            .or_else(|| keys.iter().find(|key| key.system))
+            .or_else(|| {
+                keys.iter()
+                    .find(|key| key.system && key.id != LAN_GATEWAY_KEY_ID)
+            })
             .map(|key| key.id.clone());
         (store.sources().to_vec(), keys, canonical_id)
     };
     let retired = all_keys
         .iter()
-        .filter(|key| canonical_id.as_deref() != Some(key.id.as_str()))
+        .filter(|key| {
+            canonical_id.as_deref() != Some(key.id.as_str()) && key.id != LAN_GATEWAY_KEY_ID
+        })
         .cloned()
         .collect::<Vec<_>>();
     let mut retained = all_keys
         .iter()
-        .filter(|key| canonical_id.as_deref() == Some(key.id.as_str()))
+        .filter(|key| {
+            canonical_id.as_deref() == Some(key.id.as_str()) || key.id == LAN_GATEWAY_KEY_ID
+        })
         .cloned()
         .collect::<Vec<_>>();
     let needs_normalization = retained
-        .first()
+        .iter()
+        .find(|key| canonical_id.as_deref() == Some(key.id.as_str()))
         .is_some_and(|key| !key.enabled || !key.system || key.label != SYSTEM_GATEWAY_KEY_LABEL);
-    if let Some(key) = retained.first_mut() {
+    if let Some(key) = retained
+        .iter_mut()
+        .find(|key| canonical_id.as_deref() == Some(key.id.as_str()))
+    {
         key.enabled = true;
         key.system = true;
         key.label = SYSTEM_GATEWAY_KEY_LABEL.into();
@@ -109,8 +154,8 @@ pub(crate) fn retire_user_gateway_keys(state: &DesktopState) -> LocalResult<()> 
     if retired.is_empty() && !needs_normalization {
         return Ok(());
     }
-    let retained_secret_ref = retained.first().map(|key| key.secret_ref.as_str());
-    let retired_secrets = load_retired_gateway_secrets(&retired, retained_secret_ref)?;
+    let retained_refs = retained.iter().map(|key| key.secret_ref.as_str()).collect();
+    let retired_secrets = load_retired_gateway_secrets(&retired, &retained_refs)?;
     state.store()?.replace_records(sources.clone(), retained)?;
 
     let mut attempted_refs = Vec::new();
@@ -132,12 +177,12 @@ pub(crate) fn retire_user_gateway_keys(state: &DesktopState) -> LocalResult<()> 
 
 fn load_retired_gateway_secrets(
     retired: &[LocalGatewayKeyRecord],
-    retained_secret_ref: Option<&str>,
+    retained_secret_refs: &BTreeSet<&str>,
 ) -> LocalResult<Vec<(String, Option<String>)>> {
     let mut secret_refs = BTreeSet::new();
     let mut secrets = Vec::new();
     for key in retired {
-        if retained_secret_ref == Some(key.secret_ref.as_str())
+        if retained_secret_refs.contains(key.secret_ref.as_str())
             || !secret_refs.insert(key.secret_ref.clone())
         {
             continue;

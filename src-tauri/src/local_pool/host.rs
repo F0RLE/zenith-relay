@@ -1,4 +1,6 @@
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
+use crate::local_pool::models::BindScope;
+use axum::response::IntoResponse;
 use std::{io::ErrorKind, net::SocketAddr, sync::Arc};
 use tokio::{
     net::TcpListener,
@@ -22,7 +24,8 @@ const BIND_RETRY_ATTEMPTS: usize = 5;
 
 struct RunningGateway {
     address: SocketAddr,
-    routes: watch::Sender<GatewayRoutes>,
+    scope: BindScope,
+    routes: watch::Sender<Option<GatewayRoutes>>,
     shutdown: oneshot::Sender<()>,
     task: tauri::async_runtime::JoinHandle<()>,
 }
@@ -30,12 +33,19 @@ struct RunningGateway {
 struct GatewayRoutes {
     runtime: Arc<GatewayRuntime>,
     router: axum::Router,
+    network_router: Option<axum::Router>,
 }
 
 impl GatewayRoutes {
-    fn new(runtime: Arc<GatewayRuntime>) -> Self {
+    fn new(runtime: Arc<GatewayRuntime>, scope: BindScope) -> Self {
         Self {
             router: zenith_relay_core::gateway::router(runtime.clone()),
+            network_router: (scope == BindScope::Lan).then(|| {
+                zenith_relay_core::gateway::network_router(
+                    runtime.clone(),
+                    crate::local_pool::commands::pool::LAN_GATEWAY_KEY_ID,
+                )
+            }),
             runtime,
         }
     }
@@ -47,33 +57,81 @@ pub struct GatewayManager {
 }
 
 impl GatewayManager {
+    #[cfg(test)]
     pub async fn start(&self, runtime: Arc<GatewayRuntime>, port: u16) -> Result<SocketAddr> {
+        self.start_with_scope(runtime, port, BindScope::Localhost)
+            .await
+    }
+
+    pub async fn start_with_scope(
+        &self,
+        runtime: Arc<GatewayRuntime>,
+        port: u16,
+        scope: BindScope,
+    ) -> Result<SocketAddr> {
         let mut running = self.running.lock().await;
         prune_finished(&mut running);
         if let Some(running_host) = running.as_ref() {
             return Ok(running_host.address);
         }
-        let listener = bind_loopback_listener(port).await?;
-        let address = listener.local_addr().map_err(|error| {
+        let listener = bind_listener(port, scope).await?;
+        let bound_address = listener.local_addr().map_err(|error| {
             LocalPoolError::new(ErrorCode::GatewayUnavailable, error.to_string())
         })?;
+        let address = SocketAddr::from(([127, 0, 0, 1], bound_address.port()));
         let (shutdown, receiver) = oneshot::channel();
-        let (routes, current_routes) = watch::channel(GatewayRoutes::new(runtime));
+        let (routes, current_routes) = watch::channel(Some(GatewayRoutes::new(runtime, scope)));
         // Resolve the current router for every request, not every connection:
         // keep-alive clients must observe changed credentials and membership.
-        let service = tower::service_fn(move |request| {
-            let router = current_routes.borrow().router.clone();
-            async move { router.oneshot(request).await }
+        let service = tower::service_fn(move |request: axum::extract::Request| {
+            let routes = current_routes.borrow();
+            let stopping = routes.is_none();
+            let peer = request
+                .extensions()
+                .get::<axum::extract::ConnectInfo<SocketAddr>>()
+                .map(|peer| peer.0);
+            let router = routes.as_ref().and_then(|routes| {
+                if peer.is_some_and(|peer| peer.ip().is_loopback()) {
+                    Some(routes.router.clone())
+                } else if lan_request_allowed(peer, request.headers()) {
+                    routes.network_router.clone()
+                } else {
+                    None
+                }
+            });
+            async move {
+                match router {
+                    Some(router) => router.oneshot(request).await,
+                    None if stopping => Ok((
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        "local gateway is stopping",
+                    )
+                        .into_response()),
+                    None => Ok::<_, std::convert::Infallible>(
+                        (
+                            axum::http::StatusCode::FORBIDDEN,
+                            "LAN access is not permitted",
+                        )
+                            .into_response(),
+                    ),
+                }
+            }
         });
         let task = tauri::async_runtime::spawn(async move {
-            let _ = axum::serve(listener, axum::Router::new().fallback_service(service))
-                .with_graceful_shutdown(async move {
-                    let _ = receiver.await;
-                })
-                .await;
+            let _ = axum::serve(
+                listener,
+                axum::Router::new()
+                    .fallback_service(service)
+                    .into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(async move {
+                let _ = receiver.await;
+            })
+            .await;
         });
         *running = Some(RunningGateway {
             address,
+            scope,
             routes,
             shutdown,
             task,
@@ -84,24 +142,39 @@ impl GatewayManager {
     /// Publish a fully prepared runtime without draining the listener. Already
     /// dispatched streams keep their router; delayed old dispatches are fenced.
     /// A port change still needs the regular bind/rollback path.
+    #[cfg(test)]
     pub async fn replace_runtime(&self, runtime: Arc<GatewayRuntime>, port: u16) -> bool {
+        self.replace_runtime_with_scope(runtime, port, BindScope::Localhost)
+            .await
+    }
+
+    pub async fn replace_runtime_with_scope(
+        &self,
+        runtime: Arc<GatewayRuntime>,
+        port: u16,
+        scope: BindScope,
+    ) -> bool {
         let mut running = self.running.lock().await;
         prune_finished(&mut running);
         let Some(gateway) = running
             .as_ref()
-            .filter(|gateway| gateway.address.port() == port)
+            .filter(|gateway| gateway.address.port() == port && gateway.scope == scope)
         else {
             return false;
         };
-        let next = GatewayRoutes::new(runtime);
-        gateway.routes.borrow().runtime.retire_for_replacement();
-        gateway.routes.send_replace(next);
+        let next = GatewayRoutes::new(runtime, scope);
+        if let Some(previous) = gateway.routes.borrow().as_ref() {
+            previous.runtime.retire_for_replacement();
+        }
+        drop(gateway.routes.send_replace(Some(next)));
         true
     }
 
     pub async fn stop(&self) {
         let running = self.running.lock().await.take();
         if let Some(running) = running {
+            // Idle connection receivers must not retain the stopped runtime and its storage.
+            drop(running.routes.send_replace(None));
             let _ = running.shutdown.send(());
             let mut task = running.task;
             if timeout(SHUTDOWN_TIMEOUT, &mut task).await.is_err() {
@@ -120,16 +193,40 @@ impl GatewayManager {
     pub async fn runtime(&self) -> Option<Arc<GatewayRuntime>> {
         let mut running = self.running.lock().await;
         prune_finished(&mut running);
-        running
-            .as_ref()
-            .map(|running| running.routes.borrow().runtime.clone())
+        running.as_ref().and_then(|running| {
+            running
+                .routes
+                .borrow()
+                .as_ref()
+                .map(|routes| routes.runtime.clone())
+        })
     }
 }
 
-async fn bind_loopback_listener(port: u16) -> Result<TcpListener> {
+fn lan_request_allowed(peer: Option<SocketAddr>, headers: &axum::http::HeaderMap) -> bool {
+    peer.is_some_and(|peer| matches!(peer.ip(), std::net::IpAddr::V4(ip) if ip.is_private()))
+        && !headers.contains_key(axum::http::header::ORIGIN)
+        && headers
+            .get(axum::http::header::HOST)
+            .and_then(|host| host.to_str().ok())
+            .and_then(|host| host.parse::<axum::http::uri::Authority>().ok())
+            .and_then(|host| host.host().parse::<std::net::Ipv4Addr>().ok())
+            .is_some_and(|host| host.is_private())
+}
+
+async fn bind_listener(port: u16, scope: BindScope) -> Result<TcpListener> {
     let mut retries = 0;
     loop {
-        match TcpListener::bind(("127.0.0.1", port)).await {
+        match TcpListener::bind((
+            if scope == BindScope::Lan {
+                "0.0.0.0"
+            } else {
+                "127.0.0.1"
+            },
+            port,
+        ))
+        .await
+        {
             Ok(listener) => return Ok(listener),
             Err(error) if error.kind() == ErrorKind::AddrInUse && retries < BIND_RETRY_ATTEMPTS => {
                 retries += 1;
@@ -146,17 +243,40 @@ async fn bind_loopback_listener(port: u16) -> Result<TcpListener> {
 }
 
 fn prune_finished(running: &mut Option<RunningGateway>) {
-    if running
-        .as_ref()
-        .is_some_and(|gateway| gateway.task.inner().is_finished())
-    {
-        running.take();
+    if let Some(finished) = running.take_if(|gateway| gateway.task.inner().is_finished()) {
+        drop(finished.routes.send_replace(None));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lan_admission_rejects_public_peers_domains_and_browser_origins() {
+        for (peer, host, origin, expected) in [
+            ("192.168.1.2:8000", "192.168.1.10:14998", false, true),
+            ("10.0.0.2:8000", "10.0.0.1", false, true),
+            ("8.8.8.8:8000", "192.168.1.10", false, false),
+            ("192.168.1.2:8000", "attacker.example", false, false),
+            ("192.168.1.2:8000", "localhost", false, false),
+            ("192.168.1.2:8000", "192.168.1.10", true, false),
+        ] {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(axum::http::header::HOST, host.parse().unwrap());
+            if origin {
+                headers.insert(
+                    axum::http::header::ORIGIN,
+                    "https://example.invalid".parse().unwrap(),
+                );
+            }
+            assert_eq!(
+                lan_request_allowed(Some(peer.parse().unwrap()), &headers),
+                expected
+            );
+            assert!(!lan_request_allowed(None, &headers));
+        }
+    }
     use reqwest::StatusCode;
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpStream;
@@ -210,6 +330,30 @@ mod tests {
         assert_eq!(first.port(), second.port());
         manager.stop().await;
         drop(stalled_client);
+    }
+
+    #[tokio::test]
+    async fn stop_releases_published_runtime_while_route_receivers_remain_alive() {
+        let manager = GatewayManager::default();
+        let runtime = test_runtime("source", "model", "key");
+        let owner = Arc::downgrade(&runtime);
+        manager.start(runtime, 0).await.unwrap();
+        let routes = manager
+            .running
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .routes
+            .subscribe();
+        manager.stop().await;
+        assert_eq!(
+            owner.strong_count(),
+            0,
+            "stopped routes retained the runtime"
+        );
+        assert!(routes.borrow().is_none());
+        drop(routes);
     }
 
     #[tokio::test]
@@ -525,6 +669,9 @@ mod tests {
     async fn finished_gateway_task_does_not_block_a_fresh_start() {
         let manager = GatewayManager::default();
         let runtime = test_runtime("source", "model", "key");
+        let owner = Arc::downgrade(&runtime);
+        let (routes, pending_receiver) =
+            watch::channel(Some(GatewayRoutes::new(runtime, BindScope::Localhost)));
         let (shutdown, _receiver) = oneshot::channel();
         let task = tauri::async_runtime::spawn(async {});
         timeout(Duration::from_secs(1), async {
@@ -536,12 +683,20 @@ mod tests {
         .unwrap();
         *manager.running.lock().await = Some(RunningGateway {
             address: "127.0.0.1:9".parse().unwrap(),
-            routes: watch::channel(GatewayRoutes::new(runtime.clone())).0,
+            routes,
+            scope: BindScope::Localhost,
             shutdown,
             task,
         });
 
         assert_eq!(manager.address().await, None);
+        assert_eq!(
+            owner.strong_count(),
+            0,
+            "finished routes retained the runtime"
+        );
+        assert!(pending_receiver.borrow().is_none());
+        let runtime = test_runtime("source", "model", "key");
         let address = manager.start(runtime, 0).await.unwrap();
         assert_ne!(address.port(), 9);
         manager.stop().await;

@@ -286,13 +286,36 @@ pub(crate) async fn set_application_launch_path(
     .map_err(|_| settings_io_error())?
 }
 
+fn picker_directory(input: &str) -> Option<&Path> {
+    let input = input.trim();
+    let path = Path::new(input);
+    if input.len() > 8192 || input.chars().any(char::is_control) || !path.is_absolute() {
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    let path = path
+        .ancestors()
+        .find(|path| path.extension().is_some_and(|extension| extension == "app"))
+        .unwrap_or(path);
+    if path.is_dir() && !path.extension().is_some_and(|extension| extension == "app") {
+        Some(path)
+    } else {
+        path.parent().filter(|parent| parent.is_dir())
+    }
+}
+
 #[tauri::command]
 pub(crate) async fn pick_application_launch_path(
     app: tauri::AppHandle,
     application: Application,
+    path: Option<String>,
 ) -> Result<Option<String>> {
     tauri::async_runtime::spawn_blocking(move || {
         let picker = app.dialog().file();
+        let picker = match path.as_deref().and_then(picker_directory) {
+            Some(directory) => picker.set_directory(directory),
+            None => picker,
+        };
         #[cfg(target_os = "windows")]
         let picker = picker.add_filter("Desktop application", &["exe"]);
         #[cfg(target_os = "macos")]

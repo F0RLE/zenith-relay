@@ -14,8 +14,7 @@ use serde::Deserialize;
 use tauri::{AppHandle, State};
 use zenith_relay_core::{
     protocol::{
-        ConfigurationPreset, ConfigurationPresetApplyInput, ConfigurationPresetApplyResult,
-        ConfigurationPresetPreview,
+        ConfigurationPresetApplyInput, ConfigurationPresetApplyResult, ConfigurationPresetPreview,
     },
     DefaultServiceTier,
 };
@@ -32,9 +31,11 @@ mod presets;
 pub(super) use membership::apply_local_pool_membership;
 
 pub(crate) use gateway_keys::retire_user_gateway_keys;
+pub(in crate::local_pool) use gateway_keys::LAN_GATEWAY_KEY_ID;
 pub(in crate::local_pool) use gateway_keys::SYSTEM_GATEWAY_KEY_ID;
 pub(super) use gateway_keys::{
-    ensure_local_gateway_key_secret, ensure_system_gateway_key, new_local_gateway_api_key,
+    ensure_lan_gateway_key, ensure_local_gateway_key_secret, ensure_system_gateway_key,
+    new_local_gateway_api_key,
 };
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
@@ -71,13 +72,6 @@ pub async fn apply_local_configuration_preset(
     presets::apply_local_configuration_preset(input, state).await
 }
 
-pub(super) fn write_configuration_preset(
-    preset: &ConfigurationPreset,
-    app: &AppHandle,
-) -> CommandResult<Option<String>> {
-    presets::write_configuration_preset(preset, app)
-}
-
 pub(crate) fn has_usable_pool_candidate(state: &DesktopState) -> LocalResult<bool> {
     let store = state.store()?;
     for source in store.sources() {
@@ -101,7 +95,7 @@ pub(crate) fn has_usable_pool_candidate(state: &DesktopState) -> LocalResult<boo
                     LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error.to_string())
                 })?
                 .is_some_and(|credential| {
-                    crate::local_pool::accounts::records::validate_account_plan(
+                    crate::local_pool::accounts::records::validate_pool_account(
                         &credential,
                         account.account.subscription.plan_type.as_deref(),
                     )
@@ -129,8 +123,7 @@ pub struct UpdateRoutingInput {
 pub(crate) use zenith_relay_core::protocol::PoolMembershipInput;
 
 use model_settings::{
-    SetModelContextInput, SetModelDisplayOrderInput, SetModelEnabledInput, SetModelPriceInput,
-    SetModelServiceTierInput,
+    SetModelContextInput, SetModelDisplayOrderInput, SetModelEnabledInput, SetModelServiceTierInput,
 };
 
 #[tauri::command]
@@ -139,14 +132,6 @@ pub async fn set_local_model_enabled(
     state: State<'_, DesktopState>,
 ) -> CommandResult<()> {
     model_settings::set_local_model_enabled(input, state).await
-}
-
-#[tauri::command]
-pub async fn set_local_model_price(
-    input: SetModelPriceInput,
-    state: State<'_, DesktopState>,
-) -> CommandResult<()> {
-    model_settings::set_local_model_price(input, state).await
 }
 
 #[tauri::command]
@@ -228,7 +213,6 @@ async fn update_local_routing_at(
             .map_err(|message| LocalPoolError::new(ErrorCode::Conflict, message))?;
         gateway.pool_routing = Some(policy);
     }
-    gateway.basis_points_enabled = false;
     gateway.default_service_tier = input.default_service_tier;
     if gateway == old_gateway {
         codex::sync_default_service_tier(codex_home, gateway.default_service_tier)?;

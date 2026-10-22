@@ -111,7 +111,7 @@ pub(in crate::local_pool::accounts) fn normalize_import_input(
             let document = input.documents.into_iter().next().ok_or_else(|| {
                 LocalPoolError::new(ErrorCode::InvalidState, "import document is missing")
             })?;
-            return Ok((document, None));
+            return Ok((document.trim().to_string(), None));
         }
         let content = combine_import_documents(&input.documents)
             .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.message))?;

@@ -28,6 +28,8 @@ pub(super) struct OAuthCompletionCheckpoint {
     pub(super) login_id: String,
     #[serde(default)]
     pub(super) client_kind: OAuthClientKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) siwc: Option<crate::local_pool::accounts::oauth::siwc::SiwcRegistration>,
     pub(super) access_token: String,
     pub(super) refresh_token: Option<String>,
     pub(super) id_token: Option<String>,
@@ -76,6 +78,7 @@ impl OAuthCompletionCheckpoint {
             version: COMPLETION_CHECKPOINT_VERSION,
             login_id: login_id.to_string(),
             client_kind,
+            siwc: tokens.siwc_registration().cloned(),
             access_token: tokens.access_token().to_string(),
             refresh_token: tokens.refresh_token().map(str::to_string),
             id_token: tokens.id_token().map(str::to_string),
@@ -126,6 +129,7 @@ impl OAuthCompletionCheckpoint {
             self.account_is_fedramp,
         )
         .map(|credentials| credentials.with_oauth_client_kind(self.client_kind))
+        .and_then(|credentials| credentials.with_siwc_registration(self.siwc.clone()))
     }
 
     pub(super) fn identity_hash(&self) -> String {

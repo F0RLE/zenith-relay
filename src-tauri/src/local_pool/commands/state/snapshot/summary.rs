@@ -43,6 +43,7 @@ pub(super) struct LocalAccountSummaryContext<'a> {
     pub(super) now_ms: u64,
     pub(super) refreshing: bool,
     pub(super) runtime_available: Option<bool>,
+    pub(super) runtime_quota_wait: bool,
 }
 
 pub(super) fn local_account_summary(
@@ -59,8 +60,15 @@ pub(super) fn local_account_summary(
         now_ms,
         refreshing,
         runtime_available,
+        runtime_quota_wait,
     } = context;
     let secret_available = credentials.is_some();
+    let plan_use_disabled = credentials.is_some_and(|facts| !facts.plan_use_enabled);
+    let runtime_available = if plan_use_disabled {
+        Some(false)
+    } else {
+        runtime_available
+    };
     let (proxy_mode, proxy_available) = credentials
         .map(|credentials| {
             proxy_route_status(settings, credentials.proxy_route(), common_proxy_available)
@@ -75,6 +83,10 @@ pub(super) fn local_account_summary(
         quota_stale_after_ms,
     ));
     Ok(AccountSummary {
+        route_group_id: settings
+            .account_route_group(&account_record.account.id)
+            .and_then(|group| group.account_ids.first().cloned()),
+        route_inactive: !settings.account_route_is_selected(&account_record.account.id),
         credit_balance_key: credentials
             .and_then(|facts| facts.credit_balance_key)
             .map(hex::encode),
@@ -95,24 +107,21 @@ pub(super) fn local_account_summary(
             .is_some_and(AccountCredentialFacts::basis_points_available),
         basis_points_enabled: credentials
             .is_some_and(AccountCredentialFacts::basis_points_available),
-        credential_diagnostics: credentials
-            .is_some_and(|facts| {
-                facts.oauth_client_kind
-                    == zenith_relay_core::providers::chatgpt::OAuthClientKind::ExcelBps
-            })
-            .then(|| {
-                zenith_relay_core::protocol::CredentialDiagnostics::from_local(
-                    account_record.account.auth_state,
-                    secret_available,
-                    credentials.is_some_and(|facts| facts.has_refresh_token),
-                    credentials.and_then(|facts| facts.expires_at_ms),
-                    now_ms,
-                )
-            }),
+        credential_diagnostics: credentials.is_some_and(|facts| facts.has_oauth).then(|| {
+            zenith_relay_core::protocol::CredentialDiagnostics::from_local(
+                account_record.account.auth_state,
+                secret_available,
+                credentials.is_some_and(|facts| facts.has_refresh_token),
+                credentials.and_then(|facts| facts.expires_at_ms),
+                now_ms,
+            )
+        }),
         enabled: account_record.account.enabled,
         in_pool: account_record.account.in_pool,
         draining: account_record.account.draining,
-        operational_status: operational.status.with_runtime_available(runtime_available),
+        operational_status: operational
+            .status
+            .with_runtime_available(runtime_available, runtime_quota_wait && !plan_use_disabled),
         auth_state: account_record.account.auth_state,
         health: account_record.account.health.summary_label(),
         models: account_record.effective_models().to_vec(),
@@ -126,7 +135,7 @@ pub(super) fn local_account_summary(
         subscription: account_record.account.subscription.clone(),
         quota: account_record.account.quota.clone(),
         secret_available,
-        remote_location: account_record.remote_location.clone(),
+        recovery_required: account_record.recovery.is_some(),
         proxy_mode,
         proxy_available,
         proxy_id,
@@ -137,7 +146,11 @@ pub(super) fn local_account_summary(
         ),
         refresh_state: Default::default(),
         routing_block_reason: operational.routing_block_reason,
-        last_error_code: account_record.account.last_error_code.clone(),
+        last_error_code: if plan_use_disabled {
+            Some("siwc_plan_use_disabled".into())
+        } else {
+            account_record.account.last_error_code.clone()
+        },
         client_auth_status: account_record.client_auth_status.clone(),
         last_client_login_redirect_at_ms: account_record.last_client_login_redirect_at_ms,
     })

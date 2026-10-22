@@ -29,8 +29,7 @@ use prepare::rollback_prepared_delete;
 pub(in crate::local_pool::accounts) use prepare::PreparedAccountDelete;
 use prepare::{
     acquire_delete_credential_guards, delete_local_account_inner,
-    ensure_accounts_not_in_ownership_operation, ensure_delete_rollback_or_fail_closed,
-    prepare_delete_local_account, rollback_batch_delete,
+    ensure_delete_rollback_or_fail_closed, prepare_delete_local_account, rollback_batch_delete,
 };
 
 pub(in crate::local_pool::accounts) use cleanup::{
@@ -45,7 +44,6 @@ pub async fn delete_local_account(
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
     let _mutation = state.setup_guard().await;
-    ensure_accounts_not_in_ownership_operation(&state, std::slice::from_ref(&account_id))?;
     delete_local_account_inner(&account_id, &state).await?;
     let snapshot = state.snapshot().await?;
     drop(_mutation);
@@ -61,7 +59,6 @@ pub async fn delete_local_accounts(
 ) -> CommandResult<LocalPoolSnapshot> {
     let account_ids = normalize_account_ids(account_ids)?;
     let _mutation = state.setup_guard().await;
-    ensure_accounts_not_in_ownership_operation(&state, &account_ids)?;
     let existing_accounts = state.store()?.accounts().to_vec();
     ensure_accounts_exist(&existing_accounts, &account_ids)?;
     let runtime = state.gateway.runtime().await;

@@ -49,6 +49,8 @@ pub(crate) fn official_codex_ultra_models() -> std::collections::HashMap<String,
 mod backup;
 mod bindings;
 mod gateway_attach;
+mod memory_model;
+pub(crate) use memory_model::{memory_model, set_memory_model, CodexMemoryStage};
 mod service_tier;
 mod switch_flow;
 
@@ -83,12 +85,11 @@ use config::*;
 #[cfg(test)]
 use gateway_attach::set_local_gateway_websockets_with_backend;
 pub use gateway_attach::{
-    attach, attach_with_catalog, attach_with_catalog_and_websockets, restore,
+    attach_with_catalog, attach_with_catalog_and_websockets, restore,
     set_local_gateway_websockets_with_previous,
 };
 pub(crate) use gateway_attach::{
-    attach_ready_api, attach_ready_api_explicit, attach_with_oauth_and_options,
-    direct_source_model_catalog_with_capabilities, restore_ready_api,
+    attach_with_oauth_and_options, direct_source_model_catalog_with_capabilities,
 };
 #[cfg(test)]
 pub(crate) use gateway_attach::{

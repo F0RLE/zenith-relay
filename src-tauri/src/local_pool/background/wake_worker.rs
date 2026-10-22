@@ -20,27 +20,6 @@ use zenith_relay_core::{
     unix_time_ms as current_time_ms,
 };
 
-pub(crate) async fn run_due_confirmation_wakes(
-    state: &DesktopState,
-    max_claims: usize,
-) -> Result<usize> {
-    let permits = match state
-        .claim_due_confirmation_wakes(current_time_ms(), max_claims.min(WAKE_BATCH_SIZE))
-    {
-        Ok(permits) => permits,
-        Err(error) => {
-            crate::diagnostics::record_error(
-                "background-wake",
-                Some("claim_confirmation_failed"),
-                &error.message,
-                &[],
-            );
-            return Err(error);
-        }
-    };
-    run_wake_permits(state, permits).await
-}
-
 pub(super) async fn wake_loop(app: AppHandle) {
     loop {
         let state = app.state::<DesktopState>();
@@ -106,8 +85,7 @@ async fn wait_for_automatic_wake(state: &DesktopState) -> Result<()> {
     Ok(())
 }
 
-async fn run_wake_permits(state: &DesktopState, permits: Vec<WakePermit>) -> Result<usize> {
-    let claimed = permits.len();
+async fn run_wake_permits(state: &DesktopState, permits: Vec<WakePermit>) -> Result<()> {
     let mut first_error = None;
     for permit in permits {
         let account_hash = crate::diagnostics::hash_identifier(&permit.account_id);
@@ -135,7 +113,7 @@ async fn run_wake_permits(state: &DesktopState, permits: Vec<WakePermit>) -> Res
             }
         }
     }
-    first_error.map_or(Ok(claimed), Err)
+    first_error.map_or(Ok(()), Err)
 }
 
 pub(super) async fn execute_wake_permit(

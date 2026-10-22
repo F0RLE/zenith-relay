@@ -1,25 +1,5 @@
 use super::*;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CredentialRefreshStatus {
-    Refreshed,
-    RetryableFailure,
-    RequiresReauth,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CredentialRefreshResult {
-    pub account_id: String,
-    pub status: CredentialRefreshStatus,
-    pub code: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expires_at_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub generation: Option<u64>,
-}
-
 pub(in crate::local_pool::accounts) use zenith_relay_core::accounts::TOKEN_REFRESH_SKEW_MS;
 
 pub(in crate::local_pool::accounts) const QUOTA_COMMAND_TIMEOUT_OVERHEAD: Duration =

@@ -1,4 +1,20 @@
 use super::*;
+
+#[test]
+fn account_recovery_conflict_is_a_local_nonretryable_refresh_failure() {
+    assert_eq!(
+        quota_refresh_error_kind(ErrorCode::Conflict),
+        Some(error_codes::RECOVERY_REQUIRED)
+    );
+    assert_eq!(
+        model_refresh_error_kind(ErrorCode::Conflict),
+        Some((error_codes::RECOVERY_REQUIRED, false))
+    );
+    assert_eq!(
+        prefer_model_refresh_error(Some("models_transport"), error_codes::RECOVERY_REQUIRED),
+        "models_transport"
+    );
+}
 use crate::local_pool::accounts::{credentials::StoredCodexCredentials, records};
 use zenith_relay_core::{
     accounts::{AccountAuthMode, AccountAuthState, AccountHealthState},
@@ -170,6 +186,91 @@ fn newer_subscription_and_health_win_while_quota_and_inventory_can_update() {
         assert_eq!(applied.account.allowed_models, current.allowed_models);
         assert_eq!(applied.account.weight, 9);
         assert_eq!(applied.account.effective_models(), ["gpt-new"]);
+    });
+}
+
+#[test]
+fn passive_quota_updates_do_not_discard_subscription_expiry() {
+    for from_quota in [false, true] {
+        for newer_subscription in [false, true] {
+            with_store(|store, scope| {
+                let mut current = scope.initial_account.clone();
+                current.account.quota.limit_reached = true;
+                current.account.quota.updated_at_ms = Some(200);
+                current.account.quota.provider_credits_observed_at_ms = Some(200);
+                if newer_subscription {
+                    current.account.subscription = Subscription::normalize(SubscriptionInput {
+                        plan_type: Some("pro".into()),
+                        active_until_ms: Some(9_000),
+                        forbidden: false,
+                        observed_at_ms: 200,
+                    });
+                }
+                store.upsert_account(current.clone()).unwrap();
+                let observed = SubscriptionInput {
+                    plan_type: Some("plus".into()),
+                    active_until_ms: Some(5_000),
+                    forbidden: false,
+                    observed_at_ms: 100,
+                };
+                let expected = if newer_subscription {
+                    current.account.subscription.clone()
+                } else {
+                    Subscription::normalize(observed.clone())
+                };
+                let QuotaRefreshOutcome::Updated(mut data) = quota(0.0, 100) else {
+                    unreachable!()
+                };
+                let subscription = if from_quota {
+                    data.quota.subscription = Some(observed);
+                    scope.initial_account.account.subscription.clone()
+                } else {
+                    Subscription::normalize(observed)
+                };
+                let applied = apply_quota_read(
+                    store,
+                    scope,
+                    QuotaRefreshOutcome::Updated(data),
+                    subscription,
+                    None,
+                )
+                .unwrap();
+                assert!(matches!(
+                    applied.refresh_result.outcome,
+                    AccountQuotaOutcome::Skipped
+                ));
+                assert_eq!(applied.account.account.quota, current.account.quota);
+                assert_eq!(applied.account.account.subscription, expected);
+                assert!(applied.refresh_result.exhaustion_transitions.is_empty());
+            });
+        }
+    }
+}
+
+#[test]
+fn later_quota_subscription_wins_over_an_earlier_subscription_read() {
+    with_store(|store, scope| {
+        let earlier = Subscription::normalize(SubscriptionInput {
+            plan_type: Some("plus".into()),
+            active_until_ms: None,
+            forbidden: false,
+            observed_at_ms: 100,
+        });
+        let QuotaRefreshOutcome::Updated(mut data) = quota(70.0, 110) else {
+            unreachable!()
+        };
+        let subscription = data.quota.subscription.as_mut().unwrap();
+        subscription.active_until_ms = Some(5_000);
+        let expected = Subscription::normalize(subscription.clone());
+        let applied = apply_quota_read(
+            store,
+            scope,
+            QuotaRefreshOutcome::Updated(data),
+            earlier,
+            None,
+        )
+        .unwrap();
+        assert_eq!(applied.account.account.subscription, expected);
     });
 }
 

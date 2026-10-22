@@ -4,10 +4,8 @@ use std::collections::BTreeMap;
 use zenith_relay_core::{
     accounts::AccountRecord,
     automations::{WakeAutomationState, WakeTask},
-    normalize_model_price_overrides,
-    protocol::RemoteAccountLocation,
-    ApiModelPriceOverride, PoolAccess, PoolParticipant, SourceProtocolBinding,
-    SourceProtocolConfig, SourceProtocolResolution, WireApi,
+    normalize_model_price_overrides, ApiModelPriceOverride, PoolAccess, PoolParticipant,
+    SourceProtocolBinding, SourceProtocolConfig, SourceProtocolResolution, WireApi,
 };
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -83,8 +81,13 @@ pub struct LocalAccountRecord {
     pub provider_family: Option<String>,
     #[serde(default)]
     pub purchase_cost_micro_usd: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote_location: Option<RemoteAccountLocation>,
+    /// Opaque recovery evidence is retained locally and never grants dispatch access.
+    #[serde(
+        default,
+        alias = "remoteLocation",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub recovery: Option<serde_json::Value>,
     pub wire_api: WireApi,
     pub models: Vec<String>,
     /// The last successful upstream discovery snapshot. `models` remains the
@@ -132,10 +135,6 @@ impl LocalAccountRecord {
 
     pub fn normalize(&mut self) {
         self.account.label = self.account.label.trim().to_string();
-        if let Some(location) = &mut self.remote_location {
-            location.server_id = location.server_id.trim().to_string();
-            location.remote_account_id = location.remote_account_id.trim().to_string();
-        }
         self.models = normalized_values(std::mem::take(&mut self.models));
         self.discovered_models = self.discovered_models.take().map(normalized_values);
         self.allowed_models = normalized_values(std::mem::take(&mut self.allowed_models));

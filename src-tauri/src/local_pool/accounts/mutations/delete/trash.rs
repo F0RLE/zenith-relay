@@ -25,7 +25,6 @@ pub async fn trash_local_accounts(
 ) -> CommandResult<()> {
     let account_ids = normalize_account_ids(account_ids)?;
     let mutation = state.setup_guard().await;
-    ensure_accounts_not_in_ownership_operation(&state, &account_ids)?;
     ensure_accounts_exist(state.store()?.accounts(), &account_ids)?;
     let runtime = state.gateway.runtime().await;
     let _dispatch_fences = fence_runtime_candidates(runtime.as_deref(), &account_ids, &[]);
@@ -89,7 +88,6 @@ pub async fn restore_local_account_trash(
 ) -> CommandResult<()> {
     let account_ids = normalize_account_ids(account_ids)?;
     let _mutation = state.setup_guard().await;
-    ensure_accounts_not_in_ownership_operation(&state, &account_ids)?;
     state.store()?.restore_trashed_accounts(&account_ids)?;
     Ok(())
 }
@@ -101,7 +99,6 @@ pub async fn purge_local_account_trash(
 ) -> CommandResult<()> {
     let account_ids = normalize_account_ids(account_ids)?;
     let _mutation = state.setup_guard().await;
-    ensure_accounts_not_in_ownership_operation(&state, &account_ids)?;
     {
         let store = state.store()?;
         for account_id in &account_ids {

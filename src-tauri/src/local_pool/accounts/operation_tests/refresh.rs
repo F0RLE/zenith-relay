@@ -321,3 +321,106 @@ fn quota_response_types_are_safe_and_serializable() {
     assert!(!serialized.contains("Bearer"));
     let _ = WireApi::Responses;
 }
+
+#[tokio::test]
+async fn access_only_reauthentication_is_bound_to_the_rejected_snapshot() {
+    let account_id = format!("account_{}", Uuid::new_v4().simple());
+    let expired = StoredCodexCredentials::new(
+        &account_id,
+        "synthetic-expired".into(),
+        None,
+        None,
+        Some(1_001),
+        1_000,
+        1,
+        None,
+        Some("synthetic-provider".into()),
+        None,
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+    let rejected_tokens = expired.to_token_set().unwrap();
+    let now_ms = current_time_ms();
+    let newer = StoredCodexCredentials::new(
+        &account_id,
+        "synthetic-new-login".into(),
+        None,
+        None,
+        Some(now_ms + 60_000),
+        now_ms,
+        2,
+        None,
+        Some("synthetic-provider".into()),
+        None,
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+    assert!(rejected_tokens.generation() < newer.generation());
+    let credentials = CredentialStore::from_backend(NativeSecretBackend);
+    for (stored, initial_auth, expected_auth, expected_code) in [
+        (
+            &newer,
+            AccountAuthState::DegradedAccessOnly,
+            AccountAuthState::DegradedAccessOnly,
+            None,
+        ),
+        (
+            &expired,
+            AccountAuthState::DegradedAccessOnly,
+            AccountAuthState::RequiresReauth(ReauthReason::AccessTokenExpired),
+            Some("access_token_expired"),
+        ),
+        (
+            &expired,
+            AccountAuthState::RequiresReauth(ReauthReason::InvalidGrant),
+            AccountAuthState::RequiresReauth(ReauthReason::InvalidGrant),
+            Some("invalid_grant"),
+        ),
+    ] {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-access-only-race-{}",
+            Uuid::new_v4().simple()
+        ));
+        let state = DesktopState::open(root.clone()).unwrap();
+        credentials.save(stored).unwrap();
+        let mut account = records::new_account_record(
+            stored,
+            AccountAuthMode::ImportedToken,
+            vec!["gpt-test".into()],
+            0,
+            1,
+        )
+        .unwrap();
+        account.account.auth_state = initial_auth;
+        if initial_auth.requires_fresh_login() {
+            account.account.last_error_code = Some("invalid_grant".into());
+        }
+        state
+            .store()
+            .unwrap()
+            .upsert_account(account.clone())
+            .unwrap();
+        state
+            .token_authority()
+            .register(&account_id, stored.to_token_set().unwrap(), initial_auth)
+            .await
+            .unwrap();
+
+        let marked = mark_access_only_reauthentication(&state, &account_id, &rejected_tokens).await;
+        let persisted = state.store().unwrap().account(&account_id).cloned();
+        let authority_state = state.token_authority().auth_state(&account_id).await;
+        credentials.delete(&account_id).unwrap();
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+
+        account.account.auth_state = expected_auth;
+        account.account.last_error_code = expected_code.map(str::to_string);
+        marked.unwrap();
+        assert_eq!(persisted.as_ref(), Some(&account));
+        assert_eq!(authority_state, Some(expected_auth));
+    }
+}

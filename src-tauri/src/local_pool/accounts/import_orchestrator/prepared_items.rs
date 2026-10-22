@@ -1,4 +1,4 @@
-use super::ImportedCredentialMaterial;
+use super::{timestamp_from_ms, ImportedCredentialMaterial};
 use zenith_relay_core::accounts::{ImportAuthMode, ParsedImportItem};
 
 pub(super) fn parsed_item_json(
@@ -44,6 +44,14 @@ pub(super) fn parsed_item_json(
     insert_optional_string(&mut item_json, "phone", import_item.phone());
     insert_optional_string(&mut item_json, "password", import_item.password());
     insert_optional_string(&mut item_json, "2fa", import_item.totp_secret());
+    insert_optional_string(
+        &mut item_json,
+        "expires_at",
+        import_item
+            .expires_at_ms
+            .and_then(timestamp_from_ms)
+            .as_deref(),
+    );
     if let Some(priority) = import_item.priority {
         item_json.insert("priority".into(), priority.into());
     }
@@ -69,7 +77,18 @@ pub(super) fn parsed_item_json(
     insert_optional_string(&mut item_json, "id_token", secrets.id_token());
     insert_optional_string(&mut item_json, "api_key", secrets.api_key());
     if let Some(kind) = secrets.oauth_client_kind() {
-        insert_optional_string(&mut item_json, "client_id", Some(kind.client_id()));
+        insert_optional_string(
+            &mut item_json,
+            "client_id",
+            Some(
+                secrets
+                    .siwc_registration()
+                    .map_or(kind.client_id(), |r| r.client_id.as_str()),
+            ),
+        );
+    }
+    if let Some(registration) = secrets.siwc_registration() {
+        item_json.insert("siwc".into(), serde_json::json!(registration));
     }
     if let Some(headers) = secrets.basis_points_headers() {
         item_json.insert("basis_points_headers".into(), serde_json::json!(headers));
@@ -117,8 +136,18 @@ fn apply_material(
     insert_optional_string(
         item_json,
         "client_id",
-        Some(material.oauth_client_kind.client_id()),
+        Some(
+            material
+                .siwc_registration
+                .as_ref()
+                .map_or(material.oauth_client_kind.client_id(), |r| {
+                    r.client_id.as_str()
+                }),
+        ),
     );
+    if let Some(registration) = material.siwc_registration.as_ref() {
+        item_json.insert("siwc".into(), serde_json::json!(registration));
+    }
     if let Some(headers) = material.basis_points_headers.as_ref() {
         item_json.insert("basis_points_headers".into(), serde_json::json!(headers));
     }
@@ -137,9 +166,23 @@ fn apply_material(
     if material.account_is_fedramp {
         item_json.insert("chatgpt_account_is_fedramp".into(), true.into());
     }
-    if let Some(expires_at_ms) = material.expires_at_ms {
-        item_json.insert("expires_at_ms".into(), expires_at_ms.into());
-    }
+    item_json.remove("expires_at");
+    insert_optional_string(
+        item_json,
+        "expires_at",
+        material
+            .expires_at_ms
+            .and_then(timestamp_from_ms)
+            .as_deref(),
+    );
+    insert_optional_string(
+        item_json,
+        "subscription_expires_at",
+        material
+            .subscription_active_until_ms
+            .and_then(timestamp_from_ms)
+            .as_deref(),
+    );
 }
 
 fn insert_optional_string(

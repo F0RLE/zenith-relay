@@ -125,7 +125,7 @@ fn account_record() -> LocalAccountRecord {
         },
         provider_family: Some("openai".into()),
         purchase_cost_micro_usd: None,
-        remote_location: None,
+        recovery: None,
         wire_api: WireApi::Responses,
         models: Vec::new(),
         discovered_models: None,

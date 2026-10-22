@@ -35,7 +35,6 @@ use support::normalize_pricing_identity;
 use support::responses_wire_api;
 use support::source_catalog_visibility_changed;
 use support::source_dispatch_configuration_changed;
-use support::source_probe_matches;
 use support::source_runtime_policy_compatible;
 use support::validated_source_proxy_id;
 pub(crate) use support::{source_proxy_url, validate_source_record};

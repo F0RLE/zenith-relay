@@ -30,7 +30,8 @@ use zenith_relay_core::ProxyConfig;
 
 #[derive(Clone)]
 pub struct CodexOAuthClient {
-    http: reqwest::Client,
+    pub(super) http: reqwest::Client,
+    pub(super) siwc: Option<super::siwc::SiwcPending>,
     kind: OAuthClientKind,
     authorize_endpoint: Url,
     token_endpoint: Url,
@@ -56,7 +57,11 @@ impl CodexOAuthClient {
             .join(kind.authorize_path())
             .map_err(|_| OAuthError::new(OAuthErrorCode::InvalidConfiguration, false))?;
         let token_endpoint = issuer
-            .join("oauth/token")
+            .join(if kind == OAuthClientKind::Siwc {
+                "api/accounts/oauth/token"
+            } else {
+                "oauth/token"
+            })
             .map_err(|_| OAuthError::new(OAuthErrorCode::InvalidConfiguration, false))?;
         Self::with_endpoints_and_proxy_for_kind(kind, authorize_endpoint, token_endpoint, proxy)
     }
@@ -91,6 +96,7 @@ impl CodexOAuthClient {
         .build()
         .map_err(|_| OAuthError::new(OAuthErrorCode::InvalidConfiguration, false))?;
         Ok(Self {
+            siwc: None,
             http,
             kind,
             authorize_endpoint,
@@ -107,24 +113,45 @@ impl CodexOAuthClient {
         client.kind = kind;
         client.authorize_endpoint.set_path(kind.authorize_path());
         client
+            .token_endpoint
+            .set_path(if kind == OAuthClientKind::Siwc {
+                "/api/accounts/oauth/token"
+            } else {
+                "/oauth/token"
+            });
+        client
     }
 
     pub fn begin(&self, callback_port: u16, now_ms: u64) -> Result<OAuthStart, OAuthError> {
-        if self.kind.is_local_callback() && !CODEX_OAUTH_CALLBACK_PORTS.contains(&callback_port) {
+        if (self.kind == OAuthClientKind::Codex
+            && !CODEX_OAUTH_CALLBACK_PORTS.contains(&callback_port))
+            || (self.kind == OAuthClientKind::Siwc && callback_port == 0)
+        {
             return Err(OAuthError::new(OAuthErrorCode::InvalidCallbackPort, false));
         }
 
         let redirect_uri = match self.kind {
             OAuthClientKind::Codex => format!("http://localhost:{callback_port}{CALLBACK_PATH}"),
+            OAuthClientKind::Siwc => format!("http://127.0.0.1:{callback_port}{CALLBACK_PATH}"),
             OAuthClientKind::ExcelBps => BASIS_POINTS_OAUTH_REDIRECT_URI.to_string(),
         };
         let code_verifier = random_urlsafe(64);
         let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
         let oauth_state = match self.kind {
-            OAuthClientKind::Codex => random_urlsafe(32),
+            OAuthClientKind::Codex | OAuthClientKind::Siwc => random_urlsafe(32),
             OAuthClientKind::ExcelBps => format!("bps.{}.PC", random_urlsafe(32)),
         };
         let pending = OAuthPendingSession {
+            siwc: if self.kind == OAuthClientKind::Siwc {
+                let mut siwc = self
+                    .siwc
+                    .clone()
+                    .ok_or_else(|| OAuthError::new(OAuthErrorCode::InvalidConfiguration, false))?;
+                siwc.nonce = random_urlsafe(32);
+                Some(siwc)
+            } else {
+                None
+            },
             client_kind: self.kind,
             redirect_uri,
             state: oauth_state,
@@ -136,7 +163,13 @@ impl CodexOAuthClient {
         authorization_url
             .query_pairs_mut()
             .append_pair("response_type", "code")
-            .append_pair("client_id", self.kind.client_id())
+            .append_pair(
+                "client_id",
+                pending
+                    .siwc
+                    .as_ref()
+                    .map_or(self.kind.client_id(), |s| s.client_id.as_str()),
+            )
             .append_pair("redirect_uri", &pending.redirect_uri)
             .append_pair("scope", self.kind.scope())
             .append_pair("code_challenge", &code_challenge)
@@ -148,6 +181,22 @@ impl CodexOAuthClient {
                 .append_pair("id_token_add_organizations", "true")
                 .append_pair("codex_cli_simplified_flow", "true")
                 .append_pair("originator", CODEX_OAUTH_ORIGINATOR);
+        } else if let Some(siwc) = pending.siwc.as_ref() {
+            authorization_url
+                .query_pairs_mut()
+                .append_pair("resource", super::siwc::RESOURCE)
+                .append_pair("ext_agent_host_id", &siwc.host_id)
+                .append_pair("nonce", &siwc.nonce);
+            if siwc.client_id == zenith_relay_core::providers::chatgpt::SIWC_BOOTSTRAP_CLIENT_ID {
+                authorization_url
+                    .query_pairs_mut()
+                    .append_pair("agent_name_hint", "Zenith Relay");
+            }
+            if siwc.consent {
+                authorization_url
+                    .query_pairs_mut()
+                    .append_pair("prompt", "consent");
+            }
         } else {
             authorization_url
                 .query_pairs_mut()
@@ -170,6 +219,15 @@ impl CodexOAuthClient {
         if pending.client_kind() != self.kind {
             return Err(OAuthError::new(OAuthErrorCode::InvalidConfiguration, false));
         }
+        let issued_client_id = callback
+            .client_id
+            .as_deref()
+            .unwrap_or(self.kind.client_id());
+        if self.kind == OAuthClientKind::Siwc
+            && (!super::siwc::valid_client_id(issued_client_id) || pending.siwc.is_none())
+        {
+            return Err(OAuthError::new(OAuthErrorCode::InvalidCallback, false));
+        }
         let (response, permit) = management_http_gate()
             .send(
                 &self.http,
@@ -179,8 +237,10 @@ impl CodexOAuthClient {
                         grant_type: "authorization_code",
                         code: callback.code(),
                         redirect_uri: &pending.redirect_uri,
-                        client_id: self.kind.client_id(),
+                        client_id: issued_client_id,
                         code_verifier: &pending.code_verifier,
+                        resource: (self.kind == OAuthClientKind::Siwc)
+                            .then_some(super::siwc::RESOURCE),
                     }),
                 HttpClass::Auth,
             )
@@ -205,6 +265,25 @@ impl CodexOAuthClient {
             });
         }
 
+        if let Some(siwc) = pending.siwc.as_ref() {
+            let registration = super::siwc::SiwcRegistration {
+                client_id: issued_client_id.to_string(),
+                host_id: siwc.host_id.clone(),
+                issuer: super::siwc::ISSUER.into(),
+                subject: siwc.subject.clone().unwrap_or_default(),
+                scopes: Vec::new(),
+                earliest_refresh_at_ms: None,
+                requires_reauthentication: false,
+            };
+            return self
+                .validate_siwc_tokens(
+                    &token_response_body,
+                    registration,
+                    Some(&siwc.nonce),
+                    now_ms,
+                )
+                .await;
+        }
         self.parse_tokens(&token_response_body, now_ms)
     }
 
@@ -213,6 +292,12 @@ impl CodexOAuthClient {
         refresh_token: &str,
         now_ms: u64,
     ) -> Result<OAuthTokenSet, TokenRefreshFailure> {
+        if self.kind == OAuthClientKind::Siwc {
+            return Err(TokenRefreshFailure::new(
+                TokenRefreshFailureKind::Transient,
+                "siwc_registration_required",
+            ));
+        }
         validate_token(refresh_token).map_err(|_| {
             TokenRefreshFailure::new(
                 TokenRefreshFailureKind::Transient,
@@ -227,7 +312,7 @@ impl CodexOAuthClient {
         };
         let request = match self.kind {
             OAuthClientKind::Codex => request.json(&payload),
-            OAuthClientKind::ExcelBps => request.form(&payload),
+            OAuthClientKind::ExcelBps | OAuthClientKind::Siwc => request.form(&payload),
         };
         let (response, permit) = management_http_gate()
             .send(&self.http, request, HttpClass::Auth)
@@ -305,3 +390,6 @@ impl TokenRefreshAdapter for CodexOAuthClient {
         })
     }
 }
+
+#[cfg(test)]
+mod tests;

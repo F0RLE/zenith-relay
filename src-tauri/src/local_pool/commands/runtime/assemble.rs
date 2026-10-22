@@ -19,7 +19,7 @@ use super::super::super::{
 };
 use super::super::pool;
 use super::sync::core_error;
-use super::{current_time_ms, pending_move_account_ids, runtime_account_operational_state};
+use super::{current_time_ms, runtime_account_operational_state};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
@@ -53,28 +53,42 @@ pub(in crate::local_pool) async fn runtime_from_store(
         source_api_keys,
         account_credentials,
     } = state.runtime_inputs().await?;
-    let pending_move_ids = pending_move_account_ids(state)?;
     let pool_routing = settings.pool_routing_for(&source_records, &account_records);
+    let quota_references = super::quota_references::account_quota_references(
+        &settings,
+        &account_records,
+        &account_credentials
+            .iter()
+            .map(|(id, credentials)| {
+                (
+                    id.clone(),
+                    credentials
+                        .as_ref()
+                        .map(crate::local_pool::state::AccountCredentialFacts::from_stored),
+                )
+            })
+            .collect(),
+        current_time_ms(),
+    );
     let quota_stale_after_ms = QUOTA_STALE_AFTER_MS;
     // The managed profile can expose every verified source protocol. Requests
     // still select only the protocol they actually use at the gateway edge.
     let (mut pool_source_ids, mut pool_account_ids) =
         pool::local_pool_member_ids(&source_records, &account_records)?;
     pool_account_ids.retain(|account_id| {
-        !pending_move_ids.contains(account_id)
-            && account_credentials
-                .get(account_id)
-                .and_then(Option::as_ref)
-                .is_some_and(|credential| {
-                    crate::local_pool::accounts::records::validate_account_plan(
-                        credential,
-                        account_records
-                            .iter()
-                            .find(|account| &account.account.id == account_id)
-                            .and_then(|account| account.account.subscription.plan_type.as_deref()),
-                    )
-                    .is_ok()
-                })
+        account_credentials
+            .get(account_id)
+            .and_then(Option::as_ref)
+            .is_some_and(|credential| {
+                crate::local_pool::accounts::records::validate_pool_account(
+                    credential,
+                    account_records
+                        .iter()
+                        .find(|account| &account.account.id == account_id)
+                        .and_then(|account| account.account.subscription.plan_type.as_deref()),
+                )
+                .is_ok()
+            })
     });
     let proxy_pool = ProxyPool::load().unwrap_or_default();
     let (sources, source_ids) =
@@ -94,11 +108,10 @@ pub(in crate::local_pool) async fn runtime_from_store(
         &settings,
         account_records,
         &account_credentials,
-        &pending_move_ids,
         &proxy_pool,
     )?;
     let secret = pool::ensure_local_gateway_key_secret(&system_key)?;
-    let keys = vec![RuntimeMixedLocalKey {
+    let mut keys = vec![RuntimeMixedLocalKey {
         key: LocalGatewayKey {
             id: system_key.id,
             secret,
@@ -111,6 +124,14 @@ pub(in crate::local_pool) async fn runtime_from_store(
         model_prefix: None,
         wire_apis: Some(zenith_relay_core::protocol::local_gateway_client_wire_apis()),
     }];
+    if settings.bind_scope == crate::local_pool::models::BindScope::Lan {
+        let lan = pool::ensure_lan_gateway_key(state)?;
+        let mut network_key = keys[0].clone();
+        let secret = pool::ensure_local_gateway_key_secret(&lan)?;
+        network_key.key = LocalGatewayKey { id: lan.id, secret };
+        network_key.enabled = lan.enabled;
+        keys.push(network_key);
+    }
     let oauth = Arc::new(ProxyRefreshClient::new(refresh_proxies)?);
     let refresh = Arc::new(
         StoredRefreshAdapter::new(
@@ -139,6 +160,7 @@ pub(in crate::local_pool) async fn runtime_from_store(
         agent_identities,
     };
     let options = GatewayRuntimeOptions {
+        diagnostics_enabled: crate::diagnostics::is_debug_enabled,
         tool_policy: settings.tool_policy,
         request_timezone: settings.request_timezone,
         max_retry_candidates: usize::from(settings.max_retry_candidates),
@@ -177,8 +199,11 @@ pub(in crate::local_pool) async fn runtime_from_store(
         local
     })?;
     runtime.set_activity_callback(state.runtime_activity_callback());
+    runtime.set_account_quota_references(quota_references);
     runtime.set_chatgpt_team_breaker_callback(state.runtime_team_breaker_callback());
     runtime.set_codex_background_tasks_enabled(settings.codex_background_tasks_enabled);
+    runtime.set_codex_memory_extraction_enabled(settings.codex_memory_extraction_enabled);
+    runtime.set_codex_memory_consolidation_enabled(settings.codex_memory_consolidation_enabled);
     runtime.set_codex_websockets_enabled(settings.codex_websockets_enabled);
     runtime.set_route_recovery_enabled(settings.chatgpt_retry_until_available);
     runtime.set_block_degraded_routes_enabled(settings.block_degraded_routes_enabled);
@@ -283,27 +308,23 @@ fn admit_runtime_accounts(
     settings: &GatewaySettings,
     account_records: Vec<LocalAccountRecord>,
     account_credentials: &HashMap<String, Option<StoredCodexCredentials>>,
-    pending_move_ids: &HashSet<String>,
     proxy_pool: &ProxyPool,
 ) -> Result<AdmittedAccounts> {
     let mut accounts = Vec::new();
     let mut refresh_proxies = Vec::new();
     let mut agent_identities = HashMap::new();
     for account in account_records {
+        if !settings.account_route_is_selected(&account.account.id) {
+            continue;
+        }
         let Some(secret) = account_credentials
             .get(&account.account.id)
             .and_then(Option::as_ref)
         else {
             continue;
         };
-        let Some(admitted) = admit_runtime_account(
-            authority,
-            settings,
-            account,
-            secret,
-            pending_move_ids,
-            proxy_pool,
-        )?
+        let Some(admitted) =
+            admit_runtime_account(authority, settings, account, secret, proxy_pool)?
         else {
             continue;
         };
@@ -327,7 +348,6 @@ fn admit_runtime_account(
     settings: &GatewaySettings,
     account: LocalAccountRecord,
     secret: &StoredCodexCredentials,
-    pending_move_ids: &HashSet<String>,
     proxy_pool: &ProxyPool,
 ) -> Result<Option<AdmittedRuntimeAccount>> {
     let Some(chatgpt_account_id) = secret.provider_account_id() else {
@@ -367,11 +387,9 @@ fn admit_runtime_account(
     // this flag: doing so makes a healthy pool look structurally invalid
     // until a later refresh happens to repair it.
     let candidate_enabled = account_candidate_enabled(
-        account.account.enabled
-            && account.remote_location.is_none()
-            && !pending_move_ids.contains(&account_id),
+        account.account.enabled && account.recovery.is_none(),
         operational.routing_block_reason,
-    ) && crate::local_pool::accounts::records::validate_account_plan(
+    ) && crate::local_pool::accounts::records::validate_pool_account(
         secret,
         account.account.subscription.plan_type.as_deref(),
     )
@@ -388,8 +406,6 @@ fn admit_runtime_account(
             chatgpt_account_id: chatgpt_account_id.to_string(),
             chatgpt_user_id: secret.provider_user_id().map(str::to_string),
             responses_url: CODEX_RESPONSES_URL.to_string(),
-            basis_points_enabled: secret.oauth_client_kind()
-                == zenith_relay_core::providers::chatgpt::OAuthClientKind::ExcelBps,
             basis_points_headers: secret.basis_points_headers().cloned(),
             models,
             enabled: candidate_enabled,

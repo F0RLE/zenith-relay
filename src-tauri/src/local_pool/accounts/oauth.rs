@@ -5,6 +5,7 @@ mod exchange;
 mod identity;
 mod parse;
 mod session;
+pub mod siwc;
 
 pub use authorization::validate_authorization_url;
 pub use client::CodexOAuthClient;

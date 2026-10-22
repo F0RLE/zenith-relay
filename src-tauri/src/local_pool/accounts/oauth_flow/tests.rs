@@ -15,6 +15,48 @@ use url::Url;
 
 static TEST_OAUTH_PORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[tokio::test]
+async fn route_notes_context_is_not_a_reauthentication_target_and_survives_resume() {
+    let root = test_root("route-notes-context");
+    let manager = OAuthFlowManager::new(root.clone(), MemorySecrets::default(), Events::default());
+    let oauth = CodexOAuthClient::new_with_proxy_for_kind(
+        super::super::oauth::OAuthClientKind::ExcelBps,
+        None,
+    )
+    .unwrap();
+    let first = manager
+        .start_for_account_with_notes(&oauth, None, None, Some("source_one"))
+        .await
+        .unwrap();
+    assert_eq!(first.notes_account_id.as_deref(), Some("source_one"));
+    assert!(first.target_account_id.is_none());
+    let same = manager
+        .start_for_account_with_notes(&oauth, None, None, Some("source_one"))
+        .await
+        .unwrap();
+    assert_eq!(first.login_id, same.login_id);
+    let other = manager
+        .start_for_account_with_notes(&oauth, None, None, Some("source_two"))
+        .await
+        .unwrap();
+    let ordinary = manager.start_for_account(&oauth, None, None).await.unwrap();
+    assert_ne!(first.login_id, other.login_id);
+    assert_ne!(first.login_id, ordinary.login_id);
+    let resumed = manager.resume(&first.login_id).await.unwrap();
+    assert_eq!(resumed.notes_account_id, first.notes_account_id);
+    assert!(resumed.target_account_id.is_none());
+    let mut snapshot = read_snapshot(&root, &first.login_id).unwrap();
+    snapshot.target_account_id = Some("foreign_target".into());
+    assert!(validate_snapshot(&snapshot, &first.login_id).is_err());
+    snapshot.target_account_id = None;
+    snapshot.notes_account_id = Some(" ".into());
+    assert!(validate_snapshot(&snapshot, &first.login_id).is_err());
+    for started in [first, other, ordinary] {
+        manager.cancel(&started.login_id).await.unwrap();
+    }
+    remove_root(&root);
+}
+
 #[derive(Clone, Default)]
 struct MemorySecrets(Arc<Mutex<BTreeMap<String, String>>>);
 
@@ -113,6 +155,124 @@ fn callback_success_page_uses_supported_browser_language() {
     assert!(
         callback_success_html(CallbackLanguage::English).contains("You can close this window now.")
     );
+}
+
+#[tokio::test]
+async fn siwc_start_resume_and_loopback_callback_preserve_the_issuing_client() {
+    let root = test_root("siwc-callback");
+    let secrets = MemorySecrets::default();
+    let events = Events::default();
+    let oauth = CodexOAuthClient::new_with_proxy_for_kind(OAuthClientKind::Siwc, None)
+        .unwrap()
+        .with_siwc_registration("urn:uuid:synthetic-flow-host".into(), None)
+        .unwrap();
+    let first = OAuthFlowManager::new(root.clone(), secrets.clone(), events.clone());
+    let start = first.start_for_account(&oauth, None, None).await.unwrap();
+    assert_eq!(start.client_kind, OAuthClientKind::Siwc);
+    assert_eq!(
+        Url::parse(&start.redirect_uri).unwrap().host_str(),
+        Some("127.0.0.1")
+    );
+    assert_eq!(
+        first
+            .start_for_account(&oauth, None, None)
+            .await
+            .unwrap()
+            .login_id,
+        start.login_id
+    );
+    first.shutdown().await;
+
+    let second = OAuthFlowManager::new(root.clone(), secrets.clone(), events.clone());
+    let resumed = second.resume(&start.login_id).await.unwrap();
+    assert_eq!(resumed.redirect_uri, start.redirect_uri);
+    let mut callback = callback_url_for(&resumed, "synthetic-siwc-code", None);
+    callback
+        .query_pairs_mut()
+        .append_pair("client_id", "oaiapp_synthetic_flow");
+    let mut foreign_host = callback.clone();
+    foreign_host.set_host(Some("localhost")).unwrap();
+    assert_eq!(
+        second
+            .submit_manual_callback(&start.login_id, foreign_host.as_str())
+            .await
+            .unwrap_err()
+            .code,
+        OAuthFlowErrorCode::CallbackInvalid
+    );
+    let redirect = Url::parse(&resumed.redirect_uri).unwrap();
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+        request_target(&callback),
+        redirect.port().unwrap()
+    );
+    let response = send_raw(&resumed.redirect_uri, &request).await;
+    assert!(response.starts_with("HTTP/1.1 200"));
+    wait_until(|| events.has(&start.login_id, OAuthFlowStatus::CallbackReceived)).await;
+    assert!(secrets.contains(&callback_secret_ref(&start.login_id)));
+    let (pending, _) = second
+        .exchange_material(&start.login_id)
+        .unwrap()
+        .into_parts();
+    assert_eq!(pending.client_kind(), OAuthClientKind::Siwc);
+    second.complete(&start.login_id).await.unwrap();
+    assert!(!secrets.contains(&callback_secret_ref(&start.login_id)));
+    remove_root(&root);
+}
+
+#[tokio::test]
+async fn siwc_webview_callback_keeps_state_validation_and_cancellation_fences() {
+    let root = test_root("siwc-webview-callback");
+    let secrets = MemorySecrets::default();
+    let events = Events::default();
+    let oauth = CodexOAuthClient::new_with_proxy_for_kind(OAuthClientKind::Siwc, None)
+        .unwrap()
+        .with_siwc_registration("urn:uuid:synthetic-webview-host".into(), None)
+        .unwrap();
+    let manager = OAuthFlowManager::new(root.clone(), secrets.clone(), events.clone());
+    for cancel in [false, true] {
+        let start = manager.start_for_account(&oauth, None, None).await.unwrap();
+        let wrong_state = callback_url_for(&start, "synthetic-code", Some("wrong-state"));
+        assert_eq!(
+            manager
+                .submit_manual_callback(&start.login_id, wrong_state.as_str())
+                .await
+                .unwrap_err()
+                .code,
+            OAuthFlowErrorCode::CallbackInvalid
+        );
+        assert!(!secrets.contains(&callback_secret_ref(&start.login_id)));
+        let mut callback = callback_url_for(&start, "synthetic-code", None);
+        callback
+            .query_pairs_mut()
+            .append_pair("client_id", "oaiapp_synthetic_webview");
+        if cancel {
+            manager.cancel(&start.login_id).await.unwrap();
+            assert!(manager
+                .submit_manual_callback(&start.login_id, callback.as_str())
+                .await
+                .is_err());
+            assert!(!secrets.contains(&callback_secret_ref(&start.login_id)));
+        } else {
+            manager
+                .submit_manual_callback(&start.login_id, callback.as_str())
+                .await
+                .unwrap();
+            assert!(events.has(&start.login_id, OAuthFlowStatus::CallbackReceived));
+            let (pending, _) = manager
+                .exchange_material(&start.login_id)
+                .unwrap()
+                .into_parts();
+            assert_eq!(pending.client_kind(), OAuthClientKind::Siwc);
+            assert!(manager
+                .submit_manual_callback(&start.login_id, callback.as_str())
+                .await
+                .is_err());
+            manager.complete(&start.login_id).await.unwrap();
+        }
+        assert!(!secrets.contains(&callback_secret_ref(&start.login_id)));
+    }
+    remove_root(&root);
 }
 
 #[tokio::test]
@@ -266,6 +426,7 @@ fn persisted_authorization_url_is_strictly_validated() {
         callback_secret_ref: callback_secret_ref(&login_id),
         status: OAuthFlowStatus::Pending,
         target_account_id: None,
+        notes_account_id: None,
         sign_in_proxy_id: None,
         pending,
     };

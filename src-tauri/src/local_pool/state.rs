@@ -248,12 +248,12 @@ impl DesktopState {
         duration_ms: f64,
         context: Option<&str>,
     ) {
-        let telemetry = self.telemetry.clone();
-        let operation_name = name.to_string();
-        let context = context.map(str::to_owned);
-        tauri::async_runtime::spawn_blocking(move || {
-            let _ = telemetry.record_performance(&operation_name, duration_ms, context.as_deref());
-        });
+        tauri::async_runtime::spawn_blocking(performance_sample_job(
+            &self.telemetry,
+            name,
+            duration_ms,
+            context,
+        ));
     }
 
     pub async fn setup_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
@@ -358,6 +358,24 @@ impl DesktopState {
                 return;
             }
         }
+    }
+}
+
+fn performance_sample_job(
+    telemetry: &Arc<TelemetryDb>,
+    name: &str,
+    duration_ms: f64,
+    context: Option<&str>,
+) -> impl FnOnce() + Send + 'static {
+    // Optional queued metrics must not extend the storage owner's lifetime.
+    let telemetry = Arc::downgrade(telemetry);
+    let operation_name = name.to_owned();
+    let context = context.map(str::to_owned);
+    move || {
+        let Some(telemetry) = telemetry.upgrade() else {
+            return;
+        };
+        let _ = telemetry.record_performance(&operation_name, duration_ms, context.as_deref());
     }
 }
 

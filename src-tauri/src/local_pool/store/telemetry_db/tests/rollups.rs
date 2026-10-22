@@ -30,6 +30,16 @@ fn usage_survives_database_reopen() {
             in_flight_before: 0,
             dispatches_before: 3,
             endpoint_kind: None,
+            upstream_response_model: Some("synthetic-upstream-snapshot".into()),
+            transport: Some(
+                serde_json::from_value(serde_json::json!({
+                    "upstream":"http","mode":"native","responseFormat":"json",
+                    "requestPreparationMs":0,"upstreamResponseMs":12,
+                    "requestPreparation":{"bodyMs":0,"schemaValidationMs":0,"catalogMs":0,"attachmentsMs":0},
+                    "clientFirstOutputMs":4,"clientResponseReadyMs":15
+                }))
+                .unwrap(),
+            ),
             attempt_outcome: Some(zenith_relay_core::AttemptOutcome::Completed),
             cache_context: Some(
                 serde_json::from_value(serde_json::json!({
@@ -68,6 +78,9 @@ fn usage_survives_database_reopen() {
             client_tool_count: 73,
             forwarded_tool_count: 73,
             tool_choice: ToolChoiceMode::Auto,
+            requested_parallel_tool_calls: Some(true),
+            upstream_tool_call_count: Some(2),
+            tool_calls_ready_ms: Some(6),
             tool_call_count: 1,
             text_output: false,
             terminal_output: TerminalOutputKind::ToolCall,

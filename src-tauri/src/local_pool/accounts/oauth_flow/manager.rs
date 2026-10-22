@@ -23,20 +23,41 @@ where
         target_account_id: Option<&str>,
         sign_in_proxy_id: Option<&str>,
     ) -> Result<OAuthFlowStart, OAuthFlowError> {
+        self.start_for_account_with_notes(oauth, target_account_id, sign_in_proxy_id, None)
+            .await
+    }
+
+    pub async fn start_for_account_with_notes(
+        &self,
+        oauth: &CodexOAuthClient,
+        target_account_id: Option<&str>,
+        sign_in_proxy_id: Option<&str>,
+        notes_account_id: Option<&str>,
+    ) -> Result<OAuthFlowStart, OAuthFlowError> {
         let now_ms = now_ms();
         let client_kind = oauth.kind();
         for mut snapshot in load_snapshots(&self.inner.root)? {
             if snapshot.target_account_id.as_deref() != target_account_id {
                 continue;
             }
+            if snapshot.notes_account_id.as_deref() != notes_account_id {
+                continue;
+            }
             if snapshot.pending.client_kind() != client_kind {
+                continue;
+            }
+            if !matches!(
+                snapshot.status,
+                OAuthFlowStatus::Pending | OAuthFlowStatus::CallbackReceived
+            ) {
+                self.inner.cleanup(&snapshot.login_id)?;
                 continue;
             }
             if snapshot.pending.expires_at_ms() <= now_ms {
                 self.inner.cleanup(&snapshot.login_id)?;
                 continue;
             }
-            if client_kind.is_local_callback() {
+            if client_kind == super::super::oauth::OAuthClientKind::Codex {
                 let port = callback_port(&snapshot.pending)?;
                 if !super::super::oauth::CODEX_OAUTH_CALLBACK_PORTS.contains(&port) {
                     self.inner.cleanup(&snapshot.login_id)?;
@@ -66,7 +87,16 @@ where
         }
 
         let (listener, port) = if client_kind.is_local_callback() {
-            let listener = bind_callback_listener().await?;
+            let listener = if client_kind == super::super::oauth::OAuthClientKind::Siwc {
+                TcpListener::bind(("127.0.0.1", 0)).await.map_err(|_| {
+                    OAuthFlowError::new(
+                        OAuthFlowErrorCode::ListenerUnavailable,
+                        "SIWC loopback listener is unavailable",
+                    )
+                })?
+            } else {
+                bind_callback_listener().await?
+            };
             let port = listener
                 .local_addr()
                 .map_err(|_| {
@@ -94,6 +124,7 @@ where
             callback_secret_ref: callback_secret_ref(&login_id),
             status: OAuthFlowStatus::Pending,
             target_account_id: target_account_id.map(str::to_string),
+            notes_account_id: notes_account_id.map(str::to_string),
             sign_in_proxy_id: sign_in_proxy_id.map(str::to_string),
             pending: start.into_pending(),
         };
@@ -120,7 +151,7 @@ where
                     .for_login(&login_id),
             );
         }
-        if snapshot.pending.client_kind().is_local_callback() {
+        if snapshot.pending.client_kind() == super::super::oauth::OAuthClientKind::Codex {
             let port = callback_port(&snapshot.pending)?;
             if !super::super::oauth::CODEX_OAUTH_CALLBACK_PORTS.contains(&port) {
                 self.inner.cleanup(&login_id)?;

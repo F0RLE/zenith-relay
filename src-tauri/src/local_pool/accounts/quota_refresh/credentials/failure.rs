@@ -20,52 +20,24 @@ pub(in crate::local_pool::accounts) fn is_credential_refresh_error_code(code: &s
     ) || code.starts_with("auth_")
 }
 
-pub(in crate::local_pool::accounts) fn classify_manual_refresh_failure(
-    kind: TokenRefreshFailureKind,
-) -> (CredentialRefreshStatus, Option<ReauthReason>) {
-    match kind {
-        TokenRefreshFailureKind::InvalidGrant => (
-            CredentialRefreshStatus::RequiresReauth,
-            Some(ReauthReason::InvalidGrant),
-        ),
-        TokenRefreshFailureKind::ExpiredRefreshToken => (
-            CredentialRefreshStatus::RequiresReauth,
-            Some(ReauthReason::ExpiredRefreshToken),
-        ),
-        TokenRefreshFailureKind::InvalidatedRefreshToken => (
-            CredentialRefreshStatus::RequiresReauth,
-            Some(ReauthReason::InvalidatedRefreshToken),
-        ),
-        TokenRefreshFailureKind::ReusedRefreshToken | TokenRefreshFailureKind::Transient => {
-            (CredentialRefreshStatus::RetryableFailure, None)
-        }
-    }
-}
-
-pub(in crate::local_pool::accounts) async fn persist_manual_refresh_failure(
+pub(in crate::local_pool::accounts) async fn persist_authorization_failure(
     state: &DesktopState,
     account_id: &str,
-    failed_credentials: &StoredCodexCredentials,
+    tokens: &TokenSet,
     reason: ReauthReason,
     code: &str,
 ) -> LocalResult<()> {
-    let tokens = failed_credentials
-        .to_token_set()
-        .map_err(credential_local_error)?;
     let auth_state = AccountAuthState::RequiresReauth(reason);
-    // A manual refresh releases the cross-process credential lock before it
-    // can await TokenAuthority. Persist the terminal result first, but only
-    // while the account record still describes the credential generation that
-    // failed. A just-finished desktop login or automatic refresh must win.
+    // Persist only the rejected generation; a later login or terminal failure wins.
     let Some(account) =
-        persist_manual_refresh_failure_record(state, account_id, &tokens, auth_state, code)?
+        persist_authorization_failure_record(state, account_id, tokens, auth_state, code)?
     else {
         return Ok(());
     };
     if !sync_account_state_if_running(state, &account.account.id).await {
         return Err(crate::local_pool::commands::fail_closed(
             state,
-            "credential refresh failure could not update the running account policy".to_string(),
+            "authorization failure could not update the running account policy".to_string(),
         )
         .await);
     }
@@ -106,10 +78,10 @@ pub(in crate::local_pool::accounts) async fn persist_manual_refresh_failure(
         )
         .await);
     };
-    let reconciled = match reconcile_manual_refresh_failure_record(
+    let reconciled = match reconcile_authorization_failure_record(
         state,
         account_id,
-        &tokens,
+        tokens,
         authoritative_tokens,
         authoritative_auth_state,
         auth_state,
@@ -136,7 +108,7 @@ pub(in crate::local_pool::accounts) async fn persist_manual_refresh_failure(
     Ok(())
 }
 
-fn persist_manual_refresh_failure_record(
+fn persist_authorization_failure_record(
     state: &DesktopState,
     account_id: &str,
     expected_tokens: &TokenSet,
@@ -148,7 +120,8 @@ fn persist_manual_refresh_failure_record(
         account.account.token_generation,
         account.account.token_updated_at_ms,
         expected_tokens,
-    ) {
+    ) || account.account.auth_state.requires_fresh_login()
+    {
         return Ok(None);
     }
     account.account.auth_state = auth_state;
@@ -157,7 +130,7 @@ fn persist_manual_refresh_failure_record(
     Ok(Some(account))
 }
 
-fn reconcile_manual_refresh_failure_record(
+fn reconcile_authorization_failure_record(
     state: &DesktopState,
     account_id: &str,
     failed_tokens: &TokenSet,

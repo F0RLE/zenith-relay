@@ -5,6 +5,12 @@ use super::session::OAuthPendingSession;
 use std::fmt;
 use url::Url;
 
+impl OAuthError {
+    pub fn is_authorization_denied(&self) -> bool {
+        self.code == super::error::OAuthErrorCode::AuthorizationDenied
+    }
+}
+
 pub struct OAuthStart {
     pub(super) authorization_url: Url,
     pub(super) pending: OAuthPendingSession,
@@ -37,6 +43,7 @@ impl fmt::Debug for OAuthStart {
 
 pub struct OAuthCallback {
     pub(super) code: String,
+    pub(super) client_id: Option<String>,
 }
 
 impl OAuthCallback {
@@ -59,9 +66,14 @@ pub struct OAuthTokenSet {
     pub(super) refresh_token: Option<String>,
     pub(super) id_token: Option<String>,
     pub(super) expires_at_ms: Option<u64>,
+    pub(super) verified_identity: Option<OAuthIdentityClaims>,
+    pub(super) siwc: Option<super::siwc::SiwcRegistration>,
 }
 
 impl OAuthTokenSet {
+    pub fn siwc_registration(&self) -> Option<&super::siwc::SiwcRegistration> {
+        self.siwc.as_ref()
+    }
     pub fn access_token(&self) -> &str {
         &self.access_token
     }
@@ -79,6 +91,9 @@ impl OAuthTokenSet {
     }
 
     pub fn identity_claims(&self) -> Result<Option<OAuthIdentityClaims>, OAuthError> {
+        if self.siwc.is_some() {
+            return Ok(self.verified_identity.clone());
+        }
         self.id_token
             .as_deref()
             .map(parse_identity_claims)

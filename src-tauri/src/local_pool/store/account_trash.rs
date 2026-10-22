@@ -129,7 +129,10 @@ impl LocalPoolStore {
         let revisions = self
             .refresh_revisions
             .with_accounts(&self.accounts, &accounts)?;
+        let mut gateway = self.gateway.clone();
+        gateway.retain_account_routes(&accounts);
         let entries = [
+            (super::STATE_GATEWAY, serialize_state(&gateway)?),
             (STATE_ACCOUNTS, serialize_state(&accounts)?),
             (STATE_ACCOUNT_TRASH, serialize_state(&trash)?),
             (STATE_AUTOMATIONS, serialize_state(&automations)?),
@@ -142,6 +145,7 @@ impl LocalPoolStore {
                 .replace_state_json_and_delete_accounts_data(&entries, permanently_deleted_ids)?;
         }
         self.accounts = accounts;
+        self.gateway = gateway;
         self.account_trash = trash;
         self.automations = automations;
         self.refresh_revisions = revisions;

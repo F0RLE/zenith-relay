@@ -125,7 +125,7 @@ fn resolve_local_preset_references(
             LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error.to_string())
         })?;
         if rule.in_pool {
-            crate::local_pool::accounts::records::validate_account_plan(
+            crate::local_pool::accounts::records::validate_pool_account(
                 &credential,
                 account.account.subscription.plan_type.as_deref(),
             )?;

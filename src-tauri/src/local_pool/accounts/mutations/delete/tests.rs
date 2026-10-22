@@ -2,6 +2,17 @@ use super::*;
 use std::sync::Arc;
 use zenith_relay_core::{GatewayRuntime, LocalGatewayKey, ProviderSource, WireApi};
 
+#[test]
+fn revoked_provider_grant_cannot_be_reopened_by_local_rollback() {
+    assert!(prepare::ensure_provider_rollback_possible(false).is_ok());
+    assert_eq!(
+        prepare::ensure_provider_rollback_possible(true)
+            .unwrap_err()
+            .code,
+        ErrorCode::RecoveryRequired
+    );
+}
+
 #[tokio::test]
 async fn incomplete_delete_rollback_closes_the_old_gateway() {
     let root = std::env::temp_dir().join(format!(
@@ -35,6 +46,7 @@ async fn incomplete_delete_rollback_closes_the_old_gateway() {
     assert!(!_dispatch_fences.is_empty());
 
     let deleted = PreparedAccountDelete {
+        provider_revoked: false,
         old_credential: None,
         previous_wake: state.wake_snapshot().unwrap(),
         old_automations: state.store().unwrap().automations().clone(),

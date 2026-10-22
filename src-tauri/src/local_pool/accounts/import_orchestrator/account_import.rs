@@ -16,12 +16,10 @@ use zenith_relay_core::providers::chatgpt::AccountModelsClient;
 
 mod quota_probe;
 mod reconcile;
-mod stage;
 
 use quota_probe::probe_import_quota;
 pub(super) use quota_probe::{account_import_proxy, import_proxy};
 use reconcile::reconcile_imported_credentials;
-pub(crate) use stage::stage_returned_remote_account;
 
 pub(super) struct AccountImportOptions<'a> {
     pub(super) add_to_pool: bool,
@@ -110,7 +108,8 @@ pub(super) async fn import_account_item(
                 &error.message,
             )
         })?;
-    let discovered_models = if discover_models && identity_is_registered {
+    let is_siwc = credentials.siwc_registration().is_some();
+    let discovered_models = if discover_models && identity_is_registered && !is_siwc {
         let client = AccountModelsClient::new_with_proxy(proxy.as_ref())
             .map_err(model_item_error)?
             .with_oauth_client_kind(credentials.oauth_client_kind())
@@ -171,7 +170,9 @@ pub(super) async fn import_account_item(
             .and_then(|existing_account| existing_account.discovered_models.clone())
     });
     merge_existing_account(&mut account, existing_account.as_ref());
-    account.account.in_pool |= add_to_pool;
+    account.account.in_pool = credentials.oauth_client_kind()
+        != zenith_relay_core::providers::chatgpt::OAuthClientKind::Codex
+        && (account.account.in_pool || (add_to_pool && !is_siwc));
     if let Some(active_until_ms) = subscription_active_until_ms {
         account.account.subscription = zenith_relay_core::quota::Subscription::normalize(
             zenith_relay_core::quota::SubscriptionInput {
@@ -198,7 +199,7 @@ pub(super) async fn import_account_item(
         )
     })?;
     account.normalize();
-    let quota = if probe_quota && identity_is_registered {
+    let quota = if probe_quota && identity_is_registered && !is_siwc {
         probe_import_quota(
             &mut account,
             &credentials,

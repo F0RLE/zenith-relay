@@ -187,7 +187,7 @@ pub(super) async fn prepare_account_preview_item(
         row.existing = true;
         row.status = ImportPreviewStatus::Existing;
     }
-    if probe_quota {
+    if probe_quota && material.siwc_registration.is_none() {
         probe_account_preview_quota(
             AccountPreviewQuota {
                 credentials,

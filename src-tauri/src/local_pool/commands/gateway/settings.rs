@@ -53,39 +53,6 @@ pub async fn set_local_request_timezone(
     state.snapshot().await.map_err(Into::into)
 }
 
-#[tauri::command]
-pub async fn set_local_tool_policy(
-    input: zenith_relay_core::ToolPolicyUpdate,
-    state: State<'_, DesktopState>,
-) -> Result<LocalPoolSnapshot, CommandError> {
-    let tool_policy_update = input;
-    let _mutation = state.setup_guard().await;
-    let invalid = |message| LocalPoolError::new(ErrorCode::InvalidState, message);
-    let policy = tool_policy_update.policy.normalized().map_err(invalid)?;
-    let expected = tool_policy_update
-        .expected_policy
-        .normalized()
-        .map_err(invalid)?;
-    let mut gateway = state.store()?.gateway().clone();
-    if gateway.tool_policy != expected {
-        return Err(LocalPoolError::new(
-            ErrorCode::Conflict,
-            "tool policy changed; reload before saving",
-        )
-        .into());
-    }
-    let previous_gateway = gateway.clone();
-    gateway.tool_policy = policy.clone();
-    state.store()?.replace_gateway(gateway)?;
-    if let Some(runtime) = state.gateway.runtime().await {
-        if let Err(error) = runtime.set_tool_policy(policy) {
-            state.store()?.replace_gateway(previous_gateway)?;
-            return Err(LocalPoolError::new(ErrorCode::InvalidState, error.to_string()).into());
-        }
-    }
-    state.snapshot().await.map_err(Into::into)
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetCommonProxyInput {
@@ -94,14 +61,96 @@ pub struct SetCommonProxyInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SetAccountProxyPolicyInput {
-    required: bool,
+pub struct SetCodexBackgroundTasksInput {
+    enabled: bool,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SetCodexBackgroundTasksInput {
+pub struct SetCodexMemoryModelInput {
+    stage: crate::local_pool::profiles::codex::CodexMemoryStage,
+    model: Option<String>,
+    expected_model: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetCodexMemoryEnabledInput {
+    stage: crate::local_pool::profiles::codex::CodexMemoryStage,
     enabled: bool,
+}
+
+#[tauri::command]
+pub async fn set_local_codex_memory_enabled(
+    input: SetCodexMemoryEnabledInput,
+    state: State<'_, DesktopState>,
+) -> Result<LocalPoolSnapshot, CommandError> {
+    use crate::local_pool::profiles::codex::CodexMemoryStage;
+    match input.stage {
+        CodexMemoryStage::Extraction => {
+            save_gateway_flag(
+                state.inner(),
+                input.enabled,
+                |gateway| gateway.codex_memory_extraction_enabled,
+                |gateway, enabled| gateway.codex_memory_extraction_enabled = enabled,
+                GatewayRuntime::set_codex_memory_extraction_enabled,
+            )
+            .await
+        }
+        CodexMemoryStage::Consolidation => {
+            save_gateway_flag(
+                state.inner(),
+                input.enabled,
+                |gateway| gateway.codex_memory_consolidation_enabled,
+                |gateway, enabled| gateway.codex_memory_consolidation_enabled = enabled,
+                GatewayRuntime::set_codex_memory_consolidation_enabled,
+            )
+            .await
+        }
+    }
+}
+
+#[tauri::command]
+pub fn get_local_codex_memory_model(
+    stage: crate::local_pool::profiles::codex::CodexMemoryStage,
+) -> Result<Option<String>, CommandError> {
+    crate::local_pool::profiles::codex::memory_model(&crate::platform::default_codex_home(), stage)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn set_local_codex_memory_model(
+    input: SetCodexMemoryModelInput,
+    state: State<'_, DesktopState>,
+) -> Result<Option<String>, CommandError> {
+    let _mutation = state.setup_guard().await;
+    let model = input
+        .model
+        .as_deref()
+        .map(|model| super::super::pool::canonical_pool_model(&state, model))
+        .transpose()?;
+    if let Some(model) = model.as_deref() {
+        let snapshot = super::super::state::build_local_runtime_state(&state).await?;
+        if !snapshot
+            .gateway
+            .models
+            .iter()
+            .any(|candidate| candidate.id == model && candidate.enabled && candidate.codex_visible)
+        {
+            return Err(LocalPoolError::invalid_state(
+                "Memory model must support ChatGPT Responses in the local pool",
+            )
+            .into());
+        }
+    }
+    crate::local_pool::profiles::codex::set_memory_model(
+        &crate::platform::default_codex_home(),
+        &state.profile_backup_root(),
+        input.stage,
+        model.as_deref(),
+        input.expected_model.as_deref(),
+    )
+    .map_err(Into::into)
 }
 
 #[derive(Deserialize)]
@@ -141,7 +190,7 @@ pub async fn set_local_common_proxy(
     {
         return state.snapshot().await.map_err(Into::into);
     }
-    let affected_accounts = accounts_without_explicit_proxy(&state, false)?;
+    let affected_accounts = accounts_inheriting_common_proxy(&state)?;
     let runtime = state.gateway.runtime().await;
     let _dispatch_fences = fence_runtime_candidates(runtime.as_deref(), &affected_accounts, &[]);
     state.store()?.invalidate_refresh_configuration()?;
@@ -157,27 +206,6 @@ pub async fn set_local_common_proxy(
         state.store()?.replace_gateway(old_gateway)
     })
     .await?;
-    state.snapshot().await.map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn set_local_account_proxy_required(
-    input: SetAccountProxyPolicyInput,
-    state: State<'_, DesktopState>,
-) -> Result<LocalPoolSnapshot, CommandError> {
-    let proxy_policy = input;
-    let _mutation = state.setup_guard().await;
-    let old_gateway = state.store()?.gateway().clone();
-    if old_gateway.account_proxy_required == proxy_policy.required {
-        return state.snapshot().await.map_err(Into::into);
-    }
-    let affected_accounts = accounts_without_explicit_proxy(&state, true)?;
-    let runtime = state.gateway.runtime().await;
-    let _dispatch_fences = fence_runtime_candidates(runtime.as_deref(), &affected_accounts, &[]);
-    let mut next_gateway = old_gateway.clone();
-    next_gateway.account_proxy_required = proxy_policy.required;
-    state.store()?.replace_gateway(next_gateway)?;
-    restart_or_rollback(&state, || state.store()?.replace_gateway(old_gateway)).await?;
     state.snapshot().await.map_err(Into::into)
 }
 
@@ -337,44 +365,6 @@ async fn save_gateway_flag(
     state.snapshot().await.map_err(Into::into)
 }
 
-#[tauri::command]
-pub async fn set_codex_profile_websockets(
-    input: SetCodexWebsocketsInput,
-    state: State<'_, DesktopState>,
-) -> Result<(), CommandError> {
-    let enabled = input.enabled;
-    let _mutation = state.setup_guard().await;
-    let Some((_, client)) = super::super::remote_server::active_client(&state)? else {
-        return Err(
-            LocalPoolError::new(ErrorCode::NotFound, "remote server is not connected").into(),
-        );
-    };
-    let credential = client
-        .profile_credential()
-        .await
-        .map_err(super::super::remote_server::remote_error)?;
-    super::super::profiles::verify_remote_profile_binding(
-        &crate::platform::default_codex_home(),
-        &state.profile_backup_root(),
-        &credential.key_id,
-    )?;
-    crate::local_pool::profiles::codex::set_local_gateway_websockets_with_previous(
-        &crate::platform::default_codex_home(),
-        &state.profile_backup_root(),
-        enabled,
-        Some(&credential.key_id),
-    )
-    .and_then(|previous_profile_snapshot| {
-        previous_profile_snapshot.map(|_| ()).ok_or_else(|| {
-            LocalPoolError::new(
-                ErrorCode::Conflict,
-                "the active profile changed during the update",
-            )
-        })
-    })
-    .map_err(Into::into)
-}
-
 fn save_optional_proxy(proxy_url: Option<&str>) -> crate::local_pool::error::Result<()> {
     match proxy_url {
         Some(proxy_url) => secret_store::save(COMMON_PROXY_SECRET_REF, proxy_url),
@@ -386,11 +376,9 @@ fn restore_common_proxy(proxy_url: Option<&str>) -> crate::local_pool::error::Re
     save_optional_proxy(proxy_url)
 }
 
-/// A common proxy affects only inherited routes. Requiring an account proxy
-/// additionally affects direct/bypassed routes, but never explicit proxies.
-pub(in crate::local_pool::commands) fn accounts_without_explicit_proxy(
+/// Explicit and bypassed routes are unaffected by a common-proxy change.
+pub(in crate::local_pool::commands) fn accounts_inheriting_common_proxy(
     state: &DesktopState,
-    include_bypassed: bool,
 ) -> crate::local_pool::error::Result<Vec<String>> {
     let account_ids = state
         .store()?
@@ -407,9 +395,7 @@ pub(in crate::local_pool::commands) fn accounts_without_explicit_proxy(
         else {
             continue;
         };
-        if credential.proxy_url().is_none()
-            && (include_bypassed || !credential.bypass_common_proxy())
-        {
+        if credential.proxy_url().is_none() && !credential.bypass_common_proxy() {
             affected.push(account_id);
         }
     }

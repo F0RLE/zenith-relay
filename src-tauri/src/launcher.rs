@@ -3,6 +3,7 @@ mod opencode_desktop;
 pub(crate) mod settings;
 
 pub(crate) use claude_desktop::{is_claude_desktop_running, launch_claude_desktop};
+pub(crate) mod hosted_preview;
 mod process;
 
 pub(crate) use process::is_codex_process;

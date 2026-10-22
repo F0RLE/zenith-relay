@@ -1,39 +1,6 @@
 use super::*;
 
 #[test]
-fn manual_refresh_distinguishes_reauth_from_retryable_failures() {
-    assert_eq!(
-        classify_manual_refresh_failure(TokenRefreshFailureKind::InvalidGrant),
-        (
-            CredentialRefreshStatus::RequiresReauth,
-            Some(ReauthReason::InvalidGrant)
-        )
-    );
-    assert_eq!(
-        classify_manual_refresh_failure(TokenRefreshFailureKind::ExpiredRefreshToken),
-        (
-            CredentialRefreshStatus::RequiresReauth,
-            Some(ReauthReason::ExpiredRefreshToken)
-        )
-    );
-    assert_eq!(
-        classify_manual_refresh_failure(TokenRefreshFailureKind::InvalidatedRefreshToken),
-        (
-            CredentialRefreshStatus::RequiresReauth,
-            Some(ReauthReason::InvalidatedRefreshToken)
-        )
-    );
-    assert_eq!(
-        classify_manual_refresh_failure(TokenRefreshFailureKind::ReusedRefreshToken),
-        (CredentialRefreshStatus::RetryableFailure, None)
-    );
-    assert_eq!(
-        classify_manual_refresh_failure(TokenRefreshFailureKind::Transient),
-        (CredentialRefreshStatus::RetryableFailure, None)
-    );
-}
-
-#[test]
 fn successful_refresh_only_clears_credential_owned_error_codes() {
     assert!(is_credential_refresh_error_code("invalid_grant"));
     assert!(is_credential_refresh_error_code("auth_invalid_grant"));
@@ -43,7 +10,7 @@ fn successful_refresh_only_clears_credential_owned_error_codes() {
 }
 
 #[test]
-fn stale_manual_refresh_failure_never_wins_over_a_newer_token_snapshot() {
+fn stale_authorization_failure_never_wins_over_a_newer_token_snapshot() {
     let failed = TokenSet::new("access", Some("refresh".into()), None, None, 100, 7).unwrap();
 
     assert!(!persisted_token_generation_is_newer(7, Some(100), &failed));

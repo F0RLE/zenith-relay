@@ -19,7 +19,7 @@ pub(super) async fn resolve_gateway_oauth_binding(
         for account in store.accounts() {
             let explicitly_requested = requested_account_id == Some(account.account.id.as_str());
             if !account.account.enabled
-                || account.remote_location.is_some()
+                || account.recovery.is_some()
                 || account.account.draining
                 || account.account.auth_state
                     != zenith_relay_core::accounts::AccountAuthState::Active

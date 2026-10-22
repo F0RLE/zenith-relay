@@ -22,8 +22,7 @@ pub(super) use totals::{
     usage_totals_from_sample, UsageTotalsSample,
 };
 
-const USAGE_TOTAL_COLUMNS: &str =
-    zenith_relay_core::usage_total_columns_sql!("COALESCE(output_tokens, 0) <= latency_ms");
+const USAGE_TOTAL_COLUMNS: &str = zenith_relay_core::usage_total_columns_sql!();
 
 /// Aggregate columns used when only API-equivalent pricing is needed. The
 /// sample counts are important: a cache value is only treated as complete

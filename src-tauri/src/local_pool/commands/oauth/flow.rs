@@ -22,10 +22,10 @@ pub(super) fn validate_oauth_target(
     let account = store.account(account_id).ok_or_else(|| {
         LocalPoolError::new(ErrorCode::NotFound, "OAuth target account was not found")
     })?;
-    if account.remote_location.is_some() {
+    if account.recovery.is_some() {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
-            "OAuth target account is managed by a remote server",
+            "OAuth target account requires local recovery before use",
         ));
     }
     if account.account.source_id != CODEX_SOURCE_ID {
@@ -58,9 +58,9 @@ pub(super) fn flow_error(error: OAuthFlowError) -> LocalPoolError {
     let code = match error.code {
         OAuthFlowErrorCode::CallbackAlreadyReceived => ErrorCode::Conflict,
         OAuthFlowErrorCode::Expired | OAuthFlowErrorCode::SecretMissing => ErrorCode::NotFound,
-        OAuthFlowErrorCode::InvalidLoginId | OAuthFlowErrorCode::CallbackInvalid => {
-            ErrorCode::InvalidState
-        }
+        OAuthFlowErrorCode::AuthorizationDenied
+        | OAuthFlowErrorCode::InvalidLoginId
+        | OAuthFlowErrorCode::CallbackInvalid => ErrorCode::InvalidState,
         OAuthFlowErrorCode::CallbackPortUnavailable | OAuthFlowErrorCode::ListenerUnavailable => {
             ErrorCode::GatewayUnavailable
         }

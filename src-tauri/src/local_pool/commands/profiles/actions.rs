@@ -1,46 +1,8 @@
 use super::*;
 
 mod support;
-pub(in crate::local_pool::commands) use support::verify_remote_profile_binding;
-use support::{activate_account_profile, resolve_profile_dir};
-pub(super) use support::{
-    append_profile_rollback_error, append_remote_cleanup_error, profile_rotation_commit_state,
-    set_runtime_pool_interface_reserve,
-};
-
-#[tauri::command]
-pub async fn restore_codex_profile(state: State<'_, DesktopState>) -> Result<(), CommandError> {
-    let _mutation = state.setup_guard().await;
-    let profile_dir = default_codex_home();
-    if codex::credential_kind(&profile_dir, &state.profile_backup_root())?.is_none() {
-        return Ok(());
-    }
-    let sync_history =
-        history_provider_changed(&state, &profile_dir, CodexHistoryProvider::ChatGpt)
-            .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
-    let stopped = stop_codex_and_sync_account(&state).await?;
-    let restore_result = (|| {
-        let history_backup = if sync_history {
-            synchronize_history_for_command(&state, &profile_dir, CodexHistoryProvider::ChatGpt)?
-        } else {
-            None
-        };
-        let profile_restore_result =
-            codex::restore(&profile_dir, &state.profile_backup_root()).map_err(Into::into);
-        rollback_history_on_error(&state, history_backup.as_deref(), profile_restore_result)
-    })();
-    if restore_result.is_ok() {
-        set_runtime_pool_interface_reserve(&state, None, 0).await;
-    }
-    restart_codex_after_restore(stopped, restore_result, launch_codex_with_profile)
-}
-
-pub(crate) async fn prepare_ready_api_profile(state: &DesktopState) -> Result<bool, CommandError> {
-    let _mutation = state.setup_guard().await;
-    // Detach and attach belong to the same profile transaction, not a
-    // preparatory UI call that can discard the active connection on failure.
-    stop_codex_and_sync_account(state).await
-}
+use support::activate_account_profile;
+pub(super) use support::set_runtime_pool_interface_reserve;
 
 #[tauri::command]
 pub async fn stop_managed_codex_profile(
@@ -69,22 +31,12 @@ pub async fn launch_managed_codex_profile(
 }
 
 #[tauri::command]
-pub async fn attach_codex_to_account(
-    account_id: String,
-    profile_dir: Option<String>,
-    state: State<'_, DesktopState>,
-) -> Result<ProfileActivation, CommandError> {
-    let _mutation = state.setup_guard().await;
-    activate_account_profile(&account_id, profile_dir, &state).await
-}
-
-#[tauri::command]
 pub async fn launch_codex_account(
     account_id: String,
     state: State<'_, DesktopState>,
 ) -> Result<ProfileActivation, CommandError> {
     let _mutation = state.setup_guard().await;
-    activate_account_profile(&account_id, None, &state).await
+    activate_account_profile(&account_id, &state).await
 }
 
 #[tauri::command]
@@ -123,20 +75,13 @@ pub async fn launch_codex_source(
         Some(catalog) => Some(super::catalog::context_catalog(&state, &catalog)?),
         None => None,
     };
-    let sync_history =
-        history_provider_changed(&state, &profile_dir, CodexHistoryProvider::LocalGateway)
-            .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
     let stopped = stop_codex_and_sync_account(&state).await?;
     let attach_result = with_chatgpt_context(&state, &profile_dir, || {
-        let history_backup = if sync_history {
-            synchronize_history_for_command(
-                &state,
-                &profile_dir,
-                CodexHistoryProvider::LocalGateway,
-            )?
-        } else {
-            None
-        };
+        let history_backup = synchronize_history_for_command(
+            &state,
+            &profile_dir,
+            CodexHistoryProvider::LocalGateway,
+        )?;
         let profile_attach_result = codex::attach_with_catalog(
             &profile_dir,
             &state.profile_backup_root(),
@@ -156,38 +101,6 @@ pub async fn launch_codex_source(
         state.record_catalog_refresh_result(None);
     }
     activation_result
-}
-
-#[tauri::command]
-pub fn list_codex_account_bindings(
-    state: State<'_, DesktopState>,
-) -> Result<Vec<codex::ProfileBinding>, CommandError> {
-    codex::profile_bindings(&default_codex_home(), &state.profile_backup_root()).map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn restore_codex_account_profile(
-    profile_dir: Option<String>,
-    state: State<'_, DesktopState>,
-) -> Result<Option<codex::ProfileBinding>, CommandError> {
-    let _mutation = state.setup_guard().await;
-    let profile_dir = resolve_profile_dir(profile_dir)?;
-    let sync_history =
-        history_provider_changed(&state, &profile_dir, CodexHistoryProvider::ChatGpt)
-            .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
-    let stopped = stop_codex_and_sync_account_at(&state, &profile_dir).await?;
-    let restore_result = (|| {
-        let history_backup = if sync_history {
-            synchronize_history_for_command(&state, &profile_dir, CodexHistoryProvider::ChatGpt)?
-        } else {
-            None
-        };
-        let profile_restore_result =
-            codex::restore_account_profile(&profile_dir, &state.profile_backup_root())
-                .map_err(Into::into);
-        rollback_history_on_error(&state, history_backup.as_deref(), profile_restore_result)
-    })();
-    restart_codex_after_restore(stopped, restore_result, launch_codex_with_profile)
 }
 
 #[tauri::command]
@@ -270,14 +183,8 @@ pub(crate) async fn restore_managed_profiles_before_reset(
         }
         for binding in bindings {
             let profile = Path::new(&binding.profile_dir);
-            let sync_history =
-                history_provider_changed(state, profile, CodexHistoryProvider::ChatGpt)
-                    .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
-            let history_backup = if sync_history {
-                synchronize_history_for_command(state, profile, CodexHistoryProvider::ChatGpt)?
-            } else {
-                None
-            };
+            let history_backup =
+                synchronize_history_for_command(state, profile, CodexHistoryProvider::ChatGpt)?;
             let restored = codex::restore(profile, &backup_root).map_err(Into::into);
             rollback_history_on_error(state, history_backup.as_deref(), restored)?;
         }

@@ -137,6 +137,15 @@ where
             let _ = write_response(&mut stream, 400, "Invalid OAuth callback.").await;
             RequestOutcome::Rejected
         }
+        Err(error) if error.code == OAuthFlowErrorCode::AuthorizationDenied => {
+            let _ = write_response(
+                &mut stream,
+                400,
+                "ChatGPT authorization was declined. You can close this window.",
+            )
+            .await;
+            RequestOutcome::Failed
+        }
         Err(_) => {
             let _ = write_response(&mut stream, 500, "OAuth callback could not be saved.").await;
             RequestOutcome::Failed

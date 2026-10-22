@@ -9,7 +9,8 @@ use std::time::Duration;
 use url::Url;
 use zenith_relay_core::error_codes;
 use zenith_relay_core::providers::chatgpt::{
-    push_account_id_hint, resolve_account_check_account_id, AccountCheckIdentityError,
+    merge_subscription_metadata, push_account_id_hint, resolve_account_check_account_id,
+    AccountCheckIdentityError, CodexSubscriptionMetadata,
 };
 use zenith_relay_core::ProxyConfig;
 
@@ -45,10 +46,10 @@ pub(in crate::local_pool::accounts) async fn resolve_import_account_identity(
     )
     .await
     {
-        Ok((account_id, plan)) => {
+        Ok((account_id, metadata)) => {
             material
                 .oauth_client_kind
-                .validate_plan(plan.as_deref(), None, None)
+                .validate_plan(metadata.plan_type.as_deref(), None, None)
                 .map_err(|message| {
                     ImportItemError::new(
                         error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED,
@@ -56,9 +57,11 @@ pub(in crate::local_pool::accounts) async fn resolve_import_account_identity(
                     )
                 })?;
             material.provider_account_id = Some(account_id);
-            if plan.is_some() {
-                material.plan_type = plan;
-            }
+            merge_subscription_metadata(
+                &mut material.plan_type,
+                &mut material.subscription_active_until_ms,
+                metadata,
+            );
         }
         Err(error)
             if error.code != error_codes::ACCOUNT_IDENTITY_MISMATCH
@@ -89,7 +92,7 @@ async fn lookup_import_account_id_with_hints(
     claimed_account_ids: &[String],
     proxy: Option<&ProxyConfig>,
     timeout: Duration,
-) -> ItemResult<(String, Option<String>)> {
+) -> ItemResult<(String, CodexSubscriptionMetadata)> {
     let authorization = crate::local_pool::accounts::credentials::bearer_authorization(
         access_token,
     )
@@ -185,13 +188,12 @@ async fn lookup_import_account_id_with_hints(
             };
             ImportItemError::new(code, message)
         })?;
-    let plan = zenith_relay_core::providers::chatgpt::parse_account_check_subscription(
+    let metadata = zenith_relay_core::providers::chatgpt::parse_account_check_subscription(
         &profile_payload,
         &account_id,
     )
-    .ok()
-    .and_then(|metadata| metadata.plan_type);
-    Ok((account_id, plan))
+    .unwrap_or_default();
+    Ok((account_id, metadata))
 }
 
 pub(super) fn account_id_hints(

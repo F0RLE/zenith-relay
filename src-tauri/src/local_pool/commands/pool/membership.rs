@@ -38,17 +38,29 @@ pub(in crate::local_pool::commands) async fn apply_local_pool_membership(
     }
     if input.in_pool
         && old_accounts.iter().any(|account_record| {
-            account_ids.contains(&account_record.account.id)
-                && account_record.remote_location.is_some()
+            account_ids.contains(&account_record.account.id) && account_record.recovery.is_some()
         })
     {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
-            "an account managed by a remote server cannot join the local pool",
+            "account requires local recovery before joining the pool",
         )
         .into());
     }
     if input.in_pool {
+        let selected_routes = {
+            let store = state.store()?;
+            account_ids
+                .iter()
+                .all(|id| store.gateway().account_route_is_selected(id))
+        };
+        if !selected_routes {
+            return Err(LocalPoolError::new(
+                ErrorCode::Conflict,
+                "Select this account route before adding it to the pool",
+            )
+            .into());
+        }
         for account in old_accounts
             .iter()
             .filter(|account| account_ids.contains(&account.account.id))

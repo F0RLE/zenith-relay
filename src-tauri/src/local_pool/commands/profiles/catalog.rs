@@ -20,7 +20,7 @@ const ZENITH_API_HOST: &str = "api.zenithmarket.dev";
 // the profile catalog parser. Full ChatGPT inventories may exceed 512 KiB.
 const MAX_CODEX_MODEL_CATALOG_BYTES: usize = 4 * 1024 * 1024;
 
-pub(super) async fn fetch_codex_model_catalog(
+pub(super) async fn fetch_local_codex_model_catalog(
     base_url: &str,
     secret: &str,
 ) -> Result<String, CommandError> {
@@ -36,6 +36,7 @@ pub(super) async fn fetch_codex_model_catalog(
     url.query_pairs_mut()
         .append_pair("client_version", &client_version);
     let client = reqwest::Client::builder()
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(20))
@@ -180,7 +181,7 @@ pub(in crate::local_pool) async fn refresh_active_codex_catalog(
             };
             let secret = super::super::pool::ensure_local_gateway_key_secret(&key)?;
             supports_websockets = Some(state.store()?.gateway().codex_websockets_enabled);
-            fetch_codex_model_catalog(&format!("http://{address}/v1"), &secret)
+            fetch_local_codex_model_catalog(&format!("http://{address}/v1"), &secret)
                 .await
                 .map_err(|error| LocalPoolError::new(error.code, error.message))?
         }

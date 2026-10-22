@@ -4,7 +4,7 @@ use crate::local_pool::{
         credentials::{
             credential_local_error as credential_error, CredentialStore, StoredCodexCredentials,
         },
-        proxy::{common_proxy_config, effective_proxy_config, ensure_account_proxy},
+        proxy::{effective_proxy_config, ensure_account_proxy},
         quota_refresh::{
             register_active_authority, sync_account_profile_bindings, AccountQuotaOutcome,
             AccountQuotaRefreshResponse,
@@ -82,9 +82,15 @@ async fn prepare_oauth_completion(
         ensure_account_proxy(&settings, proxy.as_ref())?;
         proxy
     } else {
-        let common_proxy = common_proxy_config(&settings)?;
-        ensure_account_proxy(&settings, common_proxy.as_ref())?;
-        common_proxy
+        let start = flow.status(login_id).map_err(flow_error)?;
+        let proxy_url = super::oauth_proxy_url(
+            state,
+            start
+                .target_account_id
+                .as_deref()
+                .or(start.notes_account_id.as_deref()),
+        )?;
+        super::parsed_proxy(proxy_url.as_deref())?
     };
     let (checkpoint, encoded_checkpoint, target_account_id) =
         completion_checkpoint(&flow, login_id, now_ms, exchange_proxy.as_ref()).await?;
@@ -97,10 +103,10 @@ async fn prepare_oauth_completion(
             .ok_or_else(|| {
                 LocalPoolError::new(ErrorCode::NotFound, "OAuth target account was not found")
             })?;
-        if target.remote_location.is_some() {
+        if target.recovery.is_some() {
             return Err(LocalPoolError::new(
                 ErrorCode::Conflict,
-                "OAuth target account is managed by a remote server",
+                "OAuth target account requires local recovery before use",
             ));
         }
         let target_credentials = credential_store
@@ -187,6 +193,7 @@ async fn prepare_oauth_completion(
     let (quota_outcome, model_result) = tokio::join!(
         refresh_sign_in_quota(
             &mut account_record,
+            credentials.oauth_client_kind(),
             proxy.as_ref(),
             &checkpoint.access_token,
             &checkpoint.provider_account_id,
@@ -220,7 +227,7 @@ async fn prepare_oauth_completion(
         account_record.models = models.clone();
     }
     if model_issue.is_none()
-        && (!models.is_empty() || credentials.oauth_client_kind() == OAuthClientKind::ExcelBps)
+        && (!models.is_empty() || credentials.oauth_client_kind() != OAuthClientKind::Codex)
     {
         account_record.discovered_models = Some(models);
     }
@@ -293,6 +300,12 @@ async fn discover_sign_in_models(
     now_ms: u64,
     previous_models: Vec<String>,
 ) -> LocalResult<(Vec<String>, Option<InitialModelIssue>)> {
+    if credentials
+        .siwc_registration()
+        .is_some_and(|r| !r.plan_use_enabled())
+    {
+        return Ok((Vec::new(), None));
+    }
     let client_version = zenith_relay_core::providers::chatgpt::configured_codex_client_version();
     match AccountModelsClient::new_with_proxy(proxy) {
         Ok(client) => match client
@@ -316,12 +329,16 @@ async fn discover_sign_in_models(
 
 async fn refresh_sign_in_quota(
     account_record: &mut LocalAccountRecord,
+    client_kind: OAuthClientKind,
     proxy: Option<&ProxyConfig>,
     access_token: &str,
     provider_account_id: &str,
     now_ms: u64,
     timeout: std::time::Duration,
 ) -> AccountQuotaOutcome {
+    if client_kind == OAuthClientKind::Siwc {
+        return AccountQuotaOutcome::Skipped;
+    }
     let quota_result = match CodexQuotaClient::new_with_proxy_and_timeout(proxy, timeout) {
         Ok(quota) => {
             quota

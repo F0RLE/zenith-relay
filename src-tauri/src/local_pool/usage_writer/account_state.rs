@@ -16,7 +16,9 @@ pub(super) fn expire_account_access<B: SecretBackend>(
     let Ok(Some(mut stored)) = credentials.load(account_id) else {
         return Some(AccountAccessState::Failed);
     };
-    if stored.generation() != expected_generation {
+    if stored.oauth_client_kind() == zenith_relay_core::providers::chatgpt::OAuthClientKind::Siwc
+        || stored.generation() != expected_generation
+    {
         return None;
     };
     let refreshable = stored.refresh_token().is_some();

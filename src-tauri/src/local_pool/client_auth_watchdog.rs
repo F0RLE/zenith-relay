@@ -4,7 +4,6 @@
 //! stable login-page signal for the account bound to the active Relay profile;
 //! it never captures network bodies, page text, cookies, or credentials.
 
-use reqwest::Client;
 use serde_json::json;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -26,7 +25,7 @@ pub(crate) fn start(app: AppHandle) {
 }
 
 async fn run(app: AppHandle) {
-    let client = match Client::builder().timeout(cdp::CDP_TIMEOUT).build() {
+    let client = match cdp::http_client() {
         Ok(client) => client,
         Err(_) => return,
     };
@@ -131,21 +130,5 @@ async fn run(app: AppHandle) {
             }
         }
         tokio::time::sleep(POLL_INTERVAL).await;
-    }
-}
-
-#[cfg(test)]
-fn observation_write_completed<E>(write_result: &std::result::Result<bool, E>) -> bool {
-    write_result.is_ok()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn watchdog_retries_failed_observation_persistence() {
-        assert!(observation_write_completed(&Ok::<bool, ()>(false)));
-        assert!(!observation_write_completed(&Err::<bool, ()>(())));
     }
 }

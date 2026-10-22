@@ -272,7 +272,7 @@ fn same_account_scope(previous_account: &LocalAccountRecord, account: &LocalAcco
         && previous_account.account.secret_refs == account.account.secret_refs
         && previous_account.account.created_at_ms == account.account.created_at_ms
         && previous_account.account.enabled == account.account.enabled
-        && previous_account.remote_location == account.remote_location
+        && previous_account.recovery == account.recovery
 }
 
 fn invalid_revisions() -> LocalPoolError {

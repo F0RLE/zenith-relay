@@ -15,7 +15,6 @@ mod account_policy;
 mod claims;
 mod confirmation;
 mod credential_material;
-mod current_profile;
 mod documents;
 mod errors;
 mod identity;
@@ -26,7 +25,6 @@ mod preview;
 mod refresh_state;
 mod sources;
 
-pub(crate) use account_import::stage_returned_remote_account;
 use account_import::{
     account_import_proxy, import_account_item, import_proxy, AccountImportOptions,
 };
@@ -43,11 +41,6 @@ pub(super) use credential_material::lookup_import_account_id;
 pub(in crate::local_pool::accounts) use credential_material::{
     build_import_credential_material, ImportedCredentialMaterial,
 };
-#[cfg(test)]
-pub(super) use current_profile::{
-    current_codex_import_documents, is_usable_current_chatgpt_profile,
-};
-use current_profile::{current_profile_available, current_profile_documents};
 pub(super) use documents::normalize_import_input;
 pub use documents::StartAccountImportInput;
 pub(crate) use documents::{pick_account_import_documents, read_import_documents};
@@ -160,46 +153,6 @@ pub async fn preview_local_account_import_files(
     }
     .await;
     record_import_command_result("preview_files_completed", started, preview_result)
-}
-
-#[tauri::command]
-pub async fn preview_current_codex_account_import(
-    state: State<'_, DesktopState>,
-) -> CommandResult<ImportSessionResponse> {
-    let started = Instant::now();
-    crate::diagnostics::breadcrumb("account-import", "preview_current_profile", &[]);
-    let preview_result = async {
-        let documents = current_profile_documents(&state)?;
-        preview_account_import_documents(documents, &state).await
-    }
-    .await;
-    record_import_command_result("preview_current_completed", started, preview_result)
-}
-
-#[tauri::command]
-pub async fn current_chatgpt_profile_available(
-    state: State<'_, DesktopState>,
-) -> CommandResult<bool> {
-    current_profile_available(&state).map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn resume_local_account_import(
-    session_id: String,
-    state: State<'_, DesktopState>,
-) -> CommandResult<ImportSessionResponse> {
-    let _mutation = state.setup_guard().await;
-    crate::diagnostics::breadcrumb(
-        "account-import",
-        "resume",
-        &[("session", crate::diagnostics::hash_identifier(&session_id))],
-    );
-    let credentials = CredentialStore::from_backend(NativeSecretBackend);
-    let existing = existing_identity_index(&state, &credentials)?;
-    let session = ImportSessionStore::new(state.transient_root(), NativeSecretBackend)
-        .resume(&session_id, &existing.keys().cloned().collect::<Vec<_>>())
-        .map_err(import_session_error)?;
-    Ok(session.into())
 }
 
 #[tauri::command]

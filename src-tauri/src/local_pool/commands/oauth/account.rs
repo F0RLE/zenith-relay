@@ -56,7 +56,7 @@ pub(super) fn preserve_existing_settings(
     account_to_update.account.last_used_at_ms = existing_account.account.last_used_at_ms;
     account_to_update.account.quota = existing_account.account.quota.clone();
     account_to_update.purchase_cost_micro_usd = existing_account.purchase_cost_micro_usd;
-    account_to_update.remote_location = existing_account.remote_location.clone();
+    account_to_update.recovery = existing_account.recovery.clone();
     let fresh_models = std::mem::take(&mut account_to_update.models);
     // Some([]) is not a live catalog and must not hide models already shown.
     let fresh_discovered_models = account_to_update

@@ -9,7 +9,7 @@ use crate::{
         error::{ErrorCode, LocalPoolError, Result},
         models::{
             AutomationRecords, GatewaySettings, LocalAccountRecord, LocalPoolSnapshot,
-            ProviderSourceRecord, RuntimeTarget,
+            ProviderSourceRecord,
         },
         store::secret_store,
     },
@@ -73,6 +73,7 @@ pub(crate) struct AccountCredentialFacts {
     pub oauth_client_kind: zenith_relay_core::providers::chatgpt::OAuthClientKind,
     pub has_oauth: bool,
     pub has_refresh_token: bool,
+    pub plan_use_enabled: bool,
     pub expires_at_ms: Option<u64>,
     pub agent_identity: bool,
     pub has_provider_account_id: bool,
@@ -91,6 +92,9 @@ impl AccountCredentialFacts {
             oauth_client_kind: credentials.oauth_client_kind(),
             has_oauth: credentials.has_oauth(),
             has_refresh_token: credentials.refresh_token().is_some(),
+            plan_use_enabled: credentials
+                .siwc_registration()
+                .is_none_or(|registration| registration.plan_use_enabled()),
             expires_at_ms: credentials.expires_at_ms(),
             agent_identity: credentials.is_agent_identity(),
             has_provider_account_id: credentials.provider_account_id().is_some(),
@@ -160,7 +164,7 @@ impl DesktopState {
             accounts,
             automations,
             mut warnings,
-            running,
+            ..
         } = self.snapshot_base().await?;
         for source in &sources {
             if !secrets.contains(&source.secret_ref)? {
@@ -177,10 +181,6 @@ impl DesktopState {
         }
         Ok(LocalPoolSnapshot {
             schema_version: crate::local_pool::models::CURRENT_SCHEMA_VERSION,
-            runtime_target: RuntimeTarget {
-                kind: "local",
-                connected: running,
-            },
             gateway,
             platform: platform::platform_name(),
             capabilities: platform::capabilities(),
@@ -278,7 +278,7 @@ impl DesktopState {
         self.project_cached_credentials(accounts, Clone::clone)
     }
 
-    fn cached_account_credential_facts(
+    pub(crate) fn cached_account_credential_facts(
         &self,
         accounts: &[LocalAccountRecord],
     ) -> Result<HashMap<String, Option<AccountCredentialFacts>>> {

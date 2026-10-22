@@ -57,6 +57,55 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn picker_starts_beside_the_executable_or_in_the_selected_directory() {
+    let fixture = Fixture::new();
+    for application in [
+        Application::Chatgpt,
+        Application::ClaudeDesktop,
+        Application::Opencode,
+    ] {
+        let path = fixture.executable(application);
+        #[cfg(not(target_os = "macos"))]
+        let directory = path.parent().unwrap();
+        #[cfg(target_os = "macos")]
+        let directory = fixture.root.as_path();
+        assert_eq!(picker_directory(path.to_str().unwrap()), Some(directory));
+        fs::remove_file(&path).unwrap();
+        assert_eq!(picker_directory(path.to_str().unwrap()), Some(directory));
+    }
+    assert_eq!(
+        picker_directory(fixture.root.to_str().unwrap()),
+        Some(fixture.root.as_path())
+    );
+    assert_eq!(
+        picker_directory(&format!("  {}  ", fixture.root.display())),
+        Some(fixture.root.as_path())
+    );
+}
+
+#[test]
+fn picker_ignores_non_filesystem_or_invalid_starting_paths() {
+    for path in [
+        "",
+        "opencode",
+        "relative/app.exe",
+        "shell:AppsFolder\\App!App",
+    ] {
+        assert_eq!(picker_directory(path), None);
+    }
+    let fixture = Fixture::new();
+    assert_eq!(
+        picker_directory(fixture.root.join("missing/app.exe").to_str().unwrap()),
+        None
+    );
+    assert_eq!(
+        picker_directory(&format!("{}\0", fixture.root.display())),
+        None
+    );
+    assert_eq!(picker_directory(&"/".repeat(8193)), None);
+}
+
+#[test]
 fn default_detection_does_not_create_preferences() {
     let fixture = Fixture::new();
     for application in [

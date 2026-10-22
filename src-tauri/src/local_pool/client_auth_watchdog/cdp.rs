@@ -5,7 +5,7 @@ use serde_json::json;
 use std::collections::BTreeSet;
 use std::time::Duration;
 use sysinfo::{ProcessesToUpdate, System};
-use tokio::time::timeout;
+use tokio::time::{timeout_at, Instant};
 use tokio_tungstenite::{
     connect_async_with_config,
     tungstenite::{protocol::WebSocketConfig, Message},
@@ -14,7 +14,7 @@ use url::Url;
 
 use crate::launcher::is_codex_process;
 
-pub(super) const CDP_TIMEOUT: Duration = Duration::from_secs(1);
+const CDP_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_CDP_RESPONSE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Deserialize)]
@@ -33,6 +33,7 @@ impl CdpTarget {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct AuthPageSnapshot {
     route: String,
     login_ui_signal: bool,
@@ -127,6 +128,14 @@ fn parse_debug_port(args: &[String]) -> Option<u16> {
     })
 }
 
+pub(super) fn http_client() -> reqwest::Result<Client> {
+    Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(CDP_TIMEOUT)
+        .build()
+}
+
 pub(super) async fn query_targets(client: &Client, port: u16) -> Vec<CdpTarget> {
     let url = format!("http://127.0.0.1:{port}/json/list");
     let Ok(response) = client.get(url).send().await else {
@@ -161,16 +170,18 @@ pub(super) async fn query_snapshot(target: &CdpTarget) -> Option<AuthPageSnapsho
     let websocket_config = WebSocketConfig::default()
         .max_message_size(Some(MAX_CDP_RESPONSE_BYTES))
         .max_frame_size(Some(MAX_CDP_RESPONSE_BYTES));
-    let Ok(Ok((mut socket, _))) = timeout(
-        CDP_TIMEOUT,
+    let deadline = Instant::now() + CDP_TIMEOUT;
+    let Ok(Ok((mut socket, _))) = timeout_at(
+        deadline,
         connect_async_with_config(websocket_url, Some(websocket_config), false),
     )
     .await
     else {
         return None;
     };
-    socket
-        .send(Message::Text(
+    timeout_at(
+        deadline,
+        socket.send(Message::Text(
             json!({
                 "id": 1,
                 "method": "Runtime.evaluate",
@@ -178,12 +189,16 @@ pub(super) async fn query_snapshot(target: &CdpTarget) -> Option<AuthPageSnapsho
             })
             .to_string()
             .into(),
-        ))
-        .await
-        .ok()?;
-    loop {
-        let Ok(Some(Ok(Message::Text(text)))) = timeout(CDP_TIMEOUT, socket.next()).await else {
-            return None;
+        )),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    while Instant::now() < deadline {
+        let text = match timeout_at(deadline, socket.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) => text,
+            Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => continue,
+            _ => return None,
         };
         let response_document: serde_json::Value = serde_json::from_str(text.as_ref()).ok()?;
         if response_document
@@ -198,6 +213,7 @@ pub(super) async fn query_snapshot(target: &CdpTarget) -> Option<AuthPageSnapsho
             .cloned()
             .and_then(|snapshot_value| serde_json::from_value(snapshot_value).ok());
     }
+    None
 }
 
 fn is_loopback_websocket_url(url_text: &str) -> bool {
@@ -221,8 +237,107 @@ fn parse_cdp_targets_body(response_body: &[u8]) -> Vec<CdpTarget> {
 }
 
 #[cfg(test)]
+mod http_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::TcpListener;
+    use tokio::time::timeout;
+    use tokio_tungstenite::accept_async;
+
+    #[test]
+    fn snapshot_decodes_fields_emitted_by_the_probe() {
+        let snapshot: AuthPageSnapshot = serde_json::from_value(json!({
+            "route": "/index.html",
+            "loginUiSignal": true,
+            "loginUiMarkers": ["login_title", "login_primary_action"],
+        }))
+        .expect("probe JSON must decode without renaming its fields");
+        assert!(snapshot.login_signal());
+    }
+
+    #[tokio::test]
+    async fn snapshot_ignores_control_frames_and_unrelated_responses() {
+        let (listener, target) = cdp_listener().await;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            if socket.next().await.is_none() {
+                return;
+            }
+            let foreign = json!({
+                "id": 2,
+                "result": {"result": {"value": {
+                    "route": "/login", "loginUiSignal": false, "loginUiMarkers": [],
+                }}},
+            });
+            let response = json!({
+                "id": 1,
+                "result": {"result": {"value": {
+                    "route": "/index.html", "loginUiSignal": false, "loginUiMarkers": [],
+                }}},
+            });
+            for message in [
+                Message::Ping(vec![1].into()),
+                Message::Pong(vec![2].into()),
+                Message::Text(foreign.to_string().into()),
+                Message::Text(response.to_string().into()),
+            ] {
+                if socket.send(message).await.is_err() {
+                    return;
+                }
+            }
+            let _ = socket.next().await;
+        });
+        let observed = timeout(CDP_TIMEOUT * 3, query_snapshot(&target)).await;
+        server.abort();
+        let _ = server.await;
+        let snapshot = observed
+            .expect("snapshot exchange must stay bounded")
+            .expect("the matching probe response must survive control frames");
+        assert!(!snapshot.login_signal());
+    }
+
+    #[tokio::test]
+    async fn snapshot_deadline_is_not_extended_by_unrelated_messages() {
+        let (listener, target) = cdp_listener().await;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            if socket.next().await.is_none() {
+                return;
+            }
+            while socket
+                .send(Message::Text(
+                    json!({"id": 2, "result": {}}).to_string().into(),
+                ))
+                .await
+                .is_ok()
+            {
+                tokio::time::sleep(CDP_TIMEOUT / 4).await;
+            }
+        });
+        let observed = timeout(CDP_TIMEOUT * 3, query_snapshot(&target)).await;
+        server.abort();
+        let _ = server.await;
+        assert!(observed
+            .expect("foreign responses must not restart the snapshot deadline")
+            .is_none());
+    }
+
+    async fn cdp_listener() -> (TcpListener, CdpTarget) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = CdpTarget {
+            target_type: "page".into(),
+            url: "app://-/index.html".into(),
+            web_socket_debugger_url: Some(format!(
+                "ws://{}/devtools/page/synthetic",
+                listener.local_addr().unwrap()
+            )),
+        };
+        (listener, target)
+    }
 
     #[test]
     fn login_signal_requires_route_or_both_login_markers() {

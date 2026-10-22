@@ -10,7 +10,7 @@ use super::{
     quota_service::apply_quota_failure,
 };
 use crate::local_pool::{
-    commands::current_time_ms,
+    commands::{current_time_ms, sync_account_quota_references},
     error::{ErrorCode, LocalPoolError, Result},
     models::LocalAccountRecord,
     state::DesktopState,
@@ -74,6 +74,26 @@ pub(in crate::local_pool) fn apply_quota_read(
 ) -> Result<AppliedAccountRefresh<AppliedQuotaRead>> {
     store.apply_account_refresh(&scope.fence, |account| {
         let account_snapshot = account.clone();
+        let observed_subscription = match &quota {
+            QuotaRefreshOutcome::Updated(result) => result
+                .quota
+                .subscription
+                .clone()
+                .map(Subscription::normalize),
+            QuotaRefreshOutcome::Failed { subscription, .. } => Some(subscription.clone()),
+        };
+        let subscription = observed_subscription
+            .filter(|observed| {
+                observed.updated_at_ms > subscription.updated_at_ms
+                    || (observed.updated_at_ms == subscription.updated_at_ms
+                        && (observed.active_until_ms.is_some()
+                            || subscription.active_until_ms.is_none()
+                            || zenith_relay_core::quota::subscription_plan_changed(
+                                subscription.plan_type.as_deref(),
+                                observed.plan_type.as_deref(),
+                            )))
+            })
+            .unwrap_or(subscription);
         let (outcome, exhaustion_transitions) = if quota_is_newer(account, scope) {
             // No transition may be emitted from superseded evidence, including
             // a late exhaustion/full result that could trigger a paid action.
@@ -99,14 +119,17 @@ pub(in crate::local_pool) fn apply_quota_read(
             };
             (outcome, Vec::new())
         } else {
-            let applied = apply_quota_outcome_with_transitions(account, quota, scope.started_at_ms);
-            if account_snapshot.account.subscription != scope.initial_account.account.subscription {
-                account.account.subscription = account_snapshot.account.subscription.clone();
-            } else if subscription != scope.initial_account.account.subscription {
-                account.account.subscription = subscription;
-            }
-            applied
+            apply_quota_outcome_with_transitions(account, quota, scope.started_at_ms)
         };
+        // Passive quota headers do not supersede an independent subscription read.
+        if account_snapshot.account.subscription != scope.initial_account.account.subscription
+            || subscription.updated_at_ms.is_none()
+            || subscription.updated_at_ms < scope.initial_account.account.subscription.updated_at_ms
+        {
+            account.account.subscription = account_snapshot.account.subscription.clone();
+        } else {
+            account.account.subscription = subscription;
+        }
         let models_changed = models
             .map(|models| apply_model_discovery(account, models))
             .unwrap_or(false);
@@ -147,17 +170,22 @@ pub(in crate::local_pool) async fn record_read_error(
     error: &LocalPoolError,
 ) {
     let _mutation = state.setup_guard().await;
-    let persist_result = (|| -> Result<()> {
+    let runtime = state.gateway.runtime().await;
+    let apply_result = (|| -> Result<()> {
         let mut store = state.store()?;
         if store.ensure_account_refresh_current(&scope.fence).is_err() {
             return Ok(());
         }
-        apply_read_error(&mut store, scope, kind, error)
+        apply_read_error(&mut store, scope, kind, error)?;
+        if let Some(runtime) = &runtime {
+            sync_account_quota_references(state, runtime, &store)?;
+        }
+        Ok(())
     })();
-    if let Err(error) = persist_result {
+    if let Err(error) = apply_result {
         crate::diagnostics::record_error(
             "account-refresh",
-            Some("persist_refresh_error_failed"),
+            Some("apply_refresh_error_failed"),
             &error.message,
             &[],
         );
@@ -256,13 +284,13 @@ fn quota_refresh_error_kind(code: ErrorCode) -> Option<&'static str> {
     Some(match code {
         ErrorCode::SecretStoreUnavailable => error_codes::QUOTA_SECRET_STORE,
         ErrorCode::GatewayUnavailable => error_codes::QUOTA_PROXY_UNAVAILABLE,
-        ErrorCode::Conflict => error_codes::QUOTA_ACCOUNT_LOCATION,
+        ErrorCode::Conflict => error_codes::RECOVERY_REQUIRED,
         ErrorCode::Io | ErrorCode::RecoveryRequired => error_codes::QUOTA_STORAGE,
         ErrorCode::InvalidState
         | ErrorCode::SourceTestFailed
         | ErrorCode::ProfileRestoreBlocked
         | ErrorCode::UnsupportedSchema => error_codes::QUOTA_PREPARE,
-        ErrorCode::NotFound | ErrorCode::SourceProbeStale => return None,
+        ErrorCode::NotFound => return None,
     })
 }
 
@@ -272,13 +300,13 @@ pub(in crate::local_pool) fn model_refresh_error_kind(
     Some(match code {
         ErrorCode::SecretStoreUnavailable => (error_codes::MODELS_SECRET_STORE, true),
         ErrorCode::GatewayUnavailable => (error_codes::MODELS_PROXY_UNAVAILABLE, true),
-        ErrorCode::Conflict => (error_codes::MODELS_ACCOUNT_LOCATION, false),
+        ErrorCode::Conflict => (error_codes::RECOVERY_REQUIRED, false),
         ErrorCode::Io | ErrorCode::RecoveryRequired => (error_codes::MODELS_STORAGE, true),
         ErrorCode::InvalidState | ErrorCode::SourceTestFailed | ErrorCode::UnsupportedSchema => {
             (error_codes::MODELS_PREPARE, true)
         }
         ErrorCode::ProfileRestoreBlocked => (error_codes::MODELS_PROFILE_RESTORE, false),
-        ErrorCode::NotFound | ErrorCode::SourceProbeStale => return None,
+        ErrorCode::NotFound => return None,
     })
 }
 
@@ -304,7 +332,7 @@ fn model_code_is_provider(code: &str) -> bool {
         error_codes::MODELS_PREPARE
             | error_codes::MODELS_SECRET_STORE
             | error_codes::MODELS_STORAGE
-            | error_codes::MODELS_ACCOUNT_LOCATION
+            | error_codes::RECOVERY_REQUIRED
             | error_codes::MODELS_PROFILE_RESTORE
             | error_codes::MODELS_PROXY_UNAVAILABLE
             | error_codes::MODELS_CLIENT_INIT

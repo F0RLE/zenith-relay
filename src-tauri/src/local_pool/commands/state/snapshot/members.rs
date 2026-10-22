@@ -157,6 +157,11 @@ pub(super) fn project_account_summaries(
                         .cloned(),
                     now_ms: snapshot_at_ms,
                     refreshing: state.quota_refresh_in_flight(&account_record.account.id)?,
+                    runtime_quota_wait: routing_order.iter().any(|candidate| {
+                        candidate.kind == zenith_relay_core::CandidateKind::OAuthAccount
+                            && candidate.candidate_id == account_record.account.id
+                            && candidate.quota_wait
+                    }),
                     runtime_available: (inputs.running && account_record.account.in_pool).then(
                         || {
                             oauth_account_runtime_available(

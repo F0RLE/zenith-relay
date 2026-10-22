@@ -3,7 +3,7 @@ use crate::local_pool::{
     models::{AutomationRecords, LocalPoolSnapshot},
     state::DesktopState,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::BTreeSet;
 use tauri::State;
 use uuid::Uuid;
@@ -149,53 +149,6 @@ pub async fn delete_quota_wake_automation(
     debug_assert!(automation_records.tasks.len() < task_count_before_delete);
     state.store()?.replace_automations(automation_records)?;
     state.snapshot().await.map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn run_due_quota_wake_confirmations(
-    max_claims: Option<u8>,
-    state: State<'_, DesktopState>,
-) -> CommandResult<usize> {
-    crate::local_pool::background::run_due_confirmation_wakes(
-        &state,
-        usize::from(max_claims.unwrap_or(1).clamp(1, 2)),
-    )
-    .await
-    .map_err(Into::into)
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WakeAutomationTestResult {
-    task_id: String,
-    status: &'static str,
-    eligible_accounts: usize,
-}
-
-#[tauri::command]
-pub async fn test_quota_wake_automation(
-    task_id: String,
-    state: State<'_, DesktopState>,
-) -> CommandResult<WakeAutomationTestResult> {
-    let task = state
-        .store()?
-        .automations()
-        .tasks
-        .iter()
-        .find(|task| task.id == task_id)
-        .cloned()
-        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "automation not found"))?;
-    validate_automation_targets(&task, &state)?;
-    let eligible_accounts = selected_automation_accounts(&task, &state)?.len();
-    Ok(WakeAutomationTestResult {
-        task_id,
-        status: if eligible_accounts == 0 {
-            "no_eligible_accounts"
-        } else {
-            "ready"
-        },
-        eligible_accounts,
-    })
 }
 
 fn build_task(

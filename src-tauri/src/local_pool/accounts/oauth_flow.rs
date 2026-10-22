@@ -66,6 +66,10 @@ pub struct OAuthFlowStart {
     pub client_kind: OAuthClientKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_account_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes_account_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub automatic_login: Option<bool>,
 }
 
 impl fmt::Debug for OAuthFlowStart {
@@ -106,6 +110,7 @@ impl fmt::Debug for OAuthExchangeMaterial {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OAuthFlowErrorCode {
+    AuthorizationDenied,
     CallbackAlreadyReceived,
     CallbackInvalid,
     CallbackPortUnavailable,
@@ -192,23 +197,32 @@ where
     fn accept_callback(&self, login_id: &str, callback_url: &str) -> Result<(), OAuthFlowError> {
         let _mutation = lock(&self.mutation);
         let mut snapshot = read_snapshot(&self.root, login_id)?;
-        if snapshot.status == OAuthFlowStatus::CallbackReceived {
+        if snapshot.status != OAuthFlowStatus::Pending {
             return Err(OAuthFlowError::new(
                 OAuthFlowErrorCode::CallbackAlreadyReceived,
                 "OAuth callback was already received",
             )
             .for_login(login_id));
         }
-        snapshot
-            .pending
-            .parse_callback(callback_url, now_ms())
-            .map_err(|_| {
-                OAuthFlowError::new(
-                    OAuthFlowErrorCode::CallbackInvalid,
-                    "OAuth callback is invalid",
+        if let Err(error) = snapshot.pending.parse_callback(callback_url, now_ms()) {
+            if snapshot.pending.client_kind() == OAuthClientKind::Siwc
+                && error.is_authorization_denied()
+            {
+                snapshot.status = OAuthFlowStatus::Failed;
+                write_snapshot(&self.root, &snapshot)?;
+                self.emit(login_id, OAuthFlowStatus::Failed);
+                return Err(OAuthFlowError::new(
+                    OAuthFlowErrorCode::AuthorizationDenied,
+                    "ChatGPT authorization was declined",
                 )
-                .for_login(login_id)
-            })?;
+                .for_login(login_id));
+            }
+            return Err(OAuthFlowError::new(
+                OAuthFlowErrorCode::CallbackInvalid,
+                "OAuth callback is invalid",
+            )
+            .for_login(login_id));
+        }
         self.secrets
             .save(&snapshot.callback_secret_ref, callback_url)
             .map_err(|_| {
@@ -277,6 +291,8 @@ struct PendingSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     target_account_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    notes_account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     sign_in_proxy_id: Option<String>,
     pending: OAuthPendingSession,
 }
@@ -291,6 +307,8 @@ impl PendingSnapshot {
             status: self.status,
             client_kind: self.pending.client_kind(),
             target_account_id: self.target_account_id.clone(),
+            notes_account_id: self.notes_account_id.clone(),
+            automatic_login: None,
         }
     }
 }

@@ -73,7 +73,7 @@ pub(in crate::local_pool::accounts) fn rollback_deleted_account_side_effects(
         pool.save()
             .map_err(|error| recovery_after_delete(cause, "proxy assignment", error))?;
     }
-    Ok(())
+    super::prepare::ensure_provider_rollback_possible(prepared.provider_revoked)
 }
 
 pub(in crate::local_pool::accounts) fn restore_bound_account_profiles(

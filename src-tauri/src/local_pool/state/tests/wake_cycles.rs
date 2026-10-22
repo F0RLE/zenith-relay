@@ -461,25 +461,11 @@ fn automatic_wake_claim_does_not_claim_confirmation_cycle() {
     assert_eq!(permits.len(), 1);
     assert_eq!(permits[0].task_id, automatic.id);
     assert_eq!(state.next_automatic_wake_due().unwrap(), None);
-    let mut confirmation_permits = state.claim_due_confirmation_wakes(110, 8).unwrap();
-    assert_eq!(confirmation_permits.len(), 1);
-    assert_eq!(confirmation_permits[0].task_id, confirmation.id);
+    let pending = state.wake_snapshot().unwrap().pending();
+    assert_eq!(pending.len(), 1);
     assert!(state
         .complete_wake(
             permits.remove(0),
-            WakeCompletion {
-                outcome: zenith_relay_core::automations::WakeCompletionOutcome::Confirmed,
-                completed_at_ms: 120,
-                latency_ms: Some(10),
-                input_tokens: Some(1),
-                output_tokens: Some(1),
-                error_code: None,
-            },
-        )
-        .unwrap());
-    assert!(state
-        .complete_wake(
-            confirmation_permits.remove(0),
             WakeCompletion {
                 outcome: zenith_relay_core::automations::WakeCompletionOutcome::Confirmed,
                 completed_at_ms: 120,
@@ -500,7 +486,7 @@ fn automatic_wake_claim_does_not_claim_confirmation_cycle() {
         state
             .remove_pending_wakes_for_task(&confirmation.id)
             .unwrap(),
-        0
+        1
     );
     assert!(state.next_automatic_wake_due().unwrap().is_none());
     drop(state);

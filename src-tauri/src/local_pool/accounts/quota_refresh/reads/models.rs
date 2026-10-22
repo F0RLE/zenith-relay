@@ -40,13 +40,15 @@ async fn read_account_models(
     respect_models_retry_after(state, scope, &discovered_models);
     scope.validate(state)?;
 
-    if prepared.tokens.is_some()
-        && model_discovery_was_unauthorized(&Some(discovered_models.clone()))
+    if let Some(rejected_tokens) = prepared
+        .tokens
+        .as_ref()
+        .filter(|_| model_discovery_was_unauthorized(&Some(discovered_models.clone())))
     {
         match recover_account_authorization(
             state,
             account_id,
-            prepared.tokens.as_ref().map(TokenSet::generation),
+            Some(rejected_tokens.generation()),
             current_time_ms(),
         )
         .await
@@ -59,7 +61,7 @@ async fn read_account_models(
                 respect_models_retry_after(state, scope, &discovered_models);
             }
             Err(_) if account_auth_is_access_only(state, account_id)? => {
-                mark_access_only_reauthentication(state, account_id).await?;
+                mark_access_only_reauthentication(state, account_id, rejected_tokens).await?;
             }
             Err(_) if !account_requires_reauthentication(state, account_id)? => {}
             Err(_) => {}

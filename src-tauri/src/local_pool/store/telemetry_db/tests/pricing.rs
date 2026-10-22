@@ -148,6 +148,27 @@ fn api_equivalents_group_priced_and_unknown_usage_by_candidate() {
         quota_snapshot: None,
     };
     database.record(&event).unwrap();
+    let report = database.usage_page(&UsageQuery::default()).unwrap();
+    let row = &report.events[0];
+    assert_eq!(row.api_equivalent.micro_usd, 148);
+    assert_eq!(
+        row.api_equivalent_breakdown
+            .uncached_input
+            .unwrap()
+            .micro_usd,
+        25
+    );
+    assert_eq!(
+        row.api_equivalent_breakdown.cache_read.unwrap().micro_usd,
+        3
+    );
+    assert_eq!(row.api_equivalent_breakdown.input.unwrap().micro_usd, 28);
+    assert_eq!(row.api_equivalent_breakdown.output.unwrap().micro_usd, 120);
+    let serialized = serde_json::to_value(row).unwrap();
+    assert_eq!(
+        serialized["apiEquivalentBreakdown"]["cacheRead"]["microUsd"],
+        3
+    );
     let equivalents = database.api_equivalents().unwrap();
     assert_eq!(
         equivalents.accounts.get("account_1"),

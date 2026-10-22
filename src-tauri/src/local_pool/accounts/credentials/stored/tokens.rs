@@ -58,11 +58,25 @@ impl StoredCodexCredentials {
         issued_at_ms: u64,
     ) -> Result<Self, CredentialError> {
         let CredentialRefresh {
+            siwc,
             access_token,
             refresh_token,
             id_token,
             expires_at_ms,
         } = refresh;
+        if self
+            .siwc
+            .as_ref()
+            .map(|r| (&r.client_id, &r.subject, &r.host_id))
+            != siwc
+                .as_ref()
+                .map(|r| (&r.client_id, &r.subject, &r.host_id))
+        {
+            return Err(CredentialError::new(
+                CredentialErrorCode::InvalidSecret,
+                "SIWC refresh changed registration identity",
+            ));
+        }
         self.rebuild_with_token_material(
             access_token,
             refresh_token.or_else(|| self.refresh_token.clone()),
@@ -71,6 +85,7 @@ impl StoredCodexCredentials {
             issued_at_ms,
             self.generation.saturating_add(1),
         )
+        .and_then(|credentials| credentials.with_siwc_registration(siwc))
     }
 
     fn rebuild_with_token_material(
@@ -100,6 +115,7 @@ impl StoredCodexCredentials {
         .with_oauth_client_kind(self.oauth_client_kind)
         .with_proxy_route(self.proxy_url.clone(), self.bypass_common_proxy)?;
         updated.agent_identity = self.agent_identity.clone();
+        updated.siwc = self.siwc.clone();
         updated.basis_points_headers = self.basis_points_headers.clone();
         updated.phone = self.phone.clone();
         updated.password = self.password.clone();

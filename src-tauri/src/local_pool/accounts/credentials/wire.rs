@@ -16,6 +16,8 @@ pub(super) struct CredentialWire {
     pub(super) version: u32,
     #[serde(default)]
     pub(super) oauth_client_kind: OAuthClientKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) siwc: Option<crate::local_pool::accounts::oauth::siwc::SiwcRegistration>,
     pub(super) local_account_id: String,
     pub(super) access_token: String,
     pub(super) refresh_token: Option<String>,

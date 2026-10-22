@@ -50,14 +50,6 @@ impl DesktopState {
         self.update_wake(|coordinator| coordinator.claim_due_automatic(now_ms, max_claims))
     }
 
-    pub(crate) fn claim_due_confirmation_wakes(
-        &self,
-        now_ms: u64,
-        max_claims: usize,
-    ) -> Result<Vec<WakePermit>> {
-        self.update_wake(|coordinator| coordinator.claim_due_confirmations(now_ms, max_claims))
-    }
-
     pub(crate) fn complete_wake(
         &self,
         permit: WakePermit,

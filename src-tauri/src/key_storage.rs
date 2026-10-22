@@ -20,28 +20,11 @@ type TestKeyring = HashMap<(String, String), String>;
 const KEYRING_SERVICE: &str = "Zenith Relay";
 const LEGACY_KEYRING_SERVICE: &str = "Zenith Codex";
 const KEYRING_USER: &str = "api-key";
-const PREVIOUS_AUTH_USER: &str = "previous-codex-auth-json";
 const READBACK_ATTEMPTS: usize = 3;
 const READBACK_DELAY: Duration = Duration::from_millis(20);
 
-pub fn save_app_key(api_key: &str) -> Result<(), String> {
-    save_named_secret(KEYRING_USER, api_key)
-}
-
 pub fn load_saved_app_key() -> Option<String> {
     load_named_secret(KEYRING_USER)
-}
-
-pub fn delete_saved_app_key() -> Result<(), String> {
-    delete_named_secret_result(KEYRING_USER)
-}
-
-pub fn load_previous_codex_auth() -> Option<String> {
-    load_named_secret(PREVIOUS_AUTH_USER)
-}
-
-pub fn delete_previous_codex_auth() -> Result<(), String> {
-    delete_named_secret_result(PREVIOUS_AUTH_USER)
 }
 
 pub fn save_named_secret(user: &str, secret_value: &str) -> Result<(), String> {

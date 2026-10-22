@@ -7,6 +7,7 @@ impl StoredCodexCredentials {
     pub(in crate::local_pool::accounts::credentials) fn to_secret_json(
         &self,
     ) -> Result<String, CredentialError> {
+        self.clone().with_siwc_registration(self.siwc.clone())?;
         if self.oauth_client_kind() == OAuthClientKind::ExcelBps
             && (self.agent_identity().is_some() || !self.has_oauth())
         {
@@ -122,5 +123,6 @@ impl StoredCodexCredentials {
                 credentials.apply_stored_login_material(wire.phone, wire.password, wire.totp_secret)
             })
             .and_then(|credentials| credentials.with_basis_points_headers(basis_points_headers))
+            .and_then(|credentials| credentials.with_siwc_registration(wire.siwc))
     }
 }

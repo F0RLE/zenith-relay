@@ -7,6 +7,112 @@ use url::Url;
 use uuid::Uuid;
 
 #[tokio::test]
+async fn siwc_import_round_trip_is_inactive_preserves_registration_and_never_probes_codex() {
+    let root = std::env::temp_dir().join(format!("relay-siwc-import-{}", Uuid::new_v4().simple()));
+    let mut state = DesktopState::open(root.clone()).unwrap();
+    state.set_account_check_url_for_test(Url::parse("http://127.0.0.1:9/accounts/check").unwrap());
+    let input = serde_json::json!({
+        "oauth_client_kind": "siwc",
+        "client_id": "oaiapp_synthetic_import",
+        "access_token": "synthetic-siwc-access",
+        "refresh_token": "synthetic-siwc-refresh",
+        "siwc": {
+            "clientId": "oaiapp_synthetic_import", "hostId": "urn:uuid:source-host",
+            "issuer": "https://auth.openai.com", "subject": "synthetic-siwc-subject",
+            "scopes": ["resource.invoke", "chatgpt.tokens.use.direct"],
+            "requiresReauthentication": false
+        }
+    })
+    .to_string();
+    let sessions = ImportSessionStore::new(state.transient_root(), NativeSecretBackend);
+    let session = sessions.start(&input, None, &[]).unwrap();
+    let session_id = session.session_id.clone();
+    let credentials = CredentialStore::from_backend(NativeSecretBackend);
+    let (content, preview) = prepare_import_preview(&state, &credentials, session, true)
+        .await
+        .unwrap();
+    assert_eq!(preview.rows.len(), 1);
+    assert!(preview.rows[0].selectable);
+    assert_eq!(preview.rows[0].quota_status, ImportQuotaStatus::Skipped);
+    let prepared = sessions
+        .prepare(&session_id, content.as_deref(), preview, &[])
+        .unwrap();
+    let selected = vec![prepared.items[0].item_id.clone()];
+    let result = super::super::confirmation::confirm_local_account_import_inner(
+        super::super::ConfirmAccountImportInput {
+            session_id,
+            selected_item_ids: selected,
+            add_to_pool: true,
+            discover_models: true,
+            probe_quota: true,
+            models: Vec::new(),
+        },
+        &state,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.results.len(), 1);
+    assert!(matches!(
+        result.results[0].status,
+        super::super::ImportItemStatus::Succeeded
+    ));
+    let account = state.store().unwrap().accounts()[0].clone();
+    assert!(!account.account.in_pool);
+    assert!(account.discovered_models.is_none());
+    let stored = credentials.require(&account.account.id).unwrap();
+    let registration = stored.siwc_registration().unwrap();
+    assert_eq!(registration.client_id, "oaiapp_synthetic_import");
+    assert!(registration.requires_reauthentication);
+    assert!(stored.authorization(current_time_ms()).is_err());
+    assert!(crate::local_pool::accounts::records::require_plan_permission(&stored).is_err());
+    let document = crate::local_pool::accounts::export_ops::build_local_account_export_document(
+        std::slice::from_ref(&account.account.id),
+        zenith_relay_core::accounts::AccountExportFormat::Zenith,
+        None,
+        &state,
+    )
+    .unwrap();
+    let parsed = zenith_relay_core::accounts::parse_import(&document.content, None, &[]).unwrap();
+    assert_eq!(
+        parsed.items[0].secrets().siwc_registration(),
+        Some(registration)
+    );
+    let (normalized, _) = normalize_import_input(StartAccountImportInput {
+        content: None,
+        documents: vec![document.content],
+        source_file: None,
+    })
+    .unwrap();
+    let duplicate = sessions.start(&normalized, None, &[]).unwrap();
+    let result = super::super::confirmation::confirm_local_account_import_inner(
+        super::super::ConfirmAccountImportInput {
+            session_id: duplicate.session_id,
+            selected_item_ids: vec![duplicate.items[0].item_id.clone()],
+            add_to_pool: true,
+            discover_models: true,
+            probe_quota: true,
+            models: Vec::new(),
+        },
+        &state,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        result.results[0].status,
+        super::super::ImportItemStatus::Failed
+    ));
+    assert!(credentials
+        .require(&account.account.id)
+        .unwrap()
+        .matches_snapshot(&stored));
+    credentials.delete(&account.account.id).unwrap();
+    drop(state);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn authenticated_free_plan_rejects_bps_preview_but_keeps_native_import() {
     let root = std::env::temp_dir().join(format!(
         "zenith-relay-import-free-bps-{}",
@@ -199,6 +305,47 @@ async fn preparation_filters_duplicates_found_by_authenticated_identity() {
     server.abort();
     drop(state);
     fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn prepared_import_keeps_both_expiries_in_the_reparsed_credential() {
+    let (endpoint, server) = spawn_account_check_server().await;
+    let mut parsed = zenith_relay_core::accounts::parse_import(
+        r#"{"access_token":"synthetic-access-ok","expires_at":"2026-10-19T14:17:45Z"}"#,
+        None,
+        &[],
+    )
+    .unwrap();
+    let original = parsed_item_json(
+        &parsed.items[0],
+        zenith_relay_core::accounts::ImportAuthMode::ImportedToken,
+    );
+    let mut material = build_import_credential_material(
+        parsed.items.remove(0),
+        1,
+        Some("plus"),
+        Some(1_792_419_465_000),
+        None,
+        2,
+        &endpoint,
+    )
+    .await
+    .unwrap();
+    for expiry in [Some(1_792_419_465_000), None] {
+        material.expires_at_ms = expiry;
+        let prepared = parsed_item_json_with_material(original.clone(), &material);
+        let reparsed =
+            zenith_relay_core::accounts::parse_import(&prepared.to_string(), None, &[]).unwrap();
+        assert_eq!(reparsed.items[0].expires_at_ms, expiry);
+        assert_eq!(
+            reparsed.preview.rows[0]
+                .subscription_expires_at
+                .as_deref()
+                .and_then(super::super::parse_subscription_timestamp_ms),
+            material.subscription_active_until_ms,
+        );
+    }
+    server.abort();
 }
 
 async fn spawn_account_check_server() -> (Url, tokio::task::JoinHandle<()>) {

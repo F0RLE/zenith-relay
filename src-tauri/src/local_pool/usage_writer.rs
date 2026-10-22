@@ -20,8 +20,8 @@ use zenith_relay_core::{
     scheduler::{
         account_member_key,
         refresh::{
-            passive_quota_age_ms, quota_reset_delay, service::RefreshService, RefreshIdentity,
-            RefreshKind,
+            passive_quota_age_ms, quota_verification_delay, service::RefreshService,
+            RefreshIdentity, RefreshKind,
         },
     },
     UsageCallback, UsageEvent,
@@ -59,7 +59,7 @@ struct AccountRefreshHint {
     identity: RefreshIdentity,
     refresh_now: bool,
     passive_observation: Option<(u64, u64)>,
-    reset_delay_ms: Option<u64>,
+    verification_delay_ms: Option<u64>,
     retry_delay_ms: Option<u64>,
 }
 
@@ -181,7 +181,7 @@ impl DesktopUsageWriter {
                 if let Some((age_ms, observed_at_ms)) = hint.passive_observation {
                     account_refresh.observe_passive_quota(&hint.identity, age_ms, observed_at_ms);
                 }
-                if let Some(delay_ms) = hint.reset_delay_ms {
+                if let Some(delay_ms) = hint.verification_delay_ms {
                     account_refresh.schedule_after(&hint.identity, RefreshKind::Quota, delay_ms);
                 }
                 if let Some(delay_ms) = hint.retry_delay_ms {
@@ -260,7 +260,7 @@ fn persist_usage_observation(
             successful_auth_state,
             ignore_account_observation,
         ) && account.account.is_automatic_quota_monitoring_eligible()
-            && account.remote_location.is_none();
+            && account.recovery.is_none();
         let new_passive = event.success
             && !ignore_account_observation
             && event.quota_snapshot.as_ref().is_some_and(|snapshot| {
@@ -283,8 +283,8 @@ fn persist_usage_observation(
                 .flatten()
             })
             .flatten();
-        let reset_delay_ms = new_passive
-            .then(|| quota_reset_delay(account_id, &account.account.quota, observed_at_ms))
+        let verification_delay_ms = new_passive
+            .then(|| quota_verification_delay(account_id, &account.account.quota, observed_at_ms))
             .flatten();
         let visible_state_changed = visible_state
             != (
@@ -317,7 +317,7 @@ fn persist_usage_observation(
                 identity: fence.identity(),
                 refresh_now,
                 passive_observation,
-                reset_delay_ms,
+                verification_delay_ms,
                 retry_delay_ms: (refresh_now && event.http_status == 429)
                     .then_some(event.retry_at_ms)
                     .flatten()
