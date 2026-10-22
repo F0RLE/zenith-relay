@@ -31,12 +31,8 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.3
-      - name: Test proposed PR metadata policy
-        run: bun test ./scripts/check/pr-metadata.test.mjs
-      - name: Test proposed CI policy
-        run: bun test ./scripts/check/ci-policy.test.mjs
-      - name: Test build artifact cleanup scope
-        run: bun test ./scripts/maintenance/clean.test.mjs
+      - name: Test development scripts
+        run: bun test ./scripts/check ./scripts/lib ./scripts/maintenance
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: rustfmt, clippy
@@ -77,7 +73,6 @@ jobs:
         run: cargo test --manifest-path crates/relay-core/Cargo.toml --locked --lib large_mixed_queue_reaches_per_principal_limit_without_starvation -- --ignored
       - run: cargo audit --db "$RUSTSEC_ADVISORY_DB" --no-fetch --file crates/relay-core/Cargo.lock
       - run: cargo audit --db "$RUSTSEC_ADVISORY_DB" --no-fetch --file src-tauri/Cargo.lock
-      - run: cargo audit --db "$RUSTSEC_ADVISORY_DB" --no-fetch --file relay-server/Cargo.lock
       - run: bun audit
         working-directory: src
       - name: Run verification with Linux Secret Service
@@ -106,9 +101,28 @@ jobs:
         # The test keyring is process-global, so its system key must not be mutated concurrently.
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1
 
+  check-web:
+    name: Check web preview
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+      - run: bun install --frozen-lockfile
+      - run: bun run test
+      - run: bun run build
+      - name: Install preview test browser
+        run: bunx --no-install playwright install --with-deps chromium
+        timeout-minutes: 10
+      - run: bun run test:e2e
+
   build:
     name: ${{ matrix.name }}
-    needs: [check, check-windows]
+    needs: [check, check-windows, check-web]
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
     runs-on: ${{ matrix.os }}
     env:

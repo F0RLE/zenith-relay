@@ -34,7 +34,7 @@ function existingPathEntries(entries) {
   return entries.filter((entry) => entry && existsSync(entry));
 }
 
-function prependPath(env, entries) {
+export function prependPath(env, entries) {
   const pathKey = process.platform === "win32" ? "Path" : "PATH";
   const existingPathValue = env[pathKey] ?? env.PATH ?? "";
   const pathEntries = [
@@ -291,4 +291,15 @@ export function tauriInvocation(args) {
     args,
     shell: process.platform === "win32",
   };
+}
+
+export function usesDefaultWindowsReleaseOutput(args, platform = process.platform, env = process.env) {
+  if (platform !== "win32" || env.CARGO_TARGET_DIR || env.CARGO_BUILD_TARGET || env.CARGO_BUILD_TARGET_DIR) {
+    return false;
+  }
+  // Alternate builds may succeed without updating the executable this marker belongs to.
+  const nonDefaultOptions = ["--help", "--version", "--debug", "--target", "--config", "--runner", "--"];
+  return !args.some((argument) =>
+    nonDefaultOptions.includes(argument.split("=", 1)[0]) || /^-v*[hVdtrc]/.test(argument),
+  );
 }

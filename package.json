@@ -8,6 +8,7 @@
     "start": "bun scripts/setup/start-dev.mjs",
     "start:browsers": "bun scripts/setup/start-dev.mjs --with-browsers",
     "app:dev": "bun scripts/build/tauri-dev.mjs",
+    "web:dev": "bun run --cwd web dev",
     "app:build": "bun scripts/build/tauri-build.mjs"
   }
 }

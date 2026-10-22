@@ -1,9 +1,10 @@
 import { spawn, spawnSync } from "node:child_process";
+import { lstatSync, readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 process.chdir(git(["rev-parse", "--show-toplevel"]).trim());
 
-const paths = ["crates", "relay-server", "src-tauri"];
+const paths = ["crates", "src-tauri"];
 const rules = [
   { name: "panic", pattern: /\bpanic!\s*\(/i },
   { name: "todo/unimplemented", pattern: /\b(todo|unimplemented)!\s*\(/i },
@@ -51,6 +52,18 @@ diffs.push(["diff", "--unified=0", "--", ...paths]);
 diffs.push(["diff", "--cached", "--unified=0", "--", ...paths]);
 
 const violations = [];
+
+function checkAddedLine(path, line) {
+  if (testPath.test(path) || (line.includes("fixture") && /\.(unwrap|expect)\s*\(/i.test(line))) {
+    return;
+  }
+  for (const rule of rules) {
+    if (rule.pattern.test(line) && violations.length < 40) {
+      violations.push(`[${rule.name}] ${path}: ${line}`);
+    }
+  }
+}
+
 for (const args of diffs) {
   // Release branches can have a large diff. Read every line without buffering
   // the whole patch in spawnSync or truncating the end of the check.
@@ -71,17 +84,10 @@ for (const args of diffs) {
         currentPath = header[2];
         return;
       }
-      if (!line.startsWith("+") || line.startsWith("+++") || testPath.test(currentPath)) {
+      if (!line.startsWith("+") || line.startsWith("+++")) {
         return;
       }
-      if (line.includes("fixture") && /\.(unwrap|expect)\s*\(/i.test(line)) {
-        return;
-      }
-      for (const rule of rules) {
-        if (rule.pattern.test(line) && violations.length < 40) {
-          violations.push(`[${rule.name}] ${currentPath}: ${line}`);
-        }
-      }
+      checkAddedLine(currentPath, line);
     });
     const result = await finished;
     if (result.error || result.code !== 0) {
@@ -93,6 +99,16 @@ for (const args of diffs) {
     throw error;
   } finally {
     lines.close();
+  }
+}
+
+const untracked = git(["ls-files", "--others", "--exclude-standard", "-z", "--", ...paths]);
+for (const path of untracked.split("\0")) {
+  if (!path.endsWith(".rs") || testPath.test(path) || !lstatSync(path).isFile()) {
+    continue;
+  }
+  for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
+    checkAddedLine(path, `+${line}`);
   }
 }
 

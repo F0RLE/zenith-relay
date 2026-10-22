@@ -11,11 +11,10 @@ node_modules/
 dist/
 src-tauri/target/
 src-tauri/gen/
-relay-server/target/
-relay-server/target-*/
 crates/relay-core/target/
 playwright-report/
 test-results/
+src/test-results-*/
 src/output/
 output/
 

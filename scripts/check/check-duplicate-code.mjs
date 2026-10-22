@@ -21,10 +21,6 @@ const ignore = [
   "**/local_pool/store/telemetry_db/migrations.rs",
   "**/local_pool/store/telemetry_db/migrations/**",
   "**/usage_writer.rs",
-  // The server and desktop vaults intentionally keep separate implementations:
-  // their file formats, limits, and filesystem hardening policies differ.
-  "relay-server/src/store/vault.rs",
-  "src-tauri/src/local_pool/store/vault.rs",
 ].join(",");
 
 function resolveBaseRef() {
@@ -82,6 +78,6 @@ function check(paths, format) {
   ]);
 }
 
-check(["crates", "relay-server", "src-tauri"], "rust");
+check(["crates", "src-tauri"], "rust");
 check(["src/src"], "typescript");
 check(["src/src"], "tsx");

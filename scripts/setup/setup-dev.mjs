@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { delimiter, join, resolve } from "node:path";
-import { repoRoot, withZenithRustEnv } from "../lib/tauri-env.mjs";
+import { join, resolve } from "node:path";
+import { prependPath, repoRoot, withZenithRustEnv } from "../lib/tauri-env.mjs";
 
 const root = repoRoot();
 const frontendRoot = join(root, "src");
@@ -18,14 +18,6 @@ if (helpRequested) {
 if (!process.versions.bun) {
   console.error("Run this setup with Bun: bun run setup");
   process.exit(1);
-}
-
-function prependPath(env, entries) {
-  const pathKey = process.platform === "win32" ? "Path" : "PATH";
-  const existingPathValue = env[pathKey] ?? env.PATH ?? "";
-  const availableEntries = entries.filter((entry) => entry && existsSync(entry));
-  env[pathKey] = [...availableEntries, existingPathValue].filter(Boolean).join(delimiter);
-  env.PATH = env[pathKey];
 }
 
 function setupEnvironment() {
@@ -133,7 +125,6 @@ try {
 
   for (const manifest of [
     "crates/relay-core/Cargo.toml",
-    "relay-server/Cargo.toml",
     "src-tauri/Cargo.toml",
   ]) {
     run(`fetch ${manifest}`, cargo, ["fetch", "--locked", "--manifest-path", manifest], root, env);

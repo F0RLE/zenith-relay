@@ -14,8 +14,6 @@ const dependencyFiles = new Set([
   "Cargo.lock",
   "crates/relay-core/Cargo.toml",
   "crates/relay-core/Cargo.lock",
-  "relay-server/Cargo.toml",
-  "relay-server/Cargo.lock",
   "src-tauri/Cargo.toml",
   "src-tauri/Cargo.lock",
 ]);

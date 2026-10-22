@@ -20,7 +20,6 @@ test("Rust caches use the nested Cargo workspaces and their own target directori
     ["build.yml", "check", ["src-tauri", "crates/relay-core"]],
     ["build.yml", "check-windows", ["src-tauri"]],
     ["build.yml", "build", ["src-tauri"]],
-    ["relay-server.yml", "check", ["relay-server"]],
   ];
   for (const [file, jobName, directories] of cases) {
     const job = workflow(file).jobs[jobName];
@@ -38,6 +37,16 @@ test("Rust caches use the nested Cargo workspaces and their own target directori
 describe("desktop CI", () => {
   const build = workflow("build.yml");
 
+  test("retired server manifests and deployment are not part of supported builds", () => {
+    for (const path of ["relay-server/Cargo.toml", ".github/workflows/relay-server.yml"]) {
+      expect(existsSync(new URL(`../../${path}`, import.meta.url))).toBe(false);
+    }
+    expect(JSON.stringify(build)).not.toContain("relay-server/");
+    const dependabot = Bun.YAML.parse(readFileSync(new URL("../../.github/dependabot.yml", import.meta.url), "utf8"));
+    expect(dependabot.updates.filter((update) => update["package-ecosystem"] === "cargo")
+      .map((update) => update.directory).sort()).toEqual(["/crates/relay-core", "/src-tauri"]);
+  });
+
   test("an older pull request run is cancelled, but a tag or manual run is not", () => {
     expect(build.concurrency["cancel-in-progress"]).toBe("${{ github.event_name == 'pull_request' }}");
   });
@@ -46,7 +55,29 @@ describe("desktop CI", () => {
     expect(build.jobs["check-windows"]["runs-on"]).toBe("windows-latest");
     expect(build.jobs["check-windows"].steps.at(-1).run)
       .toContain("cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1");
-    expect(needs(build.jobs.build)).toEqual(["check", "check-windows"]);
+    expect(needs(build.jobs.build)).toEqual(["check", "check-windows", "check-web"]);
+  });
+
+  test("web preview is checked independently and must pass before packaging", () => {
+    const web = build.jobs["check-web"];
+    expect(web).toBeDefined();
+    expect(web.defaults.run["working-directory"]).toBe("web");
+    expect(web.if).toBeUndefined();
+    expect(web["continue-on-error"]).toBeUndefined();
+    for (const command of [
+      "bun install --frozen-lockfile",
+      "bun run test",
+      "bun run build",
+      "bun run test:e2e",
+    ]) {
+      const step = web.steps.find((step) => step.run === command);
+      expect(step, command).toBeDefined();
+      expect(step.if).toBeUndefined();
+      expect(step["continue-on-error"]).toBeUndefined();
+    }
+    expect(web.steps.some((step) => step.run?.startsWith("bunx --no-install playwright install")
+      && step.run.includes("chromium"))).toBe(true);
+    expect(needs(build.jobs.build)).toContain("check-web");
   });
 
   test("installers are built only for a manual run or a pushed version tag", () => {
@@ -73,40 +104,8 @@ describe("desktop CI", () => {
   });
 });
 
-describe("server CI", () => {
-  const server = workflow("relay-server.yml");
-
-  test("the retired product-mode branch is not a trigger", () => {
-    expect(server.on.push.branches).toEqual(["main"]);
-    expect(JSON.stringify(server.on)).not.toContain("relay/local-pool-product-modes");
-  });
-
-  test("package publishing is limited to the tag publish job", () => {
-    expect(server.permissions).toEqual({ contents: "read" });
-    expect(server.jobs.smoke.permissions).toBeUndefined();
-    expect(server.jobs.check.permissions).toBeUndefined();
-    expect(server.jobs.publish.permissions).toEqual({ contents: "read", packages: "write" });
-    expect(server.jobs.publish.if).toBe(releasePush);
-    expect(needs(server.jobs.publish)).toEqual(["smoke"]);
-    expect(JSON.stringify(server.jobs.smoke)).not.toContain("docker/login-action");
-    expect(JSON.stringify(server.jobs.publish.steps)).not.toContain("edge-");
-  });
-
-  test("only manual runs retain the smoke-tested image without publishing it", () => {
-    const exportImage = server.jobs.smoke.steps.find((step) => step.name === "Export checked server image");
-    const upload = server.jobs.smoke.steps.find((step) => step.uses?.startsWith("actions/upload-artifact@"));
-    expect(exportImage.if).toBe("github.event_name == 'workflow_dispatch'");
-    expect(exportImage.run).toContain('docker save "zenith-relay-server:$GITHUB_SHA"');
-    expect(exportImage.run).toContain("sha256sum");
-    expect(upload.if).toBe(exportImage.if);
-    expect(upload.with["if-no-files-found"]).toBe("error");
-    expect(server.jobs.smoke.steps.indexOf(exportImage))
-      .toBeGreaterThan(server.jobs.smoke.steps.findIndex((step) => step.name === "Smoke-test server container"));
-  });
-});
-
 describe("agent guardrails", () => {
-  test("checks a large patch from root and nested directories and excludes test files", () => {
+  test("checks large patches and untracked sources without changing the index", () => {
     const root = mkdtempSync(join(tmpdir(), "zenith-guardrails-test-"));
     const script = fileURLToPath(new URL("./check-agent-guardrails.mjs", import.meta.url));
     const env = { ...process.env };
@@ -129,6 +128,8 @@ describe("agent guardrails", () => {
       expect(Buffer.byteLength(patch)).toBeGreaterThan(1_048_576);
       writeFileSync(source, patch);
       writeFileSync(join(root, "crates/tests/fixture.rs"), 'fn fixture() { panic!("synthetic"); }\n');
+      writeFileSync(join(root, "crates/.gitignore"), "ignored.rs\n");
+      writeFileSync(join(root, "crates/ignored.rs"), 'fn ignored() { panic!("synthetic"); }\n');
       const stage = spawnSync("git", ["add", "crates"], { cwd: root, env, windowsHide: true });
       expect(stage.status).toBe(0);
       const run = (cwd) => spawnSync(process.execPath, [script, "HEAD"], {
@@ -138,6 +139,31 @@ describe("agent guardrails", () => {
       for (const cwd of directories) {
         const clean = run(cwd);
         expect(clean.status, clean.stderr).toBe(0);
+      }
+      const untracked = join(root, "crates/new module.rs");
+      writeFileSync(untracked, 'fn failed() { panic!("synthetic"); }\n');
+      writeFileSync(join(root, "crates/tests/untracked.rs"), 'fn fixture() { panic!("synthetic"); }\n');
+      const index = () => {
+        const result = spawnSync("git", ["ls-files", "--stage"], {
+          cwd: root, env, encoding: "utf8", windowsHide: true,
+        });
+        expect(result.status, result.stderr).toBe(0);
+        return result.stdout;
+      };
+      const previousIndex = index();
+      for (const cwd of directories) {
+        const rejected = run(cwd);
+        expect(rejected.status, rejected.stderr).toBe(1);
+        expect(rejected.stderr).toContain("[panic] crates/new module.rs");
+        expect(rejected.stderr).not.toContain("ignored.rs");
+        expect(rejected.stderr).not.toContain("tests/untracked.rs");
+        expect(index()).toBe(previousIndex);
+      }
+      writeFileSync(untracked, "fn safe() {}\n");
+      for (const cwd of directories) {
+        const clean = run(cwd);
+        expect(clean.status, clean.stderr).toBe(0);
+        expect(index()).toBe(previousIndex);
       }
       writeFileSync(source, patch + 'fn failed() { panic!("synthetic"); }\n');
       expect(spawnSync("git", ["add", "crates"], { cwd: root, env, windowsHide: true }).status).toBe(0);
