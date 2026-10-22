@@ -1,6 +1,8 @@
 use super::*;
 use serde_json::json;
 
+mod concurrency;
+
 fn png_bytes() -> Vec<u8> {
     STANDARD
         .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")

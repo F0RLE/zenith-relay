@@ -9,6 +9,7 @@ use super::super::super::errors::AttemptFailure;
 use crate::runtime::AuthorizationIdentityPolicy;
 use crate::GatewayRuntime;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use futures_util::{stream, StreamExt};
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE};
 use reqwest::StatusCode;
 use serde_json::{Map, Value};
@@ -19,6 +20,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 const MAX_UPLOAD_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_FILE_ID_LEN: usize = 512;
 const MAX_ATTACHMENT_CACHE: usize = 512;
+const MAX_CONCURRENT_UPLOADS: usize = 4;
 
 #[derive(Clone, Copy)]
 pub(in crate::gateway::execution) enum AttachmentFailure {
@@ -93,39 +95,50 @@ pub(in crate::gateway::execution) async fn attach_input_images(
         .basis_points_credential_fingerprint(candidate_id)
         .await
         .unwrap_or_default();
-    for job in &jobs {
-        if let ImageJob::File(file_id) = &job.job {
-            set_image_part(
-                &mut request_fields,
-                job.input_index,
-                job.content_index,
-                file_id,
+    resolve_input_images(&mut request_fields, jobs, |image| {
+        let endpoint = &endpoint;
+        async move {
+            let key = attachment_key(
+                endpoint,
+                candidate_id,
+                &credential_fingerprint,
+                image.media_type,
+                &image.bytes,
             );
+            cached_upload(key, || {
+                upload_image(runtime, candidate_id, endpoint, headers, &image)
+            })
+            .await
         }
-    }
-    for job in jobs {
-        let ImageJob::Upload(image) = job.job else {
-            continue;
-        };
-        let key = attachment_key(
-            &endpoint,
-            candidate_id,
-            &credential_fingerprint,
-            image.media_type,
-            &image.bytes,
-        );
-        let file_id = cached_upload(key, || {
-            upload_image(runtime, candidate_id, &endpoint, headers, &image)
-        })
-        .await?;
-        set_image_part(
-            &mut request_fields,
-            job.input_index,
-            job.content_index,
-            &file_id,
-        );
-    }
+    })
+    .await?;
     serde_json::to_vec(&request_fields).map_err(|_| upload_failed())
+}
+
+async fn resolve_input_images<F>(
+    request_fields: &mut Value,
+    jobs: Vec<LocatedJob>,
+    upload: impl Fn(InlineImage) -> F,
+) -> Result<(), AttachmentFailure>
+where
+    F: std::future::Future<Output = Result<String, AttachmentFailure>>,
+{
+    let upload = &upload;
+    // Keep input/error order; dropping the request also drops every upload future.
+    let mut pending = stream::iter(jobs)
+        .map(|job| async move {
+            let file_id = match job.job {
+                ImageJob::File(file_id) => file_id,
+                ImageJob::Upload(image) => upload(image).await?,
+            };
+            Ok((job.input_index, job.content_index, file_id))
+        })
+        .buffered(MAX_CONCURRENT_UPLOADS);
+    while let Some(result) = pending.next().await {
+        let (input_index, content_index, file_id) = result?;
+        set_image_part(request_fields, input_index, content_index, &file_id);
+    }
+    Ok(())
 }
 
 fn stage_input_images(request_fields: &Value) -> Result<Vec<LocatedJob>, AttachmentFailure> {
