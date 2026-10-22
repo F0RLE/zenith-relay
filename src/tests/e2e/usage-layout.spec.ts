@@ -37,7 +37,7 @@ for (const theme of ["light", "dark"] as const) {
       await page.getByRole("button", { name: "Использование", exact: true }).click();
       await expect(page.locator(".usage-request-table tbody tr")).toHaveCount(1);
       const status = page.locator('.usage-request-table td[data-column="status"]');
-      await expect(status).toHaveText("Ошибка");
+      await expect(status).toHaveText("");
       await expect(status.getByRole("img", { name: "Ошибка провайдера", exact: true })).toHaveAttribute("data-status", "error");
       await expect(status.locator(".usage-request-result")).toHaveAttribute("data-relay-tooltip", "Ошибка провайдера");
       await expect(page.locator('.usage-request-table td[data-column="connection"]')).toHaveText("Personal Plus");

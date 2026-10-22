@@ -14,12 +14,12 @@ for (const locale of ["en", "ru"] as const) {
         ? locale === "ru" ? "Клиент отменил запрос" : "Client cancelled the request"
         : category ? locale === "ru" ? "Квота аккаунта исчерпана" : "Account quota exhausted" : label;
       const status = page.locator('.usage-request-table tbody td[data-column="status"]');
-      await expect(status).toHaveText(label);
+      await expect(status).toHaveText("");
       const icon = status.getByRole("img", { name: reason, exact: true });
       await expect(icon).toHaveAttribute("data-status", "error");
       await expect(status.locator("small")).toHaveCount(0);
       if (category) {
-        await status.locator('.usage-request-result > span[aria-hidden]').hover();
+        await status.locator(".usage-request-result").hover();
         await expect(page.getByRole("tooltip")).toHaveText(reason);
         await page.mouse.move(0, 0);
         await expect(page.getByRole("tooltip")).toHaveCount(0);
@@ -37,7 +37,7 @@ for (const locale of ["en", "ru"] as const) {
     await page.getByRole("button", { name: locale === "ru" ? "Использование" : "Usage", exact: true }).click();
     const label = locale === "ru" ? "Успешно" : "Success";
     const status = page.locator('.usage-request-table tbody td[data-column="status"]');
-    await expect(status).toHaveText(label);
+    await expect(status).toHaveText("");
     const icon = status.getByRole("img", { name: label, exact: true });
     await expect(icon).toHaveAttribute("data-status", "ready");
     await icon.hover();
@@ -199,7 +199,9 @@ test("different client request IDs stay separate and have distinguishable labels
   await expect(records).toHaveCount(4);
   const ids = await records.locator(".request-link").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label")));
   expect(new Set(ids).size).toBe(4);
-  await expect(records.first().locator('td[data-column="status"]')).toHaveText("Failed");
+  const status = records.first().locator('td[data-column="status"]');
+  await expect(status).toHaveText("");
+  await expect(status.getByRole("img", { name: "Upstream failure", exact: true })).toHaveAttribute("data-status", "error");
   await expect(records.first().locator('.usage-request-result')).toHaveAttribute("data-relay-tooltip", "Upstream failure");
   await expect(records.first().locator('td[data-column="connection"]')).not.toContainText("Upstream failure");
   for (const record of await records.all()) {

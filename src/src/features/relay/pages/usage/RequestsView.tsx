@@ -49,7 +49,6 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
               status={status === "success" ? "ready" : status === "pending" ? "info" : status}
               label={reason}
             >{status === "pending" ? <Clock3 aria-hidden /> : null}</StatusIcon>
-            <span aria-hidden>{label}</span>
           </span>
         </span>;
       },
