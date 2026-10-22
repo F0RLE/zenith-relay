@@ -77,7 +77,7 @@ impl PricingContext {
         });
         if !cache_write_allowed {
             if let Some(quote) = resolved.quote.as_mut() {
-                *quote = quote.clear_cache_writes();
+                *quote = quote.clear_messages_cache_writes();
             }
         }
         resolved

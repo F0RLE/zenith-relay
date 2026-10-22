@@ -3,14 +3,16 @@ mod context_bands;
 mod early;
 mod late;
 mod service_tiers;
+mod unknown_tiers;
 
 pub(super) use attempts::MIGRATION_033;
 pub(super) use context_bands::migrate_032;
 pub(super) use early::*;
 pub(super) use late::*;
 pub(super) use service_tiers::migrate_034;
+pub(super) use unknown_tiers::migrate_035;
 
-pub(super) const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 34;
+pub(super) const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 35;
 pub(super) const MAX_RESPONSE_AFFINITY_ROWS: usize = 16_384;
 pub(super) const MAX_STATE_JSON_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const ARCHIVE_USAGE_SQL: &str = concat!(

@@ -33,6 +33,8 @@ pub struct ApiModelPriceOverride {
     pub cache_write_5m_micro_usd_per_million: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_1h_micro_usd_per_million: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_micro_usd_per_million: Option<u64>,
     pub output_micro_usd_per_million: u64,
     #[serde(
         default,
@@ -105,9 +107,25 @@ pub enum UsagePriceClass {
     Flex,
     Priority,
     Ultrafast,
+    /// An explicit observed tier without a supported price-schedule contract.
+    Unknown,
 }
 
 impl UsagePriceClass {
+    /// Preserve a new provider tier in archive keys instead of collapsing all
+    /// unknown names together. The estimator can still classify it as unknown.
+    pub fn observed_label(observed_tier: Option<&str>) -> String {
+        let class = Self::from_observed(observed_tier);
+        if class == Self::Unknown {
+            observed_tier
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+        } else {
+            class.as_label().to_string()
+        }
+    }
+
     pub fn from_observed(observed_tier: Option<&str>) -> Self {
         match observed_tier
             .unwrap_or_default()
@@ -118,7 +136,8 @@ impl UsagePriceClass {
             "flex" => Self::Flex,
             "priority" | "fast" => Self::Priority,
             "ultrafast" => Self::Ultrafast,
-            _ => Self::Standard,
+            "" | "standard" | "default" => Self::Standard,
+            _ => Self::Unknown,
         }
     }
 
@@ -127,7 +146,8 @@ impl UsagePriceClass {
             "flex" => Self::Flex,
             "priority" => Self::Priority,
             "ultrafast" => Self::Ultrafast,
-            _ => Self::Standard,
+            "" | "standard" => Self::Standard,
+            _ => Self::Unknown,
         }
     }
 
@@ -137,6 +157,7 @@ impl UsagePriceClass {
             Self::Flex => "flex",
             Self::Priority => "priority",
             Self::Ultrafast => "ultrafast",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -211,7 +232,10 @@ macro_rules! usage_price_class_sql {
          WHEN 'priority' THEN 'priority' \
          WHEN 'fast' THEN 'priority' \
          WHEN 'ultrafast' THEN 'ultrafast' \
-         ELSE 'standard' END"
+         WHEN '' THEN 'standard' \
+         WHEN 'standard' THEN 'standard' \
+         WHEN 'default' THEN 'standard' \
+         ELSE lower(trim(applied_service_tier)) END"
     };
 }
 
@@ -269,7 +293,7 @@ pub const API_EQUIVALENT_AGGREGATE_SQL: &str = concat!(
     cache_write_ttl_bucket_sums_sql!(),
     ", SUM(output_tokens), SUM(total_tokens), COUNT(input_tokens), \
      COUNT(cached_input_tokens), COUNT(cache_write_input_tokens), \
-     COUNT(output_tokens), COUNT(total_tokens)"
+      COUNT(output_tokens), COUNT(total_tokens)"
 );
 
 /// Usage totals for Desktop telemetry.
@@ -441,7 +465,8 @@ impl ApiEquivalentUsage {
     }
 
     /// Split one reported cache write into the priced windows.
-    /// `5m` and `1h` are exact. Any other value, including no value, stays unknown.
+    /// `5m` and `1h` select legacy window-specific tariffs. Other or missing
+    /// values use the generic bucket; they never establish a retention policy.
     pub fn from_reported_tokens(
         input_tokens: Option<u64>,
         cached_input_tokens: Option<u64>,

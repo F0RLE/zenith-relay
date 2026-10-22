@@ -56,15 +56,13 @@ fn parse_token_price(
         return Ok(None);
     };
     let cache_read = optional_token(pricing_record, "cache_read_input_token_cost")?;
-    let short_cache_write_price =
-        optional_token(pricing_record, "cache_creation_input_token_cost")?;
-    let long_cache_write_price =
-        optional_token(pricing_record, "cache_creation_input_token_cost_above_1hr")?;
+    let standard = rate_set(pricing_record, "")?;
     Ok(Some(TokenPrice {
         input,
         cache_read,
-        cache_write_5m: short_cache_write_price,
-        cache_write_1h: long_cache_write_price,
+        cache_write_5m: standard.cache_write_5m,
+        cache_write_1h: standard.cache_write_1h,
+        cache_write: standard.cache_write,
         output,
         flex: rate_set(pricing_record, "_flex")?,
         priority: rate_set(pricing_record, "_priority")?,
@@ -95,7 +93,7 @@ fn long_context_set(
     tier_suffix: &str,
 ) -> Result<TokenRateSet, PricingError> {
     let above = format!("_above_{threshold}_tokens{tier_suffix}");
-    Ok(TokenRateSet {
+    let mut rates = TokenRateSet {
         input: optional_token(pricing_record, &format!("input_cost_per_token{above}"))?,
         cache_read: optional_token(
             pricing_record,
@@ -112,14 +110,17 @@ fn long_context_set(
             ),
         )?,
         output: optional_token(pricing_record, &format!("output_cost_per_token{above}"))?,
-    })
+        ..TokenRateSet::EMPTY
+    };
+    apply_provider_cache_contract(pricing_record, &mut rates);
+    Ok(rates)
 }
 
 fn rate_set(
     pricing_record: &serde_json::Map<String, Value>,
     suffix: &str,
 ) -> Result<TokenRateSet, PricingError> {
-    Ok(TokenRateSet {
+    let mut rates = TokenRateSet {
         input: optional_token(pricing_record, &format!("input_cost_per_token{suffix}"))?,
         cache_read: optional_token(
             pricing_record,
@@ -134,7 +135,32 @@ fn rate_set(
             &format!("cache_creation_input_token_cost_above_1hr{suffix}"),
         )?,
         output: optional_token(pricing_record, &format!("output_cost_per_token{suffix}"))?,
-    })
+        ..TokenRateSet::EMPTY
+    };
+    apply_provider_cache_contract(pricing_record, &mut rates);
+    Ok(rates)
+}
+
+fn apply_provider_cache_contract(
+    record: &serde_json::Map<String, Value>,
+    rates: &mut TokenRateSet,
+) {
+    let provider = record
+        .get("litellm_provider")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .map(str::to_ascii_lowercase);
+    if matches!(
+        provider.as_deref(),
+        Some("anthropic" | "vertex_ai-anthropic_models")
+    ) {
+        return;
+    }
+    // Only a known Anthropic source contract assigns the untagged field to
+    // its short window. Other providers and compatible hosts publish their
+    // own generic tariff; neither a model name nor another provider's TTL
+    // establishes its retention policy.
+    rates.cache_write = rates.cache_write_5m.take();
 }
 
 fn parse_image_price(
@@ -210,6 +236,115 @@ fn optional_micro_request(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn openai_creation_tariffs_keep_their_generic_component_and_schedules() {
+        let entry = parse_entry("synthetic-openai", &json!({
+            "litellm_provider":"openai", "input_cost_per_token":2e-6,
+            "output_cost_per_token":10e-6, "cache_creation_input_token_cost":2.5e-6,
+            "input_cost_per_token_flex":1e-6, "cache_creation_input_token_cost_flex":1.25e-6,
+            "input_cost_per_token_priority":4e-6, "cache_creation_input_token_cost_priority":5e-6,
+            "input_cost_per_token_ultrafast":12e-6, "cache_creation_input_token_cost_ultrafast":15e-6,
+            "input_cost_per_token_above_272k_tokens":4e-6,
+            "cache_creation_input_token_cost_above_272k_tokens":5e-6
+        })).unwrap().unwrap().token.unwrap();
+        assert_eq!(entry.cache_write_5m, None);
+        assert_eq!(entry.cache_write_1h, None);
+        assert_eq!(entry.cache_write, Some(2_500_000));
+        assert_eq!(entry.flex.cache_write, Some(1_250_000));
+        assert_eq!(entry.priority.cache_write, Some(5_000_000));
+        assert_eq!(entry.ultrafast.cache_write, Some(15_000_000));
+        assert_eq!(entry.above_272k.standard.cache_write, Some(5_000_000));
+        assert_eq!(entry.clear_messages_cache_writes(), entry);
+    }
+
+    #[test]
+    fn generic_creation_tariffs_do_not_become_anthropic_windows_for_other_providers() {
+        for provider in [
+            None,
+            Some("azure"),
+            Some("bedrock_converse"),
+            Some("vertex_ai"),
+            Some("deepseek"),
+            Some("minimax"),
+            Some("zai"),
+            Some("custom"),
+        ] {
+            let token = parse_entry(
+                "synthetic-claude-or-gpt-name",
+                &json!({
+                    "litellm_provider": provider,
+                    "input_cost_per_token": 2e-6,
+                    "output_cost_per_token": 10e-6,
+                    "cache_creation_input_token_cost": 0,
+                    "cache_creation_input_token_cost_priority": 3e-6,
+                    "cache_creation_input_token_cost_above_200k_tokens": 4e-6
+                }),
+            )
+            .unwrap()
+            .unwrap()
+            .token
+            .unwrap();
+            assert_eq!(token.cache_write, Some(0), "{provider:?}");
+            assert_eq!(token.cache_write_5m, None, "{provider:?}");
+            assert_eq!(token.priority.cache_write, Some(3_000_000), "{provider:?}");
+            assert_eq!(token.above_200k.standard.cache_write, Some(4_000_000));
+            assert_eq!(token.clear_messages_cache_writes(), token);
+        }
+    }
+
+    #[test]
+    fn anthropic_source_contract_keeps_distinct_window_prices() {
+        for provider in ["anthropic", " ANTHROPIC ", "vertex_ai-anthropic_models"] {
+            let token = parse_entry(
+                "synthetic-model",
+                &json!({
+                    "litellm_provider": provider,
+                    "input_cost_per_token": 2e-6,
+                    "output_cost_per_token": 10e-6,
+                    "cache_creation_input_token_cost": 2.5e-6,
+                    "cache_creation_input_token_cost_above_1hr": 4e-6
+                }),
+            )
+            .unwrap()
+            .unwrap()
+            .token
+            .unwrap();
+            assert_eq!(token.cache_write, None);
+            assert_eq!(token.cache_write_5m, Some(2_500_000));
+            assert_eq!(token.cache_write_1h, Some(4_000_000));
+        }
+    }
+
+    #[test]
+    fn missing_creation_prices_and_other_provider_quotes_are_not_guessed() {
+        for provider in ["openai", "anthropic", "custom"] {
+            let entry = parse_entry(
+                "synthetic",
+                &json!({
+                    "litellm_provider":provider, "input_cost_per_token":2e-6,
+                    "output_cost_per_token":10e-6
+                }),
+            )
+            .unwrap()
+            .unwrap()
+            .token
+            .unwrap();
+            assert_eq!(entry.cache_write, None);
+        }
+        let entry = parse_entry(
+            "synthetic",
+            &json!({
+                "litellm_provider":"openai", "input_cost_per_token":2e-6,
+                "output_cost_per_token":10e-6, "cache_creation_input_token_cost":3e-6
+            }),
+        )
+        .unwrap()
+        .unwrap()
+        .token
+        .unwrap();
+        assert_eq!(entry.cache_write, Some(3_000_000));
+    }
 
     #[test]
     fn parses_cache_windows_without_substituting_input_price() {
@@ -314,7 +449,7 @@ mod tests {
                 assert_eq!(rates.cache_read, Some(0));
                 assert_eq!(rates.cache_write_1h, Some(5_000_000));
             }
-            let cleared = token.clear_cache_writes();
+            let cleared = token.clear_messages_cache_writes();
             for (_, rates) in cleared.context_rates() {
                 for rate in [rates.standard, rates.flex, rates.priority] {
                     assert_eq!(rate.cache_write_5m, None);

@@ -6,6 +6,7 @@ mod maintenance;
 mod pricing;
 mod reporting;
 mod rollups;
+mod unknown_tiers;
 
 fn aggregate_test_event(
     request_id: &str,

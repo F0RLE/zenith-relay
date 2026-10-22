@@ -71,6 +71,11 @@ pub struct SourceSummary {
     /// Usage resolves provider prices before reference and manual fallbacks.
     #[serde(default)]
     pub detected_model_prices: BTreeMap<String, ApiModelPriceOverride>,
+    /// Query-time prices for this source, using the same resolver as usage.
+    /// Pool-wide model summaries may belong to another member and are not a
+    /// fallback for a source editor. This projection is never persisted.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resolved_model_prices: BTreeMap<String, crate::pricing::ResolvedPrice>,
     #[serde(default)]
     pub api_equivalent: ApiEquivalentSummary,
     pub secret_available: bool,
@@ -87,6 +92,27 @@ pub struct SourceSummary {
 }
 
 impl SourceSummary {
+    pub fn resolve_model_prices(
+        &mut self,
+        catalog: &crate::pricing::PricingCatalog,
+        context: &crate::pricing::PricingContext,
+    ) {
+        self.resolved_model_prices = crate::normalize_model_ids(
+            self.models
+                .iter()
+                .chain(&self.allowed_models)
+                .chain(&self.excluded_models)
+                .chain(self.model_price_overrides.keys())
+                .chain(self.detected_model_prices.keys()),
+        )
+        .into_iter()
+        .map(|model| {
+            let price = context.candidate_price(catalog, "source", &self.id, Some(&model));
+            (crate::model_id_key(&model), price)
+        })
+        .collect();
+    }
+
     /// Returns all models available through a client protocol. A source may
     /// expose more than one connector route for the same client protocol,
     /// such as native Responses and a Responses-to-Messages bridge.
@@ -192,6 +218,7 @@ impl SourceSummary {
             recovery_delay_seconds: source_record.summary_recovery_delay_seconds(),
             model_price_overrides: source_record.summary_model_price_overrides().clone(),
             detected_model_prices: source_record.summary_detected_model_prices().clone(),
+            resolved_model_prices: BTreeMap::new(),
             api_equivalent,
             secret_available,
             last_error_code,

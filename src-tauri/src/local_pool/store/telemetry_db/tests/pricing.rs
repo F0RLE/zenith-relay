@@ -1,6 +1,44 @@
 use super::*;
 
 #[test]
+fn generic_cache_write_catalog_updates_reprice_history_without_a_ttl_migration() {
+    let root = std::env::temp_dir().join(format!(
+        "relay-generic-cache-price-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+    for (id, ttl) in [
+        ("unspecified", None),
+        ("provider-window", Some("17m".into())),
+    ] {
+        database
+            .record(&aggregate_test_event(id, 1, 100, 40, ttl, 10))
+            .unwrap();
+    }
+    let context = PricingContext::default();
+    for (write_rate, expected) in [(0.0000025, 640), (0.0000031, 688)] {
+        let catalog = PricingCatalog::from_litellm_payload(
+            &serde_json::json!({"model":{
+                "litellm_provider":"openai", "input_cost_per_token":0.000002,
+                "output_cost_per_token":0.00001, "cache_creation_input_token_cost":write_rate
+            }}),
+            Some(format!("synthetic-price-{write_rate}")),
+            Some(1),
+            false,
+        )
+        .unwrap();
+        let equivalents = database
+            .api_equivalents_with_pricing(&catalog, &context)
+            .unwrap();
+        let value = equivalents.sources.get("source").unwrap();
+        assert_eq!(value.micro_usd, expected);
+        assert_eq!(value.unpriced_tokens, 0);
+    }
+    drop(database);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn context_band_sql_matches_request_boundaries() {
     use zenith_relay_core::usage::{UsageContextBand, USAGE_CONTEXT_BAND_SQL};
     let connection = Connection::open_in_memory().unwrap();

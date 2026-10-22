@@ -76,7 +76,8 @@ pub(in crate::gateway) fn usage_event(
         cached_input_tokens: None,
         cache_write_input_tokens: None,
         // Usage records describe what the upstream actually reported, not the
-        // configured preference. `apply_usage` sets this only for a cache write.
+        // configured preference. Upstream usage or applied response metadata
+        // supplies the window; a request preference alone is not evidence.
         cache_write_ttl: None,
         reasoning_tokens: None,
         output_tokens: None,
@@ -212,6 +213,7 @@ pub(in crate::gateway) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
         })
         .or_else(|| usage.get("cached_tokens"))
         .or_else(|| usage.get("cache_read_input_tokens"))
+        .or_else(|| usage.get("prompt_cache_hit_tokens"))
         .or_else(|| gemini_usage_metadata.get("cachedContentTokenCount"))
         .and_then(Value::as_u64);
     if let Some(cached_input_tokens) = cached_input_tokens {

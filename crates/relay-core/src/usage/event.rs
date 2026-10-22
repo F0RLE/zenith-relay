@@ -154,6 +154,18 @@ pub struct UsageEvent {
 
 impl UsageEvent {
     pub(crate) fn observe_response_metadata(&mut self, payload: &serde_json::Value) {
+        // Responses echoes the applied cache policy outside `usage`, including
+        // response.created/completed SSE envelopes. Do not infer it from the
+        // request preference, transport, or model name.
+        for response in std::iter::successors(Some(payload), |item| item.get("response")).take(3) {
+            if let Some(ttl) = response
+                .pointer("/prompt_cache_options/ttl")
+                .and_then(serde_json::Value::as_str)
+                .and_then(super::normalize_reported_cache_ttls)
+            {
+                self.cache_write_ttl = Some(ttl);
+            }
+        }
         if let Some(cache) = self
             .routing
             .as_mut()

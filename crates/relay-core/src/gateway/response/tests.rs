@@ -1,5 +1,33 @@
 use super::*;
 use crate::gateway::test_support::test_usage_event;
+
+#[test]
+fn response_cache_policy_is_observed_outside_usage_for_json_and_sse() {
+    for ttl in ["30m", "12h"] {
+        let response = serde_json::json!({
+            "status":"completed", "prompt_cache_options":{"mode":"implicit","ttl":ttl},
+            "usage":{"input_tokens":100, "input_tokens_details":{"cached_tokens":50,"cache_write_tokens":40},"output_tokens":10}
+        });
+        for streaming in [false, true] {
+            let body = if streaming {
+                let envelope = serde_json::json!({"type":"response.completed","response":response});
+                format!("data: {envelope}\n\n").into_bytes()
+            } else {
+                serde_json::to_vec(&response).unwrap()
+            };
+            let mut event = test_usage_event();
+            populate_tokens(&mut event, &body);
+            assert_eq!(event.cache_write_input_tokens, Some(40));
+            assert_eq!(event.cache_write_ttl.as_deref(), Some(ttl));
+        }
+    }
+    let mut event = test_usage_event();
+    populate_tokens(&mut event, br#"{"model":"gpt-6.1-sol","usage":{"input_tokens":100,"input_tokens_details":{"cache_write_tokens":40}}}"#);
+    assert_eq!(
+        event.cache_write_ttl, None,
+        "a model name does not prove the applied cache window"
+    );
+}
 use axum::body::Body;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::HeaderValue;
@@ -383,6 +411,45 @@ fn response_service_tier_preserves_upstream_text_and_prefers_nested_response() {
         response_service_tier(&serde_json::json!({"service_tier": "not a tier"})),
         None
     );
+}
+
+#[test]
+fn gemini_cached_input_and_thoughts_are_counted_once_for_json_and_sse() {
+    let body = serde_json::json!({"usageMetadata":{
+        "promptTokenCount":100,"cachedContentTokenCount":60,
+        "candidatesTokenCount":6,"thoughtsTokenCount":4,"totalTokenCount":110
+    }});
+    for payload in [body.to_string(), format!("data: {body}\n\n")] {
+        let mut event = test_usage_event();
+        populate_tokens(&mut event, payload.as_bytes());
+        assert_eq!(event.input_tokens, Some(100));
+        assert_eq!(event.cached_input_tokens, Some(60));
+        assert_eq!(event.cache_write_input_tokens, None);
+        assert_eq!(event.output_tokens, Some(10));
+        assert_eq!(event.reasoning_tokens, Some(4));
+        assert_eq!(event.total_tokens, Some(110));
+    }
+}
+
+#[test]
+fn deepseek_cache_hits_are_part_of_prompt_tokens_not_additional_input() {
+    let mut event = test_usage_event();
+    populate_tokens(
+        &mut event,
+        br#"{"usage":{"prompt_tokens":100,"prompt_cache_hit_tokens":60,"prompt_cache_miss_tokens":40,"completion_tokens":10,"total_tokens":110}}"#,
+    );
+    assert_eq!(event.input_tokens, Some(100));
+    assert_eq!(event.cached_input_tokens, Some(60));
+    assert_eq!(event.cache_write_input_tokens, None);
+    assert_eq!(event.output_tokens, Some(10));
+    assert_eq!(event.total_tokens, Some(110));
+
+    // A measured zero in the standard field must not fall back to an alias.
+    populate_tokens(
+        &mut event,
+        br#"{"usage":{"prompt_tokens":100,"prompt_tokens_details":{"cached_tokens":0},"prompt_cache_hit_tokens":60,"completion_tokens":10}}"#,
+    );
+    assert_eq!(event.cached_input_tokens, Some(0));
 }
 
 #[test]

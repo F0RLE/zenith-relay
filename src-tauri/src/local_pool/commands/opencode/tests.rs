@@ -87,6 +87,7 @@ pub(super) fn model(id: &str, enabled: bool) -> ModelSummary {
         cached_input_micro_usd_per_million: None,
         cache_write_5m_micro_usd_per_million: None,
         cache_write_1h_micro_usd_per_million: None,
+        cache_write_micro_usd_per_million: None,
         output_micro_usd_per_million: None,
         token_price: None,
         image_request_prices: Vec::new(),

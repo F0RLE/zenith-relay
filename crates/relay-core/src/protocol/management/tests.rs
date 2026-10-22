@@ -127,6 +127,7 @@ fn source_summary(id: &str, models: &[&str]) -> SourceSummary {
         recovery_delay_seconds: 0,
         model_price_overrides: BTreeMap::new(),
         detected_model_prices: BTreeMap::new(),
+        resolved_model_prices: BTreeMap::new(),
         api_equivalent: ApiEquivalentSummary::default(),
         secret_available: true,
         last_error_code: None,

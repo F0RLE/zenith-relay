@@ -47,7 +47,7 @@ fn discovered_context_prices_merge_only_when_compatible() {
             "outputMicroUsdPerMillion": 2_000_000
         });
         model[band] = serde_json::json!({ "priority": { "input": 3_000_000, "cacheRead": 0 } });
-        let price = super::pricing::detected_model_price(&model, false).unwrap();
+        let price = super::pricing::detected_model_price(&model).unwrap();
         let plain = ApiModelPriceOverride {
             input_micro_usd_per_million: 1_000_000,
             output_micro_usd_per_million: 2_000_000,
@@ -56,7 +56,7 @@ fn discovered_context_prices_merge_only_when_compatible() {
         assert_eq!(merge_route_model_price(plain, price), Some(price));
         assert_eq!(merge_route_model_price(price, plain), Some(price));
         model[band]["priority"]["input"] = serde_json::json!(4_000_000);
-        let conflicting = super::pricing::detected_model_price(&model, false).unwrap();
+        let conflicting = super::pricing::detected_model_price(&model).unwrap();
         assert!(merge_route_model_price(price, conflicting).is_none());
     }
 }
@@ -76,6 +76,45 @@ fn generic_model_catalog_retains_explicit_cache_write_windows() {
     let price = models[0].1.unwrap();
     assert_eq!(price.cache_write_5m_micro_usd_per_million, Some(1_250_000));
     assert_eq!(price.cache_write_1h_micro_usd_per_million, Some(2_500_000));
+}
+
+#[test]
+fn compatible_catalog_protocols_do_not_invent_cache_write_windows() {
+    for protocol in [
+        UpstreamProtocol::Responses,
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Messages,
+        UpstreamProtocol::GeminiGenerateContent,
+    ] {
+        let model = serde_json::json!({
+            "id": "synthetic-model",
+            "name": "models/synthetic-model",
+            "supportedGenerationMethods": ["generateContent"],
+            "inputMicroUsdPerMillion": 1_000_000,
+            "outputMicroUsdPerMillion": 2_000_000,
+            "cacheCreationInputCostMicrousdPerMillion": 0
+        });
+        let catalog = if protocol == UpstreamProtocol::GeminiGenerateContent {
+            serde_json::json!({"models": [model]})
+        } else {
+            serde_json::json!({"data": [model]})
+        };
+        let models = parse_upstream_models(protocol, &catalog).unwrap();
+        let price = models[0].1.unwrap();
+        assert_eq!(
+            price.cache_write_micro_usd_per_million,
+            Some(0),
+            "{protocol:?}"
+        );
+        assert_eq!(
+            price.cache_write_5m_micro_usd_per_million, None,
+            "{protocol:?}"
+        );
+        assert_eq!(
+            price.cache_write_1h_micro_usd_per_million, None,
+            "{protocol:?}"
+        );
+    }
 }
 
 #[test]

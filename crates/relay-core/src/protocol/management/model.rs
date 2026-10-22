@@ -161,6 +161,8 @@ pub struct ModelSummary {
     pub cache_write_5m_micro_usd_per_million: Option<u64>,
     #[serde(default)]
     pub cache_write_1h_micro_usd_per_million: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_micro_usd_per_million: Option<u64>,
     pub output_micro_usd_per_million: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_price: Option<crate::pricing::TokenPrice>,
@@ -279,6 +281,7 @@ pub fn apply_pool_model_configuration_with_context(
                 .then_some(price.cache_write_1h_micro_usd_per_million)
                 .flatten();
             model.output_micro_usd_per_million = Some(price.output_micro_usd_per_million);
+            model.cache_write_micro_usd_per_million = price.cache_write_micro_usd_per_million;
             model.token_price = Some((*price).into());
             model.custom_price = true;
         }

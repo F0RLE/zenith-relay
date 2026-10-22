@@ -73,6 +73,22 @@ impl UsageAggregate {
         row: &rusqlite::Row<'_>,
         offset: usize,
     ) -> rusqlite::Result<Self> {
+        // Immutable migrations 032/034 use the pre-035 classification. Keep
+        // their subtraction keys stable when new price classes are introduced.
+        let mut aggregate = Self::from_row_current(row, offset)?;
+        if !matches!(
+            aggregate.price_class.as_str(),
+            "standard" | "flex" | "priority" | "ultrafast"
+        ) {
+            aggregate.price_class = "standard".into();
+        }
+        Ok(aggregate)
+    }
+
+    pub(in crate::local_pool::store::telemetry_db) fn from_row_current(
+        row: &rusqlite::Row<'_>,
+        offset: usize,
+    ) -> rusqlite::Result<Self> {
         let candidate_kind: String = row.get(offset)?;
         let candidate_id: String = row.get(offset + 1)?;
         let model_id: String = row.get(offset + 2)?;
@@ -116,11 +132,9 @@ impl UsageAggregate {
             candidate_kind: candidate_kind.to_string(),
             candidate_id: candidate_id.to_string(),
             model: model.to_string(),
-            price_class: zenith_relay_core::usage::UsagePriceClass::from_observed(
+            price_class: zenith_relay_core::usage::UsagePriceClass::observed_label(
                 applied_service_tier,
-            )
-            .as_label()
-            .to_string(),
+            ),
             context_band: zenith_relay_core::usage::UsageContextBand::from_input_tokens(
                 input_tokens,
             )
@@ -200,4 +214,32 @@ pub(in crate::local_pool::store::telemetry_db) fn apply_aggregate_delta(
         )
         .map_err(db_error)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod legacy_decode_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_row_decode_keeps_immutable_migration_price_keys() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        let (legacy, current) = connection
+            .query_row(
+                "SELECT 'source', 'source', 'model', 150001, NULL, NULL, NULL,
+                    10, 150011, 'premium_v2'",
+                [],
+                |row| {
+                    Ok((
+                        UsageAggregate::from_row(row, 0)?,
+                        UsageAggregate::from_row_current(row, 0)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(legacy.price_class, "standard");
+        assert_eq!(current.price_class, "premium_v2");
+        assert_eq!(legacy.context_band, current.context_band);
+        assert_eq!(legacy.input_tokens, current.input_tokens);
+        assert_eq!(legacy.total_tokens, current.total_tokens);
+    }
 }

@@ -14,6 +14,8 @@ pub struct TokenRateSet {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_1h: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<u64>,
 }
 
@@ -23,6 +25,7 @@ impl TokenRateSet {
         cache_read: None,
         cache_write_5m: None,
         cache_write_1h: None,
+        cache_write: None,
         output: None,
     };
 
@@ -31,6 +34,7 @@ impl TokenRateSet {
             && self.cache_read.is_none()
             && self.cache_write_5m.is_none()
             && self.cache_write_1h.is_none()
+            && self.cache_write.is_none()
             && self.output.is_none()
     }
 
@@ -43,6 +47,7 @@ impl TokenRateSet {
             && option_is_valid(self.cache_read)
             && option_is_valid(self.cache_write_5m)
             && option_is_valid(self.cache_write_1h)
+            && option_is_valid(self.cache_write)
             && option_is_valid(self.output)
     }
 
@@ -52,11 +57,12 @@ impl TokenRateSet {
             cache_read: or_rate(above.cache_read, self.cache_read),
             cache_write_5m: or_rate(above.cache_write_5m, self.cache_write_5m),
             cache_write_1h: or_rate(above.cache_write_1h, self.cache_write_1h),
+            cache_write: or_rate(above.cache_write, self.cache_write),
             output: or_rate(above.output, self.output),
         }
     }
 
-    const fn clear_cache_writes(self) -> Self {
+    const fn clear_messages_cache_writes(self) -> Self {
         Self {
             cache_write_5m: None,
             cache_write_1h: None,
@@ -104,12 +110,12 @@ impl LongContextRates {
             && self.ultrafast.is_valid()
     }
 
-    const fn clear_cache_writes(self) -> Self {
+    const fn clear_messages_cache_writes(self) -> Self {
         Self {
-            standard: self.standard.clear_cache_writes(),
-            flex: self.flex.clear_cache_writes(),
-            priority: self.priority.clear_cache_writes(),
-            ultrafast: self.ultrafast.clear_cache_writes(),
+            standard: self.standard.clear_messages_cache_writes(),
+            flex: self.flex.clear_messages_cache_writes(),
+            priority: self.priority.clear_messages_cache_writes(),
+            ultrafast: self.ultrafast.clear_messages_cache_writes(),
         }
     }
 }
@@ -124,6 +130,8 @@ pub struct TokenPrice {
     pub cache_write_5m: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_1h: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<u64>,
     pub output: u64,
     /// Published Flex components. Within a published schedule missing
     /// components stay unknown.
@@ -165,6 +173,7 @@ impl TokenPrice {
             && option_is_valid(self.cache_read)
             && option_is_valid(self.cache_write_5m)
             && option_is_valid(self.cache_write_1h)
+            && option_is_valid(self.cache_write)
             && self.flex.is_valid()
             && self.priority.is_valid()
             && self.ultrafast.is_valid()
@@ -175,18 +184,19 @@ impl TokenPrice {
             && self.above_512k.is_valid()
     }
 
-    pub const fn clear_cache_writes(self) -> Self {
+    /// Messages-only settings must not erase a provider's generic write tariff.
+    pub const fn clear_messages_cache_writes(self) -> Self {
         Self {
             cache_write_5m: None,
             cache_write_1h: None,
-            flex: self.flex.clear_cache_writes(),
-            priority: self.priority.clear_cache_writes(),
-            ultrafast: self.ultrafast.clear_cache_writes(),
-            above_100k: self.above_100k.clear_cache_writes(),
-            above_128k: self.above_128k.clear_cache_writes(),
-            above_200k: self.above_200k.clear_cache_writes(),
-            above_272k: self.above_272k.clear_cache_writes(),
-            above_512k: self.above_512k.clear_cache_writes(),
+            flex: self.flex.clear_messages_cache_writes(),
+            priority: self.priority.clear_messages_cache_writes(),
+            ultrafast: self.ultrafast.clear_messages_cache_writes(),
+            above_100k: self.above_100k.clear_messages_cache_writes(),
+            above_128k: self.above_128k.clear_messages_cache_writes(),
+            above_200k: self.above_200k.clear_messages_cache_writes(),
+            above_272k: self.above_272k.clear_messages_cache_writes(),
+            above_512k: self.above_512k.clear_messages_cache_writes(),
             ..self
         }
     }

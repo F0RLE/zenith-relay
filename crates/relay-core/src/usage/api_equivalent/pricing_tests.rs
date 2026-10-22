@@ -8,6 +8,53 @@ fn fixture_catalog() -> PricingCatalog {
         .expect("pricing fixture must be valid")
 }
 
+#[test]
+fn explicit_unknown_service_tiers_never_borrow_standard_or_other_schedule_prices() {
+    let quote = crate::pricing::TokenPrice {
+        input: 1_000_000,
+        output: 2_000_000,
+        cache_read: Some(0),
+        cache_write: Some(0),
+        ..Default::default()
+    };
+    let usage = ApiEquivalentUsage::from_reported_tokens(
+        Some(100),
+        Some(30),
+        Some(20),
+        None,
+        Some(10),
+        Some(110),
+    );
+    for tier in ["premium_v2", "batch", "scale", "auto", "unknown"] {
+        let measured = usage.with_observed_rates(Some(tier), Some(100));
+        assert_eq!(measured.price_class, UsagePriceClass::Unknown, "{tier}");
+        let (value, parts) =
+            estimate_api_equivalent_breakdown_with_token_price(measured, Some(quote));
+        assert_eq!(
+            value,
+            ApiEquivalentSummary {
+                micro_usd: 0,
+                priced_tokens: 0,
+                unpriced_tokens: 110
+            },
+            "{tier}"
+        );
+        assert_eq!(parts.cache_read.unwrap().unpriced_tokens, 30);
+        assert_eq!(parts.cache_write.unwrap().unpriced_tokens, 20);
+        assert_eq!(
+            UsagePriceClass::from_label(measured.price_class.as_label()),
+            UsagePriceClass::Unknown
+        );
+        assert_eq!(UsagePriceClass::observed_label(Some(tier)), tier);
+    }
+    for tier in [None, Some(""), Some("default"), Some(" Standard ")] {
+        assert_eq!(
+            UsagePriceClass::from_observed(tier),
+            UsagePriceClass::Standard
+        );
+    }
+}
+
 fn fixture_account_estimate(model: &str, usage: ApiEquivalentUsage) -> ApiEquivalentSummary {
     estimate_api_equivalent_with_catalog(
         CandidatePriceQuery {
@@ -22,6 +69,47 @@ fn fixture_account_estimate(model: &str, usage: ApiEquivalentUsage) -> ApiEquiva
         usage,
     )
     .0
+}
+
+#[test]
+fn generic_creation_rate_does_not_require_or_invent_a_retention_window() {
+    let quote = crate::pricing::TokenPrice {
+        input: 2_000_000,
+        cache_read: Some(100_000),
+        cache_write: Some(2_500_000),
+        output: 10_000_000,
+        ..Default::default()
+    };
+    for ttl in [None, Some("17m"), Some("36h"), Some("5m"), Some("1h")] {
+        let usage = ApiEquivalentUsage::from_reported_tokens(
+            Some(75_550),
+            Some(64_048),
+            Some(10_437),
+            ttl,
+            Some(1_234),
+            Some(76_784),
+        );
+        let (total, parts) = estimate_api_equivalent_breakdown_with_token_price(usage, Some(quote));
+        assert_eq!(parts.cache_write.unwrap().micro_usd, 26_093, "{ttl:?}");
+        assert_eq!(total.micro_usd, 46_968, "{ttl:?}");
+        assert_eq!(total.unpriced_tokens, 0, "{ttl:?}");
+    }
+    let unknown = ApiEquivalentUsage::from_reported_tokens(
+        Some(75_550),
+        Some(64_048),
+        Some(10_437),
+        None,
+        Some(1_234),
+        Some(76_784),
+    );
+    let ambiguous = crate::pricing::TokenPrice {
+        cache_write_1h: Some(9_000_000),
+        ..quote
+    };
+    assert_eq!(
+        estimate_api_equivalent_with_token_price(unknown, Some(ambiguous)).unpriced_tokens,
+        10_437
+    );
 }
 
 #[test]
@@ -206,11 +294,7 @@ fn gpt_56_official_catalog_prices_match_current_rates() {
             .expect("GPT-5.6 model is in the fixture catalog");
         assert_eq!(price.input, input, "{model}");
         assert_eq!(price.cache_read, Some(cached_input), "{model} cached input");
-        assert_eq!(
-            price.cache_write_5m,
-            Some(cache_write),
-            "{model} cache write"
-        );
+        assert_eq!(price.cache_write, Some(cache_write), "{model} cache write");
         assert_eq!(price.output, output, "{model}");
     }
 
@@ -298,9 +382,9 @@ fn unknown_or_unsplit_usage_is_never_silently_priced() {
             },
         ),
         ApiEquivalentSummary {
-            micro_usd: 320,
-            priced_tokens: 80,
-            unpriced_tokens: 20,
+            micro_usd: 420,
+            priced_tokens: 100,
+            unpriced_tokens: 0,
         }
     );
     assert_eq!(

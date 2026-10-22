@@ -257,7 +257,7 @@ fn previous_usage_log(
                 Ok(PreviousUsageLog {
                     attempt: row.get(0)?,
                     aggregated: row.get(1)?,
-                    aggregate: UsageAggregate::from_row(row, 2)?,
+                    aggregate: UsageAggregate::from_row_current(row, 2)?,
                     totals: UsageTotalsSample {
                         success: row.get(12)?,
                         latency_ms: non_negative_i64(row.get(13)?),

@@ -119,7 +119,8 @@ pub(super) fn usage(protocol: WireApi, response_payload: &Value) -> Usage {
             input: counter("prompt_tokens"),
             output: counter("completion_tokens"),
             total: counter("total_tokens"),
-            cached: pointer("/prompt_tokens_details/cached_tokens"),
+            cached: pointer("/prompt_tokens_details/cached_tokens")
+                .or_else(|| counter("prompt_cache_hit_tokens")),
             reasoning: pointer("/completion_tokens_details/reasoning_tokens"),
             cache_write: pointer("/prompt_tokens_details/cache_write_tokens"),
             cache_write_5m: pointer(

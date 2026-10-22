@@ -64,6 +64,7 @@ impl From<ApiModelPriceOverride> for TokenPrice {
             cache_read: price.cached_input_micro_usd_per_million,
             cache_write_5m: price.cache_write_5m_micro_usd_per_million,
             cache_write_1h: price.cache_write_1h_micro_usd_per_million,
+            cache_write: price.cache_write_micro_usd_per_million,
             output: price.output_micro_usd_per_million,
             flex: price.flex,
             priority: price.priority,
@@ -84,6 +85,7 @@ impl From<TokenPrice> for ApiModelPriceOverride {
             cached_input_micro_usd_per_million: price.cache_read,
             cache_write_5m_micro_usd_per_million: price.cache_write_5m,
             cache_write_1h_micro_usd_per_million: price.cache_write_1h,
+            cache_write_micro_usd_per_million: price.cache_write,
             output_micro_usd_per_million: price.output,
             flex: price.flex,
             priority: price.priority,
@@ -170,67 +172,29 @@ pub fn estimate_api_equivalent_breakdown_with_token_price(
     let cache_read_tokens = usage
         .cached_input_tokens
         .map(|cached_tokens| cached_tokens.min(input_tokens.unwrap_or(cached_tokens)));
-    let short_cache_write_tokens = usage.cache_write_5m_tokens.map(|cache_write_tokens| {
-        cache_write_tokens.min(input_tokens.unwrap_or(cache_write_tokens))
+    let cache_read_tokens = cache_read_tokens.unwrap_or_default();
+    let mut uncached_input_tokens =
+        input_tokens.map(|input| input.saturating_sub(cache_read_tokens));
+    let write_buckets = [
+        usage.cache_write_5m_tokens,
+        usage.cache_write_1h_tokens,
+        usage.unknown_cache_write_tokens,
+    ];
+    // All cache buckets share one remaining-input budget, in a stable order.
+    // Unknown/mixed windows stay in their own generic/unsplit bucket.
+    let cache_write_tokens = write_buckets.map(|tokens| {
+        let count = tokens.unwrap_or_default();
+        let count = count.min(uncached_input_tokens.unwrap_or(count));
+        if let Some(remaining) = uncached_input_tokens.as_mut() {
+            *remaining -= count;
+        }
+        count
     });
-    let long_cache_write_tokens = usage.cache_write_1h_tokens.map(|cache_write_tokens| {
-        cache_write_tokens.min(input_tokens.unwrap_or(cache_write_tokens))
+    let measured_input_tokens = input_tokens.unwrap_or_else(|| {
+        cache_write_tokens
+            .into_iter()
+            .fold(cache_read_tokens, u64::saturating_add)
     });
-    let unknown_cache_write_tokens = usage
-        .unknown_cache_write_tokens
-        .map(|unknown_cache_tokens| {
-            unknown_cache_tokens.min(input_tokens.unwrap_or(unknown_cache_tokens))
-        });
-
-    let (
-        uncached_input_tokens,
-        cache_read_tokens,
-        short_cache_write_tokens,
-        long_cache_write_tokens,
-        unknown_cache_write_tokens,
-    ) = if let Some(input_tokens) = input_tokens {
-        let mut remaining_input_tokens = input_tokens;
-        let cache_read_tokens = cache_read_tokens
-            .map(|cached_tokens| cached_tokens.min(remaining_input_tokens))
-            .unwrap_or_default();
-        remaining_input_tokens = remaining_input_tokens.saturating_sub(cache_read_tokens);
-        let short_cache_write_tokens = short_cache_write_tokens
-            .map(|cache_write_tokens| cache_write_tokens.min(remaining_input_tokens))
-            .unwrap_or_default();
-        remaining_input_tokens = remaining_input_tokens.saturating_sub(short_cache_write_tokens);
-        let long_cache_write_tokens = long_cache_write_tokens
-            .map(|cache_write_tokens| cache_write_tokens.min(remaining_input_tokens))
-            .unwrap_or_default();
-        remaining_input_tokens = remaining_input_tokens.saturating_sub(long_cache_write_tokens);
-        let unknown_cache_write_tokens = unknown_cache_write_tokens
-            .map(|unknown_cache_tokens| unknown_cache_tokens.min(remaining_input_tokens))
-            .unwrap_or_default();
-        remaining_input_tokens = remaining_input_tokens.saturating_sub(unknown_cache_write_tokens);
-        (
-            Some(remaining_input_tokens),
-            cache_read_tokens,
-            short_cache_write_tokens,
-            long_cache_write_tokens,
-            unknown_cache_write_tokens,
-        )
-    } else {
-        (
-            None,
-            cache_read_tokens.unwrap_or_default(),
-            short_cache_write_tokens.unwrap_or_default(),
-            long_cache_write_tokens.unwrap_or_default(),
-            unknown_cache_write_tokens.unwrap_or_default(),
-        )
-    };
-
-    let measured_input_tokens = if input_tokens.is_some() {
-        input_tokens.unwrap_or_default()
-    } else {
-        cache_read_tokens
-            .saturating_add(short_cache_write_tokens)
-            .saturating_add(long_cache_write_tokens)
-            .saturating_add(unknown_cache_write_tokens)
-    };
     let measured_tokens = measured_input_tokens.saturating_add(output_tokens.unwrap_or_default());
     let total_tokens = usage
         .total_tokens
@@ -245,24 +209,25 @@ pub fn estimate_api_equivalent_breakdown_with_token_price(
         usage.cached_input_tokens.map(|_| cache_read_tokens),
         rates.cache_read,
     );
-    let cache_write = sum_component_values([
+    // A generic provider rate is not an inferred TTL. If the quote also has
+    // window-specific alternatives, an unsplit write remains ambiguous.
+    let unsplit_write_rate = rates.cache_write.filter(|generic| {
+        [rates.cache_write_5m, rates.cache_write_1h]
+            .into_iter()
+            .flatten()
+            .all(|rate| rate == *generic)
+    });
+    let write_rates = [
+        rates.cache_write_5m.or(rates.cache_write),
+        rates.cache_write_1h.or(rates.cache_write),
+        unsplit_write_rate,
+    ];
+    let cache_write = sum_component_values(std::array::from_fn::<_, 3, _>(|index| {
         component_value(
-            usage
-                .cache_write_5m_tokens
-                .map(|_| short_cache_write_tokens),
-            rates.cache_write_5m,
-        ),
-        component_value(
-            usage.cache_write_1h_tokens.map(|_| long_cache_write_tokens),
-            rates.cache_write_1h,
-        ),
-        component_value(
-            usage
-                .unknown_cache_write_tokens
-                .map(|_| unknown_cache_write_tokens),
-            None,
-        ),
-    ]);
+            write_buckets[index].map(|_| cache_write_tokens[index]),
+            write_rates[index],
+        )
+    }));
     let input = sum_component_values([uncached_input, cache_read, cache_write]);
     let output = component_value(output_tokens, rates.output);
     let mut summary = sum_component_values([input, output]).unwrap_or_default();
@@ -475,11 +440,13 @@ fn rates_for(
             cache_read: quote.cache_read,
             cache_write_5m: quote.cache_write_5m,
             cache_write_1h: quote.cache_write_1h,
+            cache_write: quote.cache_write,
             output: Some(quote.output),
         },
         UsagePriceClass::Flex => quote.flex,
         UsagePriceClass::Priority => quote.priority,
         UsagePriceClass::Ultrafast => quote.ultrafast,
+        UsagePriceClass::Unknown => return None,
     };
     let above = context_rates(quote, band, class);
     if let Some(above) = above {
@@ -511,6 +478,7 @@ fn band_rates(
         UsagePriceClass::Flex => rates.flex,
         UsagePriceClass::Priority => rates.priority,
         UsagePriceClass::Ultrafast => rates.ultrafast,
+        UsagePriceClass::Unknown => return None,
     };
     (!rates.is_empty()).then_some(rates)
 }

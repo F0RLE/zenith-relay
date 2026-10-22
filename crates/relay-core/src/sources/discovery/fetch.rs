@@ -281,7 +281,16 @@ pub(super) fn merge_route_model_price(
         (Some(price), _) | (_, Some(price)) => Some(price),
         (None, None) => None,
     };
+    let generic_cache_write_price = match (
+        left.cache_write_micro_usd_per_million,
+        right.cache_write_micro_usd_per_million,
+    ) {
+        (Some(left), Some(right)) if left != right => return None,
+        (Some(price), _) | (_, Some(price)) => Some(price),
+        (None, None) => None,
+    };
     let mut merged = ApiModelPriceOverride {
+        cache_write_micro_usd_per_million: generic_cache_write_price,
         cache_write_5m_micro_usd_per_million: short_cache_write_price,
         cache_write_1h_micro_usd_per_million: long_cache_write_price,
         flex: if left.flex.is_empty() {
@@ -371,15 +380,7 @@ pub(super) fn parse_upstream_models(
                 }?;
                 seen_model_ids
                     .insert(crate::model_id_key(model_id))
-                    .then(|| {
-                        (
-                            model_id.to_string(),
-                            detected_model_price(
-                                model_record,
-                                protocol == UpstreamProtocol::Messages,
-                            ),
-                        )
-                    })
+                    .then(|| (model_id.to_string(), detected_model_price(model_record)))
             })
             .collect(),
     )

@@ -74,6 +74,43 @@ fn upstream_reported_total_is_kept_for_a_responses_client() {
 }
 
 #[test]
+fn deepseek_cache_hit_alias_survives_json_and_stream_conversion() {
+    for standard_cached in [None, Some(0)] {
+        let mut counts = json!({"prompt_tokens":100,"completion_tokens":10,"total_tokens":110,
+            "prompt_cache_hit_tokens":60,"prompt_cache_miss_tokens":40});
+        if let Some(cached) = standard_cached {
+            counts["prompt_tokens_details"] = json!({"cached_tokens":cached});
+        }
+        let mut chat = output(WireApi::ChatCompletions);
+        chat["usage"] = counts.clone();
+        let events = [
+            json!({"id":"chat_test","choices":[{"index":0,"delta":{"role":"assistant","content":"Hi"},"finish_reason":null}]}),
+            json!({"id":"chat_test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
+            json!({"id":"chat_test","choices":[],"usage":counts}),
+        ];
+        let stream = events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect::<String>()
+            + "data: [DONE]\n\n";
+        let (frame_usage, body_usage) = stream_usage(WireApi::ChatCompletions, stream.as_bytes());
+        for usage in [
+            json_usage(WireApi::Responses, WireApi::ChatCompletions, &chat),
+            frame_usage,
+            body_usage,
+        ] {
+            assert_eq!(usage["input_tokens"], 100);
+            assert_eq!(
+                usage["input_tokens_details"]["cached_tokens"],
+                standard_cached.unwrap_or(60)
+            );
+            assert_eq!(usage["output_tokens"], 10);
+            assert_eq!(usage["total_tokens"], 110);
+        }
+    }
+}
+
+#[test]
 fn messages_total_counts_cache_reads_and_writes_like_the_gateway() {
     let messages = json!({"id":"msg_test","type":"message","role":"assistant","model":"test","content":[{"type":"text","text":"Hi"}],"stop_reason":"end_turn",
         "usage":{"input_tokens":3,"output_tokens":2,"cache_read_input_tokens":10,"cache_creation_input_tokens":5}});

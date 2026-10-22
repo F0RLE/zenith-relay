@@ -191,6 +191,7 @@ fn model_summary(
         cached_input_micro_usd_per_million: cache_read_price,
         cache_write_5m_micro_usd_per_million: short_cache_write_price,
         cache_write_1h_micro_usd_per_million: long_cache_write_price,
+        cache_write_micro_usd_per_million: quote.and_then(|price| price.cache_write),
         output_micro_usd_per_million: output_price,
         token_price: quote,
         image_request_prices,

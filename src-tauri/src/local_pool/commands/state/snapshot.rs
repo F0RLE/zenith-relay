@@ -58,6 +58,9 @@ pub(crate) async fn build_local_runtime_state(
     let proxy_pool = ProxyPool::load().unwrap_or_default();
     let mut source_summaries =
         project_source_summaries(&inputs, &routing_order, &equivalents, &model_metadata)?;
+    for source in &mut source_summaries {
+        source.resolve_model_prices(&catalog, &pricing);
+    }
     let mut account_summaries = project_account_summaries(AccountProjectionContext {
         state,
         inputs: &inputs,
