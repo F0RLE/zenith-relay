@@ -947,6 +947,63 @@ fn responses_failed_envelope_survives_for_gateway_error_classification() {
 }
 
 #[test]
+fn responses_terminal_diagnostics_distinguish_mismatches_without_echoing_content() {
+    for (case, parameter) in [
+        ("count", "response.terminal.output_count"),
+        ("identity", "response.output_item.identity"),
+        ("changed", "response.output_item.changed"),
+        ("decode", "response.terminal.decode"),
+    ] {
+        let mut bridge = prepare(
+            WireApi::Messages,
+            WireApi::Responses,
+            &input(WireApi::Messages),
+            true,
+        )
+        .into_stream_bridge()
+        .unwrap();
+        let mut terminal = output(WireApi::Responses);
+        if case != "decode" {
+            let item = terminal["output"][0].clone();
+            for kind in ["response.output_item.added", "response.output_item.done"] {
+                let event = json!({"type":kind,"output_index":0,"item":item});
+                bridge.push(format!("data: {event}\n\n").as_bytes());
+            }
+        }
+        match case {
+            "count" => terminal["output"] = json!([]),
+            "identity" => terminal["output"][0]["id"] = json!("synthetic-private-id"),
+            "changed" => {
+                terminal["output"][0]["content"][0]["text"] = json!("synthetic-private-content")
+            }
+            "decode" => {
+                terminal["output"][0]["content"][0]["type"] = json!("synthetic-private-type")
+            }
+            _ => unreachable!(),
+        }
+        let event = json!({"type":"response.completed","response":terminal});
+        bridge.push(format!("data: {event}\n\n").as_bytes());
+        bridge.finish();
+        assert!(bridge.completed().is_none());
+        let wire = String::from_utf8(
+            std::iter::from_fn(|| bridge.pop_output())
+                .flatten()
+                .collect(),
+        )
+        .unwrap();
+        let error = wire
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .map(|data| serde_json::from_str::<Value>(data).unwrap())
+            .find(|event| event["type"] == "error")
+            .unwrap();
+        assert_eq!(error["error"]["param"], parameter);
+        assert!(!wire.contains("synthetic-private"));
+        assert!(!wire.contains("event: message_stop"));
+    }
+}
+
+#[test]
 fn chat_refusal_deduplicates_consistent_forms_and_preserves_incomplete_reason() {
     let mut body = json!({"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant",
         "refusal":"Cannot help.","content":[{"type":"refusal","refusal":"Cannot help."}]}}]});

@@ -601,8 +601,11 @@ impl TranslationStream {
     }
 
     fn validate_final_item(&self, index: u64, item: &Value) -> AdapterResult<()> {
-        let invalid = AdapterError::upstream_stream_invalid;
-        let state = self.response_items.get(&index).ok_or_else(invalid)?;
+        let invalid =
+            || AdapterError::upstream_stream_invalid().with_parameter("response.output_item");
+        let state = self.response_items.get(&index).ok_or_else(|| {
+            AdapterError::upstream_stream_invalid().with_parameter("response.output_item.missing")
+        })?;
         if matches!(
             item.get("type").and_then(Value::as_str),
             Some("function_call" | "custom_tool_call")
@@ -615,14 +618,14 @@ impl TranslationStream {
                 .get(field)
                 .is_some_and(|value| item.get(field) != Some(value))
             {
-                return Err(invalid());
+                return Err(invalid().with_parameter("response.output_item.identity"));
             }
         }
         if state.closed {
             return if &state.item == item {
                 Ok(())
             } else {
-                Err(invalid())
+                Err(invalid().with_parameter("response.output_item.changed"))
             };
         }
         match item.get("type").and_then(Value::as_str) {
@@ -652,7 +655,7 @@ impl TranslationStream {
                 if !final_input.starts_with(previous)
                     || (state.input_done && final_input != previous)
                 {
-                    return Err(invalid());
+                    return Err(invalid().with_parameter("response.tool_input.changed"));
                 }
             }
             Some("message" | "reasoning") => {
@@ -684,7 +687,7 @@ impl TranslationStream {
                             || state.text_done.contains(&(part_index as u64)))
                             && final_text != text)
                     {
-                        return Err(invalid());
+                        return Err(invalid().with_parameter("response.text.changed"));
                     }
                 }
             }
@@ -701,13 +704,16 @@ impl TranslationStream {
                 completion == crate::protocol::completion::ResponseCompletion::Invalid
             })
         {
-            return Err(invalid());
+            return Err(invalid().with_parameter("response.terminal.status"));
         }
-        let mut terminal_response = event_payload.get("response").ok_or_else(invalid)?.clone();
+        let mut terminal_response = event_payload
+            .get("response")
+            .ok_or_else(|| invalid().with_parameter("response.terminal.response"))?
+            .clone();
         let output = terminal_response
             .get_mut("output")
             .and_then(Value::as_array_mut)
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid().with_parameter("response.terminal.output"))?;
         for (index, item) in output.iter_mut().enumerate() {
             self.merge_item_annotations(index as u64, item)?;
         }
@@ -717,12 +723,12 @@ impl TranslationStream {
             .ok_or_else(invalid)?;
         if !self.response_items.is_empty() {
             if output.len() != self.response_items.len() {
-                return Err(invalid());
+                return Err(invalid().with_parameter("response.terminal.output_count"));
             }
             for &index in self.response_items.keys() {
                 let item = output
                     .get(usize::try_from(index).map_err(|_| invalid())?)
-                    .ok_or_else(invalid)?;
+                    .ok_or_else(|| invalid().with_parameter("response.terminal.output_index"))?;
                 // An output item is immutable after its done event. Its final
                 // content must also retain every delta already sent to the client.
                 self.validate_final_item(index, item)?;
@@ -733,14 +739,21 @@ impl TranslationStream {
                 .ok()
                 .is_none_or(|index| index >= output.len())
             {
-                return Err(invalid());
+                return Err(invalid().with_parameter("response.terminal.annotations"));
             }
         }
         let decoded_response = response::decode(
             WireApi::Responses,
             &terminal_response,
             &self.decoded_response.id,
-        )?;
+        )
+        .map_err(|error| {
+            if error.parameter().is_some() {
+                error
+            } else {
+                error.with_parameter("response.terminal.decode")
+            }
+        })?;
         if event_payload.get("type").and_then(Value::as_str) != Some("response.done")
             && event_payload.get("type").and_then(Value::as_str)
                 != Some(
@@ -751,7 +764,7 @@ impl TranslationStream {
                     },
                 )
         {
-            return Err(invalid());
+            return Err(invalid().with_parameter("response.terminal.status"));
         }
         self.finish_reason = Some(decoded_response.finish);
         self.decoded_response.blocks = decoded_response.blocks;
