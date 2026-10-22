@@ -17,14 +17,15 @@ pub(in crate::gateway::websocket) async fn connect_upstream_while_client_connect
 ) -> Result<Connected, GatewayFailure> {
     await_while_client_connected(
         downstream,
-        connect_upstream(
+        // Reconnects run inside the live bridge; keep the retry future off its stack.
+        Box::pin(connect_upstream(
             runtime,
             key,
             client_headers,
             request,
             allow_previous_response_reset,
             attempt_offset,
-        ),
+        )),
     )
     .await?
 }
