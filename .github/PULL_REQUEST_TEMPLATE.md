@@ -17,6 +17,11 @@ Explain the change in your own language. Add a screenshot if it helps.
 
 ## Checks
 
-- [ ] `cd src && bun run verify`
-- [ ] `cd src && bun run test:e2e`
-- [ ] Not run (explain why below).
+Choose checks for the changed area from
+[CONTRIBUTING.md](https://github.com/F0RLE/zenith-relay/blob/main/CONTRIBUTING.md#verification). Report exact commands and
+results, including failures or checks not run and why. Documentation-only changes
+need content, link and diff checks; they do not require the full runtime suites.
+
+- Changed area:
+- Commands and results:
+- Checks not run / remaining acceptance:

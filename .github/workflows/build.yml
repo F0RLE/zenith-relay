@@ -31,8 +31,12 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.3
+      - run: bun install --frozen-lockfile
+        working-directory: src
       - name: Test development scripts
         run: bun test ./scripts/check ./scripts/lib ./scripts/maintenance
+      - name: Check documentation links
+        run: bun ./scripts/check/check-docs.mjs
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: rustfmt, clippy
@@ -50,8 +54,6 @@ jobs:
           git -C "$RUSTSEC_ADVISORY_DB" remote add origin https://github.com/RustSec/advisory-db.git
           git -C "$RUSTSEC_ADVISORY_DB" fetch --depth=1 origin b4af64d3dab58bfac9d4ab23d474264ed0bb6537
           git -C "$RUSTSEC_ADVISORY_DB" checkout --detach --quiet FETCH_HEAD
-      - run: bun install --frozen-lockfile
-        working-directory: src
       - name: Install Linux Tauri dependencies
         run: |
           sudo find /etc/apt/sources.list.d -type f \( -name '*microsoft*' -o -name '*azure*' \) -delete

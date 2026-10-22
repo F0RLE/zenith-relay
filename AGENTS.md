@@ -6,8 +6,10 @@ Relay is a separate local-first desktop/personal-pool product. Apply the workspa
 ## Sources of truth
 
 - Code and focused tests define behavior; plans and memory are not evidence.
-- [PLANNING.md](docs/project/PLANNING.md) owns current contracts;
-  [ROADMAP.md](docs/project/ROADMAP.md) owns open work and acceptance gates.
+- [PLANNING.md](docs/project/PLANNING.md) maps current contracts;
+  [BASIS_POINTS.md](docs/project/BASIS_POINTS.md) owns BPS executor details.
+- [ROADMAP.md](docs/project/ROADMAP.md) owns open Desktop work and acceptance;
+  the [Hosted roadmap](docs/project/HOSTED_RELAY_ROADMAP.md) owns planned Hosted delivery.
 - Localized Help owns user steps; `CONTRIBUTING.md` owns development/releases.
 
 Resolve conflicts at the owning code and document; do not duplicate contracts.

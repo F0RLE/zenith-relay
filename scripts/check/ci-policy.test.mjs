@@ -37,6 +37,19 @@ test("Rust caches use the nested Cargo workspaces and their own target directori
 describe("desktop CI", () => {
   const build = workflow("build.yml");
 
+  test("documentation checks use locked dependencies and cannot be skipped silently", () => {
+    const steps = build.jobs.check.steps;
+    const install = steps.findIndex((step) => step.run === "bun install --frozen-lockfile"
+      && step["working-directory"] === "src");
+    const scripts = steps.findIndex((step) => step.run === "bun test ./scripts/check ./scripts/lib ./scripts/maintenance");
+    const docs = steps.findIndex((step) => step.run === "bun ./scripts/check/check-docs.mjs");
+    expect(install).toBeGreaterThan(-1);
+    expect(scripts).toBeGreaterThan(install);
+    expect(docs).toBeGreaterThan(install);
+    expect(steps[docs].if).toBeUndefined();
+    expect(steps[docs]["continue-on-error"]).toBeUndefined();
+  });
+
   test("retired server manifests and deployment are not part of supported builds", () => {
     for (const path of ["relay-server/Cargo.toml", ".github/workflows/relay-server.yml"]) {
       expect(existsSync(new URL(`../../${path}`, import.meta.url))).toBe(false);

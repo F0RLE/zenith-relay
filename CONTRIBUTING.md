@@ -4,6 +4,10 @@ Zenith Relay is a local-first desktop application. Keep changes small, prove
 the behavior they alter, and do not move private Zenith backend concerns into
 this repository.
 
+Navigation: [setup](#development-setup) · [checks](#verification) ·
+[documentation](#documentation-policy) · [release flow](#change-and-release-flow) ·
+[agent guidance](#agent-guidance) · [protocol references](#api-and-protocol-references).
+
 ## License and contributor agreement
 
 Zenith Relay is **AGPL-3.0-only**. Keep the [LICENSE](LICENSE) text intact.
@@ -58,12 +62,14 @@ prompt/response bodies. Explicit credential exports are not support bundles.
   account identities in source, fixtures, screenshots, logs, snapshots,
   telemetry, or support exports. Credential-bearing account exports require
   an explicit user action and must stay out of support output.
-- Keep desktop secrets in the existing credential-store path and server secrets
-  in the existing encrypted vault.
-- Management tokens and pool request keys are different credentials. Do not
-  accept either one in the other's boundary.
-- Never use a management token as a `/v1` profile credential, and never expose
-  either credential in a snapshot, log, export, or example.
+- Keep Desktop secrets in the existing credential store or protected local
+  storage. The retired personal-server runtime and management client are not
+  current integration targets; future Hosted vault and administration contracts
+  belong to the [Hosted design](docs/project/HOSTED_RELAY_ARCHITECTURE.md).
+- Provider credentials and pool request keys have separate owners and purposes.
+  Use the intended request key for a `/v1` pool profile, not a provider login
+  credential. Never expose either in diagnostics, snapshots, or examples;
+  credential exports require the explicit user action described above.
 - Preserve the distinction between quota monitoring and routing eligibility.
   Native Free accounts can join the pool. Reject known Free plans only for
   Excel / Basis Points imports and requests; do not hard-code quota windows.
@@ -246,7 +252,9 @@ Use one owner per subject:
 | Product/download/first run | `README.md` |
 | Development/checks/releases | `CONTRIBUTING.md` |
 | Current contracts and core map | `docs/project/PLANNING.md` |
-| Open work and acceptance | `docs/project/ROADMAP.md` |
+| BPS executor contract | `docs/project/BASIS_POINTS.md` |
+| Open Desktop work and acceptance | `docs/project/ROADMAP.md` |
+| Planned Hosted delivery and acceptance | `docs/project/HOSTED_RELAY_ROADMAP.md` |
 | Target Hosted product contract (not shipped) | `docs/project/HOSTED_RELAY_ARCHITECTURE.md` |
 | Target Hosted web presentation (not shipped) | `docs/project/HOSTED_RELAY_WEB_DESIGN.md` |
 | Desktop user steps/error recovery | `docs/help/<locale>/README.md` |
@@ -319,6 +327,21 @@ the frontend, desktop host, shared runtime, or web preview, run the correspondin
 commands below.
 
 Changes only to contributor documentation need content/link and diff checks.
+After the locked frontend dependencies are installed, run from the repository root:
+
+~~~powershell
+bun ./scripts/check/check-docs.mjs
+git diff --check -- '*.md' '*.markdown'
+~~~
+
+The same link check is `bun run check:docs` from `src`. It checks required entry
+documents, tracked and non-ignored new Markdown files, local links/images, filename
+case and GitHub-style heading/HTML anchors. Code examples and HTML comments are not
+links. External URLs are not fetched; the optional parent workspace `AGENTS.md`
+link is not required in a standalone checkout. Review content accuracy separately;
+a passing link check does not establish implemented behavior or live acceptance.
+The existing bundled Help size gate still applies to user-guide changes.
+
 For behavior changes, reuse existing coverage or add regression cases that
 exercise the affected contract when tests are in scope. Avoid tests that
 merely repeat implementation, renamed identifiers, or document wording.

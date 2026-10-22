@@ -695,7 +695,7 @@ A greeting also carries client instructions, history and tool definitions.
 not tokens. BPS can add context Relay cannot observe. Cache hits do not free
 context-window space. Use on-demand tool loading where supported; Relay's BPS
 catalog lookup preserves all tools and schema constraints without sending every
-full schema up front. See the [BPS contract](../../project/PLANNING.md#excel--basis-points)
+full schema up front. See the [BPS contract](../../project/BASIS_POINTS.md)
 for catalog options.
 
 SSE text can stream during tool discovery; buffered replies have no first/last-token

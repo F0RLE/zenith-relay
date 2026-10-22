@@ -103,8 +103,9 @@ Use **Recovery** to restore saved client settings.
 ## Development
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing the project.
-Implemented contracts are in [PLANNING.md](docs/project/PLANNING.md); open work
-is in the [roadmap](docs/project/ROADMAP.md). The project uses
+Implemented contracts are mapped in [PLANNING.md](docs/project/PLANNING.md);
+open Desktop work is in the [roadmap](docs/project/ROADMAP.md), and future Hosted
+delivery has a [separate plan](docs/project/HOSTED_RELAY_ROADMAP.md). The project uses
 [AGPL-3.0-only](LICENSE). Before submitting a pull request, read the
 [Contributor Agreement](CONTRIBUTOR_LICENSE_AGREEMENT.md).
 

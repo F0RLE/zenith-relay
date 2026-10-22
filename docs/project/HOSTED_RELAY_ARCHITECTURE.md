@@ -1,7 +1,7 @@
 # Hosted Relay Architecture
 
 **Target product contract, not shipped behavior.** Current Desktop contracts are in
-[PLANNING.md](PLANNING.md); implementation order is in [ROADMAP.md](ROADMAP.md#delivery-stages).
+[PLANNING.md](PLANNING.md); implementation order is in the [Hosted roadmap](HOSTED_RELAY_ROADMAP.md#delivery-stages).
 
 Navigation: [design gates](#specification-before-implementation) ·
 [product](#decision) · [website](#customer-website) ·
@@ -24,7 +24,7 @@ its data ownership, failure policy or customer meaning during coding. Length is 
 a reason to remove constraints. Use navigation, stable identifiers and one canonical
 definition per subject instead of parallel architecture documents or copied rules.
 
-This document owns the target contracts; [the detailed delivery plan](ROADMAP.md#hosted-implementation-work-packages)
+This document owns the target contracts; [the detailed delivery plan](HOSTED_RELAY_ROADMAP.md#hosted-implementation-work-packages)
 owns ordered work packages, dependencies and acceptance. `PLANNING.md` continues to
 describe implemented behavior. A specified table, endpoint, file or command below
 is a target, not evidence that it exists. Do not mark a capability shipped because
@@ -326,7 +326,7 @@ This section owns the first-release customer-web specification, not shipped UI
 or a user guide to existing screens. The website is where a customer registers,
 funds access, obtains connection credentials, understands usage and manages their
 account without installing Desktop. It is not the operator pool dashboard.
-Implementation slices are tracked in the [roadmap](ROADMAP.md#customer-website-implementation-slices).
+Implementation slices are tracked in the [Hosted roadmap](HOSTED_RELAY_ROADMAP.md#customer-website-implementation-slices).
 
 ### Frontend application boundary
 
@@ -2584,7 +2584,7 @@ an index for that review, not evidence the implementation problem is solved.
 
 ## Delivery and acceptance
 
-The order is in [ROADMAP.md](ROADMAP.md#delivery-stages). Paid launch remains
+The order is in the [Hosted roadmap](HOSTED_RELAY_ROADMAP.md#delivery-stages). Paid launch remains
 blocked until acceptance establishes:
 
 - A new customer can sign in through each supported Google/Telegram/configured

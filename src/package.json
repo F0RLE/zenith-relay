@@ -16,6 +16,7 @@
     "build": "tsc -b tsconfig.json && vite build",
     "check": "tsc -b tsconfig.json --pretty false",
     "check:bundle-size": "bun ../scripts/check/check-frontend-bundle.mjs",
+    "check:docs": "bun ../scripts/check/check-docs.mjs",
     "check:guardrails": "bun ../scripts/check/check-agent-guardrails.mjs",
     "check:duplicates": "bun ../scripts/check/check-duplicate-code.mjs",
     "test:unit": "bun test tests --path-ignore-patterns=\"tests/e2e/**\" --path-ignore-patterns=\"tests/docs/**\"",
@@ -46,7 +47,9 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
+    "remark-parse": "11.0.0",
     "typescript": "^7.0.2",
+    "unified": "11.0.5",
     "vite": "^8.3.3"
   },
   "overrides": {
