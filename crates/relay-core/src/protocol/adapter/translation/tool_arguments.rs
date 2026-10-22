@@ -1,11 +1,14 @@
+use std::borrow::Cow;
+
 /// JSON has one numeric domain: an exact integral decimal or exponent value can
 /// use integer syntax. Typed Responses tools may require that syntax. Work on
 /// literal digits, not f64, to preserve precision, strings, and negative zero.
 /// An unfinished stream number is withheld until its delimiter arrives.
-pub(super) fn normalize(arguments: &str, complete: bool) -> String {
+pub(super) fn normalize(arguments: &str, complete: bool) -> Cow<'_, str> {
     let bytes = arguments.as_bytes();
-    let mut output = String::with_capacity(arguments.len());
+    let mut output = None::<String>;
     let mut copied = 0;
+    let mut end = arguments.len();
     let mut index = 0;
     let mut quoted = false;
     while index < bytes.len() {
@@ -24,10 +27,12 @@ pub(super) fn normalize(arguments: &str, complete: bool) -> String {
                     index += 1;
                 }
                 if index == bytes.len() && !complete {
-                    output.push_str(&arguments[copied..start]);
-                    return output;
+                    end = start;
+                    break;
                 }
                 if let Some(integer) = integer_literal(&arguments[start..index]) {
+                    let output =
+                        output.get_or_insert_with(|| String::with_capacity(arguments.len()));
                     output.push_str(&arguments[copied..start]);
                     output.push_str(&integer);
                     copied = index;
@@ -36,8 +41,13 @@ pub(super) fn normalize(arguments: &str, complete: bool) -> String {
             _ => index += 1,
         }
     }
-    output.push_str(&arguments[copied..]);
-    output
+    match output {
+        Some(mut output) => {
+            output.push_str(&arguments[copied..end]);
+            Cow::Owned(output)
+        }
+        None => Cow::Borrowed(&arguments[..end]),
+    }
 }
 
 fn integer_literal(literal: &str) -> Option<String> {
@@ -135,9 +145,32 @@ mod tests {
         for end in 0..=input.len() {
             let prefix = normalize(&input[..end], false);
             assert!(prefix.starts_with(&previous), "{end}");
-            assert!(expected.starts_with(&prefix), "{end}");
-            previous = prefix;
+            assert!(expected.starts_with(prefix.as_ref()), "{end}");
+            previous = prefix.into_owned();
         }
         assert_eq!(normalize(input, true), expected);
+    }
+
+    #[test]
+    fn unchanged_arguments_and_buffered_prefixes_borrow_the_input() {
+        for (input, complete, expected) in [
+            (
+                r#"{"s":"数字 1.0","count":12}"#,
+                true,
+                r#"{"s":"数字 1.0","count":12}"#,
+            ),
+            (
+                r#"{"fraction":1.5,"zero":-0.0}"#,
+                true,
+                r#"{"fraction":1.5,"zero":-0.0}"#,
+            ),
+            (r#"{"count":1000."#, false, r#"{"count":"#),
+            ("", false, ""),
+        ] {
+            let normalized = normalize(input, complete);
+            assert!(matches!(normalized, Cow::Borrowed(_)));
+            assert_eq!(normalized, expected);
+            assert_eq!(normalized.as_ptr(), input.as_ptr());
+        }
     }
 }

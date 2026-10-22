@@ -171,14 +171,13 @@ impl TranslationStream {
                 }
                 if let Block::ToolCall { arguments, .. } = &mut self.decoded_response.blocks[index]
                 {
-                    if arguments.is_empty() {
-                        *arguments = "{}".into();
+                    // The later stop reason distinguishes truncated input from a broken call.
+                    if let Ok(input) = serde_json::from_str::<Value>(arguments) {
+                        if !input.is_object() {
+                            return Err(invalid());
+                        }
+                        self.decoded_response.native_output[native_index]["input"] = input;
                     }
-                    let input = serde_json::from_str::<Value>(arguments).map_err(|_| invalid())?;
-                    if !input.is_object() {
-                        return Err(invalid());
-                    }
-                    self.decoded_response.native_output[native_index]["input"] = input;
                 }
             }
             "message_delta" => {

@@ -14,7 +14,11 @@ pub(super) fn function(tool: &Function, protocol: WireApi) -> AdapterResult<Valu
     } else {
         tool.parameters.clone()
     };
-    if let Some(strict) = tool.strict {
+    // Responses auto-normalizes omitted strict; foreign best-effort tools must opt out.
+    if let Some(strict) = tool
+        .strict
+        .or((protocol == WireApi::Responses).then_some(false))
+    {
         if protocol == WireApi::Gemini && strict {
             return Err(AdapterError::parameter_unsupported());
         }

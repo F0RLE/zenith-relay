@@ -48,7 +48,7 @@ pub(in crate::protocol::adapter::translation) fn decode(
             decode_gemini(upstream_response, protocol, seed, &mut response, invalid)?;
         }
     }
-    validate_calls(&response.blocks)?;
+    validate_calls(&response.blocks, response.finish)?;
     Ok(response)
 }
 
@@ -177,8 +177,10 @@ fn decode_chat_completion(
                 name: required_text(function, "name")
                     .map_err(|_| invalid())?
                     .into(),
-                arguments: required_text(function, "arguments")
-                    .map_err(|_| invalid())?
+                arguments: function
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .ok_or_else(invalid)?
                     .into(),
             });
         }
@@ -273,8 +275,10 @@ fn decode_responses(
                 name: required_text(response_item, "name")
                     .map_err(|_| invalid())?
                     .into(),
-                arguments: required_text(response_item, "arguments")
-                    .map_err(|_| invalid())?
+                arguments: response_item
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .ok_or_else(invalid)?
                     .into(),
             }),
             Some("custom_tool_call") => response.blocks.push(Block::ToolCall {

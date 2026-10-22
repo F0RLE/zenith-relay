@@ -282,14 +282,16 @@ impl TranslationRequest {
                 }
             }
         }
-        continuation.history_key = Some(continuation::history_key(
-            self.client,
-            &self.model,
-            continuation
-                .portable_history
-                .as_deref()
-                .expect("portable history"),
-        )?);
+        if continuation.reusable {
+            continuation.history_key = Some(continuation::history_key(
+                self.client,
+                &self.model,
+                continuation
+                    .portable_history
+                    .as_deref()
+                    .expect("portable history"),
+            )?);
+        }
         Ok(TranslatedResponse {
             response_body,
             response_id: self.response_id.clone(),
@@ -310,7 +312,13 @@ impl TranslationRequest {
                 .get(name)
                 .is_some_and(|target| target.kind == ResponsesToolKind::Custom)
             {
-                *arguments = tool_arguments::normalize(arguments, complete);
+                match tool_arguments::normalize(arguments, complete) {
+                    std::borrow::Cow::Borrowed(prefix) => {
+                        let retained = prefix.len();
+                        arguments.truncate(retained);
+                    }
+                    std::borrow::Cow::Owned(normalized) => *arguments = normalized,
+                }
             }
         }
     }

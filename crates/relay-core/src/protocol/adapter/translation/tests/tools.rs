@@ -2,6 +2,57 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn responses_upstream_preserves_foreign_tool_strict_defaults_and_optional_fields() {
+    let schema = json!({
+        "type":"object",
+        "properties":{"query":{"type":"string"},"limit":{"type":"integer"}},
+        "required":["query"],
+        "additionalProperties":false
+    });
+    for client in [WireApi::ChatCompletions, WireApi::Messages, WireApi::Gemini] {
+        for strict in [None, Some(false), Some(true)] {
+            if client == WireApi::Gemini && strict.is_some() {
+                continue;
+            }
+            let mut parameters = schema.clone();
+            if strict == Some(true) {
+                parameters["required"] = json!(["query", "limit"]);
+            }
+            let mut request = input(client);
+            let mut declaration = match client {
+                WireApi::ChatCompletions => json!({"name":"lookup","parameters":parameters}),
+                WireApi::Messages => json!({"name":"lookup","input_schema":parameters}),
+                WireApi::Gemini => json!({"name":"lookup","parametersJsonSchema":parameters}),
+                _ => unreachable!(),
+            };
+            if let Some(strict) = strict {
+                declaration["strict"] = strict.into();
+            }
+            request["tools"] = match client {
+                WireApi::ChatCompletions => json!([{"type":"function","function":declaration}]),
+                WireApi::Messages => json!([declaration]),
+                WireApi::Gemini => json!([{"functionDeclarations":[declaration]}]),
+                _ => unreachable!(),
+            };
+            for stream in [false, true] {
+                let prepared = prepare(client, WireApi::Responses, &request, stream);
+                let tool = &prepared.upstream_body()["tools"][0];
+                assert_eq!(tool["strict"], strict.unwrap_or(false), "{client:?}");
+                assert_eq!(tool["parameters"], parameters, "{client:?}");
+            }
+            assert_eq!(
+                prepare(client, client, &request, false).upstream_body()["tools"],
+                request["tools"]
+            );
+        }
+    }
+    let native =
+        json!({"input":"test","tools":[{"type":"function","name":"lookup","parameters":schema}]});
+    let prepared = prepare(WireApi::Responses, WireApi::Responses, &native, false);
+    assert!(prepared.upstream_body()["tools"][0].get("strict").is_none());
+}
+
+#[test]
 fn required_tool_choices_reject_text_only_success_without_rejecting_limits_or_refusals() {
     for client in WireApi::ALL {
         for named in [false, true] {

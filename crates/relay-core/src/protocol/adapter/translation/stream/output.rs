@@ -49,7 +49,7 @@ impl TranslationStream {
             let current = &self.decoded_response.blocks[block_index];
             if matches!(
                 current,
-                Block::Text(_) | Block::Reasoning(_) | Block::Refusal(_)
+                Block::Text(_) | Block::Reasoning(_) | Block::Refusal(_) | Block::ToolCall { .. }
             ) {
                 let previous = self.emitted.get(block_index);
                 if self.translation_request.client == WireApi::Messages {
@@ -63,22 +63,27 @@ impl TranslationStream {
                     continue;
                 }
             }
-            let mut block = self.decoded_response.blocks[block_index].clone();
-            self.translation_request
-                .normalize_function_arguments(&mut block, upstream_finished);
             if !upstream_finished
                 && self.translation_request.client == WireApi::Responses
-                && matches!(&block, Block::ToolCall { name, .. } if self.translation_request.client_tools.get(name).is_some_and(|target| target.kind == ResponsesToolKind::ToolSearch))
+                && matches!(current, Block::ToolCall { name, .. } if self.translation_request.client_tools.get(name).is_some_and(|target| target.kind == ResponsesToolKind::ToolSearch))
             {
                 break;
             }
             // Gemini patches JSON objects rather than appending JSON text.
             // Emit each assembled call once its upstream response is terminal.
             if self.translation_request.upstream == WireApi::Gemini
-                && matches!(block, Block::ToolCall { .. })
+                && matches!(current, Block::ToolCall { .. })
                 && !upstream_finished
             {
                 break;
+            }
+            let mut block = current.clone();
+            self.translation_request
+                .normalize_function_arguments(&mut block, upstream_finished);
+            if self.translation_request.client != WireApi::Messages
+                && self.emitted.get(block_index) == Some(&block)
+            {
+                continue;
             }
             let previous_block = self.emitted.get(block_index).cloned();
             if self.translation_request.client == WireApi::Messages
@@ -96,7 +101,10 @@ impl TranslationStream {
                     arguments,
                 } = &block
                 {
-                    if id.is_empty() || name.is_empty() || arguments.is_empty() {
+                    if id.is_empty()
+                        || name.is_empty()
+                        || (arguments.is_empty() && !upstream_finished)
+                    {
                         break;
                     }
                     self.translation_request.validate_tool_call(id, name)?;

@@ -82,7 +82,7 @@ pub(super) fn bridge_adapter_stream(
                     || stream_state.bridge.pop_output(),
                     preserved_error.as_ref(),
                 );
-                if let Some(response) = stream_state.bridge.completed().cloned() {
+                if let Some(response) = stream_state.bridge.take_completed() {
                     *crate::poison::mutex(&stream_state.completed) = Some(response);
                 }
                 if stream_state.bridge.is_terminal() {
@@ -100,5 +100,86 @@ fn queue_bridge_output(
 ) {
     while let Some(bytes) = next_output() {
         pending.push_back(Bytes::from(rewrite_bridge_failure(bytes, error)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        AdapterRequestContext, CacheWriteTtl, MessagesReasoningMode, SourceAdapter, WireApi,
+    };
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn completed_bridge_response_moves_body_and_continuation_without_cloning() {
+        let request = json!({"input":"Synthetic input"});
+        let mut bridge = SourceAdapter::between(WireApi::Responses, WireApi::Messages)
+            .unwrap()
+            .prepare_request(AdapterRequestContext {
+                client_wire_api: WireApi::Responses,
+                request: &request,
+                model: "test",
+                stream: true,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: CacheWriteTtl::Provider,
+                previous: None,
+                response_scope: "synthetic-source",
+                response_id_seed: "synthetic-request",
+            })
+            .unwrap()
+            .into_stream_bridge()
+            .unwrap();
+        assert!(bridge.take_completed().is_none());
+        for event in [
+            json!({"type":"message_start","message":{"id":"msg_test","content":[],"usage":{"input_tokens":3}}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"Synthetic reasoning","signature":"synthetic-signature"}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"content_block_start","index":1,"content_block":{"type":"text","text":"Hi"}}),
+            json!({"type":"content_block_stop","index":1}),
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}),
+            json!({"type":"message_stop"}),
+        ] {
+            bridge.push(format!("data: {event}\n\n").as_bytes());
+        }
+        let response = bridge.completed().expect("synthetic stream completes");
+        let body_pointer = response.response_body["output"][1]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .as_ptr();
+        let continuation_pointer = response.continuation.model().as_ptr();
+        let completed = Arc::new(Mutex::new(None));
+        let forwarded = bridge_adapter_stream(
+            Bytes::new(),
+            Box::pin(stream::pending()),
+            bridge,
+            completed.clone(),
+        );
+        let frames = tokio::time::timeout(Duration::from_secs(5), forwarded.collect::<Vec<_>>())
+            .await
+            .expect("terminal bridge must not poll the remaining upstream");
+        let wire = String::from_utf8(
+            frames
+                .into_iter()
+                .flat_map(|frame| frame.unwrap())
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(wire.matches("event: response.completed\n").count(), 1);
+        let response = crate::poison::mutex(&completed).take().unwrap();
+        assert_eq!(response.response_body["usage"]["input_tokens"], 3);
+        assert_eq!(response.response_body["usage"]["output_tokens"], 2);
+        assert_eq!(
+            response.response_body["output"][1]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .as_ptr(),
+            body_pointer
+        );
+        assert_eq!(response.continuation.model().as_ptr(), continuation_pointer);
+        assert_eq!(response.continuation.model(), "test");
+        assert_eq!(response.continuation.upstream_wire_api(), WireApi::Messages);
+        assert!(response.continuation.is_reusable());
+        assert!(crate::poison::mutex(&completed).is_none());
     }
 }

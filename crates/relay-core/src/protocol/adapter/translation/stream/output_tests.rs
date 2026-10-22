@@ -164,6 +164,130 @@ fn unchanged_messages_blocks_still_close_and_closed_mutations_fail() {
 }
 
 #[test]
+fn unchanged_tool_arguments_keep_their_emitted_buffer_on_later_events() {
+    for (client, decimal) in [
+        (WireApi::Responses, false),
+        (WireApi::ChatCompletions, false),
+        (WireApi::Gemini, false),
+        (WireApi::Responses, true),
+    ] {
+        let upstream = if client == WireApi::ChatCompletions {
+            WireApi::Messages
+        } else {
+            WireApi::ChatCompletions
+        };
+        let mut stream = stream(client, upstream);
+        stream
+            .translation_request
+            .allowed_tool_names
+            .insert("lookup".into());
+        stream.decoded_response.blocks = vec![Block::ToolCall {
+            id: "call_synthetic".into(),
+            name: "lookup".into(),
+            arguments: format!(
+                "{{\"payload\":\"{}\",\"count\":{}}}",
+                "x".repeat(64 * 1024),
+                if decimal { "1000.0" } else { "1000" }
+            ),
+        }];
+        stream.emit_changes(false).unwrap();
+        while stream.pop_output().is_some() {}
+        let Block::ToolCall { arguments, .. } = &stream.emitted[0] else {
+            unreachable!()
+        };
+        assert!(arguments.ends_with("\"count\":1000}"));
+        let pointer = arguments.as_ptr();
+        for _ in 0..3 {
+            stream.emit_changes(false).unwrap();
+            let Block::ToolCall { arguments, .. } = &stream.emitted[0] else {
+                unreachable!()
+            };
+            assert_eq!(arguments.as_ptr(), pointer, "{client:?}, decimal={decimal}");
+            assert!(stream.pop_output().is_none());
+        }
+        stream
+            .decoded_response
+            .blocks
+            .push(Block::Text("tail".into()));
+        stream.emit_changes(false).unwrap();
+        let Block::ToolCall { arguments, .. } = &stream.emitted[0] else {
+            unreachable!()
+        };
+        assert_eq!(arguments.as_ptr(), pointer);
+        let wire = String::from_utf8(
+            std::iter::from_fn(|| stream.pop_output())
+                .flatten()
+                .collect(),
+        )
+        .unwrap();
+        assert!(wire.contains("tail"));
+        assert!(!wire.contains("lookup"));
+        let mut fresh = stream.decoded_response.blocks[0].clone();
+        let Block::ToolCall { id, .. } = &mut fresh else {
+            unreachable!()
+        };
+        *id = "call_synthetic_next".into();
+        stream.decoded_response.blocks.push(fresh);
+        stream.emit_changes(false).unwrap();
+        assert_eq!(stream.emitted.len(), 3);
+        let Block::ToolCall { id, arguments, .. } = &stream.emitted[2] else {
+            unreachable!()
+        };
+        assert_eq!(id, "call_synthetic_next");
+        assert!(arguments.ends_with("\"count\":1000}"));
+        let wire = String::from_utf8(
+            std::iter::from_fn(|| stream.pop_output())
+                .flatten()
+                .collect(),
+        )
+        .unwrap();
+        if client != WireApi::Gemini {
+            assert!(wire.contains("call_synthetic_next"));
+        }
+    }
+}
+
+#[test]
+fn unchanged_messages_tool_blocks_close_once_and_reject_later_mutation() {
+    let mut stream = stream(WireApi::Messages, WireApi::ChatCompletions);
+    stream
+        .translation_request
+        .allowed_tool_names
+        .insert("lookup".into());
+    stream.decoded_response.blocks = vec![Block::ToolCall {
+        id: "call_synthetic".into(),
+        name: "lookup".into(),
+        arguments: "{}".into(),
+    }];
+    stream.emit_changes(false).unwrap();
+    while stream.pop_output().is_some() {}
+    stream.closed.insert(0);
+    stream.emit_changes(false).unwrap();
+    assert_eq!(stream.finished_message_blocks, 1);
+    let Block::ToolCall { arguments, .. } = &stream.emitted[0] else {
+        unreachable!()
+    };
+    let pointer = arguments.as_ptr();
+    stream.emit_changes(false).unwrap();
+    let Block::ToolCall { arguments, .. } = &stream.emitted[0] else {
+        unreachable!()
+    };
+    assert_eq!(arguments.as_ptr(), pointer);
+    let wire = String::from_utf8(
+        std::iter::from_fn(|| stream.pop_output())
+            .flatten()
+            .collect(),
+    )
+    .unwrap();
+    assert_eq!(wire.matches("event: content_block_stop\n").count(), 1);
+    let Block::ToolCall { arguments, .. } = &mut stream.decoded_response.blocks[0] else {
+        unreachable!()
+    };
+    *arguments = "{\"changed\":true}".into();
+    assert!(stream.emit_changes(false).is_err());
+}
+
+#[test]
 fn responses_done_snapshots_append_only_missing_text_and_reuse_its_buffer() {
     for client in [WireApi::Messages, WireApi::ChatCompletions, WireApi::Gemini] {
         let mut stream = stream(client, WireApi::Responses);
@@ -239,11 +363,22 @@ fn messages_native_snapshots_finalize_once_and_keep_fragmented_signatures() {
                 format!("prefix{}", " fragment".repeat(64))
             );
         }
+        let native_pointer = stream.decoded_response.native_output.as_ptr();
+        let thinking_pointer = stream.decoded_response.native_output[0]["thinking"]
+            .as_str()
+            .unwrap()
+            .as_ptr();
         stream.push(b"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":9}}\n\ndata: {\"type\":\"message_stop\"}\n\n");
         let completed = stream
             .completed()
             .expect("signed Messages stream completes");
         let native = completed.continuation.native_turns.values().last().unwrap();
+        assert_eq!(native.as_ptr(), native_pointer);
+        assert_eq!(
+            native[0]["thinking"].as_str().unwrap().as_ptr(),
+            thinking_pointer
+        );
+        assert!(stream.decoded_response.native_output.is_empty());
         assert_eq!(native[0]["signature"], "synthetic-opaque-signature");
         assert_eq!(
             native[0]["thinking"],
@@ -253,5 +388,31 @@ fn messages_native_snapshots_finalize_once_and_keep_fragmented_signatures() {
             native[1]["text"],
             format!("prefix{}", " fragment".repeat(64))
         );
+    }
+}
+
+#[test]
+fn function_argument_normalization_reuses_unchanged_and_buffered_string_storage() {
+    let stream = stream(WireApi::Responses, WireApi::ChatCompletions);
+    for (input, complete, expected) in [
+        (r#"{"count":12}"#, true, r#"{"count":12}"#),
+        (r#"{"count":12"#, false, r#"{"count":"#),
+    ] {
+        let mut arguments = input.to_owned();
+        arguments.reserve(64 * 1024);
+        let pointer = arguments.as_ptr();
+        let mut block = Block::ToolCall {
+            id: "call_synthetic".into(),
+            name: "lookup".into(),
+            arguments,
+        };
+        stream
+            .translation_request
+            .normalize_function_arguments(&mut block, complete);
+        let Block::ToolCall { arguments, .. } = block else {
+            unreachable!()
+        };
+        assert_eq!(arguments, expected);
+        assert_eq!(arguments.as_ptr(), pointer);
     }
 }

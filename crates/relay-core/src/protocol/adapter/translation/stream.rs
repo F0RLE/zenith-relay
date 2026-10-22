@@ -128,6 +128,9 @@ impl TranslationStream {
     pub fn completed(&self) -> Option<&TranslatedResponse> {
         self.completed.as_ref()
     }
+    pub(in crate::protocol::adapter) fn take_completed(&mut self) -> Option<TranslatedResponse> {
+        self.completed.take()
+    }
     pub fn is_terminal(&self) -> bool {
         self.terminal
     }
@@ -254,10 +257,23 @@ impl TranslationStream {
         {
             return Err(AdapterError::upstream_stream_invalid());
         }
-        response::validate_calls(&self.decoded_response.blocks)?;
-        let completed_response = self
-            .translation_request
-            .complete(self.decoded_response.clone())?;
+        if self.translation_request.upstream == WireApi::Messages
+            && self.decoded_response.finish == Finish::Tools
+        {
+            for block in &mut self.decoded_response.blocks {
+                if let Block::ToolCall { arguments, .. } = block {
+                    if arguments.is_empty() {
+                        *arguments = "{}".into();
+                    }
+                }
+            }
+        }
+        response::validate_calls(&self.decoded_response.blocks, self.decoded_response.finish)?;
+        let native_output = std::mem::take(&mut self.decoded_response.native_output);
+        let completed_response = self.translation_request.complete(Response {
+            native_output,
+            ..self.decoded_response.clone()
+        })?;
         self.emit_changes(true)?;
         self.emit_end(&completed_response.response_body)?;
         self.completed = Some(completed_response);

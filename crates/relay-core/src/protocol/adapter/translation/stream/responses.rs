@@ -589,8 +589,15 @@ impl TranslationStream {
             return Err(invalid());
         }
         *arguments = final_arguments;
-        response::validate_calls(&[self.decoded_response.blocks[block_index].clone()])
-            .map_err(|_| invalid())
+        response::validate_calls(
+            &[self.decoded_response.blocks[block_index].clone()],
+            if item.get("status").and_then(Value::as_str) == Some("incomplete") {
+                Finish::Length
+            } else {
+                Finish::Tools
+            },
+        )
+        .map_err(|_| invalid())
     }
 
     fn validate_final_item(&self, index: u64, item: &Value) -> AdapterResult<()> {

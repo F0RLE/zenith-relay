@@ -22,7 +22,7 @@ pub(super) fn validate_responses_call_execution(call: &Value) -> AdapterResult<(
     Ok(())
 }
 
-pub(super) fn validate_calls(blocks: &[Block]) -> AdapterResult<()> {
+pub(super) fn validate_calls(blocks: &[Block], finish: Finish) -> AdapterResult<()> {
     let mut call_ids = std::collections::BTreeSet::new();
     for block in blocks {
         if let Block::ToolCall {
@@ -40,12 +40,17 @@ pub(super) fn validate_calls(blocks: &[Block]) -> AdapterResult<()> {
                 return Err(AdapterError::upstream_response_invalid()
                     .with_parameter("tool_calls.function.name"));
             }
-            if serde_json::from_str::<Value>(arguments)
-                .ok()
-                .is_none_or(|args| !args.is_object())
-            {
-                return Err(AdapterError::upstream_response_invalid()
-                    .with_parameter("tool_calls.function.arguments"));
+            match serde_json::from_str::<Value>(arguments) {
+                Ok(args) if args.is_object() => {}
+                Err(error)
+                    if finish == Finish::Length
+                        && error.is_eof()
+                        && (arguments.trim().is_empty()
+                            || arguments.trim_start().starts_with('{')) => {}
+                _ => {
+                    return Err(AdapterError::upstream_response_invalid()
+                        .with_parameter("tool_calls.function.arguments"));
+                }
             }
         }
     }
@@ -319,7 +324,7 @@ pub(super) fn encode(
                         "status": "completed"
                     })
                 } else {
-                    json!({"type":"function_call","id":format!("fc_{}_{index}",response.id),"call_id":id,"name":client_name,"arguments":arguments,"status":"completed"})
+                    json!({"type":"function_call","id":format!("fc_{}_{index}",response.id),"call_id":id,"name":client_name,"arguments":arguments,"status":if serde_json::from_str::<Value>(arguments).is_err() { "incomplete" } else { "completed" }})
                 };
                 if let Some(namespace) = target.and_then(|target| target.namespace.as_deref()) {
                     item["namespace"] = namespace.into();

@@ -42,6 +42,11 @@ impl AdapterStreamBridge {
             Self::Translated(bridge) => bridge.completed(),
         }
     }
+    pub(crate) fn take_completed(&mut self) -> Option<TranslatedResponse> {
+        match self {
+            Self::Translated(bridge) => bridge.take_completed(),
+        }
+    }
     pub fn is_terminal(&self) -> bool {
         match self {
             Self::Translated(bridge) => bridge.is_terminal(),
@@ -140,6 +145,36 @@ data: {"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}],"usageMetad
                 .len(),
             2
         );
+        let native_pointer = bridge.completed().unwrap().continuation.native_turns[&1].as_ptr();
+        let history_pointer = bridge
+            .completed()
+            .unwrap()
+            .continuation
+            .portable_history
+            .as_ref()
+            .unwrap()
+            .as_ptr();
+        let completed = bridge.take_completed().unwrap();
+        assert_eq!(
+            completed.continuation.native_turns[&1].as_ptr(),
+            native_pointer
+        );
+        assert_eq!(
+            completed
+                .continuation
+                .portable_history
+                .as_ref()
+                .unwrap()
+                .as_ptr(),
+            history_pointer
+        );
+        assert!(bridge.completed().is_none());
+        assert!(bridge.take_completed().is_none());
+        assert!(bridge.is_terminal());
+        bridge.push(b"data: {}\n\n");
+        bridge.finish();
+        assert!(bridge.pop_output().is_none());
+        assert!(bridge.take_completed().is_none());
     }
 
     #[test]
