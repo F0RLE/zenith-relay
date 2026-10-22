@@ -6,7 +6,7 @@ import type {
 } from "./pricing";
 import type { RefreshStatus } from "./source";
 
-export type OAuthClientKind = "codex" | "excel_bps";
+export type OAuthClientKind = "codex" | "siwc" | "excel_bps";
 
 export type TrashedAccountSummary = {
   id: string;
@@ -15,12 +15,14 @@ export type TrashedAccountSummary = {
 };
 
 export type AccountSummary = {
+  routeGroupId?: string | null;
+  routeInactive?: boolean;
   id: string;
   label: string;
   identityHint: string;
-  /** Shared provider credit ledger; absent on older servers. */
+  /** Shared provider credit ledger when reported by the account transport. */
   creditBalanceKey?: string | null;
-  /** Older records and servers use the Codex client. */
+  /** Older saved accounts use the Codex client. */
   oauthClientKind?: OAuthClientKind;
   basisPointsAvailable?: boolean;
   basisPointsEnabled?: boolean;
@@ -47,10 +49,10 @@ export type AccountSummary = {
   subscription: { planType: string | null; activeUntilMs: number | null; status: string; updatedAtMs: number | null };
   quota: QuotaSnapshot;
   quotaRefreshStatus: "pending" | "refreshing" | "updated" | "failed" | "requires_reauth";
-  /** Optional on older servers; saved values are not assumed fresh after restart. */
+  /** Saved values are not assumed fresh after restart. */
   refreshState?: { models: RefreshStatus; quota: RefreshStatus };
   secretAvailable: boolean;
-  remoteLocation?: { serverId: string; remoteAccountId: string } | null;
+  recoveryRequired?: boolean;
   proxyMode?: "direct" | "common" | "account";
   proxyAvailable?: boolean;
   proxyId?: string | null;
@@ -105,11 +107,6 @@ export type AccountExportResult = {
   path?: string;
 };
 
-export type MoveAccountsToRemoteResult = {
-  moved: number;
-  remoteAccountIds: string[];
-};
-
 export type ImportSession = {
   sessionId: string;
   prepared: boolean;
@@ -159,26 +156,22 @@ export type AccountImportProgress = {
   currentLabel?: string;
 };
 
-export type AccountTransferProgress = {
-  completed: number;
-  total: number;
-  phase: "preparing" | "transferring" | "committing" | "complete";
-  currentAccountId?: string;
-};
-
 export type OAuthFlowStatus = "pending" | "callback_received" | "callback_rejected" | "canceled" | "completed" | "expired" | "failed";
 
 export type OAuthFlow = {
+  /** Renderer-only hint; credentials and automation stay in Rust. */
+  automaticLogin?: boolean;
   loginId: string;
   authorizationUrl: string;
   redirectUri: string;
   expiresAtMs: number;
   status: OAuthFlowStatus;
   targetAccountId?: string;
+  notesAccountId?: string;
   clientKind?: OAuthClientKind;
 };
 
-export type OAuthFlowEvent = Pick<OAuthFlow, "loginId" | "status">;
+export type OAuthFlowEvent = Pick<OAuthFlow, "loginId" | "status" | "automaticLogin">;
 
 export type OAuthCompletion = {
   account: { id: string };

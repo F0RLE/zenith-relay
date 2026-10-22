@@ -7,7 +7,6 @@ import {
 import {
   formatEditableModelPrice,
   parseEditableModelPrice,
-  parseOptionalEditableModelPrice,
 } from "../src/features/relay/modelPricing";
 import type { ModelSummary } from "../src/features/relay/api/types";
 
@@ -114,6 +113,6 @@ describe("model pricing", () => {
     expect(parseEditableModelPrice("1,4")).toBe(1_400_000);
     expect(formatEditableModelPrice(4_200_000)).toBe("4.2");
     expect(parseEditableModelPrice("1.0000001")).toBeNull();
-    expect(parseOptionalEditableModelPrice("")).toBeNull();
+    expect(parseEditableModelPrice("")).toBeNull();
   });
 });

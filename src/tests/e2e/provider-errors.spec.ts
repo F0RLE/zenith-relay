@@ -1,7 +1,7 @@
 import { expect, test } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   for (const narrow of [false, true]) {
     test(`provider error details survive ${mode} usage at ${narrow ? "mobile" : "desktop"} width`, async ({ page }, testInfo) => {
       await page.setViewportSize(narrow ? { width: 390, height: 844 } : { width: 1160, height: 760 });

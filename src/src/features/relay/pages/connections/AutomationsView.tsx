@@ -23,7 +23,7 @@ import {
 
 function AutomationEnabledControl({ task }: { task: WakeTask }) {
   const { t } = useTranslation();
-  const { mode, perform } = useRelayState();
+  const { perform } = useRelayState();
   const pending = usePendingFlag(task.enabled);
   return <ToggleSwitch
     checked={pending.checked}
@@ -31,9 +31,7 @@ function AutomationEnabledControl({ task }: { task: WakeTask }) {
     aria-busy={pending.checked !== task.enabled}
     onChange={(enabled) => pending.select(enabled, () => perform(
       `automation-${task.id}`,
-      () => mode === "local"
-        ? relayCommands.setAutomationEnabled(task.id, enabled)
-        : relayCommands.remoteAction({ type: "update_wake_task", id: task.id }, { ...task, enabled, executionPolicy: "automatic" }),
+      () => relayCommands.setAutomationEnabled(task.id, enabled),
       "feedback.saved",
       { backgroundRefresh: true, uiLock: false },
     ))}
@@ -42,7 +40,7 @@ function AutomationEnabledControl({ task }: { task: WakeTask }) {
 
 export function AutomationsList({ onEdit }: { onEdit: (task: WakeTask) => void }) {
   const { t } = useTranslation();
-  const { mode, runtime, perform } = useRelayState();
+  const { runtime, perform } = useRelayState();
   const confirm = useConfirm();
   if (!runtime?.automations.length) {
     return <EmptyState title={t("automations.emptyTitle")} description={t("automations.emptyDescription")} />;
@@ -79,7 +77,7 @@ export function AutomationsList({ onEdit }: { onEdit: (task: WakeTask) => void }
                         icon={<Trash2 aria-hidden />}
                         onClick={() => void confirm(t("automations.deleteConfirm"), { danger: true }).then((accepted) => accepted && perform(
                           `delete-${task.id}`,
-                          () => mode === "local" ? relayCommands.deleteAutomation(task.id) : relayCommands.remoteAction({ type: "delete_wake_task", id: task.id }),
+                          () => relayCommands.deleteAutomation(task.id),
                           "feedback.deleted",
                           { backgroundRefresh: true },
                         ))}
@@ -157,18 +155,12 @@ export function AutomationDialog({ task, onClose }: { task: WakeTask | null; onC
   if (!modelOptions.length) modelOptions.push({ value: "", label: t("automations.noPoolModels") });
   const save = async () => {
     if (!valid) return;
-    const now = Date.now();
-    const submission = buildAutomationSubmission({ task, automationName, triggerKind, selectorKind, accountIds, selectedModel, nowMs: now });
+    const submission = buildAutomationSubmission({ task, automationName, triggerKind, selectorKind, accountIds, selectedModel });
     const ok = await perform(
       submission.operationId,
-      () => mode === "local"
-        ? task
-          ? relayCommands.updateAutomation(task.id, submission.base)
-          : relayCommands.createAutomation(submission.base)
-        : relayCommands.remoteAction(
-          { type: task ? "update_wake_task" : "create_wake_task", ...(task ? { id: task.id } : {}) },
-          submission.remoteInput,
-        ),
+      () => task
+        ? relayCommands.updateAutomation(task.id, submission.base)
+        : relayCommands.createAutomation(submission.base),
       task ? "feedback.saved" : "feedback.automationAdded",
       { backgroundRefresh: true },
     );

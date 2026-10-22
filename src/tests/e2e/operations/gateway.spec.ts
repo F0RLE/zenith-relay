@@ -12,9 +12,9 @@ test("application chrome is not text-selectable", async ({ page }) => {
   await expect(page.locator("input").first()).toHaveCSS("user-select", "text");
 });
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
 test(`${mode} WebSocket changes require confirmation in both directions`, async ({ page }) => {
-  await installTauriMock(page, { mode, locale: "en", populated: true, remoteFeatures: ["codex_websockets"] });
+  await installTauriMock(page, { mode, locale: "en", populated: true });
   await page.goto("/");
   await openGatewayApplication(page);
 
@@ -41,11 +41,10 @@ test(`${mode} WebSocket changes require confirmation in both directions`, async 
   await expect(settings.getByText("Enabled", { exact: true })).toBeVisible();
 
   const websocketCalls = await page.evaluate(() => (window as unknown as {
-    __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { enabled?: boolean; action?: { type: string }; payload?: { enabled: boolean } } } }>;
+    __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { enabled?: boolean } } }>;
   }).__TAURI_TEST_INVOKES__
-    .filter((call) => call.command === "set_local_codex_websockets"
-      || call.command === "execute_remote_server_action" && call.args.input?.action?.type === "set_codex_websockets")
-    .map((call) => call.args.input?.enabled ?? call.args.input?.payload?.enabled));
+    .filter((call) => call.command === "set_local_codex_websockets")
+    .map((call) => call.args.input?.enabled));
   expect(websocketCalls).toEqual([false, true]);
   const restarts = await page.evaluate(() => (window as unknown as {
     __TAURI_TEST_INVOKES__: Array<{ command: string }>;
@@ -54,29 +53,10 @@ test(`${mode} WebSocket changes require confirmation in both directions`, async 
 });
 }
 
-for (const failure of ["profile", "restart"] as const) {
-  test(`remote WebSocket ${failure} failure preserves consistent saved settings`, async ({ page }) => {
-    await installTauriMock(page, { mode: "remote", locale: "en", populated: true,
-      remoteFeatures: ["codex_websockets"], codexWebsocketsEnabled: false, codexWebsocketsFailure: failure });
-    await page.goto("/");
-    await openGatewayApplication(page);
-    const websocket = page.getByRole("checkbox", { name: "Use WebSocket in ChatGPT" });
-    await websocket.click();
-    await page.getByRole("dialog", { name: "Restart ChatGPT" }).getByRole("button", { name: "Apply and restart" }).click();
-    await expect(page.locator(".global-feedback.error")).toBeVisible();
-    await expect(websocket).toBeChecked({ checked: failure === "restart" });
-    const calls = await page.evaluate(() => (window as unknown as {
-      __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { action?: { type: string }; payload?: { enabled: boolean } } } }>;
-    }).__TAURI_TEST_INVOKES__);
-    expect(calls.filter((call) => call.command === "execute_remote_server_action" && call.args.input?.action?.type === "set_codex_websockets")
-      .map((call) => call.args.input?.payload?.enabled)).toEqual(failure === "profile" ? [true, false] : [true]);
-    expect(calls.some((call) => call.command === "stop_managed_codex_profile")).toBe(failure === "restart");
-  });
-}
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`${mode} API route recovery switch saves and retains its state`, async ({ page }) => {
-    await installTauriMock(page, { mode, locale: "en", populated: true, remoteFeatures: ["route_recovery_v1"] });
+    await installTauriMock(page, { mode, locale: "en", populated: true });
     await page.goto("/");
     await openGatewayApi(page);
     const recovery = page.getByRole("checkbox", { name: "Wait for route recovery", exact: true });
@@ -90,20 +70,13 @@ for (const mode of ["local", "remote"] as const) {
     await recovery.click();
     await expect(recovery).not.toBeChecked();
     const values = await page.evaluate(() => (window as unknown as {
-      __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { enabled?: boolean; action?: { type: string }; payload?: { enabled: boolean } } } }>;
-    }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_local_chatgpt_retry_until_available"
-      || call.command === "execute_remote_server_action" && call.args.input?.action?.type === "set_chatgpt_retry_until_available")
-      .map((call) => call.args.input?.enabled ?? call.args.input?.payload?.enabled));
+      __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { enabled?: boolean } } }>;
+    }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_local_chatgpt_retry_until_available")
+      .map((call) => call.args.input?.enabled));
     expect(values).toEqual([true, false]);
   });
 }
 
-test("old remote server does not advertise cross-protocol route recovery", async ({ page }) => {
-  await installTauriMock(page, { mode: "remote", locale: "en", populated: true, remoteFeatures: ["chatgpt_retry_until_available"] });
-  await page.goto("/");
-  await openGatewayApi(page);
-  await expect(page.getByRole("checkbox", { name: "Wait for route recovery" })).toHaveCount(0);
-});
 
 test("API degraded-route switch is on for ChatGPT accounts and saves immediately", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
@@ -124,7 +97,7 @@ test("API degraded-route switch is on for ChatGPT accounts and saves immediately
 });
 
 test("local commands are reachable from the operational UI", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true, codexBindings: false, importDescription: "# Seller package\n\n- Two Business accounts" });
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountOAuthClientKind: "excel_bps", importDescription: "# Seller package\n\n- Two Business accounts" });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await expect(page.getByRole("tab", { name: "Accounts" })).toBeVisible();
@@ -159,8 +132,10 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await page.getByRole("button", { name: "Sign in" }).first().click();
   const oauthDialog = page.getByRole("dialog", { name: "Sign in" });
   await expect(oauthDialog.getByText("Time remaining", { exact: true })).toBeVisible();
+  await expect(oauthDialog.getByRole("radio", { name: "Codex", exact: true })).toBeChecked();
+  await oauthDialog.getByText("ChatGPT (SIWC)", { exact: true }).click();
   await expect(oauthDialog.getByRole("button", { name: "Copy sign-in link" })).toBeVisible();
-  const open = oauthDialog.getByRole("button", { name: "Open sign-in window" });
+  const open = oauthDialog.getByRole("button", { name: "Open sign-in window", exact: true });
   await expect(open).toBeEnabled();
   await open.click();
   const reopen = oauthDialog.getByRole("button", { name: /Open again in|Reopen sign-in window/ });
@@ -183,7 +158,7 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await expect(imported).toBeChecked();
   await expect(secondImported).toBeChecked();
   await expect(existing).not.toBeChecked();
-  await importDialog.getByLabel("Add selected to pool after import").check();
+  await importDialog.getByLabel("Add selected to pool after import", { exact: true }).check();
   await expect(importDialog.getByLabel("Assign a stored proxy")).not.toBeChecked();
   await importDialog.getByRole("button", { name: "Import 2 account(s)" }).click();
   await expect(page.getByRole("dialog", { name: "Add a regular account to the pool?", exact: true })).toHaveCount(0);
@@ -243,7 +218,7 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
 
   await openGatewayApi(page);
   await expect(page.locator(".gateway-api-connection-panel")).toBeVisible();
-  await page.locator(".integration-section-actions .relay-action-menu summary").click();
+  await page.locator(".gateway-api-controls .relay-action-menu summary").click();
   await page.getByRole("menuitem", { name: "Restart API" }).click();
   await page.getByRole("spinbutton", { name: "Port" }).fill("15001");
   await page.getByRole("spinbutton", { name: "Port" }).press("Enter");
@@ -366,7 +341,7 @@ test("reset rejection uses redacted diagnostics and leaves the credit available"
   await expect(page.getByRole("button", { name: "Reset available: 1 · Reset weekly quota", exact: true })).toBeEnabled();
 });
 
-test("secret fields expose only the themed reveal control", async ({ page }) => {
+test("secret fields expose themed copy and reveal controls without native duplicates", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
@@ -374,10 +349,19 @@ test("secret fields expose only the themed reveal control", async ({ page }) => 
   await page.getByRole("button", { name: "Add source", exact: true }).click();
   await page.getByRole("radio", { name: /^OpenAI/ }).click();
   await expect(page.locator(".secret-field")).toHaveCount(1);
-  await expect(page.locator(".secret-field > button")).toHaveCount(1);
+  await expect(page.locator(".secret-field-actions button")).toHaveCount(2);
+  await expect(page.locator(".secret-field-actions button[aria-pressed]")).toHaveCount(1);
+  await expect(page.locator(".secret-field-actions button[data-copied]")).toBeDisabled();
+  const secret = page.locator(".secret-field input");
+  await secret.fill("synthetic-api-key");
+  await secret.press("ControlOrMeta+A");
+  await secret.press("ControlOrMeta+C");
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("synthetic-api-key");
+  await page.locator(".secret-field-actions button[data-copied]").click();
+  await expect(secret).toHaveAttribute("type", "password");
 });
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`${mode} mixed rotation reorders accounts and API providers and retains weights`, async ({ page }) => {
     await installTauriMock(page, { mode, locale: "en", populated: true, sourceCount: 2 });
     await page.goto("/");

@@ -29,7 +29,6 @@ export type SourceProtocolConfig = {
   endpointHint?: SourceWireApi | null;
 };
 
-export type SourceProbeInput = { modelId: string; wireApi: SourceWireApi; expectedRevision: number };
 export type MessagesReasoningMode = "disabled" | "budget" | "adaptive";
 export type CacheWriteTtl = "provider" | "5m" | "1h";
 
@@ -72,9 +71,9 @@ export type SourceSummary = {
   apiEquivalent: ApiEquivalentSummary;
   secretAvailable: boolean;
   lastErrorCode: string | null;
-  /** Non-secret scope for cached provider observations; absent on older servers. */
+  /** Non-secret revision of cached provider observations. */
   refreshRevision?: number | null;
-  /** Optional on older servers; models and balance have independent freshness. */
+  /** Models and balance have independent freshness. */
   refreshState?: { models: RefreshStatus; balance: RefreshStatus };
   /** Host runtime cache only; reading snapshots does not poll a provider. */
   providerStats?: SourceStats | null;

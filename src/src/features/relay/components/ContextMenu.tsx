@@ -3,6 +3,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
+import { copyText } from "./ui/clipboard";
 
 type TextField = HTMLInputElement | HTMLTextAreaElement;
 
@@ -27,18 +28,10 @@ function textFieldFrom(target: EventTarget | null): TextField | null {
 
 async function writeClipboard(text: string) {
   try {
-    await navigator.clipboard.writeText(text);
+    await copyText(text);
     return true;
   } catch {
-    const fallback = document.createElement("textarea");
-    fallback.value = text;
-    fallback.style.position = "fixed";
-    fallback.style.opacity = "0";
-    document.body.appendChild(fallback);
-    fallback.select();
-    const copied = document.execCommand("copy");
-    fallback.remove();
-    return copied;
+    return false;
   }
 }
 
@@ -139,9 +132,8 @@ export function AppContextMenu() {
       const field = textFieldFrom(event.target);
       const selectionStart = field?.selectionStart ?? 0;
       const selectionEnd = field?.selectionEnd ?? selectionStart;
-      const protectsPassword = field instanceof HTMLInputElement && field.type === "password";
       const text = field
-        ? protectsPassword ? "" : field.value.slice(selectionStart, selectionEnd)
+        ? field.value.slice(selectionStart, selectionEnd)
         : window.getSelection()?.toString() ?? "";
       if (!field && !text) {
         setContext(null);

@@ -3,7 +3,7 @@ import type { RuntimeSnapshot } from "../../src/features/relay/api/types";
 import { installTauriMock } from "./tauri-mock";
 import { openPoolRotation } from "./pool-rotation";
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`${mode} rotation rebases a racing save on current membership and settings`, async ({ page }) => {
     await installTauriMock(page, { mode, locale: "en", populated: true, sourceCount: 2 });
     await page.goto("/");
@@ -13,18 +13,18 @@ for (const mode of ["local", "remote"] as const) {
       const invoke = scope.__TAURI_INTERNALS__.invoke;
       scope.__routingAttempts = 0;
       scope.__TAURI_INTERNALS__.invoke = async (command, args) => {
-        const isSave = command === "update_local_routing" || (command === "execute_remote_server_action" && args?.input?.action?.type === "set_routing_policy");
+        const isSave = command === "update_local_routing";
         if (isSave && ++scope.__routingAttempts === 1) {
           const membership = { accountIds: ["account_synthetic"], sourceIds: [], inPool: false };
-          await invoke(mode === "local" ? "set_local_pool_membership" : "execute_remote_server_action", {
-            input: mode === "local" ? membership : { action: { type: "set_pool_membership" }, payload: membership },
+          await invoke("set_local_pool_membership", {
+            input: membership,
           });
-          const runtime = await invoke(mode === "local" ? "get_local_runtime_state" : "get_remote_server_state") as RuntimeSnapshot;
+          const runtime = await invoke("get_local_runtime_state") as RuntimeSnapshot;
           const current = runtime.gateway.poolRouting!;
-          const payload = { ...(mode === "local" ? args.input : args.input.payload), expectedPoolRouting: current,
+          const payload = { ...args.input, expectedPoolRouting: current,
             poolRouting: { ...current, members: current.members.map((member) => ({ ...member, weight: 9 })) },
             maxRetryCandidates: 5, defaultServiceTier: "fast" };
-          await invoke(command, { input: mode === "local" ? payload : { action: { type: "set_routing_policy" }, payload } });
+          await invoke(command, { input: payload });
         }
         return invoke(command, args);
       };
@@ -35,7 +35,7 @@ for (const mode of ["local", "remote"] as const) {
     await expect(dialog.getByRole("listitem")).toHaveCount(2);
     const saved = await page.evaluate(async (mode) => {
       const scope = window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string) => Promise<RuntimeSnapshot> }; __routingAttempts: number };
-      return { runtime: await scope.__TAURI_INTERNALS__.invoke(mode === "local" ? "get_local_runtime_state" : "get_remote_server_state"), attempts: scope.__routingAttempts };
+      return { runtime: await scope.__TAURI_INTERNALS__.invoke("get_local_runtime_state"), attempts: scope.__routingAttempts };
     }, mode);
     expect(saved.attempts).toBe(2);
     expect(saved.runtime.gateway.poolRouting).toMatchObject({ mode: "round_robin", members: [{ kind: "source", weight: 9 }, { kind: "source", weight: 9 }] });

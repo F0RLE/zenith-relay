@@ -5,14 +5,14 @@ import type { RequestTimezonePolicy } from "../api/types";
 import { useRelayState } from "../state/RelayStateProvider";
 import type { PerformOptions } from "../state/relayOperationModel";
 
-export const DEFAULT_REQUEST_TIMEZONE_POLICY: RequestTimezonePolicy = {
+const DEFAULT_REQUEST_TIMEZONE_POLICY: RequestTimezonePolicy = {
   enabled: false,
   accountTimezones: {},
   accountTimezoneBindings: {},
   accountTimezoneSources: {},
 };
 
-export function normalizeRequestTimezonePolicy(
+function normalizeRequestTimezonePolicy(
   policy: Partial<RequestTimezonePolicy> | undefined,
 ): RequestTimezonePolicy {
   return {
@@ -29,12 +29,9 @@ export function useRequestTimezone() {
   const policy = runtime?.gateway.requestTimezone
     ? normalizeRequestTimezonePolicy(runtime.gateway.requestTimezone)
     : DEFAULT_REQUEST_TIMEZONE_POLICY;
-  const supported = Boolean(runtime) && (mode === "local"
-    || (mode === "remote" && runtime?.capabilities.features.includes("request_timezone_v1")));
+  const supported = Boolean(runtime) && mode === "local";
   const loadCatalog = useCallback(async () => {
-    const catalog = mode === "local"
-      ? await relayCommands.requestTimezoneCatalog()
-      : await relayCommands.remoteAction({ type: "request_timezone_catalog" });
+    const catalog = await relayCommands.requestTimezoneCatalog();
     if (!Array.isArray(catalog) || !catalog.length || !catalog.every((zone): zone is string => typeof zone === "string" && zone.length > 0)) {
       throw new Error(t("gateway.timezone.catalogUnavailable"));
     }
@@ -42,9 +39,7 @@ export function useRequestTimezone() {
   }, [mode, t]);
   const persist = (next: RequestTimezonePolicy, expectedPolicy = policy, options?: PerformOptions) => perform("request-timezone", () => {
     const input = { policy: next, expectedPolicy };
-    return mode === "local"
-      ? relayCommands.setRequestTimezone(input)
-      : relayCommands.remoteAction({ type: "set_request_timezone" }, input);
+    return relayCommands.setRequestTimezone(input);
   }, "feedback.saved", { backgroundRefresh: true, ...options });
   return { supported, policy, busy, loadCatalog, persist };
 }

@@ -99,7 +99,6 @@ describe("automation model", () => {
       selectorKind: "account_ids",
       accountIds: ["one"],
       selectedModel: "gpt-5.4",
-      nowMs: 123,
     });
     expect(submission.operationId).toBe("automation-create");
     expect(submission.base).toMatchObject({
@@ -109,7 +108,6 @@ describe("automation model", () => {
       executionPolicy: "automatic",
       trigger: { kind: "weekly" },
     });
-    expect(submission.remoteInput).toMatchObject({ id: "", createdAtMs: 123, updatedAtMs: 123, fallbackSchedule: null });
   });
 
   test("normalizes a legacy manual task and preserves identity and retry settings", () => {
@@ -127,9 +125,8 @@ describe("automation model", () => {
       createdAtMs: 1,
       updatedAtMs: 2,
     };
-    const submission = buildAutomationSubmission({ task, automationName: "New", triggerKind: "quota_full", selectorKind: "all_eligible", accountIds: [], selectedModel: "gpt-5.4", nowMs: 5 });
+    const submission = buildAutomationSubmission({ task, automationName: "New", triggerKind: "quota_full", selectorKind: "all_eligible", accountIds: [], selectedModel: "gpt-5.4" });
     expect(submission.operationId).toBe("automation-update-task-1");
     expect(submission.base).toMatchObject({ name: "New", enabled: false, executionPolicy: "automatic", jitterSeconds: 4, maxAttemptsPerCycle: 3 });
-    expect(submission.remoteInput).toMatchObject({ id: "task-1", createdAtMs: 1, updatedAtMs: 5 });
   });
 });

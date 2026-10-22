@@ -7,6 +7,7 @@ import {
   consumeInterruptedAccountImportConfirmation,
   finishAccountImportConfirmation,
   readLaunchApplicationAfterConnect,
+  readRelayMode,
   readRelayPreference,
   removeRelayPreference,
   writeAccountValueVisibility,
@@ -33,12 +34,28 @@ function fakeStorage(initial: Record<string, string> = {}): RelayStorage & { val
 }
 
 describe("relay preferences", () => {
+  test("retains supported modes and migrates removed modes without changing connections", () => {
+    for (const previous of ["local", "remote", "hosted", "zenith", "invalid"]) {
+      const storage = fakeStorage({
+        "relay.mode": previous,
+        "relay.directSourceId": "source-1",
+        "relay.codexPoolOauthSelection": "account-1",
+      });
+      const expected = previous === "hosted" ? "hosted" : "local";
+      expect(readRelayMode(storage)).toBe(expected);
+      expect(storage.values["relay.mode"]).toBe(expected);
+      expect(storage.values["relay.directSourceId"]).toBeUndefined();
+      expect(storage.values["relay.codexPoolOauthSelection"]).toBe("account-1");
+    }
+    expect(readRelayMode(fakeStorage())).toBe("local");
+  });
+
   test("reads, writes, and removes values through the storage boundary", () => {
     const storage = fakeStorage();
 
     expect(readRelayPreference("relay.mode", "local", storage)).toBe("local");
-    expect(writeRelayPreference("relay.mode", "remote", storage)).toBe(true);
-    expect(readRelayPreference("relay.mode", "local", storage)).toBe("remote");
+    expect(writeRelayPreference("relay.mode", "hosted", storage)).toBe(true);
+    expect(readRelayPreference("relay.mode", "local", storage)).toBe("hosted");
     removeRelayPreference("relay.mode", storage);
     expect(readRelayPreference("relay.mode", "local", storage)).toBe("local");
   });
@@ -58,8 +75,8 @@ describe("relay preferences", () => {
 
     expect(readRelayPreference("relay.mode", "local", unavailable)).toBe("local");
     expect(readLaunchApplicationAfterConnect(unavailable)).toBe(true);
-    expect(() => writeRelayPreference("relay.mode", "remote", unavailable)).not.toThrow();
-    expect(writeRelayPreference("relay.mode", "remote", unavailable)).toBe(false);
+    expect(() => writeRelayPreference("relay.mode", "hosted", unavailable)).not.toThrow();
+    expect(writeRelayPreference("relay.mode", "hosted", unavailable)).toBe(false);
     expect(() => removeRelayPreference("relay.mode", unavailable)).not.toThrow();
   });
 

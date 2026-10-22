@@ -2,7 +2,12 @@ export type CandidateRuntimeSnapshot = {
   candidateId: string;
   kind: "api_source" | "oauth_account";
   available: boolean;
+  /** Runtime quota/rate wait, distinct from unavailable credentials or routes. */
+  quotaWait?: boolean;
+  capacityWait?: boolean;
   nextForNewRequest?: boolean;
+  /** Common scheduler fallback preference; absent when model routes disagree. */
+  selectionRank?: number | null;
   /** Fresh quota/credit evidence from the scheduler; absent on older runtimes. */
   resourceHeadroom?: {
     quotaRemainingBasisPoints: number | null;

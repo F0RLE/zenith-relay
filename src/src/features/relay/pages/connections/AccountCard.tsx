@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import type { HTMLAttributes, ReactNode } from "react";
 import {
   Check,
-  Clock3,
   Download,
   Globe2,
   ListMinus,
@@ -13,7 +12,7 @@ import {
   Power,
   RefreshCw,
   StickyNote,
-  Server,
+  ShieldAlert,
   Square,
   Trash2,
   UserRound,
@@ -23,11 +22,11 @@ import { relayCommands } from "../../api/commands";
 import type { AccountSummary, CandidateRuntimeSnapshot } from "../../api/types";
 import { accountQuotaRefreshState, canLaunchCodexAccount, currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
 import { refreshOneAccountQuota } from "../../accountQuotaRefresh";
+import { accountMetadataHint, accountMetadataIsStale, accountMetadataSources, accountSubscriptionSource } from "../../accountRoutes";
 import {
   AccountBadges,
   ActionMenu,
   ActionMenuItem,
-  Button,
   Dialog,
   IconButton,
   StatusIcon,
@@ -47,6 +46,7 @@ import { usePendingFlag } from "../../state/usePendingFlag";
 import { accountParticipates } from "./accountTableModel";
 import { AccountLoginNotes } from "../../components/AccountLoginNotes";
 import { AccountTokenExpiry } from "../../components/AccountTokenExpiry";
+import { AccountRouteSelector } from "../../components/AccountRouteSelector";
 import { AccountTimezoneDialog } from "../../components/AccountTimezoneDialog";
 import { useRequestTimezone } from "../../hooks/useRequestTimezone";
 import { useConnectionAccountRemoval } from "./accountRemoval";
@@ -55,23 +55,19 @@ type AccountCardProps = {
   account: AccountSummary;
   nowMs: number;
   selected: boolean;
-  canManageProxies: boolean;
-  canExport: boolean;
   canRefreshQuota: boolean;
   runtimeState: CandidateRuntimeSnapshot | undefined;
   onToggleSelected: (accountId: string) => void;
   onShowError: (account: AccountSummary) => void;
   onProxy: (account: AccountSummary) => void;
   onExport: (accountIds: string[]) => void;
-  onReauthenticate: (account: AccountSummary) => void;
+  onReauthenticate: (account: AccountSummary, automatic?: boolean) => void;
 };
 
 export function AccountCard({
   account,
   nowMs,
   selected,
-  canManageProxies,
-  canExport,
   canRefreshQuota,
   runtimeState,
   onToggleSelected,
@@ -80,27 +76,26 @@ export function AccountCard({
   onExport,
   onReauthenticate,
 }: AccountCardProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [notesOpen, setNotesOpen] = useState(false);
   const [timezoneOpen, setTimezoneOpen] = useState(false);
   const { supported: timezoneSupported } = useRequestTimezone();
   const confirm = useConfirm();
   const membershipPending = useRef(false);
   const { mode, runtime, perform, activateCodexProfile, refresh, busy, accountIdentitiesVisible, accountValueVisible } = useRelayState();
-  const { canTrash, remove, openDeleteMenu, permanentDeleteMenu } = useConnectionAccountRemoval();
+  const metadata = accountMetadataSources(account, runtime?.accounts ?? []);
+  const subscription = accountSubscriptionSource(account, runtime?.accounts ?? []);
+  const { remove, openDeleteMenu, permanentDeleteMenu } = useConnectionAccountRemoval();
   const participation = usePendingFlag(accountParticipates(account));
   const enabledFlag = usePendingFlag(account.enabled);
   const participates = participation.checked;
   const accountEnabled = enabledFlag.checked;
-  const onServer = mode === "local" && Boolean(account.remoteLocation);
-  useEffect(() => setTimezoneOpen(false), [mode, account.id, onServer, runtime?.runtimeTarget.serverId, runtime?.runtimeTarget.origin]);
-  const showNotes = mode === "local" && !onServer && account.secretAvailable;
-  const errorCode = onServer
-    ? account.lastErrorCode === "remote_missing" ? "remote_missing" : null
-    : currentAccountErrorCode(account);
-  const remoteMissing = onServer && errorCode === "remote_missing";
+  const recoveryRequired = Boolean(account.recoveryRequired);
+  useEffect(() => setTimezoneOpen(false), [mode, account.id, recoveryRequired]);
+  const showNotes = mode === "local" && !recoveryRequired && account.secretAvailable;
+  const errorCode = recoveryRequired ? null : currentAccountErrorCode(account);
   const operationalStatus = account.operationalStatus;
-  const operationalLabel = remoteMissing ? accountErrorLabel(errorCode, t) : onServer ? t("accounts.onServerHint") : t(`connections.status.${operationalStatus}`);
+  const operationalLabel = recoveryRequired ? t("accounts.recoveryRequiredHint") : t(`connections.status.${operationalStatus}`);
   const modelRetries = upcomingModelRetries(runtimeState, nowMs);
   const firstModelRetry = modelRetries[0];
   const modelRetryHint = firstModelRetry
@@ -120,8 +115,8 @@ export function AccountCard({
   const quotaStatus = accountQuotaRefreshState(account);
   const clientAuthWarning = account.clientAuthStatus === "login_required";
   const displayedErrorCode = quotaStatus === "refreshing" ? null : errorCode;
-  const canLaunch = canLaunchCodexAccount(account) && !onServer;
-  const indicatorTone = onServer
+  const canLaunch = canLaunchCodexAccount(account) && !recoveryRequired;
+  const indicatorTone = recoveryRequired
     ? "info"
     : operationalStatus === "unavailable" || operationalStatus === "disabled"
       ? operationalStatusTone(operationalStatus)
@@ -134,7 +129,7 @@ export function AccountCard({
             : quotaStatus === "pending"
               ? "disabled"
               : runtimeTone ?? operationalStatusTone(operationalStatus);
-  const statusIndicatorLabel = quotaStatus === "updated" ? operationalLabel : `${t(`accounts.quotaRefreshStatus.${quotaStatus}`)} · ${operationalLabel}`;
+  const statusIndicatorLabel = quotaStatus === "updated" || (operationalStatus === "quotaWait" && quotaStatus === "not_available") ? operationalLabel : `${t(`accounts.quotaRefreshStatus.${quotaStatus}`)} · ${operationalLabel}`;
   const indicatorLabel = `${clientAuthWarning ? `${t("accounts.clientAuthWarning")} · ` : ""}${runtimeHint ? `${statusIndicatorLabel} · ${runtimeHint}` : statusIndicatorLabel}`;
 
   const updateParticipation = async (participate: boolean) => {
@@ -153,31 +148,22 @@ export function AccountCard({
       membershipPending.current = false;
     }
   };
-  const returnToComputer = async () => {
-    if (!await confirm(t("accounts.returnToComputerConfirm", { name: account.label }), {
-      title: t("accounts.returnToComputer"),
-      confirmLabel: t("accounts.returnToComputerAction"),
-    })) return;
-    await perform(`return-account-${account.id}`, () => relayCommands.returnAccountToLocal(account.id), "feedback.accountReturnedToComputer", { backgroundRefresh: true });
-  };
   const recoverLocally = async () => {
-    if (!await confirm(t("accounts.forceActivateLocalConfirm", { name: account.label }), {
-      title: t("accounts.forceActivateLocal"),
-      confirmLabel: t("accounts.forceActivateLocalAction"),
+    if (!await confirm(t("accounts.localRecoveryConfirm", { name: account.label }), {
+      title: t("accounts.localRecovery"),
+      confirmLabel: t("accounts.localRecoveryAction"),
       danger: true,
     })) return;
-    await perform(`recover-account-${account.id}`, () => relayCommands.forceActivateRemoteAccountLocally(account.id), "feedback.accountRecoveredLocally", { backgroundRefresh: true });
+    await perform(`recover-account-${account.id}`, () => relayCommands.recoverLocalAccount(account.id), "feedback.accountRecoveredLocally", { backgroundRefresh: true });
   };
   const setEnabled = (enabled: boolean) => enabledFlag.select(enabled, () => perform(
     `enable-${account.id}`,
-    () => mode === "local"
-      ? relayCommands.setAccountEnabled(account.id, enabled)
-      : relayCommands.remoteAction({ type: "update_account", id: account.id }, { enabled }),
+    () => relayCommands.setAccountEnabled(account.id, enabled),
     "feedback.saved",
     { backgroundRefresh: true, uiLock: false },
   ));
   const deleteAccount = async (permanently = false) => {
-    const removed = await remove([account.id], permanently, `delete-${account.id}`, onServer);
+    const removed = await remove([account.id], permanently, `delete-${account.id}`, recoveryRequired);
     if (!removed) await refresh().catch(() => undefined);
   };
 
@@ -193,7 +179,7 @@ export function AccountCard({
             <IconButton
               className="account-kind-icon account-status-button"
               data-status="error"
-              label={accountErrorLabel(displayedErrorCode, t)}
+              label={[accountErrorLabel(displayedErrorCode, t), runtimeHint].filter(Boolean).join(" · ")}
               icon={<UserRound aria-hidden />}
               onClick={() => onShowError(account)}
             />
@@ -203,7 +189,10 @@ export function AccountCard({
               <UserRound aria-hidden />
             </StatusIcon>
           )}
-        details={<div className="account-identity-meta"><AccountBadges planType={account.subscription.planType} oauthClientKind={account.oauthClientKind} unknown={t("common.unknown")} /></div>}
+        details={<div className="account-identity-meta"><AccountBadges planType={metadata.plan.subscription.planType} oauthClientKind={account.oauthClientKind} unknown={t("common.unknown")}
+          planHint={metadata.plan.id !== account.id ? accountMetadataHint(metadata.plan, "plan", nowMs, t, i18n.language) : undefined}
+          planStale={metadata.plan.id !== account.id && accountMetadataIsStale(metadata.plan, "plan", nowMs)}
+          routeControl={<AccountRouteSelector account={account} />} /></div>}
         menu={
           <ActionMenu className="account-row-menu">
             {showNotes ? (
@@ -211,36 +200,31 @@ export function AccountCard({
                 {t("accounts.loginDetails")}
               </ActionMenuItem>
             ) : null}
-            {timezoneSupported && !onServer ? (
+            {timezoneSupported && !recoveryRequired ? (
               <ActionMenuItem icon={<Globe2 aria-hidden />} disabled={Boolean(busy)} onClick={() => setTimezoneOpen(true)}>
                 {t("gateway.timezone.accountTitle")}
               </ActionMenuItem>
             ) : null}
-            {onServer ? (
-              <ActionMenuItem icon={<Download aria-hidden />} disabled={busy === `return-account-${account.id}`} onClick={() => void returnToComputer()}>
-                {t("accounts.returnToComputer")}
-              </ActionMenuItem>
-            ) : null}
-            {onServer ? (
+            {recoveryRequired ? (
               <ActionMenuItem danger icon={<Power aria-hidden />} disabled={busy === `recover-account-${account.id}`} onClick={() => void recoverLocally()}>
-                {t("accounts.forceActivateLocal")}
+                {t("accounts.localRecovery")}
               </ActionMenuItem>
             ) : null}
             <ActionMenuItem
               icon={<Network aria-hidden />}
-              disabled={onServer || !canManageProxies}
+              disabled={recoveryRequired}
               onClick={() => onProxy(account)}
             >
               {t("proxies.proxy")}: {proxyLabel}
             </ActionMenuItem>
             <ActionMenuItem
               icon={<Download aria-hidden />}
-              disabled={!canExport || !account.secretAvailable}
+              disabled={!account.secretAvailable}
               onClick={() => onExport([account.id])}
             >
               {t("accounts.exportOne", { name: account.label })}
             </ActionMenuItem>
-            {!onServer ? (
+            {!recoveryRequired ? (
               <ActionMenuItem icon={<Power aria-hidden />} onClick={() => { void setEnabled(!accountEnabled); }}>
                 {accountEnabled ? t("common.disable") : t("common.enable")}
               </ActionMenuItem>
@@ -248,7 +232,7 @@ export function AccountCard({
             <ActionMenuItem
               danger icon={<Trash2 aria-hidden />} disabled={Boolean(busy)}
               data-relay-context-action
-              title={t(canTrash ? "trash.deleteHint" : "trash.serverUpdateRequired")}
+              title={t("trash.deleteHint")}
               onClick={() => void deleteAccount()}
               onContextMenu={(event) => openDeleteMenu(event, () => void deleteAccount(true))}
             >
@@ -257,8 +241,8 @@ export function AccountCard({
           </ActionMenu>
         }
         actions={<>
-          {onServer ? (
-            <IconButton label={t("accounts.onServerHint")} icon={<Server aria-hidden />} disabled />
+          {recoveryRequired ? (
+            <IconButton label={t("accounts.recoveryRequiredHint")} icon={<ShieldAlert aria-hidden />} disabled />
           ) : canAccountJoinPool(account) ? (
             <IconButton
               className={participates ? "danger" : ""}
@@ -276,20 +260,18 @@ export function AccountCard({
             disabled={!canRefreshQuota || !account.secretAvailable || busy === `connection-account-quota-${account.id}`}
             onClick={() => void perform(
               `connection-account-quota-${account.id}`,
-              () => refreshOneAccountQuota(mode, account.id),
+              () => refreshOneAccountQuota(mode, metadata.quota.id),
               "feedback.refreshed",
               { backgroundRefresh: true },
             )}
           />
-          {mode === "local" ? (
+          {mode === "local" && account.oauthClientKind !== "excel_bps" && account.oauthClientKind !== "siwc" ? (
             <IconButton
               label={t("accounts.launchAccount")}
               icon={<Play aria-hidden />}
               disabled={!canLaunch || busy === `launch-account-${account.id}`}
-              title={onServer
-                ? t("accounts.onServerHint")
-                : account.oauthClientKind === "excel_bps"
-                  ? t("accounts.bpsChatgptSignInUnavailable")
+              title={recoveryRequired
+                ? t("accounts.recoveryRequiredHint")
                 : !account.secretAvailable
                   ? t("accounts.credentialsUnavailable")
                   : !account.enabled
@@ -312,13 +294,8 @@ export function AccountCard({
         </div>
         <AccountProviderQuotaStrip account={account} />
         <AccountTokenExpiry account={account} nowMs={nowMs} />
-        <AccountSubscriptionLine activeUntilMs={account.subscription.activeUntilMs} nowMs={nowMs} />
-        {runtimeHint ? (
-          <div className="account-runtime-line" data-warning={modelRetries.length > 0}>
-            <Clock3 aria-hidden />
-            <span>{runtimeHint}</span>
-          </div>
-        ) : null}
+        <AccountSubscriptionLine activeUntilMs={subscription.subscription.activeUntilMs} nowMs={nowMs}
+          hint={subscription.id !== account.id ? accountMetadataHint(subscription, "plan", nowMs, t, i18n.language) : undefined} />
         {accountValueVisible ? <AccountValueStrip account={account} /> : null}
       </AccountCardLayout>
       {permanentDeleteMenu}
@@ -328,7 +305,6 @@ export function AccountCard({
           className="account-login-dialog"
           title={t("accounts.loginDetails")}
           onClose={() => setNotesOpen(false)}
-          footer={<Button variant="secondary" onClick={() => setNotesOpen(false)}>{t("common.close")}</Button>}
         >
           <AccountLoginNotes accountId={account.id} />
         </Dialog>

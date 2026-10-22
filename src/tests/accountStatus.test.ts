@@ -11,6 +11,21 @@ import {
   transientCandidateTone,
 } from "../src/features/relay/accountStatus";
 
+test("local recovery blocks direct launch even with apparently usable credentials", () => {
+  const pending = account({ recoveryRequired: true });
+  expect(canLaunchCodexAccount(pending)).toBe(false);
+  expect(isCodexOauthAccountEligible(pending)).toBe(false);
+  expect(accountSurfaceTone(pending)).toBe("info");
+});
+
+test("SIWC uses the pool rather than native credential injection and explains missing consent", () => {
+  const siwc = account({ oauthClientKind: "siwc", lastErrorCode: "siwc_plan_use_disabled" });
+  expect(canLaunchCodexAccount(siwc)).toBe(false);
+  expect(isCodexOauthAccountEligible(siwc)).toBe(false);
+  expect(currentAccountErrorCode(siwc)).toBe("siwc_plan_use_disabled");
+  expect(accountErrorTranslationKey("siwc_plan_use_disabled")).toBe("accounts.errors.siwcPlanUseDisabled");
+});
+
 function account(overrides: Partial<AccountSummary> = {}): AccountSummary {
   return {
     id: "account",
@@ -37,7 +52,32 @@ function account(overrides: Partial<AccountSummary> = {}): AccountSummary {
   };
 }
 
+test("SIWC without quota data is not left waiting and preserves real refresh and auth states", () => {
+  const siwc = account({ oauthClientKind: "siwc", quotaRefreshStatus: "pending" });
+  expect(accountQuotaRefreshState(siwc)).toBe("not_available");
+  expect(accountSurfaceTone(siwc)).toBe("ready");
+  expect(accountQuotaRefreshState({ ...siwc, quotaRefreshStatus: "updated" })).toBe("not_available");
+  expect(accountQuotaRefreshState({ ...siwc, quotaRefreshStatus: "refreshing" })).toBe("refreshing");
+  expect(accountQuotaRefreshState({ ...siwc, quotaRefreshStatus: "failed" })).toBe("failed");
+  expect(accountQuotaRefreshState({
+    ...siwc, quotaRefreshStatus: "updated", quota: {
+      ...siwc.quota,
+      primary: { kind: "primary", availableBasisPoints: 7500, explicitlyFull: false, resetAtMs: 5000, windowMinutes: 300, observedAtMs: 1 },
+    },
+  })).toBe("updated");
+  expect(accountQuotaRefreshState({ ...siwc, authState: { state: "requires_reauth", reason: "invalid_grant" } })).toBe("requires_reauth");
+  expect(accountQuotaRefreshState({ ...siwc, oauthClientKind: "codex" })).toBe("pending");
+});
+
 describe("account status policy", () => {
+  test("SIWC quota wait is a warning without inventing missing quota counters", () => {
+    const waiting = account({ oauthClientKind: "siwc", operationalStatus: "quotaWait", quotaRefreshStatus: "pending" });
+    expect(accountSurfaceTone(waiting)).toBe("warning");
+    expect(currentAccountErrorCode(waiting)).toBeNull();
+    expect(accountQuotaRefreshState(waiting)).toBe("not_available");
+    expect(waiting.quota.primary).toBeUndefined();
+  });
+
   test("maps operational and transient scheduler state without treating cooldown as failure", () => {
     expect(operationalStatusTone("rotation")).toBe("ready");
     expect(operationalStatusTone("quotaWait")).toBe("warning");

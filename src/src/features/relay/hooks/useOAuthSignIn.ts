@@ -4,6 +4,7 @@ import { forgetAccountLoginDraft, mergeAccountLoginDraft, takeAccountLoginDraft 
 import type { OAuthClientKind, OAuthCompletion, OAuthFlow, OAuthFlowEvent } from "../api/types";
 import { useRelayState } from "../state/RelayStateProvider";
 import { captureOperationResult } from "../state/relayOperationModel";
+import { applyOAuthFlowEvent } from "../oauthFlowEvent";
 
 export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | Promise<void>) {
   const { perform } = useRelayState();
@@ -13,7 +14,7 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
   const listenerRef = useRef<ReturnType<typeof relayCommands.onOAuthStatus> | null>(null);
   const handlerRef = useRef<(event: OAuthFlowEvent) => void>(() => undefined);
   const finishRef = useRef<(loginId: string) => Promise<boolean>>(async () => false);
-  const latestEventRef = useRef<OAuthFlowEvent | null>(null);
+  const earlyEventsRef = useRef(new Map<string, OAuthFlowEvent>());
   const onCompleteRef = useRef(onComplete);
   const startingRef = useRef(false);
   const completingRef = useRef(false);
@@ -89,22 +90,27 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
 
   handlerRef.current = (event) => {
     if (!mountedRef.current) return;
-    latestEventRef.current = event;
+    if (startingRef.current) {
+      const previous = earlyEventsRef.current.get(event.loginId);
+      earlyEventsRef.current.set(event.loginId, previous ? applyOAuthFlowEvent(previous, event) : event);
+      return;
+    }
     const activeFlow = flowRef.current;
-    if (startingRef.current || !activeFlow || activeFlow.loginId !== event.loginId) return;
-    const updatedFlow = { ...activeFlow, status: event.status };
+    if (!activeFlow || activeFlow.loginId !== event.loginId) return;
+    const updatedFlow = applyOAuthFlowEvent(activeFlow, event);
     flowRef.current = updatedFlow;
     setFlow(updatedFlow);
-    if (event.status === "callback_received") void finishRef.current(event.loginId).catch(() => undefined);
+    if (event.automaticLogin === undefined && event.status === "callback_received") void finishRef.current(event.loginId).catch(() => undefined);
   };
 
-  const start = useCallback(async (openBrowser = true, accountId?: string, proxyId?: string, clientKind?: OAuthClientKind) => {
+  const start = useCallback(async (openBrowser = true, accountId?: string, proxyId?: string, clientKind?: OAuthClientKind, automaticLogin = false, notesAccountId?: string) => {
     if (!mountedRef.current || startingRef.current || completingRef.current || flowRef.current?.status === "callback_received") return false;
     const lifecycle = lifecycleRef.current;
     const isCurrent = () => mountedRef.current && lifecycleRef.current === lifecycle;
     const previous = flowRef.current;
     const requestedClientKind = clientKind ?? previous?.clientKind;
     let previousCancelled = false;
+    earlyEventsRef.current.clear();
     startingRef.current = true;
     setStarting(true);
     if (previous && requestedClientKind && requestedClientKind !== previous.clientKind) {
@@ -126,7 +132,8 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
             forgetAccountLoginDraft(previous.loginId);
           }
           if (!isCurrent()) return undefined;
-          return relayCommands.startOAuth(openBrowser, accountId, proxyId, clientKind);
+          const started = await relayCommands.startOAuth(openBrowser, accountId, proxyId, clientKind, automaticLogin, notesAccountId);
+          return automaticLogin ? { ...started, automaticLogin: started.automaticLogin ?? true } : started;
         },
       );
     } catch {
@@ -135,6 +142,8 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
       startingRef.current = false;
       if (mountedRef.current) setStarting(false);
     }
+    const earlyEvents = earlyEventsRef.current;
+    earlyEventsRef.current = new Map();
     const started = captured.value;
     if (!started) {
       if (previous && previousCancelled && isCurrent()) {
@@ -145,8 +154,8 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
       } else if (previous && isCurrent()) {
         flowRef.current = previous;
         setFlow(previous);
-        const earlyEvent = latestEventRef.current;
-        if (earlyEvent?.loginId === previous.loginId) handlerRef.current(earlyEvent);
+        const earlyEvent = earlyEvents.get(previous.loginId);
+        if (earlyEvent) handlerRef.current(earlyEvent);
       }
       return false;
     }
@@ -155,9 +164,9 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
       await relayCommands.cancelOAuth(started.loginId).catch(() => undefined);
       return false;
     }
-    const earlyEvent = latestEventRef.current;
-    const startedFlow = earlyEvent?.loginId === started.loginId
-      ? { ...started, status: earlyEvent.status }
+    const earlyEvent = earlyEvents.get(started.loginId);
+    const startedFlow = earlyEvent
+      ? { ...started, ...earlyEvent }
       : started;
     flowRef.current = startedFlow;
     setFlow(startedFlow);

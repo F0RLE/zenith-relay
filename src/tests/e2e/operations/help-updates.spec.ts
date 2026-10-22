@@ -43,8 +43,8 @@ for (const guide of [
       await expect(chartTable).toHaveCount(1);
       await expect(chartTable.locator("tbody tr")).toHaveCount(5);
       await expect(document).toContainText(guide.locale === "ru"
-        ? "Relay не требует номера телефона или подтверждения по SMS"
-        : "Relay does not require a phone number or SMS verification");
+        ? "Codex — по умолчанию"
+        : "Codex — the default");
       await chartTable.evaluate((table) => table.scrollIntoView({ block: "start" }));
       await page.screenshot({ path: testInfo.outputPath("help-charts.png") });
       await openContents();

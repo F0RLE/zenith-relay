@@ -1,19 +1,17 @@
 import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, ArrowRight, CircleAlert, Play, RefreshCw, Server, Square, Users } from "lucide-react";
+import { Activity, ArrowRight, CircleAlert, Play, Square, Users } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { LaunchApplication, SourceSummary } from "../../api/types";
-import { Button, EmptyState, OptionMenu, PageHeader } from "../../components/Ui";
+import type { LaunchApplication } from "../../api/types";
+import { Button, EmptyState, PageHeader } from "../../components/Ui";
 import { ApplicationPickerDialog } from "../../components/ApplicationPickerDialog";
-import { SourceStatsPanel } from "../../components/SourceStatsPanel";
-import { useSourceStats } from "../../hooks/useSourceStats";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { useSavedChoice } from "../../state/usePendingFlag";
 import { useRelayUsageContext } from "../../state/relayStateContext";
+import { readRelayPreference, removeRelayPreference, writeRelayPreference } from "../../state/relayPreferences";
 import { emptyUsageTotals, formatCompactNumber } from "../../usageTotals";
-import { sourceHost } from "../../sourceUrl";
 import { getCachedOverviewAnalytics, isOverviewAnalyticsFresh, loadOverviewAnalytics } from "./overviewAnalyticsCache";
-import { analyticsFromPage, chartWindows, DAY_MS, HOUR_MS, localSamples, remoteSamples, type Analytics, type AnalyticsScope, type Range } from "./overviewAnalyticsModel";
+import { analyticsFromPage, chartWindows, DAY_MS, HOUR_MS, localSamples, type Analytics, type AnalyticsScope, type Range } from "./overviewAnalyticsModel";
 import AnalyticsPanel from "./OverviewAnalytics";
 
 export function OverviewPage() {
@@ -23,7 +21,7 @@ export function OverviewPage() {
   const [applicationDialog, setApplicationDialog] = useState(false);
   const [range, setRange] = useState<Range>("today");
   const [analyticsScopeSelection, setAnalyticsScopeSelection] = useState<AnalyticsScope>(() => {
-    const stored = localStorage.getItem("relay.overviewAnalyticsScope");
+    const stored = readRelayPreference("relay.overviewAnalyticsScope", "");
     return stored?.startsWith("source:") || stored?.startsWith("account:") ? stored as AnalyticsScope : "";
   });
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
@@ -34,15 +32,15 @@ export function OverviewPage() {
     ? Math.floor(now.getTime() / HOUR_MS)
     : `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
   const windows = useMemo(() => chartWindows(range, locale), [range, locale, windowRevision]);
-  const usageAvailable = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("usage"));
+  const usageAvailable = mode === "local";
   const runtimeReady = runtime !== null;
   const windowStartMs = windows[0]?.startMs ?? 0;
   const windowEndMs = windows[windows.length - 1]?.endMs ?? windowStartMs;
-  const usageScope = `${mode}:${range}:${analyticsScopeSelection}:${windowStartMs}:${windowEndMs}`;
+  const runtimeIdentity = mode;
+  const usageScope = JSON.stringify([runtimeIdentity, range, analyticsScopeSelection, windowStartMs, windowEndMs]);
   const [overviewData, setOverviewData] = useState<Analytics | null>(() => getCachedOverviewAnalytics(usageScope));
   const analyticsScope = useRef<string | null>(null);
   const appliedUsageRevision = useRef(usageRevision);
-  const mounted = useRef(false);
   const analyticsScopeQuery = analyticsScopeSelection
     ? analyticsScopeSelection.slice(analyticsScopeSelection.indexOf(":") + 1)
     : undefined;
@@ -57,7 +55,7 @@ export function OverviewPage() {
   const setAnalyticsScope = useCallback((scopeValue: string) => {
     const selectedScope = scopeValue as AnalyticsScope;
     setAnalyticsScopeSelection(selectedScope);
-    localStorage.setItem("relay.overviewAnalyticsScope", selectedScope);
+    writeRelayPreference("relay.overviewAnalyticsScope", selectedScope);
   }, []);
   const launchApplication = (application: LaunchApplication) => perform(`${application}-launch`, () => relayCommands.launchApplication(application), "feedback.launched", {
     skipRefresh: true,
@@ -67,14 +65,9 @@ export function OverviewPage() {
     if (!runtime) return;
     if (analyticsScopeSelection && !analyticsScopeOptions.some((option) => option.value === analyticsScopeSelection)) {
       setAnalyticsScopeSelection("");
-      localStorage.removeItem("relay.overviewAnalyticsScope");
+      removeRelayPreference("relay.overviewAnalyticsScope");
     }
   }, [analyticsScopeOptions, analyticsScopeSelection, runtime]);
-
-  useEffect(() => {
-    mounted.current = true;
-    return () => { mounted.current = false; };
-  }, []);
 
   useEffect(() => {
     let active = true;
@@ -84,16 +77,12 @@ export function OverviewPage() {
       // Re-entry can reuse the last complete snapshot immediately. The same
       // scope is refreshed below, so the cached value is only a stale view.
       const cached = getCachedOverviewAnalytics(usageScope);
-      if (cached) startTransition(() => setOverviewData(cached));
+      startTransition(() => setOverviewData(cached));
     }
     setAnalyticsError(false);
     const stopLoading = () => {
       setAnalyticsLoading(false);
     };
-    if (mode === "zenith") {
-      stopLoading();
-      return () => { active = false; };
-    }
     if (!runtime) {
       stopLoading();
       return () => { active = false; };
@@ -122,10 +111,8 @@ export function OverviewPage() {
       includePoolMembers: false,
       ...(analyticsScopeQuery ? { sourceOrAccountQuery: analyticsScopeQuery } : {}),
     };
-    const load = () => mode === "local"
-      ? relayCommands.localUsagePage(usageQuery).then((page) => analyticsFromPage(page.totals, page.buckets, localSamples(page.events), windows))
-      : relayCommands.remoteUsage(usageQuery).then((page) => page ? analyticsFromPage(page.totals, page.buckets, remoteSamples(page.events), windows) : null);
-    loadOverviewAnalytics(usageScope, load)
+    const load = () => relayCommands.localUsagePage(usageQuery).then((page) => analyticsFromPage(page.totals, page.buckets, localSamples(page.events), windows));
+    loadOverviewAnalytics(usageScope, load, usageChanged)
       .then((analyticsResult) => {
         if (!analyticsResult) {
           if (active) setAnalyticsError(true);
@@ -136,21 +123,18 @@ export function OverviewPage() {
       })
       .catch(() => active && setAnalyticsError(true))
       .finally(() => {
-        // A same-scope refresh may supersede this effect while its request is still in flight.
-        if (mounted.current && analyticsScope.current === usageScope) setAnalyticsLoading(false);
+        if (active) setAnalyticsLoading(false);
       });
     return () => { active = false; };
   }, [mode, range, runtimeReady, usageRevision, usageAvailable, usageScope, analyticsScopeQuery, windowEndMs, windowStartMs, windows]);
 
-  if (mode === "zenith") return <DirectApiOverview sources={runtime?.sources ?? []} onOpen={() => setPage("connections")} perform={perform} />;
-
   const totals = analytics?.totals ?? emptyUsageTotals();
   const requests = totals.requests;
   const models = runtime?.gateway.visibleModelIds.length ?? 0;
-  const healthy = [...(runtime?.sources ?? []), ...(runtime?.accounts ?? [])].filter((poolMember) => poolMember.enabled).length;
+  const healthy = [...(runtime?.sources ?? []), ...(runtime?.accounts ?? []).filter((account) => !account.routeInactive)].filter((poolMember) => poolMember.enabled).length;
   const errors = Math.max(0, totals.requests - totals.successfulRequests);
 
-  const primary = mode === "local" ? <>
+  const primary = <>
     <Button
       variant={running ? "secondary" : "primary"}
       busy={busy === "gateway"}
@@ -174,11 +158,7 @@ export function OverviewPage() {
     >
       {t("overview.launchApplication")}
     </Button>
-  </> : (
-    <Button variant="primary" icon={<Server aria-hidden />} onClick={() => setPage("connections")}>
-      {runtime ? t("overview.openServer") : t("remote.connect")}
-    </Button>
-  );
+  </>;
 
   return <section className="relay-page"><PageHeader title={t("nav.overview")} actions={primary} />
     {!running && !runtime ? (
@@ -215,67 +195,5 @@ export function OverviewPage() {
         onClaudeDesktop={() => void launchApplication("claude-desktop")}
       />
     ) : null}
-  </section>;
-}
-function DirectApiOverview({ sources, onOpen, perform }: { sources: SourceSummary[]; onOpen: () => void; perform: (operationId: string, work: () => Promise<unknown>, successKey?: string, options?: { backgroundRefresh?: boolean }) => Promise<boolean> }) {
-  const { t } = useTranslation();
-  const { busy } = useRelayState();
-  const [selection, setSelection] = useState(() => localStorage.getItem("relay.directSourceId") ?? "");
-  const selectedSource = sources.find((candidateSource) => candidateSource.id === selection) ?? sources[0] ?? null;
-  const { stats: sourceStats, refresh: readSourceStats } = useSourceStats("zenith", selectedSource ? [selectedSource] : []);
-  const stats = selectedSource ? sourceStats[selectedSource.id] : undefined;
-
-  const select = (sourceId: string) => {
-    localStorage.setItem("relay.directSourceId", sourceId);
-    setSelection(sourceId);
-  };
-  const refreshSourceData = async () => {
-    if (!selectedSource) return;
-    await perform("source-data-refresh", () => relayCommands.refreshSourceData(selectedSource.id), "feedback.refreshed", { backgroundRefresh: true });
-    await readSourceStats(selectedSource.id, true);
-  };
-  const sourceRefreshBusy = busy === "source-data-refresh";
-  const actions = (
-    <>
-      <Button
-        variant="secondary"
-        icon={<RefreshCw aria-hidden />}
-        busy={stats?.loading || sourceRefreshBusy}
-        disabled={!selectedSource || sourceRefreshBusy}
-        onClick={() => void refreshSourceData()}
-      >
-        {t("common.refresh")}
-      </Button>
-      <Button variant="primary" icon={<ArrowRight aria-hidden />} onClick={onOpen}>{t("overview.openConnections")}</Button>
-    </>
-  );
-
-  return <section className="relay-page"><PageHeader title={t("nav.overview")} actions={actions} />
-    {!selectedSource ? (
-      <EmptyState
-        title={t("sources.emptyTitle")}
-        description={t("sources.emptyDescription")}
-        action={<Button variant="primary" onClick={onOpen}>{t("sources.add")}</Button>}
-      />
-    ) : <div className="direct-api-overview">
-      <div className="direct-api-toolbar">
-        <div><strong>{selectedSource.name}</strong><code>{selectedSource.baseUrl}</code></div>
-        <OptionMenu
-          className="direct-api-source-menu"
-          label={t("overview.selectedSource")}
-          value={selectedSource.id}
-          onChange={select}
-          options={sources.map((apiSource) => ({ value: apiSource.id, label: `${apiSource.name} · ${sourceHost(apiSource.baseUrl)}` }))}
-        />
-      </div>
-      <SourceStatsPanel source={selectedSource} {...(stats ? { state: stats } : {})} variant="overview" />
-      <section className="direct-api-models">
-        <header>
-          <h2>{t("overview.availableModels")}</h2>
-          <strong>{selectedSource.models.length}</strong>
-        </header>
-        <ul>{selectedSource.models.map((model) => <li key={model}><code>{model}</code></li>)}</ul>
-      </section>
-    </div>}
   </section>;
 }

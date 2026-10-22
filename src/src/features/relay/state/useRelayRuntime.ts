@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { recordPerformance } from "../../../platform/desktop";
 import { revealStartupShell, setStartupPhase } from "../../../platform/startup";
-import { relayCommands, type UiState } from "../api/commands";
+import { relayCommands } from "../api/commands";
 import type { PageId, RelayMode, RuntimeActivitySnapshot, RuntimeActivityState, RuntimeSnapshot } from "../api/types";
-import { preferNewerRuntimeOrder, reconcileRuntimeActivityOverlay } from "../routingOrder";
+import { applyRuntimeActivities, preferNewerRuntimeOrder, reconcileRuntimeActivityOverlay } from "../routingOrder";
 import {
   RELAY_STORAGE_KEYS,
-  readRelayPreference,
+  readRelayMode,
   writeRelayPreference,
 } from "./relayPreferences";
 import { LatestRequestGate } from "./latestRequestGate";
@@ -17,13 +17,12 @@ import {
   isRuntimeRefreshPage,
   startupSnapshotNeedsRetry,
 } from "./refreshPolicy";
-import { useRuntimeEvents, visibleLocalRoutingOrder } from "./useRuntimeEvents";
+import { useRuntimeEvents } from "./useRuntimeEvents";
 import { useRuntimeRouting } from "./useRuntimeRouting";
 import { loadRuntimeSnapshot } from "./snapshotLoader";
 
 type RelayRuntimeDependencies = {
   cancelOperations: () => void;
-  clearInactiveUsage: (mode: RelayMode) => void;
   resetUsage: () => void;
   reportErrorFeedback: (cause: unknown, key: string, fallbackCode: string) => void;
 };
@@ -33,16 +32,14 @@ type RuntimeRoutingOrder = NonNullable<RuntimeSnapshot["gateway"]["routingOrder"
 /** Own mode navigation, runtime snapshots, event synchronization, and refresh timing. */
 export function useRelayRuntime({
   cancelOperations,
-  clearInactiveUsage,
   resetUsage,
   reportErrorFeedback,
 }: RelayRuntimeDependencies) {
-  const [mode, setModeState] = useState<RelayMode>(() => readRelayPreference(RELAY_STORAGE_KEYS.mode, "local") as RelayMode);
+  const [mode, setModeState] = useState<RelayMode>(() => readRelayMode());
   const [page, setPageState] = useState<PageId>("overview");
   const [runtime, setRuntime] = useState<RuntimeSnapshot | null>(null);
   const [runtimeRevision, setRuntimeRevision] = useState(0);
   const [usageRevision, setUsageRevision] = useState(0);
-  const [readyState, setReadyState] = useState<UiState | null>(null);
   const [runtimeActivity, setRuntimeActivity] = useState<RuntimeActivityState>({
     revision: 0,
     lastCandidateId: null,
@@ -71,8 +68,6 @@ export function useRelayRuntime({
   // candidate after its release event arrives.
   const runtimeRoutingOrderBase = useRef<RuntimeRoutingOrder>([]);
   visibleRuntimeRef.current = runtime;
-  const runtimeRoutingSupported = mode !== "remote"
-    || Boolean(runtime?.capabilities.features.includes("runtime_routing"));
 
   const setPage = useCallback((targetPage: PageId) => {
     if (pageRef.current === targetPage) return;
@@ -125,30 +120,28 @@ export function useRelayRuntime({
         return loaded;
       },
       (loaded) => {
-        if (requestedMode === "zenith") setReadyState(loaded.readyState);
         if (requestedMode === "local") {
-          runtimeRoutingOrderBase.current = preferNewerRuntimeOrder(runtimeRoutingOrderBase.current, loaded.snapshot?.gateway.routingOrder ?? []);
+          runtimeRoutingOrderBase.current = preferNewerRuntimeOrder(runtimeRoutingOrderBase.current, loaded?.gateway.routingOrder ?? []);
           reconcileRuntimeActivityOverlay(runtimeRoutingOrderBase.current, runtimeActivityOverlay.current);
         }
-        const snapshot = loaded.snapshot && requestedMode === "local"
+        const snapshot = loaded && requestedMode === "local"
           ? {
-            ...loaded.snapshot,
+            ...loaded,
             gateway: {
-              ...loaded.snapshot.gateway,
-              routingOrder: visibleLocalRoutingOrder(runtimeRoutingOrderBase.current, runtimeActivityOverlay.current),
+              ...loaded.gateway,
+              routingOrder: applyRuntimeActivities(runtimeRoutingOrderBase.current, runtimeActivityOverlay.current.values()),
             },
           }
-          : loaded.snapshot;
+          : loaded;
         runtimeSnapshotRef.current = snapshot;
         if (snapshot) snapshotsByMode.current[requestedMode] = snapshot;
         setRuntime(snapshot);
         setInitialized(true);
-        clearInactiveUsage(requestedMode);
         refreshedRevision.current = requestedRevision;
         setRuntimeRevision((previousRevision) => previousRevision + 1);
       },
     );
-  }, [clearInactiveUsage, mode]);
+  }, [mode]);
 
   const refresh = useCallback(async (force = true) => {
     if (modeRef.current !== mode) return;
@@ -208,7 +201,7 @@ export function useRelayRuntime({
     let startupRetryTimer: number | undefined;
     let startupRetryIndex = 0;
     const scheduleStartupRetry = () => {
-      if (!active || modeRef.current !== mode || !startupSnapshotNeedsRetry(runtimeSnapshotRef.current)) return;
+      if (!active || mode === "hosted" || modeRef.current !== mode || !startupSnapshotNeedsRetry(runtimeSnapshotRef.current)) return;
       const delay = STARTUP_RUNTIME_RETRY_DELAYS_MS[startupRetryIndex];
       if (delay === undefined) return;
       startupRetryIndex += 1;
@@ -258,11 +251,10 @@ export function useRelayRuntime({
     };
   }, [initialized, loading]);
 
-  useRuntimeRouting({
+  const requestRoutingRefresh = useRuntimeRouting({
     mode,
     page,
     gatewayRunning: runtime?.gateway.running,
-    runtimeRoutingSupported,
     runtimeRoutingOrderBase,
     runtimeActivityOverlay,
     setRuntime,
@@ -271,18 +263,17 @@ export function useRelayRuntime({
   useEffect(() => {
     const enteredRuntimeRefreshPage = isRuntimeRefreshPage(page) && !isRuntimeRefreshPage(runtimeRefreshPage.current);
     runtimeRefreshPage.current = page;
-    if (!isRuntimeRefreshPage(page)) return;
+    if (mode === "hosted" || !isRuntimeRefreshPage(page)) return;
 
     const refreshVisibleRuntime = () => {
-      if (document.visibilityState === "visible" && (mode === "remote" || refreshedRevision.current !== stateRevision.current)) {
-        runBackgroundRefresh(mode === "remote");
+      if (document.visibilityState === "visible" && refreshedRevision.current !== stateRevision.current) {
+        runBackgroundRefresh(false);
       }
     };
     if (enteredRuntimeRefreshPage) refreshVisibleRuntime();
     const interval = window.setInterval(() => {
-      // Remote changes do not emit desktop state events. Poll their snapshot
-      // while visible; local snapshots can continue relying on revisions.
-      if (document.visibilityState === "visible") runBackgroundRefresh(mode === "remote");
+      // Revisions coalesce unchanged local snapshots.
+      if (document.visibilityState === "visible") runBackgroundRefresh(false);
     }, RUNTIME_REFRESH_INTERVAL_MS);
     window.addEventListener("focus", refreshVisibleRuntime);
     document.addEventListener("visibilitychange", refreshVisibleRuntime);
@@ -296,6 +287,7 @@ export function useRelayRuntime({
   useEffect(() => invalidateRefreshes, [invalidateRefreshes]);
 
   useRuntimeEvents({
+    requestRoutingRefresh,
     modeRef,
     pageRef,
     stateRevision,
@@ -310,8 +302,8 @@ export function useRelayRuntime({
 
   usePaintDuration(
     modeSwitchStartedAt.current,
-    runtime,
-    (pending) => Boolean(runtime) && pending.mode === mode && modeSwitchStartedAt.current === pending,
+    mode === "hosted" ? loading : runtime,
+    (pending) => (mode === "hosted" ? !loading : Boolean(runtime)) && pending.mode === mode && modeSwitchStartedAt.current === pending,
     () => {
       modeSwitchStartedAt.current = null;
     },
@@ -337,7 +329,6 @@ export function useRelayRuntime({
     runtime,
     runtimeRevision,
     usageRevision,
-    readyState,
     loading,
     runtimeActivity,
     refresh,

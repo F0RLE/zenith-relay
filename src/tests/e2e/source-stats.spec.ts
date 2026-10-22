@@ -4,11 +4,11 @@ import { installTauriMock } from "./tauri-mock";
 
 const sub2api: SourceStats = { provider: "sub2api", status: "available", balanceKind: "wallet", balanceMicroUsd: 12_340_000, spentMicroUsd: null, requests: null, totalTokens: null };
 
-for (const mode of ["local", "remote", "zenith"] as const) {
+for (const mode of ["local"] as const) {
   test(`${mode} uses provider balance and labels local estimate honestly`, async ({ page }) => {
     await installTauriMock(page, { mode, locale: "en", sourceStats: [sub2api] });
     await page.goto("/");
-    if (mode !== "zenith") await page.getByRole("button", { name: "Pool", exact: true }).click();
+    await page.getByRole("button", { name: "Pool", exact: true }).click();
     const panel = page.locator(".source-stats-panel");
     await expect(panel).toContainText("$12.34");
     await expect(panel).toContainText("Relay estimate");
@@ -19,22 +19,21 @@ for (const mode of ["local", "remote", "zenith"] as const) {
   test(`${mode} keeps old balance with a visible warning on refresh failure`, async ({ page }) => {
     await installTauriMock(page, { mode, locale: "en", sourceStats: [sub2api, { ...sub2api, status: "rate_limited", balanceMicroUsd: null }] });
     await page.goto("/");
-    if (mode !== "zenith") await page.getByRole("button", { name: "Pool", exact: true }).click();
+    await page.getByRole("button", { name: "Pool", exact: true }).click();
     const panel = page.locator(".source-stats-panel");
     await expect(panel).toContainText("$12.34");
-    const refresh = mode === "zenith" ? page.getByRole("button", { name: "Refresh", exact: true })
-      : page.locator('.pool-member-card[data-member-kind="source"]').getByRole("button", { name: "Refresh balance", exact: true });
+    const refresh = page.locator('.pool-member-card[data-member-kind="source"]').getByRole("button", { name: "Refresh balance", exact: true });
     await refresh.click();
-    if (mode === "zenith") await expect(panel).toContainText("Not refreshed");
-    else await expect(panel.getByText("Not refreshed", { exact: true })).toHaveCount(0);
+    await expect(panel.getByText("Not refreshed", { exact: true })).toHaveCount(0);
     await expect(panel).toContainText("$12.34");
   });
 }
 
 for (const [status, label] of [["unauthorized", "Stats access denied"], ["unsupported", "No balance API"], ["invalid_response", "Unknown format"]] as const) {
   test(`first ${status} response shows a clear state without invented money`, async ({ page }) => {
-    await installTauriMock(page, { mode: "zenith", locale: "en", sourceStats: [{ ...sub2api, status, balanceMicroUsd: null }] });
+    await installTauriMock(page, { mode: "local", locale: "en", sourceStats: [{ ...sub2api, status, balanceMicroUsd: null }] });
     await page.goto("/");
+    await page.getByRole("button", { name: "Pool", exact: true }).click();
     await expect(page.locator('[data-metric="balance"]')).toContainText(label);
     await expect(page.locator('[data-metric="balance"]')).not.toContainText("$0.00");
   });
@@ -60,8 +59,9 @@ for (const theme of ["light", "dark"] as const) {
 }
 
 test("unlimited key is not an unlimited wallet", async ({ page }) => {
-  await installTauriMock(page, { mode: "zenith", locale: "en", sourceStats: [{ ...sub2api, provider: "openrouter", balanceKind: "key_quota", balanceUnlimited: true, balanceMicroUsd: null }] });
+  await installTauriMock(page, { mode: "local", locale: "en", sourceStats: [{ ...sub2api, provider: "openrouter", balanceKind: "key_quota", balanceUnlimited: true, balanceMicroUsd: null }] });
   await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
   const balance = page.locator('[data-metric="balance"]');
   await expect(balance).toContainText("Key remaining");
   await expect(balance).toContainText("No limit");

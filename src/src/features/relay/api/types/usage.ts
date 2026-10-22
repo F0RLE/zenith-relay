@@ -3,9 +3,9 @@ import type {
   ObservedServiceTier,
   ToolPolicyMode,
 } from "./common";
-import type { ApiEquivalentSummary, PricingMetadata } from "./pricing";
+import type { ApiEquivalentBreakdown, ApiEquivalentSummary, PricingMetadata } from "./pricing";
 
-/** Local comparisons only, not evidence of a provider cache hit or miss. */
+/** Local prefix comparisons and, when reported, separate provider diagnostics. */
 export type CacheContextDiagnostics = {
   baseline: "first_observation" | "completed_request" | "overlapping_requests" | "unavailable" | "size_limit";
   scope: "client_session" | "cache_key" | "unavailable";
@@ -17,6 +17,10 @@ export type CacheContextDiagnostics = {
   relayHistory: CacheHistoryDiagnostics;
   candidateChanged: boolean | null;
   previousCompletedAgeMs: number | null;
+  provider?: { type: "cache_hit" | "comparison_response_not_found" | "unavailable" }
+    | { type: "cache_miss"; reason: "model_changed" | "prompt_cache_key_changed" | "service_tier_changed"
+      | "tools_changed" | "text_format_changed" | "reasoning_effort_changed" | "verbosity_changed"
+      | "context_compacted" | "input_changed"; cache_missed_tokens: number; comparison_reusable_tokens?: number } | null;
 };
 
 export type CacheContextSection =
@@ -41,6 +45,27 @@ export type RoutingDiagnostics = {
   inFlightBefore: number;
   dispatchesBefore: number;
   endpointKind?: string | null;
+  /** Upstream declaration, not independently verified model identity. */
+  upstreamResponseModel?: string | null;
+  transport?: {
+    upstream: "http" | "websocket";
+    mode: "native" | "protocol_conversion" | "basis_points";
+    fallbackReason?: "basis_points_http" | "protocol_conversion" | "websocket_disabled" | "websocket_unavailable" | "existing_http_bridge" | null;
+    responseFormat?: "json" | "sse" | "websocket_frames" | null;
+    handshakeMs?: number | null;
+    responseHeadersMs?: number | null;
+    requestPreparationMs?: number | null;
+    requestPreparation?: {
+      bodyMs?: number | null;
+      /** Subset of bodyMs, not an additional duration. */
+      schemaValidationMs?: number | null;
+      catalogMs?: number | null;
+      attachmentsMs?: number | null;
+    } | null;
+    upstreamResponseMs?: number | null;
+    clientFirstOutputMs?: number | null;
+    clientResponseReadyMs?: number | null;
+  } | null;
   cacheContext?: CacheContextDiagnostics | null;
   attemptOutcome?: "completed" | "tool_discovery" | "retry_selection" | "retry_repair" | "retry_authorization" | "returned_failure" | "execution_uncertain" | "client_disconnected" | null;
 };
@@ -67,6 +92,7 @@ export type ToolUseDiagnostics = {
     loadedToolCount: number;
     discoveryRounds: number;
     discoveryInputTokens?: number;
+    discoveryLatencyMs?: number;
     discoveryOutputTokens?: number;
   };
   filteredToolCount?: number;
@@ -76,6 +102,9 @@ export type ToolUseDiagnostics = {
   deferredToolSearch?: boolean;
   toolChoice: "unspecified" | "auto" | "required" | "none" | "allowed_tools" | "specific";
   toolCallCount: number;
+  requestedParallelToolCalls?: boolean | null;
+  upstreamToolCallCount?: number | null;
+  toolCallsReadyMs?: number | null;
   textOutput: boolean;
   terminalOutput: "unknown" | "empty" | "text" | "tool_call" | "mixed";
 };
@@ -93,7 +122,7 @@ export type UpstreamErrorDetails = {
 };
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
-/** Fields shared by local SQLite and remote Relay usage events. */
+/** Fields shared by local SQLite queries and runtime usage events. */
 type UsageEventRecord = {
   id: number;
   requestId: string;
@@ -127,6 +156,7 @@ type UsageEventRecord = {
 };
 
 export type LocalUsage = UsageEventRecord & {
+  apiEquivalentBreakdown?: ApiEquivalentBreakdown;
   createdAt: string;
   sourceId: string;
   accountId?: string | null;
@@ -216,14 +246,7 @@ export type UsageExportRow = {
   appliedServiceTier?: ObservedServiceTier | null;
 };
 
-export type RemoteUsage = UsageEventRecord & {
-  candidateKind: "account" | "source";
-  candidateHint: string;
-  candidateLabel?: string | null;
-  createdAtMs: number;
-};
-
-export type RemoteUsageQuery = {
+export type UsageQuery = {
   page?: number;
   pageSize?: number;
   range?: "daily" | "weekly" | "monthly" | "custom";
@@ -242,17 +265,4 @@ export type RemoteUsageQuery = {
   includeEvents?: boolean;
   includeModels?: boolean;
   includePoolMembers?: boolean;
-};
-
-export type RemoteUsagePage = {
-  events: RemoteUsage[];
-  total: number;
-  page: number;
-  pageSize: number;
-  totalPages: number;
-  totals?: UsageTotals;
-  models?: UsageGroup[];
-  poolMembers?: UsageGroup[];
-  buckets?: UsageBucket[];
-  pricing?: PricingMetadata;
 };

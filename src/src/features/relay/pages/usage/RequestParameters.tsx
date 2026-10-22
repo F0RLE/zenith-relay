@@ -1,6 +1,5 @@
 import { useTranslation } from "react-i18next";
 import type { UsageRow } from "./usageData";
-import { RequestSection } from "./RequestSection";
 import {
   formatModelId, formatReasoningEffort, formatReasoningSummary, formatRequestOrigin,
   formatServiceTier, formatTransport, formatWireApi,
@@ -15,11 +14,11 @@ export function RequestParameters({ row }: { row: UsageRow }) {
   const routedModel = formatModelId(row.routedModel);
   const modelChanged = requestedModel !== "—" && routedModel !== "—" && requestedModel !== routedModel;
   if (!row.wireApi && !row.transport && !row.serviceTier && !requestedEffort && !effectiveEffort && !modelChanged && !row.requestOrigin) return null;
-  return <RequestSection title={t("usage.requestSections.parameters")} className="request-parameters-section">
+  return <section className="request-detail-section request-parameters-section" aria-label={t("usage.requestSections.parameters")}>
     <dl className="request-details-parameters">
     {modelChanged ? <>
-      <div><dt>{t("usage.requestedModel")}</dt><dd><code>{requestedModel}</code></dd></div>
-      <div><dt>{t("usage.routedModel")}</dt><dd><code>{routedModel}</code></dd></div>
+      <div className="request-parameter-wide"><dt>{t("usage.requestedModel")}</dt><dd><code>{requestedModel}</code></dd></div>
+      <div className="request-parameter-wide"><dt>{t("usage.routedModel")}</dt><dd><code>{routedModel}</code></dd></div>
     </> : null}
     {row.wireApi ? <div><dt>{t("usage.protocol")}</dt><dd>{formatWireApi(row.wireApi, t)}</dd></div> : null}
     {row.transport ? <div><dt>{t("usage.transport")}</dt><dd>{formatTransport(row.transport, t)}</dd></div> : null}
@@ -28,11 +27,11 @@ export function RequestParameters({ row }: { row: UsageRow }) {
       <dt>{t("usage.reasoning")}</dt>
       <dd data-relay-tooltip={reasoningChanged ? formatReasoningSummary(row, t) : undefined}>
         {reasoningChanged
-          ? <><span>{formatReasoningEffort(requestedEffort, t)}</span><span className="request-parameter-arrow" aria-hidden>→</span><span>{formatReasoningEffort(effectiveEffort, t)}</span></>
+          ? <><span className="request-parameter-requested">{formatReasoningEffort(requestedEffort, t)}</span><span className="request-parameter-result"><span className="request-parameter-arrow" aria-hidden>→</span>{formatReasoningEffort(effectiveEffort, t)}</span></>
           : formatReasoningEffort(effectiveEffort ?? requestedEffort, t)}
       </dd>
     </div> : null}
-    {row.requestOrigin ? <div><dt>{t("usage.requestOrigin")}</dt><dd>{formatRequestOrigin(row.requestOrigin, t)}</dd></div> : null}
+    {row.requestOrigin ? <div className="request-parameter-wide"><dt>{t("usage.requestOrigin")}</dt><dd>{formatRequestOrigin(row.requestOrigin, t)}</dd></div> : null}
     </dl>
-  </RequestSection>;
+  </section>;
 }

@@ -1,39 +1,14 @@
-import type { RelayMode } from "../../api/types";
+export type ConnectionView = "sources" | "accounts" | "proxies" | "automations" | "trash";
 
-export type ConnectionView = "sources" | "accounts" | "proxies" | "automations" | "trash" | "remote";
-
-export function connectionViews(mode: RelayMode, features: readonly string[]): ConnectionView[] {
-  if (mode === "zenith") return ["sources"];
-
-  const supported = new Set(features);
-  const supports = (feature: string) => mode !== "remote" || supported.has(feature);
-  return [
-    ...(supports("accounts") ? ["accounts" as const] : []),
-    ...(supports("sources") ? ["sources" as const] : []),
-    ...(mode === "local" ? ["proxies" as const] : []),
-    ...(supports("wake_tasks") ? ["automations" as const] : []),
-    ...(supports("account_trash_v1") ? ["trash" as const] : []),
-    ...(mode === "remote" ? ["remote" as const] : []),
-  ];
+export function connectionViews(): ConnectionView[] {
+  return ["accounts", "sources", "proxies", "automations", "trash"];
 }
 
 export function connectionInitialView(
-  mode: RelayMode,
   currentView: ConnectionView,
   requested: string | null,
-  features: readonly string[] = [],
 ): ConnectionView {
-  if (mode === "zenith") return "sources";
-  const available = connectionViews(mode, features);
+  const available = connectionViews();
   const requestedView = requested === "sources" ? "sources" : currentView;
-  return available.includes(requestedView) ? requestedView : available[0] ?? "remote";
-}
-
-export function reconcileRemoteConnectionView(
-  mode: RelayMode,
-  hasRuntime: boolean,
-  currentView: ConnectionView,
-): ConnectionView {
-  if (mode !== "remote" || hasRuntime) return currentView;
-  return "remote";
+  return available.includes(requestedView) ? requestedView : "accounts";
 }

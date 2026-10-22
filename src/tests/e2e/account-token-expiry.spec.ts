@@ -3,7 +3,7 @@ import { installTauriMock } from "./tauri-mock";
 
 const now = Date.UTC(2026, 9, 15, 12);
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   for (const locale of ["en", "ru"] as const) {
     test(`${mode} ${locale} BPS cards show a compact token countdown without authorization banners`, async ({ page }, testInfo) => {
       await page.setViewportSize({ width: 640, height: 900 });

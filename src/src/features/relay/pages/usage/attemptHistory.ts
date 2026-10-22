@@ -1,4 +1,4 @@
-import type { RemoteUsageQuery } from "../../api/types";
+import type { UsageQuery } from "../../api/types";
 import type { UsageRow } from "./usageData";
 
 type AttemptPage = {
@@ -8,23 +8,23 @@ type AttemptPage = {
 };
 
 export type AttemptHistory = { rows: UsageRow[]; complete: boolean };
-export type AttemptPageLoader = (query: RemoteUsageQuery) => Promise<AttemptPage>;
+export type AttemptPageLoader = (query: UsageQuery) => Promise<AttemptPage>;
 
 const ATTEMPT_HISTORY_PAGE_SIZE = 200;
 const ATTEMPT_HISTORY_MAX_PAGES = 100;
 
-/** Independent of the report filters. Older servers may only support substring search. */
+/** Load one exact request independently of the report filters. */
 export async function loadRequestAttempts(
   requestId: string,
   loadPage: AttemptPageLoader,
   isActive: () => boolean = () => true,
 ): Promise<AttemptHistory> {
   const attemptsByRowId = new Map<UsageRow["id"], UsageRow>();
-  // Bound old or inconsistent hosts; expose partial history instead of claiming completeness.
+  // Expose partial history rather than claiming completeness on inconsistent pagination.
   let allPagesLoaded = false;
   for (let requestedPage = 1; requestedPage <= ATTEMPT_HISTORY_MAX_PAGES && isActive(); requestedPage += 1) {
     const attemptPage = await loadPage({
-      page: requestedPage, pageSize: ATTEMPT_HISTORY_PAGE_SIZE, requestId, requestIdQuery: requestId,
+      page: requestedPage, pageSize: ATTEMPT_HISTORY_PAGE_SIZE, requestId,
       includeEvents: true, includeModels: false, includePoolMembers: false,
     });
     if (!isActive()) return { rows: [], complete: false };

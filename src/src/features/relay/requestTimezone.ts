@@ -17,17 +17,16 @@ const CITY_KEYS: Record<string, string> = {
   "UTC": "utc",
 };
 
-export const TIMEZONE_REGIONS = ["all", "america", "europe", "asia", "other"] as const;
-export type TimezoneRegion = typeof TIMEZONE_REGIONS[number];
+type TimezoneRegion = "america" | "europe" | "asia" | "other";
 
-export function timezoneRegion(zone: string): Exclude<TimezoneRegion, "all"> {
+function timezoneRegion(zone: string): TimezoneRegion {
   if (zone.startsWith("America/") || zone.startsWith("US/") || zone.startsWith("Canada/")) return "america";
   if (zone.startsWith("Europe/")) return "europe";
   if (zone.startsWith("Asia/")) return "asia";
   return "other";
 }
 
-export function timezoneCity(zone: string, t: TFunction): string {
+function timezoneCity(zone: string, t: TFunction): string {
   const key = CITY_KEYS[zone];
   return key ? t(`gateway.timezone.cities.${key}`) : (zone.split("/").at(-1) ?? zone).replaceAll("_", " ");
 }

@@ -1,4 +1,4 @@
-import { Activity, ArchiveRestore, Cable, Check, CheckCircle2, ChevronDown, CircleAlert, CircleHelp, Download, Gauge, Laptop, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Plug, Server, Settings, SlidersHorizontal, Upload, X } from "lucide-react";
+import { Activity, ArchiveRestore, Cable, Check, CheckCircle2, ChevronDown, CircleAlert, CircleHelp, Cloud, Download, Laptop, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Plug, Server, Settings, SlidersHorizontal, Upload, X } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ComponentType } from "react";
 import { useTranslation } from "react-i18next";
@@ -9,6 +9,7 @@ import { useRelayState, type Feedback } from "../state/RelayStateProvider";
 import { ErrorDetailsDialog, IconButton } from "../components/Ui";
 import { useAppUpdates, type UpdateCheckState } from "../hooks/useAppUpdates";
 import { UpdateDialog } from "./UpdateDialog";
+import { HostedDevelopmentPage } from "../pages/hosted/HostedDevelopmentPage";
 
 function lazyNamed<P>(load: () => Promise<ComponentType<P>>) {
   let pending: Promise<{ default: ComponentType<P> }> | undefined;
@@ -70,9 +71,8 @@ export function RelayShell() {
     openUpdateDialog,
     closeUpdateDialog,
   } = useAppUpdates();
-  const visiblePages = pages.filter((pageItem) => mode !== "zenith" || !(["pool", "integrations", "usage"] as PageId[]).includes(pageItem.id));
-  const mainPages = visiblePages.filter(({ id }) => id !== "profiles" && id !== "settings");
-  const utilityPages = visiblePages.filter(({ id }) => id === "profiles" || id === "settings");
+  const mainPages = mode === "hosted" ? [] : pages.filter(({ id }) => id !== "profiles" && id !== "settings");
+  const utilityPages = mode === "hosted" ? [] : pages.filter(({ id }) => id === "profiles" || id === "settings");
   const navigationButton = ({ id: pageId, icon: Icon, preload }: (typeof pages)[number]) => (
     <button
       key={pageId}
@@ -93,11 +93,11 @@ export function RelayShell() {
     modePickerRef.current?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
   }, []);
   const openImport = useCallback((paths?: string[]) => {
+    if (mode === "hosted") return;
     importDialog.preload();
-    if (mode === "zenith") setMode("local");
     setPage("connections");
     setImportRequest({ id: ++nextImportRequest.current, ...(paths ? { paths } : {}) });
-  }, [mode, setMode, setPage]);
+  }, [mode, setPage]);
 
   useEffect(() => {
     if (contentRef.current) {
@@ -127,6 +127,7 @@ export function RelayShell() {
   }, [modeOpen, focusModePicker]);
 
   useEffect(() => {
+    if (mode === "hosted") return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
     try {
@@ -150,7 +151,7 @@ export function RelayShell() {
       disposed = true;
       unlisten?.();
     };
-  }, [openImport]);
+  }, [mode, openImport]);
 
   return (
     <div className={`relay-shell ${collapsed ? "sidebar-collapsed" : ""}`} data-mode={mode} data-page={page}>
@@ -165,12 +166,12 @@ export function RelayShell() {
             onClick={() => setModeOpen((isOpen) => !isOpen)}
           >
             <ModeIcon mode={mode} />
-            <span>{t(`modes.${mode}`)}</span>
+            <span className="mode-picker-label">{t(`modes.${mode}`)}</span>
             <ChevronDown aria-hidden />
           </button>
           {modeOpen ? (
             <div className="mode-menu relay-popover-panel" role="menu">
-              {(["local", "zenith", "remote"] as RelayMode[]).map((modeOption) => (
+              {(["local", "hosted"] as RelayMode[]).map((modeOption) => (
                 <button
                   className="relay-popover-item"
                   role="menuitemradio"
@@ -179,6 +180,8 @@ export function RelayShell() {
                   type="button"
                   onClick={() => {
                     setMode(modeOption);
+                    setImportRequest(null);
+                    setImportDragActive(false);
                     setModeOpen(false);
                   }}
                 >
@@ -190,9 +193,11 @@ export function RelayShell() {
             </div>
           ) : null}
         </div>
-        <nav className="sidebar-main-nav" aria-label={t("nav.label")}>
-          <div className="sidebar-nav-group">{mainPages.map(navigationButton)}</div>
-        </nav>
+        <div className="sidebar-navigation">
+          <nav className="sidebar-main-nav" aria-label={t("nav.label")}>
+            <div className="sidebar-nav-group">{mainPages.map(navigationButton)}</div>
+          </nav>
+        </div>
         <div className="sidebar-bottom">
           {feedback ? <div className="sidebar-feedback"><GlobalFeedback feedback={feedback} clearFeedback={clearFeedback} focusAfterClose={focusModePicker} /></div> : null}
           {availableUpdate ? (
@@ -208,32 +213,34 @@ export function RelayShell() {
               </button>
             </div>
           ) : null}
-          <nav className="sidebar-nav-utilities" aria-label={t("nav.utilities")}>
-            {utilityPages.map(navigationButton)}
-          </nav>
+          <div className="sidebar-bottom-actions">
+            <nav className="sidebar-nav-utilities" aria-label={t("nav.utilities")}>
+              {utilityPages.map(navigationButton)}
+            </nav>
+            <button
+              className={`sidebar-help ${page === "help" ? "active" : ""}`}
+              type="button"
+              aria-label={t("common.help")}
+              aria-current={page === "help" ? "page" : undefined}
+              data-relay-tooltip={collapsed ? t("common.help") : undefined}
+              onClick={() => setPage("help")}
+              onPointerEnter={helpCenter.preload}
+              onFocus={helpCenter.preload}
+            >
+              <CircleHelp aria-hidden />
+              <span className="sidebar-help-copy">{t("common.help")}</span>
+            </button>
+          </div>
           <div className="sidebar-footer">
-            <div className="sidebar-footer-row">
-              <button
-                className={`sidebar-help ${page === "help" ? "active" : ""}`}
-                type="button"
-                aria-label={t("common.help")}
-                aria-current={page === "help" ? "page" : undefined}
-                onClick={() => setPage("help")}
-                onPointerEnter={helpCenter.preload}
-                onFocus={helpCenter.preload}
-              >
-                <CircleHelp aria-hidden />
-                <span className="sidebar-help-copy"><span>{t("common.help")}</span><small>v{APP_VERSION}</small></span>
-              </button>
-              <IconButton
-                label={collapsed ? t("shell.expand") : t("shell.collapse")}
-                icon={collapsed ? <PanelLeftOpen aria-hidden /> : <PanelLeftClose aria-hidden />}
-                onClick={() => {
-                  sidebarPreference.current = !collapsed;
-                  setCollapsed(!collapsed);
-                }}
-              />
-            </div>
+            <small className="sidebar-version">v{APP_VERSION}</small>
+            <IconButton
+              label={collapsed ? t("shell.expand") : t("shell.collapse")}
+              icon={collapsed ? <PanelLeftOpen aria-hidden /> : <PanelLeftClose aria-hidden />}
+              onClick={() => {
+                sidebarPreference.current = !collapsed;
+                setCollapsed(!collapsed);
+              }}
+            />
           </div>
         </div>
       </aside>
@@ -285,7 +292,7 @@ export function RelayShell() {
 }
 
 function ModeIcon({ mode }: { mode: RelayMode }) {
-  return mode === "local" ? <Laptop aria-hidden /> : mode === "remote" ? <Server aria-hidden /> : <Gauge aria-hidden />;
+  return mode === "local" ? <Laptop aria-hidden /> : mode === "hosted" ? <Cloud aria-hidden /> : <Server aria-hidden />;
 }
 
 function GlobalFeedback({ feedback, clearFeedback, focusAfterClose }: { feedback: Exclude<Feedback, null>; clearFeedback: () => void; focusAfterClose: () => void }) {
@@ -331,6 +338,8 @@ function GlobalFeedback({ feedback, clearFeedback, focusAfterClose }: { feedback
 }
 
 function Page({ page, onImport, updateCheckState, updateVersion, onCheckUpdates }: { page: PageId; onImport: () => void; updateCheckState: UpdateCheckState; updateVersion: string | null; onCheckUpdates: () => Promise<UpdateCheckState> }) {
+  const { mode, setMode } = useRelayState();
+  if (mode === "hosted" && page !== "help") return <HostedDevelopmentPage onComputer={() => setMode("local")} />;
   if (page === "overview") return <OverviewPage />;
   if (page === "connections") return <connectionsPage.Component onImport={onImport} />;
   if (page === "pool") return <poolPage.Component />;

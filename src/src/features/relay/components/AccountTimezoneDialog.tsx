@@ -14,7 +14,7 @@ export function AccountTimezoneDialog({ account, onClose }: { account: AccountSu
   const { t } = useTranslation();
   const { supported, policy, busy, persist } = useRequestTimezone();
   const { mode, runtime } = useRelayState();
-  const localProxyStorage = mode === "local" && !account.remoteLocation;
+  const localProxyStorage = mode === "local" && !account.recoveryRequired;
   const { pool: proxies, failed: proxyLoadFailed, load: reloadProxies } = useProxyPool(localProxyStorage);
   const bindingName = useId();
   const [expected] = useState(() => structuredClone(policy));
@@ -78,7 +78,7 @@ export function AccountTimezoneDialog({ account, onClose }: { account: AccountSu
       setSaving(false);
     }
   };
-  if (!supported || account.remoteLocation) return null;
+  if (!supported || account.recoveryRequired) return null;
   const modes: Array<{ value: AccountTimezoneBinding; label: string }> = [
     { value: "inherit", label: t("gateway.timezone.useGlobal") },
     { value: "enabled", label: t("gateway.timezone.bindingTitle") },
@@ -125,8 +125,8 @@ export function AccountTimezoneDialog({ account, onClose }: { account: AccountSu
   </Dialog>;
 }
 
-export function TimezonePreview({ zone, date, hint, emptyLabel, pending = false, unknown = false }: {
-  zone: string | null; date: Date; hint?: string | undefined; emptyLabel?: string | undefined; pending?: boolean; unknown?: boolean;
+function TimezonePreview({ zone, date, hint, pending = false, unknown = false }: {
+  zone: string | null; date: Date; hint?: string | undefined; pending?: boolean; unknown?: boolean;
 }) {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
@@ -138,7 +138,7 @@ export function TimezonePreview({ zone, date, hint, emptyLabel, pending = false,
     <div>
       <span className="account-timezone-eyebrow">{t("gateway.timezone.effective")}</span>
       <strong>{pending ? t("common.loading") : unknown ? t("gateway.timezone.unknown")
-        : displayName ?? emptyLabel ?? t("gateway.timezone.noRewrite")}</strong>
+        : displayName ?? t("gateway.timezone.noRewrite")}</strong>
       {visibleZone ? <code>{visibleZone}</code> : null}
       {hint && !pending ? <small>{hint}</small> : null}
     </div>
@@ -146,7 +146,7 @@ export function TimezonePreview({ zone, date, hint, emptyLabel, pending = false,
   </div>;
 }
 
-export function TimezonePicker({ value, date, disabled, label, onChange }: {
+function TimezonePicker({ value, date, disabled, label, onChange }: {
   value: string; date: Date; disabled: boolean; label: string; onChange: (zone: string) => void;
 }) {
   const { t, i18n } = useTranslation();

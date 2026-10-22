@@ -2,6 +2,7 @@ export type {
   RequestTimezonePolicy,
   RequestTimezoneUpdate,
   AccountTimezoneSource,
+  CodexMemoryStage,
   ModelCatalogIdentity,
 } from "./types/runtime";
 
@@ -11,7 +12,6 @@ export type {
   DefaultServiceTier,
   ToolPolicyMode,
   ToolPolicy,
-  ToolPolicyUpdate,
   ObservedServiceTier,
   OperationalStatus,
 } from "./types/common";
@@ -38,7 +38,6 @@ export type {
   ProtocolFeature,
   ModelEndpointCapability,
   SourceProtocolConfig,
-  SourceProbeInput,
   MessagesReasoningMode,
   CacheWriteTtl,
   SourceProtocolBinding,
@@ -58,11 +57,9 @@ export type {
   AccountExportFormat,
   AccountExportInput,
   AccountExportResult,
-  MoveAccountsToRemoteResult,
   ImportSession,
   ConfirmAccountImportResponse,
   AccountImportProgress,
-  AccountTransferProgress,
   OAuthFlowStatus,
   OAuthClientKind,
   OAuthFlow,
@@ -141,13 +138,10 @@ export type {
   CacheSessionRecord,
   LocalUsagePage,
   UsageExportRow,
-  RemoteUsage,
-  RemoteUsageQuery,
-  RemoteUsagePage,
+  UsageQuery,
 } from "./types/usage";
 
 export type {
-  RemoteTarget,
   RelayStorageInfo,
   DiagnosticSettings,
 } from "./types/diagnostics";

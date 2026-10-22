@@ -15,15 +15,15 @@ async function expectSetupFrame(page: Page) {
   }
 }
 
-for (const kind of ["codex", "excel_bps"] as const) {
-  test(`quick setup can sign in a pool account through ${kind}`, async ({ page }) => {
-    await installTauriMock(page, { onboarding: false, locale: "en", populated: true });
+for (const kind of ["codex", "siwc", "excel_bps"] as const) {
+  test(`quick setup signs in through ${kind} and only admits pool clients`, async ({ page }) => {
+    await installTauriMock(page, { onboarding: false, locale: "en", populated: true, accountOAuthClientKind: kind });
     await page.goto("/");
     await page.getByRole("button", { name: "Get started" }).click();
     await page.getByRole("button", { name: "Continue" }).click();
-    await expect(page.getByRole("button", { name: "Sign-in method: ChatGPT", exact: true })).toBeVisible();
-    if (kind === "excel_bps") await chooseOption(page, page, "Sign-in method", kind);
-    await page.getByRole("button", { name: /^Sign in / }).click();
+    await expect(page.getByRole("button", { name: "Sign-in method: Codex", exact: true })).toBeVisible();
+    if (kind !== "codex") await chooseOption(page, page, "Sign-in method", kind);
+    await page.getByRole("button", { name: /^Sign in(?: |$)/ }).click();
     await expect.poll(() => page.evaluate(() => (window as unknown as {
       __TAURI_TEST_INVOKES__: Array<{ command: string; args: { clientKind?: string } }>;
     }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "start_codex_oauth")?.args.clientKind)).toBe(kind);
@@ -33,7 +33,13 @@ for (const kind of ["codex", "excel_bps"] as const) {
     const membership = await page.evaluate(() => (window as unknown as {
       __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }>;
     }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "set_local_pool_membership"));
-    expect(membership?.args.input).toEqual({ accountIds: ["account_synthetic"], sourceIds: [], inPool: true });
+    if (kind === "codex") {
+      expect(membership).toBeUndefined();
+      await expect(page.locator(".setup-pool-ready")).toHaveCount(0);
+    } else {
+      expect(membership?.args.input).toEqual({ accountIds: ["account_synthetic"], sourceIds: [], inPool: true });
+      await expect(page.locator(".setup-pool-ready")).toBeVisible();
+    }
   });
 }
 
@@ -45,28 +51,33 @@ test("quick setup chooses where the shared pool runs", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Where should Zenith Relay run?" })).toBeVisible();
   await expect(page.locator(".mode-options button")).toHaveCount(2);
   await expect(page.getByRole("button", { name: /Choose API/ })).toHaveCount(0);
-  await page.getByRole("button", { name: /On your server/ }).click();
+  await page.getByRole("button", { name: /Relay Hosted/ }).click();
   await page.getByRole("button", { name: "Continue" }).click();
-  await page.getByLabel("Server address").fill("https://relay.example.invalid");
-  await page.getByLabel("Management token", { exact: true }).fill("synthetic-management-token-000000");
-  await page.getByRole("button", { name: "Continue" }).click();
-  await expect(page.getByRole("heading", { name: "What should use your pool?" })).toBeVisible();
-  await page.screenshot({ path: "output/playwright/onboarding-server-1160x760.png" });
+  await expect(page.getByText("In development", { exact: true })).toBeVisible();
+  const calls = await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string }>;
+  }).__TAURI_TEST_INVOKES__);
+  expect(calls.some(({ command }) => command === "connect_remote_server" || command === "start_local_gateway")).toBe(false);
+  await page.screenshot({ path: "output/playwright/onboarding-hosted-1160x760.png" });
 });
 
-test("skipping repeated setup preserves a previously selected direct API mode", async ({ page }) => {
-  await installTauriMock(page, { onboarding: false, locale: "en", mode: "zenith", populated: true });
+test("skipping repeated setup migrates the removed API-only mode to Computer", async ({ page }) => {
+  await installTauriMock(page, { onboarding: false, locale: "en", populated: true, storedMode: "zenith" });
   await page.goto("/");
   await page.getByRole("button", { name: "Skip setup" }).click();
-  await expect(page.getByRole("button", { name: "Mode: Choose API" })).toBeVisible();
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.mode"))).toBe("zenith");
+  await expect(page.getByRole("button", { name: "Mode: Computer" })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.mode"))).toBe("local");
+  await page.getByRole("button", { name: "Mode: Computer" }).click();
+  await expect(page.getByRole("menuitemradio")).toHaveText(["Computer", "Relay Hosted"]);
+  await expect(page.getByRole("menuitemradio", { name: "Computer", exact: true })).toHaveAttribute("aria-checked", "true");
 });
 
 test("local quick setup verifies runtime and applies ChatGPT only after explicit choices", async ({ page }) => {
-  await installTauriMock(page, { onboarding: false, locale: "en", populated: true });
+  await installTauriMock(page, { onboarding: false, locale: "en", populated: true, accountOAuthClientKind: "excel_bps" });
   await page.goto("/");
   await page.getByRole("button", { name: "Get started" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
+  await chooseOption(page, page, "Sign-in method", "excel_bps");
   await page.setViewportSize({ width: 840, height: 560 });
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page.getByText("Waiting for sign-in", { exact: true })).toBeVisible();
@@ -122,22 +133,6 @@ test("local quick setup offers Claude Desktop second and connects it without lau
   expect(commands).not.toContain("connect_opencode_to_local_gateway");
 });
 
-test("remote quick setup keeps the local Desktop integration unavailable", async ({ page }) => {
-  await installTauriMock(page, { onboarding: false, locale: "en", mode: "remote", populated: true });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Get started" }).click();
-  await page.getByRole("button", { name: "Continue" }).click();
-  await page.getByLabel("Server address").fill("https://relay.example.invalid");
-  await page.getByLabel("Management token", { exact: true }).fill("synthetic-management-token-000000");
-  await page.getByRole("button", { name: "Continue" }).click();
-  const claude = page.getByRole("button", { name: "Claude Desktop", exact: true });
-  await expect(claude).toBeDisabled();
-  await expect(claude).toHaveAccessibleDescription("Claude Desktop integration is available with the local pool only.");
-  const commands = await page.evaluate(() => (window as unknown as {
-    __TAURI_TEST_INVOKES__: Array<{ command: string }>;
-  }).__TAURI_TEST_INVOKES__.map((call) => call.command));
-  expect(commands.filter((command) => command.includes("claude_desktop"))).toEqual([]);
-});
 
 test("local quick setup connects OpenCode to the pool without launching a client", async ({ page }) => {
   await installTauriMock(page, { onboarding: false, locale: "en", populated: true });
@@ -156,7 +151,7 @@ test("local quick setup connects OpenCode to the pool without launching a client
 });
 
 test("local quick setup imports through the unified dialog and selects pool membership", async ({ page }) => {
-  await installTauriMock(page, { onboarding: false, locale: "en", populated: true });
+  await installTauriMock(page, { onboarding: false, locale: "en", populated: true, accountOAuthClientKind: "excel_bps" });
   await page.goto("/");
   await page.getByRole("button", { name: "Get started" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
@@ -172,7 +167,7 @@ test("local quick setup imports through the unified dialog and selects pool memb
 });
 
 test("local quick setup imports account files and allows adding an API before continuing", async ({ page }) => {
-  await installTauriMock(page, { onboarding: false, locale: "en", populated: true, gatewayRunning: false, importConfirmDelayMs: 1_000 });
+  await installTauriMock(page, { onboarding: false, locale: "en", populated: true, accountOAuthClientKind: "excel_bps", gatewayRunning: false, importConfirmDelayMs: 1_000 });
   await page.goto("/");
   await page.getByRole("button", { name: "Get started" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
@@ -244,18 +239,24 @@ test("closing the account preview cancels its session before leaving setup", asy
 });
 
 test("setup offers explicit connections without importing the active ChatGPT profile", async ({ page }) => {
-  await installTauriMock(page, { onboarding: false, locale: "ru", theme: "dark", populated: true, currentProfileAvailable: false });
+  await installTauriMock(page, { onboarding: false, locale: "ru", theme: "dark", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Приступить" }).click();
   await page.getByRole("button", { name: "Продолжить" }).click();
   await expect(page.getByRole("button", { name: /Импортировать текущий профиль/ })).toHaveCount(0);
   await expect(page.locator(".setup-connect-options button")).toHaveCount(3);
   await expect(page.locator(".setup-connected")).toHaveCount(0);
+  const commands = await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string }>;
+  }).__TAURI_TEST_INVOKES__.map(call => call.command));
+  expect(commands.filter(command => [
+    "current_chatgpt_profile_available", "preview_current_codex_account_import",
+  ].includes(command))).toEqual([]);
   await page.screenshot({ path: "output/playwright/onboarding-step-2-no-profile-ru-dark-1160x760.png" });
 });
 
 test("all onboarding steps keep progress and actions in one bounded workspace", async ({ page }) => {
-  await installTauriMock(page, { onboarding: false, locale: "ru", theme: "dark", populated: true });
+  await installTauriMock(page, { onboarding: false, locale: "ru", theme: "dark", populated: true, accountOAuthClientKind: "excel_bps" });
   await page.setViewportSize({ width: 1160, height: 760 });
   await page.goto("/");
   await page.getByRole("button", { name: "Приступить" }).click();
@@ -283,7 +284,7 @@ test("all onboarding steps keep progress and actions in one bounded workspace", 
 });
 
 test("local quick setup combines an account and an OpenRouter source in the pool", async ({ page }) => {
-  await installTauriMock(page, { onboarding: false, locale: "en", mode: "local", populated: true });
+  await installTauriMock(page, { onboarding: false, locale: "en", mode: "local", populated: true, accountOAuthClientKind: "excel_bps" });
   await page.goto("/");
   await page.getByRole("button", { name: "Get started" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
@@ -315,7 +316,7 @@ test("local quick setup combines an account and an OpenRouter source in the pool
 });
 
 test("repeated quick setup adds a custom API to the local pool from a previous direct mode", async ({ page }) => {
-  await installTauriMock(page, { onboarding: false, locale: "en", mode: "zenith", populated: true });
+  await installTauriMock(page, { onboarding: false, locale: "en", populated: true, storedMode: "zenith" });
   await page.goto("/");
   await page.getByRole("button", { name: "Get started" }).click();
   await expect(page.getByRole("button", { name: /Computer/ })).toHaveAttribute("aria-pressed", "true");
@@ -341,18 +342,6 @@ test("repeated quick setup adds a custom API to the local pool from a previous d
   await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.mode"))).toBe("local");
 });
 
-test("remote quick setup requires explicit consent for plain HTTP", async ({ page }) => {
-  await installTauriMock(page, { onboarding: false, locale: "en", populated: true });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Get started" }).click();
-  await page.getByRole("button", { name: /On your server/ }).click();
-  await page.getByRole("button", { name: "Continue" }).click();
-  await page.getByLabel("Server address").fill("http://127.0.0.1:14999");
-  await page.getByLabel("Management token", { exact: true }).fill("synthetic-management-token-000000");
-  await expect(page.getByRole("button", { name: "Continue" })).toBeDisabled();
-  await page.getByLabel("Allow this unencrypted HTTP server connection.").check();
-  await expect(page.getByRole("button", { name: "Continue" })).toBeEnabled();
-});
 
 test("quick setup can switch to Russian without untranslated keys", async ({ page }) => {
   await installTauriMock(page, { onboarding: false, locale: "ru", populated: true });
@@ -419,15 +408,11 @@ for (const theme of ["light", "dark"] as const) {
       for (let step = 4; step > 1; step -= 1) {
         await page.getByRole("button", { name: "Назад", exact: true }).click();
       }
-      await page.getByRole("button", { name: /На своём сервере/ }).click();
+      await page.getByRole("button", { name: /На сервере/ }).click();
       await page.getByRole("button", { name: "Продолжить" }).click();
-      await page.getByLabel("Адрес сервера", { exact: true }).fill("https://relay.example.invalid");
-      await page.getByLabel("Токен управления", { exact: true }).fill("synthetic-management-token-000000");
-      await expect(page.getByRole("button", { name: "Продолжить" })).toBeEnabled();
-      await expectSetupFrame(page);
-      await page.screenshot({ path: `output/playwright/onboarding-remote-ru-${theme}-${viewport.width}x${viewport.height}.png` });
-      await page.getByRole("button", { name: "Продолжить" }).click();
-      await expect(page.locator(".client-options")).toBeVisible();
+      await expect(page.getByText("В разработке", { exact: true })).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+      await page.screenshot({ path: `output/playwright/onboarding-hosted-ru-${theme}-${viewport.width}x${viewport.height}.png` });
     });
   }
 }

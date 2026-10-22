@@ -4,7 +4,6 @@ import { isRuntimeRefreshPage, isUsageRefreshPage, startupSnapshotNeedsRetry, us
 
 function snapshot(overrides: Partial<RuntimeSnapshot["gateway"]> = {}, warnings: string[] = []) {
   return {
-    runtimeTarget: { kind: "local" },
     gateway: { running: false, candidateCount: 0, routingOrder: [], ...overrides },
     warnings,
   } as RuntimeSnapshot;
@@ -36,6 +35,6 @@ describe("refresh policy", () => {
     expect(startupSnapshotNeedsRetry(snapshot({ running: true, candidateCount: 3 }))).toBe(true);
     expect(startupSnapshotNeedsRetry(snapshot({ running: true, candidateCount: 3, routingOrder: [{ candidateId: "account", available: true }] as never }))).toBe(false);
     expect(startupSnapshotNeedsRetry(snapshot({ candidateCount: 3 }))).toBe(false);
-    expect(startupSnapshotNeedsRetry({ ...snapshot({}, ["gateway_configured_but_not_running"]), runtimeTarget: { kind: "remote" } } as RuntimeSnapshot)).toBe(false);
+    expect(startupSnapshotNeedsRetry(null)).toBe(false);
   });
 });

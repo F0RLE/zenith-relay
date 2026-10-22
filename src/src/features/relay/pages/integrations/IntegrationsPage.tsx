@@ -1,8 +1,7 @@
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { Radio, SquareTerminal, UserRound } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { PageHeader, Tabs } from "../../components/Ui";
-import { useRelayState } from "../../state/RelayStateProvider";
 import { GatewaySettings } from "../gateway/GatewayPage";
 import { IntegrationWorkspace, type IntegrationOption } from "./IntegrationWorkspace";
 import { ChatGPTApplicationSettings } from "./ChatGPTApplicationSettings";
@@ -37,13 +36,24 @@ const accountProviders = [
 
 export function IntegrationsPage() {
   const { t } = useTranslation();
-  const { mode } = useRelayState();
+  const pageRef = useRef<HTMLElement>(null);
   const [section, setSection] = useState("api");
   const [applicationId, setApplicationId] = useState("chatgpt");
   const [accountProviderId, setAccountProviderId] = useState("chatgpt");
-  const apiLabel = t(mode === "remote" ? "integrations.serverApi" : "integrations.localApi");
+  const apiLabel = t("integrations.localApi");
 
-  return <section className="relay-page relay-workspace-page integrations-page">
+  useLayoutEffect(() => {
+    const page = pageRef.current;
+    const header = page?.querySelector<HTMLElement>(":scope > .relay-workspace-header");
+    if (!page || !header) return;
+    const update = () => page.style.setProperty("--integration-header-height", `${header.getBoundingClientRect().height}px`);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(header);
+    return () => observer.disconnect();
+  }, []);
+
+  return <section ref={pageRef} className="relay-page relay-workspace-page integrations-page">
     <PageHeader
       title={t("nav.integrations")}
       navigation={<Tabs

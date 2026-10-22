@@ -3,7 +3,7 @@ import { installTauriMock } from "../tauri-mock";
 import { chooseOption } from "./helpers";
 
 test("automation editor only saves executable local configurations", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3, codexBindings: false });
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3 });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("tab", { name: "Automations" }).click();
@@ -98,7 +98,7 @@ test("automation type controls its fields and default name while custom names ar
   await expect(page.locator(".automation-card header strong")).toHaveText("Start quota countdown");
 });
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`automation cards and editor stay consistent without a toolbar in ${mode} mode`, async ({ page }) => {
     await installTauriMock(page, {
       mode, locale: "ru", populated: true,
@@ -119,34 +119,15 @@ for (const mode of ["local", "remote"] as const) {
     await expect(dialog.getByLabel("Название", { exact: true })).toHaveValue("");
     await expect(dialog.getByRole("button", { name: "Тип автоматизации: Сбросить недельную квоту", exact: true })).toBeVisible();
     await dialog.getByRole("button", { name: "Сохранить", exact: true }).click();
-    const saved = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { name?: string; payload?: { name?: string } } } }> }).__TAURI_TEST_INVOKES__.findLast((item) => ["update_quota_wake_automation", "execute_remote_server_action"].includes(item.command)));
-    expect(saved?.args.input?.payload?.name ?? saved?.args.input?.name).toBe("Сбросить недельную квоту");
+    const saved = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { name?: string } } }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "update_quota_wake_automation"));
+    expect(saved?.args.input?.name).toBe("Сбросить недельную квоту");
   });
 }
 
-test("remote automation editor exposes only automatic execution", async ({ page }) => {
-  await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Connections", exact: true }).click();
-  await page.getByRole("tab", { name: "Automations" }).click();
-  await page.getByRole("button", { name: "Edit" }).click();
 
-  const dialog = page.getByRole("dialog", { name: "Edit automation" });
-  await expect(dialog.getByRole("group", { name: "Run" })).toHaveCount(0);
-  await expect(dialog.getByText("Automatic", { exact: true })).toHaveCount(0);
-  await expect(dialog.getByRole("button", { name: /^Model: gpt-5\.4/ })).toBeVisible();
-  await dialog.getByRole("button", { name: /^Accounts:/ }).click();
-  await expect(page.locator('[role="option"][data-value="tags"]')).toHaveCount(0);
-  await page.keyboard.press("Escape");
-  await dialog.getByRole("button", { name: "Save" }).click();
-
-  const call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { action?: Record<string, unknown>; payload?: Record<string, unknown> } } }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "execute_remote_server_action"));
-  expect(call?.args.input).toMatchObject({ action: { type: "update_wake_task", id: "wake_synthetic" }, payload: { executionPolicy: "automatic", modelPolicy: { kind: "explicit", value: "gpt-5.4" } } });
-});
-
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`API source usage keeps source diagnostics in ${mode} mode`, async ({ page }) => {
-    await installTauriMock(page, { mode, locale: "en", populated: true, usageCandidateKind: "source" });
+    await installTauriMock(page, { mode, locale: "en", populated: true, usageCandidateKind: "source", diagnosticDebug: true });
     await page.goto("/");
     await page.getByRole("button", { name: "Usage", exact: true }).click();
     await page.getByRole("button", { name: new RegExp(`Request details: req_synthetic_${mode}`) }).click();
@@ -174,7 +155,7 @@ for (const mode of ["local", "remote"] as const) {
   });
 }
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`${mode} keeps transport tied to sign-in and reports it in usage`, async ({ page }) => {
     await installTauriMock(page, { mode, locale: "en", populated: true, basisPointsAvailable: true, usageEndpointKind: "excel_basis_points" });
     await page.goto("/");
@@ -203,8 +184,7 @@ for (const mode of ["local", "remote"] as const) {
     const updates = await page.evaluate(() => (window as unknown as {
       __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { basisPointsEnabled?: boolean; payload?: Record<string, unknown> } } }>;
     }).__TAURI_TEST_INVOKES__.flatMap(({ command, args }) => {
-      const input = command === "update_local_routing" ? args.input
-        : command === "execute_remote_server_action" ? args.input?.payload : undefined;
+      const input = command === "update_local_routing" ? args.input : undefined;
       return typeof input?.basisPointsEnabled === "boolean" ? [input] : [];
     }));
     expect(updates).toEqual([]);

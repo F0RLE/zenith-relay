@@ -7,8 +7,8 @@ import {
   poolActivityState,
   poolMemberRuntimeStates,
   poolMembersFromRuntime,
-  poolMemberSourceIds,
   poolMemberStatusCounts,
+  poolMemberDisplayStatus,
   poolProviderCreditsSummary,
   poolRoutingAvailability,
 } from "../src/features/relay/pages/pool/poolMembersModel";
@@ -143,7 +143,7 @@ describe("pool members model", () => {
     expect(orderedPoolMembers(members, []).map((item) => item.id)).toEqual(["ready", "source-ready", "wait", "error", "disabled"]);
   });
 
-  test("projects only pooled accounts and sources and keeps source ids stable", () => {
+  test("projects only pooled accounts and sources", () => {
     const runtime = {
       accounts: [{ id: "account-1", inPool: true }, { id: "account-2", inPool: false }],
       sources: [{ id: "source-2", inPool: true }, { id: "source-1", inPool: true }],
@@ -154,7 +154,6 @@ describe("pool members model", () => {
       "source:source-2",
       "source:source-1",
     ]);
-    expect(poolMemberSourceIds(members)).toBe("source-1\nsource-2");
   });
 
   test("maps protocol candidates back to source cards and preserves backend order", () => {
@@ -165,7 +164,7 @@ describe("pool members model", () => {
     expect(orderedPoolMembers(members, order).map((item) => item.id)).toEqual(["account-1", "source-1"]);
   });
 
-  test("keeps the saved member order while a live request bubbles another card", () => {
+  test("keeps active work ahead of the scheduler's next member and saved order", () => {
     const members = [
       member("account", "first", { label: "First" }),
       member("account", "second", { label: "Second" }),
@@ -178,10 +177,12 @@ describe("pool members model", () => {
     expect(orderedPoolMembers(members, live, [
       { id: "first" },
       { id: "second" },
-    ]).map((item) => item.id)).toEqual(["first", "second"]);
+    ]).map((item) => item.id)).toEqual(["second", "first"]);
+    const busyOnly = live.map((item) => ({ ...item, nextForNewRequest: false }));
+    expect(orderedPoolMembers(members, busyOnly, members, "round_robin").map((item) => item.id)).toEqual(["second", "first"]);
   });
 
-  test("automatic cards rank fresh limiting quota independently of active requests and manual order", () => {
+  test("automatic cards keep active work first, then rank fresh quota ahead of manual order", () => {
     const window = (availableBasisPoints: number) => ({ availableBasisPoints });
     const members = [
       member("source", "api", { name: "Zenith API" }),
@@ -199,26 +200,101 @@ describe("pool members model", () => {
       member("account", "leader", { label: "Leader", quota: { primary: window(8_300) }, refreshState: { quota: "fresh" } }),
     ];
     const live = [
-      candidate("lower", { activeRequestCount: 1, nextForNewRequest: true }),
+      candidate("lower", { activeRequestCount: 1 }),
       candidate("leader"),
       candidate("empty"),
       candidate("api"),
     ];
     const saved = [{ id: "api" }, { id: "empty" }, { id: "empty-lower" }, { id: "lower" }, { id: "leader" }];
     expect(orderedPoolMembers(members, live, saved, "automatic").map((item) => item.id)).toEqual([
-      "leader",
       "lower",
+      "leader",
       "empty",
       "empty-lower",
       "api",
     ]);
     expect(orderedPoolMembers(members, live, saved, "in_order").map((item) => item.id)).toEqual([
+      "lower",
       "api",
       "empty",
       "empty-lower",
-      "lower",
       "leader",
     ]);
+  });
+
+  test("all modes show active work before the scheduler's fallback preference", () => {
+    const members = ["a", "b", "c"].map((id) => member("account", id, {
+      label: id, quota: { primary: { availableBasisPoints: id === "a" ? 10_000 : 1_000 } }, refreshState: { quota: "fresh" },
+    }));
+    const order = [candidate("a", { selectionRank: 2, activeRequestCount: 1 }),
+      candidate("b", { selectionRank: 0, nextForNewRequest: true }), candidate("c", { selectionRank: 1 })];
+    for (const mode of ["automatic", "in_order", "round_robin", "weighted_round_robin", "failover"] as const) {
+      expect(orderedPoolMembers(members, order, members, mode).map((item) => item.id)).toEqual(["a", "b", "c"]);
+    }
+    expect(members.map((item) => item.id)).toEqual(["a", "b", "c"]);
+  });
+
+  test("live unavailable members cannot outrank ready members, even with a stale preview", () => {
+    const members = [
+      member("account", "disabled", { enabled: false, lastErrorCode: "invalid_grant" }),
+      member("account", "draining", { draining: true }),
+      member("account", "error", { operationalStatus: "unavailable" }),
+      member("account", "wait-late"), member("account", "wait-soon"),
+      member("account", "ready"), member("account", "no-secret", { secretAvailable: false }),
+    ];
+    const order = members.map((item) => candidate(item.id, item.id.startsWith("wait")
+      ? { available: false, quotaWait: true, nextRetryAtMs: item.id === "wait-soon" ? 100 : 200, selectionRank: 0 }
+      : { available: true, selectionRank: item.id === "ready" ? 1 : 0 }));
+    const states = poolMemberRuntimeStates(members, order);
+    for (const mode of ["automatic", "round_robin", "weighted_round_robin", "failover"] as const) {
+      expect(orderedPoolMembers(members, order, members, mode, states).map((item) => item.id))
+        .toEqual(["ready", "wait-soon", "wait-late", "error", "no-secret", "disabled", "draining"]);
+    }
+    expect(poolMemberDisplayStatus(members[0]!, states.get("disabled"))).toBe("disabled");
+    expect(poolMemberStatusCounts(members, states)).toMatchObject({ rotation: 1, quotaWait: 2, disabled: 2 });
+  });
+
+  test("source aliases preserve preference and only wait when no binding is ready", () => {
+    const members = [member("source", "source"), member("account", "account")];
+    const order = [candidate("source::messages", { available: false, quotaWait: true }),
+      candidate("source::responses", { selectionRank: 0 }), candidate("account", { selectionRank: 1 })];
+    const states = poolMemberRuntimeStates(members, order);
+    expect(states.get("source")).toMatchObject({ available: true, quotaWait: false, selectionRank: 0 });
+    expect(orderedPoolMembers(members, order, members, "automatic", states).map((item) => item.id)).toEqual(["source", "account"]);
+    expect(sameRuntimeOrder(order, order.map((item) => ({ ...item, selectionRank: 2 })))).toBe(false);
+    expect(sameRuntimeOrder(order, order.map((item) => ({ ...item, quotaWait: false })))).toBe(false);
+  });
+
+  test("distinguishes cooldown, capacity, recovery and draining from terminal errors", () => {
+    const ready = member("account", "account");
+    const cooling = candidate("account", { available: false, nextRetryAtMs: 200 });
+    expect(poolMemberDisplayStatus(ready, cooling)).toBe("cooldown");
+    expect(poolMemberDisplayStatus(ready, candidate("account", { available: false, capacityWait: true, activeRequestCount: 1 }))).toBe("busy");
+    expect(poolMemberDisplayStatus(member("account", "account", { operationalStatus: "unavailable" }),
+      candidate("account", { available: false, activeRequestCount: 1 }))).toBe("unavailable");
+    expect(poolMemberDisplayStatus(ready, candidate("account", { halfOpen: true }))).toBe("rotation");
+    expect(poolMemberDisplayStatus({ ...ready, draining: true }, cooling)).toBe("draining");
+    expect(poolMemberDisplayStatus(member("account", "account", { authState: { state: "requires_reauth" } }), cooling)).toBe("unavailable");
+    expect(poolMemberDisplayStatus(member("account", "account", { routingBlockReason: "subscription_expired" }), cooling)).toBe("unavailable");
+    expect(poolMemberDisplayStatus(ready, candidate("account", { available: false }))).toBe("rotation");
+    expect(poolMemberDisplayStatus(ready, { ...cooling, available: true })).toBe("rotation");
+    expect(poolMemberStatusCounts([ready], new Map([[ready.id, cooling]])))
+      .toEqual({ rotation: 0, quotaWait: 0, waiting: 1, errors: 0, disabled: 0 });
+    const source = member("source", "source", { operationalStatus: "unavailable" });
+    expect(poolMemberStatusCounts([source], new Map([[source.id, candidate("source", { available: false, capacityWait: true })]])))
+      .toEqual({ rotation: 0, quotaWait: 0, waiting: 1, errors: 0, disabled: 0 });
+  });
+
+  test("new activity invalidates the whole preference, not just its first member", () => {
+    const members = [member("account", "a"), member("account", "b")];
+    const order = [candidate("a", { activityRevision: 2, selectionRank: 1 }), candidate("b", { activityRevision: 2, selectionRank: 0, nextForNewRequest: true })];
+    const activity = { revision: 3, lastCandidateId: "b", candidates: {
+      b: { candidateId: "b", revision: 3, inFlight: 1, activeRequestCount: 1, activeModels: [] },
+    } };
+    const states = poolMemberRuntimeStates(members, order, activity);
+    expect(states.get("a")?.selectionRank).toBeNull();
+    expect(states.get("b")?.selectionRank).toBeNull();
+    expect(orderedPoolMembers(members, order, members, "round_robin", states).map((item) => item.id)).toEqual(["b", "a"]);
   });
 
   test("automatic cards do not rank stale, undated or explicitly exhausted quota as fresh capacity", () => {
@@ -414,7 +490,7 @@ describe("pool members model", () => {
       member("source", "disabled", { operationalStatus: "disabled" }),
       member("account", "quota", { operationalStatus: "quotaWait" }),
     ];
-    expect(poolMemberStatusCounts(members)).toEqual({ rotation: 2, quotaWait: 1, errors: 2, disabled: 1 });
+    expect(poolMemberStatusCounts(members)).toEqual({ rotation: 2, quotaWait: 1, waiting: 1, errors: 2, disabled: 1 });
   });
 
   test("sums provider credits only for accounts currently in the pool", () => {

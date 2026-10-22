@@ -1,6 +1,6 @@
 import { type KeyboardEvent, type PointerEvent, useEffect, useRef, useState } from "react";
 
-export const REQUEST_COLUMN_IDS = ["time", "status", "model", "protocol", "tier", "connection", "timing", "speed", "tokens", "equivalent", "request"] as const;
+export const REQUEST_COLUMN_IDS = ["time", "status", "model", "connection", "timing", "tokens", "equivalent", "request"] as const;
 export type RequestColumnId = typeof REQUEST_COLUMN_IDS[number];
 export type RequestTableLayout = { order: RequestColumnId[]; widths: Partial<Record<RequestColumnId, number>> };
 export const MODEL_COLUMN_IDS = ["name", "requests", "input", "output", "cache", "equivalent"] as const;
@@ -11,20 +11,24 @@ export type ErrorColumnId = typeof ERROR_COLUMN_IDS[number];
 type ColumnDrag<ColumnId extends string> = { column: ColumnId; pointerId: number; target: ColumnId; after: boolean };
 export const REQUEST_TABLE_LAYOUT_KEY = "relay.usageRequestTableLayout";
 export const REQUEST_COLUMN_MAX_WIDTH = 480;
-export const REQUEST_COLUMN_MIN_WIDTH: Record<RequestColumnId, number> = { time: 130, status: 58, model: 82, protocol: 112, tier: 110, connection: 100, timing: 96, speed: 82, tokens: 72, equivalent: 92, request: 120 };
+export const REQUEST_COLUMN_MIN_WIDTH: Record<RequestColumnId, number> = { time: 130, status: 100, model: 82, connection: 100, timing: 96, tokens: 72, equivalent: 92, request: 96 };
 
 export function loadRequestTableLayout(): RequestTableLayout {
   const fallback = { order: [...REQUEST_COLUMN_IDS], widths: {} } satisfies RequestTableLayout;
   try {
     const parsed = JSON.parse(localStorage.getItem(REQUEST_TABLE_LAYOUT_KEY) ?? "null") as { order?: unknown; widths?: Record<string, unknown> } | null;
-    const order = parsed?.order;
-    if (!Array.isArray(order) || order.length !== REQUEST_COLUMN_IDS.length || new Set(order).size !== REQUEST_COLUMN_IDS.length || !order.every((columnId) => REQUEST_COLUMN_IDS.includes(columnId as RequestColumnId))) return fallback;
+    const storedOrder = parsed?.order;
+    if (!Array.isArray(storedOrder) || !storedOrder.every((columnId) => typeof columnId === "string") || new Set(storedOrder).size !== storedOrder.length) return fallback;
+    const order = storedOrder.filter((columnId): columnId is RequestColumnId => REQUEST_COLUMN_IDS.includes(columnId as RequestColumnId));
+    for (const columnId of REQUEST_COLUMN_IDS) {
+      if (!order.includes(columnId)) order.push(columnId);
+    }
     const widths: Partial<Record<RequestColumnId, number>> = {};
     for (const columnId of REQUEST_COLUMN_IDS) {
-      const width = Number(parsed?.widths?.[columnId]);
-      if (Number.isFinite(width)) widths[columnId] = Math.min(REQUEST_COLUMN_MAX_WIDTH, Math.max(REQUEST_COLUMN_MIN_WIDTH[columnId], Math.round(width)));
+      const width = parsed?.widths?.[columnId];
+      if (typeof width === "number" && Number.isFinite(width)) widths[columnId] = Math.min(REQUEST_COLUMN_MAX_WIDTH, Math.max(REQUEST_COLUMN_MIN_WIDTH[columnId], Math.round(width)));
     }
-    return { order: order as RequestColumnId[], widths: Object.keys(widths).length === REQUEST_COLUMN_IDS.length ? widths : {} };
+    return { order, widths: Object.keys(widths).length === REQUEST_COLUMN_IDS.length ? widths : {} };
   } catch {
     return fallback;
   }

@@ -18,7 +18,7 @@ export function ResetCreditsControl({ account, onCompleted }: ResetCreditsContro
   const [error, setError] = useState<string | null>(null);
 
   const availableFromQuota = account.quota.resetCreditsAvailable;
-  if (account.remoteLocation || availableFromQuota == null || availableFromQuota <= 0) {
+  if (account.recoveryRequired || availableFromQuota == null || availableFromQuota <= 0) {
     return error ? <span className="reset-credits-inline-error" role="alert">{error}</span> : null;
   }
 

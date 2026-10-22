@@ -39,7 +39,7 @@ type ModelDragState = {
 
 export function ModelRulesView() {
   const { t } = useTranslation();
-  const { mode, runtime, perform } = useRelayState();
+  const { runtime, perform } = useRelayState();
   const [reasoningModel, setReasoningModel] = useState<ModelSummary | null>(null);
   // Model Rules configures the complete pool inventory. Route health and
   // cooldowns are runtime state; they must not make a member's model vanish
@@ -58,7 +58,7 @@ export function ModelRulesView() {
   const catalogSignature = modelSignature(models);
   useEffect(() => {
     setOrderedModels(models);
-  }, [runtime?.configurationRevision, catalogSignature]);
+  }, [catalogSignature]);
   useEffect(() => {
     setPendingEnabled((previousPendingEnabled) => reconcilePendingModelEnabled(previousPendingEnabled, models));
   }, [catalogSignature]);
@@ -99,8 +99,7 @@ export function ModelRulesView() {
     void perform(
       `model-toggle-${model.id}`,
       async () => {
-        if (mode === "local") await relayCommands.setModelEnabled(model.id, enabled);
-        else await relayCommands.remoteAction({ type: "set_model_enabled" }, { modelId: model.id, enabled });
+        await relayCommands.setModelEnabled(model.id, enabled);
         saved = true;
       },
       "feedback.saved",
@@ -112,12 +111,7 @@ export function ModelRulesView() {
   };
   const persistModelOrder = (orderedModelsToSave: ModelSummary[]) => perform(
     "model-order",
-    () => mode === "local"
-      ? relayCommands.setModelDisplayOrder(completeModelDisplayOrder(orderedModelsToSave, models))
-      : relayCommands.remoteAction(
-        { type: "set_model_order" },
-        { modelIds: completeModelDisplayOrder(orderedModelsToSave, models) },
-      ),
+    () => relayCommands.setModelDisplayOrder(completeModelDisplayOrder(orderedModelsToSave, models)),
     "feedback.saved",
     { backgroundRefresh: true },
   );
@@ -157,9 +151,7 @@ export function ModelRulesView() {
           submitted = mutation.next;
           mutation.next = null;
           const policy = submitted;
-          lastSaved = await perform(`model-context-${model.id}`, () => mode === "local"
-            ? relayCommands.setModelContext(model.id, policy)
-            : relayCommands.remoteAction({ type: "set_model_context" }, { modelId: model.id, contextPolicy: policy }),
+          lastSaved = await perform(`model-context-${model.id}`, () => relayCommands.setModelContext(model.id, policy),
           "feedback.saved", { backgroundRefresh: true, uiLock: false });
         }
       } finally {
@@ -292,9 +284,7 @@ export function ModelRulesView() {
                       saving={pendingSpeed[model.id] !== undefined && pendingSpeed[model.id] !== model.speedTier}
                       onChange={(nextTier) => {
                         setPendingSpeed((previousPendingSpeed) => ({ ...previousPendingSpeed, [model.id]: nextTier }));
-                        void perform(`model-speed-${model.id}`, () => mode === "local"
-                          ? relayCommands.setModelServiceTier(model.id, nextTier)
-                          : relayCommands.remoteAction({ type: "set_model_service_tier" }, { modelId: model.id, serviceTier: nextTier }),
+                        void perform(`model-speed-${model.id}`, () => relayCommands.setModelServiceTier(model.id, nextTier),
                         "feedback.saved",
                         { backgroundRefresh: true, uiLock: false },
                         ).then((ok) => {
@@ -458,7 +448,7 @@ function useModelRuleDrag({
 
 function ModelReasoningDialog({ model, onClose }: { model: ModelSummary; onClose: () => void }) {
   const { t } = useTranslation();
-  const { mode, perform } = useRelayState();
+  const { perform } = useRelayState();
   // The backend owns the provider contract and its order. Never synthesize
   // or reorder levels in the editor, and discard stale custom values from old
   // local policies before they can be sent back to the runtime.
@@ -502,9 +492,7 @@ function ModelReasoningDialog({ model, onClose }: { model: ModelSummary; onClose
       const queuedLevelsSnapshot = queuedLevels.current;
       const queuedPolicyRevision = policyRevision.current;
       queuedLevels.current = null;
-      const ok = await runSerialized(operation, () => mode === "local"
-        ? relayCommands.setModelReasoning(model.id, queuedLevelsSnapshot)
-        : relayCommands.remoteAction({ type: "set_model_reasoning" }, { modelId: model.id, allowedLevels: queuedLevelsSnapshot }), "feedback.saved");
+      const ok = await runSerialized(operation, () => relayCommands.setModelReasoning(model.id, queuedLevelsSnapshot), "feedback.saved");
       if (ok) confirmedAllowedLevels = queuedLevelsSnapshot;
       else if (queuedPolicyRevision === policyRevision.current && queuedLevels.current === null) {
         updateAllowedLevels(confirmedAllowedLevels);

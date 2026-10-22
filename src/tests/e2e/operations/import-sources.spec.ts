@@ -341,16 +341,49 @@ test("account import can reuse an already assigned stored proxy", async ({ page 
   expect(assignment?.args).toEqual({ input: { accountIds: ["account_imported_1", "account_imported_2"] } });
 });
 
-test("OAuth callback is not lost when the browser redirects before start returns", async ({ page }) => {
+test("SIWC import labels its client and requires sign-in before pool admission", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", mode: "local", populated: true, accountOAuthClientKind: "siwc" });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("button", { name: "Import", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Import accounts" });
+  await expect(dialog.getByRole("textbox", { name: "Account data or tokens", exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "Choose account files" }).click();
+  await expect(dialog.getByRole("alert")).toContainText("Sign in again to authorize this host");
+  await expect(dialog.getByText("ChatGPT (SIWC)", { exact: true })).toHaveCount(3);
+  await expect(dialog.getByLabel("Add imported accounts to the pool", { exact: true })).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Import 2 account(s)" }).click();
+  await expect(dialog).toBeHidden();
+  const calls = await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { addToPool?: boolean } } }>;
+  }).__TAURI_TEST_INVOKES__);
+  expect(calls.findLast((call) => call.command === "confirm_local_account_import")?.args.input?.addToPool).toBe(false);
+});
+
+test("OAuth callback before start returns survives unrelated flow events", async ({ page }) => {
   await installTauriMock(page, { locale: "en", mode: "local", populated: false, oauthCallbackBeforeStartReturns: true });
   await page.goto("/");
+  await page.evaluate(() => {
+    const bridge = window as unknown as {
+      __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> };
+      __TAURI_TEST_EMIT__: (event: string, payload: unknown) => void;
+    };
+    const invoke = bridge.__TAURI_INTERNALS__.invoke.bind(bridge.__TAURI_INTERNALS__);
+    bridge.__TAURI_INTERNALS__.invoke = async (command, args, options) => {
+      const result = await invoke(command, args, options);
+      if (command === "start_codex_oauth") {
+        bridge.__TAURI_TEST_EMIT__("relay-oauth-status", { loginId: "oauth_unrelated", status: "expired" });
+      }
+      return result;
+    };
+  });
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("button", { name: "Sign in", exact: true }).first().click();
 
   await expect(page.getByRole("dialog", { name: "Sign in" })).toHaveCount(0);
   await expect(page.locator(".global-feedback.success")).toHaveText("Account added.");
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.map((call) => call.command)).toContain("complete_codex_oauth");
+  expect(calls.filter((call) => call.command === "complete_codex_oauth")).toHaveLength(1);
 });
 
 test("pasted Cockpit arrays reach the Rust batch preview unchanged", async ({ page }) => {
@@ -359,7 +392,7 @@ test("pasted Cockpit arrays reach the Rust batch preview unchanged", async ({ pa
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("button", { name: "Import", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Import accounts" });
-  await expect(dialog).toContainText("Cockpit Tools JSON");
+  await expect(dialog.locator(".import-start .form-note")).toHaveCount(0);
   await expect(dialog.getByLabel("Account data or tokens")).toHaveAttribute("placeholder", /JWT/);
   const payload = JSON.stringify([
     { type: "codex", access_token: "synthetic-access-one", account_id: "synthetic-one", email: "one@example.test" },
@@ -454,10 +487,10 @@ test("failed-only retry sends only the failed account", async ({ page }) => {
 for (const scenario of [
   { mode: "local", locale: "en", code: "provider_account_id_missing", nav: "Connections", action: "Import", title: "Import accounts", input: "Account data or tokens", preview: "Preview import", confirm: "Import 2 account(s)", heading: "Some accounts were not imported", reason: "The imported record and its token claims do not contain a ChatGPT account ID.", close: "Close" },
   { mode: "local", locale: "ru", code: "models_http_status", nav: "Подключения", action: "Импорт", title: "Импортировать учётные записи", input: "Данные аккаунтов или токены", preview: "Проверить импорт", confirm: "Импортировать: 2", heading: "Часть учётных записей не импортирована", reason: "При проверке доступных моделей провайдер вернул неожиданный ответ.", close: "Закрыть" },
-  { mode: "remote", locale: "en", code: "models_forbidden", nav: "Connections", action: "Import", title: "Import accounts", input: "Account data or tokens", preview: "Preview import", confirm: "Import 2 account(s)", heading: "Some accounts were not imported", reason: "The provider denied access to the model list. Check this account's access and proxy region.", close: "Close" },
-  { mode: "remote", locale: "ru", code: "item_not_found", nav: "Подключения", action: "Импорт", title: "Импортировать учётные записи", input: "Данные аккаунтов или токены", preview: "Проверить импорт", confirm: "Импортировать: 2", heading: "Часть учётных записей не импортирована", reason: "Не пройдена финальная проверка аккаунта. Обновите его данные или прокси и повторите импорт.", close: "Закрыть" },
+  { mode: "local", locale: "en", code: "models_forbidden", nav: "Connections", action: "Import", title: "Import accounts", input: "Account data or tokens", preview: "Preview import", confirm: "Import 2 account(s)", heading: "Some accounts were not imported", reason: "The provider denied access to the model list. Check this account's access and proxy region.", close: "Close" },
+  { mode: "local", locale: "ru", code: "item_not_found", nav: "Подключения", action: "Импорт", title: "Импортировать учётные записи", input: "Данные аккаунтов или токены", preview: "Проверить импорт", confirm: "Импортировать: 2", heading: "Часть учётных записей не импортирована", reason: "Не пройдена финальная проверка аккаунта. Обновите его данные или прокси и повторите импорт.", close: "Закрыть" },
 ] as const) {
-  test(`${scenario.mode} ${scenario.locale} import failures identify the safe account and explain the cause`, async ({ page }) => {
+  test(`${scenario.mode} ${scenario.locale} ${scenario.code} import failures identify the safe account and explain the cause`, async ({ page }) => {
     await installTauriMock(page, { mode: scenario.mode, locale: scenario.locale, populated: true, importResult: "item_failure", importFailureCode: scenario.code });
     await page.goto("/");
     await page.getByRole("button", { name: scenario.nav, exact: true }).click();
@@ -506,11 +539,12 @@ test("missing import session keeps the dialog open with recovery guidance", asyn
   expect(layers.feedback).toBeGreaterThan(layers.modal);
 });
 
-test("empty Choose API mode opens the compact source picker", async ({ page }) => {
-  await installTauriMock(page, { mode: "zenith", locale: "en", populated: false, readyConnected: false });
+test("empty local Sources opens the compact source picker", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await expect(page.getByRole("tab", { name: "Sources", exact: true })).toBeVisible();
+  await page.getByRole("tab", { name: "Sources", exact: true }).click();
   await expect(page.getByText("No API sources", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Add source", exact: true })).toHaveCount(1);
   await expect(page.getByText("Zenith API", { exact: true })).toHaveCount(0);
@@ -548,7 +582,7 @@ test("empty Choose API mode opens the compact source picker", async ({ page }) =
   await dialog.getByRole("button", { name: "Add source", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "Add source" })).toBeHidden();
   await expect(page.getByText("Zenith API", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Mode: Choose API", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Mode: Computer", exact: true })).toBeVisible();
   const createdSource = page.locator(".source-card").filter({ hasText: "Zenith API" });
   await expect(createdSource.getByRole("button", { name: "Launch", exact: true })).toBeEnabled();
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
@@ -564,9 +598,10 @@ test("empty Choose API mode opens the compact source picker", async ({ page }) =
 });
 
 test("provider presets leave automatic protocol discovery to the connector", async ({ page }) => {
-  await installTauriMock(page, { mode: "zenith", locale: "en", populated: false, readyConnected: false });
+  await installTauriMock(page, { mode: "local", locale: "en", populated: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("tab", { name: "Sources", exact: true }).click();
   await page.getByRole("button", { name: "Add source", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Add source" });
 
@@ -590,9 +625,10 @@ test("provider presets leave automatic protocol discovery to the connector", asy
 });
 
 test("source setup leaves model catalog discovery to the connector", async ({ page }) => {
-  await installTauriMock(page, { mode: "zenith", locale: "en", populated: false, readyConnected: false });
+  await installTauriMock(page, { mode: "local", locale: "en", populated: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("tab", { name: "Sources", exact: true }).click();
   await page.getByRole("button", { name: "Add source", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Add source" });
 
@@ -603,9 +639,10 @@ test("source setup leaves model catalog discovery to the connector", async ({ pa
 });
 
 test("source creation errors stay in one topmost dialog", async ({ page }) => {
-  await installTauriMock(page, { mode: "zenith", locale: "en", populated: false, readyConnected: false, sourceCreateError: "source_test_failed" });
+  await installTauriMock(page, { mode: "local", locale: "en", populated: false, sourceCreateError: "source_test_failed" });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("tab", { name: "Sources", exact: true }).click();
   await page.getByRole("button", { name: "Add source", exact: true }).click();
   const sourceDialog = page.getByRole("dialog", { name: "Add source" });
   await sourceDialog.getByRole("radio", { name: /OpenAI/ }).click();
@@ -671,10 +708,11 @@ test("bridge-only sources stay pool-compatible but cannot launch ChatGPT directl
   await expect(dialog.getByRole("button", { name: "OpenCode", exact: true })).toBeEnabled();
 });
 
-test("Choose API mode manages and launches saved sources without balance controls", async ({ page }) => {
-  await installTauriMock(page, { mode: "zenith", locale: "en", populated: true });
+test("local Sources manages and launches saved sources without balance controls", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("tab", { name: "Sources", exact: true }).click();
   await expect(page.getByText("Example compatible API", { exact: true })).toBeVisible();
   await expect(page.getByText("Balance", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Top up", exact: true })).toHaveCount(0);
@@ -686,48 +724,6 @@ test("Choose API mode manages and launches saved sources without balance control
   expect(calls.find((call) => call.command === "launch_codex_source")?.args).toEqual({ sourceId: "source_synthetic" });
 });
 
-test("Choose API overview shows provider statistics and models", async ({ page }) => {
-  await installTauriMock(page, { mode: "zenith", locale: "en", populated: true });
-  await page.goto("/");
-  const metrics = page.locator(".direct-api-metrics");
-  await expect(metrics).toContainText("$42.50");
-  await expect(metrics).toContainText("$7.50");
-  await expect(metrics).toContainText("128");
-  await expect(metrics).toContainText("987,654");
-  await expect(page.locator(".direct-api-models code")).toHaveText(["gpt-5.4", "gpt-5.4-mini"]);
-  await expect(page.getByText("Usage over time", { exact: true })).toHaveCount(0);
-});
-
-test("Choose API overview shows a retained observation and its failed-refresh reason", async ({ page }) => {
-  await installTauriMock(page, {
-    mode: "zenith", locale: "en", populated: true,
-    sourceStatsById: {
-      source_synthetic: { provider: "zenith", balanceMicroUsd: 42_500_000, spentMicroUsd: null,
-        requests: null, totalTokens: null, status: "available", asOfMs: Date.UTC(2026, 8, 23, 12),
-        stale: true, refreshError: "rate_limited" },
-    },
-  });
-  await page.goto("/");
-  await expect(page.locator(".direct-api-metrics")).toContainText("$42.50");
-  await expect(page.getByText("Not refreshed", { exact: true })).toBeVisible();
-  await expect(page.getByText(/Last checked:/)).toHaveCount(0);
-  await expect(page.locator(".source-stats-caption[data-warning='true']")).toHaveAttribute("data-relay-tooltip", "Try again later");
-});
-
-test("remote pool refreshes provider statistics through the server", async ({ page }) => {
-  await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Pool", exact: true }).click();
-
-  const source = page.locator('.pool-member-card[data-member-kind="source"]');
-  const refresh = source.getByRole("button", { name: "Refresh balance" });
-  await expect(refresh).toBeEnabled();
-  await refresh.click();
-  await expect.poll(() => page.evaluate(() => {
-    const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__;
-    return calls.findLast((call) => call.command === "get_remote_source_stats")?.args;
-  })).toEqual({ sourceId: "source_synthetic", force: true });
-});
 
 test("replacing a source key with the same URL retires visible statistics", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });

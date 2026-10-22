@@ -191,7 +191,7 @@ for (const application of applications) {
       };
     }, [
       ...applications.flatMap((managed) => [managed.connect, managed.launch]),
-      "get_local_runtime_state", "list_codex_account_bindings", "get_claude_desktop_status", "get_opencode_config_status",
+      "get_local_runtime_state", "get_claude_desktop_status", "get_opencode_config_status",
     ]);
     const launch = page.getByRole("button", { name: "Launch application", exact: true });
     await launch.click();

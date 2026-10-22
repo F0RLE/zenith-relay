@@ -18,7 +18,3 @@ export function parseEditableModelPrice(priceText: string) {
     ? Math.round(price * MICRO_USD_PER_USD)
     : null;
 }
-
-export function parseOptionalEditableModelPrice(priceText: string) {
-  return priceText.trim() === "" ? null : parseEditableModelPrice(priceText) ?? undefined;
-}

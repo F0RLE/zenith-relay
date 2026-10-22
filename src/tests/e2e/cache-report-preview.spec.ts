@@ -12,13 +12,14 @@ for (const theme of ["dark", "light"] as const) {
     const dialog = page.getByRole("dialog");
     await expect(dialog.getByRole("tab")).toHaveCount(0);
     await expect(dialog.getByText("ещё ≈ 18 мин")).toBeVisible();
-    await expect(dialog.locator(".request-cache-retention")).toContainText("Хранение кэша (оценка)");
+    await expect(dialog.locator(".request-details-token-group").first().locator(".request-cache-retention")).toContainText("Хранение кэша (оценка)");
+    await expect(dialog.locator(".request-details-token-group").last().locator(".request-cache-retention")).toHaveCount(0);
     await expect(dialog.locator(".request-details-token-child dd > small")).toHaveCount(0);
     await dialog.screenshot({ path: `output/cache-remaining-${theme}.png` });
   });
 }
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   for (const locale of ["en", "ru"] as const) {
     test(`cache reads and zero writes stay separate from retention: ${mode} ${locale}`, async ({ page }) => {
       await page.setViewportSize({ width: 390, height: 760 });
@@ -30,8 +31,10 @@ for (const mode of ["local", "remote"] as const) {
       const dialog = page.getByRole("dialog");
       const reads = dialog.locator(".request-details-token-child").filter({ has: page.getByText(locale === "ru" ? "Прочитано из кэша" : "Cache reads", { exact: true }) });
       const writes = dialog.locator(".request-details-token-child").filter({ has: page.getByText(locale === "ru" ? "Записано в кэш" : "Cache writes", { exact: true }) });
-      await expect(reads.locator("dd")).toHaveText("10");
-      await expect(writes.locator("dd")).toHaveText("0");
+      await expect(reads.locator(".request-token-count")).toHaveText("10");
+      await expect(writes.locator(".request-token-count")).toHaveText("0");
+      await expect(reads.locator(".request-token-cost")).toHaveText("—");
+      await expect(writes.locator(".request-token-cost")).toHaveText("—");
       await expect(dialog.locator(".request-cache-retention")).toContainText(locale === "ru" ? "ещё ≈ 30 мин" : "≈ 30 min left");
       expect(await dialog.locator(".relay-dialog-body, .request-details-list dd").evaluateAll((elements) =>
         elements.every((element) => element.scrollWidth <= element.clientWidth + 1))).toBe(true);
@@ -46,9 +49,11 @@ test("GPT model names do not invent a private provider retention window", async 
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
   const dialog = page.getByRole("dialog");
-  await expect(dialog.locator(".request-cache-retention")).toHaveText("Cache retention (estimate)window not reported");
+  await expect(dialog.locator(".request-cache-retention")).toHaveCount(0);
+  await expect(dialog.getByText("window not reported", { exact: true })).toHaveCount(0);
   const writes = dialog.locator(".request-details-token-child").filter({ has: page.getByText("Cache writes", { exact: true }) });
-  await expect(writes.locator("dd")).toHaveText("—");
+  await expect(writes.locator(".request-token-count")).toHaveText("—");
+  await expect(writes.locator(".request-token-cost")).toHaveText("—");
 });
 
 test("mixed prefix windows do not become one longest-lived cache", async ({ page }) => {
@@ -81,5 +86,6 @@ test("a cache miss retains the prior deadline and a new observed hit refreshes t
   await emitTauriEvent(page, "zenith-usage-recorded", null);
   await expect(retention).toHaveText("≈ 30 min left");
   const writes = page.locator(".request-details-token-child").filter({ has: page.getByText("Cache writes", { exact: true }) });
-  await expect(writes.locator("dd")).toHaveText("0");
+  await expect(writes.locator(".request-token-count")).toHaveText("0");
+  await expect(writes.locator(".request-token-cost")).toHaveText("—");
 });

@@ -12,7 +12,7 @@ export type PoolRoutingPolicy = {
   mode: PoolRoutingMode;
   members: PoolRoutingMember[];
 };
-/** Snapshot shape accepted from an older server during compatibility reads. */
+/** Older saved policy is read-only until the native migration succeeds. */
 export type LegacyPoolRoutingPolicy = {
   version: 1;
   mode: LegacyPoolRoutingMode;

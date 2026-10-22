@@ -3,14 +3,12 @@ import { Clock3 } from "lucide-react";
 import type { KeyboardEvent, PointerEvent, ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { EmptyState, StatusIcon } from "../../components/Ui";
-import { tokenSpeed } from "../../usageSpeed";
 import { loadRequestTableLayout, reorderColumns, REQUEST_COLUMN_IDS, REQUEST_COLUMN_MAX_WIDTH, REQUEST_COLUMN_MIN_WIDTH, REQUEST_TABLE_LAYOUT_KEY, shiftColumn, useColumnDrag } from "./useColumnLayout";
 import type { RequestColumnId, RequestTableLayout } from "./useColumnLayout";
-import { usageSpeedSample } from "./usageData";
 import type { UsageRow } from "./usageData";
 import { formatUsageApiEquivalent } from "./usageFormatting";
-import { compactRequestId, formatTiming, requestStatusKind, requestStatusLabel, formatServiceTier, formatWireApi } from "./usageReportFormat";
-import { SpeedValue, UsageModel, UsageConnection, CompactNumber } from "./usageReportParts";
+import { formatErrorCategory, formatRequestOrigin, formatTiming, requestStatusKind, requestStatusLabel } from "./usageReportFormat";
+import { UsageModel, CompactNumber } from "./usageReportParts";
 
 type RequestsViewProps = {
   rows: UsageRow[];
@@ -41,31 +39,28 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
       label: t("common.status"),
       cell: (row) => {
         const status = requestStatusKind(row);
-        return <StatusIcon
-          status={status === "success" ? "ready" : status === "pending" ? "info" : status}
-          label={requestStatusLabel(row, t)}
-        >{status === "pending" ? <Clock3 aria-hidden /> : null}</StatusIcon>;
+        const label = requestStatusLabel(row, t);
+        const reason = row.errorCategory
+          ? formatErrorCategory(row.errorCategory, t)
+          : row.requestOrigin ? formatRequestOrigin(row.requestOrigin, t) : label;
+        return <span className="usage-request-status">
+          <span className="usage-request-result" data-relay-tooltip={reason}>
+            <StatusIcon
+              status={status === "success" ? "ready" : status === "pending" ? "info" : status}
+              label={reason}
+            >{status === "pending" ? <Clock3 aria-hidden /> : null}</StatusIcon>
+            <span aria-hidden>{label}</span>
+          </span>
+        </span>;
       },
     },
     model: { label: t("common.model"), cell: (row) => <UsageModel row={row} /> },
-    protocol: { label: t("usage.protocol"), cell: (row) => <code>{formatWireApi(row.wireApi, t)}</code> },
-    tier: { label: t("usage.serviceTier"), cell: (row) => formatServiceTier(row, t) },
-    connection: { label: t("usage.poolMember"), cell: (row) => <UsageConnection row={row} /> },
+    connection: { label: t("usage.poolMember"), cell: (row) => row.connection },
     timing: { label: t("usage.timing"), cell: (row) => formatTiming(row.ttft, row.duration, i18n.resolvedLanguage ?? i18n.language, t) },
-    speed: {
-      label: t("usage.generationSpeedShort"),
-      cell: (row) => (
-        <SpeedValue
-          value={tokenSpeed(usageSpeedSample(row))}
-          locale={i18n.resolvedLanguage ?? i18n.language}
-          unit={t("usage.tokensPerSecondUnit")}
-        />
-      ),
-    },
     tokens: { label: t("usage.tokens"), cell: (row) => row.tokens == null ? "-" : <CompactNumber value={row.tokens} locale={i18n.language} /> },
     equivalent: { label: t("usage.value"), cell: (row) => row.apiEquivalent ? formatUsageApiEquivalent(row.apiEquivalent, i18n.language) : "—" },
     request: {
-      label: t("usage.requestId"),
+      label: t("usage.openDetails"),
       cell: (row) => (
         <button
           type="button"
@@ -75,7 +70,7 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
           data-relay-tooltip={row.requestId ?? undefined}
           onClick={() => onSelect(row)}
         >
-          <code>{compactRequestId(row.requestId)}</code>
+          {t("usage.openDetails")}
           {row.attempt > 1 ? <small className="usage-request-sends">{t("usage.execution.sendCount", { count: row.attempt })}</small> : null}
         </button>
       ),

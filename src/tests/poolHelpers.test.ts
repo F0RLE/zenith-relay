@@ -9,7 +9,7 @@ import {
   groupModelSummaries,
   modelSummaries,
 } from "../src/features/relay/modelSummaries";
-import { applyRuntimeActivity, applyRuntimeActivities, reconcileRuntimeActivityOverlay, routingOrderPositions, runtimeCandidateForMember, sameRuntimeOrder, upcomingModelRetries } from "../src/features/relay/routingOrder";
+import { applyRuntimeActivities, reconcileRuntimeActivityOverlay, routingOrderPositions, runtimeCandidateForMember, sameRuntimeOrder, upcomingModelRetries } from "../src/features/relay/routingOrder";
 
 function source(overrides: Partial<SourceSummary>): SourceSummary {
   return {
@@ -63,7 +63,6 @@ function account(overrides: Partial<AccountSummary>): AccountSummary {
 function runtime(overrides: Partial<RuntimeSnapshot>): RuntimeSnapshot {
   return {
     schemaVersion: 1,
-    runtimeTarget: { kind: "local", connected: true, origin: null, serverId: null, version: null },
     gateway: {
       running: true,
       baseUrl: "http://127.0.0.1:0",
@@ -349,19 +348,19 @@ describe("pool helpers", () => {
       { candidateId: "account-a", kind: "oauth_account" as const, available: true, inFlight: 0, activeRequestCount: 0, activeModels: [], lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0 },
       { candidateId: "source-b::messages", kind: "api_source" as const, available: true, inFlight: 0, activeRequestCount: 0, activeModels: [], lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0 },
     ];
-    const next = applyRuntimeActivity(order, {
+    const next = applyRuntimeActivities(order, [{
       revision: 1,
       candidateId: "source-b::messages",
       inFlight: 2,
       activeRequestCount: 2,
       activeModels: [{ model: "claude-opus", requestCount: 2 }],
-    });
+    }]);
 
     expect(next).not.toBe(order);
     expect(next[0]).toMatchObject({ candidateId: "source-b::messages", inFlight: 2, activeRequestCount: 2, activeModels: [{ model: "claude-opus", requestCount: 2 }] });
     expect(next[1]).toMatchObject({ candidateId: "account-a", inFlight: 0, activeRequestCount: 0, activeModels: [] });
     expect(order[1]).toMatchObject({ inFlight: 0, activeRequestCount: 0, activeModels: [] });
-    expect(applyRuntimeActivity(order, { revision: 2, candidateId: "missing", inFlight: 1, activeRequestCount: 1, activeModels: [] })).toBe(order);
+    expect(applyRuntimeActivities(order, [{ revision: 2, candidateId: "missing", inFlight: 1, activeRequestCount: 1, activeModels: [] }])).toBe(order);
   });
 
   test("applies a burst once and keeps the last update per candidate", () => {
@@ -406,25 +405,25 @@ describe("pool helpers", () => {
       { candidateId: "account-a", kind: "oauth_account" as const, available: true, inFlight: 0, activeRequestCount: 0, activeModels: [], lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0 },
       { candidateId: "source-b", kind: "api_source" as const, available: true, inFlight: 0, activeRequestCount: 0, activeModels: [], lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0 },
     ];
-    const active = applyRuntimeActivity(base, {
+    const active = applyRuntimeActivities(base, [{
       revision: 1,
       candidateId: "source-b",
       inFlight: 1,
       activeRequestCount: 1,
       activeModels: [{ model: "claude-opus", requestCount: 1 }],
-    });
+    }]);
     expect(active[0].candidateId).toBe("source-b");
 
     // The base order can still contain the in-flight state when the release
     // event wins the race with the lightweight runtime poll. Replaying the
     // tombstone against the raw base must clear both the count and the move.
-    const released = applyRuntimeActivity(base, {
+    const released = applyRuntimeActivities(base, [{
       revision: 2,
       candidateId: "source-b",
       inFlight: 0,
       activeRequestCount: 0,
       activeModels: [],
-    });
+    }]);
     expect(released.map((candidate) => candidate.candidateId)).toEqual(["account-a", "source-b"]);
     expect(released[1]).toMatchObject({ inFlight: 0, activeRequestCount: 0, activeModels: [] });
   });

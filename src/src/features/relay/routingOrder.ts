@@ -13,7 +13,10 @@ function sameRuntimeCandidate(left: CandidateRuntimeSnapshot | undefined, right:
   return left.candidateId === right.candidateId
     && left.kind === right.kind
     && left.available === right.available
+    && left.quotaWait === right.quotaWait
+    && left.capacityWait === right.capacityWait
     && left.nextForNewRequest === right.nextForNewRequest
+    && left.selectionRank === right.selectionRank
     && left.resourceHeadroom?.quotaRemainingBasisPoints === right.resourceHeadroom?.quotaRemainingBasisPoints
     && left.resourceHeadroom?.providerCreditsMicroUnits === right.resourceHeadroom?.providerCreditsMicroUnits
     && left.resourceHeadroom?.providerCreditsUnlimited === right.resourceHeadroom?.providerCreditsUnlimited
@@ -98,11 +101,15 @@ export function runtimeCandidateForMember(
   const firstCandidate = memberCandidates[0];
   if (memberCandidates.length === 1 && firstCandidate?.candidateId === memberId) return firstCandidate;
   const memberActiveRequestCount = memberCandidates.reduce((total, candidate) => total + activeRequestCount(candidate), 0);
+  const selectionRanks = memberCandidates.flatMap((candidate) => candidate.selectionRank == null ? [] : [candidate.selectionRank]);
   return {
     candidateId: memberId,
     kind: memberKind,
     available: memberCandidates.some((candidate) => candidate.available),
+    quotaWait: memberCandidates.every((candidate) => !candidate.available) && memberCandidates.some((candidate) => candidate.quotaWait),
+    capacityWait: memberCandidates.every((candidate) => !candidate.available) && memberCandidates.some((candidate) => candidate.capacityWait),
     nextForNewRequest: memberCandidates.some((candidate) => candidate.nextForNewRequest),
+    selectionRank: selectionRanks.length ? Math.min(...selectionRanks) : null,
     ...(firstCandidate?.activityRevision == null ? {} : { activityRevision: firstCandidate.activityRevision }),
     ...(firstCandidate?.runtimeId == null ? {} : { runtimeId: firstCandidate.runtimeId }),
     inFlight: memberActiveRequestCount,
@@ -158,14 +165,6 @@ export function upcomingModelRetries(candidate: CandidateRuntimeSnapshot | undef
     .sort((left, right) => left.retryAtMs - right.retryAtMs);
 }
 
-/** Apply a host activity event without waiting for the next full snapshot. */
-export function applyRuntimeActivity(
-  order: CandidateRuntimeSnapshot[],
-  activity: RuntimeActivitySnapshot,
-) {
-  return applyRuntimeActivities(order, [activity]);
-}
-
 export function compareRuntimeActivity(
   left: { runtimeId?: number | undefined; revision: number },
   right: { runtimeId?: number | undefined; revision: number },
@@ -212,8 +211,8 @@ export function applyRuntimeActivities(
   let orderChanged = false;
   const updatedOrder = order.map((candidate) => {
     const activity = latestActivityByCandidate.get(candidate.candidateId);
-    const candidateWithReset = activityAheadOfSnapshot && candidate.nextForNewRequest
-      ? { ...candidate, nextForNewRequest: false }
+    const candidateWithReset = activityAheadOfSnapshot && (candidate.nextForNewRequest || candidate.selectionRank != null)
+      ? { ...candidate, nextForNewRequest: false, selectionRank: null }
       : candidate;
     orderChanged ||= candidateWithReset !== candidate;
     if (!activity || compareRuntimeActivity(activity, { runtimeId: candidate.runtimeId, revision: candidate.activityRevision ?? -1 }) <= 0) return candidateWithReset;

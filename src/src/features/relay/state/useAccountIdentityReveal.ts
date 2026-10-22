@@ -58,9 +58,7 @@ export function useAccountIdentityReveal({
     void runAccountIdentityReveal({
       accountIds: revealableIds,
       isActive: () => active,
-      reveal: (accountId) => mode === "local"
-        ? relayCommands.revealLocalAccountIdentity(accountId)
-        : relayCommands.revealRemoteAccountIdentity(accountId),
+      reveal: (accountId) => relayCommands.revealLocalAccountIdentity(accountId),
       onRevealed: (identities) => {
       setRevealedIdentities((previousIdentities) => replaceRevealedAccountIdentities(previousIdentities, mode, identities));
       },

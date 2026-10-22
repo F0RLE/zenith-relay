@@ -31,7 +31,7 @@ test("model pricing edits long Flex without changing the application context mod
     .toMatchObject({ inputMicroUsdPerMillion: 1000000, outputMicroUsdPerMillion: 2000000, above272k: { flex: { input: 1500000, output: 3000000 } } });
 });
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`${mode} pool model rules preserve published Short/Long windows`, async ({ page }) => {
     await installTauriMock(page, {
       mode,
@@ -59,15 +59,10 @@ for (const mode of ["local", "remote"] as const) {
     const controlWidth = (await row.locator(".model-context-toggle").boundingBox())!.width;
 
     await row.getByRole("radio", { name: "Long context", exact: true }).click();
-    if (mode === "local") {
+    {
       await expect.poll(() => page.evaluate(() => (window as unknown as {
         __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { modelId?: string; contextPolicy?: unknown } } }>;
       }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "set_local_model_context")?.args.input))
-        .toEqual({ modelId: "gpt-5.4", contextPolicy: { mode: "extended" } });
-    } else {
-      await expect.poll(() => page.evaluate(() => (window as unknown as {
-        __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { action?: { type?: string }; payload?: unknown } } }>;
-      }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "execute_remote_server_action" && call.args.input?.action?.type === "set_model_context")?.args.input?.payload))
         .toEqual({ modelId: "gpt-5.4", contextPolicy: { mode: "extended" } });
     }
     await expect(row.getByRole("radio", { name: "Long context", exact: true })).toHaveAttribute("aria-checked", "true");
@@ -81,18 +76,15 @@ for (const mode of ["local", "remote"] as const) {
     await expect(tokens).toHaveAttribute("max", "900000");
     await tokens.fill("240000");
     // Typing applies the policy while the field still owns focus.
-    await expect.poll(() => page.evaluate((targetMode) => {
+    await expect.poll(() => page.evaluate(() => {
       const calls = (window as unknown as {
         __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: {
           modelId?: string; contextPolicy?: unknown;
           action?: { type?: string }; payload?: { contextPolicy?: unknown };
         } } }>;
       }).__TAURI_TEST_INVOKES__;
-      return targetMode === "local"
-        ? calls.findLast((call) => call.command === "set_local_model_context")?.args.input?.contextPolicy
-        : calls.findLast((call) => call.command === "execute_remote_server_action"
-          && call.args.input?.action?.type === "set_model_context")?.args.input?.payload?.contextPolicy;
-    }, mode)).toEqual({ mode: "custom", tokens: 240000 });
+      return calls.findLast((call) => call.command === "set_local_model_context")?.args.input?.contextPolicy;
+    })).toEqual({ mode: "custom", tokens: 240000 });
     await expect(tokens).toBeFocused();
     await expect(row.locator(".model-context-toggle")).toHaveAttribute("aria-busy", "false");
     await row.screenshot({ path: `output/playwright/model-rules-custom-${mode}.png` });
@@ -164,7 +156,7 @@ test(`model controls fit Russian labels and custom context at desktop and narrow
 });
 }
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`${mode} context saves serialize rapid changes and keep the final choice`, async ({ page }) => {
     await installTauriMock(page, { mode, locale: "en", populated: true, modelContextDelayMs: 1500,
       modelContext: { "gpt-5.4": { configurable: true, contextLimit: 1_000_000 } } });

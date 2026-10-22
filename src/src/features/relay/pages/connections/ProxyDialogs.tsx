@@ -4,7 +4,7 @@ import type { TFunction } from "i18next";
 import { CircleAlert, CircleCheck, Clock3, Database, Eye, EyeOff, Globe, Loader2, Network, Plus, RefreshCw, Server, Shuffle, Trash2, Upload, UsersRound, WifiOff, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { AccountSummary, ProxyAssignmentResult, ProxyPoolEntry, ProxyPoolImportResult, ProxyPoolSummary, StoredProxyAssignmentResult } from "../../api/types";
+import type { AccountSummary, ProxyPoolEntry, ProxyPoolImportResult, ProxyPoolSummary, StoredProxyAssignmentResult } from "../../api/types";
 import { AccountBadges, ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, IconButton, OptionMenu, SecretField, StatusIcon, useConfirm } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { toggleSelectedId } from "../../state/selectionModel";
@@ -27,7 +27,7 @@ export function ProxyStorageView({ revision, diagnostics, onImport }: { revision
   const [managedProxyId, setManagedProxyId] = useState<string | null>(null);
   const automaticChecks = useRef(new Set<string>());
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const accountList = (runtime?.accounts ?? []).filter((account) => !account.remoteLocation);
+  const accountList = (runtime?.accounts ?? []).filter((account) => !account.recoveryRequired);
   const bindings = buildProxyBindings({
     entries: pool?.entries ?? [],
     accounts: accountList,
@@ -57,6 +57,14 @@ export function ProxyStorageView({ revision, diagnostics, onImport }: { revision
     for (const id of missing) automaticChecks.current.add(id);
     if (missing.length) void diagnostics.checkMany(missing);
   }, [pool, diagnostics.checks, diagnostics.checkMany]);
+  const clearCommonProxy = async () => {
+    if (busy || !await confirm(t("proxies.clearCommonConfirm"), {
+      danger: true,
+      confirmLabel: t("proxies.clearCommon"),
+    })) return;
+    setDeleteError(null);
+    await perform("proxy-common-clear", () => relayCommands.clearCommonProxy(), "feedback.saved");
+  };
   const remove = async (proxyIds: string[]) => {
     if (busy) return;
     setDeleteError(null);
@@ -94,6 +102,13 @@ export function ProxyStorageView({ revision, diagnostics, onImport }: { revision
   }
   if (!pool) return <div className="center-loading" role="status"><Loader2 className="spin" aria-hidden />{t("common.loading")}</div>;
   const managedProxy = pool.entries.find((proxyEntry) => proxyEntry.id === managedProxyId) ?? null;
+  const commonProxyControl = runtime?.gateway.commonProxyConfigured ? <Button
+    variant="secondary"
+    icon={<WifiOff aria-hidden />}
+    busy={busy === "proxy-common-clear"}
+    disabled={Boolean(busy)}
+    onClick={() => void clearCommonProxy()}
+  >{t("proxies.clearCommon")}</Button> : null;
   return <div className="proxy-storage connection-workspace">
     {pool.total ? <div className="table-toolbar proxy-storage-toolbar">
       <div className="proxy-storage-search">
@@ -123,7 +138,8 @@ export function ProxyStorageView({ revision, diagnostics, onImport }: { revision
         </div>
         <IconButton label={t("common.refresh")} icon={<RefreshCw aria-hidden />} onClick={() => void load()} />
       </>}
-    </div> : null}
+      {commonProxyControl}
+    </div> : commonProxyControl ? <div className="inline-actions">{commonProxyControl}</div> : null}
     {deleteError ? <p className="proxy-storage-error" role="alert"><CircleAlert aria-hidden />{deleteError}</p> : null}
     {!pool.total ? <EmptyState title={t("proxies.emptyTitle")} description={t("proxies.emptyDescription")} action={<Button variant="primary" icon={<Upload aria-hidden />} onClick={onImport}>{t("proxies.import")}</Button>} />
       : !proxyEntries.length ? <NoResults />
@@ -192,7 +208,8 @@ function ProxyAccountsDialog({ proxyEntry, accounts, onSaved, onClose }: { proxy
   const { busy, perform } = useRelayState();
   const [selected, setSelected] = useState(proxyEntry.assignedAccountIds);
   const [query, setQuery] = useState("");
-  const visible = accounts.filter((account) => matchesQuery(query, account.label, account.identityHint, account.subscription.planType));
+  const planType = (account: AccountSummary) => account.subscription.planType;
+  const visible = accounts.filter((account) => matchesQuery(query, account.label, account.identityHint, planType(account)));
   const allSelected = accounts.length > 0 && accounts.every((account) => selected.includes(account.id));
   const save = async () => {
     const captured = await captureOperationResult(
@@ -230,7 +247,7 @@ function ProxyAccountsDialog({ proxyEntry, accounts, onSaved, onClose }: { proxy
       <div className="scope-grid proxy-account-grid">{visible.map((account) => <label key={account.id}>
         <input type="checkbox" checked={selected.includes(account.id)} onChange={() => setSelected((selectedIds) => toggleSelectedId(selectedIds, account.id))} />
         <span className="proxy-account-identity" data-relay-tooltip={account.label}><strong>{account.label}</strong></span>
-        <AccountBadges planType={account.subscription.planType} oauthClientKind={account.oauthClientKind} unknown={t("common.unknown")} />
+        <AccountBadges planType={planType(account)} oauthClientKind={account.oauthClientKind} unknown={t("common.unknown")} />
       </label>)}</div>
       {!visible.length ? <NoResults /> : null}
       <p className="form-note">{t("proxies.sharedProxyHint")}</p>
@@ -306,8 +323,7 @@ export function ProxyImportDialog({ diagnostics, onImported, onClose }: { diagno
 }
 
 export function AccountProxyDialog({ account, onClose }: { account: AccountSummary; onClose: () => void }) {
-  const { mode } = useRelayState();
-  return mode === "local" ? <LocalAccountProxyDialog account={account} onClose={onClose} /> : <RemoteAccountProxyDialog account={account} onClose={onClose} />;
+  return <LocalAccountProxyDialog account={account} onClose={onClose} />;
 }
 
 function LocalAccountProxyDialog({ account, onClose }: { account: AccountSummary; onClose: () => void }) {
@@ -429,58 +445,6 @@ function LocalAccountProxyDialog({ account, onClose }: { account: AccountSummary
   );
 }
 
-function RemoteAccountProxyDialog({ account, onClose }: { account: AccountSummary; onClose: () => void }) {
-  const { t } = useTranslation();
-  const { busy, perform, runtime } = useRelayState();
-  const [choice, setChoice] = useState<AccountProxyChoice>(() => account.proxyMode === "common" ? "common" : account.proxyMode === "account" ? "custom" : "direct");
-  const [proxyUrl, setProxyUrl] = useState("");
-  const commonConfigured = Boolean(runtime?.gateway.commonProxyConfigured);
-  const directBlocked = Boolean(runtime?.gateway.accountProxyRequired);
-  const apply = async () => {
-    const ok = await perform(
-      `proxy-${account.id}`,
-      () => relayCommands.remoteAction({ type: "set_account_proxy", id: account.id }, { proxyUrl: choice === "custom" ? proxyUrl.trim() : null, bypassCommonProxy: choice === "direct" }),
-      "feedback.saved",
-      { backgroundRefresh: true },
-    );
-    if (ok) onClose();
-  };
-  const valid = (choice !== "direct" || !directBlocked) && (choice !== "common" || commonConfigured) && (choice !== "custom" || Boolean(proxyUrl.trim()));
-  return <Dialog
-    title={t("proxies.accountTitle")}
-    onClose={onClose}
-    footer={<>
-      <Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>
-      <Button variant="primary" busy={busy === `proxy-${account.id}`} disabled={!valid} onClick={() => void apply()}>{t("common.save")}</Button>
-    </>}
-  ><div className="relay-form proxy-route-form">
-    <p className="proxy-account-context">{account.label}</p>
-    <div className="proxy-route-options" role="radiogroup" aria-label={t("proxies.accountRoute")}>
-      <ProxyRouteOption
-        choice="direct"
-        selected={choice === "direct"}
-        disabled={directBlocked}
-        icon={<WifiOff aria-hidden />}
-        label={t("proxies.direct")}
-        hint={directBlocked ? t("proxies.directBlockedHint") : undefined}
-        onSelect={setChoice}
-      />
-      <ProxyRouteOption
-        choice="custom"
-        selected={choice === "custom"}
-        icon={<Plus aria-hidden />}
-        label={t("proxies.addCustom")}
-        onSelect={setChoice}
-      />
-      {commonConfigured ? <ProxyRouteOption choice="common" selected={choice === "common"} icon={<Network aria-hidden />} label={t("proxies.useCommon")} onSelect={setChoice} /> : null}
-    </div>
-    {choice === "custom" ? <div className="proxy-route-control">
-      <SecretField label={t("proxies.proxyUrl")} value={proxyUrl} onChange={setProxyUrl} placeholder={t("proxies.proxyPlaceholder")} />
-      <p className="form-note">{t("proxies.savedHidden")}</p>
-    </div> : null}
-  </div></Dialog>;
-}
-
 function ProxyRouteOption({
   choice,
   selected,
@@ -514,8 +478,7 @@ function ProxyRouteOption({
 }
 
 export function BulkProxyDialog({ accountIds, onClose }: { accountIds: string[]; onClose: () => void }) {
-  const { mode } = useRelayState();
-  return mode === "local" ? <LocalBulkProxyDialog accountIds={accountIds} onClose={onClose} /> : <RemoteBulkProxyDialog accountIds={accountIds} onClose={onClose} />;
+  return <LocalBulkProxyDialog accountIds={accountIds} onClose={onClose} />;
 }
 
 function LocalBulkProxyDialog({ accountIds, onClose }: { accountIds: string[]; onClose: () => void }) {
@@ -553,64 +516,6 @@ function LocalBulkProxyDialog({ accountIds, onClose }: { accountIds: string[]; o
       <p className="form-note">{t("proxies.bulkStoredHint")}</p>
       {pool && needProxy > 0 && pool.total === 0 ? <p className="form-note warning-text">{t("proxies.noStored")}</p> : null}
       {assignmentResult ? <p role="status" className="form-note success-text">{t("proxies.bulkStoredResult", assignmentResult)}</p> : null}
-    </div>
-  </Dialog>;
-}
-
-function RemoteBulkProxyDialog({ accountIds, onClose }: { accountIds: string[]; onClose: () => void }) {
-  const { t } = useTranslation();
-  const { runtime, busy, perform } = useRelayState();
-  const accountById = new Map((runtime?.accounts ?? []).map((account) => [account.id, account]));
-  const accounts = accountIds.map((accountId) => accountById.get(accountId)).filter((account): account is AccountSummary => Boolean(account));
-  const [selected, setSelected] = useState(() => accounts.map((account) => account.id));
-  const [content, setContent] = useState("");
-  const [revealed, setRevealed] = useState(false);
-  const [assignmentResult, setAssignmentResult] = useState<ProxyAssignmentResult | null>(null);
-  const proxyUrls = content.split(/\r?\n/).map((proxyLine) => proxyLine.trim()).filter(Boolean);
-  const selectedAccountIds = accounts.filter((account) => selected.includes(account.id)).map((account) => account.id);
-  const valid = selectedAccountIds.length > 0 && proxyUrls.length >= selectedAccountIds.length;
-  const toggle = (accountId: string) => setSelected((selectedIds) => toggleSelectedId(selectedIds, accountId));
-  const assign = async () => {
-    const captured = await captureOperationResult(
-      (work) => perform("proxy-bulk", work, "feedback.saved", { backgroundRefresh: true }),
-      async () => await relayCommands.remoteAction({ type: "assign_account_proxies" }, { accountIds: selectedAccountIds, proxyUrls }) as ProxyAssignmentResult,
-    );
-    if (captured.ok) {
-      setAssignmentResult(captured.value ?? null);
-      setContent("");
-    }
-  };
-  return <Dialog
-    wide
-    className="connection-dialog proxy-bulk-dialog"
-    title={t("proxies.bulkTitle")}
-    onClose={onClose}
-    footer={<>
-      <Button variant="secondary" onClick={onClose}>{t("common.close")}</Button>
-      <Button variant="primary" busy={busy === "proxy-bulk"} disabled={!valid} onClick={assign}>{t("proxies.assign")}</Button>
-    </>}
-  >
-    <div className="relay-form">
-      <label className="toggle-row">
-        <input type="checkbox" checked={selectedAccountIds.length === accounts.length && accounts.length > 0} onChange={(event) => setSelected(event.target.checked ? accounts.map((account) => account.id) : [])} />
-        <span>{t("proxies.selectAll", { count: accounts.length })}</span>
-      </label>
-      <fieldset>
-        <legend>{t("connections.accounts")}</legend>
-        <div className="scope-grid proxy-account-grid">{accounts.map((account) => <label key={account.id}>
-          <input type="checkbox" checked={selected.includes(account.id)} onChange={() => toggle(account.id)} />
-          {account.label}
-        </label>)}</div>
-      </fieldset>
-      <label className="relay-field">
-        <span>{t("proxies.proxyList")}</span>
-        <div className="proxy-list-field">
-          <textarea className={revealed ? "" : "secret-textarea"} value={content} onChange={(event) => { setContent(event.target.value); setAssignmentResult(null); }} placeholder={t("proxies.proxyListPlaceholder")} autoComplete="off" spellCheck={false} />
-          <IconButton type="button" label={revealed ? t("common.hide") : t("common.reveal")} icon={revealed ? <EyeOff aria-hidden /> : <Eye aria-hidden />} onClick={() => setRevealed((isRevealed) => !isRevealed)} />
-        </div>
-      </label>
-      <p className="form-note">{t("proxies.bulkHint", { selected: selectedAccountIds.length, provided: proxyUrls.length })}</p>
-      {assignmentResult ? <p role="status" className="form-note success-text">{t("proxies.bulkResult", assignmentResult)}</p> : null}
     </div>
   </Dialog>;
 }

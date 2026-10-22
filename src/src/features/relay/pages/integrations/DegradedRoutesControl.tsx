@@ -6,10 +6,10 @@ import { usePendingFlag } from "../../state/usePendingFlag";
 
 export function DegradedRoutesControl() {
   const { t } = useTranslation();
-  const { mode, runtime, blockDegradedRoutesEnabled, setBlockDegradedRoutesEnabled } = useRelayState();
+  const { runtime, blockDegradedRoutesEnabled, setBlockDegradedRoutesEnabled } = useRelayState();
   const controlId = useId();
   const { checked, saving, select } = usePendingFlag(blockDegradedRoutesEnabled);
-  if (mode === "zenith" || !runtime || (mode === "remote" && !runtime.capabilities.features.includes("block_degraded_routes"))) return null;
+  if (!runtime) return null;
   return <div className="integration-account-policy">
     <div className="relay-toggle-setting">
       <label htmlFor={controlId} data-relay-tooltip={t("gateway.degradedRoutesHint")}>

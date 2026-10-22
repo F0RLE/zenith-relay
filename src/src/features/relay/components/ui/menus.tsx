@@ -73,7 +73,7 @@ export function ActionMenu({ children, className = "", label }: { children: Reac
         <MoreHorizontal aria-hidden />
       </summary>
       {tooltip.tooltip}
-      <div ref={panelRef} className="relay-popover-panel" role="menu">{children}</div>
+      {open ? <div ref={panelRef} className="relay-popover-panel" role="menu">{children}</div> : null}
     </details>
   );
 }

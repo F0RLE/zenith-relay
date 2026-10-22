@@ -1,9 +1,9 @@
 import { expect, test } from "../../bun-playwright";
 import { installTauriMock } from "../tauri-mock";
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`${mode} account trash retains accounts across navigation and restores them outside the pool`, async ({ page }) => {
-    await installTauriMock(page, { mode, locale: "en", populated: true, accountCount: 2 });
+    await installTauriMock(page, { mode, locale: "en", populated: true, accountCount: 2, accountOAuthClientKind: "excel_bps" });
     await page.goto("/");
     await page.getByRole("button", { name: "Connections", exact: true }).click();
     await page.getByLabel("Select all accounts").check();
@@ -67,20 +67,6 @@ test("permanent deletion from trash confirms before removing retained accounts",
   await expect(page.getByText("Trash is empty", { exact: true })).toBeVisible();
 });
 
-test("old servers do not turn an ordinary delete into permanent deletion", async ({ page }) => {
-  await installTauriMock(page, { mode: "remote", locale: "en", populated: true, remoteFeatures: ["accounts", "sources"] });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Connections", exact: true }).click();
-  await expect(page.getByRole("tab", { name: "Trash", exact: true })).toHaveCount(0);
-  const card = page.locator(".account-card").first();
-  await card.locator(".account-row-menu summary").click();
-  await card.getByRole("menuitem", { name: "Delete", exact: true }).click();
-  await expect(card).toBeVisible();
-  const deletes = await page.evaluate(() =>
-    (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { action?: { type?: string } } } }> }).__TAURI_TEST_INVOKES__
-      .filter((call) => call.args.input?.action?.type === "delete_account"));
-  expect(deletes).toEqual([]);
-});
 
 test("right-click bulk deletion confirms before deleting permanently", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 2 });

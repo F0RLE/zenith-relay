@@ -109,7 +109,6 @@
 .account-timezone-modes label:has(input:disabled) { cursor: default; opacity: 0.65; }
 .account-timezone-source { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
 .account-timezone-source > span { color: var(--relay-muted); font-size: 12px; }
-.account-timezone-reset { align-self: flex-start; font-size: 12px; }
 
 .account-timezone-list {
   display: grid;

@@ -19,17 +19,15 @@ async function openAccountTimezone(page: Page, russian = false) {
   return page.getByRole("dialog", { name: russian ? "Часовой пояс аккаунта" : "Account timezone", exact: true });
 }
 
-async function timezoneUpdates(page: Page, remote = false) {
-  return page.evaluate((onRemote) => {
+async function timezoneUpdates(page: Page) {
+  return page.evaluate(() => {
     const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__;
-    return calls.filter((call) => onRemote
-      ? call.command === "execute_remote_server_action" && (call.args["input"] as { action?: { type?: string } })?.action?.type === "set_request_timezone"
-      : call.command === "set_local_request_timezone")
-      .map((call) => (onRemote ? (call.args["input"] as { payload?: unknown }).payload : call.args["input"]) as RequestTimezoneUpdate);
-  }, remote);
+    return calls.filter((call) => call.command === "set_local_request_timezone")
+      .map((call) => call.args["input"] as RequestTimezoneUpdate);
+  });
 }
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`${mode} account menu saves and resets only the selected account's timezone`, async ({ page }, testInfo) => {
     const initial = {
       enabled: true,
@@ -46,7 +44,7 @@ for (const mode of ["local", "remote"] as const) {
     await expect(dialog.getByRole("radio", { name: /Etc\/GMT-3/ })).toBeChecked();
     await dialog.getByRole("button", { name: "Save", exact: true }).click();
     await expect(dialog).not.toBeVisible();
-    expect((await timezoneUpdates(page, mode === "remote")).at(-1)).toEqual({
+    expect((await timezoneUpdates(page)).at(-1)).toEqual({
       expectedPolicy: initial,
       policy: {
         enabled: true,
@@ -66,11 +64,11 @@ for (const mode of ["local", "remote"] as const) {
     await expect(dialog.getByRole("radio", { name: /America\/New_York/ })).toBeChecked();
     await dialog.getByRole("button", { name: "Save", exact: true }).click();
     await expect(dialog).not.toBeVisible();
-    expect((await timezoneUpdates(page, mode === "remote")).at(-1)?.policy).toEqual(initial);
+    expect((await timezoneUpdates(page)).at(-1)?.policy).toEqual(initial);
   });
 }
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`${mode} account timezone can override and then inherit the global setting`, async ({ page }) => {
     await installTauriMock(page, { mode, populated: true, requestTimezone: {
       enabled: false,
@@ -86,7 +84,7 @@ for (const mode of ["local", "remote"] as const) {
     await expect(useHere).toBeChecked();
     await expect(dialog.getByRole("radio", { name: /America\/New_York/ })).toBeChecked();
     await dialog.getByRole("button", { name: "Save", exact: true }).click();
-    expect((await timezoneUpdates(page, mode === "remote")).at(-1)?.policy).toEqual({
+    expect((await timezoneUpdates(page)).at(-1)?.policy).toEqual({
       enabled: false,
       accountTimezones: {},
       accountTimezoneBindings: { account_synthetic: true }, accountTimezoneSources: {},
@@ -97,7 +95,7 @@ for (const mode of ["local", "remote"] as const) {
     await dialog.getByRole("radio", { name: "Auto", exact: true }).click();
     await expect(dialog).toContainText("The default is the assigned proxy's timezone.");
     await dialog.getByRole("button", { name: "Save", exact: true }).click();
-    expect((await timezoneUpdates(page, mode === "remote")).at(-1)?.policy).toEqual({
+    expect((await timezoneUpdates(page)).at(-1)?.policy).toEqual({
       enabled: false,
       accountTimezones: {},
       accountTimezoneBindings: {}, accountTimezoneSources: {},
@@ -147,13 +145,6 @@ test("empty search and keyboard selection keep the dialog usable", async ({ page
   expect(await timezoneUpdates(page)).toEqual([]);
 });
 
-test("older servers hide timezone actions in account menus", async ({ page }) => {
-  await installTauriMock(page, { mode: "remote", populated: true, remoteFeatures: ["accounts", "quota"] });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Connections", exact: true }).click();
-  await page.locator(".account-card").first().locator(".account-row-menu summary").click();
-  await expect(page.getByRole("menuitem", { name: "Account timezone", exact: true })).toHaveCount(0);
-});
 
 test("missing proxy preview does not report an available store as broken", async ({ page }) => {
   await installTauriMock(page, { populated: true });
@@ -256,15 +247,3 @@ for (const theme of ["dark", "light"] as const) {
     await page.screenshot({ path: testInfo.outputPath(`account-timezone-ru-${theme}-narrow.png`) });
   });
 }
-
-test("server account menus use the server's complete timezone catalog", async ({ page }) => {
-  await installTauriMock(page, { mode: "remote", populated: true, timezoneCatalog: ["America/New_York", "Europe/Berlin", "Asia/Kathmandu"] });
-  await page.goto("/");
-  const dialog = await openAccountTimezone(page);
-  await dialog.getByRole("radio", { name: "Set", exact: true }).click();
-  await expect(dialog.getByRole("radio", { name: /\//u })).toHaveCount(3);
-  await expect(dialog.getByRole("radio", { name: /Asia\/Kathmandu/ })).toBeVisible();
-  await dialog.getByRole("searchbox").fill("Kathmandu");
-  await expect(dialog.getByRole("radio", { name: /\//u })).toHaveCount(1);
-  await expect(dialog).toContainText("UTC+05:45");
-});

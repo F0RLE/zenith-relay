@@ -21,7 +21,7 @@ async function expectAlignedQuotas(page: Page, selector: string) {
 }
 
 for (const theme of ["light", "dark"] as const) {
-  for (const mode of ["local", "remote"] as const) {
+  for (const mode of ["local"] as const) {
     test(`account quotas align across optional dates and pending states ${mode} ${theme}`, async ({ page }) => {
       await page.setViewportSize({ width: 1160, height: 900 });
       await installTauriMock(page, { locale: "ru", theme, mode, populated: true, accountCount: 5, poolMembers: true });

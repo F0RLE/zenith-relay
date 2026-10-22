@@ -2,7 +2,52 @@ import { test, expect } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
 import { noOutputUsage, setUsageEventOverrides } from "./request-details-fixture";
 
-for (const mode of ["local", "remote"] as const) {
+for (const locale of ["en", "ru"] as const) {
+  for (const category of [null, "upstream_quota_exhausted", "client_cancelled"] as const) {
+    test(`request status keeps its reason in a tooltip: ${locale}, category=${category}`, async ({ page }) => {
+      await installTauriMock(page, { mode: "local", locale, populated: true, usageFailure: true });
+      await page.goto("/");
+      await setUsageEventOverrides(page, { errorCategory: category });
+      await page.getByRole("button", { name: locale === "ru" ? "Использование" : "Usage", exact: true }).click();
+      const label = locale === "ru" ? "Ошибка" : "Failed";
+      const reason = category === "client_cancelled"
+        ? locale === "ru" ? "Клиент отменил запрос" : "Client cancelled the request"
+        : category ? locale === "ru" ? "Квота аккаунта исчерпана" : "Account quota exhausted" : label;
+      const status = page.locator('.usage-request-table tbody td[data-column="status"]');
+      await expect(status).toHaveText(label);
+      const icon = status.getByRole("img", { name: reason, exact: true });
+      await expect(icon).toHaveAttribute("data-status", "error");
+      await expect(status.locator("small")).toHaveCount(0);
+      if (category) {
+        await status.locator('.usage-request-result > span[aria-hidden]').hover();
+        await expect(page.getByRole("tooltip")).toHaveText(reason);
+        await page.mouse.move(0, 0);
+        await expect(page.getByRole("tooltip")).toHaveCount(0);
+      }
+      await icon.hover();
+      await expect(page.getByRole("tooltip")).toHaveText(reason);
+      await icon.focus();
+      await expect(page.getByRole("tooltip")).toHaveText(reason);
+    });
+  }
+
+  test(`successful request status has a hover and keyboard tooltip: ${locale}`, async ({ page }) => {
+    await installTauriMock(page, { mode: "local", locale, populated: true });
+    await page.goto("/");
+    await page.getByRole("button", { name: locale === "ru" ? "Использование" : "Usage", exact: true }).click();
+    const label = locale === "ru" ? "Успешно" : "Success";
+    const status = page.locator('.usage-request-table tbody td[data-column="status"]');
+    await expect(status).toHaveText(label);
+    const icon = status.getByRole("img", { name: label, exact: true });
+    await expect(icon).toHaveAttribute("data-status", "ready");
+    await icon.hover();
+    await expect(page.getByRole("tooltip")).toHaveText(label);
+    await icon.focus();
+    await expect(page.getByRole("tooltip")).toHaveText(label);
+  });
+}
+
+for (const mode of ["local"] as const) {
   for (const locale of ["en", "ru"] as const) {
     test(`${mode} ${locale} catalog discovery never displays an HTTP 200 failure`, async ({ page }) => {
       const pendingLabel = locale === "en" ? "Loading tool contracts" : "Загрузка определений инструментов";
@@ -15,6 +60,8 @@ for (const mode of ["local", "remote"] as const) {
       await setUsageEventOverrides(page, { success: false, httpStatus: 200, errorCategory: null, ttftMs: null });
       await page.getByRole("button", { name: locale === "en" ? "Usage" : "Использование", exact: true }).click();
       await expect(page.locator(".usage-request-table").getByRole("img", { name: pendingLabel })).toHaveAttribute("data-status", "info");
+      await page.locator(".usage-request-table").getByRole("img", { name: pendingLabel }).hover();
+      await expect(page.getByRole("tooltip")).toHaveText(pendingLabel);
       await page.getByRole("button", { name: `${detailsLabel}: req_synthetic_${mode}` }).click();
       const details = page.getByRole("dialog", { name: detailsLabel });
       await expect(details.locator(".request-details-status")).toHaveAttribute("data-status", "pending");
@@ -26,7 +73,7 @@ for (const mode of ["local", "remote"] as const) {
   }
 }
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`${mode} shows all sends inside one request without changing its final result`, async ({ page }) => {
     await installTauriMock(page, { mode, locale: "en", populated: true, usageAttempts: true });
     await page.goto("/");
@@ -85,7 +132,7 @@ test("single successful requests omit history and empty diagnostic sections", as
   await expect(details.getByRole("button", { name: "Refresh attempts", exact: true })).toHaveCount(0);
 });
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`${mode} failures before output omit unknown metrics and empty tabs`, async ({ page }) => {
     await installTauriMock(page, { mode, locale: "en", populated: true, usageFailure: true });
     await page.goto("/");
@@ -133,10 +180,10 @@ for (const outcome of ["execution_uncertain", "client_disconnected", null] as co
 }
 
 test("partial history does not invent missing sends", async ({ page }) => {
-  await installTauriMock(page, { mode: "remote", locale: "en", populated: true, usageAttempts: true, usageAttemptsPartial: true });
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, usageAttempts: true, usageAttemptsPartial: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
-  await page.getByRole("button", { name: "Request details: req_synthetic_remote" }).click();
+  await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
   const details = page.getByRole("dialog", { name: "Request details" });
   await expect(details.locator(".request-execution .request-section-badge")).toContainText("Incomplete");
   await expect(details.getByText("Part of the history is missing. Showing only saved sends.")).toBeVisible();
@@ -150,9 +197,22 @@ test("different client request IDs stay separate and have distinguishable labels
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   const records = page.locator(".usage-request-table tbody tr");
   await expect(records).toHaveCount(4);
-  const ids = await records.locator(".request-link code").allTextContents();
+  const ids = await records.locator(".request-link").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label")));
   expect(new Set(ids).size).toBe(4);
-  await expect(records.first().locator(".usage-connection-value")).toContainText("Upstream failure");
+  await expect(records.first().locator('td[data-column="status"]')).toHaveText("Failed");
+  await expect(records.first().locator('.usage-request-result')).toHaveAttribute("data-relay-tooltip", "Upstream failure");
+  await expect(records.first().locator('td[data-column="connection"]')).not.toContainText("Upstream failure");
+  for (const record of await records.all()) {
+    const button = record.getByRole("button", { name: /^Request details:/ });
+    await expect(button).toHaveText("Details");
+    const id = await button.getAttribute("data-relay-tooltip");
+    expect(id).toBeTruthy();
+    await button.click();
+    const details = page.getByRole("dialog", { name: "Request details" });
+    await details.locator(".request-technical-details > summary").click();
+    await expect(details.getByText(id!, { exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+  }
 });
 
 for (const theme of ["dark", "light"] as const) {

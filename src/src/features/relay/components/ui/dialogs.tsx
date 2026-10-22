@@ -183,9 +183,8 @@ export function ErrorDetailsDialog({ error, message, onClose }: { error: Feedbac
       </div>
     )}
   >
-    <div className="global-feedback-dialog-summary"><CircleAlert aria-hidden /><div><strong>{message}</strong><code>{error.code}</code></div></div>
+    <div className="global-feedback-dialog-summary"><CircleAlert aria-hidden /><div><strong>{message}</strong></div></div>
     <div className="config-preview global-feedback-error-json"><pre><code>{errorDetailsJson}</code></pre></div>
-    <p className="form-note">{t("feedback.detailsHint")}</p>
   </Dialog>;
 }
 

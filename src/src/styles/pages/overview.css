@@ -10,13 +10,6 @@
   font-size: 12px;
 }
 
-.endpoint-line code,
-.deployment-result code {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .metric-band {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -58,119 +51,6 @@
   white-space: nowrap;
 }
 
-.direct-api-overview {
-  display: grid;
-  gap: 12px;
-  padding-top: 16px;
-}
-
-.direct-api-toolbar {
-  min-width: 0;
-  min-height: 64px;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(220px, 320px);
-  align-items: center;
-  gap: 16px;
-  padding: 12px 14px;
-  border: 1px solid var(--relay-border);
-  border-radius: 7px;
-  background: var(--relay-surface);
-  box-shadow: var(--relay-shadow-soft);
-}
-
-.direct-api-toolbar > div:first-child {
-  min-width: 0;
-  display: grid;
-  gap: 3px;
-}
-
-.direct-api-toolbar code {
-  overflow: hidden;
-  color: var(--relay-muted);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.direct-api-source-menu,
-.direct-api-source-menu .relay-option-trigger {
-  width: 100%;
-  min-width: 0;
-}
-
-.direct-api-metrics {
-  margin: 0;
-  box-shadow: var(--relay-shadow-soft);
-}
-
-.direct-api-stats-note {
-  margin: 0;
-  padding: 10px 14px;
-  border-left: 3px solid var(--relay-info);
-  background: var(--relay-info-soft);
-  color: var(--relay-muted);
-  font-size: 12px;
-  line-height: 18px;
-}
-
-.direct-api-models {
-  overflow: hidden;
-  border: 1px solid var(--relay-border);
-  border-radius: 7px;
-  background: var(--relay-surface);
-  box-shadow: var(--relay-shadow-soft);
-}
-
-.direct-api-models > header {
-  min-height: 58px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--relay-border);
-}
-
-.direct-api-models > header h2 {
-  margin: 0;
-}
-
-.direct-api-models > header h2 {
-  font-size: 15px;
-  line-height: 20px;
-}
-
-.direct-api-models > header > strong {
-  min-width: 30px;
-  color: var(--relay-accent-hover);
-  font-size: 20px;
-  text-align: center;
-}
-
-.direct-api-models ul {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.direct-api-models li {
-  min-width: 0;
-  min-height: 38px;
-  display: flex;
-  align-items: center;
-  padding: 8px 14px;
-  border-right: 1px solid var(--relay-border);
-  border-bottom: 1px solid var(--relay-border);
-}
-
-.direct-api-models code {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .overview-analytics {
   margin-top: 12px;
   border: 1px solid var(--relay-border);
@@ -191,43 +71,6 @@
 
 .overview-analytics-header h2 {
   margin: 0;
-}
-
-.source-stats-metrics {
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-}
-
-.source-stats-metrics > div {
-  display: grid;
-  grid-template-columns: 20px minmax(0, 1fr);
-  column-gap: 12px;
-  row-gap: 4px;
-  text-align: left;
-}
-
-.source-stats-metrics dt {
-  color: var(--relay-muted);
-  font-size: 12px;
-}
-
-.source-stats-metrics dd {
-  grid-column: 2;
-  margin: 0;
-  font-size: 20px;
-  font-weight: 650;
-  line-height: 26px;
-  font-variant-numeric: tabular-nums;
-}
-
-.source-stats-metrics dd[data-muted="true"] {
-  color: var(--relay-muted);
-  font-size: 13px;
-  line-height: 18px;
-}
-
-.source-stats-overview .source-stats-caption {
-  border: 0;
-  padding-top: 6px;
 }
 
 .overview-analytics-controls {
@@ -759,8 +602,6 @@
 }
 
 .relay-page h2,
-.flat-section h2,
-.gateway-sections h2,
 .model-rules h2 {
   margin: 0 0 10px;
   font-size: 15px;
@@ -768,56 +609,6 @@
   font-weight: 650;
 }
 
-.detail-list {
-  margin: 0 0 12px;
-}
-
-.detail-list > div {
-  min-height: 32px;
-  display: grid;
-  grid-template-columns: minmax(110px, 35%) 1fr;
-  align-items: center;
-  border-bottom: 1px solid var(--relay-border);
-}
-
-.detail-list dt {
-  color: var(--relay-muted);
-}
-
-.detail-list dd {
-  min-width: 0;
-  margin: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.detail-list .detail-copy-value {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.detail-copy-value code {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.detail-list > .detail-section-heading {
-  grid-template-columns: 1fr;
-  min-height: 28px;
-  padding-top: 8px;
-  border-bottom: 0;
-  color: var(--relay-text);
-  font-weight: 650;
-}
-
-.detail-section-heading dd {
-  display: none;
-}
-
-.remote-status,
-.gateway-sections section > header,
 .config-preview header,
 .model-rules header {
   display: flex;

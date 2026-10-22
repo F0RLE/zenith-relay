@@ -65,8 +65,84 @@ test("application navigation stays readable with the sidebar expanded in a narro
   })).toBe(true);
 });
 
+for (const width of [840, 1280, 1600]) {
+  test(`Access pickers stay visible while settings scroll at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 560 });
+    await installTauriMock(page, { locale: "en", theme: "dark", mode: "local", populated: true });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Access", exact: true }).click();
+    const scroller = page.locator(".relay-content");
+    for (const section of ["Applications", "Accounts"]) {
+      await scroller.evaluate((element) => { element.scrollTop = 0; });
+      await page.getByRole("tab", { name: section, exact: true }).click();
+      const picker = page.locator(".integration-picker");
+      const settings = page.locator(".integrations-settings");
+      // Exercise long settings even when the current account panel is short.
+      await settings.evaluate((element) => { element.style.minHeight = "1800px"; });
+      const initialPicker = await picker.boundingBox();
+      await scroller.evaluate((element) => { element.scrollTop = 350; });
+      await expect(picker.getByRole("tab").first()).toBeInViewport({ ratio: 1 });
+      const pickerBefore = await picker.boundingBox();
+      const settingsBefore = await settings.boundingBox();
+      const header = page.locator(".integrations-page > .relay-workspace-header");
+      const headerBox = await header.boundingBox();
+      expect(pickerBefore).not.toBeNull();
+      expect(settingsBefore).not.toBeNull();
+      expect(pickerBefore!.y).toBeCloseTo(initialPicker!.y, 0);
+      expect(pickerBefore!.y).toBeGreaterThanOrEqual(headerBox!.y + headerBox!.height + 16);
+      await scroller.evaluate((element) => { element.scrollTop = 650; });
+      await expect.poll(async () => (await picker.boundingBox())!.y).toBeCloseTo(pickerBefore!.y, 0);
+      expect((await settings.boundingBox())!.y).toBeLessThan(settingsBefore!.y - 250);
+      for (const tab of await picker.getByRole("tab").all()) {
+        await expect(tab).toBeInViewport({ ratio: 1 });
+        expect(await tab.evaluate((element) => {
+          const box = element.getBoundingClientRect();
+          return element.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
+        })).toBe(true);
+      }
+      expect(await scroller.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      await page.screenshot({ path: `output/playwright/access-${section.toLowerCase()}-scrolled-${width}.png` });
+      if (section === "Applications") {
+        const claude = picker.getByRole("tab", { name: "Claude Desktop", exact: true });
+        await claude.click();
+        await expect(claude).toHaveAttribute("aria-selected", "true");
+        await expect(page.locator('.application-launch-path[data-application="claude-desktop"]')).toBeVisible();
+        await claude.press("ArrowUp");
+        await expect(picker.getByRole("tab", { name: "ChatGPT", exact: true })).toBeFocused();
+        if (width === 1600) {
+          const initialHeader = (await header.boundingBox())!;
+          await page.setViewportSize({ width: 1100, height: 560 });
+          await expect.poll(async () => (await header.boundingBox())!.height).toBeGreaterThan(initialHeader.height + 10);
+          await expect.poll(async () => {
+            const pickerBox = (await picker.boundingBox())!;
+            const headerBox = (await header.boundingBox())!;
+            return pickerBox.y - headerBox.y - headerBox.height;
+          }).toBeGreaterThanOrEqual(16);
+          await page.setViewportSize({ width, height: 560 });
+        }
+      }
+    }
+  });
+}
+
+test("Access pickers keep normal document flow in a stacked mobile layout", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await installTauriMock(page, { locale: "ru", theme: "light", mode: "local", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Доступ", exact: true }).click();
+  for (const section of ["Приложения", "Аккаунты"]) {
+    await page.getByRole("tab", { name: section, exact: true }).click();
+    const picker = page.locator(".integration-picker");
+    const settings = page.locator(".integrations-settings");
+    expect(await picker.evaluate((element) => getComputedStyle(element).position)).toBe("static");
+    expect((await settings.boundingBox())!.y).toBeGreaterThanOrEqual((await picker.boundingBox())!.y + (await picker.boundingBox())!.height);
+    expect(await page.locator(".relay-content").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  }
+});
+
 for (const client of [
-  { name: "ChatGPT", kind: "codex" },
+  { name: "Codex", kind: "codex" },
+  { name: "ChatGPT (SIWC)", kind: "siwc" },
   { name: "Excel / Basis Points", kind: "excel_bps" },
 ] as const) {
   test(`Connections signs in using ${client.name} without an extra completion dialog`, async ({ page }) => {
@@ -75,12 +151,17 @@ for (const client of [
     await page.getByRole("button", { name: "Connections", exact: true }).click();
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
     const dialog = page.getByRole("dialog", { name: "Sign in", exact: true });
+    await expect(dialog.getByRole("radio", { name: "Codex", exact: true })).toBeChecked();
     await dialog.getByText(client.name, { exact: true }).click();
     await expect(dialog.getByRole("radio", { name: client.name, exact: true })).toBeChecked();
+    await expect(dialog.locator(".account-connection-purpose")).toHaveCount(0);
     await expect.poll(() => page.evaluate(() => (window as unknown as {
       __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }>;
     }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "start_codex_oauth")?.args))
-      .toEqual({ openBrowser: false, ...(client.kind === "excel_bps" ? { clientKind: client.kind } : {}) });
+      .toEqual({ openBrowser: false, ...(client.kind !== "codex" ? { clientKind: client.kind } : {}) });
+    await dialog.getByRole("button", { name: "Copy sign-in link", exact: true }).click();
+    await expect(dialog.getByRole("button", { name: "Link copied", exact: true })).toBeVisible();
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("https://auth.example.invalid/authorize");
     await emitTauriEvent(page, "relay-oauth-status", { loginId: "oauth_synthetic", status: "callback_received" });
     await expect(dialog).not.toBeVisible();
     await expect(page.getByRole("dialog", { name: "Account added", exact: true })).toHaveCount(0);
@@ -89,25 +170,8 @@ for (const client of [
   });
 }
 
-test("Accounts keeps behavior settings beside its compact provider navigation", async ({ page }) => {
-  await installTauriMock(page, { locale: "en", mode: "remote", populated: true, remoteFeatures: ["block_degraded_routes"] });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Access", exact: true }).click();
-  await expect(page.getByRole("tab", { name: "Server API", exact: true })).toBeVisible();
-  await page.getByRole("tab", { name: "Accounts", exact: true }).click();
-  const accounts = page.getByRole("tabpanel", { name: "Accounts", exact: true });
-  await expect(accounts.getByRole("checkbox", { name: "Reject model substitution", exact: true })).toBeChecked();
-  await expect(accounts.getByRole("tablist")).toHaveAttribute("aria-orientation", "vertical");
-  await expect(accounts.getByRole("tab")).toHaveText(["ChatGPT"]);
-  await expect(accounts.getByRole("button", { name: "Sign in", exact: true })).toHaveCount(0);
-  await expect(accounts.getByRole("button", { name: "My connections", exact: true })).toHaveCount(0);
-  await expect(accounts.getByRole("article")).toHaveCount(0);
-  expect(await page.evaluate(() => (window as unknown as {
-    __TAURI_TEST_INVOKES__: Array<{ command: string }>;
-  }).__TAURI_TEST_INVOKES__.some((call) => call.command === "start_codex_oauth"))).toBe(false);
-});
 
-test("saved feedback and update appear above Recovery in both sidebar states", async ({ page }) => {
+test("sidebar bottom actions stay below feedback and updates in both states", async ({ page }) => {
   await page.setViewportSize({ width: 840, height: 560 });
   await installTauriMock(page, { locale: "ru", theme: "dark", mode: "local", populated: true, updateVersion: "1.1.3" });
   await page.goto("/");
@@ -123,7 +187,7 @@ test("saved feedback and update appear above Recovery in both sidebar states", a
       await expect(button).toBeInViewport({ ratio: 1 });
     }
     expect(await page.locator(".relay-sidebar").evaluate((element) => {
-      const selectors = [".sidebar-feedback", ".sidebar-update-row", ".sidebar-nav-utilities", ".sidebar-footer"];
+      const selectors = [".sidebar-feedback", ".sidebar-update-row", ".sidebar-nav-utilities", ".sidebar-help", ".sidebar-footer"];
       const boxes = selectors.map((selector) => element.querySelector(selector)!.getBoundingClientRect());
       return boxes.every((box, index) => box.top >= 36 && box.bottom <= innerHeight
         && (index === 0 || boxes[index - 1]!.bottom <= box.top));

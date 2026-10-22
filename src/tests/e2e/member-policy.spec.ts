@@ -3,7 +3,7 @@ import { installTauriMock } from "./tauri-mock";
 
 const models = ["newer-model", "older-model", "provider-alias"];
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   for (const kind of ["account", "source"] as const) {
     test(`${mode} ${kind} member policy retains inventory order across save and cancel`, async ({ page }) => {
       await installTauriMock(page, {

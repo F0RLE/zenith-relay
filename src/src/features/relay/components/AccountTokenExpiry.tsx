@@ -7,7 +7,7 @@ import { formatDetailedRemainingTime } from "../quotaFormatting";
 /** Informational only: reaching expiry never changes the account or its tokens. */
 export function AccountTokenExpiry({ account, nowMs }: { account: AccountSummary; nowMs: number }) {
   const { t, i18n } = useTranslation();
-  if (account.oauthClientKind !== "excel_bps" || !account.credentialDiagnostics || account.remoteLocation) return null;
+  if (!account.credentialDiagnostics || account.recoveryRequired) return null;
 
   const expiry = account.credentialDiagnostics.expiresAtMs;
   const known = expiry != null && Number.isFinite(expiry) && Math.abs(expiry) <= 8.64e15;

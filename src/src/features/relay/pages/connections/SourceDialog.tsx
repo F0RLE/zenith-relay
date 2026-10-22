@@ -70,15 +70,13 @@ export function SourceDialog({ source: initialSource, onClose, addToPool = false
       if (!source) {
         if (!createdSourceId.current) {
           const sourceInput = apiProviderSourceInput(provider);
-          const proxyInput = relayMode !== "remote" && proxyId ? { proxyId } : {};
-          const created = relayMode !== "remote"
-            ? await relayCommands.createSource({ ...sourceInput, ...proxyInput }) as { id: string }
-            : await relayCommands.remoteAction({ type: "create_source" }, sourceInput) as { id: string };
+          const proxyInput = proxyId ? { proxyId } : {};
+          const created = await relayCommands.createSource({ ...sourceInput, ...proxyInput }) as { id: string };
           // Creation has committed even if the following snapshot or membership
           // operation fails. A retry must continue with this source's identity.
           createdSourceId.current = created.id;
         }
-        const latestSource = (relayMode !== "remote" ? await relayCommands.localState() : await relayCommands.remoteState())?.sources.find((sourceOption) => sourceOption.id === createdSourceId.current);
+        const latestSource = (await relayCommands.localState()).sources.find((sourceOption) => sourceOption.id === createdSourceId.current);
         if (latestSource) {
           setSavedSource(latestSource);
           setName(latestSource.name);
@@ -109,14 +107,10 @@ export function SourceDialog({ source: initialSource, onClose, addToPool = false
         recoveryDelaySeconds: source.recoveryDelaySeconds,
         modelPriceOverrides,
       };
-      if (relayMode !== "remote") {
-        await relayCommands.updateSource({ sourceId: source.id, ...update, proxyId });
-        if (apiKey) await relayCommands.rotateSourceKey(source.id, apiKey);
-      } else {
-        await relayCommands.remoteAction({ type: "update_source", id: source.id }, { ...update, ...(apiKey ? { apiKey } : {}) });
-      }
+      await relayCommands.updateSource({ sourceId: source.id, ...update, proxyId });
+      if (apiKey) await relayCommands.rotateSourceKey(source.id, apiKey);
       if (addToPool && !initialSource && !source.inPool) {
-        const latestSource = (relayMode !== "remote" ? await relayCommands.localState() : await relayCommands.remoteState())?.sources.find((sourceOption) => sourceOption.id === source.id);
+        const latestSource = (await relayCommands.localState()).sources.find((sourceOption) => sourceOption.id === source.id);
         if (latestSource && !latestSource.inPool) {
           await updatePoolMembership(relayMode, { accountIds: [], sourceIds: [source.id], inPool: true });
         }
@@ -177,7 +171,7 @@ export function SourceDialog({ source: initialSource, onClose, addToPool = false
                       <SecretField label={t("sources.replaceKey")} value={apiKey} onChange={setApiKey} />
                       <p className="form-note">{t("sources.keepKeyHint")}</p>
                     </div>
-                    {relayMode !== "remote" ? <SourceProxyField proxyId={proxyId} onChange={setProxyId} /> : null}
+                    <SourceProxyField proxyId={proxyId} onChange={setProxyId} />
                   </section>
                 </section>
               ) : null}
@@ -190,7 +184,7 @@ export function SourceDialog({ source: initialSource, onClose, addToPool = false
           ) : (
             <>
               <ApiProviderForm value={provider} onChange={setProvider} />
-              {provider.kind && relayMode !== "remote" ? <SourceProxyField proxyId={proxyId} onChange={setProxyId} /> : null}
+              {provider.kind ? <SourceProxyField proxyId={proxyId} onChange={setProxyId} /> : null}
             </>
           )}
         </form>

@@ -4,7 +4,6 @@ import {
   CircleAlert,
   CircleCheck,
   CirclePause,
-  Clock3,
   Coins,
   DollarSign,
   Download,
@@ -17,14 +16,12 @@ import {
   Network,
   RefreshCw,
   Trash2,
-  Upload,
   UserRound,
   X,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { relayCommands } from "../../api/commands";
 import { accountPlanOption } from "../../accountPlans";
-import type { AccountSummary, AccountTransferProgress, CandidateRuntimeSnapshot, ProfileBinding } from "../../api/types";
+import type { AccountSummary, CandidateRuntimeSnapshot } from "../../api/types";
 import {
   refreshAllAccountQuotas,
   type AccountQuotaRefreshReport,
@@ -37,7 +34,6 @@ import {
   EmptyState,
   IconButton,
   OptionMenu,
-  useConfirm,
   AccountPlanBadge,
 } from "../../components/Ui";
 import { formatNumber } from "../../numberFormatting";
@@ -49,6 +45,7 @@ import { toggleSelectedId } from "../../state/selectionModel";
 import { NoResults } from "./connectionHelpers";
 import { AccountErrorDialog } from "./AccountErrorDialog";
 import { AccountCard } from "./AccountCard";
+import { accountMetadataObservation, visibleAccounts } from "../../accountRoutes";
 import { useConnectionAccountRemoval } from "./accountRemoval";
 import {
   accountCounts,
@@ -67,9 +64,6 @@ const EMPTY_RUNTIME_ORDER: CandidateRuntimeSnapshot[] = [];
 export function AccountsTable({
   query,
   onQuery,
-  canImport,
-  canManageProxies,
-  canExport,
   onImport,
   onSignIn,
   onReauthenticate,
@@ -79,12 +73,9 @@ export function AccountsTable({
 }: {
   query: string;
   onQuery: (queryText: string) => void;
-  canImport: boolean;
-  canManageProxies: boolean;
-  canExport: boolean;
   onImport: () => void;
   onSignIn: () => void;
-  onReauthenticate: (account: AccountSummary) => void;
+  onReauthenticate: (account: AccountSummary, automatic?: boolean) => void;
   onProxy: (account: AccountSummary) => void;
   onBulkProxies: (accountIds: string[]) => void;
   onExport: (accountIds: string[]) => void;
@@ -95,7 +86,6 @@ export function AccountsTable({
     mode,
     runtime,
     perform,
-    activateCodexProfile,
     refresh,
     busy,
     accountIdentitiesVisible,
@@ -105,27 +95,27 @@ export function AccountsTable({
     accountValueVisible,
     setAccountValueVisible,
   } = useRelayState();
-  const confirm = useConfirm();
-  const { canTrash, remove, openDeleteMenu, permanentDeleteMenu } = useConnectionAccountRemoval();
+  const { remove, openDeleteMenu, permanentDeleteMenu } = useConnectionAccountRemoval();
   const [selected, setSelected] = useState<string[]>([]);
-  const [transfer, setTransfer] = useState<{ accountIds: string[]; progress: AccountTransferProgress } | null>(null);
   const [planFilter, setPlanFilter] = useState("all");
   const [participationFilter, setParticipationFilter] = useState<ParticipationFilter>("all");
   const [groupByPlan, setGroupByPlan] = useState(() => localStorage.getItem("relay.accountsGroupByPlan") === "true");
   const [errorDetails, setErrorDetails] = useState<AccountSummary | null>(null);
   const [quotaReport, setQuotaReport] = useState<{ succeeded: number; failed: number } | null>(null);
-  const allAccounts = runtime?.accounts ?? EMPTY_ACCOUNTS;
+  const allAccounts = useMemo(() => visibleAccounts(runtime?.accounts ?? EMPTY_ACCOUNTS), [runtime?.accounts]);
   const runtimeOrder = runtime?.gateway.routingOrder ?? EMPTY_RUNTIME_ORDER;
-  const accountTimestamps = useMemo(() => allAccounts.flatMap((account) => [
+  const accountTimestamps = useMemo(() => (runtime?.accounts ?? EMPTY_ACCOUNTS).flatMap((account) => [
+    accountMetadataObservation(account, "plan").staleAtMs,
+    accountMetadataObservation(account, "quota").staleAtMs,
     account.subscription.activeUntilMs,
-    account.oauthClientKind === "excel_bps" && !account.remoteLocation ? account.credentialDiagnostics?.expiresAtMs : null,
+    !account.recoveryRequired ? account.credentialDiagnostics?.expiresAtMs : null,
     account.quota.primary?.resetAtMs,
     account.quota.secondary?.resetAtMs,
     ...(account.quota.supplemental ?? []).map((quotaWindow) => quotaWindow.window.resetAtMs),
     ...(account.inPool
       ? (runtimeCandidateForMember(account.id, "oauth_account", runtimeOrder)?.modelRetries ?? []).map((retry) => retry.retryAtMs)
       : []),
-  ]), [allAccounts, runtimeOrder]);
+  ]), [runtime?.accounts, runtimeOrder]);
   const nowMs = useRelativeTimeClock(accountTimestamps);
   const unknownPlanLabel = t("common.unknown");
   const plans = useMemo(() => accountPlanOptions(allAccounts, unknownPlanLabel), [allAccounts, unknownPlanLabel]);
@@ -144,19 +134,7 @@ export function AccountsTable({
   const activePlan = useMemo(() => activeAccountPlan(planFilter, plans, errorCount), [errorCount, planFilter, plans]);
   useEffect(() => setSelected((previousSelectedAccountIds) => previousSelectedAccountIds.filter((accountId) => allAccounts.some((account) => account.id === accountId))), [runtime?.accounts]);
   useEffect(() => { setSelected([]); setPlanFilter("all"); setParticipationFilter("all"); }, [mode]);
-  useEffect(() => {
-    let disposed = false;
-    let stop: (() => void) | undefined;
-  void relayCommands.onAccountTransferProgress((progress) => setTransfer((previousTransfer) => previousTransfer ? { ...previousTransfer, progress } : null)).then((unlisten) => {
-      if (disposed) unlisten();
-      else stop = unlisten;
-    }).catch(() => undefined);
-    return () => {
-      disposed = true;
-      stop?.();
-    };
-  }, []);
-  const canRefreshQuota = mode === "local" || Boolean(runtime?.capabilities.features.includes("quota"));
+  const canRefreshQuota = mode === "local";
   const accounts = useMemo(() => filterAndSortAccounts(
     allAccounts,
     query,
@@ -170,11 +148,8 @@ export function AccountsTable({
   const filtersHideAccounts = filtersActive && accounts.length !== allAccounts.length;
   const {
     selectedAccounts,
-    selectedIds,
     selectedCount,
-    selectedAccessOnly,
-    selectedSecretsUnavailable,
-    selectedOnServer,
+    selectedRecoveryRequired,
     exportIds,
     canIncludeSelected,
     canExcludeSelected,
@@ -201,8 +176,6 @@ export function AccountsTable({
             {mode === "local" ? <Button variant="primary" onClick={onSignIn}>{t("accounts.signIn")}</Button> : null}
             <Button
               variant={mode === "local" ? "secondary" : "primary"}
-              disabled={!canImport}
-              title={!canImport ? t("remote.capabilityUnavailable") : undefined}
               onClick={onImport}
             >
               {t("accounts.import")}
@@ -234,7 +207,7 @@ export function AccountsTable({
     }
   };
   const deleteAccounts = async (accountIds: string[], operation: string, permanently: boolean) => {
-    const ok = await remove(accountIds, permanently, operation, Boolean(selectedOnServer));
+    const ok = await remove(accountIds, permanently, operation, Boolean(selectedRecoveryRequired));
     if (!ok) await refresh().catch(() => undefined);
     if (ok) setSelected((previousSelectedAccountIds) => previousSelectedAccountIds.filter((accountId) => !accountIds.includes(accountId)));
     return ok;
@@ -243,37 +216,6 @@ export function AccountsTable({
     const accountIds = selectedAccounts.map((account) => account.id);
     if (!accountIds.length) return;
     await deleteAccounts(accountIds, "delete-selected-accounts", permanently);
-  };
-  const moveSelectedToRemote = async () => {
-    if (!await confirm(t("accounts.moveToServerConfirm", { count: selectedCount }), {
-      title: t("accounts.moveToServer"),
-      confirmLabel: t("accounts.moveToServerAction"),
-    })) return;
-    const accountIds = [...selectedIds];
-    let bindings: ProfileBinding[] = [];
-    const bindingsLoaded = await perform("move-profile-check", async () => { bindings = await relayCommands.profileBindings(); }, undefined, { backgroundRefresh: true });
-    if (!bindingsLoaded) return;
-    const usesSelectedAccount = bindings.some((binding) => binding.active
-      && (accountIds.includes(binding.credentialId) || (binding.boundOauthAccountId != null && accountIds.includes(binding.boundOauthAccountId))));
-    let switchedProfile = false;
-    if (usesSelectedAccount) {
-      if (!await confirm(t("accounts.moveActiveProfileConfirm"), {
-        title: t("accounts.moveActiveProfileTitle"),
-        confirmLabel: t("accounts.moveActiveProfileAction"),
-      })) return;
-      switchedProfile = await activateCodexProfile("move-profile-switch", relayCommands.attachCodexRemoteGateway);
-      if (!switchedProfile) return;
-    }
-    setTransfer({ accountIds, progress: { completed: 0, total: accountIds.length, phase: "preparing", ...(accountIds[0] ? { currentAccountId: accountIds[0] } : {}) } });
-    const ok = await perform("move-accounts-to-remote", () => relayCommands.moveAccountsToRemote(accountIds), "feedback.accountsMovedToServer", { backgroundRefresh: true });
-    setTransfer(null);
-    if (!ok && switchedProfile) {
-      await relayCommands.restoreDefaultAccountProfile().then(() => refresh()).catch(() => undefined);
-    }
-    if (ok && switchedProfile) {
-      await perform("move-profile-launch", relayCommands.launchManagedCodex, "feedback.launched", { backgroundRefresh: true });
-    }
-    if (ok) setSelected([]);
   };
   const refreshAllQuotas = async () => {
     let report: AccountQuotaRefreshReport | null = null;
@@ -374,26 +316,10 @@ export function AccountsTable({
                 onClick={() => void updateSelectedParticipation(false)}
               />
             ) : null}
-            {mode === "local" ? (
-              <IconButton
-                label={t("accounts.moveToServer")}
-                icon={busy === "move-accounts-to-remote" ? <Loader2 className="spin" aria-hidden /> : <Upload aria-hidden />}
-                disabled={busy === "move-accounts-to-remote" || selectedSecretsUnavailable || selectedAccessOnly || selectedOnServer}
-                title={selectedOnServer
-                  ? t("accounts.moveToServerAlreadyRemote")
-                  : selectedAccessOnly
-                    ? t("accounts.moveToServerAccessOnlyUnavailable")
-                    : selectedSecretsUnavailable
-                      ? t("accounts.moveToServerUnavailable")
-                      : t("accounts.moveToServer")}
-                onClick={() => void moveSelectedToRemote()}
-              />
-            ) : null}
             <IconButton
               label={t("accounts.exportSelected", { count: selectedCount })}
               icon={<Download aria-hidden />}
-              disabled={!canExport}
-              title={!canExport ? t("remote.capabilityUnavailable") : t("accounts.exportSelected", { count: selectedCount })}
+              title={t("accounts.exportSelected", { count: selectedCount })}
               onClick={() => onExport(exportIds)}
             />
             <IconButton
@@ -402,7 +328,7 @@ export function AccountsTable({
               label={t("accounts.deleteSelected")}
               icon={busy === "delete-selected-accounts" ? <Loader2 className="spin" aria-hidden /> : <Trash2 aria-hidden />}
               disabled={Boolean(busy)}
-              title={t(canTrash ? "trash.deleteHint" : "trash.serverUpdateRequired")}
+              title={t("trash.deleteHint")}
               onClick={() => void deleteSelected()}
               onContextMenu={(event) => openDeleteMenu(event, () => void deleteSelected(true))}
             />
@@ -433,12 +359,11 @@ export function AccountsTable({
               />
             ) : null}
             <ActionMenu className="account-row-menu account-bulk-menu">
-              <ActionMenuItem icon={<Download aria-hidden />} disabled={!canExport} onClick={() => onExport(exportIds)}>
+              <ActionMenuItem icon={<Download aria-hidden />} onClick={() => onExport(exportIds)}>
                 {t("accounts.exportAll")}
               </ActionMenuItem>
               <ActionMenuItem
                 icon={<Network aria-hidden />}
-                disabled={!canManageProxies}
                 onClick={() => onBulkProxies(accounts.map((account) => account.id))}
               >
                 {t("proxies.assignBulk")}
@@ -449,7 +374,6 @@ export function AccountsTable({
       </div>
     </div>
     {quotaReport ? <AccountQuotaReport report={quotaReport} onClose={() => setQuotaReport(null)} /> : null}
-    {transfer ? <AccountMoveProgress transfer={transfer} accounts={allAccounts} /> : null}
     {filtersHideAccounts ? (
       <div className="account-filter-summary" role="status" aria-live="polite">
         <span>{t("accounts.filterSummary", { visible: accounts.length, total: allAccounts.length })}</span>
@@ -474,8 +398,6 @@ export function AccountsTable({
         planCounts={visiblePlanCounts}
         nowMs={nowMs}
         selected={selected}
-        canManageProxies={canManageProxies}
-        canExport={canExport}
         canRefreshQuota={canRefreshQuota}
         runtimeByAccount={runtimeByAccount}
         onToggleSelected={toggleSelected}
@@ -504,50 +426,12 @@ function AccountQuotaReport({ report, onClose }: { report: { succeeded: number; 
   );
 }
 
-function AccountMoveProgress({
-  transfer,
-  accounts,
-}: {
-  transfer: { accountIds: string[]; progress: AccountTransferProgress };
-  accounts: readonly AccountSummary[];
-}) {
-  const { t } = useTranslation();
-  return (
-    <div className="account-transfer-progress" role="status" aria-live="polite">
-      <header>
-        <span><Loader2 className="spin" aria-hidden /></span>
-        <div>
-          <strong>{t("accounts.moveProgress", { completed: transfer.progress.completed, total: transfer.progress.total })}</strong>
-          <small>{t(`accounts.moveProgressPhase.${transfer.progress.phase}`)}</small>
-        </div>
-        <b>{transfer.progress.completed}/{transfer.progress.total}</b>
-      </header>
-      <progress max={Math.max(1, transfer.progress.total)} value={transfer.progress.completed} />
-      <ul>
-        {transfer.accountIds.map((accountId, index) => {
-          const account = accounts.find((candidateAccount) => candidateAccount.id === accountId);
-          const status = index < transfer.progress.completed ? "validated" : index === transfer.progress.completed ? "current" : "pending";
-          return (
-            <li key={accountId} data-transfer-state={status}>
-              {status === "validated" ? <Check aria-hidden /> : status === "current" ? <Loader2 className="spin" aria-hidden /> : <Clock3 aria-hidden />}
-              <span>{account?.label ?? accountId}</span>
-              <small>{t(`accounts.moveProgressStatus.${status}`)}</small>
-            </li>
-          );
-        })}
-      </ul>
-    </div>
-  );
-}
-
 function AccountList({
   accounts,
   groupByPlan,
   planCounts,
   nowMs,
   selected,
-  canManageProxies,
-  canExport,
   canRefreshQuota,
   runtimeByAccount,
   onToggleSelected,
@@ -561,29 +445,28 @@ function AccountList({
   planCounts: ReadonlyMap<string, number>;
   nowMs: number;
   selected: readonly string[];
-  canManageProxies: boolean;
-  canExport: boolean;
   canRefreshQuota: boolean;
   runtimeByAccount: ReadonlyMap<string, CandidateRuntimeSnapshot | undefined>;
   onToggleSelected: (accountId: string) => void;
   onShowError: (account: AccountSummary) => void;
   onProxy: (account: AccountSummary) => void;
   onExport: (accountIds: string[]) => void;
-  onReauthenticate: (account: AccountSummary) => void;
+  onReauthenticate: (account: AccountSummary, automatic?: boolean) => void;
 }) {
   const { t } = useTranslation();
   const unknownPlan = t("common.unknown");
   return (
     <div className="account-list" role="list" aria-label={t("connections.accounts")}>
       {accounts.map((account, index) => {
-        const plan = accountPlanOption(account.subscription.planType, unknownPlan);
+        const planType = account.subscription.planType;
+        const plan = accountPlanOption(planType, unknownPlan);
         const previousAccount = index ? accounts[index - 1] : undefined;
         const previousPlan = previousAccount ? accountPlanOption(previousAccount.subscription.planType, unknownPlan).id : null;
         return (
           <Fragment key={account.id}>
             {groupByPlan && plan.id !== previousPlan ? (
               <div className="account-plan-group-heading" role="presentation">
-                <AccountPlanBadge planType={account.subscription.planType} unknown={unknownPlan} />
+                <AccountPlanBadge planType={planType} unknown={unknownPlan} />
                 <span>{t("accounts.groupCount", { count: planCounts.get(plan.id) ?? 0 })}</span>
               </div>
             ) : null}
@@ -591,8 +474,6 @@ function AccountList({
               account={account}
               nowMs={nowMs}
               selected={selected.includes(account.id)}
-              canManageProxies={canManageProxies}
-              canExport={canExport}
               canRefreshQuota={canRefreshQuota}
               runtimeState={account.inPool ? runtimeByAccount.get(account.id) : undefined}
               onToggleSelected={onToggleSelected}

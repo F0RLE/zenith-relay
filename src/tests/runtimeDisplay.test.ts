@@ -31,7 +31,6 @@ function account(overrides: Partial<AccountSummary> = {}): AccountSummary {
 function runtime(accounts: AccountSummary[]): RuntimeSnapshot {
   return {
     schemaVersion: 1,
-    runtimeTarget: { kind: "local", connected: true, origin: null, serverId: null, version: null },
     gateway: {
       running: true,
       baseUrl: "http://127.0.0.1:0",

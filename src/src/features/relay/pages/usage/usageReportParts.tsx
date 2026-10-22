@@ -4,10 +4,29 @@ import { useTranslation } from "react-i18next";
 import { formatTokenSpeed } from "../../usageSpeed";
 import { formatCompactNumber, formatFullNumber } from "../../usageTotals";
 import type { UsageRow } from "./usageData";
-import { formatErrorCategory, formatReasoningEffort } from "./usageReportFormat";
+import { formatReasoningEffort } from "./usageReportFormat";
+import type { ApiEquivalentSummary } from "../../api/types";
+import { formatUsageApiEquivalent } from "./usageFormatting";
 
 export function RequestDetailMetric({ label, value }: { label: string; value: ReactNode }) {
   return <div className="request-details-metric"><dt>{label}</dt><dd>{value}</dd></div>;
+}
+
+export function RequestTokenValue({ tokens, price, included = false }: {
+  tokens: number | null;
+  price?: ApiEquivalentSummary | null | undefined;
+  included?: boolean;
+}) {
+  const { t, i18n } = useTranslation();
+  const known = tokens != null && price != null;
+  return <dd className="request-token-value">
+    <span className="request-token-count">{tokens == null ? "—" : formatFullNumber(tokens, i18n.language)}</span>
+    <span className={`request-token-cost${included ? " request-token-included" : ""}`}
+      data-relay-tooltip={included ? t("usage.outputPriceIncludedHint") : known
+        ? t("usage.requestApiEquivalentHint", { count: price.unpricedTokens }) : t("usage.tokenPriceUnavailable")}>
+      {included ? t("usage.outputPriceIncluded") : known ? formatUsageApiEquivalent(price, i18n.language, 6) : "—"}
+    </span>
+  </dd>;
 }
 
 export function SpeedValue({ value, locale, unit }: { value: number | null; locale: string; unit: string }) {
@@ -26,15 +45,6 @@ export function UsageModel({ row }: { row: Pick<UsageRow, "model" | "requestedRe
     <code>{row.model ?? "-"}</code>
     {requestOrigin ? <span className="usage-request-origin" data-relay-tooltip={t("codex.backgroundRequestHint")}><Bot aria-hidden /></span> : null}
     {effort ? <small data-relay-tooltip={changed ? t("usage.reasoningEffortChanged", { requested: formatReasoningEffort(requested, t), effective: formatReasoningEffort(effective, t) }) : undefined}>{changed ? `${formatReasoningEffort(requested, t)} → ${formatReasoningEffort(effective, t)}` : formatReasoningEffort(effort, t)}</small> : null}
-  </span>;
-}
-
-export function UsageConnection({ row }: { row: Pick<UsageRow, "connection" | "success" | "errorCategory" | "requestOrigin"> }) {
-  const { t } = useTranslation();
-  return <span className="usage-connection-value">
-    <span>{row.connection}</span>
-    {!row.success && row.errorCategory && !row.requestOrigin
-      ? <small className="error-text">{formatErrorCategory(row.errorCategory, t)}</small> : null}
   </span>;
 }
 

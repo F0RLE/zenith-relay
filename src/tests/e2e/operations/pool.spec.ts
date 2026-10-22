@@ -2,7 +2,7 @@ import { expect, test } from "../../bun-playwright";
 import { emitTauriEvent, installTauriMock } from "../tauri-mock";
 import { chooseOption, openGatewayApplication } from "./helpers";
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`${mode} pool stays off Usage and uses the lightweight runtime snapshot`, async ({ page }) => {
     await installTauriMock(page, {
       mode,
@@ -11,7 +11,7 @@ for (const mode of ["local", "remote"] as const) {
       usageActive: false,
     });
     await page.goto("/");
-    const usageCommand = mode === "local" ? "get_local_usage_page" : "get_remote_server_usage";
+    const usageCommand = "get_local_usage_page";
     const usageReads = () => page.evaluate((command) => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === command).length, usageCommand);
     await expect.poll(usageReads).toBeGreaterThan(0);
     const before = await usageReads();
@@ -57,12 +57,13 @@ test("pool account avatar opens the shared error details", async ({ page }) => {
   await expect(dialog.locator("pre")).toContainText('"code": "quota_transport"');
 });
 
-test("pool places unavailable accounts after ready members", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 4, accountAuthReason: "invalid_grant" });
+test("pool places idle unavailable accounts after ready members", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 4, accountAuthReason: "invalid_grant", usageActive: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
 
-  await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-member-label", "Pro account");
+  await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-member-label", "Business Workspace");
+  await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-next", "true");
   await expect(page.locator(".pool-member-card").last()).toHaveAttribute("data-member-label", "Personal Plus");
 });
 
@@ -97,7 +98,7 @@ test("connections show the same sign-in action instead of stale quota data", asy
 });
 
 test("connections stay outside the pool until the user adds selected members", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3, poolMembers: false, gatewayRunning: false });
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountOAuthClientKind: "siwc", accountCount: 3, poolMembers: false, gatewayRunning: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await expect(page.getByText("No pool members", { exact: true })).toBeVisible();
@@ -141,7 +142,7 @@ test("pool member removal on right click skips confirmation", async ({ page }) =
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_local_pool_membership").length)).toBe(1);
 });
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`${mode} API sources expose routing role and pool membership`, async ({ page }) => {
     await installTauriMock(page, { mode, locale: "en", populated: true });
     await page.goto("/");
@@ -154,17 +155,10 @@ for (const mode of ["local", "remote"] as const) {
     await row.getByRole("button", { name: "Add to pool", exact: true }).click();
 
     const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-    if (mode === "local") {
-      expect(calls.filter((call) => call.command === "set_local_pool_membership").map((call) => call.args)).toEqual([
+    expect(calls.filter((call) => call.command === "set_local_pool_membership").map((call) => call.args)).toEqual([
         { input: { accountIds: [], sourceIds: ["source_synthetic"], inPool: false } },
         { input: { accountIds: [], sourceIds: ["source_synthetic"], inPool: true } },
-      ]);
-    } else {
-      expect(calls.filter((call) => call.command === "execute_remote_server_action").map((call) => call.args.input).filter((input) => (input as { action?: { type?: string } }).action?.type === "set_pool_membership")).toEqual([
-        { action: { type: "set_pool_membership" }, payload: { accountIds: [], sourceIds: ["source_synthetic"], inPool: false } },
-        { action: { type: "set_pool_membership" }, payload: { accountIds: [], sourceIds: ["source_synthetic"], inPool: true } },
-      ]);
-    }
+    ]);
   });
 
   test(`${mode} pool creates an API source through the shared picker and applies shared rotation modes`, async ({ page }) => {
@@ -193,15 +187,10 @@ for (const mode of ["local", "remote"] as const) {
     }
 
     const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-    if (mode === "local") {
+    {
       expect(calls.find((call) => call.command === "create_local_source")?.args.input).toMatchObject({ name: "Failover API", priority: 0 });
       expect(calls.find((call) => call.command === "set_local_pool_membership")?.args).toEqual({ input: { accountIds: [], sourceIds: ["source_created_1"], inPool: true } });
       expect(calls.filter((call) => call.command === "update_local_routing")).toHaveLength(1);
-    } else {
-      const actions = calls.filter((call) => call.command === "execute_remote_server_action").map((call) => call.args.input as { action: { type: string }; payload?: Record<string, unknown> });
-      expect(actions.find((call) => call.action.type === "create_source")?.payload).toMatchObject({ name: "Failover API", priority: 0 });
-      expect(actions.find((call) => call.action.type === "set_pool_membership")?.payload).toMatchObject({ sourceIds: ["source_remote_created_1"] });
-      expect(actions.filter((call) => call.action.type === "set_routing_policy")).toHaveLength(1);
     }
   });
 
@@ -431,7 +420,7 @@ test("pool follows a lower-priority stabilizer reported by runtime activity", as
 });
 
 test("pool member picker lists individual accounts instead of subscription groups", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 4, poolMembers: false });
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountOAuthClientKind: "siwc", accountCount: 4, poolMembers: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Add member", exact: true }).first().click();
@@ -490,8 +479,11 @@ test("local pool refreshes all account quotas without an interval setting", asyn
   const freeMember = page.locator('[data-member-label="Backup account"]');
   await expect(freeMember.locator('.relay-status-icon[aria-label^="In rotation"]')).toBeVisible();
 
-  await page.locator('[data-toolbar-group="refresh"]').getByRole("button", { name: "Refresh", exact: true }).click();
-  await expect(page.getByText("Updated: 3 · Errors: 0", { exact: true })).toBeVisible();
+  const refresh = page.locator('[data-toolbar-group="refresh"]').getByRole("button", { name: "Refresh", exact: true });
+  await refresh.click();
+  await expect(refresh).toBeEnabled();
+  await expect(page.locator(".account-quota-report")).toHaveCount(0);
+  await expect(page.locator(".pool-controls + .pool-member-list")).toHaveCount(1);
   await expect(page.getByRole("button", { name: "Quota refresh settings", exact: true })).toHaveCount(0);
   await expect(freeMember.locator(".relay-status-icon")).toHaveAttribute("aria-label", "In rotation");
 
@@ -591,56 +583,7 @@ test("closing mixed rotation retains the immediately applied order", async ({ pa
   expect(await ids()).toEqual(reordered);
 });
 
-test("remote pool saves distribution settings on the connected runtime", async ({ page }) => {
-  await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Pool", exact: true }).click();
-  const speed = page.getByRole("radiogroup", { name: "Request speed" });
-  await speed.getByRole("radio", { name: "Fast", exact: true }).click();
-  await expect(speed.getByRole("radio", { name: "Fast", exact: true })).toBeEnabled();
-  await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "Pool rotation" });
-  await expect(dialog).not.toContainText("Keep one chat on one account");
-  await expect(dialog).not.toContainText("Request speed");
-  await dialog.getByRole("radio", { name: "Round robin", exact: true }).click();
-  await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
 
-  const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.findLast((call) => call.command === "execute_remote_server_action")?.args.input).toMatchObject({
-    action: { type: "set_routing_policy" },
-    payload: { poolRouting: { mode: "round_robin" }, expectedPoolRouting: { mode: "automatic" }, maxRetryCandidates: 3, defaultServiceTier: "fast" },
-  });
-  const remoteRoutingPayload = calls.findLast((call) => call.command === "execute_remote_server_action")?.args.input as { payload: Record<string, unknown> };
-  expect(remoteRoutingPayload.payload).not.toHaveProperty("cooldownAfterFailures");
-  expect(remoteRoutingPayload.payload).not.toHaveProperty("keepLastCandidateAvailable");
-  expect(remoteRoutingPayload.payload).not.toHaveProperty("routingStrategy");
-  expect(remoteRoutingPayload.payload).not.toHaveProperty("subscriptionPlanOrder");
-  expect(calls.findLast((call) => call.command === "sync_codex_default_service_tier")?.args).toEqual({ defaultServiceTier: "fast" });
-});
-
-test("remote configuration presets require preview before an explicit apply", async ({ page }) => {
-  await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Pool", exact: true }).click();
-
-  await page.locator(".pool-preset-menu summary").click();
-  await page.getByRole("menuitem", { name: "Save preset", exact: true }).click();
-  await page.locator(".pool-preset-menu summary").click();
-  await page.getByRole("menuitem", { name: "Apply preset", exact: true }).click();
-
-  const dialog = page.getByRole("dialog", { name: "Configuration preset" });
-  await expect(dialog.getByText("Changes: 1", { exact: true })).toBeVisible();
-  await expect(dialog.getByText("routing / maxRetryCandidates", { exact: true })).toBeVisible();
-  await expect(dialog.getByRole("cell", { name: "3", exact: true })).toBeVisible();
-  await expect(dialog.getByRole("cell", { name: "4", exact: true })).toBeVisible();
-  await dialog.getByRole("button", { name: "Apply changes" }).click();
-  await expect(dialog).toBeHidden();
-
-  const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.some((call) => call.command === "export_remote_configuration_preset")).toBe(true);
-  expect(calls.some((call) => call.command === "preview_remote_configuration_preset")).toBe(true);
-  expect(calls.findLast((call) => call.command === "apply_remote_configuration_preset")?.args).toMatchObject({ input: { baseRevision: "cfg_synthetic_current" } });
-});
 
 test("local configuration presets require preview before an explicit apply", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
@@ -663,31 +606,7 @@ test("local configuration presets require preview before an explicit apply", asy
   expect(calls.findLast((call) => call.command === "apply_local_configuration_preset")?.args).toMatchObject({ input: { baseRevision: "cfg_synthetic_current" } });
 });
 
-test("remote pool refreshes quotas without exposing an interval setting", async ({ page }) => {
-  await installTauriMock(page, { mode: "remote", locale: "en", populated: true, accountCount: 3, freeAccountHealthy: true });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Pool", exact: true }).click();
 
-  await page.locator('[data-toolbar-group="refresh"]').getByRole("button", { name: "Refresh", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Quota refresh settings", exact: true })).toHaveCount(0);
-
-  const actions = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { action?: { type?: string }; payload?: unknown } } }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "execute_remote_server_action").map((call) => call.args.input));
-  expect(actions).toContainEqual({ action: { type: "refresh_all_quotas" }, payload: null });
-  expect(actions.some((input) => input?.action?.type === "set_quota_policy")).toBe(false);
-});
-
-test("remote connections expose the same account refresh action as the pool", async ({ page }) => {
-  await installTauriMock(page, { mode: "remote", locale: "en", populated: true, accountCount: 3, freeAccountHealthy: true });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Connections", exact: true }).click();
-
-  const refreshAll = page.locator(".account-command-actions").getByRole("button", { name: "Refresh", exact: true });
-  await expect(refreshAll).toBeVisible();
-  await refreshAll.click();
-
-  const actions = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { action?: { type?: string }; payload?: unknown } } }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "execute_remote_server_action").map((call) => call.args.input));
-  expect(actions).toContainEqual({ action: { type: "refresh_all_quotas" }, payload: null });
-});
 
 test("connections route Free accounts like other pool members", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3, freeAccountHealthy: true });
@@ -761,7 +680,7 @@ test("invalid OAuth grants keep the account and explain the required action", as
 });
 
 test("source and automation rows keep rare actions in consistent menus", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true, codexBindings: false });
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
 
@@ -769,7 +688,7 @@ test("source and automation rows keep rare actions in consistent menus", async (
   let actions = page.locator(".source-card .account-card-actions");
   expect(await actions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.getAttribute("aria-label")))).toEqual(["Remove from pool", "Refresh API data", "Edit", "Launch"]);
   await page.locator(".source-card .account-row-menu summary").click();
-  expect(await page.getByRole("menuitem").allTextContents()).toEqual(["Disable", "Delete"]);
+  await expect(page.getByRole("menuitem")).toHaveText(["Disable", "Delete"]);
   await page.keyboard.press("Escape");
 
   await page.getByRole("tab", { name: "Automations" }).click();
@@ -828,7 +747,7 @@ test("ChatGPT client setup combines account selection, fixed reserve, and forced
   await expect(setup).not.toContainText("Generated configuration");
   const selectionMatchesTheme = await setup.evaluate((element) => {
     const probe = document.createElement("span");
-    probe.style.backgroundColor = "var(--relay-accent-soft)";
+    probe.style.backgroundColor = "var(--relay-selection-background)";
     element.appendChild(probe);
     const expected = getComputedStyle(probe).backgroundColor;
     probe.remove();

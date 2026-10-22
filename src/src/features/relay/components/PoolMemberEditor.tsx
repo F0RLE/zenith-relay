@@ -17,7 +17,7 @@ import {
 export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onClose: () => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
-  const canSave = mode !== "remote" || Boolean(runtime?.capabilities.features.includes(member.kind === "account" ? "accounts" : "sources"));
+  const canSave = mode === "local";
   const [recoveryDelaySeconds, setRecoveryDelaySeconds] = useState(member.kind === "source" ? member.recoveryDelaySeconds ?? 0 : 0);
   const [tab, setTab] = useState("models");
   const [search, setSearch] = useState("");
@@ -51,14 +51,12 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
     const persist = () => {
       if (member.kind === "account") {
         const accountUpdate = { allowedModels, excludedModels, draining, purchaseCostMicroUsd: Math.round(purchaseCostUsd * 1_000_000) };
-        return mode === "local"
-          ? relayCommands.updateAccount({ accountId: member.id, ...accountUpdate })
-          : relayCommands.remoteAction({ type: "update_account", id: member.id }, accountUpdate);
+        return relayCommands.updateAccount({ accountId: member.id, ...accountUpdate });
       }
       const protocolBindings = member.protocolBindings ?? [];
       const sourceUpdate = { allowedModels, excludedModels, draining, priority: member.priority, weight: member.weight, recoveryDelaySeconds, modelPriceOverrides: sourcePriceOverrides ?? {}, protocolBindings };
       const sourceCommand = { sourceId: member.id, name: member.name, baseUrl: member.baseUrl, wireApi: member.wireApi, models: member.models, ...sourceUpdate };
-      return mode === "local" ? relayCommands.updateSource(sourceCommand) : relayCommands.remoteAction({ type: "update_source", id: member.id }, sourceUpdate);
+      return relayCommands.updateSource(sourceCommand);
     };
     const ok = await perform(`member-${member.id}`, persist, "feedback.saved", { backgroundRefresh: true });
     if (ok) onClose();
@@ -81,7 +79,7 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
             variant="primary"
             busy={busy === `member-${member.id}`}
             disabled={!canSave || !purchaseCostValid || (member.kind === "source" && !sourcePriceOverrides)}
-            title={!canSave ? t("remote.capabilityUnavailable") : undefined}
+            title={!canSave ? t("common.unsupported") : undefined}
             onClick={() => void save()}
           >
             {t("pool.savePolicy")}

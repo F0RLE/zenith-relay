@@ -11,6 +11,7 @@ import type {
 import type { PoolRoutingSnapshot } from "./pool";
 
 export type AccountTimezoneSource = "account" | "proxy";
+export type CodexMemoryStage = "extraction" | "consolidation";
 
 export type RequestTimezonePolicy = {
   enabled: boolean;
@@ -33,12 +34,9 @@ export type ModelCatalogIdentity = Pick<ModelSummary, "catalogProvider" | "catal
 
 export type RuntimeSnapshot = {
   schemaVersion: number;
-  configurationRevision?: string | null;
-  runtimeTarget: { kind: "local" | "remote"; connected: boolean; origin: string | null; serverId: string | null; version: string | null };
   gateway: {
     toolPolicy?: ToolPolicy;
     requestTimezone?: RequestTimezonePolicy;
-    basisPointsEnabled?: boolean;
     poolRouting?: PoolRoutingSnapshot;
     running: boolean;
     baseUrl: string;
@@ -56,6 +54,8 @@ export type RuntimeSnapshot = {
     quotaRequestTimeoutSeconds?: number;
     chatgptInterfaceQuotaReserveBasisPoints?: number;
     codexBackgroundTasksEnabled?: boolean;
+    codexMemoryExtractionEnabled?: boolean;
+    codexMemoryConsolidationEnabled?: boolean;
     codexWebsocketsEnabled?: boolean;
     chatgptRetryUntilAvailable?: boolean;
     blockDegradedRoutesEnabled?: boolean;
@@ -64,8 +64,6 @@ export type RuntimeSnapshot = {
   platform: string;
   capabilities: {
     features: string[];
-    supportedWireApis?: Array<"responses" | "chat_completions" | "messages" | "gemini">;
-    [key: string]: unknown;
   };
   sources: SourceSummary[];
   accounts: AccountSummary[];

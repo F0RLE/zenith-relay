@@ -153,7 +153,7 @@ export function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
           </div> : null}
         </section>
         {errorKey ? <p role="alert" className="form-error">{t(errorKey)}</p> : null}
-        {!available ? <p role="alert" className="form-error">{t("remote.capabilityUnavailable")}</p> : null}
+        {!available ? <p role="alert" className="form-error">{t("common.unsupported")}</p> : null}
         <section className="pool-routing-members">
           <div className="pool-routing-columns">
             <div className="pool-routing-members-heading"><h3>{listLabel}</h3><span>{rows.length}</span></div>

@@ -34,6 +34,17 @@ const account = (id: string, overrides: Partial<AccountSummary> = {}): AccountSu
 });
 
 describe("account table model", () => {
+  test("linked plans do not classify SIWC without verified workspace metadata", () => {
+    const siwc = account("siwc", { oauthClientKind: "siwc", routeGroupId: "shared", subscription: { planType: null, activeUntilMs: null, status: "unknown", updatedAtMs: null } });
+    const donor = account("codex", { routeGroupId: "shared", routeInactive: true });
+    const connections = [siwc, donor];
+    expect(accountPlanOptions(connections, "Unknown")).toMatchObject([{ id: "plus", count: 1 }, { id: "unknown", count: 1 }]);
+    expect(visiblePlanCounts([siwc], "Unknown")).toEqual(new Map([["unknown", 1]]));
+    expect(filterAndSortAccounts([siwc], "plus", "plus", "all", true, new Map(), "Unknown")).toEqual([]);
+    expect(filterAndSortAccounts([siwc], "", "unknown", "all", false, new Map(), "Unknown")).toEqual([siwc]);
+    expect(siwc.subscription.planType).toBeNull();
+  });
+
   test("groups availability consistently with Pool without overriding order inside each group", () => {
     const accounts = [
       account("error", { operationalStatus: "unavailable" }),
@@ -64,7 +75,7 @@ describe("account table model", () => {
   });
 
   test("keeps selection actions scoped to visible rows and all-account exports", () => {
-    const all = [account("one"), account("two", { remoteLocation: { serverId: "server", remoteAccountId: "remote" } })];
+    const all = [account("one"), account("two", { recoveryRequired: true })];
     const visible = [all[0]!];
     const state = accountSelectionState(all, visible, ["one"]);
     expect(state).toMatchObject({ selectedIds: ["one"], selectedCount: 1, exportIds: ["one"], allSelected: true, canIncludeSelected: false, canExcludeSelected: true });

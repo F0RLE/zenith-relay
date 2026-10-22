@@ -31,9 +31,10 @@ for (const failedStep of ["state", "membership"] as const) {
 }
 
 test("provider picker supports keyboard selection and preserves edits to the selected provider", async ({ page }) => {
-  await installTauriMock(page, { mode: "zenith", locale: "en", populated: false, readyConnected: false });
+  await installTauriMock(page, { mode: "local", locale: "en", populated: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("tab", { name: "Sources", exact: true }).click();
   await page.getByRole("button", { name: "Add source", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Add source" });
   const first = dialog.getByRole("radio", { name: "OpenAI", exact: true });
@@ -68,10 +69,11 @@ test("provider picker supports keyboard selection and preserves edits to the sel
 for (const theme of ["light", "dark"] as const) {
   for (const viewport of [{ width: 1160, height: 760 }, { width: 840, height: 560 }, { width: 390, height: 844 }]) {
     test(`provider setup stays compact and usable ${theme} ${viewport.width}`, async ({ page }) => {
-      await installTauriMock(page, { mode: "zenith", locale: "ru", theme, populated: false, readyConnected: false });
+      await installTauriMock(page, { mode: "local", locale: "ru", theme, populated: false });
       await page.setViewportSize(viewport);
       await page.goto("/");
       await page.getByRole("button", { name: "Подключения", exact: true }).click();
+      await page.getByRole("tab", { name: "Источники API", exact: true }).click();
       await page.getByRole("button", { name: "Добавить источник", exact: true }).click();
       await expect(page.locator("#splash-screen")).toHaveCount(0);
       const dialog = page.getByRole("dialog", { name: "Добавить источник" });

@@ -1,5 +1,5 @@
 import type { PoolMember } from "../poolHelpers";
-import { uniqueModelIds } from "../modelGroups";
+import { modelIdKey, uniqueModelIds } from "../modelGroups";
 import { sourcePriceModels } from "./sourcePriceEditorModel";
 
 export type ModelSelection = {
@@ -21,11 +21,12 @@ export function modelSelectionForMember(member: PoolMember): ModelSelection {
 
 /** A model is off only when a saved rule says so. A later exact model stays on. */
 export function memberModelIsEnabled(allowedModels: readonly string[], excludedModels: readonly string[], model: string) {
-  const key = model.toLocaleLowerCase();
-  const allowed = allowedModels.map((modelRule) => modelRule.toLocaleLowerCase());
-  const excluded = excludedModels.map((modelRule) => modelRule.toLocaleLowerCase());
-  if (excluded.includes(key)) return false;
-  if (!allowed.length || allowed.includes(key)) return true;
+  const key = modelIdKey(model);
+  const allowed = allowedModels.map(modelIdKey).filter(Boolean);
+  const excluded = excludedModels.map(modelIdKey).filter(Boolean);
+  const matches = (rule: string) => rule.endsWith("*") ? key.startsWith(rule.slice(0, -1)) : rule === key;
+  if (excluded.some(matches)) return false;
+  if (!allowed.length || allowed.some(matches)) return true;
   return excluded.length > 0 && allowed.every((rule) => !rule.includes("*")) && excluded.every((rule) => !rule.includes("*"));
 }
 

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../api/commands";
-import { editedLoginNotes, rememberAccountLoginDraft, type AccountLoginDraft, type LoginNoteEdits } from "../accountLoginDraft";
+import { editedLoginNotes, getAccountLoginDraft, rememberAccountLoginDraft, type AccountLoginDraft, type LoginNoteEdits } from "../accountLoginDraft";
 import { secondsUntil, useRelativeTimeClock } from "../hooks/useRelativeTimeClock";
 import { useTransientFlag } from "../hooks/useTransientFlag";
 import { useRelayState } from "../state/RelayStateProvider";
@@ -16,21 +16,20 @@ type AccountLoginNotesProps = {
 type PendingSave = {
   accountId: string;
   loginValues: AccountLoginDraft;
-  notify: boolean;
 };
 
 export function AccountLoginNotes({ accountId, loginId }: AccountLoginNotesProps) {
   const { t } = useTranslation();
   const { refresh } = useRelayState();
-  const [email, setEmail] = useState("");
-  const [phone, setPhone] = useState("");
-  const [password, setPassword] = useState("");
-  const [totpSecret, setTotpSecret] = useState("");
+  const initialDraft = useRef(loginId && !accountId ? getAccountLoginDraft(loginId) : undefined);
+  const [email, setEmail] = useState(initialDraft.current?.email ?? "");
+  const [phone, setPhone] = useState(initialDraft.current?.phone ?? "");
+  const [password, setPassword] = useState(initialDraft.current?.password ?? "");
+  const [totpSecret, setTotpSecret] = useState(initialDraft.current?.totpSecret ?? "");
   const [ready, setReady] = useState(!accountId);
   const [loadFailed, setLoadFailed] = useState(false);
   const [saveFailed, setSaveFailed] = useState(false);
   const [preview, setPreview] = useState<{ code: string | null; expiresAtMs: number | null } | null>(null);
-  const [savedVisible, showSaved, hideSaved] = useTransientFlag(1_500);
   const [codeCopied, showCodeCopied] = useTransientFlag(1_500);
   const savedEmail = useRef("");
   const savedValues = useRef<AccountLoginDraft>({ email: "", phone: "", password: "", totpSecret: "" });
@@ -40,7 +39,7 @@ export function AccountLoginNotes({ accountId, loginId }: AccountLoginNotesProps
   const saveInFlight = useRef<Promise<void> | null>(null);
   const queuedSaves = useRef<PendingSave[]>([]);
   const accountIdRef = useRef(accountId);
-  const enqueueSaveRef = useRef<(notify?: boolean, targetAccountId?: string) => void>(() => undefined);
+  const enqueueSaveRef = useRef<(targetAccountId?: string) => void>(() => undefined);
   const previewTimer = useRef(0);
   const latestValues = useRef<AccountLoginDraft>({ email: "", phone: "", password: "", totpSecret: "" });
   const now = useRelativeTimeClock([preview?.expiresAtMs ?? null]);
@@ -50,6 +49,7 @@ export function AccountLoginNotes({ accountId, loginId }: AccountLoginNotesProps
   const updateDraftField = (field: keyof AccountLoginDraft, fieldValue: string, setFieldValue: (value: string) => void) => {
     dirtyFields.current[field] = true;
     latestValues.current = { ...latestValues.current, [field]: fieldValue };
+    if (loginId && !accountId) rememberAccountLoginDraft(loginId, latestValues.current);
     setFieldValue(fieldValue);
   };
 
@@ -63,7 +63,6 @@ export function AccountLoginNotes({ accountId, loginId }: AccountLoginNotesProps
         // failed background save look like a successful one.
         queuedSaves.current.unshift(pending);
         if (mountedRef.current && accountIdRef.current === pending.accountId) {
-          hideSaved();
           setSaveFailed(true);
         }
         return;
@@ -79,7 +78,6 @@ export function AccountLoginNotes({ accountId, loginId }: AccountLoginNotesProps
       };
       if (mountedRef.current) {
         setSaveFailed(false);
-        if (pending.notify) showSaved();
       }
       if (pending.loginValues.email !== savedEmail.current) {
         savedEmail.current = pending.loginValues.email;
@@ -88,20 +86,17 @@ export function AccountLoginNotes({ accountId, loginId }: AccountLoginNotesProps
     }
   };
 
-  const enqueueCurrentSave = (notify = true, targetAccountId = accountId) => {
+  const enqueueCurrentSave = (targetAccountId = accountId) => {
     if (!targetAccountId || !ready || !loadedRef.current) return;
     const changedValues = editedLoginNotes(savedValues.current, latestValues.current, dirtyFields.current);
     if (!changedValues) return;
-    hideSaved();
     const existing = queuedSaves.current.find((pending) => pending.accountId === targetAccountId);
     const pending: PendingSave = {
       accountId: targetAccountId,
       loginValues: changedValues,
-      notify: Boolean(existing?.notify || notify),
     };
     if (existing) {
       existing.loginValues = pending.loginValues;
-      existing.notify = pending.notify;
     } else {
       queuedSaves.current.push(pending);
     }
@@ -113,16 +108,16 @@ export function AccountLoginNotes({ accountId, loginId }: AccountLoginNotesProps
       });
     }
   };
-  enqueueSaveRef.current = (notify = true, targetAccountId = accountId) => enqueueCurrentSave(notify, targetAccountId);
+  enqueueSaveRef.current = (targetAccountId = accountId) => enqueueCurrentSave(targetAccountId);
 
   useEffect(() => {
     if (!accountId) return;
     const currentAccountId = accountId;
     return () => {
-      if (loadedRef.current) enqueueSaveRef.current(false, currentAccountId);
+      if (loadedRef.current) enqueueSaveRef.current(currentAccountId);
       loadedRef.current = false;
       // The queued command still runs after unmount, but it must not update
-      // React state or show a false "Saved" status in a closed dialog.
+      // React state in a closed dialog.
     };
   }, [accountId]);
 
@@ -136,7 +131,6 @@ export function AccountLoginNotes({ accountId, loginId }: AccountLoginNotesProps
     setReady(false);
     setLoadFailed(false);
     setSaveFailed(false);
-    hideSaved();
     setEmail("");
     setPhone("");
     setPassword("");
@@ -167,11 +161,6 @@ export function AccountLoginNotes({ accountId, loginId }: AccountLoginNotesProps
       cancelled = true;
     };
   }, [accountId]);
-
-  useEffect(() => {
-    if (!loginId || accountId) return;
-    rememberAccountLoginDraft(loginId, { email, phone, password, totpSecret });
-  }, [accountId, email, loginId, password, phone, totpSecret]);
 
   useEffect(() => {
     let cancelled = false;
@@ -248,11 +237,9 @@ export function AccountLoginNotes({ accountId, loginId }: AccountLoginNotesProps
           </Button>
         ) : null}
       </div> : null}
-      <div className="account-login-feedback">
-        {loadFailed || saveFailed
-          ? <p role="alert" className="form-note error-text">{t(loadFailed ? "accounts.loginLoadFailed" : "accounts.loginSaveFailed")}</p>
-          : savedVisible ? <p role="status" className="form-note success-text">{t("accounts.loginSaved")}</p> : null}
-      </div>
+      {loadFailed || saveFailed ? <div className="account-login-feedback">
+        <p role="alert" className="form-note error-text">{t(loadFailed ? "accounts.loginLoadFailed" : "accounts.loginSaveFailed")}</p>
+      </div> : null}
     </section>
   );
 }

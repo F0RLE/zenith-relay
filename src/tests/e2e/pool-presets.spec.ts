@@ -59,7 +59,7 @@ for (const theme of ["light", "dark"] as const) {
   });
 }
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`${mode} recommended preset restores defaults without changing membership or restarting the gateway`, async ({ page }) => {
     await installTauriMock(page, { mode, locale: "en", accountCount: 2, sourceCount: 2, quotaAvailable: true });
     await page.goto("/");
@@ -71,7 +71,7 @@ for (const mode of ["local", "remote"] as const) {
     await dialog.getByLabel("Concurrent requests: Personal Plus", { exact: true }).fill("2");
     await dialog.getByRole("radio", { name: "Primary & reserve", exact: true }).click();
     await expect(dialog.locator(".pool-routing-editor")).toHaveAttribute("aria-busy", "false");
-    const readRuntime = () => page.evaluate(async (mode) => (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string) => Promise<RuntimeSnapshot> } }).__TAURI_INTERNALS__.invoke(mode === "local" ? "get_local_runtime_state" : "get_remote_server_state"), mode);
+    const readRuntime = () => page.evaluate(async () => (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string) => Promise<RuntimeSnapshot> } }).__TAURI_INTERNALS__.invoke("get_local_runtime_state"));
     const before = await readRuntime();
     expect(before.gateway.poolRouting?.members.find((member) => member.id === "account_synthetic")).toMatchObject({ weight: 17, maxConcurrency: 2 });
     await recommended.click();
@@ -112,7 +112,7 @@ for (const mode of ["local", "remote"] as const) {
     await expect(dialog.getByLabel("Request share: Personal Plus", { exact: true })).toHaveCount(0);
     await expect(dialog.locator(".pool-routing-description")).toHaveCount(0);
     await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
-    const runtime = await page.evaluate(async (mode) => (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string) => Promise<RuntimeSnapshot> } }).__TAURI_INTERNALS__.invoke(mode === "local" ? "get_local_runtime_state" : "get_remote_server_state"), mode);
+    const runtime = await page.evaluate(async () => (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string) => Promise<RuntimeSnapshot> } }).__TAURI_INTERNALS__.invoke("get_local_runtime_state"));
     expect(runtime.gateway.poolRouting).toMatchObject({ version: 3, mode: "failover" });
     expect(runtime.gateway.poolRouting?.members.map((member) => member.kind)).toEqual(["account", "account", "source", "source"]);
     expect(runtime.gateway.poolRouting?.members.every((member) => member.weight === 1 && member.maxConcurrency === 0)).toBe(true);
@@ -147,23 +147,11 @@ for (const mode of ["local", "remote"] as const) {
     await expect(limit).toHaveValue("");
     await expect(dialog.getByRole("button", { name: "Even distribution", exact: true })).toHaveAttribute("aria-pressed", "true");
     await dialog.getByRole("button", { name: "Close", exact: true }).click();
-    const runtime = await page.evaluate(async (mode) => (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string) => Promise<RuntimeSnapshot> } }).__TAURI_INTERNALS__.invoke(mode === "local" ? "get_local_runtime_state" : "get_remote_server_state"), mode);
+    const runtime = await page.evaluate(async () => (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string) => Promise<RuntimeSnapshot> } }).__TAURI_INTERNALS__.invoke("get_local_runtime_state"));
     expect(runtime.gateway.poolRouting?.members.every((member) => member.weight === 1 && member.maxConcurrency === 0)).toBe(true);
   });
 }
 
-test("version two servers keep cycling controls without receiving version three choices", async ({ page }) => {
-  await installTauriMock(page, { mode: "remote", locale: "en", rotationVersion: 2, remoteFeatures: ["sources", "accounts", "runtime_routing", "rotation_v2"] });
-  await page.goto("/");
-  const dialog = await openPoolRotation(page);
-  await expect(dialog.getByRole("radio")).toHaveCount(2);
-  await expect(dialog.getByRole("group", { name: "Preset", exact: true })).toHaveCount(0);
-  await dialog.getByRole("radio", { name: "Round robin", exact: true }).click();
-  await expect(dialog.getByRole("checkbox")).toHaveCount(0);
-  await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
-  const runtime = await page.evaluate(async () => (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string) => Promise<RuntimeSnapshot> } }).__TAURI_INTERNALS__.invoke("get_remote_server_state"));
-  expect(runtime.gateway.poolRouting).toMatchObject({ version: 2, mode: "round_robin" });
-});
 
 for (const locale of ["en", "ru"] as const) {
   test(`${locale} rotation keeps explanations in contextual Help and restores focus`, async ({ page }) => {

@@ -16,6 +16,27 @@ test("source editor keeps discovery and routing controls internal", async ({ pag
   await expect(dialog.getByLabel("API address", { exact: true })).toBeVisible();
 });
 
+test("deleting one API source preserves the other sources", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", populated: true, sourceCount: 3 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("tab", { name: "Sources", exact: true }).click();
+  await expect(page.locator(".source-card")).toHaveCount(3);
+  const source = page.locator(".source-card[data-source-id='source_synthetic']");
+  await source.locator('summary[aria-haspopup="menu"]').click();
+  await source.getByRole("menuitem", { name: "Delete", exact: true }).click();
+  await page.getByRole("dialog", { name: "Confirm action" }).getByRole("button", { name: "Confirm", exact: true }).click();
+  await expect(source).toHaveCount(0);
+  await expect(page.locator(".source-card")).toHaveCount(2);
+  await expect(page.locator(".source-card[data-source-id='source_synthetic_2']")).toContainText("Backup API 1");
+  await expect(page.locator(".source-card[data-source-id='source_synthetic_3']")).toContainText("Backup API 2");
+  const deletions = await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string; args: { sourceId?: string } }>;
+  }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "delete_local_source"));
+  expect(deletions).toHaveLength(1);
+  expect(deletions[0]?.args.sourceId).toBe("source_synthetic");
+});
+
 test("native Messages source can launch OpenCode while direct ChatGPT is disabled", async ({ page }) => {
   await installTauriMock(page, { locale: "en", populated: true,
     sourceProtocolBindings: [{ wireApi: "messages", adapter: "native", modelIds: ["gpt-5.4", "gpt-5.4-mini"] }] });
@@ -29,6 +50,20 @@ test("native Messages source can launch OpenCode while direct ChatGPT is disable
   await dialog.getByRole("button", { name: "OpenCode", exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "launch_opencode_source"))).toBe(true);
 });
+
+for (const resolvedRoutes of [[], [{ wireApi: "responses", adapter: "native", modelIds: [] }]] as const) {
+  test(`source launch respects empty backend routes (${resolvedRoutes.length} bindings)`, async ({ page }) => {
+    await installTauriMock(page, { locale: "en", populated: true,
+      sourceResolvedProtocolBindings: resolvedRoutes.map(binding => ({ ...binding, modelIds: [...binding.modelIds] })),
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Connections", exact: true }).click();
+    await page.getByRole("tab", { name: "Sources", exact: true }).click();
+    const source = page.locator(".source-card[data-source-id='source_synthetic']");
+    await expect(source.getByRole("button", { name: "Edit", exact: true })).toBeEnabled();
+    await expect(source.getByRole("button", { name: "Launch", exact: true })).toBeDisabled();
+  });
+}
 
 test("adding an unknown source to the pool completes without format selection", async ({ page }) => {
   await installTauriMock(page, { locale: "en", mode: "local", populated: false });

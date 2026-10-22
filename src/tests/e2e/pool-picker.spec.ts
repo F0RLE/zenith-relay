@@ -1,9 +1,9 @@
 import { expect, test } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`${mode} pool picker preserves selections across sections and searches only visible connections`, async ({ page }) => {
-    await installTauriMock(page, { mode, locale: "en", populated: true, accountCount: 4, sourceCount: 3, poolMembers: false });
+    await installTauriMock(page, { mode, locale: "en", populated: true, accountCount: 4, accountOAuthClientKind: "siwc", sourceCount: 3, poolMembers: false });
     await page.goto("/");
     await page.getByRole("button", { name: "Pool", exact: true }).click();
     await page.getByRole("button", { name: "Add member", exact: true }).first().click();

@@ -13,8 +13,9 @@ import { useProxyPool } from "../../hooks/useProxyPool";
 
 const HelpTopicDialog = lazy(async () => ({ default: (await import("../../help/HelpCenter")).HelpTopicDialog }));
 
-export function OAuthDialog({ flow, onCancel, onUseProxy, onUseClient, starting = false }: {
+export function OAuthDialog({ flow, notesAccountId, onCancel, onUseProxy, onUseClient, starting = false }: {
   flow: OAuthFlow;
+  notesAccountId?: string | undefined;
   onCancel: () => Promise<void>;
   onUseProxy?: ((proxyId: string) => void) | undefined;
   onUseClient?: ((clientKind: OAuthClientKind) => void) | undefined;
@@ -40,6 +41,8 @@ export function OAuthDialog({ flow, onCancel, onUseProxy, onUseClient, starting 
   const closeLocked = starting || busy === "oauth-complete" || busy === "oauth-cancel"
     || busy === "oauth-start" || busy === "oauth-reopen";
   const reauthentication = Boolean(flow.targetAccountId);
+  // A route sign-in reads card notes without reauthenticating its issuing client.
+  const loginNotesAccountId = flow.targetAccountId ?? notesAccountId;
   const clientKind = flow.clientKind ?? "codex";
   const proxies = useProxyPool(!reauthentication && Boolean(onUseProxy));
   const requestClose = () => {
@@ -51,7 +54,9 @@ export function OAuthDialog({ flow, onCancel, onUseProxy, onUseClient, starting 
     actionPending.current = true;
     try {
       const opened = await perform("oauth-reopen", () => relayCommands.resumeOAuth(flow.loginId), undefined, { backgroundRefresh: true });
-      if (opened) setReopenAt(Date.now() + 3_000);
+      if (opened) {
+        setReopenAt(Date.now() + 3_000);
+      }
     } finally {
       actionPending.current = false;
     }
@@ -104,7 +109,8 @@ export function OAuthDialog({ flow, onCancel, onUseProxy, onUseClient, starting 
         <legend className="sr-only">{t("accounts.oauthClient")}</legend>
         <div className="oauth-client-options">
           {([
-            { kind: "codex", label: t("accounts.oauthChatGpt") },
+            { kind: "codex", label: t("accounts.oauthCodex") },
+            { kind: "siwc", label: t("accounts.oauthChatGpt") },
             { kind: "excel_bps", label: t("accounts.oauthExcel") },
           ] as const).map((client) => <label key={client.kind} className="oauth-client-option">
             <input
@@ -169,21 +175,21 @@ export function OAuthDialog({ flow, onCancel, onUseProxy, onUseClient, starting 
             {reopenIn > 0 ? t("accounts.reopenSignInCooldown", { count: reopenIn }) : t(reopenAt ? "accounts.reopenSignIn" : "accounts.openSignIn")}
           </Button>
         )}
-        {clientKind === "codex" ? <IconButton
+        <IconButton
           className="oauth-copy-link"
           label={t(linkCopied ? "accounts.signInLinkCopied" : "accounts.copySignInLink")}
           icon={linkCopied ? <Check aria-hidden /> : <Copy aria-hidden />}
           disabled={flowUnavailable || closeLocked}
           onClick={() => void copyLink()}
-        /> : null}
+        />
       </div>
-      {reauthentication ? <section className="oauth-notes-card">
+      <section className="oauth-notes-card">
         <button type="button" className="oauth-notes-toggle" aria-expanded={notesOpen} onClick={() => setNotesOpen((open) => !open)}>
           <span>{t("accounts.loginDetails")}</span>
           <ChevronDown aria-hidden />
         </button>
-        {notesOpen && flow.targetAccountId ? <AccountLoginNotes accountId={flow.targetAccountId} /> : null}
-      </section> : null}
+        {notesOpen ? <AccountLoginNotes key={flow.loginId} {...(loginNotesAccountId ? { accountId: loginNotesAccountId } : {})} loginId={flow.loginId} /> : null}
+      </section>
     </div>
   </Dialog>
   {proxyOpen && onUseProxy ? (

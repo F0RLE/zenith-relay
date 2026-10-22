@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { TFunction } from "i18next";
+import { useTranslation } from "react-i18next";
 import type { OAuthClientKind } from "../../api/types";
 import { accountErrorTranslationKey } from "../../accountStatus";
 import { accountPlanOption } from "../../accountPlans";
@@ -10,22 +11,29 @@ export function accountErrorLabel(code: string, t: TFunction) {
   });
 }
 
-export function AccountPlanBadge({ planType, unknown }: { planType: string | null; unknown: string }) {
+export function AccountPlanBadge({ planType, unknown, hint, stale }: { planType: string | null; unknown: string; hint?: string | undefined; stale?: boolean | undefined }) {
   const plan = accountPlanOption(planType, unknown);
-  return <span className="account-plan-badge" data-plan={plan.id}>{plan.label}</span>;
+  return <span className="account-plan-badge" data-plan={plan.id} data-relay-tooltip={hint} data-stale={hint ? stale : undefined}
+    role={hint ? "note" : undefined} tabIndex={hint ? 0 : undefined} aria-label={hint ? `${plan.label}. ${hint}` : undefined}>
+    {plan.label}
+  </span>;
 }
 
-export function AccountBadges({ planType, oauthClientKind, unknown }: {
+export function AccountBadges({ planType, oauthClientKind, unknown, routeControl, planHint, planStale }: {
   planType: string | null;
   oauthClientKind?: OAuthClientKind | undefined;
   unknown: string;
+  routeControl?: ReactNode;
+  planHint?: string | undefined;
+  planStale?: boolean | undefined;
 }) {
-  return <span className="account-badges">
-    <AccountPlanBadge planType={planType} unknown={unknown} />
-    {oauthClientKind === "excel_bps"
-      ? <span className="account-client-badge" data-relay-tooltip="Excel · Basis Points" aria-label="Excel · Basis Points">BPS</span>
-      : null}
-  </span>;
+  const { t } = useTranslation();
+  const client = oauthClientKind === "excel_bps" ? "BPS" : oauthClientKind === "siwc" ? "SIWC" : "Codex";
+  const label = client === "BPS" ? "Excel · Basis Points" : client === "SIWC" ? "ChatGPT · SIWC" : "Codex";
+  return <div className="account-badges">
+    <AccountPlanBadge planType={planType} unknown={oauthClientKind === "siwc" ? t("accounts.siwcPlanUnavailable") : unknown} hint={planHint} stale={planStale} />
+    {routeControl ?? <span className="account-client-badge" data-relay-tooltip={label} aria-label={label}>{client}</span>}
+  </div>;
 }
 
 export function PageHeader({ title, actions, navigation, workspace = false }: { title: string; actions?: ReactNode; navigation?: ReactNode; workspace?: boolean }) {

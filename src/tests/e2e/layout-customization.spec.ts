@@ -15,8 +15,20 @@ async function dragColumn(page: Page, table: Locator, column: string, target: st
   await page.mouse.up();
 }
 
-async function expectCentered(table: Locator) {
-  expect(await table.locator("th, td").evaluateAll((cells) => cells.every((cell) => getComputedStyle(cell).textAlign === "center"))).toBe(true);
+async function expectColumnAlignment(table: Locator) {
+  const alignmentByColumn: Record<string, string> = {
+    time: "left", model: "left", name: "left", connection: "left",
+    timing: "right", speed: "right", tokens: "right", equivalent: "right",
+    requests: "right", success: "right", total: "right", input: "right", output: "right", cache: "right",
+  };
+  const cells = await table.locator("th[data-column], td[data-column]").evaluateAll((elements) => elements.map((element) => ({
+    column: element.getAttribute("data-column")!,
+    alignment: getComputedStyle(element).textAlign,
+  })));
+  expect(cells.length).toBeGreaterThan(0);
+  for (const { column, alignment } of cells) {
+    expect(alignment, `Alignment of ${column}`).toBe(alignmentByColumn[column] ?? "center");
+  }
 }
 
 test("usage report columns move with pointer input and persist independently", async ({ page }) => {
@@ -26,30 +38,30 @@ test("usage report columns move with pointer input and persist independently", a
 
   let table = page.locator(".usage-request-table");
   await dragColumn(page, table, "time", "status");
-  await expect.poll(() => columnOrder(table)).toEqual(["status", "time", "model", "protocol", "tier", "connection", "timing", "speed", "tokens", "equivalent", "request"]);
-  await expectCentered(table);
+  await expect.poll(() => columnOrder(table)).toEqual(["status", "time", "model", "connection", "timing", "tokens", "equivalent", "request"]);
+  await expectColumnAlignment(table);
 
   await page.getByRole("tab", { name: "Models" }).click();
   table = page.locator(".usage-aggregate-table");
   await dragColumn(page, table, "name", "requests");
   await expect.poll(() => columnOrder(table)).toEqual(["requests", "name", "input", "output", "cache", "equivalent"]);
-  await expectCentered(table);
+  await expectColumnAlignment(table);
 
   await page.getByRole("tab", { name: "Pool members" }).click();
   table = page.locator(".usage-aggregate-table");
   await dragColumn(page, table, "name", "success");
   await expect.poll(() => columnOrder(table)).toEqual(["requests", "success", "name", "breakdown", "total", "equivalent", "speed", "timing"]);
-  await expectCentered(table);
+  await expectColumnAlignment(table);
 
   await page.getByRole("tab", { name: "Errors" }).click();
   table = page.locator(".usage-error-table");
   await dragColumn(page, table, "time", "model");
   await expect.poll(() => columnOrder(table)).toEqual(["model", "time", "connection", "origin", "error", "request"]);
-  await expectCentered(table);
+  await expectColumnAlignment(table);
 
   await page.reload();
   await page.getByRole("button", { name: "Usage", exact: true }).click();
-  await expect.poll(() => columnOrder(page.locator(".usage-request-table"))).toEqual(["status", "time", "model", "protocol", "tier", "connection", "timing", "speed", "tokens", "equivalent", "request"]);
+  await expect.poll(() => columnOrder(page.locator(".usage-request-table"))).toEqual(["status", "time", "model", "connection", "timing", "tokens", "equivalent", "request"]);
   await page.getByRole("tab", { name: "Models" }).click();
   await expect.poll(() => columnOrder(page.locator(".usage-aggregate-table"))).toEqual(["requests", "name", "input", "output", "cache", "equivalent"]);
   await page.getByRole("tab", { name: "Pool members" }).click();

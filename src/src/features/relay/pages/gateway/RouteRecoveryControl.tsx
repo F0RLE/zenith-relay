@@ -6,11 +6,10 @@ import { usePendingFlag } from "../../state/usePendingFlag";
 
 export function RouteRecoveryControl() {
   const { t } = useTranslation();
-  const { mode, runtime, routeRecoveryEnabled, setRouteRecoveryEnabled } = useRelayState();
+  const { runtime, routeRecoveryEnabled, setRouteRecoveryEnabled } = useRelayState();
   const controlId = useId();
   const { checked, select } = usePendingFlag(routeRecoveryEnabled);
-  // Older servers only apply the legacy setting to ChatGPT requests.
-  if (mode === "zenith" || !runtime || (mode === "remote" && !runtime.capabilities.features.includes("route_recovery_v1"))) return null;
+  if (!runtime) return null;
   return <div className="gateway-api-toggle-setting">
     <div className="relay-toggle-setting">
       <label htmlFor={controlId} data-relay-tooltip={t("gateway.routeRecoveryHint")}>

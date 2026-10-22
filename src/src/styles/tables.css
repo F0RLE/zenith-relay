@@ -62,8 +62,7 @@
   background: var(--relay-subtle);
 }
 
-.relay-table td small,
-.remote-status small {
+.relay-table td small {
   display: block;
   color: var(--relay-muted);
   font-size: 11px;
@@ -76,15 +75,10 @@
   white-space: nowrap;
 }
 
-.row-actions-cell:has(.relay-action-menu[open]) {
-  z-index: 30;
-}
-
 .row-actions .relay-button.ghost {
   border-color: transparent;
 }
 
-.relay-table td.row-actions-cell,
 .relay-shell[data-page="profiles"] .relay-table th:last-child,
 .relay-shell[data-page="profiles"] .relay-table td:last-child {
   position: sticky;
@@ -92,11 +86,6 @@
   right: 0;
   background: var(--relay-surface);
   box-shadow: -10px 0 14px -12px rgb(20 31 36 / 55%);
-}
-
-.relay-table td.row-actions-cell {
-  width: 1%;
-  white-space: nowrap;
 }
 
 .relay-shell[data-page="profiles"] .relay-table {
@@ -129,8 +118,6 @@
   background: var(--relay-sidebar);
 }
 
-.relay-table tbody tr:hover td.row-actions-cell,
-.relay-table tbody tr:focus-within td.row-actions-cell,
 .relay-shell[data-page="profiles"] .relay-table tbody tr:hover td:last-child,
 .relay-shell[data-page="profiles"] .relay-table tbody tr:focus-within td:last-child {
   background: var(--relay-subtle);
@@ -317,7 +304,6 @@
 }
 
 .quota-meter small,
-.quota-unknown,
 .muted,
 .form-note {
   color: var(--relay-muted);

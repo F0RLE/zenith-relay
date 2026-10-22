@@ -10,23 +10,14 @@ type LocalQuotaRefreshResult = {
   status: "succeeded" | "failed";
 };
 
-type RemoteQuotaRefreshResult = {
-  refreshed?: number;
-  failed?: number;
-};
-
 export type AccountQuotaRefreshExecutor = {
   refreshOneLocal: (accountId: string) => Promise<unknown>;
   refreshAllLocal: () => Promise<readonly LocalQuotaRefreshResult[]>;
-  refreshOneRemote: (accountId: string) => Promise<unknown>;
-  refreshAllRemote: () => Promise<RemoteQuotaRefreshResult>;
 };
 
 const relayAccountQuotaRefreshExecutor: AccountQuotaRefreshExecutor = {
   refreshOneLocal: relayCommands.refreshAccountQuota,
   refreshAllLocal: relayCommands.refreshAllAccountQuotas,
-  refreshOneRemote: (accountId) => relayCommands.remoteAction({ type: "refresh_account", id: accountId }),
-  refreshAllRemote: () => relayCommands.remoteAction({ type: "refresh_all_quotas" }) as Promise<RemoteQuotaRefreshResult>,
 };
 
 /** Refreshes one account through the runtime that owns its credential. */
@@ -35,24 +26,19 @@ export function refreshOneAccountQuota(
   accountId: string,
   executor: AccountQuotaRefreshExecutor = relayAccountQuotaRefreshExecutor,
 ) {
-  return mode === "local"
-    ? executor.refreshOneLocal(accountId)
-    : executor.refreshOneRemote(accountId);
+  if (mode !== "local") return Promise.reject(new Error("Account quotas require the local pool"));
+  return executor.refreshOneLocal(accountId);
 }
 
-/** Refreshes all local or managed account quotas and normalizes the report. */
+/** Refreshes local account quotas and normalizes the report. */
 export async function refreshAllAccountQuotas(
   mode: RelayMode,
   executor: AccountQuotaRefreshExecutor = relayAccountQuotaRefreshExecutor,
 ): Promise<AccountQuotaRefreshReport> {
-  if (mode === "local") {
-    const localRefreshResults = await executor.refreshAllLocal();
-    return {
-      succeeded: localRefreshResults.filter((refreshResult) => refreshResult.status === "succeeded").length,
-      failed: localRefreshResults.filter((refreshResult) => refreshResult.status === "failed").length,
-    };
-  }
-
-  const remoteRefreshResult = await executor.refreshAllRemote();
-  return { succeeded: remoteRefreshResult.refreshed ?? 0, failed: remoteRefreshResult.failed ?? 0 };
+  if (mode !== "local") throw new Error("Account quotas require the local pool");
+  const results = await executor.refreshAllLocal();
+  return {
+    succeeded: results.filter((result) => result.status === "succeeded").length,
+    failed: results.filter((result) => result.status === "failed").length,
+  };
 }

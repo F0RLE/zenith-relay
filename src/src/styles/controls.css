@@ -231,11 +231,14 @@ textarea {
   grid-area: 1 / 1;
   min-width: 0;
   width: 100%;
-  padding-inline-end: 46px;
+  padding-inline-end: 82px;
 }
 
-.secret-field > :is(.relay-icon-button, .relay-disabled-tooltip-anchor) {
+.secret-field-actions {
   grid-area: 1 / 1;
+  display: flex;
+  align-items: center;
+  gap: 2px;
   align-self: center;
   justify-self: end;
   margin-inline-end: 5px;

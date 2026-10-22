@@ -8,22 +8,15 @@ import { GatewayApiTab } from "./GatewayApiTab";
 
 export function GatewaySettings() {
   const { t } = useTranslation();
-  const { mode, runtime, readyState, busy, perform } = useRelayState();
-  const gatewayRunning = useSavedChoice(mode === "zenith" ? Boolean(readyState?.providerActive) : Boolean(runtime?.gateway.running));
+  const { mode, runtime, busy, perform } = useRelayState();
+  const gatewayRunning = useSavedChoice(Boolean(runtime?.gateway.running));
   const running = gatewayRunning.value;
-  const endpoint = mode === "zenith" ? "https://api.zenithmarket.dev/v1" : runtime?.gateway.baseUrl ?? "";
-  const canManage = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("local_gateway"));
+  const endpoint = runtime?.gateway.baseUrl ?? "";
+  const canManage = mode === "local";
 
-  const restart = () => perform("gateway-restart", async () => {
-    if (mode === "local") {
-      await relayCommands.restartGateway();
-    } else {
-      await relayCommands.remoteAction({ type: "stop_gateway" });
-      await relayCommands.remoteAction({ type: "start_gateway" });
-    }
-  }, "feedback.restarted", { backgroundRefresh: true });
+  const restart = () => perform("gateway-restart", relayCommands.restartGateway, "feedback.restarted", { backgroundRefresh: true });
 
-  const apiActions = mode === "zenith" ? null : <>
+  const apiActions = <>
     <ActionMenu>
       <ActionMenuItem icon={<RotateCw aria-hidden />} disabled={!running || !canManage || busy === "gateway-restart"} onClick={restart}>
         {t("gateway.restart")}
@@ -40,10 +33,8 @@ export function GatewaySettings() {
         void perform(
           "gateway-toggle",
           async () => {
-            if (mode === "local") {
-              if (shouldRunGateway) await relayCommands.startGateway();
-              else await relayCommands.stopGateway();
-            } else await relayCommands.remoteAction({ type: shouldRunGateway ? "start_gateway" : "stop_gateway" });
+            if (shouldRunGateway) await relayCommands.startGateway();
+            else await relayCommands.stopGateway();
             gatewayRunning.confirm(shouldRunGateway);
           },
           shouldRunGateway ? "feedback.started" : "feedback.stopped",
@@ -56,10 +47,6 @@ export function GatewaySettings() {
   </>;
 
   return <div className="gateway-page">
-    <div className="integration-section-heading">
-      <h2>{t("integrations.apiTitle")}</h2>
-      <div className="integration-section-actions">{apiActions}</div>
-    </div>
-    <GatewayApiTab running={running} endpoint={endpoint} />
+    <GatewayApiTab running={running} endpoint={endpoint} actions={apiActions} />
   </div>;
 }

@@ -23,11 +23,12 @@ function comparison(): CacheContextDiagnostics {
     },
     candidateChanged: true,
     previousCompletedAgeMs: 12_000,
+    provider: { type: "cache_miss", reason: "tools_changed", cache_missed_tokens: 2_048 },
   };
 }
 
 for (const locale of ["ru", "en"] as const) {
-  for (const mode of ["local", "remote"] as const) {
+  for (const mode of ["local"] as const) {
     test(`Context comparison ${locale} ${mode} fits a narrow dialog`, async ({ page }) => {
       await page.setViewportSize({ width: 390, height: 760 });
       await installTauriMock(page, { mode, locale, populated: true, diagnosticDebug: true, usageCacheContext: comparison() });
@@ -49,10 +50,12 @@ for (const locale of ["ru", "en"] as const) {
       const section = dialog.getByRole("region", { name: locale === "ru" ? "Сравнение контекста" : "Context comparison" });
       await expect(section).toBeVisible();
       await expect(section.getByText(locale === "ru" ? "Предыдущий завершённый" : "Previous completed", { exact: true })).toBeVisible();
+      await expect(section.getByText(locale === "ru" ? "Диагностика кэша провайдера" : "Provider cache diagnostics", { exact: true })).toBeVisible();
+      await expect(section).toContainText(locale === "ru" ? "Промах кэша · Изменились инструменты" : "Cache miss · Tools changed");
       await expect(section).toContainText(locale === "ru" ? "Первое изменение: Инструкции" : "First change: Instructions");
       const relayChanges = section.locator("dl > div").filter({ has: page.getByText(locale === "ru" ? "Изменения Relay в этом запросе" : "Relay changes in this request", { exact: true }) });
       await expect(relayChanges.locator("dd")).toHaveText(locale === "ru" ? "Рассуждение" : "Reasoning");
-      await expect(section).toContainText(locale === "ru" ? "Без содержимого и хешей" : "No content or hashes");
+      await expect(section.locator("p, .form-note")).toHaveCount(0);
       expect(await dialog.locator(".relay-dialog-body, .request-cache-context, .request-details-list dd").evaluateAll((elements) =>
         elements.every((element) => element.scrollWidth <= element.clientWidth + 1))).toBe(true);
       if (locale === "ru" && mode === "local") {
@@ -93,6 +96,23 @@ test("Old usage rows without context diagnostics remain readable", async ({ page
   await expect(page.getByRole("region", { name: "Context comparison" })).toHaveCount(0);
   await expect(page.getByRole("dialog")).toContainText("Total tokens");
 });
+
+for (const type of ["cache_hit", "unavailable", "comparison_response_not_found"] as const) {
+  test(`Provider cache status ${type} is not displayed as a cache miss`, async ({ page }) => {
+    const diagnostics = comparison();
+    diagnostics.provider = { type };
+    await installTauriMock(page, { mode: "local", locale: "en", populated: true, diagnosticDebug: true, usageCacheContext: diagnostics });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Usage", exact: true }).click();
+    await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
+    await page.locator(".request-technical-details > summary").click();
+    await page.locator(".request-context-details > summary").click();
+    const section = page.getByRole("region", { name: "Context comparison" });
+    const result = { cache_hit: "No miss detected", unavailable: "Provider comparison unavailable", comparison_response_not_found: "Comparison baseline not found" }[type];
+    await expect(section).toContainText(result);
+    await expect(section).not.toContainText("Cache miss");
+  });
+}
 
 test("Context diagnostics are hidden outside debug mode", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, diagnosticDebug: false, usageCacheContext: comparison() });

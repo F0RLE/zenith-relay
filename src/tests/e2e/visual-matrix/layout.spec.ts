@@ -4,7 +4,7 @@ import { themes, viewports } from "./fixtures";
 
 for (const viewport of viewports) {
   test(`empty pool and quota policy ${viewport.width}x${viewport.height}`, async ({ page }) => {
-    await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, accountCount: 4, poolMembers: false, gatewayRunning: false });
+    await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, accountCount: 4, accountOAuthClientKind: "excel_bps", poolMembers: false, gatewayRunning: false });
     await page.setViewportSize(viewport);
     await page.goto("/");
     await page.getByRole("button", { name: "Пул", exact: true }).click();
@@ -112,9 +112,9 @@ for (const viewport of viewports) {
     expect(await members.locator('.pool-member-card[data-current="true"]').evaluate((element) => {
       const style = getComputedStyle(element);
       const other = element.parentElement?.querySelector('.pool-member-card[data-current="false"]');
-      return getComputedStyle(element, "::before").display === "none"
-        && style.borderTopColor === "rgba(0, 0, 0, 0)"
-        && other != null && style.backgroundColor !== getComputedStyle(other).backgroundColor;
+      return getComputedStyle(element, "::before").content === "none"
+        && other != null && style.borderTopColor !== getComputedStyle(other).borderTopColor
+        && style.backgroundColor === getComputedStyle(other).backgroundColor;
     })).toBe(true);
     await expect(page.locator(".pool-summary > div")).toHaveCount(4);
     await expect(members.getByText("Pro account", { exact: true })).toBeVisible();
@@ -373,9 +373,9 @@ for (const viewport of viewports) {
     expect(await page.locator(".account-filter-stack").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     expect(await page.locator(".account-subscription-line").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
     await expect(cards.locator(".account-card-actions")).toHaveCount(3);
-    await expect(cards.locator(".account-card-actions > .relay-icon-button")).toHaveCount(9);
-    // The pool button is a call to action, not a state label.
-    await expect(cards.locator('.account-card-actions > .relay-icon-button:first-child[aria-label="Убрать из пула"]')).toHaveCount(3);
+    await expect(cards.locator(".account-card-actions > .relay-icon-button")).toHaveCount(6);
+    // Codex switches app accounts; it never exposes pool membership actions.
+    await expect(cards.getByRole('button', { name: /^(Убрать из пула|Добавить в пул)$/ })).toHaveCount(0);
 
     await expect(page.getByRole("button", { name: "Список" })).toHaveCount(0);
     expect(await cards.locator(".account-card-main").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
@@ -455,8 +455,8 @@ for (const viewport of viewports) {
     const modeButton = page.getByRole("button", { name: "Mode: Computer" });
     await modeButton.click();
     const modeMenu = page.getByRole("menu");
-    await expect(modeMenu.getByRole("menuitemradio")).toHaveCount(3);
-    await expect(modeMenu.getByRole("menuitemradio")).toHaveText(["Computer", "Choose API", "On your server"]);
+    await expect(modeMenu.getByRole("menuitemradio")).toHaveCount(2);
+    await expect(modeMenu.getByRole("menuitemradio")).toHaveText(["Computer", "Relay Hosted"]);
     await expect(modeMenu.getByRole("menuitemradio", { name: "Computer" })).toHaveAttribute("aria-checked", "true");
     expect(await modeMenu.evaluate((element) => {
       const rect = element.getBoundingClientRect();
@@ -476,7 +476,7 @@ for (const viewport of viewports) {
     }
     await expect(shell).not.toHaveClass(/sidebar-collapsed/);
     await expect(page.locator(".relay-sidebar nav button span").first()).toBeVisible();
-    await expect(page.locator(".sidebar-help-copy small")).toHaveText(/^v\d+\.\d+\.\d+$/);
+    await expect(page.locator(".sidebar-version")).toHaveText(/^v\d+\.\d+\.\d+$/);
     expect(await page.locator(".sidebar-footer").evaluate((footer) => {
       const bounds = footer.getBoundingClientRect();
       return [...footer.children].every((child) => {
@@ -489,7 +489,7 @@ for (const viewport of viewports) {
   });
 
   test(`secondary actions and dialogs ${viewport.width}x${viewport.height}`, async ({ page }) => {
-    await installTauriMock(page, { locale: "en", mode: "local", theme: "light", populated: true });
+    await installTauriMock(page, { locale: "en", mode: "local", theme: "light", populated: true, diagnosticDebug: true });
     await page.setViewportSize(viewport);
     await page.goto("/");
 

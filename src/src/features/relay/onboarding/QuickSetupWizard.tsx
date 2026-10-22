@@ -1,11 +1,11 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import { ArrowLeft, ArrowRight, Check, Clock3, Cloud, ExternalLink, Laptop, Loader2, LogIn, Server, SkipForward, Upload } from "lucide-react";
+import { ArrowLeft, ArrowRight, Check, Clock3, Cloud, ExternalLink, Laptop, Loader2, LogIn, SkipForward, Upload } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import relayLogoUrl from "../../../../../src-tauri/icons/zenith-relay.svg?url";
 import { setI18nLanguage } from "../../../i18n";
 import { relayCommands } from "../api/commands";
 import type { OAuthClientKind, RelayMode } from "../api/types";
-import { Button, OptionMenu, SecretField } from "../components/Ui";
+import { Button, OptionMenu } from "../components/Ui";
 import { useOAuthSignIn } from "../hooks/useOAuthSignIn";
 import { canAccountJoinPool } from "../poolMembership";
 import { useRelayState } from "../state/RelayStateProvider";
@@ -16,24 +16,15 @@ const SourceDialog = lazy(async () => ({ default: (await import("../pages/connec
 
 export function QuickSetupWizard() {
   const { t } = useTranslation();
-  const { mode: appMode, runtime, finishOnboarding, perform, activateCodexProfile, busy } = useRelayState();
+  const { mode: appMode, finishOnboarding, perform, activateCodexProfile, busy } = useRelayState();
   const [intro, setIntro] = useState(true);
   const [step, setStep] = useState(1);
-  const [mode, setMode] = useState<RelayMode>(appMode === "zenith" ? "local" : appMode);
+  const [mode, setMode] = useState<RelayMode>(appMode);
   const [client, setClient] = useState("later");
-  const [serverUrl, setServerUrl] = useState("");
-  const [serverToken, setServerToken] = useState("");
-  const [allowInsecureRemote, setAllowInsecureRemote] = useState(false);
   const [connectionReady, setConnectionReady] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [showSource, setShowSource] = useState(false);
   const [oauthPending, setOauthPending] = useState(false);
-
-  useEffect(() => {
-    if (step !== 2) return;
-    if (appMode !== mode) return;
-    if (mode === "remote" && runtime?.runtimeTarget.connected) setConnectionReady(true);
-  }, [appMode, mode, runtime, step]);
 
   const selectMode = (selectedMode: RelayMode) => {
     setMode(selectedMode);
@@ -57,22 +48,12 @@ export function QuickSetupWizard() {
 
   if (intro) return <SetupIntro onStart={() => setIntro(false)} onSkip={finishLater} />;
 
-  const insecureRemote = serverUrl.trim().toLowerCase().startsWith("http://");
-  const remoteReady = connectionReady || Boolean(serverUrl && serverToken && (!insecureRemote || allowInsecureRemote));
-  const canContinue = step === 2
-    ? mode === "local" ? !oauthPending : remoteReady
-    : true;
+  const canContinue = step !== 2 || !oauthPending;
 
   const continueSetup = async () => {
-    if (step === 2 && mode === "remote" && !connectionReady) {
-      const ok = await perform("onboarding-remote", () => relayCommands.connectRemote({
-        baseUrl: serverUrl,
-        managementToken: serverToken,
-        allowInsecureHttp: insecureRemote && allowInsecureRemote,
-        confirmIdentityChange: false,
-      }), "feedback.connected", { backgroundRefresh: true });
-      if (!ok) return;
-      setConnectionReady(true);
+    if (mode === "hosted") {
+      finishOnboarding(mode);
+      return;
     }
     if (step === 2 && mode === "local") {
       const ok = await perform("onboarding-local", prepareLocalRuntime, undefined, { backgroundRefresh: true });
@@ -106,21 +87,12 @@ export function QuickSetupWizard() {
       {step === 1 ? <ModeStep mode={mode} onSelect={selectMode} /> : null}
       {step === 2 ? <div className="setup-step">
         <ConnectionStep
-          mode={mode}
           connectionReady={connectionReady}
-          serverUrl={serverUrl}
-          setServerUrl={(serverUrlValue) => { setServerUrl(serverUrlValue); setConnectionReady(false); }}
-          serverToken={serverToken}
-          setServerToken={(serverTokenValue) => { setServerToken(serverTokenValue); setConnectionReady(false); }}
           onConnected={() => setConnectionReady(true)}
           onOAuthPendingChange={setOauthPending}
           onImport={openFileImport}
           onAddSource={() => setShowSource(true)}
         />
-        {mode === "remote" && insecureRemote ? <label className="check-line">
-          <input type="checkbox" checked={allowInsecureRemote} onChange={(event) => setAllowInsecureRemote(event.target.checked)} />
-          <span>{t("onboarding.allowInsecureRemote")}</span>
-        </label> : null}
       </div> : null}
       {step === 3 ? <ClientStep mode={mode} client={client} onSelect={setClient} /> : null}
       {step === 4 ? <ReadyStep mode={mode} client={client} /> : null}
@@ -149,12 +121,7 @@ export function QuickSetupWizard() {
 }
 
 type ConnectionStepProps = {
-  mode: RelayMode;
   connectionReady: boolean;
-  serverUrl: string;
-  setServerUrl: (serverUrlValue: string) => void;
-  serverToken: string;
-  setServerToken: (serverTokenValue: string) => void;
   onConnected: () => void;
   onOAuthPendingChange: (pending: boolean) => void;
   onImport: () => void;
@@ -162,12 +129,7 @@ type ConnectionStepProps = {
 };
 
 function ConnectionStep({
-  mode,
   connectionReady,
-  serverUrl,
-  setServerUrl,
-  serverToken,
-  setServerToken,
   onConnected,
   onOAuthPendingChange,
   onImport,
@@ -194,16 +156,6 @@ function ConnectionStep({
     return () => onOAuthPendingChange(false);
   }, [oauth.flow, onOAuthPendingChange]);
 
-  if (mode === "remote") return <>
-    <div className="setup-heading"><h1>{t("onboarding.connectionRemote")}</h1><p>{t("onboarding.remoteHint")}</p></div>
-    <div className="setup-fields">
-      <label className="relay-field">
-        <span>{t("remote.address")}</span>
-        <input type="url" value={serverUrl} onChange={(event) => setServerUrl(event.target.value)} placeholder="https://relay.example.com" />
-      </label>
-      <SecretField label={t("remote.token")} value={serverToken} onChange={setServerToken} />
-    </div>
-  </>;
   const flow = oauth.flow;
   const flowFailed = flow && (flow.status === "callback_rejected" || flow.status === "expired" || flow.status === "failed");
   return <>
@@ -238,7 +190,8 @@ function ConnectionStep({
           value={clientKind}
           onChange={(kind) => setClientKind(kind as OAuthClientKind)}
           options={[
-            { value: "codex", label: t("accounts.oauthChatGpt") },
+            { value: "codex", label: t("accounts.oauthCodex") },
+            { value: "siwc", label: t("accounts.oauthChatGpt") },
             { value: "excel_bps", label: t("accounts.oauthExcel") },
           ]}
         />
@@ -249,7 +202,7 @@ function ConnectionStep({
             <LogIn aria-hidden />
             <span>
               <strong>{t("accounts.signIn")}</strong>
-              <small>{t("onboarding.signInDescription")}</small>
+              {clientKind === "codex" ? <small>{t("accounts.codexPurpose")}</small> : null}
             </span>
           </button>
           <button type="button" onClick={onImport}>
@@ -346,12 +299,12 @@ function ModeStep({ mode, onSelect }: { mode: RelayMode; onSelect: (mode: RelayM
     <div className="setup-step setup-mode-step">
       <div className="setup-heading"><h1>{t("onboarding.modeQuestion")}</h1></div>
       <div className="mode-options" role="group" aria-label={t("onboarding.steps.1")}>
-        {(["local", "remote"] as RelayMode[]).map((relayMode) => {
-          const Icon = relayMode === "local" ? Laptop : Server;
+        {(["local", "hosted"] as RelayMode[]).map((relayMode) => {
+          const Icon = relayMode === "local" ? Laptop : Cloud;
           return (
             <button key={relayMode} type="button" aria-pressed={mode === relayMode} className={mode === relayMode ? "selected" : ""} onClick={() => onSelect(relayMode)}>
               <Icon aria-hidden />
-              <span><strong>{t(`modes.${relayMode}`)}</strong><small>{t(`onboarding.modeDescriptions.${relayMode}`)}</small></span>
+              <span><strong>{t(`modes.${relayMode}`)}</strong><small>{t(relayMode === "hosted" ? "hosted.inDevelopment" : `onboarding.modeDescriptions.${relayMode}`)}</small></span>
               <i>{mode === relayMode ? <Check aria-hidden /> : null}</i>
             </button>
           );

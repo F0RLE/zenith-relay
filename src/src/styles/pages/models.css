@@ -10,14 +10,6 @@
   background: transparent;
 }
 
-.model-rules-copy {
-  min-width: 0;
-  display: grid;
-  align-content: center;
-  justify-items: start;
-  gap: 6px;
-}
-
 .model-rules header h2 {
   margin: 0;
   font-size: 19px;

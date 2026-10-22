@@ -6,7 +6,6 @@ import {
   logicalRequestRows,
   totalsFromRows,
   usageRowsFromLocal,
-  usageRowsFromRemote,
   type UsageRow,
 } from "../src/features/relay/pages/usage/usageData";
 import {
@@ -14,7 +13,7 @@ import {
   cacheTouchForRow,
   cacheWriteDurationWindows,
 } from "../src/features/relay/pages/usage/cacheLifetime";
-import type { LocalUsage, RemoteUsage } from "../src/features/relay/api/types";
+import type { LocalUsage } from "../src/features/relay/api/types";
 import { formatUsageApiEquivalent } from "../src/features/relay/pages/usage/usageFormatting";
 import { compactRequestId, formatModelId, formatReasoningEffort, formatReasoningSummary, formatTiming, prefixErrorOrigin, requestStatusKind, requestStatusLabel } from "../src/features/relay/pages/usage/usageReportFormat";
 import { en } from "../src/i18n/locales/en";
@@ -134,10 +133,7 @@ describe("usage data", () => {
           reasoningTokens: null, outputTokens: null, totalTokens: null,
         };
         const local = usageRowsFromLocal([{ ...base, createdAt: "2026-10-16T00:00:00Z", sourceId: "source" }], labels);
-        const remote = usageRowsFromRemote([{ ...base, createdAtMs: 1, candidateKind: "source", candidateHint: "source" }], labels);
-        for (const rows of [local, remote]) {
-          expect(rows[0]).toMatchObject({ model: resolvedModel, requestedModel: alias, routedModel: resolvedModel });
-        }
+        expect(local[0]).toMatchObject({ model: resolvedModel, requestedModel: alias, routedModel: resolvedModel });
       }
     }
   });
@@ -239,6 +235,10 @@ describe("usage data", () => {
 
   test("normalizes known Codex background categories", () => {
     expect(codexRequestOriginFromErrorCategory("codex_activity_summary")).toBe("activity_summary");
+    expect(codexRequestOriginFromErrorCategory("codex_memory_extraction")).toBe("memory_extraction");
+    expect(codexRequestOriginFromErrorCategory("codex_memory_consolidation")).toBe("memory_consolidation");
+    expect(codexRequestOriginFromErrorCategory("codex_background_blocked_memory_extraction")).toBe("blocked_memory_extraction");
+    expect(codexRequestOriginFromErrorCategory("codex_background_blocked_memory_consolidation")).toBe("blocked_memory_consolidation");
     expect(codexRequestOriginFromErrorCategory("other")).toBeNull();
   });
 
@@ -253,7 +253,7 @@ describe("usage data", () => {
     expect(normalizeObservedServiceTier(null)).toBeNull();
   });
 
-  test("uses one field projection for local and remote usage rows", () => {
+  test("projects local timing, tier and cache fields", () => {
     const local: LocalUsage = {
       id: 1,
       createdAt: "2026-08-23T00:00:00.000Z",
@@ -282,34 +282,6 @@ describe("usage data", () => {
       outputTokens: 40,
       totalTokens: 140,
     };
-    const remote: RemoteUsage = {
-      id: 2,
-      requestId: "remote-request",
-      attempt: 3,
-      candidateKind: "account",
-      candidateHint: "remote-account",
-      candidateLabel: "Remote account",
-      requestedModel: "gpt-5.4",
-      resolvedModel: "gpt-5.4",
-      wireApi: "responses",
-      transport: "websocket",
-      serviceTier: "standard",
-      appliedServiceTier: "flex",
-      success: true,
-      httpStatus: 200,
-      errorCategory: null,
-      latencyMs: 800,
-      ttftMs: 100,
-      generationMs: 500,
-      inputTokens: 90,
-      cachedInputTokens: 10,
-      cacheWriteInputTokens: null,
-      cacheWriteTtl: "45m",
-      reasoningTokens: 20,
-      outputTokens: 30,
-      totalTokens: 120,
-      createdAtMs: Date.parse("2026-08-23T01:00:00.000Z"),
-    };
     const labels = {
       backgroundConnection: "ChatGPT",
       unknownAccount: "Unknown account",
@@ -335,33 +307,12 @@ describe("usage data", () => {
       cacheWriteTtl: "45m",
       clientContextId: "client_0123456789abcdef01234567",
     });
-    expect(usageRowsFromRemote([remote], {
-      ...labels,
-      accountDisplayName: (label) => label ? `Named ${label}` : null,
-    })[0]).toMatchObject({
-      id: 2,
-      attempt: 3,
-      connection: "Named Remote account",
-      accountId: null,
-      candidateKind: "account",
-      candidateKey: "remote-account",
-      appliedServiceTier: "flex",
-      cacheWriteTtl: "45m",
-      clientContextId: null,
-      requestOrigin: null,
-      ttft: 100,
-      generationMs: 500,
-    });
     const upstreamError = { httpStatus: 422, code: "future_constraint", errorType: "validation_error", message: "Invalid field: temperature", redacted: false, truncated: false };
     for (const success of [false, true]) {
       const localRow = usageRowsFromLocal([{ ...local, success, upstreamError }], {
         ...labels, accountLabels: new Map(), sourceLabels: new Map(),
       })[0];
-      const remoteRow = usageRowsFromRemote([{ ...remote, success, upstreamError }], {
-        ...labels, accountDisplayName: (label) => label,
-      })[0];
       expect(localRow?.upstreamError).toEqual(success ? null : upstreamError);
-      expect(remoteRow?.upstreamError).toEqual(success ? null : upstreamError);
     }
   });
 
@@ -377,13 +328,7 @@ describe("usage data", () => {
       backgroundConnection: "ChatGPT", unknownAccount: "Unknown", removedAccount: "Removed",
       unknownConnection: "Unknown", accountLabels: new Map(), sourceLabels: new Map(),
     });
-    const remote = usageRowsFromRemote([{ ...base, createdAtMs: 1, candidateKind: "source", candidateHint: "source" }], {
-      backgroundConnection: "ChatGPT", unknownAccount: "Unknown", removedAccount: "Removed",
-      unknownConnection: "Unknown", accountDisplayName: (label) => label,
-    });
-    for (const rows of [local, remote]) {
-      expect(rows[0]).toMatchObject({ model: "vendor/model", requestedModel: "public-alias", routedModel: "vendor/model" });
-    }
+    expect(local[0]).toMatchObject({ model: "vendor/model", requestedModel: "public-alias", routedModel: "vendor/model" });
   });
 
   test("labels deleted account history without collapsing it into an unknown account", () => {
@@ -413,36 +358,11 @@ describe("usage data", () => {
       outputTokens: 1,
       totalTokens: 2,
     } satisfies LocalUsage;
-    const remote = {
-      id: 4,
-      requestId: "deleted-remote",
-      attempt: 1,
-      candidateKind: "account" as const,
-      candidateHint: "deleted-account",
-      candidateLabel: null,
-      requestedModel: "gpt-5.4",
-      resolvedModel: "gpt-5.4",
-      wireApi: "responses",
-      transport: "websocket" as const,
-      serviceTier: "standard" as const,
-      success: true,
-      httpStatus: 200,
-      errorCategory: null,
-      latencyMs: 100,
-      inputTokens: 1,
-      outputTokens: 1,
-      totalTokens: 2,
-      createdAtMs: Date.parse("2026-08-23T02:00:00.000Z"),
-    } satisfies RemoteUsage;
 
     expect(usageRowsFromLocal([local], {
       ...labels,
       accountLabels: new Map(),
       sourceLabels: new Map([["source-1", "Primary source"]]),
-    })[0]?.connection).toBe("Removed account");
-    expect(usageRowsFromRemote([remote], {
-      ...labels,
-      accountDisplayName: () => null,
     })[0]?.connection).toBe("Removed account");
   });
 
@@ -465,5 +385,6 @@ describe("usage data", () => {
   test("renders unavailable and partially priced API equivalents consistently", () => {
     expect(formatUsageApiEquivalent({ microUsd: 0, pricedTokens: 0, unpricedTokens: 10 }, "en-US")).toBe("—");
     expect(formatUsageApiEquivalent({ microUsd: 1_234_567, pricedTokens: 10, unpricedTokens: 2 }, "en-US")).toBe("≈$1.2346");
+    expect(formatUsageApiEquivalent({ microUsd: 3_112_864_200, pricedTokens: 10, unpricedTokens: 2 }, "en-US", 2)).toBe("≈$3,112.86");
   });
 });

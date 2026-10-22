@@ -41,7 +41,7 @@ export function emptyUsageTotals(): UsageTotals {
   };
 }
 
-/** Aggregates local and remote telemetry with one accounting policy. */
+/** Aggregates runtime telemetry with one accounting policy. */
 export function totalsFromUsageSamples(samples: Iterable<UsageTotalsSample>): UsageTotals {
   const usageTotals = emptyUsageTotals();
   for (const sample of samples) {

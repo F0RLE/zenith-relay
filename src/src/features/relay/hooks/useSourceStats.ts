@@ -26,7 +26,7 @@ export function useSourceStats(mode: RelayMode, sources: readonly SourceSummary[
     const isCurrentRequest = () => generation.current === currentGeneration && requests.current[sourceId] === requestRevision;
     setStats((previousStats) => ({ ...previousStats, [sourceId]: { stats: previousStats[sourceId]?.stats ?? null, loading: true, failed: false } }));
     try {
-      const sourceStats = await (mode === "remote" ? relayCommands.remoteSourceStats(sourceId, force) : relayCommands.localSourceStats(sourceId, force));
+      const sourceStats = await relayCommands.localSourceStats(sourceId, force);
       if (isCurrentRequest()) setStats((previousStats) => ({ ...previousStats, [sourceId]: settledSourceStats(previousStats[sourceId]?.stats ?? null, sourceStats) }));
     } catch {
       if (isCurrentRequest()) setStats((previousStats) => ({ ...previousStats, [sourceId]: { stats: previousStats[sourceId]?.stats ?? null, loading: false, failed: true, error: "unavailable" } }));

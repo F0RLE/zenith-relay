@@ -113,15 +113,6 @@
   color: var(--relay-accent-hover);
 }
 
-.relay-workspace-page .connections-toolbar {
-  margin-block: 0 16px;
-  min-height: 0;
-  padding: 12px 16px;
-  border: 1px solid var(--relay-border);
-  border-radius: 10px;
-  background: var(--relay-surface);
-}
-
 /* Card counts follow the usable workspace, including sidebar resizing.
    Tracks stay between 280px and 340px; spare space stays after the grid. */
 .relay-page :is(.account-list, .pool-member-list):not(.relay-dialog *) {

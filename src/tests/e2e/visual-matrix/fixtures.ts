@@ -1,6 +1,6 @@
 import { expect, type Page } from "../../bun-playwright";
 
-export const modes = ["local", "remote", "zenith"] as const;
+export const modes = ["local"] as const;
 export const themes = ["light", "dark"] as const;
 export const locales = ["en", "ru"] as const;
 export const viewports = [{ width: 1160, height: 760 }, { width: 840, height: 560 }] as const;

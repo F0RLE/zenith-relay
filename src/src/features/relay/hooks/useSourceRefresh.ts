@@ -23,10 +23,6 @@ export function useSourceRefresh({ mode, sources, resetKey, perform, refreshStat
       relayCommands.testSource(sourceId),
       refreshStats(sourceId, true),
     ),
-    testRemote: (sourceId) => completeSourceRefresh(
-      relayCommands.remoteAction({ type: "test_source", id: sourceId }),
-      refreshStats(sourceId, true),
-    ),
   }), [refreshStats]);
 
   useEffect(() => {

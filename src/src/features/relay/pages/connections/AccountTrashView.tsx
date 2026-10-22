@@ -11,7 +11,7 @@ import { NoResults } from "./connectionHelpers";
 
 export function AccountTrashView() {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, perform, busy } = useRelayState();
+  const { mode, perform, busy } = useRelayState();
   const confirm = useConfirm();
   const [accounts, setAccounts] = useState<TrashedAccountSummary[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
@@ -22,14 +22,14 @@ export function AccountTrashView() {
   const mutationPending = useRef(false);
   const currentBusy = useRef(busy);
   currentBusy.current = busy;
-  const targetId = mode === "remote" ? runtime?.runtimeTarget.serverId : "local";
+  const targetId = "local";
 
   const load = useCallback(async () => {
     const revision = ++requestRevision.current;
     setLoading(true);
     setLoadFailed(false);
     try {
-      const entries = await (mode === "local" ? relayCommands.accountTrash() : relayCommands.remoteAccountTrash());
+      const entries = await relayCommands.accountTrash();
       if (revision !== requestRevision.current) return;
       setAccounts(entries);
       setSelected((previous) => previous.filter((accountId) => entries.some((entry) => entry.id === accountId)));
@@ -58,17 +58,8 @@ export function AccountTrashView() {
       })) return;
       if (revision !== requestRevision.current || currentBusy.current) return;
       await perform(permanently ? "trash-purge" : "trash-restore", async () => {
-        if (mode === "local") {
-          if (permanently) await relayCommands.purgeAccountTrash(accountIds);
-          else await relayCommands.restoreAccountTrash(accountIds);
-        } else {
-          for (const accountId of accountIds) {
-            await relayCommands.remoteAction({
-              type: permanently ? "purge_trashed_account" : "restore_trashed_account",
-              id: accountId,
-            });
-          }
-        }
+        if (permanently) await relayCommands.purgeAccountTrash(accountIds);
+        else await relayCommands.restoreAccountTrash(accountIds);
       }, permanently ? "feedback.deleted" : "trash.restored", { backgroundRefresh: true });
       if (revision === requestRevision.current) await load();
     } finally {

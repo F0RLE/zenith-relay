@@ -70,6 +70,8 @@
 }
 
 .integration-picker {
+  position: sticky;
+  top: calc(var(--integration-header-height, 0px) + 24px);
   min-width: 0;
 }
 
@@ -156,10 +158,10 @@
   .integration-workspace.has-picker {
     grid-template-columns: minmax(0, 1fr);
   }
-}
 
-.integrations-settings .gateway-workspace {
-  margin-top: 0;
+  .integration-picker {
+    position: static;
+  }
 }
 
 .integrations-settings .gateway-account-panel,
@@ -254,15 +256,65 @@
   width: auto;
 }
 
+.integration-chatgpt-settings .gateway-setting-row.codex-memory-model-control {
+  min-height: 76px;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 330px);
+  gap: 12px 24px;
+  padding: 16px 20px;
+}
+
+.codex-memory-model-options {
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+}
+
+.codex-memory-model-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+}
+
+.codex-memory-model-menu .relay-option-trigger {
+  min-width: 0;
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid var(--relay-border);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--relay-text) 3%, var(--relay-surface));
+}
+
+.codex-memory-model-menu .relay-option-trigger:hover:not(:disabled) {
+  border-color: var(--relay-border-strong);
+}
+
+.codex-memory-model-menu .relay-option-trigger > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 @container (max-width: 620px) {
   .integration-chatgpt-settings .gateway-account-panel {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .integration-chatgpt-settings .gateway-setting-row.codex-memory-model-control {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .codex-memory-model-options {
+    padding-left: 40px;
   }
 }
 
 @container (max-width: 440px) {
   .integration-chatgpt-settings .gateway-account-panel,
-  .integration-chatgpt-settings .gateway-setting-row.codex-feature-control {
+  .integration-chatgpt-settings .gateway-setting-row.codex-feature-control,
+  .integration-chatgpt-settings .gateway-setting-row.codex-memory-model-control {
     padding: 16px;
   }
 }
@@ -332,32 +384,5 @@
   .application-launch-path-actions .relay-button span {
     min-width: 0;
     overflow-wrap: anywhere;
-  }
-}
-
-.chatgpt-context-settings {
-  min-width: 0;
-}
-
-.chatgpt-context-controls {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 8px;
-  max-width: 320px;
-}
-
-.chatgpt-context-mode .relay-option-trigger {
-  width: auto;
-  min-width: 0;
-  max-width: 100%;
-}
-
-@container (max-width: 440px) {
-  .integration-chatgpt-settings .chatgpt-context-settings {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 140px);
-    gap: 12px;
   }
 }

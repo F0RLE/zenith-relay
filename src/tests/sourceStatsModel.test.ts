@@ -5,13 +5,18 @@ import { formatSourceAmount, projectedSourceStats, settledSourceStats, sourceSta
 const legacy: SourceStats = { provider: "zenith", balanceMicroUsd: 0, spentMicroUsd: 1_000_000, requests: null, totalTokens: null };
 
 describe("provider statistics presentation", () => {
+  test("a delayed explicit read cannot roll back a newer host observation", () => {
+    const current = { ...legacy, asOfMs: 30, balanceMicroUsd: 17_000_000 };
+    const delayed = { ...legacy, asOfMs: 20, balanceMicroUsd: 2_000_000 };
+    expect(settledSourceStats(current, delayed)).toEqual({ stats: current, loading: false, failed: false });
+  });
   test("cached snapshots update the value without settling a pending manual read", () => {
     const current = { stats: { ...legacy, asOfMs: 20 }, loading: true, failed: false };
     const newer = { ...legacy, balanceMicroUsd: 17_000_000, asOfMs: 30 };
     expect(projectedSourceStats(current, newer)).toEqual({ stats: newer, loading: true, failed: false });
     expect(projectedSourceStats(current, { ...legacy, asOfMs: 10 })).toBe(current);
   });
-  test("old servers retain real zero balances", () => {
+  test("historical snapshots retain real zero balances", () => {
     expect(sourceStatsStatus(legacy)).toBe("available");
     expect(sourceStatsAmounts(legacy)).toEqual([{ currency: "USD", balanceMicros: 0, spentMicros: 1_000_000 }]);
   });
@@ -26,7 +31,7 @@ describe("provider statistics presentation", () => {
     expect(settledSourceStats(legacy, failure)).toEqual({ stats: { ...legacy, stale: true, refreshError: "rate_limited" }, loading: false, failed: true, error: "rate_limited" });
     expect(sourceStatsAmounts(failure)).toEqual([]);
   });
-  test("server-retained last success remains stale after remount without a new provider read", () => {
+  test("runtime-retained last success remains stale after remount without a new provider read", () => {
     const retained: SourceStats = { ...legacy, asOfMs: 123, stale: true, refreshError: "unavailable" };
     expect(settledSourceStats(null, retained)).toEqual({ stats: retained, loading: false, failed: true, error: "unavailable" });
   });

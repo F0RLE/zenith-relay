@@ -68,9 +68,9 @@ describe("rotation modes and presets", () => {
     expect(rotationModeName("in_order")).toBe("roundRobin");
   });
 
-  test("old servers retain their editor but cannot apply new presets", () => {
+  test("only the current local policy is editable; legacy input is not upgraded by the editor", () => {
     const old = { ...policy(), version: 2 as const };
-    expect(supportsRotationEditing(old, ["rotation_v2"])).toBe(true);
+    expect(supportsRotationEditing(old, ["rotation_v2"])).toBe(false);
     expect(supportsRotationEditing({ ...old, mode: "failover" }, ["rotation_v2"])).toBe(false);
     expect(supportsRotationEditing({ ...old, mode: "weighted_round_robin" }, ["rotation_v2"])).toBe(false);
     expect(supportsRotationEditing(policy(), ["rotation_v2"])).toBe(false);

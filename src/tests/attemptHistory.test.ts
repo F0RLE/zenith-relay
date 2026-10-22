@@ -7,7 +7,8 @@ const row = (id: number, attempt: number, requestId = "req"): UsageRow =>
 
 test("history retrieves all pages, excludes prefix collisions and keeps distinct records of an attempt", async () => {
   const result = await loadRequestAttempts("req", async (query) => {
-    expect(query).toMatchObject({ requestId: "req", requestIdQuery: "req", pageSize: 200, includeEvents: true, includeModels: false });
+    expect(query).toMatchObject({ requestId: "req", pageSize: 200, includeEvents: true, includeModels: false });
+    expect(query.requestIdQuery).toBeUndefined();
     expect(query.success).toBeUndefined();
     expect(query.range).toBeUndefined();
     return { page: query.page!, totalPages: 2, rows: query.page === 1

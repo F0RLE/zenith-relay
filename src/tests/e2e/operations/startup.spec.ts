@@ -52,18 +52,16 @@ test("slow startup remains recoverable instead of revealing an unfinished worksp
   await expect(page.locator(".relay-shell")).toBeVisible();
 });
 
-for (const mode of ["local", "remote", "zenith"] as const) {
-  test(`${mode} snapshot failure is not recorded as successful startup`, async ({ page }) => {
-    await page.clock.install();
-    await installTauriMock(page, { mode, runtimeState: "error", locale: "en" });
-    await page.goto("/");
-    await expect(page.locator("#splash-message")).toHaveText("Relay could not start");
-    await expect(page.getByRole("button", { name: "Reload", exact: true })).toBeVisible();
-    await page.clock.fastForward(12_000);
-    expect(await page.evaluate(() => performance.getEntriesByName("zenith:interactive", "measure"))).toEqual([]);
-    await expect(page.locator(".app-workspace")).toHaveAttribute("inert", "");
-  });
-}
+test("local snapshot failure is not recorded as successful startup", async ({ page }) => {
+  await page.clock.install();
+  await installTauriMock(page, { mode: "local", runtimeState: "error", locale: "en" });
+  await page.goto("/");
+  await expect(page.locator("#splash-message")).toHaveText("Relay could not start");
+  await expect(page.getByRole("button", { name: "Reload", exact: true })).toBeVisible();
+  await page.clock.fastForward(12_000);
+  expect(await page.evaluate(() => performance.getEntriesByName("zenith:interactive", "measure"))).toEqual([]);
+  await expect(page.locator(".app-workspace")).toHaveAttribute("inert", "");
+});
 
 test("a failed UI bundle can be reloaded without losing preferences", async ({ page }) => {
   await installTauriMock(page, { theme: "light", locale: "en" });
@@ -87,9 +85,9 @@ test("render failure reveals the error boundary instead of hiding it behind the 
   await expect(page.getByRole("button", { name: "Reload", exact: true })).toBeEnabled();
 });
 
-test("reduced motion and a disconnected remote do not leave a stuck loader", async ({ page }) => {
+test("migrating a saved legacy mode does not leave a stuck loader", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce", colorScheme: "dark" });
-  await installTauriMock(page, { mode: "remote", remoteConnected: false, theme: "system" });
+  await installTauriMock(page, { storedMode: "remote", theme: "system" });
   await page.goto("/");
   await expect(page.locator("#splash-screen")).toHaveCount(0);
   await expect(page.locator("html")).toHaveAttribute("data-startup-ready", "true");

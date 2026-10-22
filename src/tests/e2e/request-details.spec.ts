@@ -8,7 +8,89 @@ const desktopModelAliases = [
   `claude-fable-5-zenith-${Array(32).fill("ab").join("-")}`,
 ];
 
-for (const mode of ["local", "remote"] as const) {
+for (const locale of ["en", "ru"] as const) {
+  for (const policy of [true, false, undefined]) {
+    test(`BPS parallel diagnostics preserve ${String(policy)} policy in ${locale}`, async ({ page }) => {
+      await page.setViewportSize({ width: 390, height: 900 });
+      await installTauriMock(page, { mode: "local", locale, populated: true, diagnosticDebug: true });
+      await page.goto("/");
+      await setUsageEventOverrides(page, {
+        ...completedUsage,
+        routing: {
+          reason: "only_eligible", eligibleCandidates: 1, quotaRemainingBasisPoints: null,
+          inFlightBefore: 0, dispatchesBefore: 0, endpointKind: "excel_basis_points",
+          transport: {
+            upstream: "http", mode: "basis_points", responseHeadersMs: 0,
+            ...(policy == null ? {} : {
+              requestPreparationMs: policy ? 0 : 125,
+              requestPreparation: {
+                bodyMs: policy ? 0 : 65,
+                schemaValidationMs: policy ? 0 : 40,
+                catalogMs: policy ? 0 : 25,
+                attachmentsMs: policy ? 0 : 30,
+              },
+              upstreamResponseMs: policy ? 0 : 250,
+              clientFirstOutputMs: policy ? 0 : 500,
+              clientResponseReadyMs: policy ? 0 : 750,
+            }),
+          },
+        },
+        toolUse: {
+          clientToolCount: 2, forwardedToolCount: 2, toolChoice: "auto",
+          toolCallCount: policy === true ? 2 : 0, textOutput: false, terminalOutput: "tool_call",
+          requestedParallelToolCalls: policy,
+          upstreamToolCallCount: policy == null ? undefined : 3,
+          toolCallsReadyMs: policy === true ? 0 : undefined,
+        },
+      });
+      await page.getByRole("button", { name: locale === "en" ? "Usage" : "Использование", exact: true }).click();
+      await page.getByRole("button", {
+        name: `${locale === "en" ? "Request details" : "Сведения о запросе"}: req_synthetic_local`, exact: true,
+      }).click();
+      const dialog = page.getByRole("dialog");
+      await dialog.locator(".request-technical-details > summary").click();
+      const parallel = dialog.locator("dl > div").filter({ has: page.locator("dt", {
+        hasText: locale === "en" ? "Client explicitly allows parallel calls" : "Клиент явно разрешает параллельные вызовы",
+      }) });
+      if (policy == null) {
+        await expect(parallel).toHaveCount(0);
+      } else {
+        await expect(parallel.locator("dd")).toHaveText(locale === "en" ? (policy ? "Yes" : "No") : (policy ? "Да" : "Нет"));
+      }
+      const ready = dialog.locator("dl > div").filter({ has: page.locator("dt", {
+        hasText: locale === "en" ? "Validated calls ready after dispatch" : "Готовность проверенных вызовов после отправки",
+      }) });
+      if (policy === true) await expect(ready.locator("dd")).toHaveText(locale === "en" ? "0 ms" : "0 мс");
+      else await expect(ready).toHaveCount(0);
+      for (const [english, russian, milliseconds, prefix] of [
+        ["Preparation before dispatch", "Подготовка до отправки", 125, ""],
+        ["Upstream response collected", "Ответ источника собран", 250, "+"],
+        ["First Relay output", "Первый вывод Relay", 500, "+"],
+        ["Relay response ready", "Ответ Relay готов", 750, "+"],
+        ["Request building", "Сборка запроса", 65, ""],
+        ["Of which: schema checks", "В т. ч. проверка схем", 40, ""],
+        ["Catalog preparation", "Подготовка каталога", 25, ""],
+        ["Attachments", "Вложения", 30, ""],
+      ] as const) {
+        const stage = dialog.locator("dl > div").filter({ has: page.locator("dt", {
+          hasText: locale === "en" ? english : russian,
+        }) });
+        if (policy == null) await expect(stage).toHaveCount(0);
+        else await expect(stage.locator("dd")).toHaveText(`${prefix}${policy ? 0 : milliseconds} ${locale === "en" ? "ms" : "мс"}`);
+      }
+      if (policy === false) {
+        await expect(dialog.locator(".request-timing-metrics dd")).toHaveText(
+          [0, 250, 500, 750].map((milliseconds) => `+${milliseconds} ${locale === "en" ? "ms" : "мс"}`),
+        );
+      }
+      await expect(dialog.locator(".request-technical-details p, .request-technical-details .form-note")).toHaveCount(0);
+      expect(await dialog.locator(".request-details-list dd").evaluateAll((cells) =>
+        cells.every((cell) => cell.scrollWidth <= cell.clientWidth + 1))).toBe(true);
+    });
+  }
+}
+
+for (const mode of ["local"] as const) {
   for (const alias of desktopModelAliases) {
     test(`${mode} keeps ${alias.split("-relay-")[0]} model aliases in technical details`, async ({ page }) => {
       await page.setViewportSize({ width: 390, height: 900 });
@@ -51,7 +133,7 @@ test("unresolved Desktop alias does not impersonate a known model", async ({ pag
 
 async function openRequest(page: Page, theme: "dark" | "light" = "dark", failure = true) {
   await installTauriMock(page, {
-    mode: "local", locale: "ru", theme, populated: true, usageFailure: failure, usageCandidateKind: "source",
+    mode: "local", locale: "ru", theme, populated: true, diagnosticDebug: true, usageFailure: failure, usageCandidateKind: "source",
     usageRequestedModel: "gpt-6.1-sol", usageResolvedModel: "gpt-6.1-sol",
     usageAttemptOutcome: failure ? "retry_selection" : "completed",
     usageUpstreamError: failure ? {
@@ -125,14 +207,16 @@ for (const theme of ["dark", "light"] as const) {
       await expect(dialog.locator(".request-execution")).toHaveCount(0);
       await expect(dialog.getByText("640 мс", { exact: true })).toBeVisible();
       await expect(dialog.locator(".request-details-metrics dt")).toHaveText([
-        "Первый вывод", "Время ответа", "Скорость генерации", "Стоимость запроса",
+        "Первый вывод", "Время ответа", "Скорость генерации", "Эквивалент API",
       ]);
       await expect(dialog.getByText("Responses", { exact: true })).toBeVisible();
       await expect(dialog.getByText("Обычные входные", { exact: true })).toBeVisible();
       await expect(dialog.getByText("Прочитано из кэша", { exact: true })).toBeVisible();
       await expect(dialog.getByText("Видимый вывод", { exact: true })).toBeVisible();
       await expect(dialog.getByText("Рассуждения", { exact: true })).toBeVisible();
-      await expect(dialog.locator(".request-token-details .request-section-badge")).toHaveText(/Всего токенов19\s340/);
+      await expect(dialog.getByRole("region", { name: "Токены", exact: true })).toBeVisible();
+      await expect(dialog.locator(".request-token-total dt")).toHaveText("Всего токенов");
+      await expect(dialog.locator(".request-token-total dd")).toHaveText(/19\s340/);
       await expect(dialog.locator(".request-tool-details")).toBeHidden();
       await expect(dialog.getByText("req_synthetic_local", { exact: true })).toBeHidden();
       expect(await dialog.locator(".relay-dialog-body, .request-details-parameters > div, .request-details-list dd")

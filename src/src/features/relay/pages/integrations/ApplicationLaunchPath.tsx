@@ -38,7 +38,7 @@ export function ApplicationLaunchPath({ application }: { application: LaunchAppl
     setFailure(null);
     setSaved(false);
     try {
-      const path = await relayCommands.pickApplicationLaunchPath(application);
+      const path = await relayCommands.pickApplicationLaunchPath(application, draft.trim() || setting?.detectedPath || null);
       if (path !== null) setDraft(path);
     } catch { setFailure("pick"); }
     finally { setPending(null); }

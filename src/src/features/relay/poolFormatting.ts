@@ -7,13 +7,6 @@ export function formatApiEquivalent(microUsd: number, locale: string) {
   })}`;
 }
 
-export function formatProviderMicroUsd(microUsdAmount: number, locale: string) {
-  return formatMicroUsd(microUsdAmount, locale, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
-}
-
 export function formatAccountValueMicroUsd(accountValueMicroUsd: number, locale: string, approximate = false) {
   const formatted = formatMicroUsd(accountValueMicroUsd, locale, {
     minimumFractionDigits: 0,

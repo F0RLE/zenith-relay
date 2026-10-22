@@ -7,6 +7,7 @@ import type { RelayMode } from "../../api/types";
 import { ContextMenu } from "../../components/ContextMenu";
 import { ActionMenuItem, useConfirm } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { expandAccountRouteIds } from "../../accountRoutes";
 
 type DeleteMenuState = {
   x: number;
@@ -21,7 +22,7 @@ export function useConnectionAccountRemoval() {
   const { mode, runtime, busy, perform } = useRelayState();
   const pending = useRef(false);
   const mounted = useRef(true);
-  const target = `${mode}:${runtime?.runtimeTarget.serverId ?? ""}`;
+  const target = mode;
   const currentTarget = useRef(target);
   const targetRevision = useRef(0);
   const currentBusy = useRef(busy);
@@ -36,14 +37,10 @@ export function useConnectionAccountRemoval() {
     return () => { mounted.current = false; };
   }, []);
   useEffect(() => { setDeleteMenu(null); }, [target, busy]);
-  const canTrash = mode === "local" || Boolean(runtime?.capabilities.features.includes("account_trash_v1"));
   const remove = async (accountIds: string[], permanently: boolean, operation: string, localRecovery = false) => {
     if (target !== currentTarget.current || !accountIds.length || pending.current || currentBusy.current) return false;
-    if (!permanently && !canTrash) {
-      return perform(operation, async () => {
-        throw { code: "unsupported_schema", message: t("trash.serverUpdateRequired") };
-      });
-    }
+    if (mode !== "local") return false;
+    accountIds = expandAccountRouteIds(accountIds, runtime?.accounts ?? []);
     pending.current = true;
     const revision = targetRevision.current;
     try {
@@ -87,20 +84,12 @@ export function useConnectionAccountRemoval() {
       </ActionMenuItem>
     </ContextMenu>
   ) : null;
-  return { canTrash, remove, openDeleteMenu, permanentDeleteMenu };
+  return { remove, openDeleteMenu, permanentDeleteMenu };
 }
 
 export async function removeConnectionAccounts(mode: RelayMode, accountIds: string[], permanently: boolean) {
-  if (mode === "local") {
-    if (!permanently) return relayCommands.trashAccounts(accountIds);
-    if (accountIds.length === 1 && accountIds[0]) return relayCommands.deleteAccount(accountIds[0]);
-    return relayCommands.deleteAccounts(accountIds);
-  }
-  for (const accountId of accountIds) {
-    await relayCommands.remoteAction({
-      type: permanently ? "delete_account" : "trash_account",
-      id: accountId,
-    });
-  }
-  return undefined;
+  if (mode !== "local") throw new Error("Account removal requires the local pool");
+  if (!permanently) return relayCommands.trashAccounts(accountIds);
+  if (accountIds.length === 1 && accountIds[0]) return relayCommands.deleteAccount(accountIds[0]);
+  return relayCommands.deleteAccounts(accountIds);
 }

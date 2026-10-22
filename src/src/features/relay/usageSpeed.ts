@@ -41,18 +41,6 @@ export function tokenSpeed(sample: TokenSpeedSample) {
   return measured ? observedTokensPerSecond(measured.outputTokens, measured.durationMs) : null;
 }
 
-export function averageTokenSpeed(samples: TokenSpeedSample[]) {
-  const totals = samples.reduce((speedTotals, sample) => {
-    const measured = measureTokenSpeed(sample);
-    if (measured) {
-      speedTotals.outputTokens += measured.outputTokens;
-      speedTotals.durationMs += measured.durationMs;
-    }
-    return speedTotals;
-  }, { outputTokens: 0, durationMs: 0 });
-  return observedTokensPerSecond(totals.outputTokens, totals.durationMs);
-}
-
 export function formatTokenSpeed(tokensPerSecond: number | null | undefined, locale: string, unit: string) {
   return tokensPerSecond == null ? "-" : `${formatNumber(tokensPerSecond, locale, { maximumFractionDigits: 1 })} ${unit}`;
 }

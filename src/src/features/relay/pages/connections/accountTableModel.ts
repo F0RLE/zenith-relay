@@ -48,13 +48,14 @@ export function filterAndSortAccounts(
   runtimePosition: ReadonlyMap<string, number>,
   unknown: string,
 ) {
+  const planType = (account: AccountSummary) => account.subscription.planType;
   return [...accounts]
-    .filter((account) => matchesQuery(query, account.label, account.identityHint, account.subscription.planType, account.models))
+    .filter((account) => matchesQuery(query, account.label, account.identityHint, planType(account), account.models))
     .filter((account) => activePlan === "all"
-      || (activePlan === "errors" ? Boolean(currentAccountErrorCode(account)) : accountPlanOption(account.subscription.planType, unknown).id === activePlan))
+      || (activePlan === "errors" ? Boolean(currentAccountErrorCode(account)) : accountPlanOption(planType(account), unknown).id === activePlan))
     .filter((account) => participationFilter === "all" || (participationFilter === "included") === accountParticipates(account))
     .sort((left, right) => groupByPlan
-      ? compareAccountPlans(accountPlanOption(left.subscription.planType, unknown), accountPlanOption(right.subscription.planType, unknown))
+      ? compareAccountPlans(accountPlanOption(planType(left), unknown), accountPlanOption(planType(right), unknown))
         || compareOperationalStatus(left.operationalStatus, right.operationalStatus)
         || compareRoutingOrder(left.id, right.id, runtimePosition)
         || compareStableText(left.identityHint || left.label, right.identityHint || right.label)
@@ -80,16 +81,16 @@ export function accountSelectionState(
   const selectedAccounts = visibleAccounts.filter((account) => selected.has(account.id));
   const selectedAccountIds = selectedAccounts.map((account) => account.id);
   const selectedCount = selectedAccounts.length;
-  const selectedOnServer = selectedAccounts.some((account) => Boolean(account.remoteLocation));
+  const selectedRecoveryRequired = selectedAccounts.some((account) => Boolean(account.recoveryRequired));
   return {
     selectedAccounts,
     selectedIds: selectedAccountIds,
     selectedCount,
     selectedAccessOnly: selectedAccounts.some((account) => account.authState.state === "degraded_access_only"),
     selectedSecretsUnavailable: selectedAccounts.some((account) => !account.secretAvailable),
-    selectedOnServer,
+    selectedRecoveryRequired,
     exportIds: selectedCount ? selectedAccountIds : allAccounts.map((account) => account.id),
-    canIncludeSelected: !selectedOnServer && selectedAccounts.some((account) => canAccountJoinPool(account) && !accountParticipates(account)),
+    canIncludeSelected: !selectedRecoveryRequired && selectedAccounts.some((account) => canAccountJoinPool(account) && !accountParticipates(account)),
     canExcludeSelected: selectedAccounts.some(accountParticipates),
     allSelected: visibleAccounts.length > 0 && visibleAccounts.every((account) => selected.has(account.id)),
   };

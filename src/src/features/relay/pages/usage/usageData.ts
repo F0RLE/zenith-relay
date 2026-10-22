@@ -4,7 +4,6 @@ import type {
   LocalUsage,
   ObservedServiceTier,
   ReasoningEffort,
-  RemoteUsage,
   RoutingDiagnostics,
   ToolUseDiagnostics,
   UpstreamErrorDetails,
@@ -20,6 +19,10 @@ export type CodexRequestOrigin =
   | "task_title"
   | "blocked_activity_summary"
   | "blocked_task_title"
+  | "memory_extraction"
+  | "memory_consolidation"
+  | "blocked_memory_extraction"
+  | "blocked_memory_consolidation"
   | null;
 
 export type UsageRow = {
@@ -59,6 +62,7 @@ export type UsageRow = {
   candidateKind: "account" | "source";
   candidateKey: string;
   apiEquivalent: UsageTotals["apiEquivalent"] | null;
+  apiEquivalentBreakdown?: LocalUsage["apiEquivalentBreakdown"];
   requestOrigin: CodexRequestOrigin;
 };
 
@@ -74,10 +78,14 @@ export function codexRequestOriginFromErrorCategory(category: string | null): Co
   if (category === "codex_task_title") return "task_title";
   if (category === "codex_background_blocked_activity_summary") return "blocked_activity_summary";
   if (category === "codex_background_blocked_task_title") return "blocked_task_title";
+  if (category === "codex_memory_extraction") return "memory_extraction";
+  if (category === "codex_memory_consolidation") return "memory_consolidation";
+  if (category === "codex_background_blocked_memory_extraction") return "blocked_memory_extraction";
+  if (category === "codex_background_blocked_memory_consolidation") return "blocked_memory_consolidation";
   return null;
 }
 
-type UsageEvent = LocalUsage | RemoteUsage;
+type UsageEvent = LocalUsage;
 
 type UsageRowLabels = {
   backgroundConnection: string;
@@ -89,10 +97,6 @@ type UsageRowLabels = {
 export type LocalUsageRowLabels = UsageRowLabels & {
   accountLabels: ReadonlyMap<string, string>;
   sourceLabels: ReadonlyMap<string, string>;
-};
-
-export type RemoteUsageRowLabels = UsageRowLabels & {
-  accountDisplayName: (candidateLabel: string | null | undefined) => string | null | undefined;
 };
 
 function usageRowFromEvent(
@@ -140,12 +144,13 @@ function usageRowFromEvent(
     candidateKind,
     candidateKey,
     apiEquivalent: event.apiEquivalent ?? null,
+    apiEquivalentBreakdown: event.apiEquivalentBreakdown,
     requestOrigin,
     clientContextId: "clientContextId" in event ? event.clientContextId ?? null : null,
   };
 }
 
-/** Builds UI rows from local telemetry without allowing local/remote fields to drift. */
+/** Builds UI rows from persisted local telemetry. */
 export function usageRowsFromLocal(events: readonly LocalUsage[], labels: LocalUsageRowLabels): UsageRow[] {
   return events.map((event) => {
     const requestOrigin = codexRequestOriginFromErrorCategory(event.errorCategory);
@@ -161,27 +166,6 @@ export function usageRowsFromLocal(events: readonly LocalUsage[], labels: LocalU
       event.accountId ?? null,
       event.accountId ? "account" : "source",
       event.accountId ?? event.sourceId,
-      requestOrigin,
-    );
-  });
-}
-
-/** Builds UI rows from remote telemetry using the same canonical field projection. */
-export function usageRowsFromRemote(events: readonly RemoteUsage[], labels: RemoteUsageRowLabels): UsageRow[] {
-  return events.map((event) => {
-    const requestOrigin = codexRequestOriginFromErrorCategory(event.errorCategory);
-    const connection = requestOrigin
-      ? labels.backgroundConnection
-      : event.candidateKind === "account"
-        ? labels.accountDisplayName(event.candidateLabel) ?? labels.removedAccount
-        : event.candidateLabel ?? labels.unknownConnection;
-    return usageRowFromEvent(
-      event,
-      new Date(event.createdAtMs).toISOString(),
-      connection,
-      null,
-      event.candidateKind,
-      event.candidateHint,
       requestOrigin,
     );
   });

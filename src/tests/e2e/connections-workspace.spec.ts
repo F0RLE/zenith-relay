@@ -75,7 +75,7 @@ for (const locale of ["ru", "en"] as const) {
       await page.screenshot({ path: `output/playwright/proxy-cards-${locale}-${theme}.png`, animations: "disabled" });
       const calls = await commands(page);
       expect(calls.filter((call) => call.command === "check_local_stored_proxy")).toHaveLength(3);
-      expect(calls.some((call) => ["set_local_stored_proxy_accounts", "set_local_stored_proxy_timezone", "set_local_account_proxy"].includes(call.command))).toBe(false);
+      expect(calls.some((call) => ["set_local_stored_proxy_accounts", "set_local_account_proxy"].includes(call.command))).toBe(false);
     });
   }
 }
@@ -209,7 +209,7 @@ test("proxy import determines timezone without extra controls or a manual save",
   expect((await commands(page)).filter((call) => call.command === "check_local_stored_proxy")).toHaveLength(1);
 });
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`sources retain hidden selections and change only selected pool members in ${mode}`, async ({ page }) => {
     await installTauriMock(page, { mode, locale: "en", populated: true, sourceCount: 3 });
     await openConnections(page);

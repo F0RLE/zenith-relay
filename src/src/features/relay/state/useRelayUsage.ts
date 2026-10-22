@@ -1,32 +1,19 @@
 import { useCallback, useRef, useState } from "react";
-import type {
-  LocalUsagePage,
-  RelayMode,
-  RemoteUsage,
-  RemoteUsagePage,
-  RemoteUsageQuery,
-} from "../api/types";
+import type { LocalUsagePage, UsageQuery } from "../api/types";
 import { LatestRequestGate } from "./latestRequestGate";
 
 export type RelayUsageCommands = {
-  localUsagePage: (query: RemoteUsageQuery) => Promise<LocalUsagePage>;
-  remoteUsage: (query: RemoteUsageQuery) => Promise<RemoteUsagePage | null>;
+  localUsagePage: (query: UsageQuery) => Promise<LocalUsagePage>;
 };
 
-export type UsageLoadOptions = {
-  force?: boolean;
-};
+export type UsageLoadOptions = { force?: boolean };
 
-// A request can produce both state and usage events. Keep the last complete
-// projection visible and avoid re-running the aggregate query for every event
-// in the same short burst.
 const USAGE_REVALIDATION_COOLDOWN_MS = 1_000;
-
 type UsageCacheEntry<T> = { data: T; updatedAt: number };
 
-function rememberUsage<T>(cache: Map<string, UsageCacheEntry<T>>, key: string, usageData: T) {
+function rememberUsage<T>(cache: Map<string, UsageCacheEntry<T>>, key: string, data: T) {
   cache.delete(key);
-  cache.set(key, { data: usageData, updatedAt: Date.now() });
+  cache.set(key, { data, updatedAt: Date.now() });
   while (cache.size > 8) {
     const oldest = cache.keys().next().value;
     if (oldest === undefined) break;
@@ -34,165 +21,56 @@ function rememberUsage<T>(cache: Map<string, UsageCacheEntry<T>>, key: string, u
   }
 }
 
-/** Own paginated usage results and stale-request protection for both runtimes. */
+/** Keeps the last complete local report without allowing stale filters to win. */
 export function useRelayUsage(commands: RelayUsageCommands) {
   const [localUsagePage, setLocalUsagePage] = useState<LocalUsagePage | null>(null);
-  const [remoteUsage, setRemoteUsage] = useState<RemoteUsage[]>([]);
-  const [remoteUsagePage, setRemoteUsagePage] = useState<RemoteUsagePage | null>(null);
-  const localRequest = useRef(new LatestRequestGate());
-  const remoteRequest = useRef(new LatestRequestGate());
-  // Usage pages are expensive aggregates. Keep a small per-query cache so
-  // navigating away and back can render the last complete result immediately
-  // while the newest snapshot is refreshed in the background.
-  const localCache = useRef(new Map<string, UsageCacheEntry<LocalUsagePage>>());
-  const remoteCache = useRef(new Map<string, UsageCacheEntry<RemoteUsagePage | null>>());
-  const localInFlight = useRef(new Map<string, Promise<LocalUsagePage>>());
-  const remoteInFlight = useRef(new Map<string, Promise<RemoteUsagePage | null>>());
-  const displayedLocalQueryKey = useRef<string | null>(null);
-  const displayedRemoteQueryKey = useRef<string | null>(null);
+  const request = useRef(new LatestRequestGate());
+  const cache = useRef(new Map<string, UsageCacheEntry<LocalUsagePage>>());
+  const inFlight = useRef(new Map<string, Promise<LocalUsagePage>>());
+  const displayedQueryKey = useRef<string | null>(null);
 
-  const loadLocalUsage = useCallback((query: RemoteUsageQuery, options: UsageLoadOptions = {}) => {
+  const loadLocalUsage = useCallback((query: UsageQuery, options: UsageLoadOptions = {}) => {
     const key = JSON.stringify(query);
-    const queryChanged = displayedLocalQueryKey.current !== key;
+    const queryChanged = displayedQueryKey.current !== key;
     if (queryChanged) {
-      // A cached report can become visible without starting a new request.
-      // Invalidate the previous request anyway, otherwise its late result can
-      // overwrite this query after the user has changed filters.
-      localRequest.current.invalidate();
-      displayedLocalQueryKey.current = key;
+      // Invalidate even when a cached report avoids starting another request.
+      request.current.invalidate();
+      displayedQueryKey.current = key;
     }
-    const cached = localCache.current.get(key);
+    const cached = cache.current.get(key);
     if (cached) {
       setLocalUsagePage(cached.data);
-      if (!options.force && Date.now() - cached.updatedAt < USAGE_REVALIDATION_COOLDOWN_MS) {
+      const age = Date.now() - cached.updatedAt;
+      if (!options.force && age >= 0 && age < USAGE_REVALIDATION_COOLDOWN_MS) {
         return Promise.resolve(cached.data);
       }
     } else if (queryChanged) {
-      // A new filter must not show the previous report while it is loading.
       setLocalUsagePage(null);
     }
-    const existing = localInFlight.current.get(key);
-    if (existing) {
-      // Re-adopt a deduplicated query after another filter was selected. Its
-      // original completion was intentionally invalidated above, so this
-      // current gate owns the visible result instead.
-      return localRequest.current.run(() => existing, (usagePage) => {
-        rememberUsage(localCache.current, key, usagePage);
-        displayedLocalQueryKey.current = key;
-        setLocalUsagePage(usagePage);
-      });
-    }
-    const localUsageRequest = localRequest.current.run(
-      () => commands.localUsagePage(query),
-      (usagePage) => {
-        rememberUsage(localCache.current, key, usagePage);
-        displayedLocalQueryKey.current = key;
-        setLocalUsagePage(usagePage);
-      },
-    );
-    localInFlight.current.set(key, localUsageRequest);
-    void localUsageRequest.then(() => {
-      if (localInFlight.current.get(key) === localUsageRequest) localInFlight.current.delete(key);
-    }, () => {
-      if (localInFlight.current.get(key) === localUsageRequest) localInFlight.current.delete(key);
-    });
-    return localUsageRequest;
-  }, [commands]);
-
-  const loadRemoteUsage = useCallback((query: RemoteUsageQuery, options: UsageLoadOptions = {}) => {
-    const key = JSON.stringify(query);
-    const queryChanged = displayedRemoteQueryKey.current !== key;
-    if (queryChanged) {
-      // See the local branch: a cached query change must also invalidate a
-      // previous remote aggregate that is still in flight.
-      remoteRequest.current.invalidate();
-      displayedRemoteQueryKey.current = key;
-    }
-    const cached = remoteCache.current.get(key);
-    if (cached !== undefined) {
-      setRemoteUsage(cached.data?.events ?? []);
-      setRemoteUsagePage(cached.data);
-      if (!options.force && Date.now() - cached.updatedAt < USAGE_REVALIDATION_COOLDOWN_MS) {
-        return Promise.resolve(cached.data);
-      }
-    } else if (queryChanged) {
-      // A new filter must not show the previous report while it is loading.
-      setRemoteUsage([]);
-      setRemoteUsagePage(null);
-    }
-    const existing = remoteInFlight.current.get(key);
-    if (existing) {
-      return remoteRequest.current.run(() => existing, (usagePage) => {
-        rememberUsage(remoteCache.current, key, usagePage);
-        displayedRemoteQueryKey.current = key;
-        setRemoteUsage(usagePage?.events ?? []);
-        setRemoteUsagePage(usagePage);
-      });
-    }
-    const remoteUsageRequest = remoteRequest.current.run(
-      () => commands.remoteUsage(query),
-      (usagePage) => {
-        rememberUsage(remoteCache.current, key, usagePage);
-        displayedRemoteQueryKey.current = key;
-        setRemoteUsage(usagePage?.events ?? []);
-        setRemoteUsagePage(usagePage);
-      },
-    );
-    remoteInFlight.current.set(key, remoteUsageRequest);
-    void remoteUsageRequest.then(() => {
-      if (remoteInFlight.current.get(key) === remoteUsageRequest) remoteInFlight.current.delete(key);
-    }, () => {
-      if (remoteInFlight.current.get(key) === remoteUsageRequest) remoteInFlight.current.delete(key);
-    });
-    return remoteUsageRequest;
+    const accept = (page: LocalUsagePage) => {
+      rememberUsage(cache.current, key, page);
+      displayedQueryKey.current = key;
+      setLocalUsagePage(page);
+    };
+    const existing = inFlight.current.get(key);
+    // Re-adopt an existing query under the current filter's request gate.
+    if (existing) return request.current.run(() => existing, accept);
+    const loading = request.current.run(() => commands.localUsagePage(query), accept);
+    inFlight.current.set(key, loading);
+    const settled = () => {
+      if (inFlight.current.get(key) === loading) inFlight.current.delete(key);
+    };
+    void loading.then(settled, settled);
+    return loading;
   }, [commands]);
 
   const resetUsage = useCallback(() => {
-    localRequest.current.invalidate();
-    remoteRequest.current.invalidate();
-    localInFlight.current.clear();
-    remoteInFlight.current.clear();
-    localCache.current.clear();
-    remoteCache.current.clear();
-    displayedLocalQueryKey.current = null;
-    displayedRemoteQueryKey.current = null;
+    request.current.invalidate();
+    inFlight.current.clear();
+    cache.current.clear();
+    displayedQueryKey.current = null;
     setLocalUsagePage(null);
-    setRemoteUsage([]);
-    setRemoteUsagePage(null);
   }, []);
 
-  const clearInactiveUsage = useCallback((mode: RelayMode) => {
-    if (mode === "local") {
-      remoteRequest.current.invalidate();
-      remoteCache.current.clear();
-      remoteInFlight.current.clear();
-      displayedRemoteQueryKey.current = null;
-      setRemoteUsage([]);
-      setRemoteUsagePage(null);
-      return;
-    }
-    localRequest.current.invalidate();
-    setLocalUsagePage(null);
-    localCache.current.clear();
-    localInFlight.current.clear();
-    displayedLocalQueryKey.current = null;
-    if (mode === "zenith") {
-      remoteRequest.current.invalidate();
-      remoteCache.current.clear();
-      remoteInFlight.current.clear();
-      displayedRemoteQueryKey.current = null;
-      setRemoteUsage([]);
-      setRemoteUsagePage(null);
-    }
-  }, []);
-
-  return {
-    localUsagePage,
-    remoteUsage,
-    remoteUsagePage,
-    loadLocalUsage,
-    loadRemoteUsage,
-    resetUsage,
-    clearInactiveUsage,
-  };
+  return { localUsagePage, loadLocalUsage, resetUsage };
 }

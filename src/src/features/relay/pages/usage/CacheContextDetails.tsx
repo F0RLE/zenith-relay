@@ -6,13 +6,19 @@ import { formatDurationMs } from "./usageReportFormat";
 export function CacheContextDetails({ diagnostics }: { diagnostics: CacheContextDiagnostics | null | undefined }) {
   const { t, i18n } = useTranslation();
   if (!diagnostics) return null;
+  // Structural differences do not prove why a provider missed its prompt cache.
   const compared = diagnostics.baseline === "completed_request";
   const sections = (changes: CacheContextSection[]) => changes.length
     ? changes.map((section) => t(`usage.cacheContext.sections.${section}`)).join(", ")
     : t("usage.cacheContext.noChanges");
   return <section className="request-cache-context" aria-label={t("usage.cacheContext.title")}>
-    <p className="form-note">{t("usage.cacheContext.hint")}</p>
     <dl className="request-details-list">
+      {diagnostics.provider ? <div>
+        <dt>{t("usage.cacheContext.provider")}</dt>
+        <dd>{t(`usage.cacheContext.providerResults.${diagnostics.provider.type}`)}
+          {diagnostics.provider.type === "cache_miss" ? <> · {t(`usage.cacheContext.providerReasons.${diagnostics.provider.reason}`)}</> : null}
+        </dd>
+      </div> : null}
       <div><dt>{t("usage.cacheContext.baseline")}</dt><dd>{t(`usage.cacheContext.baselines.${diagnostics.baseline}`)}</dd></div>
       <div><dt>{t("usage.cacheContext.scope")}</dt><dd>{t(`usage.cacheContext.scopes.${diagnostics.scope}`)}</dd></div>
       {compared && diagnostics.previousCompletedAgeMs != null ? <div>

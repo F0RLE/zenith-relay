@@ -11,7 +11,7 @@ export function CodexWebsocketsControl({ className = "" }: { className?: string 
   const { mode, runtime, codexWebsocketsEnabled, setCodexWebsocketsEnabled } = useRelayState();
   const confirm = useConfirm();
   const { checked, saving, select } = usePendingFlag(codexWebsocketsEnabled);
-  const supported = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("codex_websockets"));
+  const supported = mode === "local";
   if (!supported) return null;
   return <CodexFeatureToggleControl
     className={className}

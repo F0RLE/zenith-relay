@@ -32,10 +32,10 @@ function MemberOption({ name, detail, status, statusLabel, icon, badge, checked,
   </label>;
 }
 
-function accountPickerStatus(account: AccountSummary, onServer: boolean, t: TFunction): { status: SurfaceTone; statusLabel: string } {
-  const status = accountPickerTone(account, onServer);
+function accountPickerStatus(account: AccountSummary, recoveryRequired: boolean, t: TFunction): { status: SurfaceTone; statusLabel: string } {
+  const status = accountPickerTone(account, recoveryRequired);
   const operationalLabel = t(`pool.memberStatus.${account.operationalStatus}`);
-  if (onServer) return { status, statusLabel: t("accounts.onServerHint") };
+  if (recoveryRequired) return { status, statusLabel: t("accounts.recoveryRequiredHint") };
   const quotaStatus = accountQuotaRefreshState(account);
   const errorCode = quotaStatus === "refreshing" ? null : currentAccountErrorCode(account);
   if (errorCode) return { status, statusLabel: accountErrorLabel(errorCode, t) };
@@ -55,7 +55,7 @@ export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
   const addPending = useRef(false);
-  const canAddSource = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("sources"));
+  const canAddSource = mode === "local";
   const [accountIds, setAccountIds] = useState<string[]>([]);
   const [sourceIds, setSourceIds] = useState<string[]>([]);
   const [query, setQuery] = useState("");
@@ -63,11 +63,12 @@ export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void
   const [planFilter, setPlanFilter] = useState("all");
   const [healthFilter, setHealthFilter] = useState<HealthFilter>("all");
   const listRef = useRef<HTMLDivElement>(null);
-  const allAccounts = (runtime?.accounts ?? []).filter((account) => canAccountJoinPool(account) && !account.inPool);
+  const allAccounts = (runtime?.accounts ?? []).filter((account) => !account.routeInactive && canAccountJoinPool(account) && !account.inPool);
   const allSources = (runtime?.sources ?? []).filter((source) => !source.inPool);
+  const planType = (account: AccountSummary) => account.subscription.planType;
   const planOptions = new Map<string, { id: string; label: string; count: number }>();
   for (const account of allAccounts) {
-    const option = accountPlanOption(account.subscription.planType, t("common.unknown"));
+    const option = accountPlanOption(planType(account), t("common.unknown"));
     const existingOption = planOptions.get(option.id);
     planOptions.set(option.id, { ...option, count: (existingOption?.count ?? 0) + 1 });
   }
@@ -75,18 +76,18 @@ export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void
   const activePlan = view !== "accounts" || !planOptions.has(planFilter) ? "all" : planFilter;
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const matches = (...searchFields: Array<string | null | undefined>) => !normalizedQuery || searchFields.some((searchField) => searchField?.toLocaleLowerCase().includes(normalizedQuery));
-  const accountOnServer = (account: AccountSummary) => mode === "local" && Boolean(account.remoteLocation);
+  const accountNeedsRecovery = (account: AccountSummary) => Boolean(account.recoveryRequired);
   const listedAccounts = allAccounts
     .filter((account) => view !== "sources" && (view !== "selected" || accountIds.includes(account.id)))
-    .filter((account) => activePlan === "all" || accountPlanOption(account.subscription.planType, t("common.unknown")).id === activePlan)
-    .filter((account) => matches(account.identityHint, account.label, account.subscription.planType));
+    .filter((account) => activePlan === "all" || accountPlanOption(planType(account), t("common.unknown")).id === activePlan)
+    .filter((account) => matches(account.identityHint, account.label, planType(account)));
   const listedSources = allSources
     .filter((source) => view !== "accounts" && (view !== "selected" || sourceIds.includes(source.id)) && matches(source.name, source.baseUrl));
   const healthCounts = new Map<MemberPickerHealth, number>();
   const countHealth = (health: MemberPickerHealth) => healthCounts.set(health, (healthCounts.get(health) ?? 0) + 1);
   const rankedAccounts = listedAccounts.map((account) => ({
     account,
-    health: memberPickerHealth(accountPickerTone(account, accountOnServer(account))),
+    health: memberPickerHealth(accountPickerTone(account, accountNeedsRecovery(account))),
   }));
   const rankedSources = listedSources.map((source) => ({
     source,
@@ -103,7 +104,7 @@ export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void
   const accounts = rankedAccounts
     .filter((rankedAccount) => matchesHealth(rankedAccount.health))
     .sort((left, right) => compareMemberPickerHealth(left.health, right.health)
-      || compareAccountPlans(accountPlanOption(left.account.subscription.planType, t("common.unknown")), accountPlanOption(right.account.subscription.planType, t("common.unknown")))
+      || compareAccountPlans(accountPlanOption(planType(left.account), t("common.unknown")), accountPlanOption(planType(right.account), t("common.unknown")))
       || compareStableText(left.account.label, right.account.label))
     .map((rankedAccount) => rankedAccount.account);
   const sources = rankedSources
@@ -186,7 +187,7 @@ export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void
           icon={<Plus aria-hidden />}
           aria-label={t("sources.addToPool")}
           disabled={!canAddSource || saving}
-          title={!canAddSource ? t("remote.capabilityUnavailable") : undefined}
+          title={!canAddSource ? t("common.unsupported") : undefined}
           onClick={onAddSource}
         >
           {t("pool.newSource")}
@@ -239,10 +240,10 @@ export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void
             {accounts.map((account) => (
               <MemberOption
                 key={account.id}
-                {...accountPickerStatus(account, mode === "local" && Boolean(account.remoteLocation), t)}
+                {...accountPickerStatus(account, accountNeedsRecovery(account), t)}
                 name={account.label}
                 icon={<UserRound />}
-                badge={<AccountBadges planType={account.subscription.planType} oauthClientKind={account.oauthClientKind} unknown={t("common.unknown")} />}
+                badge={<AccountBadges planType={planType(account)} oauthClientKind={account.oauthClientKind} unknown={t("common.unknown")} />}
                 checked={accountIds.includes(account.id)}
                 disabled={saving}
                 onChange={() => setAccountIds((previousAccountIds) => toggle(previousAccountIds, account.id))}

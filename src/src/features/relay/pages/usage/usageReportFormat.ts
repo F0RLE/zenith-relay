@@ -74,6 +74,8 @@ export function requestStatusLabel(row: RequestStatusRow, t: TFunction): string 
 }
 
 export function formatRequestOrigin(origin: Exclude<CodexRequestOrigin, null>, t: TFunction): string {
+  if (origin === "memory_extraction" || origin === "blocked_memory_extraction") return t("codex.memoryExtractionTitle");
+  if (origin === "memory_consolidation" || origin === "blocked_memory_consolidation") return t("codex.memoryConsolidationTitle");
   if (origin === "activity_summary" || origin === "blocked_activity_summary") return t("codex.activitySummary");
   return t("codex.taskTitle");
 }

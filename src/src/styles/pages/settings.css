@@ -288,19 +288,7 @@
   width: 100%;
 }
 
-.opencode-recovery-status {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px;
-  border: 1px solid var(--relay-border);
-  border-radius: 6px;
-  background: var(--relay-subtle);
-}
-
-.toggle-row,
-.form-row {
+.toggle-row {
   display: flex;
   align-items: center;
   gap: 10px;

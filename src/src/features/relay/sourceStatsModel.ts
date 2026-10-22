@@ -14,6 +14,7 @@ export function sourceStatsStatus(stats: SourceStats): SourceStatsStatus {
 }
 
 export function settledSourceStats(previousStats: SourceStats | null, nextStats: SourceStats): SourceStatsState {
+  if (previousStats?.asOfMs != null && nextStats.asOfMs != null && previousStats.asOfMs > nextStats.asOfMs) nextStats = previousStats;
   const status = sourceStatsStatus(nextStats);
   const failed = status !== "available" && status !== "unsupported";
   const retained = failed && previousStats && sourceStatsStatus(previousStats) === "available";

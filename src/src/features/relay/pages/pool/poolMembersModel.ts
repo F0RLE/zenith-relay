@@ -1,5 +1,5 @@
-import type { AccountSummary, CandidateRuntimeSnapshot, PoolRoutingMode, RuntimeActivitySnapshot, RuntimeActivityState, RuntimeSnapshot } from "../../api/types";
-import { compareOperationalStatus, currentAccountErrorCode } from "../../accountStatus";
+import type { AccountSummary, CandidateRuntimeSnapshot, OperationalStatus, PoolRoutingMode, RuntimeActivitySnapshot, RuntimeActivityState, RuntimeSnapshot } from "../../api/types";
+import { currentAccountErrorCode } from "../../accountStatus";
 import { providerCreditsSummary, type ProviderCreditsSummary } from "../../providerCredits";
 import {
   activeModelCounts,
@@ -10,18 +10,23 @@ import {
   runtimeCandidateForMember,
   compareRoutingOrder,
 } from "../../routingOrder";
-import { comparePoolMembers, compareStableText, memberName, type PoolMember } from "../../poolHelpers";
+import { compareStableText, memberName, type PoolMember } from "../../poolHelpers";
 import { modelIdKey } from "../../modelGroups";
 
 export type PoolMemberStatusCounts = {
   rotation: number;
   quotaWait: number;
+  waiting: number;
   errors: number;
   disabled: number;
 };
 
 export type PoolProviderCreditsSummary = ProviderCreditsSummary;
 type ResourceHeadroom = CandidateRuntimeSnapshot["resourceHeadroom"];
+type PoolMemberDisplayStatus = OperationalStatus | "cooldown" | "busy" | "draining";
+const DISPLAY_STATUS_ORDER: Record<PoolMemberDisplayStatus, number> = {
+  rotation: 0, quotaWait: 1, cooldown: 1, busy: 1, unavailable: 2, disabled: 3, draining: 3,
+};
 
 export type PoolActivityState = {
   activeMembers: PoolMember[];
@@ -38,7 +43,7 @@ export function poolMembersFromRuntime(runtime: RuntimeSnapshot | null): PoolMem
   if (!runtime) return [];
   return [
     ...runtime.accounts
-      .filter((account) => account.inPool)
+      .filter((account) => account.inPool && !account.routeInactive)
       .map((account) => ({ ...account, kind: "account" as const })),
     ...runtime.sources
       .filter((source) => source.inPool)
@@ -135,14 +140,49 @@ function compareDisplayedPoolMembers(
   mode?: PoolRoutingMode | null,
   runtimeByMember?: ReadonlyMap<string, CandidateRuntimeSnapshot | undefined>,
 ) {
-  const status = compareOperationalStatus(left.operationalStatus, right.operationalStatus);
-  if (status || mode !== "automatic") return status || comparePoolMembers(left, right, order);
-  const leftHeadroom = runtimeByMember?.get(left.id)?.resourceHeadroom;
-  const rightHeadroom = runtimeByMember?.get(right.id)?.resourceHeadroom;
-  return compareRoutingRemainder(left, right, leftHeadroom, rightHeadroom)
-    || compareCreditsWhenQuotaIsEmpty(left, right, leftHeadroom, rightHeadroom)
-    || compareRoutingOrder(left.id, right.id, order)
+  const leftRuntime = runtimeByMember?.get(left.id);
+  const rightRuntime = runtimeByMember?.get(right.id);
+  // Match the scheduler's live order before ranking candidates for new work.
+  const active = Number(activeRequestCount(rightRuntime) > 0) - Number(activeRequestCount(leftRuntime) > 0);
+  if (active) return active;
+  const leftStatus = poolMemberDisplayStatus(left, leftRuntime);
+  const rightStatus = poolMemberDisplayStatus(right, rightRuntime);
+  const status = DISPLAY_STATUS_ORDER[leftStatus] - DISPLAY_STATUS_ORDER[rightStatus];
+  if (status) return status;
+  if (leftStatus === "rotation") {
+    const rank = (candidate: CandidateRuntimeSnapshot | undefined) =>
+      candidate?.selectionRank ?? (candidate?.nextForNewRequest ? 0 : Number.MAX_SAFE_INTEGER);
+    const preference = rank(leftRuntime) - rank(rightRuntime);
+    if (preference) return preference;
+    if (mode === "automatic") {
+      const resources = compareRoutingRemainder(left, right, leftRuntime?.resourceHeadroom, rightRuntime?.resourceHeadroom)
+        || compareCreditsWhenQuotaIsEmpty(left, right, leftRuntime?.resourceHeadroom, rightRuntime?.resourceHeadroom);
+      if (resources) return resources;
+    }
+  } else if (DISPLAY_STATUS_ORDER[leftStatus] < DISPLAY_STATUS_ORDER.disabled) {
+    const retry = (leftRuntime?.nextRetryAtMs ?? Number.MAX_SAFE_INTEGER)
+      - (rightRuntime?.nextRetryAtMs ?? Number.MAX_SAFE_INTEGER);
+    if (retry) return retry;
+  }
+  return compareRoutingOrder(left.id, right.id, order)
     || compareStableText(memberName(left), memberName(right));
+}
+
+/** Explicit live waits narrow readiness; a bare unavailable preview can be stale. */
+export function poolMemberDisplayStatus(member: PoolMember, candidate?: CandidateRuntimeSnapshot): PoolMemberDisplayStatus {
+  if (!member.enabled) return "disabled";
+  if (member.draining) return "draining";
+  if (member.operationalStatus === "disabled") return "disabled";
+  if (!member.secretAvailable || (member.kind === "account" && (member.proxyAvailable === false
+    || member.recoveryRequired || member.authState.state === "requires_reauth"))) return "unavailable";
+  if (member.kind === "account" && member.routingBlockReason
+    && member.routingBlockReason !== "quota_exhausted" && member.routingBlockReason !== "not_in_pool") return "unavailable";
+  if (candidate?.available === false) {
+    if (candidate.quotaWait) return "quotaWait";
+    if (candidate.nextRetryAtMs != null) return "cooldown";
+    if (candidate.capacityWait) return "busy";
+  }
+  return member.operationalStatus;
 }
 
 /**
@@ -211,14 +251,6 @@ function savedMemberPositions(members: readonly { id: string }[] | undefined) {
     if (memberId && !positions.has(memberId)) positions.set(memberId, positions.size);
   }
   return positions;
-}
-
-export function poolMemberSourceIds(members: readonly PoolMember[]) {
-  return members
-    .filter((member) => member.kind === "source")
-    .map((member) => member.id)
-    .sort()
-    .join("\n");
 }
 
 export function poolActivityState(
@@ -335,15 +367,19 @@ function candidateKindMatchesMember(member: PoolMember, kind: CandidateRuntimeSn
   return member.kind === "account" ? kind === "oauth_account" : kind === "api_source";
 }
 
-export function poolMemberStatusCounts(members: readonly PoolMember[]): PoolMemberStatusCounts {
-  const statuses = members.map((member) => member.operationalStatus);
+export function poolMemberStatusCounts(
+  members: readonly PoolMember[],
+  runtimeByMember?: ReadonlyMap<string, CandidateRuntimeSnapshot | undefined>,
+): PoolMemberStatusCounts {
+  const statuses = members.map((member) => poolMemberDisplayStatus(member, runtimeByMember?.get(member.id)));
   return {
     rotation: statuses.filter((status) => status === "rotation").length,
     quotaWait: statuses.filter((status) => status === "quotaWait").length,
-    errors: members.filter((member) => member.kind === "account"
+    waiting: statuses.filter((status) => DISPLAY_STATUS_ORDER[status] === 1).length,
+    errors: members.filter((member, index) => member.kind === "account"
       ? Boolean(currentAccountErrorCode(member as AccountSummary))
-      : member.operationalStatus === "unavailable" || Boolean(member.lastErrorCode?.trim())).length,
-    disabled: statuses.filter((status) => status === "disabled").length,
+      : statuses[index] === "unavailable" || Boolean(member.lastErrorCode?.trim())).length,
+    disabled: statuses.filter((status) => status === "disabled" || status === "draining").length,
   };
 }
 

@@ -76,7 +76,7 @@ export function SourcesList({ query, sourceStats, onEdit, onRefresh, onRefreshSe
   if (!runtime?.sources.length) {
     return <EmptyState title={t("sources.emptyTitle")} description={t("sources.emptyDescription")} />;
   }
-  const localSource = mode !== "remote";
+  const localSource = mode === "local";
   const launchSource = launchSourceId ? sourcesSnapshot.find((source) => source.id === launchSourceId) ?? null : null;
   const sortColumn = (key: SourceSortKey) => setSort((previousSort) =>
     previousSort.key === key
@@ -117,9 +117,7 @@ export function SourcesList({ query, sourceStats, onEdit, onRefresh, onRefreshSe
     rememberFlag(setPendingEnabled, source.id, enabled);
     void perform(
       `toggle-${source.id}`,
-      () => localSource
-        ? relayCommands.setSourceEnabled(source.id, enabled)
-        : relayCommands.remoteAction({ type: "update_source", id: source.id }, { enabled }),
+      () => relayCommands.setSourceEnabled(source.id, enabled),
       "feedback.saved",
       { backgroundRefresh: true },
     ).then((ok) => {
@@ -148,8 +146,7 @@ export function SourcesList({ query, sourceStats, onEdit, onRefresh, onRefreshSe
     void perform("sources-enabled-selected", async () => {
       try {
         for (const id of sourceIds) {
-          if (localSource) await relayCommands.setSourceEnabled(id, enabled);
-          else await relayCommands.remoteAction({ type: "update_source", id }, { enabled });
+          await relayCommands.setSourceEnabled(id, enabled);
         }
       } catch (cause) {
         // Earlier commands may have succeeded; show the saved state before reporting the failure.
@@ -164,8 +161,7 @@ export function SourcesList({ query, sourceStats, onEdit, onRefresh, onRefreshSe
     await perform("sources-delete-selected", async () => {
       try {
         for (const id of sourceIds) {
-          if (localSource) await relayCommands.deleteSource(id);
-          else await relayCommands.remoteAction({ type: "delete_source", id });
+          await relayCommands.deleteSource(id);
           setSelected((previous) => previous.filter((selectedId) => selectedId !== id));
         }
       } catch (cause) {
@@ -215,10 +211,8 @@ export function SourcesList({ query, sourceStats, onEdit, onRefresh, onRefreshSe
         {selectedSources.length ? <div className="sources-selection-toolbar">
           <span>{t("sources.selectedCount", { count: selectedSources.length })}</span>
           <div className="sources-selection-actions">
-            {mode !== "zenith" ? <>
               <Button variant="secondary" icon={<ListPlus aria-hidden />} disabled={Boolean(busy) || selectedSources.every((source) => pendingPool[source.id] ?? source.inPool)} onClick={() => void updateSelectedParticipation(true)}>{t("sources.addToPoolAction")}</Button>
               <Button variant="secondary" icon={<ListMinus aria-hidden />} disabled={Boolean(busy) || selectedSources.every((source) => !(pendingPool[source.id] ?? source.inPool))} onClick={() => void updateSelectedParticipation(false)}>{t("sources.removeFromPoolAction")}</Button>
-            </> : null}
             <ActionMenu label={t("common.actions")}>
               <ActionMenuItem icon={<RefreshCw aria-hidden />} disabled={Boolean(busy)} onClick={() => onRefreshSelected(selectedSources.map((source) => source.id))}>{t("sources.refreshData")}</ActionMenuItem>
               <ActionMenuItem icon={<Power aria-hidden />} disabled={Boolean(busy) || selectedSources.every((source) => pendingEnabled[source.id] ?? source.enabled)} onClick={() => updateSelectedEnabled(true)}>{t("common.enable")}</ActionMenuItem>
@@ -300,9 +294,7 @@ export function SourcesList({ query, sourceStats, onEdit, onRefresh, onRefreshSe
                   disabled={Boolean(busy)}
                   onClick={() => void confirm(t("sources.deleteConfirm"), { danger: true }).then((accepted) => accepted && perform(
                     `delete-${source.id}`,
-                    () => localSource
-                      ? relayCommands.deleteSource(source.id)
-                      : relayCommands.remoteAction({ type: "delete_source", id: source.id }),
+                    () => relayCommands.deleteSource(source.id),
                     "feedback.deleted",
                     { backgroundRefresh: true },
                   ))}
@@ -312,13 +304,13 @@ export function SourcesList({ query, sourceStats, onEdit, onRefresh, onRefreshSe
               </ActionMenu>
             }
             actions={<>
-              {mode !== "zenith" ? <IconButton
+              <IconButton
                 className={inPool ? "danger" : ""}
                 label={t(inPool ? "sources.removeFromPoolAction" : "sources.addToPoolAction")}
                 icon={inPool ? <ListMinus aria-hidden /> : <ListPlus aria-hidden />}
                 disabled={Boolean(busy)}
                 onClick={() => void updateParticipation(source, !inPool)}
-              /> : null}
+              />
               <IconButton
                 label={t("sources.refreshData")}
                 icon={<RefreshCw aria-hidden />}

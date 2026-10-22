@@ -27,7 +27,7 @@ const modelMetadata: MockOptions["modelMetadata"] = {
   "gemini-2.5-pro": { catalogProvider: "google", catalogFamily: "gemini", catalogName: "Gemini 2.5 Pro" },
 };
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`${mode} member pricing keeps tier and model context independent through save and reset`, async ({ page }) => {
     await installTauriMock(page, {
       mode, locale: "en", populated: true,

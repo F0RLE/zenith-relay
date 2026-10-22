@@ -1,4 +1,4 @@
-import type { LocalUsage, RemoteUsage, UsageBucket, UsageTotals } from "../../api/types";
+import type { LocalUsage, UsageBucket, UsageTotals } from "../../api/types";
 import {
   emptyUsageTotals,
   totalsFromUsageSamples,
@@ -88,10 +88,6 @@ export function totalsFromSamples(samples: UsageSample[]) {
 
 export function localSamples(events: LocalUsage[]): UsageSample[] {
   return events.map((usageEvent) => ({ ...usageEvent, createdAtMs: Date.parse(usageEvent.createdAt) }));
-}
-
-export function remoteSamples(events: RemoteUsage[]): UsageSample[] {
-  return events.map((usageEvent) => ({ ...usageEvent, ttftMs: usageEvent.ttftMs ?? null, generationMs: usageEvent.generationMs ?? null }));
 }
 
 export function fillBuckets(windows: WindowBucket[], buckets: UsageBucket[]) {

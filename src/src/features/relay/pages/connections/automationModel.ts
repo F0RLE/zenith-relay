@@ -102,7 +102,6 @@ export function automationFormValid(
 export type AutomationSubmission = {
   operationId: string;
   base: Omit<WakeTask, "id" | "createdAtMs" | "updatedAtMs">;
-  remoteInput: WakeTask;
 };
 
 export function buildAutomationSubmission(input: {
@@ -112,7 +111,6 @@ export function buildAutomationSubmission(input: {
   selectorKind: AutomationSelectorKind;
   accountIds: readonly string[];
   selectedModel: string;
-  nowMs: number;
 }): AutomationSubmission {
   const {
     task,
@@ -121,7 +119,6 @@ export function buildAutomationSubmission(input: {
     selectorKind,
     accountIds,
     selectedModel,
-    nowMs,
   } = input;
   const weeklyReset = triggerKind === "weekly";
   const accountSelector = selectorKind === "account_ids"
@@ -141,12 +138,8 @@ export function buildAutomationSubmission(input: {
     jitterSeconds: task?.jitterSeconds ?? 0,
     maxAttemptsPerCycle: task?.maxAttemptsPerCycle ?? 1,
   };
-  const remoteInput = task
-    ? { ...task, ...base, updatedAtMs: nowMs }
-    : { ...base, id: "", fallbackSchedule: null, createdAtMs: nowMs, updatedAtMs: nowMs };
   return {
     operationId: task ? `automation-update-${task.id}` : "automation-create",
     base,
-    remoteInput,
   };
 }

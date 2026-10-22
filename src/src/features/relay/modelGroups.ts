@@ -20,7 +20,7 @@ export function modelIdKey(modelId: string) {
   return modelId.trim().toLowerCase();
 }
 
-/** Older servers expose metadata only on operational model rows. */
+/** Catalog metadata takes precedence over operational model rows. */
 export function memberModelCatalog(gateway: RuntimeSnapshot["gateway"] | undefined) {
   return new Map<string, ModelCatalogIdentity>([
     ...(gateway?.models ?? []).map((model): [string, ModelCatalogIdentity] => [modelIdKey(model.id), model]),

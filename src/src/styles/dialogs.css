@@ -132,7 +132,7 @@
 }
 
 .relay-dialog .secret-field > input {
-  padding-inline-end: 46px;
+  padding-inline-end: 82px;
 }
 
 .relay-dialog .source-proxy-field {
@@ -155,7 +155,7 @@
 }
 
 .relay-dialog .source-proxy-field .relay-option-trigger:focus-visible {
-  background: color-mix(in srgb, var(--relay-accent) 12%, var(--relay-dialog-field-background));
+  background: var(--relay-field-focus-background);
 }
 
 .relay-dialog .relay-field > input:hover,
@@ -169,7 +169,7 @@
 .relay-dialog .secret-field > input:focus,
 .relay-dialog .search-field > input:focus,
 .relay-dialog textarea:focus {
-  background: color-mix(in srgb, var(--relay-accent) 12%, var(--relay-dialog-field-background));
+  background: var(--relay-field-focus-background);
 }
 
 .relay-dialog .relay-dialog-body .relay-tabs {
@@ -837,21 +837,6 @@
   text-underline-offset: 2px;
 }
 
-.post-import-options {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  padding-top: 8px;
-}
-
-.post-import-options > span {
-  grid-column: 1 / -1;
-  color: var(--relay-muted);
-  font-size: 11px;
-  font-weight: 650;
-  text-transform: uppercase;
-}
-
 .import-account-list {
   display: grid;
   margin: 0;
@@ -1155,37 +1140,4 @@
   50% {
     transform: translateY(-3px);
   }
-}
-
-.deployment-result {
-  display: grid;
-  gap: 18px;
-}
-
-.deployment-result > .relay-status {
-  justify-self: start;
-}
-
-.deployment-result > label,
-.deployment-result > .relay-field {
-  min-width: 0;
-  display: grid;
-  gap: 7px;
-  margin: 0;
-}
-
-.deployment-result > label > span,
-.deployment-result > .relay-field > span {
-  color: var(--relay-muted);
-  font-size: 12px;
-}
-
-.deployment-result > label > code,
-.deployment-result > .relay-field > code {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.deployment-result > .form-note {
-  margin: 0;
 }

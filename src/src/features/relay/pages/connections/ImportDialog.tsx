@@ -44,7 +44,7 @@ export function ImportDialog({
   onClose: () => void;
 }) {
   const { t } = useTranslation();
-  const { mode: currentMode, runtime, perform, busy } = useRelayState();
+  const { mode: currentMode, perform, busy } = useRelayState();
   const relayMode = modeOverride ?? currentMode;
   const { pool: proxyPool } = useProxyPool(relayMode === "local");
   const [content, setContent] = useState("");
@@ -65,9 +65,9 @@ export function ImportDialog({
   const pendingSelection = useRef<ImportedSelection | null>(null);
   const importedToPool = useRef(false);
   const closing = useRef(false);
-  const supportsImportToPool = relayMode !== "remote" || Boolean(runtime?.capabilities.features.includes("account_import_to_pool"));
+  const supportsImportToPool = relayMode === "local";
   const poolItemIds = new Set(session?.preview.rows
-    .filter((row) => selected.includes(row.itemId) && row.status !== "invalid" && (row.authMode === "api_key" || canAccountJoinPool(row)))
+    .filter((row) => selected.includes(row.itemId) && row.status !== "invalid" && row.oauthClientKind !== "siwc" && (row.authMode === "api_key" || canAccountJoinPool(row)))
     .map((row) => row.itemId));
   const canImportToPool = supportsImportToPool && poolItemIds.size > 0;
   const importOperationBusy = busy?.startsWith("import-") ?? false;
@@ -124,13 +124,6 @@ export function ImportDialog({
       }
       return;
     }
-    const captured = await captureOperationResult(
-      (work) => perform("import-preview", work, undefined, { backgroundRefresh: true }),
-      async () => await relayCommands.remoteAction({ type: "preview_account_batch_import" }, { content }) as ImportSession,
-    );
-    if (!mounted.current) return;
-    if (captured.ok && captured.value) acceptSession(captured.value);
-    else if (!captured.ok) setCommandFailed(true);
   };
   const chooseFiles = async (paths?: string[]) => {
     setFileLoading(true);
@@ -140,9 +133,7 @@ export function ImportDialog({
       captured = await captureOperationResult(
         (work) => perform("import-files", work, undefined, { backgroundRefresh: true }),
         async () => {
-          const session = relayMode === "local"
-            ? await relayCommands.previewImportFiles(paths)
-            : await relayCommands.previewRemoteImportFiles(paths);
+          const session = await relayCommands.previewImportFiles(paths);
           if (session) {
             activeSessionId.current = session.sessionId;
             createdSessionId = session.sessionId;
@@ -205,7 +196,7 @@ export function ImportDialog({
         return;
       }
       const eligibleItemIds = new Set(session.preview.rows
-        .filter((row) => selectedIds.includes(row.itemId) && row.status !== "invalid" && (row.authMode === "api_key" || canAccountJoinPool(row)))
+        .filter((row) => selectedIds.includes(row.itemId) && row.status !== "invalid" && row.oauthClientKind !== "siwc" && (row.authMode === "api_key" || canAccountJoinPool(row)))
         .map((row) => row.itemId));
       const includeInPool = addToPool && supportsImportToPool && eligibleItemIds.size > 0;
       const acceptImportedSelection = async (result: ConfirmAccountImportResponse) => {
@@ -237,20 +228,6 @@ export function ImportDialog({
         if (captured.value) await acceptImportedSelection(captured.value);
         return;
       }
-      const captured = await captureOperationResult(
-        (work) => perform("import-confirm", work, "feedback.accountAdded", { backgroundRefresh: true }),
-        async () => await relayCommands.remoteAction(
-          { type: "confirm_account_batch_import" },
-          { sessionId, selectedItemIds: selectedIds, probeMetadata: true, addToPool: includeInPool },
-        ) as ConfirmAccountImportResponse,
-      );
-      if (!mounted.current) return;
-      if (!captured.ok) {
-        setProgress(null);
-        setCommandFailed(true);
-        return;
-      }
-      if (captured.value) await acceptImportedSelection(captured.value);
     } finally {
       confirmInFlight.current = false;
     }
@@ -353,7 +330,7 @@ export function ImportDialog({
   } else if (fileLoading || busy === "import-preview") {
     importContent = <ImportFileStatus />;
   } else {
-    importContent = <ImportSourceForm mode={relayMode} choosingFiles={busy === "import-files"} content={content} onContent={setContent} onChooseFiles={() => void chooseFiles()} />;
+    importContent = <ImportSourceForm choosingFiles={busy === "import-files"} content={content} onContent={setContent} onChooseFiles={() => void chooseFiles()} />;
   }
   return (
     <Dialog className="account-import-dialog" title={t("accounts.import")} onClose={cancel} footer={footer}>
@@ -412,13 +389,11 @@ function ImportFileStatus() {
 }
 
 function ImportSourceForm({
-  mode,
   choosingFiles,
   content,
   onContent,
   onChooseFiles,
 }: {
-  mode: RelayMode;
   choosingFiles: boolean;
   content: string;
   onContent: (contentValue: string) => void;
@@ -435,9 +410,8 @@ function ImportSourceForm({
       <div className="import-source-divider"><span>{t("accounts.orPaste")}</span></div>
       <label className="relay-field">
         <span>{t("accounts.importData")}</span>
-        <textarea value={content} onChange={(event) => onContent(event.target.value)} placeholder={mode === "local" ? t("accounts.importPlaceholder") : t("accounts.remoteImportPlaceholder")} spellCheck={false} />
+        <textarea value={content} onChange={(event) => onContent(event.target.value)} placeholder={t("accounts.importPlaceholder")} spellCheck={false} />
       </label>
-      <p className="form-note">{t("accounts.importFormatsHint")}</p>
     </div>
   );
 }
@@ -494,6 +468,7 @@ function ImportPreview({
       <strong>{t("accounts.importReady")}</strong>
     </div>
     {session.preview.description ? <div className="import-package-description"><span>{t("accounts.importPackageDescription")}</span><MarkdownPreview content={session.preview.description} /></div> : null}
+    {rows.some((row) => row.oauthClientKind === "siwc") ? <p role="alert">{t("accounts.siwcImportNotice")}</p> : null}
     <ul className="import-account-list">
       <li className="import-account-card import-select-all-row">
         <label>
@@ -525,6 +500,7 @@ function ImportPreview({
                 {tone === "ready" ? null : <span className="import-row-status" data-status={tone}>{statusLabel}</span>}
               </span>
               <span className="import-account-meta">
+                {row.oauthClientKind ? <span>{t(row.oauthClientKind === "siwc" ? "accounts.oauthChatGpt" : row.oauthClientKind === "excel_bps" ? "accounts.oauthExcel" : "accounts.oauthCodex")}</span> : null}
                 <span className="import-account-identity">{row.identity}</span>
                 <AccountPlanBadge planType={row.plan ?? null} unknown={t("common.unknown")} />
               </span>

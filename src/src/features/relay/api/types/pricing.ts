@@ -47,6 +47,15 @@ export type ApiEquivalentSummary = {
   unpricedTokens: number;
 };
 
+/** Components of the same API-price estimate, not separate billed charges. */
+export type ApiEquivalentBreakdown = {
+  input: ApiEquivalentSummary | null;
+  uncachedInput: ApiEquivalentSummary | null;
+  cacheRead: ApiEquivalentSummary | null;
+  cacheWrite: ApiEquivalentSummary | null;
+  output: ApiEquivalentSummary | null;
+};
+
 export type PricingSourceSummary =
   | "provider"
   | "liteLlmExact"

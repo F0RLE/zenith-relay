@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { averageTokenSpeed, formatTokenSpeed, tokenSpeed } from "../src/features/relay/usageSpeed";
+import { formatTokenSpeed, tokenSpeed } from "../src/features/relay/usageSpeed";
 
 describe("usage token speed", () => {
   test("measures tokens after the first output over generation time", () => {
@@ -8,13 +8,9 @@ describe("usage token speed", () => {
     expect(formatTokenSpeed(speed, "en", "tok/s")).toBe("96.7 tok/s");
   });
 
-  test("uses a token-weighted average and ignores failed samples", () => {
-    expect(averageTokenSpeed([
-      { success: true, outputTokens: 30, durationMs: 500 },
-      { success: true, outputTokens: 20, durationMs: 500 },
-      { success: false, outputTokens: 100, durationMs: 100 },
-    ])).toBe(48);
-    expect(averageTokenSpeed([{ success: false, outputTokens: 8, durationMs: 300 }])).toBeNull();
+  test("ignores failed samples", () => {
+    expect(tokenSpeed({ success: false, outputTokens: 100, durationMs: 100 })).toBeNull();
+    expect(tokenSpeed({ success: false, outputTokens: 8, durationMs: 300 })).toBeNull();
   });
 
   test("subtracts separately reported reasoning tokens", () => {
@@ -34,9 +30,6 @@ describe("usage token speed", () => {
   test("ignores buffered outliers above the reasonable throughput limit", () => {
     expect(tokenSpeed({ success: true, outputTokens: 52, durationMs: 50 })).toBeNull();
     expect(tokenSpeed({ success: true, outputTokens: 51, durationMs: 51 })).toBeCloseTo(980.3922, 4);
-    expect(averageTokenSpeed([
-      { success: true, outputTokens: 52, durationMs: 50 },
-      { success: true, outputTokens: 11, durationMs: 100 },
-    ])).toBe(100);
+    expect(tokenSpeed({ success: true, outputTokens: 11, durationMs: 100 })).toBe(100);
   });
 });

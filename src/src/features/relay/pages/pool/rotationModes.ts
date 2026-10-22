@@ -11,9 +11,7 @@ export function usesRequestShares(mode: PoolRoutingMode) {
 }
 
 export function supportsRotationEditing(policy: PoolRoutingSnapshot | undefined, features: readonly string[]): policy is PoolRoutingPolicy {
-  return policy != null && ((policy.version === 3 && features.includes("rotation_v3"))
-    || (policy.version === 2 && features.includes("rotation_v2")
-      && (policy.mode === "automatic" || policy.mode === "in_order" || policy.mode === "round_robin")));
+  return policy != null && policy.version === 3 && features.includes("rotation_v3");
 }
 
 export function applyRotationPreset(policy: PoolRoutingPolicy, preset: RotationPreset): PoolRoutingPolicy {

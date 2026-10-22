@@ -11,17 +11,8 @@ import {
 
 type RuntimeRoutingOrder = NonNullable<RuntimeSnapshot["gateway"]["routingOrder"]>;
 
-export function visibleLocalRoutingOrder(
-  base: RuntimeRoutingOrder,
-  overlay: ReadonlyMap<string, RuntimeActivitySnapshot>,
-) {
-  return applyRuntimeActivities(
-    base,
-    overlay.values(),
-  );
-}
-
 export function useRuntimeEvents({
+  requestRoutingRefresh,
   modeRef,
   pageRef,
   stateRevision,
@@ -33,6 +24,7 @@ export function useRuntimeEvents({
   setUsageRevision,
   runBackgroundRefresh,
 }: {
+  requestRoutingRefresh: () => void;
   modeRef: MutableRefObject<RelayMode>;
   pageRef: MutableRefObject<PageId>;
   stateRevision: MutableRefObject<number>;
@@ -68,9 +60,13 @@ export function useRuntimeEvents({
       pendingRuntimeActivity = null;
       if (pending) {
         const candidates = Object.fromEntries(runtimeActivityOverlay.current);
-        setRuntimeActivity((previousActivitySnapshot) => compareRuntimeActivity(pending, previousActivitySnapshot) > 0
-          ? { ...pending, candidates }
-          : previousActivitySnapshot);
+        setRuntimeActivity((previousActivitySnapshot) => {
+          // A late event can still be new for a different candidate.
+          const latestActivity = compareRuntimeActivity(pending, previousActivitySnapshot) > 0
+            ? pending
+            : previousActivitySnapshot;
+          return { ...latestActivity, candidates };
+        });
       }
       if (document.visibilityState !== "visible" || !isRuntimeRefreshPage(pageRef.current)) return;
       setRuntime((snapshot) => {
@@ -79,7 +75,7 @@ export function useRuntimeEvents({
         const baseOrder = runtimeRoutingOrderBase.current.length
           ? runtimeRoutingOrderBase.current
           : currentOrder;
-        const nextOrder = visibleLocalRoutingOrder(baseOrder, runtimeActivityOverlay.current);
+        const nextOrder = applyRuntimeActivities(baseOrder, runtimeActivityOverlay.current.values());
         return nextOrder === currentOrder
           ? snapshot
           : { ...snapshot, gateway: { ...snapshot.gateway, routingOrder: nextOrder } };
@@ -155,6 +151,7 @@ export function useRuntimeEvents({
         };
       }
       scheduleRuntimeActivityFlush();
+      requestRoutingRefresh();
     }).then((stop) => {
       if (active) unlistenRuntimeActivity = stop;
       else stop();
@@ -181,5 +178,5 @@ export function useRuntimeEvents({
       unlistenUsage?.();
       unlistenRuntimeActivity?.();
     };
-  }, [runBackgroundRefresh]);
+  }, [requestRoutingRefresh, runBackgroundRefresh]);
 }

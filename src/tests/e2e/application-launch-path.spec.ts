@@ -72,6 +72,8 @@ for (const application of applications) {
 
     await form.getByRole("button", { name: "Browse application", exact: true }).click();
     await expect(input).toHaveValue(application.detected);
+    expect((await calls(page)).filter((call) => call.command === "pick_application_launch_path").at(-1)?.args)
+      .toEqual({ application: application.id, path: application.path });
     await expect(form.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
     expect((await calls(page)).filter((call) => call.command === "set_application_launch_path")).toHaveLength(1);
     await input.press("Enter");
@@ -88,6 +90,25 @@ for (const application of applications) {
     expect((await calls(page)).filter((call) => call.command === "set_application_launch_path").at(-1)?.args)
       .toEqual({ application: application.id, path: null });
     expect((await calls(page)).filter((call) => /^(launch_|restart_|connect_|attach_|restore_)/.test(call.command))).toEqual([]);
+  });
+
+  test(`${application.name} opens the picker at the detected path or unsaved draft`, async ({ page }) => {
+    await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+    await page.goto("/");
+    await openApplications(page);
+    const form = await selectApplication(page, application);
+    const picker = form.getByRole("button", { name: "Browse application", exact: true });
+    await picker.click();
+    await expect(form.getByRole("textbox")).toHaveValue(application.detected);
+    expect((await calls(page)).filter((call) => call.command === "pick_application_launch_path").at(-1)?.args)
+      .toEqual({ application: application.id, path: application.detected });
+
+    await form.getByRole("textbox").fill(`  ${application.path}  `);
+    await picker.click();
+    await expect(form.getByRole("textbox")).toHaveValue(application.detected);
+    expect((await calls(page)).filter((call) => call.command === "pick_application_launch_path").at(-1)?.args)
+      .toEqual({ application: application.id, path: application.path });
+    expect((await calls(page)).filter((call) => call.command === "set_application_launch_path")).toEqual([]);
   });
 }
 
@@ -183,7 +204,7 @@ test("native picker errors leave the current draft editable", async ({ page }) =
   expect((await calls(page)).filter((call) => call.command === "set_application_launch_path")).toEqual([]);
 });
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`${mode} mode keeps application launch preferences on this computer`, async ({ page }) => {
     await installTauriMock(page, { mode, locale: "en", populated: true });
     await page.goto("/");
@@ -202,11 +223,11 @@ for (const mode of ["local", "remote"] as const) {
   });
 }
 
-test("direct API mode keeps Access hidden and does not load launch preferences", async ({ page }) => {
-  await installTauriMock(page, { mode: "zenith", locale: "en", populated: true });
+test("overview keeps Access available without loading launch preferences", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Access", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Access", exact: true })).toBeVisible();
   expect((await calls(page)).filter((call) => call.command.includes("application_launch_path"))).toEqual([]);
 });
 

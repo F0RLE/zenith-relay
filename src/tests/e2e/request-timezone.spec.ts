@@ -8,7 +8,7 @@ async function openAccountSettings(page: Page, russian = false) {
   await page.getByRole("tab", { name: "ChatGPT", exact: true }).click();
 }
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`${mode} changing the default timezone source preserves account overrides`, async ({ page }, testInfo) => {
     await installTauriMock(page, { mode, locale: "en", populated: true, accountCount: 2 });
     await page.goto("/");
@@ -49,12 +49,6 @@ for (const mode of ["local", "remote"] as const) {
   });
 }
 
-test("older servers do not offer unsupported timezone commands", async ({ page }) => {
-  await installTauriMock(page, { mode: "remote", locale: "en", populated: true, remoteFeatures: ["accounts", "quota"] });
-  await page.goto("/");
-  await openAccountSettings(page);
-  await expect(page.getByRole("button", { name: /^Default request timezone:/ })).toHaveCount(0);
-});
 
 test("Russian timezone settings fit a narrow dark window", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 640, height: 900 });

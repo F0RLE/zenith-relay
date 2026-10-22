@@ -1,4 +1,6 @@
 import type { Analytics } from "./overviewAnalyticsModel";
+import type { UsageTotals } from "../../api/types";
+import { emptyUsageTotals } from "../../usageTotals";
 
 const MAX_CACHED_ANALYTICS = 8;
 const ANALYTICS_REVALIDATION_COOLDOWN_MS = 1_000;
@@ -8,6 +10,21 @@ const analyticsCache = new Map<string, AnalyticsCacheEntry>();
 const analyticsInFlight = new Map<string, Promise<Analytics | null>>();
 let cacheHydrated = false;
 
+function validCounter(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function validTotals(value: unknown): value is UsageTotals {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const counters = value as Record<string, unknown>;
+  const { apiEquivalent, ...fields } = emptyUsageTotals();
+  const equivalent = counters["apiEquivalent"];
+  return Object.keys(fields).every((key) => validCounter(counters[key])
+    || (counters[key] === undefined && (key === "cacheWriteInputTokens" || key === "cacheWriteInputSamples")))
+    && equivalent != null && typeof equivalent === "object" && !Array.isArray(equivalent)
+    && Object.keys(apiEquivalent).every((key) => validCounter((equivalent as Record<string, unknown>)[key]));
+}
+
 function hydrateCache() {
   if (cacheHydrated) return;
   cacheHydrated = true;
@@ -16,12 +33,13 @@ function hydrateCache() {
     if (!stored) return;
     const storedEntries: unknown = JSON.parse(stored);
     if (!Array.isArray(storedEntries)) return;
-    storedEntries.forEach((storedEntry) => {
+    storedEntries.slice(-MAX_CACHED_ANALYTICS).forEach((storedEntry) => {
       if (!storedEntry || typeof storedEntry !== "object") return;
       const storedEntryRecord = storedEntry as { scope?: unknown; value?: unknown };
       if (typeof storedEntryRecord.scope !== "string" || !storedEntryRecord.value || typeof storedEntryRecord.value !== "object") return;
       const analytics = storedEntryRecord.value as Partial<Analytics>;
-      if (!analytics.totals || typeof analytics.totals !== "object" || !Array.isArray(analytics.buckets)) return;
+      if (!validTotals(analytics.totals) || !Array.isArray(analytics.buckets)
+        || !analytics.buckets.every((bucket) => bucket != null && Number.isFinite(bucket.startMs) && validTotals(bucket.totals))) return;
       // Persisted snapshots are for immediate display only. Always revalidate
       // them after a process restart instead of treating them as fresh.
       analyticsCache.set(storedEntryRecord.scope, { analytics: analytics as Analytics, updatedAt: 0 });
@@ -64,13 +82,18 @@ export function rememberOverviewAnalytics(scope: string, analytics: Analytics) {
 export function isOverviewAnalyticsFresh(scope: string, now = Date.now()) {
   hydrateCache();
   const cacheEntry = analyticsCache.get(scope);
-  return Boolean(cacheEntry && now - cacheEntry.updatedAt < ANALYTICS_REVALIDATION_COOLDOWN_MS);
+  const age = cacheEntry ? now - cacheEntry.updatedAt : Infinity;
+  return age >= 0 && age < ANALYTICS_REVALIDATION_COOLDOWN_MS;
 }
 
 /** Deduplicates concurrent refreshes for the same report scope. */
-export function loadOverviewAnalytics(scope: string, loader: () => Promise<Analytics | null>) {
+export function loadOverviewAnalytics(scope: string, loader: () => Promise<Analytics | null>, force = false): Promise<Analytics | null> {
   const existing = analyticsInFlight.get(scope);
-  if (existing) return existing;
+  if (existing) {
+    if (!force) return existing;
+    const reload = () => loadOverviewAnalytics(scope, loader);
+    return existing.then(reload, reload);
+  }
   const analyticsRequest = loader()
     .then((loadedAnalytics) => {
       if (loadedAnalytics) rememberOverviewAnalytics(scope, loadedAnalytics);

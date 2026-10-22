@@ -30,16 +30,16 @@ export function applyPoolRoutingEdits(policy: PoolRoutingPolicy, edits: readonly
   }, policy);
 }
 
-export const readRoutingRuntime = (mode: RelayMode) => mode === "local" ? relayCommands.localState() : relayCommands.remoteState();
+export const readRoutingRuntime = (mode: RelayMode) => mode === "local" ? relayCommands.localState() : Promise.resolve(null);
 
 export async function persistPoolRoutingEdits(mode: RelayMode, edits: readonly PoolRoutingEdit[]) {
   for (let attempt = 0; ; attempt += 1) {
     const runtime = await readRoutingRuntime(mode);
     const currentPolicy = runtime?.gateway.poolRouting;
     if (!runtime || !currentPolicy) throw { code: "unsupported_schema", message: "pool routing is unavailable" };
-    if (!supportsRotationEditing(currentPolicy, runtime.capabilities.features)) throw { code: "unsupported_schema", message: "pool rotation is unavailable on this server" };
+    if (!supportsRotationEditing(currentPolicy, runtime.capabilities.features)) throw { code: "unsupported_schema", message: "pool rotation is unavailable in this local runtime" };
     const updatedPolicy = applyPoolRoutingEdits(currentPolicy, edits);
-    if (!supportsRotationEditing(updatedPolicy, runtime.capabilities.features)) throw { code: "unsupported_schema", message: "this rotation strategy requires an updated server" };
+    if (!supportsRotationEditing(updatedPolicy, runtime.capabilities.features)) throw { code: "unsupported_schema", message: "this rotation strategy requires an updated local runtime" };
     if (JSON.stringify(updatedPolicy) === JSON.stringify(currentPolicy)) return currentPolicy;
     try {
       await persistRoutingPolicy(mode, {

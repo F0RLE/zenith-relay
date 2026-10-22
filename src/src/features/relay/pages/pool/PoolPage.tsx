@@ -28,16 +28,12 @@ export function PoolPage() {
   const [configurationPreview, setConfigurationPreview] = useState<ConfigurationPresetPreview | null>(null);
   const oauth = useOAuthSignIn(() => refresh());
   const claudeDesktop = useClaudeDesktopLaunch();
-  const supportsModels = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("models"));
-  const supportsModelOrderReset = mode === "local" || Boolean(runtime?.capabilities.features.includes("model_order_reset"));
-  const supportsMembers = mode !== "remote" || Boolean(runtime?.capabilities.features.some((feature) => feature === "accounts" || feature === "sources"));
-  const supportsRoutingSettings = Boolean(runtime);
-  const supportsConfigurationPresets = mode === "local" || Boolean(runtime?.capabilities.features.includes("configuration_presets"));
-  const canSaveConfigurationPreset = mode === "local" || supportsConfigurationPresets;
-  const reauthenticateAccount = (account: AccountSummary) => void oauth.start(false, account.id);
+  const localPool = mode === "local";
+  const supportsRoutingSettings = localPool && Boolean(runtime);
+  const reauthenticateAccount = (account: AccountSummary, automatic = false) => void oauth.start(automatic, account.id, undefined, undefined, automatic);
   useEffect(() => {
-    if (view === "models" && !supportsModels) setView("members");
-  }, [view, supportsModels]);
+    if (view === "models" && !localPool) setView("members");
+  }, [view, localPool]);
   const selectedOauthAccountId = codexPoolOauthSelection !== "none"
     && runtime?.accounts.some((account) => account.id === codexPoolOauthSelection && isCodexOauthAccountEligible(account))
     ? codexPoolOauthSelection
@@ -56,11 +52,9 @@ export function PoolPage() {
     ...(launchApplicationAfterConnect ? { afterWork: claudeDesktop.launch } : {}),
   });
   const running = Boolean(runtime?.gateway.running);
-  const exportConfiguration = () => perform("configuration-preset-export", mode === "local" ? relayCommands.exportLocalConfigurationPreset : relayCommands.exportRemoteConfigurationPreset, undefined, { backgroundRefresh: true });
+  const exportConfiguration = () => perform("configuration-preset-export", relayCommands.exportLocalConfigurationPreset, undefined, { backgroundRefresh: true });
   const previewConfiguration = () => perform("configuration-preset-preview", async () => {
-    const preview = mode === "local"
-      ? await relayCommands.previewLocalConfigurationPreset()
-      : await relayCommands.previewRemoteConfigurationPreset();
+    const preview = await relayCommands.previewLocalConfigurationPreset();
     if (preview) setConfigurationPreview(preview);
   }, undefined, { backgroundRefresh: true });
   const action = <div className="pool-header-actions">
@@ -69,25 +63,23 @@ export function PoolPage() {
         data-action="pool-add"
         aria-label={t("pool.addMember")}
         icon={<Plus aria-hidden />}
-        disabled={!supportsMembers}
-        title={!supportsMembers ? t("remote.capabilityUnavailable") : undefined}
+        disabled={!localPool}
+        title={!localPool ? t("common.unsupported") : undefined}
         onClick={() => setAddMembers(true)}
       >
         {t("pool.addMemberShort")}
       </Button>
     ) : null}
-    {view === "models" && supportsModelOrderReset ? (
+    {view === "models" && localPool ? (
       <IconButton
         className="pool-header-icon"
         label={t("models.resetOrder")}
         icon={busy === "model-order-reset" ? <Loader2 className="spin" aria-hidden /> : <RotateCcw aria-hidden />}
         disabled={busy === "model-order" || busy === "model-order-reset" || !runtime?.gateway.models?.length}
-        onClick={() => void perform("model-order-reset", () => mode === "local"
-          ? relayCommands.setModelDisplayOrder([])
-          : relayCommands.remoteAction({ type: "set_model_order" }, { modelIds: [] }), "feedback.saved", { backgroundRefresh: true })}
+        onClick={() => void perform("model-order-reset", () => relayCommands.setModelDisplayOrder([]), "feedback.saved", { backgroundRefresh: true })}
       />
     ) : null}
-    {mode === "local" ? (
+    {localPool ? (
       <Button
         data-action="pool-connect"
         variant="primary"
@@ -101,7 +93,7 @@ export function PoolPage() {
         {t("pool.connect")}
       </Button>
     ) : null}
-    {canSaveConfigurationPreset ? <ActionMenu className="pool-preset-menu" label={t("pool.configurationPreset")}>
+    {localPool ? <ActionMenu className="pool-preset-menu" label={t("pool.configurationPreset")}>
       <ActionMenuItem
         icon={busy === "configuration-preset-export" ? <Loader2 className="spin" aria-hidden /> : <Download aria-hidden />}
         disabled={busy === "configuration-preset-export"}
@@ -109,18 +101,16 @@ export function PoolPage() {
       >
         {t("pool.exportConfiguration")}
       </ActionMenuItem>
-      {supportsConfigurationPresets ? (
-        <ActionMenuItem
-          icon={busy === "configuration-preset-preview" ? <Loader2 className="spin" aria-hidden /> : <Upload aria-hidden />}
-          disabled={busy === "configuration-preset-preview"}
-          onClick={() => void previewConfiguration()}
-        >
-          {t("pool.importConfiguration")}
-        </ActionMenuItem>
-      ) : null}
+      <ActionMenuItem
+        icon={busy === "configuration-preset-preview" ? <Loader2 className="spin" aria-hidden /> : <Upload aria-hidden />}
+        disabled={busy === "configuration-preset-preview"}
+        onClick={() => void previewConfiguration()}
+      >
+        {t("pool.importConfiguration")}
+      </ActionMenuItem>
     </ActionMenu> : null}
   </div>;
-  const tabs = [{ id: "members", label: t("pool.members") }, ...(supportsModels ? [{ id: "models", label: t("pool.modelRules") }] : [])];
+  const tabs = [{ id: "members", label: t("pool.members") }, ...(localPool ? [{ id: "models", label: t("pool.modelRules") }] : [])];
   return <section className="relay-page relay-workspace-page" data-view={view}>
     <PageHeader title={t("nav.pool")} actions={action} navigation={<Tabs value={view} onChange={(viewId) => setView(viewId as View)} label={t("pool.views")} items={tabs} />} />
     {view === "members" ? (
@@ -146,7 +136,6 @@ export function PoolPage() {
     {configurationPreview ? (
       <ConfigurationPresetDialog
         preview={configurationPreview}
-        mode={mode === "remote" ? "remote" : "local"}
         onClose={() => setConfigurationPreview(null)}
       />
     ) : null}
@@ -155,12 +144,12 @@ export function PoolPage() {
   </section>;
 }
 
-function ConfigurationPresetDialog({ preview, mode, onClose }: { preview: ConfigurationPresetPreview; mode: "local" | "remote"; onClose: () => void }) {
+function ConfigurationPresetDialog({ preview, onClose }: { preview: ConfigurationPresetPreview; onClose: () => void }) {
   const { t } = useTranslation();
   const { perform, busy } = useRelayState();
   const apply = async () => {
     if (!preview.changes.length) return onClose();
-    const applyPreset = mode === "local" ? relayCommands.applyLocalConfigurationPreset : relayCommands.applyRemoteConfigurationPreset;
+    const applyPreset = relayCommands.applyLocalConfigurationPreset;
     if (await perform("configuration-preset-apply", () => applyPreset(preview), "feedback.saved", { backgroundRefresh: true })) onClose();
   };
   return (

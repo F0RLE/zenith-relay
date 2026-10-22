@@ -7,6 +7,10 @@ export type AccountLoginDraft = {
 
 const drafts = new Map<string, AccountLoginDraft>();
 
+export function getAccountLoginDraft(loginId: string) {
+  return drafts.get(loginId);
+}
+
 export function rememberAccountLoginDraft(loginId: string, draft: AccountLoginDraft) {
   if (!draft.email && !draft.phone && !draft.password && !draft.totpSecret) {
     drafts.delete(loginId);

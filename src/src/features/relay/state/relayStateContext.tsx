@@ -3,15 +3,11 @@ import type {
   LocalUsagePage,
   PageId,
   ProfileActivation,
-  ProfileBinding,
   RelayMode,
-  RemoteUsage,
-  RemoteUsagePage,
-  RemoteUsageQuery,
+  UsageQuery,
   RuntimeActivityState,
   RuntimeSnapshot,
 } from "../api/types";
-import type { UiState } from "../api/commands";
 import type { Feedback, PerformOptions } from "./relayOperationModel";
 import type { UsageLoadOptions } from "./useRelayUsage";
 
@@ -31,14 +27,12 @@ export type RelayContextValue = {
   accountValueVisible: boolean;
   setAccountValueVisible: (visible: boolean) => void;
   accountDisplayName: (accountId?: string | null, fallbackLabel?: string | null) => string | null;
-  readyState: UiState | null;
   loading: boolean;
   busy: string | null;
   feedback: Feedback;
   refresh: (force?: boolean) => Promise<void>;
   perform: (operationId: string, work: () => Promise<unknown>, successKey?: string, options?: PerformOptions) => Promise<boolean>;
   activateCodexProfile: (profileId: string, work: () => Promise<ProfileActivation>, launchAfter?: boolean) => Promise<boolean>;
-  launchCodexProfile: (binding: ProfileBinding) => Promise<boolean>;
   clearFeedback: () => void;
   onboardingComplete: boolean;
   finishOnboarding: (mode: RelayMode) => void;
@@ -63,10 +57,7 @@ export type RelayContextValue = {
 
 export type RelayUsageContextValue = {
   localUsagePage: LocalUsagePage | null;
-  loadLocalUsage: (query: RemoteUsageQuery, options?: UsageLoadOptions) => Promise<LocalUsagePage>;
-  remoteUsage: RemoteUsage[];
-  remoteUsagePage: RemoteUsagePage | null;
-  loadRemoteUsage: (query: RemoteUsageQuery, options?: UsageLoadOptions) => Promise<RemoteUsagePage | null>;
+  loadLocalUsage: (query: UsageQuery, options?: UsageLoadOptions) => Promise<LocalUsagePage>;
   usageRevision: number;
 };
 

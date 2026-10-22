@@ -105,15 +105,6 @@ test("a failed Claude restore keeps the confirmation and saved recovery availabl
   expect(await commands(page)).not.toContain("launch_claude_desktop");
 });
 
-test("remote mode never inspects or restores local Claude profiles", async ({ page }) => {
-  await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Recovery", exact: true }).click();
-  await page.getByRole("tab", { name: "Claude Desktop", exact: true }).click();
-  await expect(page.getByText("Recovery is available on this computer", { exact: true })).toBeVisible();
-  await expect(page.locator(".profile-recovery-claude-desktop")).toHaveCount(0);
-  expect((await commands(page)).filter((command) => command.includes("claude_desktop"))).toEqual([]);
-});
 
 for (const locale of ["en", "ru"] as const) {
   for (const width of [390, 1160]) {

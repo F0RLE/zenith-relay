@@ -1,10 +1,10 @@
 import "../../../../styles/pages/usage.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, CalendarDays, CheckCircle2, CreditCard, Database, Download, Gauge, RefreshCw, SlidersHorizontal, Trash2, TrendingUp, X } from "lucide-react";
+import { CalendarDays, Download, RefreshCw, SlidersHorizontal, Trash2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { RemoteUsageQuery, UsageTotals } from "../../api/types";
-import { ActionMenu, ActionMenuItem, EmptyState, IconButton, OptionMenu, PageHeader, Tabs, useConfirm } from "../../components/Ui";
+import type { UsageQuery, UsageTotals } from "../../api/types";
+import { ActionMenu, ActionMenuItem, IconButton, OptionMenu, PageHeader, Tabs, useConfirm } from "../../components/Ui";
 import { orderModelIdsBySnapshot } from "../../modelGroups";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { useRelayUsageContext } from "../../state/relayStateContext";
@@ -19,7 +19,7 @@ import { CompactNumber } from "./usageReportParts";
 import { UsageMetric } from "./UsageMetric";
 import { UsagePagination } from "./UsagePagination";
 import { AccountUsageSummary } from "./AccountUsageSummary";
-import { logicalRequestRows, totalsFromRows, usageRowsFromLocal, usageRowsFromRemote, type UsageRow } from "./usageData";
+import { logicalRequestRows, totalsFromRows, usageRowsFromLocal, type UsageRow } from "./usageData";
 import { formatUsageApiEquivalent } from "./usageFormatting";
 import { formatCompactNumber, formatFullNumber } from "../../usageTotals";
 
@@ -33,7 +33,7 @@ const AGGREGATE_SUMMARY_METRICS: UsageSummaryMetric[] = ["requests", "tokens", "
 export function UsagePage() {
   const { t, i18n } = useTranslation();
   const { mode, runtime, loading, busy, perform, accountDisplayName } = useRelayState();
-  const { usageRevision, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage } = useRelayUsageContext();
+  const { usageRevision, localUsagePage, loadLocalUsage } = useRelayUsageContext();
   const confirm = useConfirm();
   const [view, setView] = useState<View>("requests");
   const [status, setStatus] = useState("all");
@@ -51,19 +51,19 @@ export function UsagePage() {
   const [selectedRequest, setSelectedRequest] = useState<UsageRow | null>(null);
   const appliedUsageRevision = useRef(usageRevision);
   const locale = i18n.resolvedLanguage ?? i18n.language;
-  const remoteUsageSupported = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("usage"));
+  const usageSupported = mode === "local";
   const runtimeReady = runtime !== null;
   const requestFiltersActive = view === "requests";
-  const usageQuery = useMemo<RemoteUsageQuery>(() => {
+  const usageQuery = useMemo<UsageQuery>(() => {
     const model = modelQuery.trim();
     const connection = connectionQuery.trim();
     const error = requestFiltersActive ? errorQuery.trim() : "";
     const requestId = requestFiltersActive ? requestQuery.trim() : "";
-    const selectedWireApi: NonNullable<RemoteUsageQuery["wireApi"]> | undefined = requestFiltersActive && wireApi
-      ? wireApi as NonNullable<RemoteUsageQuery["wireApi"]>
+    const selectedWireApi: NonNullable<UsageQuery["wireApi"]> | undefined = requestFiltersActive && wireApi
+      ? wireApi as NonNullable<UsageQuery["wireApi"]>
       : undefined;
-    const selectedTransport: NonNullable<RemoteUsageQuery["transport"]> | undefined = requestFiltersActive && transport
-      ? transport as NonNullable<RemoteUsageQuery["transport"]>
+    const selectedTransport: NonNullable<UsageQuery["transport"]> | undefined = requestFiltersActive && transport
+      ? transport as NonNullable<UsageQuery["transport"]>
       : undefined;
     const success = view === "errors" ? false : status !== "all" ? status === "success" : undefined;
     return {
@@ -86,7 +86,7 @@ export function UsagePage() {
   }, [page, range, modelQuery, connectionQuery, wireApi, transport, status, errorQuery, requestQuery, view, requestFiltersActive]);
 
   useEffect(() => {
-    if (mode === "zenith" || !runtimeReady || !remoteUsageSupported) {
+    if (!runtimeReady || !usageSupported) {
       setUsageLoading(false);
       return;
     }
@@ -95,41 +95,33 @@ export function UsagePage() {
     appliedUsageRevision.current = usageRevision;
     setUsageLoading(true);
     setUsageError(false);
-    const loadUsage = mode === "local" ? loadLocalUsage : loadRemoteUsage;
-    loadUsage(usageQuery, { force: usageChanged })
+    loadLocalUsage(usageQuery, { force: usageChanged })
       .catch(() => isActive && setUsageError(true))
       .finally(() => isActive && setUsageLoading(false));
     return () => { isActive = false; };
-  }, [mode, runtimeReady, usageRevision, remoteUsageSupported, usageQuery, loadLocalUsage, loadRemoteUsage]);
+  }, [mode, runtimeReady, usageRevision, usageSupported, usageQuery, loadLocalUsage]);
 
 
   useEffect(() => {
     setPage(1);
     setSelectedRequest(null);
-  }, [mode, runtime?.runtimeTarget.serverId]);
+  }, [mode]);
 
   const accountLabels = useMemo(() => new Map(runtime?.accounts.map((account) => [account.id, account.label]) ?? []), [runtime?.accounts]);
   const sourceLabels = useMemo(() => new Map(runtime?.sources.map((source) => [source.id, source.name]) ?? []), [runtime?.sources]);
   const rows = useMemo<UsageRow[]>(() => {
-    if (mode === "zenith") return [];
     const labels = {
       backgroundConnection: t("codex.backgroundConnection"),
       unknownAccount: t("accounts.importUnknownAccount"),
       removedAccount: t("usage.removedAccount"),
       unknownConnection: t("common.unknown"),
     };
-    if (mode === "remote") {
-      return logicalRequestRows(usageRowsFromRemote(remoteUsage, {
-        ...labels,
-        accountDisplayName: (candidateLabel) => accountDisplayName(null, candidateLabel),
-      }));
-    }
     return logicalRequestRows(usageRowsFromLocal(localUsagePage?.events ?? [], {
       ...labels,
       accountLabels,
       sourceLabels,
     }));
-  }, [mode, remoteUsage, localUsagePage?.events, accountLabels, sourceLabels, accountDisplayName, t]);
+  }, [localUsagePage?.events, accountLabels, sourceLabels, t]);
   useEffect(() => {
     if (!selectedRequest) return;
     const currentRow = rows.find((row) => selectedRequest.requestId
@@ -137,24 +129,17 @@ export function UsagePage() {
       : row.id === selectedRequest.id);
     if (currentRow && currentRow !== selectedRequest) setSelectedRequest(currentRow);
   }, [rows, selectedRequest]);
-  const loadAttempts = useCallback(async (query: RemoteUsageQuery) => {
+  const loadAttempts = useCallback(async (query: UsageQuery) => {
     const labels = {
       backgroundConnection: t("codex.backgroundConnection"),
       unknownAccount: t("accounts.importUnknownAccount"),
       removedAccount: t("usage.removedAccount"),
       unknownConnection: t("common.unknown"),
     };
-    if (mode === "remote") {
-      const result = await relayCommands.remoteUsage(query);
-      if (!result) throw new Error("Usage history is unavailable");
-      return { ...result, rows: usageRowsFromRemote(result.events, {
-        ...labels, accountDisplayName: (label) => accountDisplayName(null, label),
-      }) };
-    }
     const result = await relayCommands.localUsagePage(query);
     return { ...result, rows: usageRowsFromLocal(result.events, { ...labels, accountLabels, sourceLabels }) };
-  }, [mode, t, accountDisplayName, accountLabels, sourceLabels]);
-  const usagePage = mode === "local" ? localUsagePage : mode === "remote" ? remoteUsagePage : null;
+  }, [t, accountLabels, sourceLabels]);
+  const usagePage = mode === "local" ? localUsagePage : null;
   const totals = usagePage?.totals ?? totalsFromRows(rows);
   const averageGenerationSpeed = observedTokensPerSecond(totals.generationOutputTokens, totals.generationMs);
   const averageE2eSpeed = observedTokensPerSecond(totals.speedOutputTokens, totals.speedDurationMs);
@@ -190,15 +175,14 @@ export function UsagePage() {
   const clearLogs = async () => {
     if (!await confirm(t("usage.clearConfirm"), { danger: true })) return;
     setPage(1);
-    await perform("usage-clear", () => mode === "local" ? relayCommands.clearLocalUsage() : relayCommands.remoteAction({ type: "clear_usage" }), "feedback.cleared", { backgroundRefresh: true });
+    await perform("usage-clear", () => relayCommands.clearLocalUsage(), "feedback.cleared", { backgroundRefresh: true });
   };
-  const canClear = mode === "local" || (mode === "remote" && remoteUsageSupported);
+  const canClear = mode === "local";
   const refreshUsage = async () => {
     setUsageLoading(true);
     setUsageError(false);
     try {
-      const loadUsage = mode === "local" ? loadLocalUsage : loadRemoteUsage;
-      await loadUsage(usageQuery, { force: true });
+      await loadLocalUsage(usageQuery, { force: true });
     } catch {
       setUsageError(true);
     } finally {
@@ -208,9 +192,7 @@ export function UsagePage() {
   const modelGroups = usagePage?.models;
   const poolMemberGroups = useMemo(() => usagePage?.poolMembers?.map((group) => ({
     ...group,
-    label: mode === "remote"
-      ? accountDisplayName(null, group.label) ?? group.label ?? t("usage.removedAccount")
-      : accountLabels.get(group.key) ?? sourceLabels.get(group.key) ?? group.label ?? t("common.unknown"),
+    label: accountLabels.get(group.key) ?? sourceLabels.get(group.key) ?? group.label ?? t("common.unknown"),
   })), [accountDisplayName, accountLabels, mode, sourceLabels, t, usagePage?.poolMembers]);
   const modelOptionIds = useMemo(() => orderModelIdsBySnapshot(
     [
@@ -234,9 +216,7 @@ export function UsagePage() {
     .map((group) => ({ value: group.key, label: group.label || group.key }))
     .sort((left, right) => left.label.localeCompare(right.label, i18n.language))
     .map((option) => [option.value, option] as const)).values())], [i18n.language, poolMemberOptionSource, t]);
-  const selectedAccount = mode !== "zenith"
-    ? runtime?.accounts.find((account) => account.id === connectionQuery)
-    : undefined;
+  const selectedAccount = runtime?.accounts.find((account) => account.id === connectionQuery);
   const errorRows = useMemo(() => rows.filter((usageRow) => !usageRow.success && requestStatusKind(usageRow) !== "pending"), [rows]);
   const clearFilters = () => {
     setRange("all"); setStatus("all"); setModelQuery(""); setConnectionQuery("");
@@ -264,10 +244,6 @@ export function UsagePage() {
     if (nextView === "models") setModelQuery("");
     if (nextView === "connections") setConnectionQuery("");
   };
-
-  if (mode === "remote" && !remoteUsageSupported) {
-    return <section className="relay-page relay-workspace-page"><PageHeader workspace title={t("nav.usage")} /><EmptyState title={t("common.unsupported")} description={t("remote.capabilityUnavailable")} /></section>;
-  }
 
   return <section className="relay-page relay-workspace-page usage-page">
     <PageHeader
@@ -304,7 +280,7 @@ export function UsagePage() {
             { value: "daily", label: t("usage.daily") },
             { value: "weekly", label: t("usage.weekly") },
             { value: "monthly", label: t("usage.monthly") },
-            { value: "all", label: t("common.all") },
+            { value: "all", label: t("usage.allTime") },
           ]}
         />
         {showStatusFilter ? <OptionMenu
@@ -385,7 +361,7 @@ export function UsagePage() {
     {view === "models" ? <AggregateView rows={rows} {...(modelGroups ? { groups: modelGroups } : {})} field="model" empty={t("usage.empty")} /> : null}
     {view === "connections" ? <AggregateView rows={rows} {...(poolMemberGroups ? { groups: poolMemberGroups } : {})} field="connection" empty={t("usage.empty")} /> : null}
     {view === "errors" ? <ErrorsView rows={errorRows} formatTime={formatTime} onSelect={setSelectedRequest} /> : null}
-    {usageError ? <p role="alert" className="form-note error-text">{t("usage.remoteLoadFailed")}</p> : null}
+    {usageError ? <p role="alert" className="form-note error-text">{t("usage.loadFailed")}</p> : null}
     {(view === "requests" || view === "errors") && usagePage && usagePage.page === page && usagePage.totalPages > 1 ? (
       <UsagePagination
         key={JSON.stringify([mode, view, status, range, modelQuery, connectionQuery, wireApi, transport, errorQuery, requestQuery])}
@@ -395,7 +371,7 @@ export function UsagePage() {
         onPageChange={changePage}
       />
     ) : null}
-    {selectedRequest ? <RequestDetails key={`${mode}:${runtime?.runtimeTarget.serverId ?? ""}:${selectedRequest.requestId ?? selectedRequest.id}`}
+    {selectedRequest ? <RequestDetails key={`${mode}:${selectedRequest.requestId ?? selectedRequest.id}`}
       row={selectedRequest} local={mode === "local"} loadAttempts={loadAttempts} onClose={() => setSelectedRequest(null)} /> : null}
   </section>;
 }
@@ -422,10 +398,10 @@ function UsageSummary({
   return (
     <section className="usage-overview" aria-label={t("usage.summary")}>
       <div className="usage-metrics">
-        {visibleMetrics.includes("requests") ? <UsageMetric icon={<Activity aria-hidden />} label={t("usage.requests")} value={<CompactNumber value={totals.requests} locale={language} />} /> : null}
+        {visibleMetrics.includes("requests") ? <UsageMetric label={t("usage.requests")} value={<CompactNumber value={totals.requests} locale={language} />} /> : null}
         {visibleMetrics.includes("success") ? (
           <UsageMetric
-            icon={<CheckCircle2 aria-hidden />}
+            className="usage-success-metric"
             label={t("common.success")}
             value={successRate == null ? "-" : `${successRate}%`}
             detail={`${formatFullNumber(totals.successfulRequests, language)} / ${formatFullNumber(totals.requests, language)}`}
@@ -433,35 +409,34 @@ function UsageSummary({
         ) : null}
         {visibleMetrics.includes("tokens") ? (
           <UsageMetric
-            icon={<Database aria-hidden />}
+            className="usage-token-metric"
             label={t("usage.totalTokens")}
             value={<CompactNumber value={totals.totalTokens} locale={language} />}
-            detail={[
-              `${t("usage.inputShort")} ${formatCompactNumber(totals.inputTokens, language)}`,
-              `${t("usage.outputShort")} ${formatCompactNumber(totals.outputTokens, language)}`,
-              `${t("usage.cachedShort")} ${totals.cachedInputSamples ? formatCompactNumber(totals.cachedInputTokens, language) : "—"}`,
-              totals.cacheWriteInputSamples
-                ? `${t("usage.cacheWriteShort")} ${formatCompactNumber(totals.cacheWriteInputTokens ?? 0, language)}`
-                : null,
-            ].filter(Boolean).join(" · ")}
             title={t("usage.tokenCompositionHint")}
           />
         ) : null}
         {visibleMetrics.includes("equivalent") ? (
           <UsageMetric
-            icon={<CreditCard aria-hidden />}
             label={t("usage.apiEquivalent")}
-            value={formatUsageApiEquivalent(totals.apiEquivalent, language)}
-            detail={t("usage.apiEquivalentCoverage", {
+            value={formatUsageApiEquivalent(totals.apiEquivalent, language, totals.apiEquivalent.microUsd >= 1_000_000 ? 2 : 4)}
+            detail={totals.apiEquivalent.unpricedTokens > 0 ? t("usage.apiEquivalentCoverage", {
               priced: formatCompactNumber(totals.apiEquivalent.pricedTokens, language),
               unpriced: formatCompactNumber(totals.apiEquivalent.unpricedTokens, language),
-            })}
-            title={t("usage.apiEquivalentHint", { count: formatFullNumber(totals.apiEquivalent.unpricedTokens, language) })}
+            }) : undefined}
+            title={`${formatUsageApiEquivalent(totals.apiEquivalent, language)} · ${t("usage.apiEquivalentHint", { count: formatFullNumber(totals.apiEquivalent.unpricedTokens, language) })}`}
           />
         ) : null}
+      </div>
+      <div className="usage-overview-details">
+        {visibleMetrics.includes("tokens") ? <dl className="usage-token-totals">
+          <div><dt>{t("usage.inputTokens")}</dt><dd><CompactNumber value={totals.inputTokens} locale={language} /></dd></div>
+          <div><dt>{t("usage.outputTokens")}</dt><dd><CompactNumber value={totals.outputTokens} locale={language} /></dd></div>
+          <div><dt>{t("usage.cachedShort")}</dt><dd>{totals.cachedInputSamples ? <CompactNumber value={totals.cachedInputTokens} locale={language} /> : "—"}</dd></div>
+          {totals.cacheWriteInputSamples ? <div><dt>{t("usage.cacheWriteShort")}</dt><dd><CompactNumber value={totals.cacheWriteInputTokens ?? 0} locale={language} /></dd></div> : null}
+        </dl> : null}
+        {visibleMetrics.includes("generationSpeed") || visibleMetrics.includes("e2eSpeed") ? <div className="usage-secondary-metrics">
         {visibleMetrics.includes("generationSpeed") ? (
           <UsageMetric
-            icon={<TrendingUp aria-hidden />}
             label={t("usage.generationSpeed")}
             value={formatTokenSpeed(generationSpeed, locale, speedUnit)}
             title={t("usage.generationSpeedHint")}
@@ -469,11 +444,11 @@ function UsageSummary({
         ) : null}
         {visibleMetrics.includes("e2eSpeed") ? (
           <UsageMetric
-            icon={<Gauge aria-hidden />}
             label={t("usage.summaryMetrics.e2eSpeed")}
             value={formatTokenSpeed(e2eSpeed, locale, speedUnit)}
           />
         ) : null}
+        </div> : null}
       </div>
     </section>
   );

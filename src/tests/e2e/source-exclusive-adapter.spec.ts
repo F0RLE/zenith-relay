@@ -2,9 +2,10 @@ import { expect, test } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
 
 test("source setup saves automatic routing without exposing adapter controls", async ({ page }) => {
-  await installTauriMock(page, { mode: "zenith", locale: "en", populated: false, readyConnected: false });
+  await installTauriMock(page, { mode: "local", locale: "en", populated: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("tab", { name: "Sources", exact: true }).click();
   await page.getByRole("button", { name: "Add source", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Add source" });
   await dialog.getByRole("radio", { name: /Custom API/ }).click();

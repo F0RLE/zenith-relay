@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { checkForUpdate, installUpdate, type AppUpdate } from "../../../platform/desktop";
+import { readRelayPreference, writeRelayPreference } from "../state/relayPreferences";
 
 export const SKIPPED_UPDATE_KEY = "relay.skippedUpdate";
 export const UPDATE_CHECK_INTERVAL_MS = 8 * 60 * 60 * 1_000;
@@ -45,8 +46,11 @@ export function useAppUpdates(): AppUpdates {
   const [updateInstallError, setUpdateInstallError] = useState<UpdateInstallError>(null);
   const updateCheckInFlight = useRef<Promise<UpdateCheckState> | null>(null);
   const pendingCheckOptions = useRef<ResolvedUpdateCheckOptions>(resolveCheckOptions());
+  const installInFlight = useRef(false);
+  const checkedVersion = useRef<string | null>(null);
 
   const checkUpdates = useCallback(async (options: UpdateCheckOptions = {}): Promise<UpdateCheckState> => {
+    if (installInFlight.current) return "available";
     const requestedOptions = resolveCheckOptions(options);
     if (updateCheckInFlight.current) {
       // The first caller owns the network request, but a later explicit user
@@ -60,13 +64,19 @@ export function useAppUpdates(): AppUpdates {
       setUpdateCheckState("checking");
       try {
         const update = await checkForUpdate();
+        if (installInFlight.current) return "available" as const;
+        if (checkedVersion.current !== (update?.version ?? null)) {
+          checkedVersion.current = update?.version ?? null;
+          setUpdateInstallError(null);
+          setUpdateProgress(null);
+        }
         if (!update) {
           setAvailableUpdate(null);
           setUpdateCheckState("current");
           return "current" as const;
         }
         const { includeSkipped, openWhenAvailable } = pendingCheckOptions.current;
-        if (!includeSkipped && localStorage.getItem(SKIPPED_UPDATE_KEY) === update.version) {
+        if (!includeSkipped && readRelayPreference(SKIPPED_UPDATE_KEY, "") === update.version) {
           setAvailableUpdate(null);
           setUpdateCheckState("skipped");
           return "skipped" as const;
@@ -76,6 +86,7 @@ export function useAppUpdates(): AppUpdates {
         if (openWhenAvailable) setUpdateDialogOpen(true);
         return "available" as const;
       } catch {
+        if (installInFlight.current) return "available" as const;
         setUpdateCheckState("error");
         return "error" as const;
       }
@@ -92,7 +103,9 @@ export function useAppUpdates(): AppUpdates {
   }, []);
 
   const applyUpdate = useCallback(async () => {
-    if (!availableUpdate) return;
+    if (!availableUpdate || installInFlight.current) return;
+    installInFlight.current = true;
+    setUpdateCheckState("available");
     setInstallingUpdate(true);
     setUpdateInstallError(null);
     setUpdateProgress({ downloaded: 0 });
@@ -106,12 +119,13 @@ export function useAppUpdates(): AppUpdates {
     } catch (error) {
       setUpdateInstallError(String(error).includes("portable_not_writable") ? "write" : "install");
     } finally {
+      installInFlight.current = false;
       setInstallingUpdate(false);
     }
   }, [availableUpdate]);
 
   const skipUpdate = useCallback(() => {
-    if (availableUpdate) localStorage.setItem(SKIPPED_UPDATE_KEY, availableUpdate.version);
+    if (availableUpdate) writeRelayPreference(SKIPPED_UPDATE_KEY, availableUpdate.version);
     setAvailableUpdate(null);
     setUpdateDialogOpen(false);
     setUpdateCheckState("skipped");

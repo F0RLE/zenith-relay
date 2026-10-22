@@ -1,3 +1,5 @@
+import type { RelayMode } from "../api/types";
+
 export type RelayStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
 export const RELAY_STORAGE_KEYS = {
@@ -24,6 +26,14 @@ export function readRelayPreference(
   } catch {
     return fallback;
   }
+}
+
+export function readRelayMode(storage: RelayStorage | undefined = browserStorage()): RelayMode {
+  const stored = readRelayPreference(RELAY_STORAGE_KEYS.mode, "local", storage);
+  const mode = stored === "hosted" ? stored : "local";
+  if (stored !== mode) writeRelayPreference(RELAY_STORAGE_KEYS.mode, mode, storage);
+  removeRelayPreference("relay.directSourceId", storage);
+  return mode;
 }
 
 export function writeRelayPreference(

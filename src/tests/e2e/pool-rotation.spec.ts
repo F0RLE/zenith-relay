@@ -81,7 +81,7 @@ for (const [width, height] of [[1160, 844], [1160, 540], [820, 844], [600, 844],
   }
 }
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`${mode} automatic display groups statuses without changing manual order or member settings`, async ({ page }) => {
     await installTauriMock(page, { mode, locale: "en", populated: true, accountCount: 4 });
     await page.goto("/");
@@ -90,7 +90,7 @@ for (const mode of ["local", "remote"] as const) {
         __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> };
       };
       const invoke = scope.__TAURI_INTERNALS__.invoke.bind(scope.__TAURI_INTERNALS__);
-      const snapshotCommand = mode === "local" ? "get_local_runtime_state" : "get_remote_server_state";
+      const snapshotCommand = "get_local_runtime_state";
       scope.__TAURI_INTERNALS__.invoke = async (command, args, options) => {
         const result = await invoke(command, args, options);
         if (command !== snapshotCommand) return result;
@@ -140,7 +140,7 @@ for (const mode of ["local", "remote"] as const) {
     await expect(dialog).toBeHidden();
     const savedLimit = await page.evaluate(async (mode) => {
       const invoke = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string) => Promise<RuntimeSnapshot> } }).__TAURI_INTERNALS__.invoke;
-      const runtime = await invoke(mode === "local" ? "get_local_runtime_state" : "get_remote_server_state");
+      const runtime = await invoke("get_local_runtime_state");
       return runtime.gateway.poolRouting?.members.find((member) => member.kind === "account" && member.id === "account_synthetic_4")?.maxConcurrency;
     }, mode);
     expect(savedLimit).toBe(0);

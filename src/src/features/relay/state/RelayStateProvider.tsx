@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { setWindowBackgroundColor } from "../../../platform/desktop";
 import { relayCommands } from "../api/commands";
-import type { ProfileActivation, ProfileBinding } from "../api/types";
+import type { ProfileActivation } from "../api/types";
 import { useConfirm } from "../components/Ui";
 import { buildAccountIdentityIndex, displayAccountIdentity } from "./accountIdentity";
 import { useAccountIdentityReveal } from "./useAccountIdentityReveal";
@@ -31,12 +31,8 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   } = useRelayOperations();
   const {
     loadLocalUsage,
-    loadRemoteUsage,
     localUsagePage,
-    remoteUsage,
-    remoteUsagePage,
     resetUsage,
-    clearInactiveUsage,
   } = useRelayUsage(relayCommands);
   const {
     mode,
@@ -47,23 +43,20 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     runtimeActivity,
     runtimeRevision,
     usageRevision,
-    readyState,
     loading,
     refresh,
   } = useRelayRuntime({
     cancelOperations,
-    clearInactiveUsage,
     resetUsage,
     reportErrorFeedback,
   });
-  const prefetchedUsageMode = useRef<"local" | "remote" | null>(null);
+  const prefetchedUsageMode = useRef<"local" | null>(null);
 
   // Warm the default Usage view once the runtime snapshot is ready. The
   // result is retained by useRelayUsage, so opening the page is immediate;
   // UsagePage still performs its normal background refresh afterwards.
   useEffect(() => {
-    if (!runtime || mode === "zenith") return;
-    if (mode === "remote" && !runtime.capabilities.features.includes("usage")) return;
+    if (!runtime || mode === "hosted") return;
     if (prefetchedUsageMode.current === mode) return;
     prefetchedUsageMode.current = mode;
     const query = {
@@ -73,11 +66,10 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
       includeModels: false,
       includePoolMembers: false,
     };
-    const load = mode === "local" ? loadLocalUsage : loadRemoteUsage;
-    void load(query).catch(() => {
+    void loadLocalUsage(query).catch(() => {
       // UsagePage retries and reports the error when it is opened.
     });
-  }, [loadLocalUsage, loadRemoteUsage, mode, runtime]);
+  }, [loadLocalUsage, mode, runtime]);
   const {
     onboardingComplete,
     finishOnboarding,
@@ -99,7 +91,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setPage,
     setRevealedAccountIdentities,
   });
-  const canRevealAccountIdentities = mode === "local" || (mode === "remote" && Boolean(runtime?.capabilities.features.includes("account_identity_reveal")));
+  const canRevealAccountIdentities = mode === "local";
   const accountIdentitiesBusy = useAccountIdentityReveal({
     accounts: runtime?.accounts ?? [],
     canReveal: canRevealAccountIdentities,
@@ -108,7 +100,6 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setRevealedIdentities: setRevealedAccountIdentities,
   });
   const accountIndex = useMemo(() => buildAccountIdentityIndex(runtime?.accounts ?? []), [runtime?.accounts]);
-  const codexWebsocketsEnabled = runtime?.gateway.codexWebsocketsEnabled ?? true;
 
   const perform = useCallback(async (
     operationId: string,
@@ -130,20 +121,11 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
       { backgroundRefresh: true, ...(launchAfter ? { afterWork: relayCommands.launchManagedCodex } : {}) });
   }, [confirm, perform, profileSwitchBackupPrompt, t]);
 
-  const launchCodexProfile = useCallback(async (_binding: ProfileBinding) => {
-    return perform("profile-launch", relayCommands.stopManagedCodex, "feedback.launched", {
-      backgroundRefresh: true,
-      afterWork: relayCommands.launchManagedCodex,
-    });
-  }, [perform]);
-
   const setCodexBackgroundTasksEnabled = useCallback((enabled: boolean) => perform(
     "codex-background-tasks",
     mode === "local"
       ? () => relayCommands.setCodexBackgroundTasks(enabled)
-      : mode === "remote"
-        ? () => relayCommands.setRemoteCodexBackgroundTasks(enabled)
-        : () => Promise.reject(new Error(t("errors.chatgpt_background_tasks_unavailable"))),
+      : () => Promise.reject(new Error(t("errors.chatgpt_background_tasks_unavailable"))),
     "feedback.saved",
     { backgroundRefresh: true, uiLock: false },
   ), [mode, perform, t]);
@@ -158,36 +140,20 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
       if (mode === "local") {
         return relayCommands.setCodexWebsockets(enabled);
       }
-      if (mode === "remote") {
-        await relayCommands.setRemoteCodexWebsockets(enabled);
-        try {
-          await relayCommands.setCodexProfileWebsockets(enabled);
-        } catch (error) {
-          try {
-            await relayCommands.setRemoteCodexWebsockets(codexWebsocketsEnabled);
-          } catch {
-            // Keep the original profile error; the remote action is best-effort rollback.
-          }
-          throw error;
-        }
-        return;
-      }
       throw new Error(t("errors.chatgpt_websockets_unavailable"));
     }, undefined, { backgroundRefresh: true, uiLock: false });
     if (!saved) return false;
-    // Restart failure must not undo a setting already saved in the server and profile.
+    // Restart failure must not undo a setting already saved in the local runtime and profile.
     await perform("codex-websockets-restart", restartManagedCodexIfRunning,
       "feedback.saved", { skipRefresh: true, uiLock: false });
     return true;
-  }, [codexWebsocketsEnabled, mode, perform, restartManagedCodexIfRunning, t]);
+  }, [mode, perform, restartManagedCodexIfRunning, t]);
 
   const setRouteRecoveryEnabled = useCallback((enabled: boolean) => perform(
     "route-recovery",
     mode === "local"
       ? () => relayCommands.setChatgptRetryUntilAvailable(enabled)
-      : mode === "remote"
-        ? () => relayCommands.setRemoteChatgptRetryUntilAvailable(enabled)
-        : () => Promise.reject(new Error(t("errors.chatgpt_retry_until_available_unavailable"))),
+      : () => Promise.reject(new Error(t("errors.chatgpt_retry_until_available_unavailable"))),
     "feedback.saved",
     { backgroundRefresh: true, uiLock: false },
   ), [mode, perform, t]);
@@ -196,9 +162,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     "block-degraded-routes",
     mode === "local"
       ? () => relayCommands.setBlockDegradedRoutes(enabled)
-      : mode === "remote"
-        ? () => relayCommands.setRemoteBlockDegradedRoutes(enabled)
-        : () => Promise.reject(new Error(t("errors.block_degraded_routes_unavailable"))),
+      : () => Promise.reject(new Error(t("errors.block_degraded_routes_unavailable"))),
     "feedback.saved",
     { backgroundRefresh: true, uiLock: false },
   ), [mode, perform, t]);
@@ -246,14 +210,12 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     accountValueVisible,
     setAccountValueVisible,
     accountDisplayName,
-    readyState,
     loading,
     busy,
     feedback,
     refresh,
     perform,
     activateCodexProfile,
-    launchCodexProfile,
     clearFeedback,
     onboardingComplete,
     finishOnboarding,
@@ -288,14 +250,12 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     accountValueVisible,
     setAccountValueVisible,
     accountDisplayName,
-    readyState,
     loading,
     busy,
     feedback,
     refresh,
     perform,
     activateCodexProfile,
-    launchCodexProfile,
     clearFeedback,
     onboardingComplete,
     finishOnboarding,
@@ -317,11 +277,8 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const usage = useMemo<RelayUsageContextValue>(() => ({
     localUsagePage,
     loadLocalUsage,
-    remoteUsage,
-    remoteUsagePage,
-    loadRemoteUsage,
     usageRevision,
-  }), [loadLocalUsage, loadRemoteUsage, localUsagePage, remoteUsage, remoteUsagePage, usageRevision]);
+  }), [loadLocalUsage, localUsagePage, usageRevision]);
 
   useEffect(() => {
     document.documentElement.lang = i18n.language.startsWith("ru") ? "ru" : "en";

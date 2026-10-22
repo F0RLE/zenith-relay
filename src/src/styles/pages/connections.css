@@ -104,109 +104,6 @@
   z-index: 40;
 }
 
-.account-transfer-progress {
-  display: grid;
-  gap: 10px;
-  padding: 12px 0;
-  border-block: 1px solid var(--relay-border);
-}
-
-.account-transfer-progress header {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: 32px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
-}
-
-.account-transfer-progress header > span {
-  width: 32px;
-  height: 32px;
-  display: grid;
-  place-items: center;
-  color: var(--relay-accent-hover);
-}
-
-.account-transfer-progress header > div {
-  min-width: 0;
-  display: grid;
-  gap: 2px;
-}
-
-.account-transfer-progress header strong,
-.account-transfer-progress header small,
-.account-transfer-progress li span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.account-transfer-progress header small,
-.account-transfer-progress li small {
-  color: var(--relay-muted);
-  font-size: 12px;
-}
-
-.account-transfer-progress header b {
-  font-family: var(--relay-mono);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
-.account-transfer-progress progress {
-  width: 100%;
-  height: 6px;
-  border: 0;
-  border-radius: 3px;
-  background: var(--relay-border);
-  accent-color: var(--relay-accent);
-}
-
-.account-transfer-progress ul {
-  max-height: 164px;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
-  gap: 0 16px;
-  overflow-y: auto;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.account-transfer-progress li {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-  min-height: 32px;
-  border-bottom: 1px solid color-mix(in srgb, var(--relay-border) 72%, transparent);
-}
-
-.account-transfer-progress li svg {
-  width: 15px;
-  height: 15px;
-  color: var(--relay-muted);
-}
-
-.account-transfer-progress li[data-transfer-state="validated"] svg {
-  color: var(--relay-accent);
-}
-
-.account-transfer-progress li[data-transfer-state="current"] svg {
-  color: var(--relay-accent-hover);
-}
-
-.account-plan-filters {
-  min-width: 0;
-  max-width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  overflow-x: auto;
-  padding: 0;
-}
-
 .account-filter-stack {
   min-width: 0;
   display: flex;
@@ -283,11 +180,6 @@
   }
 }
 
-.account-plan-filters + .account-plan-filters {
-  padding-left: 16px;
-  border-left: 1px solid var(--relay-border);
-}
-
 .account-filter-summary {
   min-height: 30px;
   display: flex;
@@ -323,62 +215,6 @@
 .account-filter-summary svg {
   width: 13px;
   height: 13px;
-}
-
-.account-plan-filters > span {
-  flex: 0 0 auto;
-  margin-right: 4px;
-  color: var(--relay-muted);
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.account-plan-filters button {
-  min-height: 28px;
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 8px;
-  border: 1px solid transparent;
-  border-radius: 5px;
-  background: var(--relay-surface);
-  color: var(--relay-muted);
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.account-plan-filters button:hover {
-  border-color: transparent;
-  color: var(--relay-text);
-}
-
-.account-plan-filters button[aria-pressed="true"] {
-  border-color: transparent;
-  background: var(--relay-accent-soft);
-  color: var(--relay-accent-hover);
-}
-
-.account-plan-filters button.error[aria-pressed="true"] {
-  border-color: transparent;
-  background: color-mix(in srgb, var(--relay-error) 9%, var(--relay-surface));
-  color: var(--relay-error);
-}
-
-.account-plan-filters button svg {
-  width: 13px;
-  height: 13px;
-}
-
-.account-plan-filters button small {
-  min-width: 16px;
-  padding: 0 4px;
-  border-radius: 4px;
-  background: var(--relay-subtle);
-  color: inherit;
-  font-size: 10px;
-  line-height: 16px;
-  text-align: center;
 }
 
 .account-list {
@@ -418,18 +254,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.account-plan-group-heading .api-source-group-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--relay-info);
-}
-
-.account-plan-group-heading .api-source-group-label svg {
-  width: 13px;
-  height: 13px;
 }
 
 .account-card {
@@ -576,8 +400,8 @@
   display: flex;
   align-self: center;
   align-items: center;
-  gap: 6px;
-  margin-right: 10px;
+  gap: 4px;
+  margin-right: 8px;
 }
 
 .account-card-header-actions .relay-action-menu summary {
@@ -672,39 +496,6 @@
 
 .account-subscription-line.expired .account-subscription-countdown {
   color: inherit;
-}
-
-.account-runtime-line {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  min-height: 26px;
-  margin: -4px 12px 8px;
-  padding: 0 4px;
-  overflow: hidden;
-  color: var(--relay-info, var(--relay-secondary));
-  font-size: 10px;
-  line-height: 16px;
-  text-align: center;
-}
-
-.account-runtime-line[data-warning="true"] {
-  color: var(--relay-warning, #d6a84f);
-}
-
-.account-runtime-line svg {
-  width: 13px;
-  height: 13px;
-  flex: 0 0 13px;
-}
-
-.account-runtime-line span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .relay-dialog.account-error-dialog {
@@ -1101,6 +892,10 @@
   color: var(--relay-success);
 }
 
+.account-quota-refresh-state.not_available {
+  color: var(--relay-muted);
+}
+
 .account-quota-report {
   min-height: 36px;
   display: flex;
@@ -1263,7 +1058,7 @@
 
 .oauth-client-options {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 4px;
   padding: 4px;
   border-radius: 10px;
@@ -1808,26 +1603,6 @@
   justify-self: center;
 }
 
-.relay-option-copy {
-  min-width: 0;
-  display: grid;
-  gap: 2px;
-}
-
-.relay-option-copy > span,
-.relay-option-copy > small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.relay-option-copy > small {
-  color: var(--relay-muted);
-  font-size: 10px;
-  font-weight: 450;
-  line-height: 13px;
-}
-
 .app-context-menu {
   position: fixed;
   z-index: 1100;
@@ -2114,8 +1889,6 @@
     justify-content: flex-end;
   }
 }
-.source-probe-result { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; font-size: 12px; }
-.source-probe-result code { overflow-wrap: anywhere; color: var(--relay-muted); }
 .account-token-expiry {
   min-width: 0;
   display: flex;

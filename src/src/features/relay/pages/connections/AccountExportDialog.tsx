@@ -6,6 +6,7 @@ import type { AccountExportFormat } from "../../api/types";
 import { Button, Dialog, IconButton, copyText } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { MarkdownPreview } from "../../components/MarkdownPreview";
+import { expandAccountRouteIds } from "../../accountRoutes";
 
 const MAX_ZENITH_EXPORT_DESCRIPTION_LENGTH = 2_000;
 const accountExportFormats: Array<{ value: AccountExportFormat; label: string; multiple: boolean }> = [
@@ -14,21 +15,24 @@ const accountExportFormats: Array<{ value: AccountExportFormat; label: string; m
   { value: "cockpit", label: "Cockpit Tools", multiple: true },
   { value: "cpa", label: "CPA", multiple: false },
   { value: "9router", label: "9router", multiple: true },
-  { value: "codex", label: "ChatGPT", multiple: false },
+  { value: "codex", label: "Codex", multiple: false },
   { value: "axon_hub", label: "AxonHub", multiple: false },
   { value: "codex_manager", label: "Bulk JSON", multiple: true },
 ];
 export function AccountExportDialog({ accountIds, onClose }: { accountIds: string[]; onClose: () => void }) {
   const { t } = useTranslation();
-  const { mode, runtime, perform, busy } = useRelayState();
+  const { runtime, perform, busy } = useRelayState();
+  accountIds = expandAccountRouteIds(accountIds, runtime?.accounts ?? []);
   const [format, setFormat] = useState<AccountExportFormat>("zenith");
   const [description, setDescription] = useState("");
   const [descriptionMode, setDescriptionMode] = useState<"edit" | "preview">("edit");
   const [descriptionError, setDescriptionError] = useState<string | null>(null);
   const markdownFileInput = useRef<HTMLInputElement>(null);
+  const hasSiwcAccount = runtime?.accounts.some((account) => accountIds.includes(account.id) && account.oauthClientKind === "siwc");
   const hasExcelAccount = runtime?.accounts.some((account) => accountIds.includes(account.id) && account.oauthClientKind === "excel_bps");
   const formats = accountExportFormats.filter((option) =>
     (accountIds.length === 1 || option.multiple)
+    && (!hasSiwcAccount || option.value === "zenith")
     && (!hasExcelAccount || option.value === "zenith" || option.value === "sub2api"),
   );
   const selectedFormat = formats.find((option) => option.value === format) ?? formats[0];
@@ -59,9 +63,7 @@ export function AccountExportDialog({ accountIds, onClose }: { accountIds: strin
         destination,
         ...(selectedFormat.value === "zenith" && description.trim() ? { description } : {}),
       } as const;
-      const exportResult = mode === "local"
-        ? await relayCommands.exportLocalAccounts(exportRequest)
-        : await relayCommands.exportRemoteAccounts(exportRequest);
+      const exportResult = await relayCommands.exportLocalAccounts(exportRequest);
       if (destination === "copy") {
         if (!exportResult.content) throw new Error("account export content is missing");
         await copyText(exportResult.content);
@@ -84,6 +86,7 @@ export function AccountExportDialog({ accountIds, onClose }: { accountIds: strin
     }
   >
     <div className="relay-form account-export-form">
+      {hasSiwcAccount ? <p role="alert">{t("accounts.siwcExportNotice")}</p> : null}
       <div className="account-export-heading"><span>{t("accounts.exportFormat")}</span><strong>{t("accounts.exportCount", { count: accountIds.length })}</strong></div>
       <div className="account-export-formats" data-count={formats.length} role="radiogroup" aria-label={t("accounts.exportFormat")}>
         {formats.map((option) => (

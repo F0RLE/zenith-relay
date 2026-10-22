@@ -2,46 +2,8 @@ import { expect, test } from "../../bun-playwright";
 import { installTauriMock } from "../tauri-mock";
 import { viewports, expectTopLevelEmptyCentered } from "./fixtures";
 
-test("remote connection choices use clear switches in a centered dialog", async ({ page }) => {
-  await installTauriMock(page, { locale: "ru", mode: "remote", theme: "dark", populated: true, remoteConnected: false });
-  await page.setViewportSize({ width: 840, height: 560 });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Подключения", exact: true }).click();
-  await page.getByRole("button", { name: "Подключить существующий сервер" }).click();
-  await page.getByLabel("Адрес сервера").fill("http://127.0.0.1:14999");
 
-  const dialog = page.getByRole("dialog", { name: "Подключить существующий сервер" });
-  await expect(dialog.locator(".setting-toggle")).toHaveCount(2);
-  await expect(dialog.getByLabel("Разрешить HTTP без шифрования")).toBeVisible();
-  await expect(dialog.getByLabel("Доверять новой идентичности")).toBeVisible();
-  await expect(dialog.getByText("Токен и трафик передаются открыто. Используйте только в доверенной локальной сети.", { exact: true })).toBeVisible();
-  const [backdropBox, dialogBox] = await Promise.all([page.locator(".relay-modal-backdrop").boundingBox(), dialog.boundingBox()]);
-  expect(backdropBox).not.toBeNull();
-  expect(dialogBox).not.toBeNull();
-  expect(Math.abs(dialogBox!.y + dialogBox!.height / 2 - (backdropBox!.y + backdropBox!.height / 2))).toBeLessThanOrEqual(2);
-  expect(await dialog.locator(".setting-toggle").evaluateAll((rows) => rows.every((row) => row.scrollWidth <= row.clientWidth))).toBe(true);
-  await page.screenshot({ path: "output/playwright/remote-connect-options-ru-dark-840x560.png" });
-});
 
-test("unconfigured API empty state uses the available page center", async ({ page }) => {
-  await installTauriMock(page, { locale: "ru", mode: "remote", theme: "dark", populated: true, remoteConnected: false });
-  await page.setViewportSize({ width: 1160, height: 760 });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Доступ", exact: true }).click();
-  await expect(page.getByText("API не настроен", { exact: true })).toBeVisible();
-  await expectTopLevelEmptyCentered(page);
-  await page.screenshot({ path: "output/playwright/gateway-empty-centered-ru-dark-1160x760.png" });
-});
-
-test("unsupported usage empty state uses the available page center", async ({ page }) => {
-  await installTauriMock(page, { locale: "ru", mode: "remote", theme: "dark", populated: true, remoteFeatures: ["accounts"] });
-  await page.setViewportSize({ width: 1160, height: 760 });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Использование", exact: true }).click();
-  await expect(page.getByText("Не поддерживается", { exact: true })).toBeVisible();
-  await expectTopLevelEmptyCentered(page);
-  await page.screenshot({ path: "output/playwright/usage-unsupported-centered-ru-dark-1160x760.png" });
-});
 
 test("automation list fits the standard window without horizontal scrolling", async ({ page }) => {
   await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true });
@@ -130,7 +92,7 @@ test("ru compact disclosure labels stay readable", async ({ page }) => {
 
   await page.locator(".mode-picker > button").click();
   const modeMenu = page.getByRole("menu");
-  await expect(modeMenu.getByRole("menuitemradio")).toHaveCount(3);
+  await expect(modeMenu.getByRole("menuitemradio")).toHaveCount(2);
   expect(await modeMenu.locator("span").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
   await page.screenshot({ path: "output/playwright/shell-mode-menu-ru-840x560.png" });
   await page.keyboard.press("Escape");
@@ -161,9 +123,9 @@ test("ru compact disclosure labels stay readable", async ({ page }) => {
   await expect(dialog).toContainText("РазмышлениеМаксимальное→Низкое");
   await dialog.locator(".request-technical-details > summary").click();
   await expect(dialog).toContainText("req_synthetic_local");
-  await expect(dialog).toContainText("Причина выбораСвежий запас квоты в пределах порога");
-  await expect(dialog).toContainText("Доступных участников4");
-  await expect(dialog).toContainText("Квота при выборе63.00%");
+  await expect(dialog.locator(".request-route-section")).toHaveCount(0);
+  await expect(dialog.locator(".request-context-section")).toHaveCount(0);
+  await expect(dialog).not.toContainText("Квота при выборе");
   expect(await dialog.locator(".request-details-list > div").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
   expect(await dialog.evaluate((element) => {
     const rect = element.getBoundingClientRect();
@@ -174,8 +136,8 @@ test("ru compact disclosure labels stay readable", async ({ page }) => {
 });
 
 for (const scenario of [
-  { locale: "en" as const, theme: "light" as const, width: 1160, label: "First / total", file: "usage-timing-en-light-1160x760.png" },
-  { locale: "ru" as const, theme: "dark" as const, width: 840, label: "Первый / всего", file: "usage-timing-ru-dark-840x560.png" },
+  { locale: "en" as const, theme: "light" as const, width: 1160, label: "First output / response", file: "usage-timing-en-light-1160x760.png" },
+  { locale: "ru" as const, theme: "dark" as const, width: 840, label: "Первый вывод / ответ", file: "usage-timing-ru-dark-840x560.png" },
 ]) {
   test(`usage timing unknown first ${scenario.locale} ${scenario.theme} ${scenario.width}`, async ({ page }) => {
     await installTauriMock(page, {
@@ -187,7 +149,7 @@ for (const scenario of [
     await page.goto("/");
     await page.getByRole("button", { name: scenario.locale === "ru" ? "Использование" : "Usage", exact: true }).click();
     await expect(page.getByRole("columnheader", { name: scenario.label })).toBeVisible();
-    const timing = page.getByRole("row").filter({ hasText: "req_synthetic_local" }).locator('td[data-column="timing"]');
+    const timing = page.locator('.usage-request-table tbody td[data-column="timing"]');
     await expect(timing).toHaveText(scenario.locale === "ru" ? "— / 20,9 с" : "— / 20.9 s");
     expect(await timing.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     await timing.scrollIntoViewIfNeeded();
@@ -195,31 +157,34 @@ for (const scenario of [
   });
 
   test(`usage timing ${scenario.locale} ${scenario.theme} ${scenario.width}`, async ({ page }) => {
-    await installTauriMock(page, { locale: scenario.locale, mode: "local", theme: scenario.theme, populated: true });
+    await installTauriMock(page, {
+      locale: scenario.locale, mode: "local", theme: scenario.theme, populated: true,
+      ...(scenario.width === 840 ? { usageSummaryTotals: {
+        totalTokens: 49_337_300, inputTokens: 49_200_000, outputTokens: 137_300,
+        cachedInputTokens: 43_600_000,
+        apiEquivalent: { microUsd: 54_043_100, pricedTokens: 49_337_300, unpricedTokens: 0 },
+      } } : {}),
+    });
     await page.setViewportSize({ width: scenario.width, height: scenario.width === 840 ? 560 : 760 });
     await page.goto("/");
     await page.getByRole("button", { name: scenario.locale === "ru" ? "Использование" : "Usage", exact: true }).click();
 
-    if (scenario.width === 840) {
-      await page.locator(".usage-metrics > div").nth(2).evaluate((card) => {
-        card.querySelector("strong")!.textContent = "49,3 млн";
-        card.querySelector("small")!.textContent = "Вх. 49,2 млн · Кэш ↓ 43,6 млн · Вых. 137,3 тыс.";
-      });
-      await page.locator(".usage-metrics > div").nth(3).evaluate((card) => {
-        card.querySelector("strong")!.textContent = "≈54,0431 $";
-        card.querySelector("small")!.textContent = "Оценено токенов: 49,3 млн";
-      });
-    }
     await expect(page.getByRole("columnheader", { name: scenario.label })).toBeVisible();
-    expect(await page.locator(".usage-metrics").evaluate((grid) => getComputedStyle(grid).gridTemplateColumns.split(" ").length)).toBe(scenario.width === 840 ? 2 : 3);
+    expect(await page.locator(".usage-metrics").evaluate((grid) => getComputedStyle(grid).gridTemplateColumns.split(" ").length)).toBe(scenario.width === 840 ? 2 : 4);
     if (scenario.width === 1160) {
-      expect(await page.locator(".usage-metrics > div").evaluateAll((cards) => new Set(cards.map((card) => Math.round(card.getBoundingClientRect().top))).size)).toBe(2);
+      expect(await page.locator(".usage-metrics > div").evaluateAll((cards) => new Set(cards.map((card) => Math.round(card.getBoundingClientRect().top))).size)).toBe(1);
     }
     expect(await page.locator(".usage-metrics > div").evaluateAll((cards) => cards.every((card) => card.scrollWidth <= card.clientWidth))).toBe(true);
-    expect(await page.locator(".usage-overview strong").evaluateAll((values) => new Set(values.map((value) => getComputedStyle(value).fontSize)).size)).toBe(1);
+    expect(await page.locator(".usage-metrics strong").evaluateAll((values) => new Set(values.map((value) => getComputedStyle(value).fontSize)).size)).toBe(1);
+    const primarySize = await page.locator(".usage-metrics strong").first().evaluate((value) => parseFloat(getComputedStyle(value).fontSize));
+    const secondarySize = await page.locator(".usage-secondary-metrics strong").first().evaluate((value) => parseFloat(getComputedStyle(value).fontSize));
+    expect(secondarySize).toBeLessThan(primarySize);
     expect(await page.locator(".usage-metrics > div").evaluateAll((items) => items.every((item) => getComputedStyle(item).textAlign === "left"))).toBe(true);
-    expect(await page.locator(".usage-request-table th, .usage-request-table td").evaluateAll((items) => items.every((item) => getComputedStyle(item).textAlign === "center"))).toBe(true);
-    const timing = page.getByRole("row").filter({ hasText: "req_synthetic_local" }).locator('td[data-column="timing"]');
+    for (const [column, alignment] of [["model", "left"], ["connection", "left"], ["timing", "right"], ["equivalent", "right"], ["status", "center"]]) {
+      expect(await page.locator(`.usage-request-table th[data-column="${column}"], .usage-request-table td[data-column="${column}"]`)
+        .evaluateAll((items, expected) => items.every((item) => getComputedStyle(item).textAlign === expected), alignment)).toBe(true);
+    }
+    const timing = page.locator('.usage-request-table tbody td[data-column="timing"]');
     await expect(timing).toHaveText(scenario.locale === "ru" ? "128 мс / 428 мс" : "128 ms / 428 ms");
     expect(await timing.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     const clippedHeaders = await page.locator(".usage-request-table th").evaluateAll((items) => items.filter((item) => item.scrollWidth > item.clientWidth || item.scrollHeight > item.clientHeight).map((item) => item.textContent));

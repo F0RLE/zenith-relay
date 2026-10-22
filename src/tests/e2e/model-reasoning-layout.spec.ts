@@ -10,18 +10,15 @@ async function openReasoning(page: Page, locale: "ru" | "en") {
   return page.getByRole("dialog");
 }
 
-async function savedLevels(page: Page, mode: "local" | "remote") {
-  return page.evaluate((targetMode) => {
+async function savedLevels(page: Page) {
+  return page.evaluate(() => {
     const calls = (window as unknown as {
       __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: {
         allowedLevels?: string[]; action?: { type?: string }; payload?: { allowedLevels?: string[] };
       } } }>;
     }).__TAURI_TEST_INVOKES__;
-    return targetMode === "local"
-      ? calls.findLast((call) => call.command === "set_local_model_reasoning")?.args.input?.allowedLevels
-      : calls.findLast((call) => call.command === "execute_remote_server_action"
-        && call.args.input?.action?.type === "set_model_reasoning")?.args.input?.payload?.allowedLevels;
-  }, mode);
+    return calls.findLast((call) => call.command === "set_local_model_reasoning")?.args.input?.allowedLevels;
+  });
 }
 
 for (const width of [1160, 520, 390, 320]) {
@@ -66,9 +63,9 @@ for (const width of [1160, 520, 390, 320]) {
         await expect(options.nth(1)).not.toBeChecked();
         await options.last().click();
         await expect(options.last()).not.toBeChecked();
-        await expect.poll(() => savedLevels(page, "local")).toEqual(["none", "medium", "high", "xhigh"]);
-        const colors = await options.evaluateAll((buttons) => buttons.map((button) => getComputedStyle(button).backgroundColor));
-        expect(colors[0]).not.toBe(colors[1]);
+        await expect.poll(() => savedLevels(page)).toEqual(["none", "medium", "high", "xhigh"]);
+        const selectedColor = await options.first().evaluate((button) => getComputedStyle(button).backgroundColor);
+        await expect(options.nth(1)).not.toHaveCSS("background-color", selectedColor);
         await options.first().focus();
         await page.keyboard.press("Tab");
         await dialog.screenshot({ path: testInfo.outputPath("reasoning.png"), animations: "disabled" });
@@ -82,19 +79,3 @@ for (const width of [1160, 520, 390, 320]) {
     }
   }
 }
-
-test("remote reasoning policy preserves an empty selection and restores it", async ({ page }) => {
-  await installTauriMock(page, { locale: "en", mode: "remote", populated: true, modelReasoning: { "gpt-5.4": levels } });
-  await page.goto("/");
-  const dialog = await openReasoning(page, "en");
-  const options = dialog.getByRole("checkbox");
-  for (const option of await options.all()) await option.click();
-  await expect.poll(() => savedLevels(page, "remote")).toEqual([]);
-  await page.keyboard.press("Escape");
-  await page.locator('[data-model-id="gpt-5.4"] [data-model-reasoning-edit]').click();
-  await expect(options).toHaveCount(levels.length);
-  for (const option of await options.all()) await expect(option).not.toBeChecked();
-  await options.last().click();
-  await expect.poll(() => savedLevels(page, "remote")).toEqual(["max"]);
-  await expect(options.last()).toBeChecked();
-});

@@ -40,7 +40,7 @@ for (const scenario of [
     await expect(updateButton).toBeVisible();
     await expect(updateButton).toHaveText(scenario.locale === "ru" ? "Доступно обновление" : "Update available");
     await expect(updateButton).not.toContainText("1.1.3");
-    expect(await page.locator(".sidebar-bottom").evaluate((element) => {
+    expect(await page.locator(".relay-sidebar").evaluate((element) => {
       const feedback = element.querySelector(".sidebar-feedback")?.getBoundingClientRect();
       const update = element.querySelector(".sidebar-update-row")?.getBoundingClientRect();
       const utilities = element.querySelector(".sidebar-nav-utilities")?.getBoundingClientRect();
@@ -384,13 +384,14 @@ for (const theme of themes) {
     await page.getByRole("tab", { name: "ChatGPT", exact: true }).click();
     const panel = page.getByRole("tabpanel", { name: "ChatGPT", exact: true });
     const switches = panel.getByRole("checkbox");
-    await expect(switches).toHaveCount(2);
+    await expect(switches).toHaveCount(4);
+    await expect(panel.locator('.codex-memory-model-control')).toHaveCount(2);
     await expect(panel.getByRole("checkbox", { name: "Резерв 1%" })).toHaveCount(0);
     const accountSelect = panel.getByRole("button", { name: /^Аккаунт:/ });
     await accountSelect.click();
     await page.locator('[role="option"][data-value="account_synthetic"]').click();
     await expect(accountSelect).toHaveAttribute("data-value", "account_synthetic");
-    await expect(switches).toHaveCount(3);
+    await expect(switches).toHaveCount(5);
     await expect(panel.locator(".codex-background-tasks-control").getByRole("checkbox")).toHaveCount(1);
     await expect(panel.locator(".codex-websockets-control").getByRole("checkbox")).toHaveCount(1);
     const edges = await switches.evaluateAll((inputs) => inputs.map((input) => input.getBoundingClientRect().right));

@@ -17,8 +17,10 @@
   --relay-accent: #15644d;
   --relay-accent-hover: #104c3b;
   --relay-accent-soft: #e8f0e6;
+  --relay-selection-background: #d8d8d8;
+  --relay-selection-text: var(--relay-text);
+  --relay-field-focus-background: #eeeeee;
   --relay-on-accent: #fffefa;
-  --relay-focus: #15644d;
   --relay-warning: #916013;
   --relay-warning-soft: #fff4dc;
   --relay-error: #a52d2a;
@@ -26,7 +28,6 @@
   --relay-info: #246da8;
   --relay-info-soft: #ebf5fc;
   --relay-success: var(--relay-accent);
-  --relay-success-soft: var(--relay-accent-soft);
   --relay-danger: var(--relay-error);
   --relay-danger-soft: var(--relay-error-soft);
   --relay-primary: var(--relay-accent);
@@ -60,8 +61,10 @@
   --relay-accent: #80b49a;
   --relay-accent-hover: #a0ccb3;
   --relay-accent-soft: #20332a;
+  --relay-selection-background: #383838;
+  --relay-selection-text: var(--relay-text);
+  --relay-field-focus-background: #202020;
   --relay-on-accent: #102018;
-  --relay-focus: #80b49a;
   --relay-warning: #e2aa52;
   --relay-warning-soft: #352916;
   --relay-error: #ffa8a4;
@@ -94,8 +97,10 @@
     --relay-accent: #80b49a;
     --relay-accent-hover: #a0ccb3;
     --relay-accent-soft: #20332a;
+    --relay-selection-background: #383838;
+    --relay-selection-text: var(--relay-text);
+    --relay-field-focus-background: #202020;
     --relay-on-accent: #102018;
-    --relay-focus: #80b49a;
     --relay-warning: #e2aa52;
     --relay-warning-soft: #352916;
     --relay-error: #ffa8a4;
