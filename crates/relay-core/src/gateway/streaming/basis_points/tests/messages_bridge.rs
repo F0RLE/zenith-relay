@@ -2,6 +2,60 @@ use super::*;
 use crate::{AdapterRequestContext, CacheWriteTtl, MessagesReasoningMode, SourceAdapter, WireApi};
 
 #[test]
+fn search_progress_without_item_events_still_completes_the_messages_tool_turn() {
+    let request = json!({"max_tokens":4096,"messages":[{"role":"user","content":"Inspect a synthetic file."}],
+        "tools":[{"name":"inspect","input_schema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}}]});
+    let prepared = SourceAdapter::MessagesToResponses
+        .prepare_request(AdapterRequestContext {
+            client_wire_api: WireApi::Messages,
+            request: &request,
+            model: "test",
+            stream: true,
+            reasoning_mode: MessagesReasoningMode::Adaptive,
+            cache_write_ttl: CacheWriteTtl::Provider,
+            previous: None,
+            response_scope: "synthetic-bps",
+            response_id_seed: "synthetic-search",
+        })
+        .unwrap();
+    let mut normalizer = Translator::new(prepared.upstream_body().clone());
+    let mut bridge = prepared.into_stream_bridge().unwrap();
+    for kind in [
+        "response.web_search_call.in_progress",
+        "response.web_search_call.searching",
+        "response.web_search_call.completed",
+    ] {
+        normalizer.push(&frame(
+            json!({"type":kind,"output_index":0,"item_id":"ws_synthetic"}),
+        ));
+    }
+    normalizer.push(&frame(completed(json!([
+        {"type":"web_search_call","id":"ws_synthetic","status":"completed"},
+        {"type":"message","id":"msg_synthetic","role":"assistant","content":[{"type":"output_text","text":"Inspecting the file.","annotations":[]}]},
+        call("inspect")
+    ]))));
+    while let Some(bytes) = normalizer.output.pop_front() {
+        for chunk in bytes.chunks(7) {
+            bridge.push(chunk);
+        }
+    }
+    bridge.finish();
+    let wire = String::from_utf8(
+        std::iter::from_fn(|| bridge.pop_output())
+            .flatten()
+            .collect(),
+    )
+    .unwrap();
+    assert!(!wire.contains("event: error"), "{wire}");
+    assert_eq!(wire.matches("event: message_stop").count(), 1);
+    assert_eq!(wire.matches("\"type\":\"tool_use\"").count(), 1);
+    assert_eq!(
+        bridge.completed().unwrap().response_body["stop_reason"],
+        "tool_use"
+    );
+}
+
+#[test]
 fn messages_write_svg_and_empty_signature_tool_result_preserve_the_conversation() {
     let request = json!({"max_tokens":4096,"messages":[{"role":"user","content":"Create a synthetic SVG."}],
         "thinking":{"type":"adaptive"},"output_config":{"effort":"max"},

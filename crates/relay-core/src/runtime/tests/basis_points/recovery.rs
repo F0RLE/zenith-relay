@@ -158,6 +158,10 @@ async fn claude_tool_cycle(stream: bool) {
     let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
     server
         .state
+        .stream_generations
+        .store(stream, Ordering::SeqCst);
+    server
+        .state
         .strict_request_schema
         .store(true, Ordering::SeqCst);
     let runtime = Arc::new(runtime(&server).await);
@@ -165,7 +169,10 @@ async fn claude_tool_cycle(stream: bool) {
     let mut history = vec![json!({"role":"user","content":"Hello"})];
     for turn in 0..3 {
         let output = if turn == 1 {
-            json!([{"type":"function_call","id":"fc_lookup","call_id":"call_lookup","name":"run_officejs","arguments":json!({"references":["lookup"],"code":"{\"path\":\"synthetic\"}"}).to_string(),"status":"completed"}])
+            json!([
+                {"type":"web_search_call","id":"ws_synthetic","status":"completed"},
+                {"type":"function_call","id":"fc_lookup","call_id":"call_lookup","name":"run_officejs","arguments":json!({"references":["lookup"],"code":"{\"path\":\"synthetic\"}"}).to_string(),"status":"completed"}
+            ])
         } else {
             json!([{"type":"message","id":"msg_synthetic","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Ready","annotations":[]}]}])
         };
@@ -173,6 +180,11 @@ async fn claude_tool_cycle(stream: bool) {
             "id":format!("resp_synthetic_{turn}"),"object":"response","status":"completed","model":"gpt-test","output":output,
             "usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}
         });
+        if stream && turn == 1 {
+            crate::poison::mutex(&server.state.stream_prefixes).push_back(
+                b"data: {\"type\":\"response.web_search_call.searching\",\"output_index\":0,\"item_id\":\"ws_synthetic\"}\n\n".to_vec(),
+            );
+        }
         let response = reqwest::Client::new()
             .post(format!("{base}/v1/messages"))
             .bearer_auth("local-secret")

@@ -190,7 +190,15 @@ impl Translator {
             if self.tool_barrier.is_some_and(|barrier| index >= barrier) {
                 return Ok(());
             }
-            self.seen.insert(index);
+            // Search progress does not publish the output item itself.
+            if !matches!(
+                kind.as_str(),
+                "response.web_search_call.in_progress"
+                    | "response.web_search_call.searching"
+                    | "response.web_search_call.completed"
+            ) {
+                self.seen.insert(index);
+            }
         }
         if kind == "response.completed" {
             let response = event
