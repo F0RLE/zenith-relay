@@ -1192,7 +1192,8 @@ is observed and regression-tested, not guaranteed by public OpenAI documentation
   request duration), not a sum of cumulative attempt durations. Schema bytes
   count compact preloads and unique full definitions introduced by lookups;
   reuse references do not count the same full schema again. Intermediate visible
-  text and reasoning are preserved;
+  text, reasoning, and completed hosted web-search items are preserved in their
+  original order, so the final output retains already-streamed item indices;
   native internal items replay only inside that request, not in a cross-request
   discovery store. Dropping the response drops discovery and its upstream body;
   no detached generation survives client cancellation.

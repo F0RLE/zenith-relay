@@ -181,6 +181,89 @@ async fn discovery_streams_text_before_completion_with_and_without_a_lookup() {
 }
 
 #[tokio::test]
+async fn discovery_keeps_hosted_search_in_the_final_messages_tool_turn() {
+    use crate::{
+        AdapterRequestContext, CacheWriteTtl, MessagesReasoningMode, SourceAdapter, WireApi,
+    };
+
+    for stream in [false, true] {
+        let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+        server
+            .state
+            .stream_generations
+            .store(true, Ordering::SeqCst);
+        let mut first = tool_response("relay.catalog", "call_catalog", json!({"names":["lookup"]}));
+        first["output"].as_array_mut().unwrap().splice(
+            0..0,
+            [
+                json!({"type":"web_search_call","id":"ws_synthetic","status":"completed"}),
+                visible_message("Checking the synthetic path"),
+            ],
+        );
+        crate::poison::mutex(&server.state.generation_replies).push_back((StatusCode::OK, first));
+        *crate::poison::mutex(&server.state.generation_body) =
+            tool_response("lookup", "call_client", json!({"path":"synthetic.txt"}));
+        let (base, task) = recovery::gateway(Arc::new(runtime(&server).await)).await;
+        let response = reqwest::Client::new()
+            .post(format!("{base}/v1/responses"))
+            .bearer_auth("local-secret")
+            .json(&catalog_request(stream))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.bytes().await.unwrap();
+        let request = json!({"max_tokens":4096,"messages":[{"role":"user","content":"Inspect the synthetic file"}],
+            "tools":[{"name":"lookup","input_schema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}]});
+        let prepared = SourceAdapter::MessagesToResponses
+            .prepare_request(AdapterRequestContext {
+                client_wire_api: WireApi::Messages,
+                request: &request,
+                model: "gpt-test",
+                stream,
+                reasoning_mode: MessagesReasoningMode::Adaptive,
+                cache_write_ttl: CacheWriteTtl::Provider,
+                previous: None,
+                response_scope: "synthetic-discovery",
+                response_id_seed: "synthetic-search",
+            })
+            .unwrap();
+        let translated = if stream {
+            let mut bridge = prepared.into_stream_bridge().unwrap();
+            for chunk in bytes.chunks(7) {
+                bridge.push(chunk);
+            }
+            bridge.finish();
+            bridge
+                .completed()
+                .expect("discovery must preserve the complete output sequence")
+                .response_body
+                .clone()
+        } else {
+            assert_eq!(
+                serde_json::from_slice::<Value>(&bytes).unwrap()["output"][0]["type"],
+                "web_search_call"
+            );
+            prepared
+                .translate_response_bytes(&bytes)
+                .unwrap()
+                .unwrap()
+                .translated_response()
+                .response_body
+                .clone()
+        };
+        assert_eq!(translated["stop_reason"], "tool_use");
+        assert_eq!(
+            translated["content"][0]["text"],
+            "Checking the synthetic path"
+        );
+        assert_eq!(translated["content"][1]["name"], "lookup");
+        assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 2);
+        task.abort();
+    }
+}
+
+#[tokio::test]
 async fn discovery_preserves_rate_limits_after_output_without_replaying() {
     for (stream, untyped) in [(true, false), (true, true), (false, false), (false, true)] {
         let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;

@@ -507,6 +507,7 @@ fn opaque_reasoning_and_text_replay_unchanged_inside_the_owned_turn() {
     let mut upstream = prepare_request(&request).unwrap();
     let mut lookup = response(LOOKUP_TOOL, json!({"query":"read file","limit":1}));
     let reasoning = json!({"type":"reasoning","id":"rs_synthetic","encrypted_content":"synthetic-opaque","summary":[]});
+    let search = json!({"type":"web_search_call","id":"ws_synthetic","status":"completed"});
     let text = json!({"type":"message","id":"msg_synthetic","role":"assistant","content":[{"type":"output_text","text":"Inspecting the tool contract."}]});
     lookup["output"]
         .as_array_mut()
@@ -516,12 +517,16 @@ fn opaque_reasoning_and_text_replay_unchanged_inside_the_owned_turn() {
         .as_array_mut()
         .unwrap()
         .insert(1, text.clone());
+    lookup["output"]
+        .as_array_mut()
+        .unwrap()
+        .insert(2, search.clone());
     let mut session = DiscoverySession::new(&request, true).unwrap().unwrap();
     session.advance(&lookup, &mut upstream).unwrap();
     assert!(upstream["input"].as_array().unwrap().contains(&reasoning));
     let mut final_response = json!({"output":[]});
     session.finish(&mut final_response);
-    assert_eq!(final_response["output"], json!([reasoning, text]));
+    assert_eq!(final_response["output"], json!([reasoning, text, search]));
     assert!(final_response["output"]
         .as_array()
         .unwrap()

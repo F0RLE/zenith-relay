@@ -296,7 +296,12 @@ impl DiscoverySession {
         self.prior_messages.extend(
             items
                 .iter()
-                .filter(|item| matches!(item["type"].as_str(), Some("message" | "reasoning")))
+                .filter(|item| {
+                    matches!(
+                        item["type"].as_str(),
+                        Some("message" | "reasoning" | "web_search_call")
+                    )
+                })
                 .cloned(),
         );
         self.rounds += 1;
