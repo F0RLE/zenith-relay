@@ -351,7 +351,6 @@
 
 .pool-member-list {
   display: grid;
-  direction: rtl;
   grid-template-columns: minmax(0, 1fr);
   align-items: stretch;
   gap: 10px;
@@ -364,7 +363,6 @@
 }
 
 .pool-member-card {
-  direction: ltr;
   position: relative;
   min-width: 0;
   overflow: hidden;

@@ -481,7 +481,7 @@ a read-only fallback preference, excluding all aliases of each preceding physica
 member through the same selector. Ranking stops where text model/protocol routes
 disagree or lack a candidate; it never reserves work or advances rotation.
 Cards show members with active requests first, then follow this common preference
-right-to-left, then down, ahead of waiting, unavailable and disabled/draining
+left-to-right, then down, ahead of waiting, unavailable and disabled/draining
 members. Card contents retain their normal text direction. Only members with
 active requests get a subtle card outline, without an activity badge; next
 candidates remain neutral. Unranked cards

@@ -3,10 +3,10 @@ import type { PoolRoutingMode, RuntimeSnapshot } from "../../src/features/relay/
 import { emitTauriEvent, installTauriMock } from "./tauri-mock";
 
 for (const mode of ["automatic", "in_order", "round_robin", "weighted_round_robin", "failover"] satisfies PoolRoutingMode[]) {
-  for (const width of [1160, 390]) {
+  for (const width of [2451, 1160, 390]) {
     test(`pool cards follow ${mode} preference and highlight only active work at ${width}px`, async ({ page }, testInfo) => {
       await page.setViewportSize({ width, height: 844 });
-      await installTauriMock(page, { locale: "en", theme: width === 390 ? "dark" : "light", populated: true, accountCount: 6 });
+      await installTauriMock(page, { locale: "en", theme: width === 1160 ? "light" : "dark", populated: true, accountCount: 6 });
       await page.goto("/");
       await page.evaluate(async (mode) => {
         const scope = window as unknown as {
@@ -67,9 +67,11 @@ for (const mode of ["automatic", "in_order", "round_robin", "weighted_round_robi
       await expect(cards.nth(4).locator(".pool-member-kind-icon")).toHaveAttribute("aria-label", /Waiting to retry/);
       const layout = await cards.evaluateAll((elements) => {
         const boxes = elements.map((element) => element.getBoundingClientRect());
+        const lastRow = boxes.filter((box) => box.top === boxes.at(-1)?.top);
         return {
           rowMajor: boxes.every((box, index) => index === 0 || box.top > boxes[index - 1].top
-            || (box.top === boxes[index - 1].top && box.left < boxes[index - 1].left)),
+            || (box.top === boxes[index - 1].top && box.left > boxes[index - 1].left)),
+          lastRowStartsLeft: Math.abs(lastRow[0].left - Math.min(...boxes.map((box) => box.left))) < 1,
           backgrounds: new Set(elements.map((element) => getComputedStyle(element).backgroundColor)).size,
           activeBorder: getComputedStyle(elements[0]).borderColor !== getComputedStyle(elements[1]).borderColor,
           neutralCandidates: getComputedStyle(elements[1]).borderColor === getComputedStyle(elements[2]).borderColor,
@@ -77,7 +79,7 @@ for (const mode of ["automatic", "in_order", "round_robin", "weighted_round_robi
           fits: document.documentElement.scrollWidth <= innerWidth,
         };
       });
-      expect(layout).toEqual({ rowMajor: true, backgrounds: 1, activeBorder: true, neutralCandidates: true, textDirection: true, fits: true });
+      expect(layout).toEqual({ rowMajor: true, lastRowStartsLeft: true, backgrounds: 1, activeBorder: true, neutralCandidates: true, textDirection: true, fits: true });
       if (mode === "automatic") await page.screenshot({ path: testInfo.outputPath("pool-order.png"), fullPage: true });
 
       await page.evaluate(async () => {
