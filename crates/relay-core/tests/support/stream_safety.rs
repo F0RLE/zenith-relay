@@ -103,7 +103,7 @@ async fn truncated_prelude_transport_failure_does_not_replay_unknown_work() {
 }
 
 #[tokio::test]
-async fn streaming_usage_limit_keeps_the_provider_reset_before_fallback() {
+async fn streaming_relayed_subscription_limit_does_not_pause_the_api_key_globally() {
     let (source_a, _) = spawn_upstream(
         "a-key",
         vec![Reply::Stream {
@@ -149,10 +149,10 @@ async fn streaming_usage_limit_keeps_the_provider_reset_before_fallback() {
         events[0].error_category.as_deref(),
         Some("upstream_quota_exhausted")
     );
-    assert_eq!(events[0].cooldown_scope.as_deref(), Some("*"));
+    assert_eq!(events[0].cooldown_scope.as_deref(), Some(MODEL));
     assert!(events[0]
         .retry_at_ms
-        .is_some_and(|retry_at| retry_at > now_ms + 100_000));
+        .is_some_and(|retry_at| retry_at < now_ms + 10_000));
     assert!(events[1].success);
 }
 
