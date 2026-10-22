@@ -8,7 +8,7 @@ use axum::response::IntoResponse;
 
 pub(super) enum AfterRepair<'a> {
     Step(FailureStep),
-    Proceed(super::CollectedRejection<'a>, AttemptFailure),
+    Proceed(Box<super::CollectedRejection<'a>>, AttemptFailure),
 }
 pub(super) fn repair_collected_rejection(
     super::CollectedRejection {
@@ -245,7 +245,7 @@ pub(super) fn repair_collected_rejection(
             tried,
             &route.candidate_id,
             lease,
-            || super::super::super::account::drop_rejected_encrypted_context(request),
+            || super::super::super::account::drop_rejected_encrypted_context(request, &bytes),
         )
     {
         bind_encrypted_context_repair_owner(
@@ -263,7 +263,7 @@ pub(super) fn repair_collected_rejection(
         return AfterRepair::Step(FailureStep::Continue);
     }
     AfterRepair::Proceed(
-        super::CollectedRejection {
+        Box::new(super::CollectedRejection {
             status,
             response_headers,
             runtime,
@@ -298,7 +298,7 @@ pub(super) fn repair_collected_rejection(
             },
             event,
             bytes,
-        },
+        }),
         failure,
     )
 }

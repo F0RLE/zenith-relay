@@ -403,7 +403,10 @@ pub(super) fn attempt_error_response(
     };
     // A request-local limit can carry Retry-After without creating any pool cooldown.
     if failure.status == StatusCode::TOO_MANY_REQUESTS {
-        if let Some(delay) = failure.cooldown_hint.retry_after_ms {
+        if let Some(delay) = failure
+            .cooldown_hint
+            .retry_after_for_account(failure_origin == ErrorOrigin::Account)
+        {
             let seconds = delay
                 .saturating_add(999)
                 .checked_div(1_000)

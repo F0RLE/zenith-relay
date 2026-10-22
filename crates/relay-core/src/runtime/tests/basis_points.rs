@@ -12,6 +12,7 @@ use tokio::sync::{Notify, Semaphore};
 
 mod catalog_discovery;
 mod quota_rotation;
+mod rate_limits;
 mod recovery;
 mod request_timezone;
 mod retry_admission;

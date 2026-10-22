@@ -1,4 +1,6 @@
-use super::{ApiEquivalentSummary, ApiEquivalentUsage, ApiModelPriceOverride};
+use super::{
+    ApiEquivalentBreakdown, ApiEquivalentSummary, ApiEquivalentUsage, ApiModelPriceOverride,
+};
 use crate::{
     is_valid_model_id, model_id_key,
     pricing::{
@@ -155,6 +157,14 @@ pub fn estimate_api_equivalent_with_token_price(
     usage: ApiEquivalentUsage,
     quote: Option<TokenPrice>,
 ) -> ApiEquivalentSummary {
+    estimate_api_equivalent_breakdown_with_token_price(usage, quote).0
+}
+
+/// Uses the same component rounding and price selection for the total and detail.
+pub fn estimate_api_equivalent_breakdown_with_token_price(
+    usage: ApiEquivalentUsage,
+    quote: Option<TokenPrice>,
+) -> (ApiEquivalentSummary, ApiEquivalentBreakdown) {
     let input_tokens = usage.input_tokens;
     let output_tokens = usage.output_tokens;
     let cache_read_tokens = usage
@@ -227,40 +237,69 @@ pub fn estimate_api_equivalent_with_token_price(
         .unwrap_or(measured_tokens)
         .max(measured_tokens);
 
-    let Some(quote) = quote else {
-        return ApiEquivalentSummary {
-            unpriced_tokens: total_tokens,
-            ..Default::default()
-        };
-    };
-    let Some(rates) = rates_for(quote, usage.price_class, usage.context_band) else {
-        return ApiEquivalentSummary {
-            unpriced_tokens: total_tokens,
-            ..Default::default()
-        };
-    };
+    let rates = quote
+        .and_then(|quote| rates_for(quote, usage.price_class, usage.context_band))
+        .unwrap_or_default();
+    let uncached_input = component_value(uncached_input_tokens, rates.input);
+    let cache_read = component_value(
+        usage.cached_input_tokens.map(|_| cache_read_tokens),
+        rates.cache_read,
+    );
+    let cache_write = sum_component_values([
+        component_value(
+            usage
+                .cache_write_5m_tokens
+                .map(|_| short_cache_write_tokens),
+            rates.cache_write_5m,
+        ),
+        component_value(
+            usage.cache_write_1h_tokens.map(|_| long_cache_write_tokens),
+            rates.cache_write_1h,
+        ),
+        component_value(
+            usage
+                .unknown_cache_write_tokens
+                .map(|_| unknown_cache_write_tokens),
+            None,
+        ),
+    ]);
+    let input = sum_component_values([uncached_input, cache_read, cache_write]);
+    let output = component_value(output_tokens, rates.output);
+    let mut summary = sum_component_values([input, output]).unwrap_or_default();
+    summary.unpriced_tokens = total_tokens.saturating_sub(summary.priced_tokens);
+    (
+        summary,
+        ApiEquivalentBreakdown {
+            input,
+            uncached_input,
+            cache_read,
+            cache_write,
+            output,
+        },
+    )
+}
 
-    let components = [
-        (uncached_input_tokens, rates.input),
-        (Some(cache_read_tokens), rates.cache_read),
-        (Some(short_cache_write_tokens), rates.cache_write_5m),
-        (Some(long_cache_write_tokens), rates.cache_write_1h),
-        (Some(unknown_cache_write_tokens), None),
-        (output_tokens, rates.output),
-    ];
-    let mut priced_tokens = 0_u64;
-    let mut micro_usd = 0_u64;
-    for (tokens, price) in components {
-        if let (Some(tokens), Some(price)) = (tokens, price) {
-            priced_tokens = priced_tokens.saturating_add(tokens);
-            micro_usd = micro_usd.saturating_add(token_cost(tokens, price));
-        }
-    }
-    ApiEquivalentSummary {
-        micro_usd,
-        priced_tokens,
-        unpriced_tokens: total_tokens.saturating_sub(priced_tokens),
-    }
+fn component_value(tokens: Option<u64>, rate: Option<u64>) -> Option<ApiEquivalentSummary> {
+    tokens.map(|tokens| match rate {
+        Some(rate) => ApiEquivalentSummary {
+            micro_usd: token_cost(tokens, rate),
+            priced_tokens: tokens,
+            unpriced_tokens: 0,
+        },
+        None => ApiEquivalentSummary {
+            unpriced_tokens: tokens,
+            ..Default::default()
+        },
+    })
+}
+
+fn sum_component_values<const N: usize>(
+    values: [Option<ApiEquivalentSummary>; N],
+) -> Option<ApiEquivalentSummary> {
+    values.into_iter().flatten().reduce(|mut sum, value| {
+        sum.merge(value);
+        sum
+    })
 }
 
 /// Resolves a candidate's price against one immutable catalog snapshot.
@@ -381,6 +420,19 @@ impl<'a> CatalogPriceResolver<'a> {
         self.context
             .candidate_price(self.catalog, candidate_kind, candidate_id, model)
             .source
+    }
+
+    pub fn estimate_breakdown(
+        &self,
+        candidate_kind: &str,
+        candidate_id: &str,
+        model: Option<&str>,
+        usage: ApiEquivalentUsage,
+    ) -> (ApiEquivalentSummary, ApiEquivalentBreakdown) {
+        let resolved =
+            self.context
+                .candidate_price(self.catalog, candidate_kind, candidate_id, model);
+        estimate_api_equivalent_breakdown_with_token_price(usage, resolved.quote)
     }
 
     pub fn revision_key(&self) -> &str {

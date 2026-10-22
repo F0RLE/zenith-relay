@@ -48,7 +48,8 @@ pub(in crate::accounts::import::item) fn imported_jwt_metadata(
     access_token: Option<&str>,
 ) -> ImportedJwtMetadata {
     let mut metadata = ImportedJwtMetadata::default();
-    for token in [id_token, access_token].into_iter().flatten() {
+    for (token, is_access_token) in [(id_token, false), (access_token, true)] {
+        let Some(token) = token else { continue };
         let Some(claims) =
             crate::accounts::decode_unverified_jwt_payload::<Value>(token).filter(Value::is_object)
         else {
@@ -82,9 +83,9 @@ pub(in crate::accounts::import::item) fn imported_jwt_metadata(
         metadata.subscription_expires_at = metadata.subscription_expires_at.or_else(|| {
             auth.and_then(|auth| safe_expiry(auth.get("chatgpt_subscription_active_until")))
         });
-        metadata.expires_at = metadata
-            .expires_at
-            .or_else(|| safe_expiry(claims.get("exp")));
+        if is_access_token {
+            metadata.expires_at = safe_expiry(claims.get("exp"));
+        }
     }
     metadata
 }

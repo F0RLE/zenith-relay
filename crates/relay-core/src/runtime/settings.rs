@@ -95,6 +95,18 @@ impl GatewayRuntime {
         self.control.set_codex_background_tasks_enabled(enabled);
     }
 
+    pub fn codex_background_request_enabled(&self, kind: &str) -> bool {
+        self.control.codex_background_request_enabled(kind)
+    }
+
+    pub fn set_codex_memory_extraction_enabled(&self, enabled: bool) {
+        self.control.set_codex_memory_extraction_enabled(enabled);
+    }
+
+    pub fn set_codex_memory_consolidation_enabled(&self, enabled: bool) {
+        self.control.set_codex_memory_consolidation_enabled(enabled);
+    }
+
     pub fn codex_websockets_enabled(&self) -> bool {
         self.control.codex_websockets_enabled()
     }

@@ -96,6 +96,8 @@ fn metadata_operation_key(key: &str) -> bool {
         key.to_ascii_lowercase().as_str(),
         "request_type"
             | "requesttype"
+            | "request_kind"
+            | "subagent_kind"
             | "task_type"
             | "tasktype"
             | "purpose"
@@ -126,6 +128,13 @@ fn parse_metadata_value(metadata_value: &Value) -> Option<Value> {
 fn metadata_kind_value(metadata_value: &Value) -> Option<&'static str> {
     match metadata_value {
         Value::String(_) => metadata_kind(metadata_value),
+        // Codex extraction also declares thread_source=memory_consolidation;
+        // the explicit request kind distinguishes phase 1 from phase 2.
+        Value::Object(object)
+            if object.get("request_kind").and_then(Value::as_str) == Some("memory") =>
+        {
+            Some(CODEX_MEMORY_EXTRACTION)
+        }
         Value::Object(object) => object.iter().find_map(|(key, nested_value)| {
             let relevant = metadata_operation_key(key);
             if relevant {
@@ -161,6 +170,7 @@ fn metadata_kind_text(text: &str) -> Option<&'static str> {
     let normalized = text.trim().to_ascii_lowercase().replace('-', "_");
     let normalized = normalized.replace(' ', "_");
     match normalized.as_str() {
+        "memory_consolidation" => Some(CODEX_MEMORY_CONSOLIDATION),
         "activity_summary" | "summarize_activity" | "thread_summary" | "thread_description" => {
             Some(CODEX_ACTIVITY_SUMMARY)
         }

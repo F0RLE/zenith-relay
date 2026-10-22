@@ -175,7 +175,7 @@ async fn execute_client_request_inner(
     } || force_stream;
     if let Some(kind) = background_kind {
         runtime.mark_request_origin(&request_id, kind);
-        if !runtime.codex_background_tasks_enabled() {
+        if !runtime.codex_background_request_enabled(kind) {
             runtime.blocked_codex_background_event(
                 &request_id,
                 &key.id,
@@ -309,6 +309,19 @@ fn blocked_background_response(
     request_id: &str,
     kind: &str,
 ) -> Response<Body> {
+    // Empty success would let the client mark a memory job complete without data.
+    let code = match kind {
+        "memory_extraction" => Some(error_codes::CODEX_BACKGROUND_BLOCKED_MEMORY_EXTRACTION),
+        "memory_consolidation" => Some(error_codes::CODEX_BACKGROUND_BLOCKED_MEMORY_CONSOLIDATION),
+        _ => None,
+    };
+    if let Some(code) = code {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "This memory stage is disabled in Relay",
+            code,
+        );
+    }
     let response_id = format!("resp_relay_blocked_{request_id}");
     let response_body = if stream {
         format!(

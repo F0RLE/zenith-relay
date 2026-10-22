@@ -7,7 +7,9 @@ fn runtime_snapshot_keeps_the_management_wire_shape() {
         kind: CandidateKind::ApiSource,
         available: true,
         quota_wait: false,
+        capacity_wait: false,
         next_for_new_request: false,
+        selection_rank: None,
         resource_headroom: None,
         activity_revision: 0,
         runtime_id: 0,
@@ -29,9 +31,12 @@ fn runtime_snapshot_keeps_the_management_wire_shape() {
     assert!(value.get("active_request_count").is_none());
     assert!(value.get("resourceHeadroom").is_none());
     value.as_object_mut().unwrap().remove("quotaWait");
+    value.as_object_mut().unwrap().remove("capacityWait");
     let restored: CandidateRuntimeSnapshot = serde_json::from_value(value).unwrap();
     assert!(!restored.quota_wait);
+    assert!(!restored.capacity_wait);
     assert!(restored.resource_headroom.is_none());
+    assert!(restored.selection_rank.is_none());
 }
 
 #[test]

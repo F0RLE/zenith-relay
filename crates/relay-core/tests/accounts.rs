@@ -68,6 +68,8 @@ mod client_compatibility;
 mod compaction;
 #[path = "support/long_requests.rs"]
 mod long_requests;
+#[path = "support/memory_policy.rs"]
+mod memory_policy;
 #[path = "support/request_timezone.rs"]
 mod request_timezone;
 #[path = "support/rotation_policy.rs"]

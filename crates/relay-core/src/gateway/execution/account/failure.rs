@@ -238,7 +238,12 @@ fn repair_classified_account_failure(
                 tried,
                 candidate_id,
                 account_failure_input.lease,
-                || super::drop_rejected_encrypted_context(request_body),
+                || {
+                    super::drop_rejected_encrypted_context(
+                        request_body,
+                        &account_failure_input.bytes,
+                    )
+                },
             )
         {
             bind_encrypted_context_repair_owner(

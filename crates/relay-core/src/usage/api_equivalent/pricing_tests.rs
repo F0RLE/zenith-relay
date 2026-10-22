@@ -25,6 +25,72 @@ fn fixture_account_estimate(model: &str, usage: ApiEquivalentUsage) -> ApiEquiva
 }
 
 #[test]
+fn itemized_estimates_preserve_component_rounding_and_unknown_prices() {
+    let quote = crate::pricing::TokenPrice {
+        input: 1_500_000,
+        cache_read: Some(500_000),
+        cache_write_5m: Some(2_500_000),
+        output: 4_500_000,
+        ..Default::default()
+    };
+    let usage = ApiEquivalentUsage::from_reported_tokens(
+        Some(4),
+        Some(1),
+        Some(2),
+        Some("5m"),
+        Some(1),
+        Some(5),
+    );
+    let (total, parts) = estimate_api_equivalent_breakdown_with_token_price(usage, Some(quote));
+    assert_eq!(
+        total,
+        ApiEquivalentSummary {
+            micro_usd: 13,
+            priced_tokens: 5,
+            unpriced_tokens: 0
+        }
+    );
+    assert_eq!(parts.uncached_input.unwrap().micro_usd, 2);
+    assert_eq!(parts.cache_read.unwrap().micro_usd, 1);
+    assert_eq!(parts.cache_write.unwrap().micro_usd, 5);
+    assert_eq!(parts.input.unwrap().micro_usd, 8);
+    assert_eq!(parts.output.unwrap().micro_usd, 5);
+
+    let unknown_ttl =
+        ApiEquivalentUsage::from_reported_tokens(Some(4), Some(1), Some(2), None, Some(1), Some(5));
+    let (total, parts) =
+        estimate_api_equivalent_breakdown_with_token_price(unknown_ttl, Some(quote));
+    assert_eq!(
+        total,
+        ApiEquivalentSummary {
+            micro_usd: 8,
+            priced_tokens: 3,
+            unpriced_tokens: 2
+        }
+    );
+    assert_eq!(parts.cache_write.unwrap().unpriced_tokens, 2);
+    assert_eq!(parts.input.unwrap().unpriced_tokens, 2);
+
+    let (total, parts) = estimate_api_equivalent_breakdown_with_token_price(usage, None);
+    assert_eq!(total.unpriced_tokens, 5);
+    assert_eq!(parts.input.unwrap().unpriced_tokens, 4);
+    assert_eq!(parts.output.unwrap().unpriced_tokens, 1);
+
+    let (total, parts) = estimate_api_equivalent_breakdown_with_token_price(
+        ApiEquivalentUsage {
+            cached_input_tokens: Some(0),
+            total_tokens: Some(20),
+            ..Default::default()
+        },
+        Some(quote),
+    );
+    assert_eq!(total.unpriced_tokens, 20);
+    assert_eq!(parts.cache_read, Some(ApiEquivalentSummary::default()));
+    assert_eq!(parts.uncached_input, None);
+    assert_eq!(parts.output, None);
+}
+
+#[test]
 fn observed_sums_keep_rollup_buckets_and_gate_complete_aggregates() {
     let complete = ApiEquivalentUsage::from_observed_sums(ObservedUsageSums {
         input_tokens: Some(10),

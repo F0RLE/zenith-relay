@@ -76,6 +76,22 @@ pub(super) struct GatewayFailure {
 }
 
 impl GatewayFailure {
+    pub(super) fn blocked_memory(kind: &str) -> Option<Self> {
+        let category = match kind {
+            "memory_extraction" => error_codes::CODEX_BACKGROUND_BLOCKED_MEMORY_EXTRACTION,
+            "memory_consolidation" => error_codes::CODEX_BACKGROUND_BLOCKED_MEMORY_CONSOLIDATION,
+            _ => return None,
+        };
+        Some(Self {
+            upstream_error: None,
+            status: StatusCode::FORBIDDEN,
+            category,
+            message: "This memory stage is disabled in Relay",
+            retry_at_ms: None,
+            origin: ErrorOrigin::Relay,
+        })
+    }
+
     pub(super) fn admission(reason: crate::scheduler::rotation::AdmissionStopReason) -> Self {
         let (category, message) = super::super::errors::admission_failure(reason);
         Self {
@@ -277,7 +293,7 @@ impl GatewayFailure {
         if failure.status == StatusCode::TOO_MANY_REQUESTS {
             failure.retry_at_ms = upstream_error_body
                 .map(rate_limit_body_hint)
-                .and_then(|hint| hint.retry_after_ms)
+                .and_then(|hint| hint.retry_after_for_account(origin == ErrorOrigin::Account))
                 .map(|delay| now_ms().saturating_add(delay));
         }
         failure

@@ -85,6 +85,22 @@ pub(crate) fn failure_cooldown(cooldown_input: CooldownInput<'_>) -> Option<Cool
         return None;
     }
     let status = canonical_upstream_status(status, category);
+    // A relayed ChatGPT subscription reset is not the API key's own quota window.
+    let relayed_subscription = status == StatusCode::TOO_MANY_REQUESTS
+        && hint.chatgpt_subscription
+        && !runtime.is_chatgpt_account(candidate_id);
+    let (category, hint) = if relayed_subscription {
+        (
+            error_codes::UPSTREAM_RATE_LIMITED,
+            RateLimitBodyHint {
+                retry_after_ms: hint.retry_after_for_account(false),
+                global: false,
+                ..hint
+            },
+        )
+    } else {
+        (category, hint)
+    };
     if status == StatusCode::UNAUTHORIZED
         && category == error_codes::UPSTREAM_UNAUTHORIZED
         && runtime.is_basis_points_account(candidate_id)
@@ -109,7 +125,7 @@ pub(crate) fn failure_cooldown(cooldown_input: CooldownInput<'_>) -> Option<Cool
         && category == error_codes::UPSTREAM_MODEL_UNAVAILABLE
         && runtime.is_basis_points_account(candidate_id);
     let scope = if status == StatusCode::TOO_MANY_REQUESTS {
-        rate_limit_scope(category, hint.global || basis_points_rate_limit, model)
+        rate_limit_scope(category, hint.global, model)
     } else if category.starts_with("upstream_model_")
         || matches!(
             category,
@@ -143,6 +159,11 @@ pub(crate) fn failure_cooldown(cooldown_input: CooldownInput<'_>) -> Option<Cool
         TRANSIENT_COOLDOWN_MS
     };
     let mut duration_ms = retry_delay_ms(header_retry_after_ms, hint.retry_after_ms, fallback);
+    if basis_points_rate_limit {
+        // Millisecond token-bucket hints must not recycle a saturated BPS route immediately.
+        duration_ms =
+            duration_ms.max(crate::providers::chatgpt::BASIS_POINTS_RATE_LIMIT_COOLDOWN_MS);
+    }
     if basis_points_model_permission {
         duration_ms = duration_ms.max(30 * 60 * 1_000);
     }

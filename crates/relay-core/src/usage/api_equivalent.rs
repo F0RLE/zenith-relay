@@ -6,10 +6,22 @@ use std::collections::BTreeMap;
 mod estimate;
 
 pub use estimate::{
-    estimate_api_equivalent_with_catalog, estimate_api_equivalent_with_token_price,
-    estimate_candidate_api_equivalent_with_catalog, normalize_model_price_overrides,
-    resolve_candidate_price, CandidatePriceQuery, CatalogPriceResolver,
+    estimate_api_equivalent_breakdown_with_token_price, estimate_api_equivalent_with_catalog,
+    estimate_api_equivalent_with_token_price, estimate_candidate_api_equivalent_with_catalog,
+    normalize_model_price_overrides, resolve_candidate_price, CandidatePriceQuery,
+    CatalogPriceResolver,
 };
+
+/// Itemized parts of an API-price estimate, never separate billed charges.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiEquivalentBreakdown {
+    pub input: Option<ApiEquivalentSummary>,
+    pub uncached_input: Option<ApiEquivalentSummary>,
+    pub cache_read: Option<ApiEquivalentSummary>,
+    pub cache_write: Option<ApiEquivalentSummary>,
+    pub output: Option<ApiEquivalentSummary>,
+}
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]

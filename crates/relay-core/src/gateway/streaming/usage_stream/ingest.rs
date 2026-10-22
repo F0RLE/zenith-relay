@@ -372,7 +372,7 @@ impl<S> UsageStream<S> {
                 crate::poison::mutex(capture).observe(terminal_event_payload, event.wire_api);
             }
             if let Some(usage_event) = self.event.as_mut() {
-                usage_event.observe_response_model(terminal_event_payload);
+                usage_event.observe_response_metadata(terminal_event_payload);
                 usage_event
                     .tool_use
                     .observe_stream_payload(terminal_event_payload);

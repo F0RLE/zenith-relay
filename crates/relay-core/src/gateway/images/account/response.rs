@@ -4,14 +4,14 @@ pub(in crate::gateway::images) fn translate_account_response(
     bytes: &[u8],
     response_format: &str,
     stream_prefix: &str,
-) -> Result<TranslatedImageResponse, ImageFailure> {
+) -> Result<TranslatedImageResponse, Box<ImageFailure>> {
     let mut output_items = Vec::new();
     let mut partial_events = Vec::new();
     let mut completed_response = None;
 
     if let Ok(response_payload) = serde_json::from_slice::<Value>(bytes) {
         if let Some(failure) = image_failure_from_event(&response_payload) {
-            return Err(failure);
+            return Err(Box::new(failure));
         }
         if image_event_is_completion(&response_payload) {
             completed_response = Some(
@@ -30,7 +30,7 @@ pub(in crate::gateway::images) fn translate_account_response(
                 continue;
             };
             if let Some(failure) = image_failure_from_event(&event) {
-                return Err(failure);
+                return Err(Box::new(failure));
             }
             match event
                 .get("type")
@@ -58,7 +58,7 @@ pub(in crate::gateway::images) fn translate_account_response(
     }
 
     let Some(mut completed_response) = completed_response else {
-        return Err(ImageFailure {
+        return Err(Box::new(ImageFailure {
             status: StatusCode::BAD_GATEWAY,
             category: error_codes::STREAM_INCOMPLETE,
             upstream_error: None,
@@ -66,7 +66,7 @@ pub(in crate::gateway::images) fn translate_account_response(
             message: "upstream image stream ended before completion".to_string(),
             retryable: true,
             cooldown_hint: RateLimitBodyHint::default(),
-        });
+        }));
     };
     if completed_response
         .get("output")
@@ -84,7 +84,7 @@ pub(in crate::gateway::images) fn translate_account_response(
         .filter_map(image_result)
         .collect::<Vec<_>>();
     if images.is_empty() {
-        return Err(ImageFailure {
+        return Err(Box::new(ImageFailure {
             status: StatusCode::BAD_GATEWAY,
             category: error_codes::IMAGE_OUTPUT_MISSING,
             upstream_error: None,
@@ -92,7 +92,7 @@ pub(in crate::gateway::images) fn translate_account_response(
             message: "upstream did not return image output".to_string(),
             retryable: true,
             cooldown_hint: RateLimitBodyHint::default(),
-        });
+        }));
     }
     let created = completed_response
         .get("created_at")

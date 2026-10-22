@@ -3,6 +3,8 @@ use crate::usage::{CacheContextSection, CacheHistoryComparison, CacheInputKind};
 use crate::{DefaultServiceTier, RoutingDiagnostics, SelectionReason, ToolUseDiagnostics};
 use serde_json::json;
 
+mod provider;
+
 fn payload() -> Value {
     json!({
         "model": "synthetic",

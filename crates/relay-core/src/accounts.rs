@@ -4,6 +4,7 @@ mod jwt;
 mod login_notes;
 mod quota_state;
 mod record;
+mod routes;
 mod token_authority;
 
 /// Upper bound for a user-entered account purchase cost in micro-USD.
@@ -41,6 +42,10 @@ pub use record::{
     reduce_account_usage, AccountAccessState, AccountAuthMode, AccountAuthState,
     AccountHealthState, AccountIdentity, AccountRecord, AccountUsageObservation, AccountUsageState,
     AccountUsageUpdate, ProviderAccountFailure, ReauthReason,
+};
+pub use routes::{
+    detach_account_route, select_account_route_group, validate_account_route_connection,
+    validate_account_route_groups, AccountRouteGroup, AccountRouteIdentity,
 };
 pub use token_authority::{
     access_token_is_usable, PrepareStatus, PreparedToken, TokenAuthority, TokenAuthorityError,

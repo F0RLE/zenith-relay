@@ -79,3 +79,5 @@ pub(super) const CODEX_RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-re
 
 pub(super) const CODEX_ACTIVITY_SUMMARY: &str = "activity_summary";
 pub(super) const CODEX_TASK_TITLE: &str = "task_title";
+pub(super) const CODEX_MEMORY_EXTRACTION: &str = "memory_extraction";
+pub(super) const CODEX_MEMORY_CONSOLIDATION: &str = "memory_consolidation";

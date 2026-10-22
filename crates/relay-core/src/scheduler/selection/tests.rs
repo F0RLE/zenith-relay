@@ -6,6 +6,7 @@ mod capacity;
 mod live_order;
 mod policy;
 mod preview;
+mod rate_limits;
 mod recovery;
 mod rotation;
 use crate::scheduler::{CandidateKind, CandidateQuota};

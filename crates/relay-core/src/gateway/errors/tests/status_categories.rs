@@ -1,6 +1,50 @@
 use super::*;
 
 #[test]
+fn siwc_eligibility_is_terminal_without_cooling_or_penalizing_the_account() {
+    for (status, body) in [
+        (
+            StatusCode::FORBIDDEN,
+            serde_json::json!({"error":{"code":"subscription_sharing_user_not_eligible"}}),
+        ),
+        (
+            StatusCode::BAD_GATEWAY,
+            serde_json::json!({"error":{"upstream_error":{"type":"subscription_sharing_user_not_eligible"}}}),
+        ),
+    ] {
+        let failure =
+            AttemptFailure::status_with_body(status, Some(&serde_json::to_vec(&body).unwrap()));
+        assert_eq!(failure.category, error_codes::UPSTREAM_SIWC_NOT_ELIGIBLE);
+        assert_eq!(failure.status, StatusCode::FORBIDDEN);
+        assert!(!retryable_failure(failure.status, failure.category, false));
+        assert!(!failure_category_requires_cooldown(failure.category));
+        assert!(!failure_category_affects_account_state(failure.category));
+    }
+    let frame = format!(
+        "data: {}\n\n",
+        serde_json::json!({
+            "type":"response.failed", "response":{"status":"failed","error":{
+                "code":"subscription_sharing_user_not_eligible"
+            }}
+        })
+    );
+    let terminal = crate::gateway::streaming::parse_sse_event(frame.as_bytes());
+    assert_eq!(
+        terminal.error_category,
+        Some(error_codes::UPSTREAM_SIWC_NOT_ELIGIBLE)
+    );
+    for body in [
+        serde_json::json!({"error":{"message":"subscription_sharing_user_not_eligible"}}),
+        serde_json::json!({"input":{"code":"subscription_sharing_user_not_eligible"}}),
+    ] {
+        assert_ne!(
+            classify_upstream_error_value(StatusCode::FORBIDDEN, &body).category,
+            error_codes::UPSTREAM_SIWC_NOT_ELIGIBLE
+        );
+    }
+}
+
+#[test]
 fn capacity_exhaustion_is_model_scoped_in_json_and_stream_terminals() {
     let body = serde_json::json!({"error":{
         "code":"model_capacity_exhausted","type":"api_error",

@@ -221,6 +221,7 @@ pub(super) fn prepare_request_attempt(
         )
     };
     let adapter_is_passthrough = adapter_request.is_passthrough();
+    tool_policy.observe_cache_context(runtime, &mut route, adapter_request.upstream_body_mut());
     let Ok(request_body) = serde_json::to_vec(adapter_request.upstream_body()) else {
         return RequestPrepare::Respond(api_error(
             StatusCode::BAD_REQUEST,
@@ -228,7 +229,6 @@ pub(super) fn prepare_request_attempt(
             error_codes::INVALID_REQUEST,
         ));
     };
-    tool_policy.observe_cache_context(runtime, &mut route, adapter_request.upstream_body());
     let tool_use = tool_policy.diagnostics.clone();
     RequestPrepare::Ready(Box::new(PreparedRequestAttempt {
         preparation,

@@ -4,6 +4,7 @@ mod members;
 pub use members::{account_member_key, source_member_key};
 mod ownership;
 mod projection;
+mod rate_limits;
 mod recovery;
 mod registry;
 mod reservations;
@@ -74,6 +75,7 @@ pub struct PoolScheduler {
     candidates: BTreeMap<String, RuntimeCandidate>,
     quota_references: BTreeMap<String, crate::CandidateQuotaReference>,
     cooldown_reasons: BTreeMap<(String, String), CooldownReason>,
+    shared_rate_limits: BTreeMap<(String, String), rate_limits::RateLimitObservation>,
     response_affinity: AffinityCache,
     prompt_affinity: AffinityCache,
     activity: SchedulerActivity,
@@ -110,6 +112,7 @@ impl PoolScheduler {
             candidates: BTreeMap::new(),
             quota_references: BTreeMap::new(),
             cooldown_reasons: BTreeMap::new(),
+            shared_rate_limits: BTreeMap::new(),
             response_affinity: AffinityCache::new(
                 RESPONSE_AFFINITY_MAX_ENTRIES,
                 RESPONSE_AFFINITY_TTL_MS,

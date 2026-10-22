@@ -46,13 +46,17 @@ impl UpstreamUsage {
         self.event.applied_service_tier = None;
         if let Some(routing) = self.event.routing.as_mut() {
             routing.upstream_response_model = None;
+            if let Some(cache) = routing.cache_context.as_mut() {
+                cache.provider = None;
+                cache.provider_response_id = None;
+            }
         }
         self.event.tool_use.upstream_tool_call_count = None;
     }
 
     pub(super) fn finish_json_generation(&mut self, bytes: &[u8]) {
         if let Ok(payload) = serde_json::from_slice::<Value>(bytes) {
-            self.event.observe_response_model(&payload);
+            self.event.observe_response_metadata(&payload);
             self.event.tool_use.observe_upstream_response(&payload);
             if let Some(usage) = payload.get("usage") {
                 apply_usage(&mut self.event, usage);
@@ -133,7 +137,7 @@ impl UpstreamUsage {
         }
         let parsed = parse_sse_event(frame);
         if let Some(payload) = parsed.event_payload.as_ref() {
-            self.event.observe_response_model(payload);
+            self.event.observe_response_metadata(payload);
         }
         if parsed.outcome.is_some() {
             // Gemini can report final candidate status before a separate usage chunk.
@@ -177,6 +181,14 @@ impl UpstreamUsage {
             target
                 .upstream_response_model
                 .clone_from(&source.upstream_response_model);
+            if let (Some(source), Some(target)) =
+                (source.cache_context.as_ref(), target.cache_context.as_mut())
+            {
+                target.provider.clone_from(&source.provider);
+                target
+                    .provider_response_id
+                    .clone_from(&source.provider_response_id);
+            }
         }
         if let Some((_, timing)) = &self.timing {
             timing.apply(event);
@@ -232,7 +244,7 @@ mod tests {
         for chunk in frames.chunks(3) {
             assert!(capture.observe(chunk));
         }
-        event.observe_response_model(&json!({"model":"synthetic-client-alias"}));
+        event.observe_response_metadata(&json!({"model":"synthetic-client-alias"}));
         capture.apply_to(&mut event);
         assert_eq!(
             event

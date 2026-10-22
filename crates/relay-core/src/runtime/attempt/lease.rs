@@ -204,6 +204,7 @@ impl CandidateLease {
             now_ms,
             first_output_latency_ms,
             |scheduler| {
+                scheduler.reset_shared_rate_limit_backoff(&self.candidate_id, &self.model, now_ms);
                 recovered = scheduler.record_success(&self.candidate_id, &self.model, now_ms);
             },
         );

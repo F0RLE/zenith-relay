@@ -105,6 +105,19 @@ impl super::ClientRequest {
         let request_id = crate::gateway::request::request_id();
         if let Some(kind) = background_kind {
             runtime.mark_request_origin(&request_id, kind);
+            if !runtime.codex_background_request_enabled(kind) {
+                if let Some(failure) = GatewayFailure::blocked_memory(kind) {
+                    runtime.blocked_codex_background_event(
+                        &request_id,
+                        &key.id,
+                        &requested_model,
+                        crate::WireApi::Responses,
+                        crate::UsageTransport::Websocket,
+                        kind,
+                    );
+                    return Err(failure);
+                }
+            }
         }
         let client_identity = client_request_identity(headers, &request_body);
         let client_context_id = client_identity.context_id;

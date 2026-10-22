@@ -1,11 +1,25 @@
 use super::super::{upstream_error_text, MAX_RATE_LIMIT_RETRY_HINT_MS};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct RateLimitBodyHint {
     pub(crate) retry_after_ms: Option<u64>,
+    pub(crate) explicit_retry_after_ms: Option<u64>,
+    pub(crate) chatgpt_subscription: bool,
     pub(crate) global: bool,
+    pub(crate) shared_bucket: Option<[u8; 32]>,
+}
+
+impl RateLimitBodyHint {
+    pub(crate) fn retry_after_for_account(self, account_route: bool) -> Option<u64> {
+        if self.chatgpt_subscription && !account_route {
+            self.explicit_retry_after_ms
+        } else {
+            self.retry_after_ms
+        }
+    }
 }
 
 pub(crate) fn rate_limit_body_hint(response_body: &[u8]) -> RateLimitBodyHint {
@@ -23,6 +37,19 @@ pub(crate) fn rate_limit_body_hint_value(
     rate_limit_payload: &Value,
     now: SystemTime,
 ) -> RateLimitBodyHint {
+    let explicit_retry_after_ms = [
+        "/retry_after",
+        "/error/retry_after",
+        "/body/error/retry_after",
+        "/response/error/retry_after",
+    ]
+    .into_iter()
+    .find_map(|path| {
+        rate_limit_payload
+            .pointer(path)
+            .and_then(json_seconds_to_ms)
+    })
+    .or_else(|| retry_delay_from_text(&upstream_error_text(rate_limit_payload)));
     let retry_after_ms = rate_limit_reset_delay_ms(rate_limit_payload, now)
         .or_else(|| {
             [
@@ -38,21 +65,18 @@ pub(crate) fn rate_limit_body_hint_value(
                     .and_then(json_seconds_to_ms)
             })
         })
-        .or_else(|| {
-            [
-                "/retry_after",
-                "/error/retry_after",
-                "/body/error/retry_after",
-                "/response/error/retry_after",
-            ]
-            .into_iter()
-            .find_map(|path| {
-                rate_limit_payload
-                    .pointer(path)
-                    .and_then(json_seconds_to_ms)
+        .or(explicit_retry_after_ms);
+    let chatgpt_subscription = ["", "/error", "/body/error", "/response/error"]
+        .into_iter()
+        .filter_map(|path| rate_limit_payload.pointer(path))
+        .any(|error| {
+            ["code", "type"].into_iter().any(|field| {
+                matches!(
+                    error.get(field).and_then(Value::as_str),
+                    Some("usage_limit_reached" | "subscription_sharing_usage_limit_exceeded")
+                )
             })
-        })
-        .or_else(|| retry_delay_from_text(&upstream_error_text(rate_limit_payload)));
+        });
     let global = [
         "/type",
         "/code",
@@ -78,8 +102,46 @@ pub(crate) fn rate_limit_body_hint_value(
     });
     RateLimitBodyHint {
         retry_after_ms,
+        explicit_retry_after_ms,
+        chatgpt_subscription,
         global,
+        shared_bucket: organization_rate_limit_bucket(rate_limit_payload),
     }
+}
+
+fn organization_rate_limit_bucket(payload: &Value) -> Option<[u8; 32]> {
+    let error = ["/error", "/body/error", "/response/error", ""]
+        .into_iter()
+        .filter_map(|path| payload.pointer(path))
+        .find(|error| error["code"].as_str() == Some("rate_limit_exceeded"))?;
+    let dimension = error["type"].as_str()?;
+    let unit = match dimension {
+        "tokens" => "tokens per min",
+        "requests" => "requests per min",
+        _ => return None,
+    };
+    let message = error["message"].as_str()?;
+    let (model, remainder) = message
+        .strip_prefix("Rate limit reached for ")?
+        .split_once(" in organization ")?;
+    let (organization, limit) = remainder.split_once(" on ")?;
+    if !crate::catalog::is_valid_model_token(model)
+        || organization.is_empty()
+        || organization.len() > 128
+        || !organization
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        || !limit.starts_with(unit)
+    {
+        return None;
+    }
+    // Keep quota identity opaque; account names and provider messages are not stored here.
+    let mut digest = Sha256::new();
+    for value in [organization, model, dimension] {
+        digest.update(value.as_bytes());
+        digest.update([0]);
+    }
+    Some(digest.finalize().into())
 }
 
 fn rate_limit_reset_delay_ms(rate_limit_payload: &Value, now: SystemTime) -> Option<u64> {

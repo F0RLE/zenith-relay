@@ -161,7 +161,7 @@ pub(super) fn handle_collected_image(
             });
             emit_usage(runtime, event);
             return ImageAttemptStep::Respond(image_error_response(
-                failure,
+                *failure,
                 route_error_origin(route),
                 observed.request_id,
             ));

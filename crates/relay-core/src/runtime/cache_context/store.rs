@@ -31,6 +31,7 @@ pub(super) struct CompletedRequest {
     pub(super) upstream: Arc<RequestFingerprint>,
     pub(super) candidate: Fingerprint,
     pub(super) completed_at_ms: u64,
+    pub(super) provider_response_id: Option<String>,
     sequence: u64,
 }
 
@@ -168,7 +169,11 @@ impl StoreState {
         // persisted classification at completion rather than falsely blaming an
         // overlapping client for a cache-prefix rewrite.
         if observed.overlapping.load(Ordering::Relaxed) {
+            let provider = diagnostics.provider.take();
+            let response_id = diagnostics.provider_response_id.take();
             *diagnostics = super::diagnostics(&observed, prepared.upstream.as_deref(), now_ms);
+            diagnostics.provider = provider;
+            diagnostics.provider_response_id = response_id;
         }
         if !event.success {
             return;
@@ -184,6 +189,7 @@ impl StoreState {
                     upstream,
                     candidate,
                     completed_at_ms: now_ms,
+                    provider_response_id: diagnostics.provider_response_id.clone(),
                     sequence: observed.sequence,
                 })
             });

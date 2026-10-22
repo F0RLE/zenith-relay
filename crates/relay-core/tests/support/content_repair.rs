@@ -1,6 +1,60 @@
 use super::*;
 
 #[tokio::test]
+async fn targeted_encrypted_reasoning_repair_preserves_other_items() {
+    for diagnostic in [
+        json!({"param":"input[1].encrypted_content"}),
+        json!({"message":"The encrypted content BBBB...2222 could not be verified. Reason: Encrypted content could not be decrypted or parsed."}),
+    ] {
+        let mut error = diagnostic;
+        error["code"] = json!("invalid_encrypted_content");
+        let (upstream, state) = spawn_upstream(vec![
+            Reply::Json(StatusCode::BAD_REQUEST, json!({"error":error})),
+            success_reply("synthetic-targeted-recovery"),
+        ])
+        .await;
+        let authority = ready_authority("relay-account", "account-access").await;
+        let (gateway, _, _, _) = spawn_mixed_gateway(
+            Vec::new(),
+            vec![account("relay-account", "provider-account", &upstream, 10)],
+            vec![mixed_key(None, None)],
+            authority,
+            refresh_adapter(),
+            Arc::new(PersistenceAdapter::default()),
+        )
+        .await;
+        let input = json!([
+            {"id":"rs_first","type":"reasoning","encrypted_content":"AAAA-synthetic-1111","summary":[]},
+            {"id":"rs_second","type":"reasoning","encrypted_content":"BBBB-synthetic-2222","summary":[{"type":"summary_text","text":"Visible synthetic summary"}]},
+            {"type":"function_call","name":"lookup","call_id":"call_synthetic","arguments":"{}"},
+            {"type":"function_call_output","call_id":"call_synthetic","output":"Synthetic result"},
+            {"role":"user","content":"Continue synthetic task"}
+        ]);
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .json(&json!({"model":MODEL,"input":input}))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.text().await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let requests = state.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].body["input"], input);
+        let retry = &requests[1].body["input"];
+        assert_eq!(retry[0], input[0]);
+        assert_eq!(retry[1]["summary"], input[1]["summary"]);
+        assert!(retry[1].get("encrypted_content").is_none());
+        assert!(retry[1].get("id").is_none());
+        for index in 2..5 {
+            assert_eq!(retry[index], input[index]);
+        }
+    }
+}
+
+#[tokio::test]
 async fn invalid_foreign_reasoning_retries_a_native_account_without_ciphertext() {
     assert_foreign_reasoning_repair(false).await;
 }

@@ -1,5 +1,7 @@
 use super::*;
 
+mod cache_context;
+
 async fn runtime(siwc: &AccessServer, native: &AccessServer) -> Arc<GatewayRuntime> {
     let mut runtime = retry_admission::pool_runtime(siwc, 1, true).await;
     let account = runtime
@@ -394,6 +396,47 @@ async fn siwc_rejection_never_replays_repairs_or_changes_billing() {
 }
 
 #[tokio::test]
+async fn siwc_eligibility_refusal_does_not_block_a_later_client_request() {
+    let siwc = AccessServer::start(json!([]), false).await;
+    *crate::poison::mutex(&siwc.state.generation_status) = StatusCode::FORBIDDEN;
+    *crate::poison::mutex(&siwc.state.generation_body) = json!({"error":{
+        "code":"subscription_sharing_user_not_eligible","message":"Synthetic eligibility refusal"
+    }});
+    let mut runtime = retry_admission::pool_runtime(&siwc, 1, false).await;
+    let account = runtime
+        .chatgpt_accounts
+        .get_mut("synthetic-account-0")
+        .unwrap();
+    account.oauth_client_kind = OAuthClientKind::Siwc;
+    let runtime = Arc::new(runtime);
+    runtime.set_route_recovery_enabled(true);
+    let (base, task) = recovery::gateway(runtime).await;
+    let client = retry_admission::bounded_client();
+    for expected in [StatusCode::FORBIDDEN, StatusCode::OK] {
+        let response = client
+            .post(format!("{base}/v1/responses"))
+            .bearer_auth("local-secret")
+            .json(&json!({"model":"gpt-test","input":"Synthetic input","stream":false}))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.text().await.unwrap();
+        assert_eq!(status, expected, "{body}");
+        *crate::poison::mutex(&siwc.state.generation_status) = StatusCode::OK;
+        *crate::poison::mutex(&siwc.state.generation_body) = json!({
+            "id":"resp_synthetic_eligible","status":"completed","output":[{
+                "type":"message","role":"assistant","content":[{
+                    "type":"output_text","text":"Synthetic recovery"
+                }]
+            }]
+        });
+    }
+    assert_eq!(siwc.state.generation_requests.load(Ordering::SeqCst), 2);
+    task.abort();
+}
+
+#[tokio::test]
 async fn siwc_local_rejection_does_not_switch_to_native() {
     let siwc = AccessServer::start(json!([]), false).await;
     let native = AccessServer::start(json!([]), false).await;
@@ -410,6 +453,32 @@ async fn siwc_local_rejection_does_not_switch_to_native() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(siwc.state.generation_requests.load(Ordering::SeqCst), 0);
     assert_eq!(native.state.generation_requests.load(Ordering::SeqCst), 0);
+    task.abort();
+}
+
+#[tokio::test]
+async fn native_account_subscription_reset_is_not_shortened() {
+    let server = AccessServer::start(json!([]), false).await;
+    let reset_at = crate::unix_time_ms() / 1_000 + 6 * 24 * 60 * 60;
+    *crate::poison::mutex(&server.state.generation_status) = StatusCode::TOO_MANY_REQUESTS;
+    *crate::poison::mutex(&server.state.generation_body) = json!({"error":{
+        "type":"usage_limit_reached","plan_type":"plus","resets_at":reset_at
+    }});
+    let runtime = Arc::new(retry_admission::pool_runtime(&server, 0, true).await);
+    let (base, task) = recovery::gateway(runtime.clone()).await;
+    let response = retry_admission::bounded_client()
+        .post(format!("{base}/v1/responses"))
+        .bearer_auth("local-secret")
+        .json(&json!({"model":"gpt-test","input":"Synthetic input","stream":false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let snapshot = runtime.candidate_runtime_order();
+    let deadline = snapshot[0].next_retry_at_ms.unwrap();
+    assert!(deadline >= reset_at * 1_000);
+    assert!(deadline < (reset_at + 1) * 1_000);
+    assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 1);
     task.abort();
 }
 

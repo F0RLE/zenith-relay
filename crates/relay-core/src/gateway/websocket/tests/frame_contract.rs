@@ -467,3 +467,19 @@ fn http_fallback_rejects_unknown_or_untrusted_error_origins() {
         .unwrap();
     assert_eq!(fallback_response_origin(&upstream), ErrorOrigin::Provider);
 }
+#[test]
+fn relayed_subscription_reset_does_not_become_a_websocket_retry_deadline() {
+    let body = br#"{"error":{"type":"usage_limit_reached","resets_at":9999999999}}"#;
+    let source = GatewayFailure::upstream_status(
+        StatusCode::TOO_MANY_REQUESTS,
+        Some(body),
+        ErrorOrigin::Provider,
+    );
+    assert_eq!(source.retry_at_ms, None);
+    let account = GatewayFailure::upstream_status(
+        StatusCode::TOO_MANY_REQUESTS,
+        Some(body),
+        ErrorOrigin::Account,
+    );
+    assert!(account.retry_at_ms.is_some());
+}

@@ -1,6 +1,7 @@
 //! SIWC preview contract: preserve options or reject before network dispatch.
 use crate::protocol::AdapterError;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 pub(crate) fn sanitize_siwc_headers(headers: &mut reqwest::header::HeaderMap) {
     let removed: Vec<_> = headers
@@ -62,6 +63,9 @@ pub(crate) fn prepare_siwc_request(body: &mut Value) -> Result<(), AdapterError>
     {
         return Err(AdapterError::parameter_unsupported_for("store"));
     }
+    if let Some(tools) = object.get("tools") {
+        validate_tools(tools)?;
+    }
     let input = object.entry("input").or_insert_with(|| json!([]));
     if let Some(text) = input.as_str() {
         *input = json!([{"role":"user","content":text}]);
@@ -90,10 +94,27 @@ pub(crate) fn prepare_siwc_request(body: &mut Value) -> Result<(), AdapterError>
             }
         }
     }
-    if let Some(tools) = object.get("tools") {
-        validate_tools(tools)?;
-    }
-    // additional_tools keeps bare call names and call IDs unchanged on the roundtrip.
+    let has_tool_history = items
+        .iter()
+        .any(|item| item.get("type").and_then(Value::as_str) == Some("additional_tools"));
+    let historical_tools: BTreeMap<_, _> = items
+        .iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("additional_tools"))
+        .filter_map(|item| item.get("tools").and_then(Value::as_array))
+        .flatten()
+        .filter(|tool| {
+            matches!(
+                tool.get("type").and_then(Value::as_str),
+                Some("function" | "custom")
+            )
+        })
+        .filter_map(|tool| {
+            tool.get("name")
+                .and_then(Value::as_str)
+                .map(|name| (name.to_string(), tool.to_string()))
+        })
+        .collect();
+    // Preserve declared history; current definitions override it only at the tail.
     let mut bare = Vec::new();
     if let Some(tools) = object.get_mut("tools").and_then(Value::as_array_mut) {
         tools.retain(|tool| {
@@ -101,7 +122,14 @@ pub(crate) fn prepare_siwc_request(body: &mut Value) -> Result<(), AdapterError>
                 tool.get("type").and_then(Value::as_str),
                 Some("function" | "custom")
             ) {
-                bare.push(tool.clone());
+                if tool
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .and_then(|name| historical_tools.get(name))
+                    .is_none_or(|previous| previous != &tool.to_string())
+                {
+                    bare.push(tool.clone());
+                }
                 false
             } else {
                 true
@@ -109,14 +137,36 @@ pub(crate) fn prepare_siwc_request(body: &mut Value) -> Result<(), AdapterError>
         });
     }
     if !bare.is_empty() {
-        object
+        let input = object
             .get_mut("input")
             .and_then(Value::as_array_mut)
-            .expect("validated input")
-            .insert(
+            .expect("validated input");
+        let (prefix, appended): (Vec<_>, Vec<_>) = bare.into_iter().partition(|tool| {
+            !has_tool_history
+                || tool
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| {
+                        !historical_tools.contains_key(name)
+                            && input.iter().any(|item| {
+                                matches!(
+                                    item.get("type").and_then(Value::as_str),
+                                    Some("function_call" | "custom_tool_call")
+                                ) && item.get("name").and_then(Value::as_str) == Some(name)
+                                    && item.get("namespace").is_none_or(Value::is_null)
+                            })
+                    })
+        });
+        // A legacy call without loading history still needs its definition first.
+        if !prefix.is_empty() {
+            input.insert(
                 0,
-                json!({"type":"additional_tools","role":"developer","tools":bare}),
+                json!({"type":"additional_tools","role":"developer","tools":prefix}),
             );
+        }
+        if !appended.is_empty() {
+            input.push(json!({"type":"additional_tools","role":"developer","tools":appended}));
+        }
     }
     object.remove("previous_response_id");
     object.insert("store".into(), Value::Bool(false));
@@ -212,6 +262,118 @@ mod tests {
         let prepared = request.clone();
         prepare_siwc_request(&mut request).unwrap();
         assert_eq!(request, prepared);
+    }
+    #[test]
+    fn appends_only_new_tools_after_existing_loading_history() {
+        let lookup = json!({"type":"function","name":"lookup","parameters":{"type":"object"}});
+        let edit = json!({"type":"custom","name":"edit","format":{"type":"text"}});
+        let history = json!([
+            {"role":"developer","content":"Synthetic stable context"},
+            {"type":"additional_tools","role":"developer","tools":[lookup]},
+            {"type":"function_call","name":"lookup","call_id":"call_1","arguments":"{}"},
+            {"type":"function_call_output","call_id":"call_1","output":"Synthetic result"},
+            {"role":"user","content":"Synthetic next turn"}
+        ]);
+        let mut request = json!({"input":history,"tools":[lookup,edit],
+            "tool_choice":{"type":"custom","name":"edit"},
+            "prompt_cache_options":{"mode":"implicit","ttl":"30m"}});
+        prepare_siwc_request(&mut request).unwrap();
+        let input = request["input"].as_array().unwrap();
+        assert_eq!(&input[..5], history.as_array().unwrap());
+        assert_eq!(
+            input[5],
+            json!({"type":"additional_tools","role":"developer","tools":[edit]})
+        );
+        assert_eq!(request["tools"], json!([]));
+        assert_eq!(
+            request["tool_choice"],
+            json!({"type":"custom","name":"edit"})
+        );
+        assert_eq!(
+            request["prompt_cache_options"],
+            json!({"mode":"implicit","ttl":"30m"})
+        );
+        let prepared = request.clone();
+        prepare_siwc_request(&mut request).unwrap();
+        assert_eq!(request, prepared);
+    }
+    #[test]
+    fn repeated_current_catalog_does_not_rewrite_or_duplicate_history() {
+        let first = json!({"type":"function","name":"first","parameters":{"type":"object"}});
+        let second = json!({"type":"custom","name":"second","format":{"type":"text"}});
+        let history = json!([
+            {"type":"additional_tools","role":"developer","tools":[first]},
+            {"role":"user","content":"Synthetic first turn"},
+            {"type":"additional_tools","role":"developer","tools":[second]},
+            {"role":"user","content":"Synthetic next turn"}
+        ]);
+        let mut request = json!({"input":history,"tools":[second,first]});
+        prepare_siwc_request(&mut request).unwrap();
+        assert_eq!(request["input"], history);
+    }
+    #[test]
+    fn current_tool_overrides_latest_history_without_changing_earlier_definitions() {
+        let old = json!({"type":"function","name":"lookup","description":"Synthetic old schema","parameters":{"type":"object"}});
+        let updated = json!({"type":"function","name":"lookup","description":"Synthetic updated schema","parameters":{"type":"object","required":["value"],"properties":{"value":{"type":"string"}}}});
+        for current in [&old, &updated] {
+            let history = json!([
+                {"type":"additional_tools","role":"developer","tools":[old]},
+                {"role":"user","content":"Synthetic first turn"},
+                {"type":"additional_tools","role":"developer","tools":[updated]},
+                {"role":"user","content":"Synthetic next turn"}
+            ]);
+            let mut request = json!({"input":history,"tools":[current]});
+            prepare_siwc_request(&mut request).unwrap();
+            let input = request["input"].as_array().unwrap();
+            assert_eq!(&input[..4], history.as_array().unwrap());
+            if current == &updated {
+                assert_eq!(input.len(), 4);
+            } else {
+                assert_eq!(
+                    input[4],
+                    json!({"type":"additional_tools","role":"developer","tools":[current]})
+                );
+            }
+        }
+    }
+    #[test]
+    fn preserves_legacy_calls_missing_a_tool_loading_item() {
+        let lookup = json!({"type":"function","name":"lookup","parameters":{"type":"object"}});
+        let edit = json!({"type":"custom","name":"edit","format":{"type":"text"}});
+        let history = json!([
+            {"type":"additional_tools","role":"developer","tools":[lookup]},
+            {"type":"custom_tool_call","name":"edit","call_id":"call_edit","input":"Synthetic edit"},
+            {"type":"custom_tool_call_output","call_id":"call_edit","output":"Synthetic result"}
+        ]);
+        let mut request = json!({"input":history,"tools":[lookup,edit]});
+        prepare_siwc_request(&mut request).unwrap();
+        assert_eq!(
+            request["input"][0],
+            json!({"type":"additional_tools","role":"developer","tools":[edit]})
+        );
+        assert_eq!(
+            &request["input"].as_array().unwrap()[1..],
+            history.as_array().unwrap()
+        );
+    }
+    #[test]
+    fn current_schema_property_order_is_not_lost_during_deduplication() {
+        let old = json!({"type":"function","name":"lookup","parameters":{
+            "type":"object","properties":{"first":{"type":"string"},"second":{"type":"string"}}
+        }});
+        let current = json!({"type":"function","name":"lookup","parameters":{
+            "type":"object","properties":{"second":{"type":"string"},"first":{"type":"string"}}
+        }});
+        let mut request = json!({"input":[{"type":"additional_tools","role":"developer","tools":[old]}],"tools":[current]});
+        prepare_siwc_request(&mut request).unwrap();
+        assert_eq!(request["input"].as_array().unwrap().len(), 2);
+        let properties = request["input"][1]["tools"][0]["parameters"]["properties"]
+            .as_object()
+            .unwrap();
+        assert_eq!(
+            properties.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["second", "first"]
+        );
     }
     #[test]
     fn rejects_semantic_loss_and_hosted_tools() {

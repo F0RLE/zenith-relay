@@ -52,6 +52,10 @@ fn failure(code: ModelDiscoveryFailureCode, retryable: bool) -> ModelDiscoveryFa
 }
 
 impl GatewayRuntime {
+    pub(crate) fn is_chatgpt_account(&self, candidate_id: &str) -> bool {
+        self.chatgpt_accounts.contains_key(candidate_id)
+    }
+
     pub(crate) fn is_siwc_account(&self, candidate_id: &str) -> bool {
         self.chatgpt_accounts
             .get(candidate_id)

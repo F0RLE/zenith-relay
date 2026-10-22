@@ -111,3 +111,45 @@ fn source_recovery_delay_overrides_automatic_but_not_provider_retry_after() {
     );
     assert_eq!(cooldown::source_cooldown_ms(5_000, None, false), 5_000);
 }
+
+#[test]
+fn organization_rate_limit_requires_explicit_model_and_quota_identity() {
+    let error = serde_json::json!({
+        "code": "rate_limit_exceeded", "type": "tokens",
+        "message": "Rate limit reached for synthetic-model in organization org-synthetic on tokens per min (TPM): Limit 1000, Used 1000, Requested 100. Please try again in 2ms."
+    });
+    let hint = |value: &Value| cooldown::rate_limit_body_hint_value(value, UNIX_EPOCH);
+    let expected = hint(&serde_json::json!({"error": error}));
+    assert!(expected.shared_bucket.is_some());
+    assert!(!expected.global);
+    assert_eq!(expected.retry_after_ms, Some(2));
+    for value in [
+        error.clone(),
+        serde_json::json!({"body": {"error": error}}),
+        serde_json::json!({"response": {"error": error}}),
+    ] {
+        assert_eq!(hint(&value).shared_bucket, expected.shared_bucket);
+    }
+    for (from, to) in [
+        ("org-synthetic", "org-independent"),
+        ("synthetic-model", "different-model"),
+    ] {
+        let mut other = error.clone();
+        other["message"] = Value::String(error["message"].as_str().unwrap().replace(from, to));
+        assert_ne!(hint(&other).shared_bucket, expected.shared_bucket);
+    }
+    for message in [
+        "Too many requests. Please try again in 2ms.",
+        "Rate limit reached for synthetic-model in organization  on tokens per min",
+        "Rate limit reached for synthetic-model in organization org/synthetic on tokens per min",
+        "Request too large for synthetic-model in organization org-synthetic on tokens per min",
+    ] {
+        let mut other = error.clone();
+        other["message"] = Value::String(message.into());
+        assert!(hint(&other).shared_bucket.is_none());
+    }
+    let mut other = error.clone();
+    other["code"] = serde_json::json!("usage_limit_reached");
+    assert!(hint(&other).shared_bucket.is_none());
+    assert!(hint(&other).global);
+}

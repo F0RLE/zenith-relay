@@ -38,6 +38,7 @@ async fn cooldown_is_visible_to_release_observers_and_revokes_pending_dispatch()
             retry_at_ms: deadline,
             reason: CooldownReason::RateLimit,
         }),
+        None,
         crate::unix_time_ms(),
     );
     assert!(
@@ -63,6 +64,7 @@ async fn cooldown_is_visible_to_release_observers_and_revokes_pending_dispatch()
             retry_at_ms: deadline + 60_000,
             reason: CooldownReason::RateLimit,
         }),
+        None,
         crate::unix_time_ms(),
     );
     assert_eq!(

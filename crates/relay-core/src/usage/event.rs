@@ -42,7 +42,10 @@ pub enum ErrorOrigin {
 
 impl ErrorOrigin {
     pub fn for_category(self, category: &str) -> Self {
-        if relay_error_category(category) || adapter_error_category_is_relay(category) {
+        if category.starts_with("codex_background_blocked_")
+            || relay_error_category(category)
+            || adapter_error_category_is_relay(category)
+        {
             return Self::Relay;
         }
         // Origin identifies the selected route. Whether an upstream failure
@@ -150,7 +153,39 @@ pub struct UsageEvent {
 }
 
 impl UsageEvent {
-    pub(crate) fn observe_response_model(&mut self, payload: &serde_json::Value) {
+    pub(crate) fn observe_response_metadata(&mut self, payload: &serde_json::Value) {
+        if let Some(cache) = self
+            .routing
+            .as_mut()
+            .and_then(|routing| routing.cache_context.as_mut())
+        {
+            for response in
+                std::iter::successors(Some(payload), |item| item.get("response")).take(3)
+            {
+                if let Some(diagnostics) = response.get("prompt_cache_diagnostics") {
+                    if let Ok(diagnostics) =
+                        super::ProviderCacheDiagnostics::deserialize(diagnostics)
+                    {
+                        cache.provider = Some(diagnostics);
+                    }
+                }
+                if response.get("status").and_then(serde_json::Value::as_str) == Some("completed") {
+                    if let Some(id) = response
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|id| {
+                            !id.is_empty()
+                                && id.len() <= 256
+                                && id.bytes().all(|byte| {
+                                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+                                })
+                        })
+                    {
+                        cache.provider_response_id = Some(id.to_owned());
+                    }
+                }
+            }
+        }
         let model = [
             "/response/model",
             "/message/model",

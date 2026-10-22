@@ -30,6 +30,26 @@ pub(in crate::gateway) fn classify_upstream_error_value(
     status: StatusCode,
     error_payload: &Value,
 ) -> UpstreamErrorClassification {
+    if matches!(status, StatusCode::FORBIDDEN | StatusCode::BAD_GATEWAY)
+        && [
+            "/code",
+            "/type",
+            "/error/code",
+            "/error/type",
+            "/error/upstream_error/code",
+            "/error/upstream_error/type",
+            "/response/error/code",
+            "/response/error/type",
+        ]
+        .iter()
+        .filter_map(|path| error_payload.pointer(path).and_then(Value::as_str))
+        .any(|code| code == "subscription_sharing_user_not_eligible")
+    {
+        return UpstreamErrorClassification {
+            category: error_codes::UPSTREAM_SIWC_NOT_ELIGIBLE,
+            message: upstream_failure_message(error_codes::UPSTREAM_SIWC_NOT_ELIGIBLE),
+        };
+    }
     // Normalization and stream guards emit typed local failures into the stream.
     // Keep its exact category instead of falling back to upstream_terminal.
     // Only these representation failures are accepted, never arbitrary codes

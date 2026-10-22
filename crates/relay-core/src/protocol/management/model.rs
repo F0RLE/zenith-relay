@@ -57,6 +57,10 @@ pub struct GatewaySummary {
     pub chatgpt_interface_quota_reserve_basis_points: Option<u64>,
     #[serde(default = "default_codex_background_tasks_enabled")]
     pub codex_background_tasks_enabled: bool,
+    #[serde(default = "default_codex_background_tasks_enabled")]
+    pub codex_memory_extraction_enabled: bool,
+    #[serde(default = "default_codex_background_tasks_enabled")]
+    pub codex_memory_consolidation_enabled: bool,
     #[serde(default = "default_codex_websockets_enabled")]
     pub codex_websockets_enabled: bool,
     /// Legacy snapshot key retained for older desktop/server clients.

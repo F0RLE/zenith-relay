@@ -115,7 +115,7 @@ async fn handle_connection(
 
     let request_id = client_request.request_id.clone();
     if let Some(kind) = client_request.background_kind {
-        if !runtime.codex_background_tasks_enabled() {
+        if !runtime.codex_background_request_enabled(kind) {
             runtime.blocked_codex_background_event(
                 &client_request.request_id,
                 &key.id,
@@ -124,6 +124,16 @@ async fn handle_connection(
                 UsageTransport::Websocket,
                 kind,
             );
+            if let Some(failure) = GatewayFailure::blocked_memory(kind) {
+                send_gateway_error(
+                    &mut downstream,
+                    &failure,
+                    Some(&request_id),
+                    client_request.stream_id.as_deref(),
+                )
+                .await;
+                return;
+            }
             let mut blocked_response_payload = serde_json::json!({
                 "type": "response.completed",
                 "response": {"id": format!("resp_relay_blocked_{}", client_request.request_id), "object": "response", "status": "completed", "output": [], "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}, "metadata": {"zenith_relay": {"blocked": true, "request_type": kind}}}

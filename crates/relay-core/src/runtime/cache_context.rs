@@ -2,7 +2,9 @@
 //! No content, identity, salt, or digest is serialized or logged.
 
 use super::{AccountTransport, ExecutorRoute, GatewayRuntime};
-use crate::usage::{CacheContextBaseline, CacheContextDiagnostics, CacheContextScope};
+use crate::usage::{
+    CacheContextBaseline, CacheContextDiagnostics, CacheContextScope, CacheContextSection,
+};
 use crate::{UsageEvent, WireApi};
 use fingerprint::{identity, Fingerprint, RequestFingerprint};
 use ring::rand::{SecureRandom, SystemRandom};
@@ -271,6 +273,8 @@ fn diagnostics(
             .unwrap_or_default(),
         candidate_changed: None,
         previous_completed_age_ms: previous.map(|old| now_ms.saturating_sub(old.completed_at_ms)),
+        provider: None,
+        provider_response_id: None,
     }
 }
 
@@ -295,27 +299,73 @@ impl GatewayRuntime {
         &self,
         observation: &CacheContextObservation,
         route: &mut ExecutorRoute,
-        upstream: &Value,
+        upstream: &mut Value,
     ) {
         if route.client_wire_api != WireApi::Responses
             || !route.adapter.is_passthrough()
-            || route.account_transport != AccountTransport::NativeResponses
+            || !matches!(
+                route.account_transport,
+                AccountTransport::NativeResponses | AccountTransport::Siwc
+            )
         {
             return;
         }
         if let Some(routing) = route.routing.as_mut() {
-            routing.cache_context = Some(self.cache_context_store.prepare(
+            let now_ms = super::runtime_now_ms();
+            let diagnostics = self.cache_context_store.prepare(
                 observation,
                 upstream,
                 &route.candidate_id,
-                super::runtime_now_ms(),
-            ));
+                now_ms,
+            );
+            if route.account_transport == AccountTransport::Siwc {
+                add_provider_comparison(observation, upstream, &diagnostics, now_ms);
+            }
+            routing.cache_context = Some(diagnostics);
             route.cache_context_observation = Some(observation.clone());
         }
     }
 
     pub(crate) fn finish_cache_context(&self, event: &mut UsageEvent, now_ms: u64) {
         self.cache_context_store.finish(event, now_ms);
+    }
+}
+
+fn add_provider_comparison(
+    observation: &CacheContextObservation,
+    upstream: &mut Value,
+    diagnostics: &CacheContextDiagnostics,
+    now_ms: u64,
+) {
+    if diagnostics.baseline != CacheContextBaseline::CompletedRequest
+        || diagnostics.candidate_changed != Some(false)
+        || diagnostics
+            .upstream_changes
+            .contains(&CacheContextSection::Model)
+    {
+        return;
+    }
+    let Some(response_id) = observation
+        .inner
+        .previous
+        .as_ref()
+        .filter(|previous| now_ms.saturating_sub(previous.completed_at_ms) < BASELINE_TTL_MS)
+        .and_then(|previous| previous.provider_response_id.as_ref())
+    else {
+        return;
+    };
+    let Some(fields) = upstream.as_object_mut() else {
+        return;
+    };
+    // Diagnostics do not load history, change caching, or authorize continuation.
+    if let Some(options) = fields
+        .entry("prompt_cache_options")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+    {
+        options
+            .entry("comparison_response_id")
+            .or_insert_with(|| Value::String(response_id.clone()));
     }
 }
 

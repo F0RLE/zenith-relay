@@ -54,6 +54,7 @@ impl PoolScheduler {
                         .is_some()
             })
         {
+            self.forget_shared_rate_limits(&candidate_id);
             let revision = self
                 .candidate_permission_revisions
                 .entry(candidate_id.clone())
@@ -76,6 +77,7 @@ impl PoolScheduler {
     }
 
     pub fn remove(&mut self, candidate_id: &str) -> Option<RuntimeCandidate> {
+        self.forget_shared_rate_limits(candidate_id);
         self.quota_references.retain(|id, reference| {
             id != candidate_id && reference.source_account_id != candidate_id
         });

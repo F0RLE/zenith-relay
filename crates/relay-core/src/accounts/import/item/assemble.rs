@@ -232,6 +232,10 @@ pub(super) fn assemble_parsed_item(
         protocol,
         protocol_supplied,
         priority,
+        expires_at_ms: preview
+            .expires_at
+            .as_deref()
+            .and_then(crate::providers::chatgpt::parse_subscription_timestamp_text),
         account_is_fedramp,
         tags,
         email: email.map(RedactedValue::new),

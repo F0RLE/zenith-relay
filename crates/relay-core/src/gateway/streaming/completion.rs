@@ -121,6 +121,7 @@ impl StreamCompletionSettlement {
                     health,
                 },
                 cooldown,
+                hint.shared_bucket,
                 crate::unix_time_ms_at(now),
             );
         }

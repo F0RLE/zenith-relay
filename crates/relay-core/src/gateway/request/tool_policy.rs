@@ -65,7 +65,7 @@ impl RequestToolPolicy {
         &self,
         runtime: &GatewayRuntime,
         route: &mut crate::runtime::ExecutorRoute,
-        upstream: &Value,
+        upstream: &mut Value,
     ) {
         if let Some(observation) = self.cache_context.as_ref() {
             runtime.observe_cache_context(observation, route, upstream);

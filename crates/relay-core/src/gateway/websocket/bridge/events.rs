@@ -300,7 +300,7 @@ pub(super) fn inspect_upstream_event(
 fn inspect_parsed_event(event_payload: &Value, state: &mut BridgeState) -> EventTerminal {
     let event_type = event_payload.get("type").and_then(Value::as_str);
     if let Some(in_flight) = state.in_flight.as_mut() {
-        in_flight.event.observe_response_model(event_payload);
+        in_flight.event.observe_response_metadata(event_payload);
         in_flight.native_replay_capture.observe(event_payload);
         in_flight
             .tool_call_capture

@@ -226,7 +226,7 @@ pub(super) async fn handle_upstream_failure(
     match repair::repair_collected_rejection(rejection) {
         repair::AfterRepair::Step(step) => step,
         repair::AfterRepair::Proceed(rejection, failure) => {
-            settle::settle_collected_rejection(rejection, failure)
+            settle::settle_collected_rejection(*rejection, failure)
         }
     }
 }

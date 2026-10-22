@@ -99,7 +99,7 @@ pub(in crate::gateway) fn populate_tokens(event: &mut UsageEvent, response_body:
         while let Some(end) = crate::protocol::sse::event_end(&response_body[offset..]) {
             let data = crate::protocol::sse::event_data(&response_body[offset..offset + end]);
             if let Ok(payload) = serde_json::from_slice::<Value>(&data) {
-                event.observe_response_model(&payload);
+                event.observe_response_metadata(&payload);
                 if let Some(usage) = find_usage(&payload) {
                     crate::protocol::merge_usage(&mut usage_snapshot, usage);
                 }
@@ -112,7 +112,7 @@ pub(in crate::gateway) fn populate_tokens(event: &mut UsageEvent, response_body:
         return;
     };
     event.tool_use.set_terminal_response(&response_payload);
-    event.observe_response_model(&response_payload);
+    event.observe_response_metadata(&response_payload);
     event.applied_service_tier = response_service_tier(&response_payload);
     let Some(usage) = find_usage(&response_payload) else {
         return;

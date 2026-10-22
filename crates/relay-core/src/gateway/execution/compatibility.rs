@@ -90,7 +90,11 @@ pub(in crate::gateway) fn incompatible_routes(
             {
                 if capability.temperature == Some(false)
                     && request
-                        .get("temperature")
+                        .pointer(if client == WireApi::Gemini {
+                            "/generationConfig/temperature"
+                        } else {
+                            "/temperature"
+                        })
                         .is_some_and(|value| !value.is_null())
                 {
                     return Err(AdapterError::parameter_unsupported_for("temperature"));
@@ -332,6 +336,70 @@ fn has_image(request_value: &Value) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn gemini_temperature_obeys_model_capabilities_before_route_admission() {
+        use crate::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
+        use crate::runtime::{GatewayRuntimeOptions, RuntimeLocalKey, RuntimeSource};
+        use crate::{LocalGatewayKey, ProviderSource};
+
+        for supported in [false, true] {
+            let catalog = ModelMetadataCatalog::from_models_dev_json(
+                &json!({"anthropic/temperature-test":{
+                    "name":"Temperature Test","family":"claude","temperature":supported
+                }})
+                .to_string(),
+            )
+            .unwrap();
+            let runtime = GatewayRuntime::from_pool(
+                vec![RuntimeSource::unrestricted(ProviderSource {
+                    id: "synthetic-source".into(),
+                    name: "Synthetic source".into(),
+                    base_url: "https://example.test/v1".into(),
+                    api_key: "synthetic-upstream-key".into(),
+                    proxy_url: None,
+                    wire_api: WireApi::Messages,
+                    models: vec!["temperature-test".into()],
+                })],
+                vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
+                    id: "synthetic-key".into(),
+                    secret: "synthetic-secret".into(),
+                })],
+                GatewayRuntimeOptions {
+                    model_metadata_catalog: Some(ModelMetadataCatalogHandle::new(catalog)),
+                    ..Default::default()
+                },
+                std::sync::Arc::new(|_| {}),
+            )
+            .unwrap();
+            let key = runtime.authenticate_secret("synthetic-secret").unwrap();
+            for temperature in [None, Some(Value::Null), Some(json!(0.3))] {
+                let mut request =
+                    json!({"contents":[{"role":"user","parts":[{"text":"Synthetic input"}]}]});
+                if let Some(value) = &temperature {
+                    request["generationConfig"] = json!({"temperature":value});
+                }
+                let tier_policy = ServiceTierPolicy::pool_owned(&request);
+                let (excluded, admitted, error) = incompatible_routes(RouteCompatibility {
+                    runtime: &runtime,
+                    key: &key,
+                    model: "temperature-test",
+                    client: WireApi::Gemini,
+                    request: &request,
+                    stream: false,
+                    tier_policy: &tier_policy,
+                    now_ms: 1,
+                });
+                let rejected = !supported && temperature.is_some_and(|value| !value.is_null());
+                assert_eq!(admitted.len(), usize::from(!rejected));
+                assert_eq!(excluded.len(), usize::from(rejected));
+                assert_eq!(
+                    error.and_then(AdapterError::parameter),
+                    rejected.then_some("temperature")
+                );
+            }
+        }
+    }
 
     #[test]
     fn neutral_controls_do_not_require_unsupported_features() {

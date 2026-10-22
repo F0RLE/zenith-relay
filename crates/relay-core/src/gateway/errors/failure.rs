@@ -70,6 +70,7 @@ impl AttemptFailure {
                 health,
             },
             cooldown,
+            self.cooldown_hint.shared_bucket,
             now_ms,
         );
     }
@@ -99,6 +100,7 @@ impl AttemptFailure {
                     cooldown_hint: RateLimitBodyHint {
                         retry_after_ms: failure.retry_after_ms,
                         global: rate_limited,
+                        ..Default::default()
                     },
                 }
             }
@@ -225,6 +227,10 @@ impl AttemptFailure {
 
     pub(crate) fn with_retry_headers(mut self, headers: &HeaderMap) -> Self {
         let header_delay = super::cooldown::retry_after_ms(headers, std::time::SystemTime::now());
+        self.cooldown_hint.explicit_retry_after_ms = header_delay
+            .into_iter()
+            .chain(self.cooldown_hint.explicit_retry_after_ms)
+            .max();
         self.cooldown_hint.retry_after_ms = header_delay
             .into_iter()
             .chain(self.cooldown_hint.retry_after_ms)
@@ -327,6 +333,7 @@ fn rejection_execution(status: StatusCode, category: &str) -> ExecutionObservati
             error_codes::UPSTREAM_OVERLOADED
                 | error_codes::UPSTREAM_TRANSPORT_CONNECT
                 | error_codes::UPSTREAM_USAGE_NOT_INCLUDED
+                | error_codes::UPSTREAM_SIWC_NOT_ELIGIBLE
                 | error_codes::UPSTREAM_MODEL_UNAVAILABLE
                 | error_codes::UPSTREAM_MODEL_UNSUPPORTED
                 | error_codes::UPSTREAM_MODEL_NOT_FOUND

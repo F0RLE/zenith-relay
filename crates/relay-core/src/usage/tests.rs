@@ -20,7 +20,7 @@ fn upstream_model_declarations_are_bounded_and_do_not_change_routing_identity() 
         json!({"message":{"model":"synthetic-snapshot"}}),
         json!({"modelVersion":"synthetic-snapshot"}),
     ] {
-        event.observe_response_model(&payload);
+        event.observe_response_metadata(&payload);
         assert_eq!(
             event
                 .routing
@@ -42,7 +42,7 @@ fn upstream_model_declarations_are_bounded_and_do_not_change_routing_identity() 
         "https://example.test/private",
         &"x".repeat(1025),
     ] {
-        event.observe_response_model(&json!({"model":model}));
+        event.observe_response_metadata(&json!({"model":model}));
         assert_eq!(
             event
                 .routing

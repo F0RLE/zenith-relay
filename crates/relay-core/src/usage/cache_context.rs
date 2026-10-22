@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-/// Local request comparisons, not provider cache-hit or execution evidence.
-/// Only classifications and counts leave the in-memory fingerprint store.
+/// Local prefix comparisons and separate, allowlisted provider diagnostics.
+/// Only classifications and counts leave the in-memory comparison store.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CacheContextDiagnostics {
@@ -15,6 +15,39 @@ pub struct CacheContextDiagnostics {
     pub relay_history: CacheHistoryDiagnostics,
     pub candidate_changed: Option<bool>,
     pub previous_completed_age_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderCacheDiagnostics>,
+    #[serde(skip)]
+    pub(crate) provider_response_id: Option<String>,
+}
+
+/// Provider classifications, not a substitute for observed cache-token counters.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ProviderCacheDiagnostics {
+    CacheHit,
+    CacheMiss {
+        reason: ProviderCacheMissReason,
+        cache_missed_tokens: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        comparison_reusable_tokens: Option<u64>,
+    },
+    ComparisonResponseNotFound,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderCacheMissReason {
+    ModelChanged,
+    PromptCacheKeyChanged,
+    ServiceTierChanged,
+    ToolsChanged,
+    TextFormatChanged,
+    ReasoningEffortChanged,
+    VerbosityChanged,
+    ContextCompacted,
+    InputChanged,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

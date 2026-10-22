@@ -144,11 +144,11 @@ impl ClientRequest {
             WireApi::Responses,
             WireApi::Responses,
         );
+        self.tool_policy
+            .observe_cache_context(runtime, route, &mut filtered_request);
         let payload = serde_json::to_string(&filtered_request)
             .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))?;
         tool_use.capture_upstream_context(&filtered_request);
-        self.tool_policy
-            .observe_cache_context(runtime, route, &filtered_request);
         Ok(PreparedPayload {
             payload,
             reasoning_effort,

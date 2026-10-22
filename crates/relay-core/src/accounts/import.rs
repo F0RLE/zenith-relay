@@ -324,6 +324,7 @@ pub struct ParsedImportItem {
     pub protocol: Option<String>,
     pub protocol_supplied: bool,
     pub priority: Option<i32>,
+    pub expires_at_ms: Option<u64>,
     pub account_is_fedramp: bool,
     /// Safe, non-secret labels imported from a portable account format.
     pub tags: BTreeSet<String>,
@@ -375,6 +376,7 @@ impl fmt::Debug for ParsedImportItem {
             .field("protocol", &self.protocol)
             .field("protocol_supplied", &self.protocol_supplied)
             .field("priority", &self.priority)
+            .field("expires_at_ms", &self.expires_at_ms)
             .field("account_is_fedramp", &self.account_is_fedramp)
             .field("tag_count", &self.tags.len())
             .field("email", &self.email.as_ref().map(|_| "[redacted]"))

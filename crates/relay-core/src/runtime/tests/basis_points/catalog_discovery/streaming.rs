@@ -262,7 +262,7 @@ async fn discovery_preserves_rate_limits_after_output_without_replaying() {
             .lock_scheduler()
             .candidate("account-1")
             .unwrap()
-            .cooldowns["*"];
+            .cooldowns["gpt-test"];
         assert!(
             retry_at >= before + 120_000,
             "provider pause was shortened: stream={stream}, untyped={untyped}"
@@ -361,7 +361,7 @@ async fn discovery_continuation_retains_redacted_provider_error_without_replay()
             .lock_scheduler()
             .candidate("account-1")
             .unwrap()
-            .cooldowns["*"];
+            .cooldowns["gpt-test"];
         assert!(retry_at >= before + 120_000, "stream={stream}");
         assert!(retry_at <= runtime_now_ms() + 120_000);
         let events = crate::poison::mutex(&events);
