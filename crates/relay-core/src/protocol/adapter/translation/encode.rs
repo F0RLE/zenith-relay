@@ -84,6 +84,20 @@ fn conversation(
     let mut system = Vec::new();
     let mut assistant_started = false;
     let mut gemini_call_ids = BTreeMap::new();
+    let portable_messages_end = request
+        .messages
+        .iter()
+        .rposition(|message| {
+            message.role == Role::User
+                && !message.blocks.is_empty()
+                && message.blocks.iter().all(|block| {
+                    matches!(
+                        block,
+                        Block::Text(_) | Block::Image { .. } | Block::Document { .. }
+                    )
+                })
+        })
+        .map(|index| index + usize::from(request.instructions.is_some()));
     for (position, message) in request
         .instructions
         .iter()
@@ -154,11 +168,16 @@ fn conversation(
             for block in &mut visible.blocks {
                 super::tool_search::lower_result(block, &request.client_tools)?;
             }
-            if request.origin == Some(WireApi::Responses)
-                && matches!(protocol, WireApi::Messages | WireApi::Gemini)
+            if (request.origin == Some(WireApi::Responses)
+                && matches!(protocol, WireApi::Messages | WireApi::Gemini))
+                || (request.origin == Some(WireApi::Messages)
+                    && message.role == Role::Assistant
+                    && matches!(protocol, WireApi::Responses | WireApi::Gemini)
+                    && portable_messages_end.is_some_and(|end| position < end))
             {
                 // A public summary is visible history, not a fabricated
-                // signature. Original signed turns take the native branch.
+                // signature. Messages requires a new user turn; original
+                // signed turns always take the native branch above.
                 for block in &mut visible.blocks {
                     if let Block::Reasoning(text) = block {
                         *block = Block::Text(std::mem::take(text));

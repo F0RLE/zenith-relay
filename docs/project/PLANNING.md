@@ -884,7 +884,10 @@ own field-level review; third-party proxies are comparisons, not specifications.
 - Chat plaintext `reasoning_content` / `reasoning` aliases must agree. Messages
   clients may replay translated summaries with absent/null/empty signatures;
   nonempty foreign signatures fail. A new ordinary user turn can carry completed
-  portable history, not an unfinished foreign tool loop.
+  portable history, not an unfinished foreign tool loop. Without a native
+  checkpoint, unsigned Messages summaries before that new user turn become
+  visible assistant text on Responses/Gemini; they are never fabricated native
+  reasoning. An available checkpoint still restores its original opaque state.
 - Preserve supported URL citations and Unicode offsets. Unsupported citations
   or meaningful output extensions fail rather than disappearing.
 - Metadata and advisory cache hints follow the target contract. Valid foreign

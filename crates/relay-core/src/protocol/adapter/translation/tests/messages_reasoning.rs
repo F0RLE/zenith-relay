@@ -156,6 +156,148 @@ fn messages_harness_empty_signature_keeps_native_tool_continuation() {
     }
 }
 
+#[test]
+fn messages_unsigned_reasoning_history_can_start_a_new_user_turn() {
+    for upstream in [
+        WireApi::Responses,
+        WireApi::ChatCompletions,
+        WireApi::Gemini,
+    ] {
+        for signature in [None, Some(Value::Null), Some(json!(""))] {
+            let mut thinking = json!({"type":"thinking","thinking":"Plan the greeting."});
+            if let Some(signature) = signature {
+                thinking["signature"] = signature;
+            }
+            let mut next = request();
+            next["messages"] = json!([
+                {"role":"user","content":"Hello"},
+                {"role":"assistant","content":[thinking,{"type":"text","text":"Hi"}]},
+                {"role":"user","content":"Continue"}
+            ]);
+            for stream in [false, true] {
+                let prepared = prepare(WireApi::Messages, upstream, &next, stream);
+                let body = prepared.upstream_body();
+                let history = &body[if upstream == WireApi::Responses {
+                    "input"
+                } else if upstream == WireApi::Gemini {
+                    "contents"
+                } else {
+                    "messages"
+                }];
+                if upstream == WireApi::ChatCompletions {
+                    assert_eq!(history[1]["reasoning_content"], "Plan the greeting.");
+                } else if upstream == WireApi::Gemini {
+                    assert_eq!(history[1]["parts"][0], json!({"text":"Plan the greeting."}));
+                } else {
+                    assert_eq!(
+                        history[1]["content"][0],
+                        json!({"type":"output_text","text":"Plan the greeting."})
+                    );
+                }
+                let serialized = body.to_string();
+                assert!(!serialized.contains("encrypted_content"));
+                assert!(!serialized.contains("signature"));
+            }
+        }
+    }
+}
+
+#[test]
+fn messages_unsigned_reasoning_without_a_new_user_turn_stays_strict() {
+    let mut next = request();
+    next["messages"].as_array_mut().unwrap().push(json!({
+        "role":"assistant","content":[
+            {"type":"thinking","thinking":"Plan the greeting.","signature":""},
+            {"type":"text","text":"Hi"}
+        ]
+    }));
+    let error = SourceAdapter::MessagesToResponses
+        .prepare_request(AdapterRequestContext {
+            client_wire_api: WireApi::Messages,
+            request: &next,
+            model: "test",
+            stream: false,
+            reasoning_mode: MessagesReasoningMode::Adaptive,
+            cache_write_ttl: CacheWriteTtl::Provider,
+            previous: None,
+            response_scope: "source-test",
+            response_id_seed: "unfinished-turn",
+        })
+        .unwrap_err();
+    assert_eq!(
+        error.code(),
+        crate::error_codes::ADAPTER_REASONING_UNSUPPORTED
+    );
+}
+
+#[test]
+fn messages_portable_history_does_not_accept_foreign_signatures() {
+    for signature in [json!("foreign-signature"), json!(true)] {
+        let mut next = request();
+        next["messages"].as_array_mut().unwrap().extend([
+            json!({"role":"assistant","content":[
+                {"type":"thinking","thinking":"Plan the greeting.","signature":signature},
+                {"type":"text","text":"Hi"}
+            ]}),
+            json!({"role":"user","content":"Continue"}),
+        ]);
+        for upstream in [WireApi::Responses, WireApi::Gemini] {
+            let error = try_convert(WireApi::Messages, upstream, &next, false).unwrap_err();
+            assert_eq!(error.parameter(), Some("messages[].content[].signature"));
+        }
+    }
+}
+
+#[test]
+fn messages_portable_reasoning_requires_assistant_history() {
+    let mut next = request();
+    next["messages"].as_array_mut().unwrap().extend([
+        json!({"role":"user","content":[
+            {"type":"thinking","thinking":"Not assistant history.","signature":""},
+            {"type":"text","text":"Hi"}
+        ]}),
+        json!({"role":"user","content":"Continue"}),
+    ]);
+    for upstream in [WireApi::Responses, WireApi::Gemini] {
+        let error = try_convert(WireApi::Messages, upstream, &next, false).unwrap_err();
+        assert_eq!(
+            error.code(),
+            crate::error_codes::ADAPTER_REASONING_UNSUPPORTED
+        );
+    }
+}
+
+#[test]
+fn messages_new_user_turn_restores_available_native_reasoning() {
+    let mut native = reply();
+    native["output"][1] = output(WireApi::Responses)["output"][0].clone();
+    let completed = prepare(WireApi::Messages, WireApi::Responses, &request(), false)
+        .translate_response_bytes(&serde_json::to_vec(&native).unwrap())
+        .unwrap()
+        .unwrap();
+    let completed = completed.translated_response();
+    let mut next = request();
+    next["messages"].as_array_mut().unwrap().extend([
+        json!({"role":"assistant","content":completed.response_body["content"]}),
+        json!({"role":"user","content":"Continue"}),
+    ]);
+    let prepared = SourceAdapter::MessagesToResponses
+        .prepare_request(AdapterRequestContext {
+            client_wire_api: WireApi::Messages,
+            request: &next,
+            model: "test",
+            stream: false,
+            reasoning_mode: MessagesReasoningMode::Adaptive,
+            cache_write_ttl: CacheWriteTtl::Provider,
+            previous: Some(completed.continuation.clone()),
+            response_scope: "source-test",
+            response_id_seed: "native-history",
+        })
+        .unwrap();
+    assert_eq!(prepared.upstream_body()["input"][1], native["output"][0]);
+    assert_eq!(prepared.upstream_body()["input"][2], native["output"][1]);
+}
+
 fn response_events(response: &Value) -> Vec<Value> {
     let mut events = vec![
         json!({"type":"response.created","response":{"id":"resp_synthetic","output":[]}}),

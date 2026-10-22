@@ -43,7 +43,9 @@ async fn invalid_bps_body_422_is_returned_once_without_cooling_the_account() {
 #[tokio::test]
 async fn claude_messages_satisfy_strict_bps_schema_through_json_and_streaming_tool_cycles() {
     for stream in [false, true] {
-        claude_tool_cycle(stream).await;
+        for unsigned_history in [false, true] {
+            claude_tool_cycle(stream, unsigned_history).await;
+        }
     }
 }
 
@@ -154,7 +156,7 @@ async fn claude_desktop_effort_is_separate_from_model_and_obeys_pool_policy() {
     task.abort();
 }
 
-async fn claude_tool_cycle(stream: bool) {
+async fn claude_tool_cycle(stream: bool, unsigned_history: bool) {
     let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
     server
         .state
@@ -167,6 +169,15 @@ async fn claude_tool_cycle(stream: bool) {
     let runtime = Arc::new(runtime(&server).await);
     let (base, task) = gateway(runtime).await;
     let mut history = vec![json!({"role":"user","content":"Hello"})];
+    if unsigned_history {
+        history.extend([
+            json!({"role":"assistant","content":[
+                {"type":"thinking","thinking":"Plan the greeting.","signature":""},
+                {"type":"text","text":"Hi"}
+            ]}),
+            json!({"role":"user","content":"Continue"}),
+        ]);
+    }
     for turn in 0..3 {
         let output = if turn == 1 {
             json!([
@@ -224,6 +235,21 @@ async fn claude_tool_cycle(stream: bool) {
         .all(|body| body["metadata"].get("user_id").is_none()
             && body["metadata"].as_object().unwrap().len() == 3));
     let final_input = bodies[2]["input"].as_array().unwrap();
+    if unsigned_history {
+        for body in bodies.iter() {
+            let input = body["input"].as_array().unwrap();
+            assert_eq!(
+                input
+                    .iter()
+                    .filter(|item| item["role"] == "assistant")
+                    .filter_map(|item| item["content"].as_array())
+                    .flatten()
+                    .filter(|block| block["text"] == "Plan the greeting.")
+                    .count(),
+                1
+            );
+        }
+    }
     assert!(
         final_input
             .iter()
