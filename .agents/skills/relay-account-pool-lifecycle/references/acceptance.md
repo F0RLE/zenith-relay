@@ -43,10 +43,9 @@ define acceptance; they do not claim that live compatibility was established.
 | Membership commit/runtime update fails | Existing rollback restores only its own mutation; newer user changes survive. |
 | Trash during monitoring or dispatch preparation | Routing/monitoring eligibility ends and pending work is fenced; credentials remain recoverable in trash. |
 | Restore/permanent delete | Restore follows the existing disabled/outside-pool contract; permanent delete removes owned secrets and late work cannot recreate them. |
-| User-managed server replacement | Persistence stays bound to the current secret reference; no write through the old login's reference. |
 
 Existing coverage starts in `accounts/token_authority/tests/`, desktop
 `accounts/authority/tests.rs`, `accounts/operation_tests/`, import persistence,
-`runtime/tests/`, scheduler ownership tests, and server `token_refresh/tests.rs`.
+`runtime/tests/` and scheduler ownership tests.
 For account routes requiring conversion, also use the protocol skill's
 text/tool/result/continuation acceptance.

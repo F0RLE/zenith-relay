@@ -92,7 +92,7 @@ Relay's admission and execution-ownership contracts.
   [`src/oauth.rs`](https://github.com/IuCC123/CLIProxyAPI-Rust/blob/7a3c8c2e017fafe9a3dc9a72dba5697feffcb992/src/oauth.rs)
   shows per-account locking and rechecking after acquisition. Token-text equality
   alone does not fence a newer login with identical token text. Its OAuth files
-  are not a replacement for Relay's credential store or server vault.
+  are not a replacement for Relay's credential store or protected local vault.
 
 ## Protocol standards
 

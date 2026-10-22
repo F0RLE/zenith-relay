@@ -26,20 +26,19 @@ Load guidance for the affected task only:
 | `src/src` | React rendering, i18n, UI state, typed Tauri wrappers |
 | `src-tauri/src` | Desktop I/O, credentials, OAuth, profiles, process lifecycle |
 | `crates/relay-core` | Shared discovery, scheduling, protocols, gateway, quota, usage |
-| `relay-server` | User-managed runtime, encrypted vault, persistence, management API |
 
-Keep validation/side effects in Rust and hosted API/local pool/server distinct.
+Keep validation/side effects in Rust and Hosted/local pool boundaries distinct.
 No production credentials, customer inventory, or Gateway/Control business logic
 in Relay. Accounts stay local by default; secrets use the credential store or
-the user's encrypted server vault. Transfers need explicit confirmation;
-credential exports need explicit user action. Management tokens and pool keys
+protected local storage. Transfers need explicit confirmation;
+credential exports need explicit user action. Provider credentials and pool keys
 are distinct. Redact snapshots, logs, support bundles, and diagnostics.
 
 Preserve account inventory. Model meaning comes from Relay's validated catalog,
 not participant declarations. Price evidence, quota, and route eligibility are
 separate; `PLANNING.md` owns their contracts. Retry only after proven
 pre-execution rejection or not-sent, before client output, preserving ownership.
-History does not make uncertain execution safe to repeat. Server migrations are
+History does not make uncertain execution safe to repeat. Database migrations are
 append-only. Profile recovery uses inspect/snapshot/attach/verify/restore and
 preserves newer user logins.
 

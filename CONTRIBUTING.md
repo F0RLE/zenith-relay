@@ -46,7 +46,8 @@ Relay is separate from production Zenith Gateway and Control.
 
 Never copy production Zenith credentials, customer data, inventory, or internal
 business logic into Relay. User secrets use the existing credential store or
-the user's encrypted server vault; transfer is explicit and confirmed.
+protected local storage; transfer is explicit and confirmed. Future Hosted vault
+requirements belong in the [Hosted design](docs/project/HOSTED_RELAY_ARCHITECTURE.md).
 Diagnostics, screenshots, snapshots, and fixtures contain no secrets or raw
 prompt/response bodies. Explicit credential exports are not support bundles.
 
@@ -246,14 +247,16 @@ Use one owner per subject:
 | Development/checks/releases | `CONTRIBUTING.md` |
 | Current contracts and core map | `docs/project/PLANNING.md` |
 | Open work and acceptance | `docs/project/ROADMAP.md` |
-| Proposed Hosted design | `docs/project/HOSTED_RELAY_ARCHITECTURE.md` |
-| User steps/error recovery | `docs/help/<locale>/README.md` |
+| Target Hosted product contract (not shipped) | `docs/project/HOSTED_RELAY_ARCHITECTURE.md` |
+| Target Hosted web presentation (not shipped) | `docs/project/HOSTED_RELAY_WEB_DESIGN.md` |
+| Desktop user steps/error recovery | `docs/help/<locale>/README.md` |
 | User-visible release history | `docs/releases/CHANGELOG.md` |
 | Catalog policy/export | `catalog/README.md` and versioned catalog JSON |
 
 `AGENTS.md` owns repository guidance; legal terms stay in `LICENSE` and the
-Contributor Agreement. `relay-server/openapi.yaml` is the machine-readable
-server contract. Keep screenshots under `docs/screenshots/`.
+Contributor Agreement. Keep screenshots under `docs/screenshots/`.
+Hosted deployment procedures belong to its future operator guide, not bundled
+Desktop Help; the Help document size gate remains unchanged.
 Do not add parallel architecture/handoff documents, transcripts, completed TODOs,
 or per-model tables copied from generated data. Publishing an export is separate
 from generating it. Mark proposals as proposals, not available features.
@@ -312,7 +315,7 @@ bun run screenshots
 ## Verification
 
 Run the narrowest relevant checks while iterating. Before a commit that changes
-the frontend, desktop host, shared runtime, or server, run the corresponding
+the frontend, desktop host, shared runtime, or web preview, run the corresponding
 commands below.
 
 Changes only to contributor documentation need content/link and diff checks.
@@ -336,6 +339,8 @@ Replace `origin/main` with the target branch for a release or development pull
 request. From `src`, the same commands are
 `bun run check:guardrails -- "$BASE_REF"` and
 `bun run check:duplicates -- "$BASE_REF"`.
+Local guardrails also check non-ignored, untracked Rust source files without
+changing the Git index.
 
 For PR template or metadata-workflow changes, run the isolated policy tests:
 
@@ -348,6 +353,10 @@ never check out or execute PR-head code in `pull_request_target`, interpolate
 PR text into scripts, or require write permissions or repository secrets.
 The regular Build workflow also runs these tests against the proposed changes
 in its unprivileged `pull_request` context.
+
+For build, setup, check, or cleanup scripts, run
+`bun test ./scripts/check ./scripts/lib ./scripts/maintenance`. The Build workflow
+runs this same suite.
 
 ### Frontend and desktop
 
@@ -394,15 +403,47 @@ On Windows, the executable is written to
 `src-tauri/target/release/zenith-relay.exe`. Building does not replace or
 restart an installed Relay.
 
+### Web preview
+
+From `web`, verify the independent web preview:
+
+~~~powershell
+bun install --frozen-lockfile
+bun run test
+bun run build
+bun run test:e2e
+~~~
+
+Browser tests use only loopback. Install their Chromium with
+`bunx --no-install playwright install chromium`, or set
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to an existing executable. The Build workflow
+checks this package separately before packaging. These checks do not establish
+Hosted backend readiness or real WebView integration.
+
 ### Build artifacts
 
-To remove frontend build artifacts, run
-`bun scripts/maintenance/clean.mjs` from the repository root, or `bun run clean`
-from `src`. The optional `--all` also removes this repository's Rust targets
-and generated build files. Cleanup paths are anchored to Relay, never the
-caller's working directory; neither command changes an installed application.
-For cleanup tooling changes, run `bun test ./scripts/maintenance/clean.test.mjs`;
-the Build workflow runs the same synthetic, non-destructive checks.
+Stop builds and browser tests before cleanup. From the repository root:
+
+~~~powershell
+bun scripts/maintenance/clean.mjs
+~~~
+
+The default removes only `src/.build`, `src/dist`, and `web/dist`. Add `--all`
+to also remove test reports, Desktop browser captures, Rust targets, and Tauri
+permission schemas. **This includes the locally built release executable.**
+From `src`, the equivalent commands are `bun run clean` and `bun run clean:all`.
+
+Paths are anchored to this checkout, not the caller's working directory. All
+targets and their parents inside the checkout are checked before removal;
+links, non-directories, or unreadable metadata abort cleanup. Removal errors
+stop the command, but already removed artifacts are not restored.
+Root-level `.build` worktrees, other `gen` contents, committed `docs/screenshots`,
+user data, and installed applications are not targets.
+
+Cleanup paths and their validation live next to the command in
+`scripts/maintenance/artifact-paths.mjs`; `scripts/lib` is for shared tooling.
+Run `bun test ./scripts/maintenance/clean.test.mjs` after cleanup-tooling changes.
+These synthetic checks do not delete build artifacts; CI runs them too.
 
 ### Shared runtime
 
@@ -491,21 +532,6 @@ bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --
 bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --example quality_probe
 ~~~
 
-### User-managed server
-
-~~~powershell
-bun scripts/build/cargo.mjs fmt --manifest-path relay-server/Cargo.toml --all -- --check
-bun scripts/build/cargo.mjs check --manifest-path relay-server/Cargo.toml --all-targets --locked
-bun scripts/build/cargo.mjs clippy --manifest-path relay-server/Cargo.toml --all-targets --locked -- -D warnings
-bun scripts/build/cargo.mjs test --manifest-path relay-server/Cargo.toml --locked
-~~~
-
-Use the real server acceptance gate in
-[ROADMAP.md](docs/project/ROADMAP.md) before
-claiming that the remote pool works in production. Unit and mocked browser
-tests cannot prove real account, proxy, streaming, or server persistence
-behavior.
-
 ## Change and release flow
 
 1. Inspect the active branch and working tree. Preserve unrelated local work.
@@ -530,15 +556,9 @@ behavior.
 
 Pull requests and pushes to <code>main</code> run checks only. They do not build
 installers or publish artifacts. Pushing a <code>v*</code> tag builds the desktop
-installers and, after those checks pass, publishes the GitHub Release, updater
-manifest, and server image. A manual workflow run can build and smoke-test the
-same artifacts, but it does not publish, even when started from a tag.
-The manual Build run retains desktop installers as Actions artifacts. A manual
-Relay Server run retains the checked `linux/amd64` image as a `.tar.gz` archive,
-with `SHA256SUMS` and `REVISION`. Verify the checksum, then load the archive with
-`docker load --input zenith-relay-server-linux-amd64.tar.gz`; the loaded tag is
-`zenith-relay-server:<commit SHA>`. These artifacts do not update a GitHub Release,
-the updater, or GHCR.
+installers and, after those checks pass, publishes the GitHub Release and updater
+manifest. A manual Build run retains desktop installers as Actions artifacts
+without publishing, even when started from a tag.
 
 ### macOS distribution
 

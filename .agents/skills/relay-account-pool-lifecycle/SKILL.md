@@ -19,14 +19,13 @@ For additional implementations read the relevant
 
 - Admission: `src-tauri/src/local_pool/commands/pool/membership.rs`,
   `accounts/records.rs`, and `crates/relay-core/src/runtime/build/accounts.rs`.
-  Inspect the corresponding server management/import path when it is affected.
-- Renewal: `crates/relay-core/src/accounts/token_authority/`,
-  desktop `accounts/authority/`, and `relay-server/src/token_refresh/`.
+- Renewal: `crates/relay-core/src/accounts/token_authority/`
+  and desktop `accounts/authority/`.
 - Availability and observations: `accounts/quota_refresh/`, shared
   `quota/`, `scheduler/`, and `runtime/selection/`. Keep the current ownership
   and resource-refresh revisions rather than adding another health registry.
 - Removal/replacement: desktop `accounts/mutations/delete/` and
-  `accounts/import_orchestrator/`; server store/vault and management mutations.
+  `accounts/import_orchestrator/`.
   Follow callers to the durable commit and runtime fences.
 
 ## Preserve the lifecycle distinctions
@@ -62,7 +61,7 @@ For additional implementations read the relevant
   must not resend a possibly executed generation or adopt another account's
   opaque response state.
 - Aggregate credits by provider ledger identity, not connection count or
-  email. Keep local and remote ownership explicit. Trash/delete, membership
+  email. Keep recovery and runtime ownership explicit. Trash/delete, membership
   changes, and reauthentication fence pending refresh, quota, and dispatch
   work; late results must not recreate a registration or credential.
 

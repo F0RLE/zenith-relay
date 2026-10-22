@@ -13,8 +13,30 @@ recoverable account deletion. Changes below are grouped by area.
 
 ### Changed
 
+- Local account cards can explicitly group Codex, SIWC and Excel/BPS authorizations
+  and select one route from Accounts or Rotation. Credentials and quota remain
+  independent; switching preserves pool weight/concurrency and waits for idle routes.
+  Association checks the whole group; SIWC does not prove a shared workspace or allowance.
+  Account-targeted automations follow route changes atomically with model validation.
+
+- Codex, ChatGPT/SIWC and Excel / Basis Points remain separate
+  sign-in methods. Zenith export/import preserves the issuing client and SIWC
+  registration; imported SIWC requires a fresh sign-in before joining the pool.
+  SIWC uses verified registrations, protected rotating tokens and public Responses
+  HTTP/SSE. Unsupported capabilities fail explicitly; live acceptance is pending.
+- SIWC opens in Relay's Tauri sign-in window with an isolated profile and the
+  existing proxy controls. OAuth callback checks and cancellation remain in Rust;
+  copy-link browser recovery stays available. Live embedded sign-in is unqualified.
+
 #### Protocol adapters and Excel / Basis Points
 
+- Request details separate the model declared by the upstream response from
+  requested and routed models without treating it as verified identity.
+  BPS tool failures identify the validation stage and why executable calls are
+  not regenerated. Ambiguous encrypted reasoning is no longer removed in bulk.
+- Native HTTP has an optional response-header deadline shared across attempts,
+  disabled by default. It does not limit response bodies, BPS or native WS;
+  expiry never automatically repeats possibly accepted work or disables accounts.
 - BPS keeps turn-local tool choices and serial-call constraints outside its
   stable catalog/history prefix. Account Responses requests without a client
   cache key derive an opaque context-scoped key consistently over HTTP and
@@ -28,6 +50,8 @@ recoverable account deletion. Changes below are grouped by area.
   malformed syntax and schema violations still fail without retrying generation.
 - BPS accepts its existing single-call compatibility form with an explicit tool
   reference too, requiring an exact name match and original schema validation.
+  Mixed old/new envelopes recover only one same-tool wrapper without dropping
+  fields or changing valid arguments; custom input remains opaque.
   Invalid JSON diagnostics distinguish syntax errors from premature EOF without
   retaining arguments or automatically regenerating a response.
 - BPS JSON failures now include an allowlisted parser reason, input-shape
@@ -164,6 +188,12 @@ recoverable account deletion. Changes below are grouped by area.
 
 #### Desktop UI and Access
 
+- Closed action menus mount their contents only when opened, reducing hidden UI
+  work while preserving keyboard and dismissal controls.
+- Removes the retired personal-server runtime and Desktop management client,
+  including deployment, CI and compatibility contracts. Computer/LAN access and
+  the separate Hosted development remain. Saved account ownership is retained
+  privately for explicit local recovery, never automatic reactivation.
 - Startup uses a themed, localized loader with real loading states and a reload
   action for slow or failed starts. The window opens before React loads;
   secondary pages load on navigation intent instead of competing with startup.
@@ -203,6 +233,55 @@ recoverable account deletion. Changes below are grouped by area.
 
 ### Fixed
 
+- SIWC tool requests include the required developer role on generated
+  `additional_tools` input items, preventing upstream `input[0].role` rejections
+  without changing tool names, call history or retry behavior.
+
+- Missing SIWC plan/quota data uses linked Codex/BPS values in the existing badge
+  and meters, without an extra panel. Compact indicators retain source, time and
+  staleness details; stored metadata, restrictions and routing remain separate.
+  Manual quota refresh adds no background polling.
+- Selecting an unconnected Codex or Excel/BPS route normally can use the card's
+  saved notes for automatic sign-in on Windows, macOS and Linux. The route menu
+  no longer uses right-click for sign-in. Missing notes fall back to manual
+  sign-in; SIWC stays manual and client credentials stay separate.
+- Every sign-in method exposes copy-link recovery. Redundant purpose and
+  automatic-login descriptions are removed from the sign-in dialog.
+- Usage's last-24-hours filter now ends at the current time instead of selecting
+  the local calendar day, including across midnight and daylight-saving changes.
+- Adding another sign-in method to an account shows its saved notes instead of
+  an empty draft, without reusing a different client's grant. The redundant
+  account-connections menu and dialog have been removed.
+- Runtime HTTP clients no longer resend protocol-level refusals invisibly inside
+  one Relay attempt. Existing retry eligibility and candidate budgets remain authoritative.
+- BPS resolves up to four image uploads concurrently, preserving bytes, input
+  order, cancellation and account/credential-scoped coalescing. Failures are not cached.
+- Usage rows keep short status labels; hover or keyboard focus reveals the reason.
+- Repeated BPS catalog selections reference earlier lookup results instead of
+  appending duplicate full schemas. History, current validators and generation budgets remain intact.
+- Completed BPS catalog lookups remain reusable after a later answer fails
+  or the dispatch budget is exhausted, including streaming replies.
+  An explicit retry with the same validated history can preload the current
+  tool contracts rather than repeating discovery over the full conversation.
+  Budget exhaustion no longer emits a duplicate usage event for the last lookup.
+  History, validators, permissions and no-replay protections stay unchanged.
+- BPS failures during local tool discovery retain redacted provider error details
+  instead of replacing them with a generic rate-limit message in request history.
+  Buffered and streamed responses keep their existing no-replay safety checks.
+- Structured-output requests skip incompatible Excel/BPS routes before account
+  reservation, preserving the JSON schema on a compatible
+  native route. Unsupported BPS-only requests still fail without weakening
+  command approval checks.
+- Pool activity retains each member's latest event when events from different
+  members arrive out of order, so completed requests no longer stay marked active.
+- Proxy storage can clear a configured common proxy after confirmation without
+  deleting stored entries or explicit account bindings. Direct-access restrictions
+  and protected-proxy deletion checks remain in force.
+- Late expiry or rejection of an access-only token no longer marks a newer login
+  as expired or replaces an existing sign-in error.
+- Stopped or finished local API listeners release references to published routes
+  and storage even while idle connection subscribers remain. Already-dispatched
+  requests retain their own state during shutdown.
 - **Launch application** on Overview now opens ChatGPT, Claude Desktop or OpenCode
   without connecting it to Relay, changing its configuration or restarting a
   running client. Launch is available with the API stopped and an empty pool.
@@ -305,8 +384,30 @@ recoverable account deletion. Changes below are grouped by area.
 
 ### Изменения
 
+- На одной локальной карточке можно явно объединить авторизации Codex, SIWC и
+  Excel/BPS и выбрать маршрут в Аккаунтах или Ротации. Токены и квоты не смешиваются;
+  переключение сохраняет вес/параллельность и доступно после завершения запросов.
+  Проверяется вся группа; SIWC не подтверждает общую рабочую область или равные лимиты.
+  Автоматизации следуют за маршрутом атомарно с проверкой доступности модели.
+
+- Codex, ChatGPT/SIWC и Excel / Basis Points остаются отдельными
+  способами входа. Экспорт/импорт Zenith сохраняет клиента и регистрацию SIWC;
+  импорт SIWC требует повторного входа перед добавлением в пул. SIWC использует
+  проверенные регистрации, защищённые ротируемые токены и публичный Responses
+  HTTP/SSE. Неподдерживаемые возможности отклоняются; реальная проверка — отдельно.
+- SIWC открывается в окне Tauri внутри Relay с отдельным профилем и прежними
+  настройками прокси. Проверки OAuth и отмена остаются в Rust; ссылка для входа
+  через браузер сохранена. Реальный вход во встроенном окне требует проверки.
+
 #### Адаптеры протоколов и Excel / Basis Points
 
+- В деталях запроса отдельно показана модель из ответа источника — без выдачи
+  её за подтверждённую личность модели. Ошибки BPS-инструментов поясняют этап
+  проверки и запрет перегенерации исполняемых вызовов. При неоднозначном отказе
+  несколько зашифрованных reasoning-элементов больше не удаляются массово.
+- Для native HTTP добавлен общий для попыток срок ожидания заголовков,
+  выключенный по умолчанию. Он не ограничивает тело ответа, BPS и native WS;
+  истечение срока не повторяет потенциально принятый запрос и не отключает аккаунт.
 - BPS больше не меняет стабильный префикс каталога и истории при смене настроек
   вызова инструментов. Для аккаунтных Responses без клиентского ключа кэша
   используется непрозрачный ключ контекста, одинаковый в HTTP и WebSocket;
@@ -321,6 +422,8 @@ recoverable account deletion. Changes below are grouped by area.
   без повторной генерации.
 - BPS распознаёт уже поддерживаемую совместимую форму одного вызова и с явной
   ссылкой на инструмент, проверяя точное совпадение имени и исходную схему.
+  При смешении старого и нового формата снимается только одна обёртка того же
+  инструмента: поля не отбрасываются, корректные аргументы и custom-входы не меняются.
   Диагностика отличает синтаксическую ошибку JSON от преждевременного обрыва,
   не сохраняя аргументы и не запуская автоматическую перегенерацию.
 - Ошибки JSON в BPS содержат безопасный код причины парсера, категорию формы
@@ -465,6 +568,12 @@ recoverable account deletion. Changes below are grouped by area.
 
 #### Интерфейс и Доступ
 
+- Закрытые меню действий создают пункты только при открытии, уменьшая скрытую
+  работу интерфейса; управление с клавиатуры и закрытие сохранены.
+- Удалён старый личный сервер и его клиент управления, включая развёртывание,
+  CI и контракты совместимости. Режим «На устройстве», локальная сеть и отдельная
+  разработка Hosted сохранены. Прежнее владение аккаунтами сохраняется локально
+  для явного восстановления, без автоматического включения.
 - Новый экран запуска учитывает тему и язык, показывает этап загрузки и
   позволяет перезагрузить окно при задержке или ошибке. Окно открывается до
   загрузки React; остальные страницы подгружаются при переходе, а не все сразу.
@@ -504,6 +613,55 @@ recoverable account deletion. Changes below are grouped by area.
 
 ### Исправления
 
+- SIWC передаёт обязательную роль developer в создаваемых блоках
+  `additional_tools`: запросы с инструментами больше не теряют `input[0].role`.
+  Имена инструментов, история вызовов и правила повторов не меняются.
+
+- Если SIWC не передал тариф или квоту, данные Codex/BPS показаны на обычных местах,
+  без отдельного блока. Компактные значки сохраняют источник, время и устаревание
+  в подсказках; сохранённые данные, ограничения и маршруты не смешиваются.
+  Ручное обновление квоты не добавляет фоновых опросов.
+- Обычное нажатие на неподключённый Codex или Excel/BPS запускает автовход из
+  заметок карточки на Windows, macOS и Linux. ПКМ в меню маршрутов больше не
+  запускает вход. Без почты или пароля остаётся ручной вход; SIWC входит вручную,
+  авторизации разных клиентов не смешиваются.
+- Копирование ссылки доступно для всех способов входа. Лишние описания назначения
+  Codex и автоматического заполнения убраны из окна входа.
+- Фильтр использования «Последние 24 часа» отсчитывается от текущего момента,
+  а не от полуночи, в том числе при смене даты и переходе на летнее время.
+- При добавлении способа входа к аккаунту показываются сохранённые заметки,
+  а не пустой черновик; авторизация другого клиента не переиспользуется.
+  Лишний пункт «Подключения аккаунта» и его окно удалены.
+- HTTP-клиенты больше не повторяют протокольные отказы незаметно внутри одной
+  попытки Relay. Правила безопасного повтора и лимиты кандидатов сохраняются.
+- BPS загружает до четырёх изображений одновременно, сохраняя байты, порядок,
+  отмену и объединение одинаковых загрузок в рамках аккаунта/авторизации. Ошибки не кэшируются.
+- В строках Использования остаётся короткий статус; причина видна при наведении или фокусе.
+- Повторный выбор инструментов BPS ссылается на прежние результаты поиска вместо
+  добавления полных копий схем. История, актуальная валидация и лимиты генераций сохраняются.
+- Завершённый поиск каталога BPS остаётся пригодным для повторного использования,
+  даже если последующий ответ завершился ошибкой или исчерпан лимит попыток,
+  в том числе в потоке. При явном повторе с той же
+  проверенной историей контракты инструментов загружаются заранее, без лишнего
+  поиска на всей переписке. При исчерпании лимита последняя загрузка не создаёт
+  дубликат события usage. История, валидация, права и защита от повторной генерации сохраняются.
+- Ошибки BPS при локальном поиске инструментов сохраняют обезличенные подробности
+  отказа провайдера в истории запросов вместо общего сообщения о лимите частоты.
+  Защита от повторной генерации сохраняется для обычных и потоковых ответов.
+- Запросы со структурированным ответом исключают несовместимые маршруты Excel/BPS
+  до резервирования аккаунта. JSON-схема сохраняется на
+  совместимом родном маршруте; неподдерживаемый запрос в пуле только из BPS
+  завершается отказом, без ослабления проверки команд.
+- Активность пула сохраняет последнее событие каждого участника, даже если события
+  разных участников пришли не по порядку: завершённые запросы не остаются активными.
+- В хранилище прокси можно явно сбросить общую настройку после подтверждения,
+  не удаляя записи и явные привязки аккаунтов. Запрет прямого доступа и защита
+  удаления используемых прокси сохраняются.
+- Запоздалая ошибка или истечение токена без refresh token больше не помечает
+  новый вход как истёкший и не подменяет уже установленную ошибку авторизации.
+- Остановленный или завершившийся локальный API освобождает ссылки на маршруты
+  и хранилище даже при оставшихся подписчиках простаивающих соединений.
+  Уже отправленные запросы сохраняют своё состояние во время остановки.
 - **Запустить приложение** на Обзоре открывает ChatGPT, Claude Desktop или OpenCode
   без подключения к Relay, изменения настроек и перезапуска работающего клиента.
   Запуск доступен при остановленном API и пустом пуле.

@@ -49,14 +49,14 @@ workflow.
   `slow_down`. Stop on denial, expiry, or cancellation. Do not apply one
   provider's HTTP-status polling convention to another.
 - Validate the token response before replacing credentials. Retain the issuing
-  client for refresh, import, export, and server transfer. Decoded JWT claims
+  client for refresh, import, and export. Decoded JWT claims
   are unverified hints unless validated under the provider's identity contract.
   Missing expiry or refresh support stays explicit.
 - Reauthenticate only the intended principal and client. A stable provider user
   ID takes precedence over a changed email. Preserve notes, account ID, proxy,
   model rules, operator settings, and membership; apply credentials through
   the existing lock, checkpoint, revision, and conditional rollback owners.
-- Store secrets through the desktop credential store or the user's server vault.
+- Store secrets through the Desktop credential store and protected vault.
   Renderer state and diagnostics receive redacted status. An import consumes
   an explicitly selected document; it does not scan browser profiles or harvest
   cookies. Keep profile configuration and backups with the existing profile

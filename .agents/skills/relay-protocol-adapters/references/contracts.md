@@ -17,6 +17,21 @@ Responses support, tool search, structured outputs, or a reasoning level.
 For native Responses sockets, also check the official
 [WebSocket mode guide](https://developers.openai.com/api/docs/guides/websocket-mode).
 Connection reuse is not evidence of multiplexing or safe replay after output.
+The [rate-limits guide](https://developers.openai.com/api/docs/guides/rate-limits)
+distinguishes request and token budgets. A TPM rejection is not by itself evidence
+of context-window overflow or a request-size 413.
+The [Structured Outputs guide](https://developers.openai.com/api/docs/guides/structured-outputs)
+defines schema adherence and separate refusals. A command-approval request must
+not silently lose its schema or acquire a prompt-only strict-mode substitute.
+The [function-calling strict-mode contract](https://developers.openai.com/api/docs/guides/function-calling#strict-mode)
+distinguishes omitted `strict`: Responses attempts strict normalization with a
+best-effort fallback, while Chat Completions defaults to non-strict. Foreign
+best-effort tools sent to Responses need explicit `strict: false`; omission is
+not a protocol-neutral default. Do not rewrite their optional fields or schemas.
+Gemini's [Generate Content request](https://ai.google.dev/api/generate-content#v1beta.GenerationConfig)
+places temperature under `generationConfig`, not at the request root. Apply
+existing model capability exclusions at that path before route admission;
+the endpoint's general numeric range does not establish model-specific support.
 
 For cache optimization, use OpenAI's [prompt caching guide](https://developers.openai.com/api/docs/guides/prompt-caching)
 and [cache diagnostics](https://developers.openai.com/api/docs/guides/prompt-caching/diagnostics).
@@ -42,6 +57,13 @@ The [Messages stop-reason guide](https://platform.claude.com/docs/en/build-with-
 distinguishes server-tool `pause_turn` from `max_tokens` and context-window
 truncation. Foreign APIs have no equivalent server-loop continuation here;
 reject the unsupported result instead of inventing a token-limit cause.
+The [fine-grained tool-streaming guide](https://platform.claude.com/docs/en/agents-and-tools/tool-use/fine-grained-tool-streaming)
+allows accumulated tool input to end mid-JSON under `max_tokens`. This is not
+a completed executable call. The inspected OpenAI SDK
+[function-call item](https://github.com/openai/openai-python/blob/7db9d884c33b0d5ef252e9a4b6e7ae0bbd217e5b/src/openai/types/responses/response_function_tool_call.py)
+supports `status: incomplete` with string arguments, and the
+[Chat function-call type](https://github.com/openai/openai-python/blob/7db9d884c33b0d5ef252e9a4b6e7ae0bbd217e5b/src/openai/types/chat/chat_completion_message_function_tool_call.py)
+requires callers to validate generated argument strings before execution.
 OpenAI's SDK types below define output messages as `assistant` and Chat choice
 indexes as positions in the choice list; conversion requests one choice only.
 Reject invalid supplied identities instead of renaming them.
@@ -67,6 +89,10 @@ Use these inspected official SDK revisions to reproduce field-level checks;
 fetch the exact endpoint's current documentation before changing the contract.
 They are references, not dependencies or copied converters.
 
+- [Responses additional-tools input type](https://github.com/openai/openai-node/blob/e35205033764ec2a2adc7fc71f3d2df9b0ea8679/src/resources/responses/responses.ts):
+  input `additional_tools` requires `role: "developer"`; the wider output-item
+  role union is not the request contract. SIWC-generated tool items must retain
+  this role as well as the original declarations and call identities.
 - [OpenAI SDK](https://github.com/openai/openai-node/blob/e9f788ebfb1b6e2f5aa59022eee3da202110390e/src/resources/chat/completions/completions.ts):
   protocol-specific message roles, nullable Chat token-limit fields, and
   name-only function selectors versus separate custom-tool selectors. Assistant

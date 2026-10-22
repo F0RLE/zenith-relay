@@ -18,8 +18,20 @@ recheck the exact revision, file license, and attribution before copying code.
 
 ## Additional inspected revisions
 
+Sub2API `production` at `974a47f2ed722798566727a342df1eab3140dc94`
+(LGPL-3.0) supplied comparison scenarios in
+`openai_gateway_chat_completions.go`, `openai_upstream_session_error.go`,
+`openai_http_phase_guard.go` and `basispoints/unknown_tool_repair.go` under
+`backend/internal/service/`. Relay independently implements bounded declarations,
+diagnostic labels and an opt-in response-header bound in Rust. It does not copy
+the Go implementation, replay executable tools, import SIWC, or claim a separate
+network upload-completion signal from reqwest.
+
 | Source | Revision or digest | Files / reason |
 | --- | --- | --- |
+| Sub2API (`v2.15.0`, LGPL-3.0) | `8b36fe7d647c28e8189147c6bfce52a41b6e26db` | `backend/internal/service/{ratelimit_service,openai_siwc_errors,openai_encrypted_content_locator}.go`: compared forwarded subscription quota ownership, structured eligibility refusals and unique ciphertext locators. Relay independently implements these behaviors in its existing Rust policy/repair owners; no Go code, Redis lifecycle or retry-after-uncertain-execution policy is imported. |
+| Sub2API (`v2.14.0`, LGPL-3.0) | `f3f72fa9893b7cc7ba76b32a59748ef84ee1004c` | `backend/internal/service/{openai_gateway_upstream_errors,openai_upstream_session_error,openai_siwc}.go`, `backend/internal/service/basispoints/structured_output.go`, `docs/responses-stream-keepalive.md`: compared error scope, opaque SIWC metadata, local schema validation and waiting-stage heartbeats. No Go code, retry policy or login changes copied; Relay retains token-rate failover and request-scoped policy handling, and does not substitute prompt-only validation for native strict output. |
+| Sub2API (`v2.12.3`, LGPL-3.0) | `7cf8892c1d20cab786736e524cba983d80938fe8` | `docs/gateway-transport-diagnostics.md`, `backend/internal/service/basispoints/tool_schema_diagnostics.go`: separate ingress/egress observations and safe schema-error categories. Relay implements these independently in its existing routing JSON and adapter errors; no Go code or retry policy is copied. Credential/proxy regressions reuse Relay's existing authority and synthetic endpoints. |
 | Sub2API (`production`, LGPL-3.0) | `6bc2eb2ffe858c60f1bd600c53683b66ae3cc1c6` | `backend/internal/service/basispoints/catalog.go`, `docs/bps-{compact,dynamic}-tool-catalog.md`: compact schema presentation and current-over-history catalogs; no native deferred search. Relay independently implements its own renderer and bounded local discovery, not copied Go code. |
 | New API | `09109ec315a5086366f94bcce00f177ec831dbe1` | `relay/channel/openai/relay_responses.go`, `relay/helper/stream_scanner.go`: terminal and usage observation |
 | New API | `d032204733db31208f10bac118b6e683aab3bf29` | `relaykit/relayconvert/internal/claude_messages/to_oai_responses_req.go`, `relaykit/dto/claude.go`, Responses-to-Messages JSON/SSE converters: history, metadata, thinking, deferred tools |

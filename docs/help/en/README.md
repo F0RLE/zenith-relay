@@ -45,7 +45,7 @@ to work in. Relay does not install ChatGPT, Claude Desktop, or OpenCode.
 Use **SIWC** or **Excel / BPS** for the pool; **Codex** only switches app accounts.
 Selecting Codex removes pool membership, not saved sign-ins or **Notes**.
 In **Connections → Accounts**, the client badge selects the route. **Connect**
-signs in to the same account/workspace with separate credentials and quota.
+signs in to the same account with separate credentials and quota.
 Only the selected route rotates, keeping its weight/concurrency. Finish active
 requests first. Account automations follow the route; edit or disable an
 incompatible explicit model before switching.
@@ -135,8 +135,8 @@ values. Gaps and **—** mean unmeasured, not zero. Loading errors show a warnin
 
 ### Balances and estimates
 
-Providers report balance and quota; Relay estimates **API equiv. used** from
-usage and known API prices. These are separate values, not a bill.
+Balance and quota come from providers; **API equiv. used** is a Relay estimate,
+not a bill.
 
 **No balance API** means unreadable, not zero. **Stats access denied** is a
 statistics refusal; model requests may still work. Failed refreshes retain
@@ -202,9 +202,11 @@ BPS supports Zenith and Sub2API.
 
 An account card shows its plan, quota, reset times, and state. **Refresh**
 requests updated data; it does not replenish quota. Unknown quota is not zero.
-Missing SIWC plan/quota uses linked Codex/BPS values for display, never routing;
-without a source it is marked unavailable. The info tooltip shows source/time;
-amber means stale. **Refresh** checks that source without background polling.
+Linked Codex/BPS fills missing SIWC plan/quota displays; without a source they
+stay unavailable. Fresh quota also ranks automatic rotation, never grants access;
+SIWC's own limits win. Hover/focus shows source/time; amber means stale.
+Linking does not verify a shared workspace or equal allowances. **Refresh**
+reads that source without extra polling.
 Quota windows and credits have independent freshness: active requests do not
 refresh an old balance. Rotation uses only fresh credit observations; the
 saved balance remains visible until the next complete poll.
@@ -813,7 +815,7 @@ such as 429, explains why. More retries do not replenish quota.
 | `invalid_host` · 400 | The local API received an unsuitable Host. | Use the address shown in **Access → Local API** without a proxy rewriting Host. For another device, enable **Allow local network access** and use the displayed LAN address. |
 | `gateway_stopped`, `gateway_unavailable`, `runtime_unavailable` | The API is stopped, unreachable, or not ready. | Start the local API and check the address/port. Choose a free port if occupied, then reconnect the client. For LAN access, check the private network and firewall. |
 | `codex_background_blocked_activity_summary`, `codex_background_blocked_task_title` | A ChatGPT background request was disabled. | Enable **Access → Applications → ChatGPT → ChatGPT background tasks** when summaries/titles are wanted. This is not a main-request failure or exhausted quota. |
-| `codex_background_blocked_memory_extraction`, `codex_background_blocked_memory_consolidation` | Relay disabled this memory stage (403). | Enable **Memory extraction** or **Memory consolidation** under **Access → Applications → ChatGPT**. No provider call or empty success is generated. |
+| `codex_background_blocked_memory_extraction`, `codex_background_blocked_memory_consolidation` | Relay disabled this memory stage (403). | Enable **Memory extraction** or **Memory summaries** under **Access → Applications → ChatGPT**. No provider call or empty success is generated. |
 
 ### Quota, rate limits and provider permissions
 
