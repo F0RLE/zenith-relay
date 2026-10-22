@@ -17,7 +17,13 @@ Load guidance for the affected task only:
   and [protocol skill](.agents/skills/relay-protocol-adapters/SKILL.md).
 - Sign-in/import/reauthentication: [connectors](.agents/skills/relay-account-connectors/SKILL.md).
 - Pool admission/renewal/quota/removal: [lifecycle](.agents/skills/relay-account-pool-lifecycle/SKILL.md).
+- Frontend-to-Rust commands: [Tauri commands](.agents/skills/tauri-calling-rust/SKILL.md).
+- Rust-to-frontend events/progress: [Tauri events](.agents/skills/tauri-calling-frontend/SKILL.md).
 - Agent instructions or GPT-6 prompting: [agent guidance](CONTRIBUTING.md#agent-guidance).
+
+Read only the skills relevant to the affected boundary. Reuse the workspace's
+shared provider-contract, browser, build, and CLI guidance when present; do not
+apply production Zenith billing, route-evidence, or operations skills to Relay.
 
 ## Ownership
 
