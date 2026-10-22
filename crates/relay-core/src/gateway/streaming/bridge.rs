@@ -1,31 +1,29 @@
 use super::{
-    preserved_stream_error, rewrite_bridge_failure, PreservedUpstreamError, TranslatedResponse,
-    UpstreamStream,
+    preserved_stream_error, rewrite_bridge_failure, PreservedUpstreamError, UpstreamStream,
 };
-use crate::AdapterStreamBridge;
+use crate::{AdapterStreamBridge, TranslatedResponse};
 use axum::body::Bytes;
 use futures_util::{stream, Stream, StreamExt};
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::Instant;
 
 const UPSTREAM_END_TIMEOUT: Duration = Duration::from_secs(30);
 
-struct AdapterBridgeStreamState {
+struct AdapterBridgeStreamState<F> {
     inner: UpstreamStream,
     bridge: AdapterStreamBridge,
     pending: VecDeque<Bytes>,
     finished: bool,
     end_deadline: Option<Instant>,
-    completed: Arc<Mutex<Option<TranslatedResponse>>>,
+    on_completed: Option<F>,
 }
 
 pub(super) fn bridge_adapter_stream(
     first: Bytes,
     remaining: UpstreamStream,
     bridge: AdapterStreamBridge,
-    completed: Arc<Mutex<Option<TranslatedResponse>>>,
+    on_completed: impl FnOnce(TranslatedResponse) + Send + 'static,
 ) -> impl Stream<Item = Result<Bytes, reqwest::Error>> + Send {
     let inner = stream::once(async move { Ok::<Bytes, reqwest::Error>(first) }).chain(remaining);
     stream::unfold(
@@ -35,7 +33,7 @@ pub(super) fn bridge_adapter_stream(
             pending: VecDeque::new(),
             finished: false,
             end_deadline: None,
-            completed,
+            on_completed: Some(on_completed),
         },
         |mut stream_state| async move {
             loop {
@@ -83,7 +81,9 @@ pub(super) fn bridge_adapter_stream(
                     preserved_error.as_ref(),
                 );
                 if let Some(response) = stream_state.bridge.take_completed() {
-                    *crate::poison::mutex(&stream_state.completed) = Some(response);
+                    if let Some(on_completed) = stream_state.on_completed.take() {
+                        on_completed(response);
+                    }
                 }
                 if stream_state.bridge.is_terminal() {
                     stream_state.finished = true;
@@ -110,6 +110,7 @@ mod tests {
         AdapterRequestContext, CacheWriteTtl, MessagesReasoningMode, SourceAdapter, WireApi,
     };
     use serde_json::json;
+    use std::sync::{Arc, Mutex};
 
     #[tokio::test]
     async fn completed_bridge_response_moves_body_and_continuation_without_cloning() {
@@ -149,15 +150,25 @@ mod tests {
             .as_ptr();
         let continuation_pointer = response.continuation.model().as_ptr();
         let completed = Arc::new(Mutex::new(None));
+        let captured = completed.clone();
         let forwarded = bridge_adapter_stream(
             Bytes::new(),
             Box::pin(stream::pending()),
             bridge,
-            completed.clone(),
+            move |response| *crate::poison::mutex(&captured) = Some(response),
         );
-        let frames = tokio::time::timeout(Duration::from_secs(5), forwarded.collect::<Vec<_>>())
-            .await
-            .expect("terminal bridge must not poll the remaining upstream");
+        futures_util::pin_mut!(forwarded);
+        let first = forwarded.next().await.unwrap();
+        assert!(
+            crate::poison::mutex(&completed).is_some(),
+            "continuation must be saved before client frames are returned"
+        );
+        let mut frames = vec![first];
+        frames.extend(
+            tokio::time::timeout(Duration::from_secs(5), forwarded.collect::<Vec<_>>())
+                .await
+                .expect("terminal bridge must not poll the remaining upstream"),
+        );
         let wire = String::from_utf8(
             frames
                 .into_iter()

@@ -248,7 +248,7 @@ fn unchanged_tool_arguments_keep_their_emitted_buffer_on_later_events() {
 }
 
 #[test]
-fn unchanged_messages_tool_blocks_close_once_and_reject_later_mutation() {
+fn messages_tool_blocks_close_once_after_terminal_and_reject_later_mutation() {
     let mut stream = stream(WireApi::Messages, WireApi::ChatCompletions);
     stream
         .translation_request
@@ -263,7 +263,7 @@ fn unchanged_messages_tool_blocks_close_once_and_reject_later_mutation() {
     while stream.pop_output().is_some() {}
     stream.closed.insert(0);
     stream.emit_changes(false).unwrap();
-    assert_eq!(stream.finished_message_blocks, 1);
+    assert_eq!(stream.finished_message_blocks, 0);
     let Block::ToolCall { arguments, .. } = &stream.emitted[0] else {
         unreachable!()
     };
@@ -273,6 +273,16 @@ fn unchanged_messages_tool_blocks_close_once_and_reject_later_mutation() {
         unreachable!()
     };
     assert_eq!(arguments.as_ptr(), pointer);
+    let wire = String::from_utf8(
+        std::iter::from_fn(|| stream.pop_output())
+            .flatten()
+            .collect(),
+    )
+    .unwrap();
+    assert!(!wire.contains("event: content_block_stop\n"));
+    stream.emit_changes(true).unwrap();
+    stream.emit_changes(true).unwrap();
+    assert_eq!(stream.finished_message_blocks, 1);
     let wire = String::from_utf8(
         std::iter::from_fn(|| stream.pop_output())
             .flatten()

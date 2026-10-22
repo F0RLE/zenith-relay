@@ -59,6 +59,12 @@ impl TranslationStream {
                         }
                         continue;
                     }
+                    if !upstream_finished
+                        && previous == Some(current)
+                        && matches!(current, Block::ToolCall { .. })
+                    {
+                        break;
+                    }
                 } else if previous == Some(current) {
                     continue;
                 }
@@ -165,7 +171,11 @@ impl TranslationStream {
             if self.translation_request.client == WireApi::Messages {
                 // Messages streams one block at a time. Buffer later blocks while
                 // the upstream can still add deltas to the active block.
-                if !upstream_finished && !self.closed.contains(&block_index) {
+                // A tool is executable only after the entire response validates.
+                if !upstream_finished
+                    && (!self.closed.contains(&block_index)
+                        || matches!(&self.emitted[block_index], Block::ToolCall { .. }))
+                {
                     break;
                 }
                 self.event(

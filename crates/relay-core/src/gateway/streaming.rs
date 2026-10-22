@@ -15,10 +15,7 @@ use super::response::{
 use crate::error_codes;
 use crate::runtime::{CandidateLease, ExecutorRoute};
 use crate::usage::ReasoningEffortDiagnostics;
-use crate::{
-    GatewayRuntime, PreparedAdapterRequest, ToolUseDiagnostics, TranslatedResponse, UsageEvent,
-    WireApi,
-};
+use crate::{GatewayRuntime, PreparedAdapterRequest, ToolUseDiagnostics, UsageEvent, WireApi};
 use axum::body::{Body, Bytes};
 use axum::http::{Response, StatusCode};
 use futures_util::{stream, Stream, StreamExt};
@@ -168,10 +165,6 @@ impl StreamExecution {
         let completion_prompt_affinity = prompt_affinity_key.clone();
         let completion_headers = headers.clone();
         let completion_uses_response_affinity = client_wire_api == WireApi::Responses;
-        let completion_bridge_state = adapter_request
-            .uses_local_continuation_state()
-            .then(|| Arc::new(Mutex::new(None::<TranslatedResponse>)));
-        let completion_bridge_state_for_callback = completion_bridge_state.clone();
         let completion_native_response =
             (matches!(client_wire_api, WireApi::Responses | WireApi::Gemini)
                 && adapter_is_passthrough)
@@ -203,7 +196,6 @@ impl StreamExecution {
             headers: completion_headers,
             prompt_affinity: completion_prompt_affinity,
             uses_response_affinity: completion_uses_response_affinity,
-            bridge_state: completion_bridge_state_for_callback,
             native_response: completion_native_response_for_callback,
             tool_call_capture: tool_call_capture.clone(),
             native_template: completion_native_template,
@@ -240,9 +232,22 @@ impl StreamExecution {
         let combined: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>> =
             match adapter_request.into_stream_bridge() {
                 Some(bridge) => {
-                    let completed = completion_bridge_state
-                        .expect("translation completion state is configured");
-                    Box::pin(bridge_adapter_stream(first, remaining, bridge, completed))
+                    let continuation_runtime = runtime.clone();
+                    let continuation_key = local_key_id.clone();
+                    let continuation_route = route.clone();
+                    Box::pin(bridge_adapter_stream(
+                        first,
+                        remaining,
+                        bridge,
+                        move |response| {
+                            continuation_runtime.save_adapter_response_for_route(
+                                &continuation_key,
+                                &continuation_route,
+                                &response,
+                                now_ms(),
+                            );
+                        },
+                    ))
                 }
                 None => Box::pin(
                     stream::once(async move { Ok::<_, reqwest::Error>(first) }).chain(remaining),

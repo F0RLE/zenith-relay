@@ -2,6 +2,59 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn messages_tool_block_stays_open_until_the_responses_terminal_validates() {
+    for valid_terminal in [false, true] {
+        let mut bridge =
+            matrix::prepare_portable_tool_history(WireApi::Messages, WireApi::Responses, true)
+                .into_stream_bridge()
+                .unwrap();
+        let call = json!({"type":"function_call","id":"fc_pending","call_id":"call_pending","name":"lookup","arguments":"{\"value\":3}","status":"completed"});
+        let mut added = call.clone();
+        added["arguments"] = json!("");
+        added["status"] = json!("in_progress");
+        for event in [
+            json!({"type":"response.output_item.added","output_index":0,"item":added}),
+            json!({"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"value\":3}"}),
+            json!({"type":"response.output_item.done","output_index":0,"item":call}),
+        ] {
+            bridge.push(format!("data: {event}\n\n").as_bytes());
+        }
+        let prefix = String::from_utf8(
+            std::iter::from_fn(|| bridge.pop_output())
+                .flatten()
+                .collect(),
+        )
+        .unwrap();
+        assert!(prefix.contains("input_json_delta"));
+        assert!(!prefix.contains("event: content_block_stop"));
+        assert!(bridge.completed().is_none());
+        let mut terminal_call = call;
+        if !valid_terminal {
+            terminal_call["arguments"] = json!("{\"value\":99}");
+        }
+        let terminal = json!({"type":"response.completed","response":{"id":"resp_pending","status":"completed","output":[terminal_call]}});
+        bridge.push(format!("data: {terminal}\n\n").as_bytes());
+        bridge.finish();
+        let suffix = String::from_utf8(
+            std::iter::from_fn(|| bridge.pop_output())
+                .flatten()
+                .collect(),
+        )
+        .unwrap();
+        if valid_terminal {
+            assert_eq!(suffix.matches("event: content_block_stop").count(), 1);
+            assert_eq!(suffix.matches("event: message_stop").count(), 1);
+            assert!(bridge.completed().unwrap().continuation.is_reusable());
+        } else {
+            assert!(suffix.contains("event: error"));
+            assert!(!suffix.contains("event: content_block_stop"));
+            assert!(!suffix.contains("event: message_stop"));
+            assert!(bridge.completed().is_none());
+        }
+    }
+}
+
+#[test]
 fn oversized_sse_events_terminate_each_upstream_protocol_without_false_completion() {
     let oversized = vec![b'x'; crate::protocol::sse::MAX_EVENT_BYTES + 1];
     for upstream in [

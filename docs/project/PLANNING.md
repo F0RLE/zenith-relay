@@ -720,6 +720,11 @@ These fields share existing routing JSON storage and add no retry or transport p
 Messages streams finalize native text/thinking snapshots when their block closes
 and append signature fragments in place. Portable deltas still stream immediately;
 only a fully closed response can supply replayable native continuation state.
+Converted Messages tool arguments may stream incrementally, but their block-stop
+is withheld until the complete upstream response passes validation. A failed
+terminal cannot release an executable tool call or establish continuation state.
+BPS search progress alone does not mark its output item as delivered; a terminal-only
+search item is materialized before the shared protocol bridge validates completion.
 
 An output limit may truncate a tool's JSON object. Responses and Chat clients
 retain that incomplete argument string, the limit reason, and known usage;
@@ -745,6 +750,9 @@ in place after the existing identity, prefix, and closed-block checks.
 Completed streams move existing history and native continuation state into the
 saved checkpoint without cloning the entire prepared request. Validation and
 response encoding precede the transfer; final client emission keeps its checks.
+The validated checkpoint is saved before final tool/terminal frames reach the
+client, so an immediate tool-result request cannot outrun continuation storage.
+Usage and lease settlement remain tied to client-stream completion.
 Terminal native output moves into the checkpoint without copying its opaque
 payload. Tool-argument normalization borrows unchanged input or an unchanged
 buffered prefix; its owning string is retained/truncated in place, and a new
