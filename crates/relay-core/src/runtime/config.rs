@@ -355,6 +355,9 @@ pub struct GatewayRuntimeOptions {
     pub model_reasoning_allowed_levels: BTreeMap<String, Vec<String>>,
     pub model_context_policies: BTreeMap<String, ModelContextPolicy>,
     pub response_affinity_store: Option<Arc<dyn ResponseAffinityStore>>,
+    /// Reuse only within the same host lifetime. Payloads remain in memory;
+    /// route/credential ownership and existing cache bounds still apply.
+    pub continuation_state: Option<super::RuntimeContinuationStores>,
 }
 
 impl fmt::Debug for GatewayRuntimeOptions {
@@ -404,6 +407,7 @@ impl Default for GatewayRuntimeOptions {
             model_reasoning_allowed_levels: BTreeMap::new(),
             model_context_policies: BTreeMap::new(),
             response_affinity_store: None,
+            continuation_state: None,
         }
     }
 }

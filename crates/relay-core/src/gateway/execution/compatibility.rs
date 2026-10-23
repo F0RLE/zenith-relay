@@ -189,6 +189,71 @@ pub(in crate::gateway) fn incompatible_routes(
     (excluded, admitted, last_error)
 }
 
+pub(in crate::gateway) struct AdapterRejection<'a> {
+    pub request_id: &'a str,
+    pub attempt: u16,
+    pub local_key_id: &'a str,
+    pub requested_model: &'a str,
+    pub resolved_model: &'a str,
+    pub client_context_id: Option<&'a str>,
+    pub wire_api: WireApi,
+    pub transport: crate::UsageTransport,
+    pub service_tier: DefaultServiceTier,
+}
+
+/// Preparation can fail before a route is reserved. Record the logical request
+/// without inventing a provider attempt, tokens, or a health/quota failure.
+pub(in crate::gateway) fn record_adapter_rejection(
+    runtime: &GatewayRuntime,
+    request: AdapterRejection<'_>,
+    error: &AdapterError,
+    latency_ms: u64,
+) {
+    let event = crate::UsageEvent {
+        request_id: request.request_id.to_owned(),
+        attempt: request.attempt,
+        local_key_id: request.local_key_id.to_owned(),
+        source_id: "relay".to_owned(),
+        candidate_id: None,
+        account_id: None,
+        account_token_generation: None,
+        client_context_id: request.client_context_id.map(str::to_owned),
+        routing: None,
+        requested_model: Some(request.requested_model.to_owned()),
+        resolved_model: Some(request.resolved_model.to_owned()),
+        requested_reasoning_effort: None,
+        effective_reasoning_effort: None,
+        wire_api: request.wire_api,
+        transport: request.transport,
+        service_tier: request.service_tier,
+        applied_service_tier: None,
+        success: false,
+        http_status: if error.is_upstream_failure() {
+            502
+        } else {
+            400
+        },
+        error_category: Some(error.code().to_owned()),
+        tool_use: Default::default(),
+        cooldown_scope: None,
+        retry_at_ms: None,
+        consecutive_failures: None,
+        latency_ms,
+        ttft_ms: None,
+        generation_ms: None,
+        input_tokens: None,
+        cached_input_tokens: None,
+        cache_write_input_tokens: None,
+        cache_write_ttl: None,
+        reasoning_tokens: None,
+        output_tokens: None,
+        total_tokens: None,
+        upstream_error: None,
+        quota_snapshot: None,
+    };
+    crate::gateway::response::emit_usage(runtime, event);
+}
+
 pub(super) fn basis_points_route_error(
     request: &Value,
     _stream: bool,

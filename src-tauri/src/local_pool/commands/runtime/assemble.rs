@@ -174,6 +174,7 @@ pub(in crate::local_pool) async fn runtime_from_store(
         model_reasoning_allowed_levels: settings.model_reasoning_allowed_levels,
         model_context_policies: settings.model_context_policies.clone(),
         response_affinity_store: Some(state.response_affinity_store()),
+        continuation_state: Some(state.continuation_state.clone()),
     };
     let usage_callback = state.usage_callback();
     // A desktop configuration can legitimately have no route while the user

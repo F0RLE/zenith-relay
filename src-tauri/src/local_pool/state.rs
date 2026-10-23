@@ -35,6 +35,7 @@ use zenith_relay_core::{
     model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogLoader},
     pricing::{CatalogStatus, PricingCatalog, PricingCatalogLoader},
     scheduler::refresh::{service::RefreshService, RefreshLimits},
+    RuntimeContinuationStores,
 };
 
 pub(super) use zenith_relay_core::unix_time_ms as now_ms;
@@ -67,6 +68,7 @@ pub struct DesktopStateOwner {
     model_metadata: Arc<ModelMetadataCatalogLoader>,
     store: Arc<Mutex<LocalPoolStore>>,
     token_authority: Arc<TokenAuthority>,
+    pub(in crate::local_pool) continuation_state: RuntimeContinuationStores,
     pub(super) refresh: Arc<RefreshService<super::refresh::RefreshReadResult>>,
     pub(super) refresh_started: std::sync::atomic::AtomicBool,
     wake: Arc<Mutex<WakeCoordinator>>,
@@ -177,6 +179,7 @@ impl DesktopState {
                 model_metadata,
                 store: Arc::new(Mutex::new(store)),
                 token_authority,
+                continuation_state: RuntimeContinuationStores::default(),
                 refresh: RefreshService::with_cache_policy(
                     RefreshLimits::default(),
                     super::refresh::cache_observation,

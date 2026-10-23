@@ -1,4 +1,123 @@
 use super::*;
+use zenith_relay_core::{
+    ResponseAffinityBinding, ResponseAffinityStore, RuntimeContinuationStores,
+};
+
+#[derive(Default)]
+struct MemoryAffinityStore {
+    bindings: Mutex<std::collections::BTreeMap<String, ResponseAffinityBinding>>,
+}
+
+impl ResponseAffinityStore for MemoryAffinityStore {
+    fn load(&self, now_ms: u64) -> Result<Vec<ResponseAffinityBinding>, String> {
+        Ok(self
+            .bindings
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|binding| binding.expires_at_ms > now_ms)
+            .cloned()
+            .collect())
+    }
+
+    fn find(&self, key: &str, now_ms: u64) -> Result<Option<ResponseAffinityBinding>, String> {
+        Ok(self
+            .bindings
+            .lock()
+            .unwrap()
+            .get(key)
+            .filter(|binding| binding.expires_at_ms > now_ms)
+            .cloned())
+    }
+
+    fn upsert(&self, binding: &ResponseAffinityBinding) -> Result<(), String> {
+        self.bindings
+            .lock()
+            .unwrap()
+            .insert(binding.key.clone(), binding.clone());
+        Ok(())
+    }
+
+    fn delete(&self, key: &str) -> Result<(), String> {
+        self.bindings.lock().unwrap().remove(key);
+        Ok(())
+    }
+
+    fn delete_candidate(&self, candidate_id: &str) -> Result<(), String> {
+        self.bindings
+            .lock()
+            .unwrap()
+            .retain(|_, binding| binding.candidate_id != candidate_id);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn responses_bridge_tool_roundtrip_survives_runtime_replacement() {
+    let (upstream, state) = spawn_messages_upstream().await;
+    let options = GatewayRuntimeOptions {
+        continuation_state: Some(RuntimeContinuationStores::default()),
+        response_affinity_store: Some(Arc::new(MemoryAffinityStore::default())),
+        ..Default::default()
+    };
+    let (first, _) = spawn_messages_bridge_gateway_with_options(
+        &upstream.base_url,
+        &state,
+        MessagesReasoningMode::Budget,
+        options.clone(),
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{}/v1/responses", first.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model":"claude-test", "input":"Use the file tool", "reasoning":{"effort":"high"},
+            "tools":[{"type":"function","name":"read_file","parameters":{"type":"object"}}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: Value = response.json().await.unwrap();
+    let previous = response["id"].as_str().unwrap();
+    let call_id = response["output"][0]["call_id"].as_str().unwrap();
+    drop(first);
+
+    let (replacement, events) = spawn_messages_bridge_gateway_with_options(
+        &upstream.base_url,
+        &state,
+        MessagesReasoningMode::Budget,
+        options,
+    )
+    .await;
+    let response = client
+        .post(format!("{}/v1/responses", replacement.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model":"claude-test", "previous_response_id":previous,
+            "input":[{"type":"function_call_output", "call_id":call_id, "output":"synthetic result"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: Value = response.json().await.unwrap();
+    assert_eq!(
+        response["output"][0]["content"][0]["text"],
+        "Tool result received"
+    );
+    let bodies = state.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0]["messages"][1]["content"][0]["type"], "tool_use");
+    assert_eq!(
+        bodies[0]["messages"][2]["content"][0]["tool_use_id"],
+        call_id
+    );
+    let recorded = events.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert!(recorded[0].success);
+}
 
 #[tokio::test]
 async fn responses_to_messages_bridge_translates_tool_turn_and_preserves_continuation() {

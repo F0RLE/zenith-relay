@@ -196,6 +196,59 @@ fn fragmented_history_text_keeps_the_same_scoped_fingerprint() {
 }
 
 #[test]
+fn tool_argument_objects_have_order_independent_continuation_keys() {
+    let history = |arguments: &str| {
+        vec![Message {
+            role: Role::Assistant,
+            blocks: vec![Block::ToolCall {
+                id: "call_synthetic".into(),
+                name: "create_file".into(),
+                arguments: arguments.into(),
+            }],
+        }]
+    };
+    let original = history(
+        r#"{"path":"pelican.svg","options":{"encoding":"utf-8","layers":[{"name":"body","visible":true},{"name":"wheel","visible":false}]},"count":130,"zero":-0.0,"large":90071992547409931234567}"#,
+    );
+    let reordered = history(
+        r#"{"large":90071992547409931234567,"zero":-0.0,"count":130,"options":{"layers":[{"visible":true,"name":"body"},{"visible":false,"name":"wheel"}],"encoding":"utf-8"},"path":"pelican.svg"}"#,
+    );
+    for client in WireApi::ALL {
+        let expected = continuation::history_key(client, "test", &original).unwrap();
+        assert_eq!(
+            expected,
+            continuation::history_key(client, "test", &reordered).unwrap()
+        );
+        for (before, after) in [
+            ("pelican.svg", "different.svg"),
+            ("130", "131"),
+            ("90071992547409931234567", "90071992547409931234568"),
+            ("-0.0", "0.0"),
+        ] {
+            let Block::ToolCall { arguments, .. } = &original[0].blocks[0] else {
+                unreachable!()
+            };
+            let changed = history(&arguments.replace(before, after));
+            assert_ne!(
+                expected,
+                continuation::history_key(client, "test", &changed).unwrap()
+            );
+        }
+        let mut changed = original.clone();
+        let Block::ToolCall { arguments, .. } = &mut changed[0].blocks[0] else {
+            unreachable!()
+        };
+        let mut value: Value = serde_json::from_str(arguments).unwrap();
+        value["options"]["layers"].as_array_mut().unwrap().reverse();
+        *arguments = value.to_string();
+        assert_ne!(
+            expected,
+            continuation::history_key(client, "test", &changed).unwrap()
+        );
+    }
+}
+
+#[test]
 fn image_detail_changes_cannot_restore_an_older_native_continuation() {
     let client = WireApi::ChatCompletions;
     for upstream in [WireApi::Responses, WireApi::Messages, WireApi::Gemini] {

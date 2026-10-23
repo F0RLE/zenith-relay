@@ -1,12 +1,12 @@
 use super::prelude::*;
 use super::recovery::{
-    adapter_error_response, replay_native_affinity_continuation,
-    should_wait_for_candidate_availability,
+    replay_native_affinity_continuation, should_wait_for_candidate_availability,
 };
 
 pub(super) enum SelectionMiss {
     Continue,
     Stop { retry_window_expired: bool },
+    AdapterError(AdapterError),
     Respond(Response<Body>),
 }
 
@@ -32,7 +32,6 @@ pub(super) struct SelectionMissInput<'a> {
     pub(super) retry_until_available: bool,
     pub(super) attempt: u16,
     pub(super) retry_window_expired: bool,
-    pub(super) request_id: &'a str,
 }
 
 /// No reserved candidate is available for this attempt. Recover a pinned
@@ -145,10 +144,7 @@ fn replay_pinned_continuation(
             Some(SelectionMiss::Continue)
         }
         Ok(false) => None,
-        Err(error) => Some(SelectionMiss::Respond(adapter_error_response(
-            error,
-            Some(selection_context.request_id),
-        ))),
+        Err(error) => Some(SelectionMiss::AdapterError(error)),
     }
 }
 
@@ -246,10 +242,7 @@ fn first_attempt_cooldown(selection_context: &SelectionMissInput<'_>) -> Option<
 fn stop_without_candidate(selection_context: &mut SelectionMissInput<'_>) -> SelectionMiss {
     if selection_context.last_failure.is_none() {
         if let Some(error) = selection_context.last_adapter_error.take() {
-            return SelectionMiss::Respond(adapter_error_response(
-                error,
-                Some(selection_context.request_id),
-            ));
+            return SelectionMiss::AdapterError(error);
         }
     }
     SelectionMiss::Stop {

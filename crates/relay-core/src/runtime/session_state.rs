@@ -1,6 +1,36 @@
 use super::*;
 use sha2::{Digest, Sha256};
 
+/// Host-owned volatile conversation state. Clone the handles when replacing a
+/// routing graph, not the conversations. A new host/process starts empty.
+#[derive(Clone)]
+pub struct RuntimeContinuationStores {
+    pub(in crate::runtime) adapters: Arc<Mutex<crate::AdapterContinuationStore>>,
+    pub(in crate::runtime) native_responses: Arc<Mutex<crate::NativeResponsesReplayStore>>,
+    pub(in crate::runtime) routes: Arc<Mutex<crate::scheduler::AffinityCache>>,
+}
+
+impl Default for RuntimeContinuationStores {
+    fn default() -> Self {
+        Self {
+            adapters: Arc::new(Mutex::new(crate::AdapterContinuationStore::default())),
+            native_responses: Arc::new(Mutex::new(crate::NativeResponsesReplayStore::default())),
+            routes: Arc::new(Mutex::new(crate::scheduler::AffinityCache::new(
+                4_096,
+                crate::RESPONSE_AFFINITY_TTL_MS,
+            ))),
+        }
+    }
+}
+
+impl fmt::Debug for RuntimeContinuationStores {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RuntimeContinuationStores")
+            .finish_non_exhaustive()
+    }
+}
+
 pub(super) mod request;
 
 const CODEX_TURN_STATE_TTL_MS: u64 = 60 * 60 * 1_000;

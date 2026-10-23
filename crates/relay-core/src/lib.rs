@@ -107,10 +107,11 @@ pub use runtime::{
     normalize_model_service_tier_overrides, pool_catalog_visibility_changed,
     pool_dispatch_permission_changed, DefaultServiceTier, ExecutionFence, GatewayRuntime,
     GatewayRuntimeOptions, PoolAccess, PoolParticipant, ResponseAffinityBinding,
-    ResponseAffinityStore, RuntimeActivitySnapshot, RuntimeCandidatePolicy, RuntimeLocalKey,
-    RuntimeMixedLocalKey, RuntimeSource, RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate,
-    RESPONSE_AFFINITY_DELETE_CANDIDATE_SQL, RESPONSE_AFFINITY_DELETE_EXPIRED_SQL,
-    RESPONSE_AFFINITY_DELETE_SQL, RESPONSE_AFFINITY_FIND_SQL, RESPONSE_AFFINITY_UPSERT_SQL,
+    ResponseAffinityStore, RuntimeActivitySnapshot, RuntimeCandidatePolicy,
+    RuntimeContinuationStores, RuntimeLocalKey, RuntimeMixedLocalKey, RuntimeSource,
+    RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate, RESPONSE_AFFINITY_DELETE_CANDIDATE_SQL,
+    RESPONSE_AFFINITY_DELETE_EXPIRED_SQL, RESPONSE_AFFINITY_DELETE_SQL, RESPONSE_AFFINITY_FIND_SQL,
+    RESPONSE_AFFINITY_UPSERT_SQL,
 };
 pub use scheduler::refresh::{
     RefreshCompletion, RefreshCoordinator, RefreshIdentity, RefreshJob, RefreshJobId, RefreshKind,

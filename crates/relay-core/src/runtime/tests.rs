@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 mod affinity;
 mod basis_points;
 mod claude_desktop;
+mod continuation;
 mod dispatch;
 mod listing;
 mod member_quota;

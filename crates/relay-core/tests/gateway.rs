@@ -148,6 +148,21 @@ async fn spawn_messages_bridge_gateway(
     state: &UpstreamState,
     reasoning_mode: MessagesReasoningMode,
 ) -> (TestServer, Arc<Mutex<Vec<UsageEvent>>>) {
+    spawn_messages_bridge_gateway_with_options(
+        upstream_base_url,
+        state,
+        reasoning_mode,
+        GatewayRuntimeOptions::default(),
+    )
+    .await
+}
+
+async fn spawn_messages_bridge_gateway_with_options(
+    upstream_base_url: &str,
+    state: &UpstreamState,
+    reasoning_mode: MessagesReasoningMode,
+    mut options: GatewayRuntimeOptions,
+) -> (TestServer, Arc<Mutex<Vec<UsageEvent>>>) {
     let events = Arc::new(Mutex::new(Vec::new()));
     let usage_events = events.clone();
     let source = ProviderSource {
@@ -159,8 +174,8 @@ async fn spawn_messages_bridge_gateway(
         wire_api: WireApi::Messages,
         models: vec!["claude-test".to_string()],
     };
-    let mut options = GatewayRuntimeOptions {
-        model_metadata_catalog: Some(
+    if options.model_metadata_catalog.is_none() {
+        options.model_metadata_catalog = Some(
             zenith_relay_core::model_metadata::ModelMetadataCatalogHandle::new(
                 zenith_relay_core::model_metadata::ModelMetadataCatalog::from_models_dev_json(
                     &json!({
@@ -172,9 +187,8 @@ async fn spawn_messages_bridge_gateway(
                 )
                 .unwrap(),
             ),
-        ),
-        ..GatewayRuntimeOptions::default()
-    };
+        );
+    }
     if reasoning_mode != MessagesReasoningMode::Disabled {
         options
             .model_reasoning_allowed_levels

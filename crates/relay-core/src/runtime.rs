@@ -85,6 +85,7 @@ pub use attempt::ExecutionFence;
 use control::RuntimeControl;
 pub(crate) use session_state::CodexTurnStateScope;
 use session_state::CodexTurnStateStore;
+pub use session_state::RuntimeContinuationStores;
 
 #[cfg(test)]
 use crate::{
@@ -145,8 +146,8 @@ pub struct GatewayRuntime {
     model_display_order: Mutex<Vec<String>>,
     model_metadata_catalog: Option<ModelMetadataCatalogHandle>,
     passive_quotas: Mutex<BTreeMap<String, PassiveQuotaState>>,
-    adapter_continuation_store: Mutex<crate::AdapterContinuationStore>,
-    native_responses_replay_store: Mutex<NativeResponsesReplayStore>,
+    adapter_continuation_store: Arc<Mutex<crate::AdapterContinuationStore>>,
+    native_responses_replay_store: Arc<Mutex<NativeResponsesReplayStore>>,
     cache_context_store: cache_context::CacheContextStore,
     codex_turn_state_store: CodexTurnStateStore,
     pub(crate) basis_points_catalog_store: tool_catalog::ToolCatalogStore,
@@ -155,7 +156,7 @@ pub struct GatewayRuntime {
     quota_stale_after_ms: u64,
     default_service_tier_value: AtomicU8,
     response_affinity_store: Option<Arc<dyn ResponseAffinityStore>>,
-    response_route_affinity: Mutex<crate::scheduler::AffinityCache>,
+    response_route_affinity: Arc<Mutex<crate::scheduler::AffinityCache>>,
     activity_callback: Arc<Mutex<RuntimeActivityCallback>>,
     activity_runtime_id: u64,
     activity_revision: Arc<AtomicU64>,

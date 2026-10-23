@@ -6,8 +6,8 @@ use super::{
 };
 use super::{
     normalize_image_base_model, runtime_now_ms, CodexTurnStateStore, GatewayRuntime,
-    LocalGatewayKey, NativeResponsesReplayStore, ProviderSource, RuntimeControl, RuntimeLocalKey,
-    SourceModelMetadataState, UsageCallback, NEXT_ACTIVITY_RUNTIME_ID,
+    LocalGatewayKey, ProviderSource, RuntimeControl, RuntimeLocalKey, SourceModelMetadataState,
+    UsageCallback, NEXT_ACTIVITY_RUNTIME_ID,
 };
 use crate::catalog::normalize_model_reasoning_allowed_levels;
 use crate::protocol::ClientWireApi;
@@ -279,8 +279,8 @@ impl GatewayRuntime {
         )?;
 
         let affinity_store = options.response_affinity_store.clone();
-        let mut response_route_affinity =
-            crate::scheduler::AffinityCache::new(4_096, crate::RESPONSE_AFFINITY_TTL_MS);
+        let continuation_state = options.continuation_state.clone().unwrap_or_default();
+        let response_route_affinity = continuation_state.routes.clone();
         if let Some(store) = affinity_store.as_ref() {
             let now_ms = runtime_now_ms();
             if let Ok(bindings) = store.load(now_ms) {
@@ -292,12 +292,15 @@ impl GatewayRuntime {
                                 .bytes()
                                 .all(|byte| byte.is_ascii_hexdigit())
                         {
-                            response_route_affinity.restore(
-                                binding.key,
-                                binding.candidate_id,
-                                binding.expires_at_ms,
-                                now_ms,
-                            );
+                            let mut routes = crate::poison::mutex(&response_route_affinity);
+                            if routes.get_with_expiry(&binding.key, now_ms).is_none() {
+                                routes.restore(
+                                    binding.key,
+                                    binding.candidate_id,
+                                    binding.expires_at_ms,
+                                    now_ms,
+                                );
+                            }
                         } else {
                             let _ = store.delete(&binding.key);
                         }
@@ -379,7 +382,7 @@ impl GatewayRuntime {
             source_websocket_clients,
             source_candidate_bindings: source_parts.candidate_bindings,
             legacy_source_candidate_ids: source_parts.legacy_candidate_ids,
-            response_route_affinity: Mutex::new(response_route_affinity),
+            response_route_affinity,
             source_recovery_delays_ms: Mutex::new(source_parts.recovery_delays_ms),
             chatgpt_accounts: account_parts.executors,
             chatgpt_team_members: account_parts.team_members,
@@ -403,8 +406,8 @@ impl GatewayRuntime {
             model_display_order: Mutex::new(Vec::new()),
             model_metadata_catalog: options.model_metadata_catalog.clone(),
             passive_quotas: Mutex::new(account_parts.passive_quotas),
-            adapter_continuation_store: Mutex::new(crate::AdapterContinuationStore::default()),
-            native_responses_replay_store: Mutex::new(NativeResponsesReplayStore::default()),
+            adapter_continuation_store: continuation_state.adapters.clone(),
+            native_responses_replay_store: continuation_state.native_responses.clone(),
             cache_context_store: super::cache_context::CacheContextStore::default(),
             codex_turn_state_store: CodexTurnStateStore::default(),
             basis_points_catalog_store: super::tool_catalog::ToolCatalogStore::default(),

@@ -1,4 +1,6 @@
-use super::super::compatibility::{incompatible_routes, RouteCompatibility};
+use super::super::compatibility::{
+    incompatible_routes, record_adapter_rejection, AdapterRejection, RouteCompatibility,
+};
 use super::drive::{drive_selected_attempt, AttemptCarry, DriveAttemptInput, DrivenAttempt};
 use super::prelude::*;
 use super::recovery::{adapter_error_response, request_has_previous_response_id};
@@ -8,6 +10,7 @@ use super::RequestExecution;
 pub(in crate::gateway::execution) async fn execute_request(
     context: RequestExecution,
 ) -> Response<Body> {
+    let started = Instant::now();
     let RequestExecution {
         mut tool_policy,
         runtime,
@@ -181,7 +184,6 @@ pub(in crate::gateway::execution) async fn execute_request(
                 retry_until_available,
                 attempt,
                 retry_window_expired,
-                request_id: &request_id,
             })
             .await
             {
@@ -191,6 +193,25 @@ pub(in crate::gateway::execution) async fn execute_request(
                 } => {
                     retry_window_expired = expired;
                     break;
+                }
+                SelectionMiss::AdapterError(error) => {
+                    record_adapter_rejection(
+                        &runtime,
+                        AdapterRejection {
+                            request_id: &request_id,
+                            attempt,
+                            local_key_id: &key.id,
+                            requested_model: &requested_model,
+                            resolved_model: &resolved_model,
+                            client_context_id: client_context_id.as_deref(),
+                            wire_api: client_wire_api,
+                            transport,
+                            service_tier: service_tier_policy.selected_tier(),
+                        },
+                        &error,
+                        started.elapsed().as_millis() as u64,
+                    );
+                    return adapter_error_response(error, Some(&request_id));
                 }
                 SelectionMiss::Respond(response) => return response,
             }
@@ -332,6 +353,22 @@ pub(in crate::gateway::execution) async fn execute_request(
 
     if last_failure.is_none() {
         if let Some(error) = last_adapter_error {
+            record_adapter_rejection(
+                &runtime,
+                AdapterRejection {
+                    request_id: &request_id,
+                    attempt,
+                    local_key_id: &key.id,
+                    requested_model: &requested_model,
+                    resolved_model: &resolved_model,
+                    client_context_id: client_context_id.as_deref(),
+                    wire_api: client_wire_api,
+                    transport,
+                    service_tier: service_tier_policy.selected_tier(),
+                },
+                &error,
+                started.elapsed().as_millis() as u64,
+            );
             return adapter_error_response(error, Some(&request_id));
         }
     }

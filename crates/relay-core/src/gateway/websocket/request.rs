@@ -76,7 +76,10 @@ impl ClientRequest {
         runtime: &GatewayRuntime,
         key: &crate::runtime::AuthenticatedKey,
     ) -> Result<(HashSet<String>, BTreeMap<String, ExecutorRoute>), GatewayFailure> {
-        use crate::gateway::execution::compatibility::{incompatible_routes, RouteCompatibility};
+        use crate::gateway::execution::compatibility::{
+            incompatible_routes, record_adapter_rejection, AdapterRejection, RouteCompatibility,
+        };
+        let started = std::time::Instant::now();
         let mut request = self.request_body.clone();
         if let Some(object) = request.as_object_mut() {
             object.remove("type");
@@ -97,6 +100,22 @@ impl ClientRequest {
                 !(self.has_previous_response_id()
                     && error.code() == error_codes::ADAPTER_CONTINUATION_MISMATCH)
             }) {
+                record_adapter_rejection(
+                    runtime,
+                    AdapterRejection {
+                        request_id: &self.request_id,
+                        attempt: 0,
+                        local_key_id: &self.local_key_id,
+                        requested_model: &self.requested_model,
+                        resolved_model: &self.resolved_model,
+                        client_context_id: self.client_context_id.as_deref(),
+                        wire_api: WireApi::Responses,
+                        transport: crate::UsageTransport::Websocket,
+                        service_tier: self.service_tier(),
+                    },
+                    &error,
+                    started.elapsed().as_millis() as u64,
+                );
                 return Err(GatewayFailure::adapter(error));
             }
         }

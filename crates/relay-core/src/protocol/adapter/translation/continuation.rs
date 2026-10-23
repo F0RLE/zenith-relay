@@ -84,11 +84,16 @@ pub(super) fn history_key(
                     id,
                     name,
                     arguments,
-                } => json!({
-                    "call": id, "name": name,
-                    "arguments": serde_json::from_str::<Value>(arguments)
-                        .map_err(|_| AdapterError::invalid_request())?
-                }),
+                } => {
+                    let mut arguments = serde_json::from_str::<Value>(arguments)
+                        .map_err(|_| AdapterError::invalid_request())?;
+                    // Clients may serialize tool input fields in schema order.
+                    // Object order is not call identity; arrays and exact values
+                    // still are. Canonicalize only this comparison copy, never
+                    // native replay blocks, signatures or the outgoing payload.
+                    arguments.sort_all_objects();
+                    json!({"call": id, "name": name, "arguments": arguments})
+                }
                 Block::ToolResult {
                     id,
                     content,

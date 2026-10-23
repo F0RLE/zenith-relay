@@ -360,6 +360,7 @@ async fn claude_desktop_sparse_efforts_use_the_nearest_allowed_lower_level() {
                 ("/v1/chat/completions".to_string(), json!({"model":alias,"messages":history,"reasoning_effort":"medium"})),
                 (format!("/v1beta/models/{alias}:generateContent"), json!({"contents":[{"role":"user","parts":[{"text":"Synthetic input."}]}],"generationConfig":{"thinkingConfig":{"thinkingLevel":"MEDIUM"}}})),
             ]);
+            let rejected_count = rejected.len();
             for (path, body) in rejected {
                 let response = reqwest::Client::new()
                     .post(format!("{}{path}", gateway.base_url))
@@ -376,6 +377,23 @@ async fn claude_desktop_sparse_efforts_use_the_nearest_allowed_lower_level() {
                 );
             }
             assert!(state.requests.lock().unwrap().is_empty());
+            {
+                let mut rejected_events = events.lock().unwrap();
+                assert_eq!(rejected_events.len(), rejected_count);
+                for event in rejected_events.iter() {
+                    assert!(!event.success);
+                    assert_eq!(event.http_status, 400);
+                    assert_eq!(event.source_id, "relay");
+                    assert!(event.error_category.is_some());
+                    assert!(event.candidate_id.is_none());
+                    assert!(event.account_id.is_none());
+                    assert!(event.routing.is_none());
+                    assert!(event.input_tokens.is_none());
+                    assert!(event.output_tokens.is_none());
+                    assert!(event.total_tokens.is_none());
+                }
+                rejected_events.clear();
+            }
             let mut disabled = original.clone();
             disabled["thinking"] = json!({"type":"disabled"});
             let response = reqwest::Client::new()
