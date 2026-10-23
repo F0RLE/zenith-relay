@@ -105,6 +105,8 @@ async fn network_scope_restarts_same_pool_without_changing_local_address_or_key(
     let network_secret = pool::ensure_local_gateway_key_secret(&network).unwrap();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
+        // A scope restart closes old sockets; each assertion probes the new listener.
+        .pool_max_idle_per_host(0)
         .build()
         .unwrap();
     for secret in [&local_secret, &network_secret] {
