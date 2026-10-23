@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { LogIn, Plus, RefreshCw, Upload } from "lucide-react";
+import { LogIn, Plus, Upload } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { AccountSummary, SourceSummary, WakeTask } from "../../api/types";
-import { Button, IconButton, PageHeader, Tabs } from "../../components/Ui";
+import { Button, PageHeader, Tabs } from "../../components/Ui";
 import { useAccountSignIn } from "../../hooks/useAccountSignIn";
 import { useSourceRefresh } from "../../hooks/useSourceRefresh";
 import { useSourceStats } from "../../hooks/useSourceStats";
@@ -38,7 +38,6 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
   const signIn = useAccountSignIn();
   const startOAuth = () => signIn.start();
   const availableViews = connectionViews();
-  const showSourceToolbar = view === "sources" && Boolean(runtime?.sources.length);
   const { stats: sourceStats, refresh: refreshSourceStats } = useSourceStats(mode, view === "sources" ? runtime?.sources ?? EMPTY_SOURCES : EMPTY_SOURCES);
 
   useEffect(() => {
@@ -123,16 +122,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
           </>
         }
       />
-      {showSourceToolbar ? <div className="source-command-bar">
-        <label className="search-field">
-          <span className="sr-only">{t("common.search")}</span>
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("common.search")} />
-        </label>
-        {sourceRefreshReport ? <span className="table-toolbar-result" role="status">{t("sources.refreshResult", sourceRefreshReport)}</span> : null}
-        <IconButton label={t("sources.refreshData")} icon={<RefreshCw aria-hidden />} busy={busy === "sources-refresh-all"} disabled={Boolean(busy)} onClick={() => refreshSourceData()} />
-      </div> : null}
-
-      {view === "sources" ? <SourcesList query={query} sourceStats={sourceStats} onEdit={(source) => { setEditingSource(source); setDialog("source"); }} onRefresh={refreshSingleSource} onRefreshSelected={refreshSourceData} /> : null}
+      {view === "sources" ? <SourcesList query={query} onQuery={setQuery} sourceStats={sourceStats} refreshReport={sourceRefreshReport ? t("sources.refreshResult", sourceRefreshReport) : null} onEdit={(source) => { setEditingSource(source); setDialog("source"); }} onRefresh={refreshSingleSource} onRefreshSelected={refreshSourceData} onRefreshAll={() => refreshSourceData()} /> : null}
       {view === "accounts" ? (
         <AccountsTable
           query={query}

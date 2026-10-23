@@ -283,6 +283,7 @@ export const en = {
     },
   },
   sources: {
+    summaryLabel: "API source summary",
     status: {
       ready: "Ready for requests",
       disabled: "Disabled",
@@ -620,6 +621,13 @@ export const en = {
     checkSuccess: "Connection works",
     checkFailed: "Check failed",
     latency: "{{ms}} ms",
+    latencyHint: "HTTPS-check duration, not ICMP ping or model latency",
+    declaredLocation: "From login: {{location}}",
+    geoUnknown: "Region unknown",
+    locationErrors: {
+      proxy_location_unavailable: "City and timezone are unavailable. The observed exit country is shown when known.",
+      proxy_location_mismatch: "Location sources disagree; city and timezone are omitted.",
+    },
     testConnection: "Test proxy",
     checkedAt: "Checked: {{time}}",
     checkUnavailable: "Could not read the stored proxy. Refresh the list and try again.",
@@ -999,6 +1007,9 @@ export const en = {
     },
     views: "Usage views",
     requests: "Requests",
+    sends: "Sends",
+    clientRequests: "Client requests",
+    elapsedTiming: "Elapsed from the client request start. Send timings are not additive.",
     tokens: "Tokens",
     inputTokens: "Input tokens",
     uncachedInputTokens: "Regular input",
@@ -1215,7 +1226,7 @@ export const en = {
       decisions: {
         retry_selection: "Selecting another connection",
         retry_repair: "Retrying with corrected parameters",
-        tool_discovery: "Loading tool contracts",
+        tool_discovery: "Tool lookup",
         retry_authorization: "Retrying after authorization refresh",
       },
     },

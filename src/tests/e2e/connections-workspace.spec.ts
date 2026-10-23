@@ -58,11 +58,12 @@ for (const locale of ["ru", "en"] as const) {
       await expect(page.getByRole("menuitem")).toHaveText(russian ? "Удалить" : "Delete");
       await page.keyboard.press("Escape");
       await expect(card).toContainText("203.0.113.42");
-      await expect(card).toContainText("Europe/Amsterdam");
+      await expect(card).not.toContainText("Europe/Amsterdam");
+      await expect(card.locator(".proxy-region")).toContainText(russian ? "Нидерланды" : "Netherlands");
       await expect(card.locator(".account-kind-icon")).toHaveAttribute("data-status", "ready");
       await expect(card.locator(".proxy-diagnostic-status")).toHaveCount(0);
       await expect(cards.nth(1).locator(".account-kind-icon")).toHaveAttribute("data-status", "ready");
-      await expect(cards.nth(1)).toContainText("Europe/Amsterdam");
+      await expect(cards.nth(1)).not.toContainText("Europe/Amsterdam");
       await expect(cards.locator(".proxy-storage-location, .proxy-storage-timezone.unset, .proxy-storage-bindings > small")).toHaveCount(0);
       const boxes = await cards.evaluateAll((elements) => elements.map((element) => {
         const box = element.getBoundingClientRect();
@@ -136,7 +137,7 @@ test("proxy checks automatically detect timezone, show observed egress, and keep
   await expect(status).toHaveAttribute("data-status", "info");
   await expect(row).toContainText("203.0.113.42");
   await expect(row).toContainText("Netherlands");
-  await expect(row).toContainText("Europe/Amsterdam");
+  await expect(row).not.toContainText("Europe/Amsterdam");
   await expect(row).toContainText("184 ms");
   await expect(status).toHaveAttribute("data-status", "ready");
   await expect(status).toHaveAttribute("aria-label", "Connection works");
@@ -145,6 +146,7 @@ test("proxy checks automatically detect timezone, show observed egress, and keep
   await expect(page.getByRole("tooltip")).toHaveText("Connection works");
   await row.locator(".proxy-diagnostic").hover();
   await expect(page.getByRole("tooltip")).toContainText("Checked:");
+  await expect(page.getByRole("tooltip")).toContainText("Europe/Amsterdam");
   const calls = await commands(page);
   expect(calls.filter((call) => call.command === "check_local_stored_proxy")).toEqual([
     { command: "check_local_stored_proxy", args: { proxyId: "proxy_synthetic_1" } },
@@ -162,14 +164,14 @@ test("automatic proxy checks reserve queued entries and do not loop on tab chang
   await page.getByRole("tab", { name: "Proxies" }).click();
   await page.getByRole("tab", { name: "Sources" }).click();
   await page.getByRole("tab", { name: "Proxies" }).click();
-  await expect(page.locator(".proxy-storage-timezone")).toHaveCount(5);
+  await expect(page.locator('.proxy-diagnostic[data-state="success"]')).toHaveCount(5);
   const checkedIds = async () => (await commands(page))
     .filter((call) => call.command === "check_local_stored_proxy")
     .map((call) => call.args["proxyId"]).sort();
   expect(await checkedIds()).toEqual(Array.from({ length: 5 }, (_, index) => `proxy_synthetic_${index + 1}`));
   await page.getByRole("tab", { name: "Sources" }).click();
   await page.getByRole("tab", { name: "Proxies" }).click();
-  await expect(page.locator(".proxy-storage-timezone")).toHaveCount(5);
+  await expect(page.locator('.proxy-diagnostic[data-state="success"]')).toHaveCount(5);
   expect(await checkedIds()).toHaveLength(5);
 });
 
@@ -205,7 +207,8 @@ test("proxy import determines timezone without extra controls or a manual save",
   await dialog.getByRole("button", { name: "Import 1", exact: true }).click();
   await expect(dialog).toContainText("Connection works");
   await dialog.getByRole("button", { name: "Done", exact: true }).click();
-  await expect(page.locator(".proxy-storage-row").first()).toContainText("Europe/Amsterdam");
+  await page.locator(".proxy-storage-row .proxy-diagnostic").first().hover();
+  await expect(page.getByRole("tooltip")).toContainText("Europe/Amsterdam");
   expect((await commands(page)).filter((call) => call.command === "check_local_stored_proxy")).toHaveLength(1);
 });
 

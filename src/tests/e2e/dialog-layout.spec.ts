@@ -101,7 +101,7 @@ for (const theme of ["light", "dark"] as const) {
 
   test(`long source names wrap inside dropdown options (${theme})`, async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 560 });
-    await installTauriMock(page, { mode: "local", locale: "en", theme, populated: true });
+    await installTauriMock(page, { mode: "local", locale: "en", theme, populated: true, usageCandidateKind: "source" });
     await page.goto("/");
     await page.getByRole("button", { name: "Connections", exact: true }).click();
     await page.getByRole("tab", { name: "Sources", exact: true }).click();

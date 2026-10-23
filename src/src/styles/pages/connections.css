@@ -180,6 +180,69 @@
   }
 }
 
+.connection-command-bar {
+  min-height: 34px;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.connection-command-context {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.connection-command-context > input {
+  flex: 0 0 auto;
+}
+
+.connection-command-context .search-field {
+  min-width: 0;
+  flex: 1;
+}
+
+.connection-command-context .search-field input {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding-block: 6px;
+}
+
+.connection-command-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.connection-command-bar .relay-icon-button,
+.connection-command-bar .relay-option-trigger {
+  min-height: 34px;
+  height: 34px;
+}
+
+.connection-command-bar .relay-icon-button {
+  width: 34px;
+  flex: 0 0 34px;
+  border-color: transparent;
+  background: transparent;
+}
+
+.connection-command-bar .relay-icon-button:hover:not(:disabled) {
+  background: var(--relay-subtle);
+}
+
+.connection-toolbar-result {
+  color: var(--relay-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .account-filter-summary {
   min-height: 30px;
   display: flex;

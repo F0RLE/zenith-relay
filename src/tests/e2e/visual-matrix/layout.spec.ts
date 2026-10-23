@@ -185,7 +185,7 @@ for (const viewport of viewports) {
     await accountProxy.getByRole("button", { name: "Cancel" }).click();
 
     await page.getByRole("tab", { name: "Proxies" }).click();
-    await expect(page.locator(".proxy-storage-counts")).toContainText("Total3");
+    await expect(page.locator(".proxy-storage-counts strong").first()).toHaveText("3");
     await page.screenshot({ path: `output/playwright/proxy-storage-${viewport.width}x${viewport.height}.png` });
     await page.getByRole("button", { name: "Import", exact: true }).click();
     const proxyImport = page.getByRole("dialog", { name: "Import proxies" });

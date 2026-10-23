@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Cloud, ListMinus, ListPlus, Pencil, Play, Power, RefreshCw, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, CircleAlert, CircleCheck, CirclePause, Cloud, ListMinus, ListPlus, Pencil, Play, Power, RefreshCw, Trash2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { CandidateRuntimeSnapshot, SourceSummary } from "../../api/types";
@@ -7,7 +7,7 @@ import { ApplicationPickerDialog } from "../../components/ApplicationPickerDialo
 import { SourceStatsPanel } from "../../components/SourceStatsPanel";
 import { formatDetailedRemainingTime } from "../../quotaFormatting";
 import { sourceSupportsNativeResponses, sourceSupportsNativeProtocol } from "../../sourceProtocolBindings";
-import { ActionMenu, ActionMenuItem, Button, EmptyState, ErrorDetailsDialog, IconButton, OptionMenu, StatusIcon, useConfirm } from "../../components/Ui";
+import { ActionMenu, ActionMenuItem, EmptyState, ErrorDetailsDialog, IconButton, OptionMenu, StatusIcon, useConfirm } from "../../components/Ui";
 import type { FeedbackError } from "../../state/feedback";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { setVisibleIdsSelected, toggleSelectedId } from "../../state/selectionModel";
@@ -23,12 +23,15 @@ import { sourceErrorDetails } from "./sourceError";
 const EMPTY_SOURCES: SourceSummary[] = [];
 const EMPTY_RUNTIME_ORDER: CandidateRuntimeSnapshot[] = [];
 
-export function SourcesList({ query, sourceStats, onEdit, onRefresh, onRefreshSelected }: {
+export function SourcesList({ query, onQuery, sourceStats, refreshReport, onEdit, onRefresh, onRefreshSelected, onRefreshAll }: {
   query: string;
+  onQuery: (query: string) => void;
   sourceStats: Record<string, SourceStatsState>;
+  refreshReport: string | null;
   onEdit: (source: SourceSummary) => void;
   onRefresh: (sourceId: string) => void;
   onRefreshSelected: (sourceIds: readonly string[]) => void;
+  onRefreshAll: () => void;
 }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, refresh, activateCodexProfile, busy } = useRelayState();
@@ -77,6 +80,14 @@ export function SourcesList({ query, sourceStats, onEdit, onRefresh, onRefreshSe
     return <EmptyState title={t("sources.emptyTitle")} description={t("sources.emptyDescription")} />;
   }
   const localSource = mode === "local";
+  const inPoolCount = sourcesSnapshot.filter((source) => pendingPool[source.id] ?? source.inPool).length;
+  const disabledCount = sourcesSnapshot.filter((source) => !(pendingEnabled[source.id] ?? source.enabled)).length;
+  const errorCount = sourcesSnapshot.filter((source) => sourceStatus(
+    source,
+    (pendingPool[source.id] ?? source.inPool) ? runtimeCandidateForMember(source.id, "api_source", runtimeOrder, "all", source.wireApi) : undefined,
+    nowMs,
+    pendingEnabled[source.id] ?? source.enabled,
+  ).tone === "error").length;
   const launchSource = launchSourceId ? sourcesSnapshot.find((source) => source.id === launchSourceId) ?? null : null;
   const sortColumn = (key: SourceSortKey) => setSort((previousSort) =>
     previousSort.key === key
@@ -172,8 +183,15 @@ export function SourcesList({ query, sourceStats, onEdit, onRefresh, onRefreshSe
   };
   return (
     <div className="sources-workspace">
-        <div className="sources-list-heading">
-          <div className="sources-selection-heading">
+      <div className="workspace-controls sources-controls">
+        <div className="relay-status-summary" aria-label={t("sources.summaryLabel")}>
+          <div><Cloud aria-hidden /><strong>{sourcesSnapshot.length}</strong><span>{t("accounts.summary.total")}</span></div>
+          <div data-tone={inPoolCount ? "ready" : "muted"}><CircleCheck aria-hidden /><strong>{inPoolCount}</strong><span>{t("accounts.summary.inPool")}</span></div>
+          <div data-tone={errorCount ? "error" : "muted"}><CircleAlert aria-hidden /><strong>{errorCount}</strong><span>{t("accounts.summary.errors")}</span></div>
+          <div data-tone="muted"><CirclePause aria-hidden /><strong>{disabledCount}</strong><span>{t("accounts.summary.disabled")}</span></div>
+        </div>
+        <div className="connection-command-bar source-command-bar">
+          <div className="connection-command-context">
             <input
               ref={selectAllRef}
               type="checkbox"
@@ -184,7 +202,10 @@ export function SourcesList({ query, sourceStats, onEdit, onRefresh, onRefreshSe
                 selectedIds, sources.map((source) => source.id), event.target.checked,
               ))}
             />
-            <span className="sources-list-count">{t("connections.sources")} <strong>{sources.length}</strong></span>
+            <label className="search-field">
+              <span className="sr-only">{t("common.search")}</span>
+              <input value={query} onChange={(event) => onQuery(event.target.value)} placeholder={t("common.search")} />
+            </label>
           </div>
           <div className="sources-sort-controls">
           <OptionMenu
@@ -197,7 +218,7 @@ export function SourcesList({ query, sourceStats, onEdit, onRefresh, onRefreshSe
               { value: "name", label: t("common.name") },
               { value: "server", label: t("sources.host") },
               { value: "models", label: t("common.models") },
-            ]}
+            ].map((option) => ({ ...option, shortLabel: `${t("sources.sortLabel")}: ${option.label}` }))}
           />
           {sort.key !== "runtime" ? (
             <IconButton
@@ -207,12 +228,13 @@ export function SourcesList({ query, sourceStats, onEdit, onRefresh, onRefreshSe
             />
           ) : null}
           </div>
+          <IconButton label={t("sources.refreshData")} icon={<RefreshCw aria-hidden />} busy={busy === "sources-refresh-all"} disabled={Boolean(busy)} onClick={onRefreshAll} />
         </div>
         {selectedSources.length ? <div className="sources-selection-toolbar">
           <span>{t("sources.selectedCount", { count: selectedSources.length })}</span>
           <div className="sources-selection-actions">
-              <Button variant="secondary" icon={<ListPlus aria-hidden />} disabled={Boolean(busy) || selectedSources.every((source) => pendingPool[source.id] ?? source.inPool)} onClick={() => void updateSelectedParticipation(true)}>{t("sources.addToPoolAction")}</Button>
-              <Button variant="secondary" icon={<ListMinus aria-hidden />} disabled={Boolean(busy) || selectedSources.every((source) => !(pendingPool[source.id] ?? source.inPool))} onClick={() => void updateSelectedParticipation(false)}>{t("sources.removeFromPoolAction")}</Button>
+            <IconButton label={t("sources.addToPoolAction")} icon={<ListPlus aria-hidden />} disabled={Boolean(busy) || selectedSources.every((source) => pendingPool[source.id] ?? source.inPool)} onClick={() => void updateSelectedParticipation(true)} />
+            <IconButton label={t("sources.removeFromPoolAction")} icon={<ListMinus aria-hidden />} disabled={Boolean(busy) || selectedSources.every((source) => !(pendingPool[source.id] ?? source.inPool))} onClick={() => void updateSelectedParticipation(false)} />
             <ActionMenu label={t("common.actions")}>
               <ActionMenuItem icon={<RefreshCw aria-hidden />} disabled={Boolean(busy)} onClick={() => onRefreshSelected(selectedSources.map((source) => source.id))}>{t("sources.refreshData")}</ActionMenuItem>
               <ActionMenuItem icon={<Power aria-hidden />} disabled={Boolean(busy) || selectedSources.every((source) => pendingEnabled[source.id] ?? source.enabled)} onClick={() => updateSelectedEnabled(true)}>{t("common.enable")}</ActionMenuItem>
@@ -222,6 +244,8 @@ export function SourcesList({ query, sourceStats, onEdit, onRefresh, onRefreshSe
           </div>
           <IconButton label={t("accounts.clearSelection")} icon={<X aria-hidden />} disabled={Boolean(busy)} onClick={() => setSelected([])} />
         </div> : null}
+      </div>
+        {refreshReport ? <div className="connection-toolbar-result" role="status">{refreshReport}</div> : null}
         {!sources.length ? <NoResults /> : null}
         <div className="account-list source-cards" role="list">{sources.map((source) => {
           const sourceState = sourceStats[source.id];

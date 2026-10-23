@@ -118,7 +118,8 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
   const listRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<{ left: number; top: number; width: number; maxHeight: number } | null>(null);
-  const selected = options.find((option) => option.value === value) ?? options[0];
+  const selected: (typeof options)[number] | undefined = options.find((option) => option.value === value)
+    ?? (value ? { value, label: value } : options[0]);
 
   const close = (restoreFocus = false) => {
     setOpen(false);
@@ -159,8 +160,10 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
         + pixels(listStyle.borderRightWidth),
       );
     };
-    const preferredWidth = fitContent ? measuredWidth() : 220;
-    const width = Math.min(fitContent ? preferredWidth : Math.max(trigger.width, preferredWidth), window.innerWidth - margin * 2);
+    const preferredWidth = fitContent ? measuredWidth() : trigger.width;
+    const width = Math.min(preferredWidth, window.innerWidth - margin * 2);
+    // Measure wrapping at the final field width before choosing above/below.
+    list.style.width = `${width}px`;
     const preferredLeft = align === "start"
       ? trigger.left
       : align === "center"
@@ -179,10 +182,13 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
 
   useEffect(() => {
     if (!open) return;
-    const selectedOption = listRef.current?.querySelector<HTMLElement>('[role="option"][aria-selected="true"]');
-    selectedOption?.focus({ preventScroll: true });
     let opening = true;
-    const openingFrame = window.requestAnimationFrame(() => { opening = false; });
+    const openingFrame = window.requestAnimationFrame(() => {
+      // The portal stays hidden until its measured position is committed.
+      const selectedOption = listRef.current?.querySelector<HTMLElement>('[role="option"][aria-selected="true"]');
+      selectedOption?.focus({ preventScroll: true });
+      opening = false;
+    });
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target as Node;
       if (!triggerRef.current?.contains(target) && !listRef.current?.contains(target)) close();

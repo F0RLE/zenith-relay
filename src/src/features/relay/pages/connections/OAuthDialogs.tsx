@@ -249,7 +249,10 @@ export function SignInProxyDialog({
           <div className="proxy-route-options sign-in-proxy-options" role="radiogroup" aria-label={t("accounts.signInWithProxy")}>
             {proxyEntries.map((proxyEntry) => {
               const isHttpProxy = isHttpProxyEndpoint(proxyEntry.endpoint);
-              const proxyLocation = [proxyEntry.countryCode, proxyEntry.region].filter(Boolean).join(" · ");
+              const observed = proxyEntry.lastCheck?.countryCode && !proxyEntry.lastCheck.errorCode
+                ? [proxyEntry.lastCheck.countryCode, proxyEntry.lastCheck.region, proxyEntry.lastCheck.city].filter(Boolean).join(" · ") : "";
+              const declared = [proxyEntry.countryCode, proxyEntry.region].filter(Boolean).join(" · ");
+              const proxyLocation = observed || (declared ? t("proxies.declaredLocation", { location: declared }) : "");
               const isSelected = proxyEntry.id === selected?.id;
               return (
                 <button key={proxyEntry.id} type="button" role="radio" aria-checked={isSelected} disabled={!isHttpProxy} className={isSelected ? "selected" : ""} onClick={() => setSelectedId(proxyEntry.id)}>

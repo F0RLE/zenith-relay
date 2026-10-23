@@ -283,6 +283,7 @@ export const ru = {
     },
   },
   sources: {
+    summaryLabel: "Сводка источников API",
     status: {
       ready: "Готов к запросам",
       disabled: "Отключён",
@@ -620,6 +621,13 @@ export const ru = {
     checkSuccess: "Соединение работает",
     checkFailed: "Проверка не прошла",
     latency: "{{ms}} мс",
+    latencyHint: "Длительность HTTPS-проверки, не ICMP-пинг и не задержка модели",
+    declaredLocation: "Из логина: {{location}}",
+    geoUnknown: "Регион неизвестен",
+    locationErrors: {
+      proxy_location_unavailable: "Город и пояс недоступны. Страна выхода показана, если известна.",
+      proxy_location_mismatch: "Источники геолокации расходятся; город и пояс не подставляются.",
+    },
     testConnection: "Проверить прокси",
     checkedAt: "Проверено: {{time}}",
     checkUnavailable: "Не удалось прочитать сохранённый прокси. Обновите список и повторите.",
@@ -999,6 +1007,9 @@ export const ru = {
     },
     views: "Виды использования",
     requests: "Запросы",
+    sends: "Отправки",
+    clientRequests: "Запросы клиента",
+    elapsedTiming: "Время с начала запроса клиента. Время отправок не складывается.",
     tokens: "Токены",
     inputTokens: "Входные токены",
     uncachedInputTokens: "Обычные входные",
@@ -1215,7 +1226,7 @@ export const ru = {
       decisions: {
         retry_selection: "Выбор другого подключения",
         retry_repair: "Повтор с исправленными параметрами",
-        tool_discovery: "Загрузка определений инструментов",
+        tool_discovery: "Поиск инструментов",
         retry_authorization: "Повтор после обновления авторизации",
       },
     },

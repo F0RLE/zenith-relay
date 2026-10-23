@@ -237,12 +237,11 @@ test("local proxy storage confirms assigned deletion and sends one atomic batch 
   await page.getByRole("tab", { name: "Proxies" }).click();
 
   const summary = page.locator(".proxy-storage-counts");
-  await expect(summary).toContainText("Total3");
-  await expect(summary).toContainText("Free2");
-  await expect(summary).toContainText("Assigned1");
+  await expect(summary.locator("strong")).toHaveText(["3", "2", "1"]);
   await expect(page.locator(".proxy-storage-list")).not.toContainText("secret");
   await expect(page.locator(".proxy-storage-row").first().getByRole("img", { name: "Connection works" })).toBeVisible();
-  await expect(page.locator(".proxy-storage-row").first()).toContainText("Europe/Amsterdam");
+  await page.locator(".proxy-storage-row .proxy-diagnostic").first().hover();
+  await expect(page.getByRole("tooltip")).toContainText("Europe/Amsterdam");
 
   await page.getByRole("button", { name: "Manage assigned accounts" }).first().click();
   let manager = page.getByRole("dialog", { name: "Proxy accounts" });
@@ -261,10 +260,10 @@ test("local proxy storage confirms assigned deletion and sends one atomic batch 
   await importDialog.getByRole("button", { name: "Import 2" }).click();
   await expect(importDialog.getByText("Added 2; skipped 0 duplicate(s).", { exact: true })).toBeVisible();
   await importDialog.getByRole("button", { name: "Done" }).click();
-  await expect(summary).toContainText("Total5");
+  await expect(summary.locator("strong")).toHaveText(["5", "4", "1"]);
 
   await page.getByLabel("Select all visible proxies").check();
-  await page.locator(".proxy-storage-toolbar").getByRole("button", { name: "Delete", exact: true }).click();
+  await page.locator(".proxy-selection-toolbar").getByRole("button", { name: "Delete", exact: true }).click();
   const confirmation = page.getByRole("dialog", { name: "Confirm action" });
   await expect(confirmation).toContainText("1 selected proxy endpoint(s) are used by 2 account(s). Delete all 5 selected proxies and return those accounts to their inherited route?");
   await confirmation.getByRole("button", { name: "Detach and delete" }).click();
@@ -283,7 +282,7 @@ for (const staleReadOutcome of ["resolve", "reject"] as const) {
     await page.goto("/");
     await page.getByRole("button", { name: "Connections", exact: true }).click();
     await page.getByRole("tab", { name: "Proxies" }).click();
-    await expect(page.locator(".proxy-storage-counts")).toContainText("Total3");
+    await expect(page.locator(".proxy-storage-counts strong").first()).toHaveText("3");
 
     await page.evaluate((outcome) => {
       const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
@@ -319,7 +318,7 @@ for (const staleReadOutcome of ["resolve", "reject"] as const) {
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
     });
     await expect(assignedAccounts).toBeVisible();
-    await expect(page.locator(".proxy-storage-counts")).toContainText("Total3");
+    await expect(page.locator(".proxy-storage-counts strong").first()).toHaveText("3");
   });
 }
 

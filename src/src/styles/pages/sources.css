@@ -1,43 +1,49 @@
-.source-command-bar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-block: 20px 12px;
-}
-
-.source-command-bar .search-field {
-  flex: 1;
-  max-width: 380px;
-}
-
-.source-command-bar .search-field input {
-  width: 100%;
-}
-
-.source-command-bar > .relay-icon-button {
-  margin-left: auto;
-}
-
 .sources-workspace {
   min-width: 0;
   display: grid;
-  gap: 14px;
+  gap: 16px;
 }
 
-.sources-list-heading,
-.sources-selection-heading,
 .sources-sort-controls {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.sources-list-heading {
-  justify-content: space-between;
+.sources-workspace > .sources-controls {
+  margin: 0;
 }
 
-.sources-selection-heading {
-  gap: 12px;
+.source-command-bar {
+  grid-template-areas: "context sort refresh";
+}
+
+.source-command-bar .connection-command-context {
+  grid-area: context;
+}
+
+.sources-sort-controls {
+  grid-area: sort;
+  min-width: 0;
+}
+
+.sources-sort-controls .relay-option-menu,
+.sources-sort-controls .relay-option-trigger {
+  min-width: 0;
+  max-width: 220px;
+}
+
+.sources-sort-controls .relay-option-menu {
+  width: fit-content;
+}
+
+.sources-sort-controls .relay-option-trigger {
+  width: max-content;
+}
+
+.source-command-bar > .relay-icon-button {
+  grid-area: refresh;
+  justify-self: end;
 }
 
 .sources-selection-toolbar {
@@ -45,9 +51,9 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 12px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: var(--relay-subtle);
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--relay-border);
   color: var(--relay-secondary);
   font-size: 12px;
 }
@@ -60,23 +66,33 @@
   margin-left: auto;
 }
 
-.sources-selection-toolbar:has(.relay-action-menu[open]) {
+.sources-controls:has(.relay-action-menu[open]) {
   position: relative;
   z-index: 31;
 }
 
-.sources-list-count {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--relay-muted);
-  font-size: 12px;
+.sources-selection-toolbar .relay-icon-button,
+.sources-selection-toolbar .relay-action-menu > summary {
+  width: 34px;
+  height: 34px;
+  min-height: 34px;
+  flex: 0 0 34px;
+  border-color: transparent;
+  background: transparent;
 }
 
-.sources-list-count strong {
-  color: var(--relay-secondary);
-  font-weight: 500;
-  font-variant-numeric: tabular-nums;
+.sources-selection-toolbar .relay-icon-button:hover:not(:disabled),
+.sources-selection-toolbar .relay-action-menu > summary:hover,
+.sources-selection-toolbar .relay-action-menu[open] > summary {
+  background: var(--relay-subtle);
+}
+
+@container (max-width: 780px) {
+  .source-command-bar {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "context refresh" "sort sort";
+    gap: 10px 12px;
+  }
 }
 
 .source-card .account-identity > strong.revealed {
@@ -148,30 +164,6 @@
 }
 
 @media (max-width: 640px) {
-  .sources-list-heading {
-    flex-wrap: wrap;
-    gap: 12px;
-  }
-
-  .sources-selection-actions {
-    order: 1;
-    width: 100%;
-    margin-left: 0;
-  }
-
-  .sources-selection-toolbar > .relay-icon-button {
-    margin-left: auto;
-  }
-
-  .source-command-bar {
-    flex-wrap: wrap;
-  }
-
-  .source-command-bar .search-field {
-    max-width: none;
-    min-width: 140px;
-  }
-
   .source-add-dialog .api-provider-setup {
     grid-template-columns: minmax(0, 1fr);
     gap: 20px;

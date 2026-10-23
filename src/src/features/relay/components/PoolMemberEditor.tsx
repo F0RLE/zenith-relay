@@ -18,7 +18,14 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
   const canSave = mode === "local";
-  const [recoveryDelaySeconds, setRecoveryDelaySeconds] = useState(member.kind === "source" ? member.recoveryDelaySeconds ?? 0 : 0);
+  const savedRecoveryDelaySeconds = member.kind === "source" ? member.recoveryDelaySeconds ?? 0 : 0;
+  const [recoveryDelaySeconds, setRecoveryDelaySeconds] = useState(savedRecoveryDelaySeconds);
+  const recoveryDelayOptions = Array.from(new Set([0, 5, 30, 60, 300, 900, savedRecoveryDelaySeconds]))
+    .sort((left, right) => left - right)
+    .map((seconds) => ({
+      value: String(seconds),
+      label: seconds === 0 ? t("sources.recoveryAutomatic") : formatRecoveryDelay(seconds, t),
+    }));
   const [tab, setTab] = useState("models");
   const [search, setSearch] = useState("");
   const { modelIds, enabledModels: initialEnabledModels } = modelSelectionForMember(member);
@@ -161,10 +168,7 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
                     label={t("sources.recoveryDelay")}
                     value={String(recoveryDelaySeconds)}
                     onChange={(secondsText) => setRecoveryDelaySeconds(Number(secondsText))}
-                    options={[0, 5, 30, 60, 300, 900].map((seconds) => ({
-                      value: String(seconds),
-                      label: seconds === 0 ? t("sources.recoveryAutomatic") : formatRecoveryDelay(seconds, t),
-                    }))}
+                    options={recoveryDelayOptions}
                   />
                 </div>
               ) : (
