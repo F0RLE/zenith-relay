@@ -1,4 +1,5 @@
 use super::*;
+mod snapshots;
 
 // Only fixed protocol labels may enter diagnostics, never an upstream-supplied
 // event type, item identity, tool arguments or response content.
@@ -622,11 +623,7 @@ impl TranslationStream {
             }
         }
         if state.closed {
-            return if &state.item == item {
-                Ok(())
-            } else {
-                Err(invalid().with_parameter("response.output_item.changed"))
-            };
+            return snapshots::validate_unchanged(&state.item, item);
         }
         match item.get("type").and_then(Value::as_str) {
             Some("function_call" | "custom_tool_call") => {

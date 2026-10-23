@@ -951,7 +951,7 @@ fn responses_terminal_diagnostics_distinguish_mismatches_without_echoing_content
     for (case, parameter) in [
         ("count", "response.terminal.output_count"),
         ("identity", "response.output_item.identity"),
-        ("changed", "response.output_item.changed"),
+        ("changed", "response.output_item.content"),
         ("decode", "response.terminal.decode"),
     ] {
         let mut bridge = prepare(

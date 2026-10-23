@@ -3,6 +3,7 @@ use crate::{AdapterRequestContext, CacheWriteTtl, SourceAdapter};
 use serde_json::json;
 mod history;
 mod matrix;
+mod responses_snapshots;
 mod responses_tool_search;
 mod responses_tools;
 mod responses_usage;
