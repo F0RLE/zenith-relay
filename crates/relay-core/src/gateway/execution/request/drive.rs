@@ -1,4 +1,5 @@
 use super::super::super::request::ServiceTierPolicy;
+use super::super::basis_points::structured_output::requires_buffering;
 use super::completion::{complete_buffered_response, BufferedCompletionInput, CompletionStep};
 use super::dispatch::{
     dispatch_request_attempt, DispatchedRequestAttempt, RequestDispatch, RequestDispatchInput,
@@ -301,14 +302,11 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
                 .next()
                 .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
         });
-    // Explicit local JSON validation withholds the whole answer. It must never
+    // Local JSON validation withholds the whole answer. It must never
     // expose invalid text through incremental deltas before terminal validation.
-    let validate_output = basis_points_request.as_ref().is_some_and(|request| {
-        request
-            .get("relay_bps_output_validation")
-            .and_then(Value::as_bool)
-            == Some(true)
-    });
+    let validate_output = basis_points_request
+        .as_ref()
+        .is_some_and(requires_buffering);
     if !stream || (basis_points_route && (!upstream_sse || validate_output)) {
         match complete_buffered_response(BufferedCompletionInput {
             upstream,

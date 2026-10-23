@@ -1,4 +1,4 @@
-//! Explicit, locally validated output compatibility, never native strict decoding.
+//! Locally validated non-strict output, never native strict decoding.
 use super::schema::validator;
 use crate::protocol::AdapterError;
 use serde_json::Value;
@@ -13,11 +13,26 @@ pub(super) struct StructuredOutput {
     schema: Option<Arc<jsonschema::Validator>>,
 }
 
-pub(super) fn prepare(request: &Value) -> Result<Option<StructuredOutput>, AdapterError> {
+pub(in crate::gateway::execution) fn requires_buffering(request: &Value) -> bool {
     match request.get(OPTION) {
-        None | Some(Value::Bool(false)) => return Ok(None),
-        Some(Value::Bool(true)) => {}
-        _ => return Err(AdapterError::invalid_request().with_parameter(OPTION)),
+        Some(Value::Bool(true)) => true,
+        None => {
+            request.pointer("/text/format/type").and_then(Value::as_str) == Some("json_schema")
+                && request.pointer("/text/format/strict") == Some(&Value::Bool(false))
+        }
+        _ => false,
+    }
+}
+
+pub(super) fn prepare(request: &Value) -> Result<Option<StructuredOutput>, AdapterError> {
+    if request.get(OPTION).is_some_and(|value| !value.is_boolean()) {
+        return Err(AdapterError::invalid_request().with_parameter(OPTION));
+    }
+    // An explicit non-strict schema can use the existing local validator.
+    // Omitted strictness, strict requests, and explicit opt-outs do not silently
+    // acquire this compatibility mode. Admission and both stream paths share it.
+    if !requires_buffering(request) {
+        return Ok(None);
     }
     let Some(format) = request.pointer("/text/format") else {
         return Ok(None);
@@ -93,7 +108,7 @@ pub(super) fn prepare(request: &Value) -> Result<Option<StructuredOutput>, Adapt
 
 impl StructuredOutput {
     pub(super) fn instructions(&self) -> String {
-        format!("The client explicitly enabled local structured-output validation. Return exactly one JSON value without fences or surrounding prose as the final answer. Tool calls and refusals remain separate protocol items. This is not native constrained decoding. Required format: {}", self.format)
+        format!("Return exactly one JSON value without fences or surrounding prose as the final answer. Relay validates the answer against the unchanged client format before release. Tool calls and refusals remain separate protocol items. This is not native constrained decoding. Required format: {}", self.format)
     }
 
     pub(super) fn validate(&self, response: &Value) -> Result<(), AdapterError> {
@@ -150,9 +165,9 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn validation_is_explicit_and_never_claims_native_strict() {
+    fn validation_keeps_explicit_non_strict_and_never_claims_native_strict() {
         let mut request = json!({"text":{"format":{"type":"json_schema","name":"answer","strict":false,"schema":{"type":"object","properties":{"n":{"type":"integer"}},"required":["n"],"additionalProperties":false}}}});
-        assert!(prepare(&request).unwrap().is_none());
+        assert!(prepare(&request).unwrap().is_some());
         request[OPTION] = json!(true);
         let format = prepare(&request).unwrap().unwrap();
         for (text, valid) in [

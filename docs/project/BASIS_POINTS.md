@@ -332,13 +332,17 @@ is observed and regression-tested, not guaranteed by public OpenAI documentation
   native web search/image generation, and Agent Identity are unsupported.
   Full supplied history reconstructs the tool catalog; the preload hint cache
   is not a BPS provider session store and cannot restore opaque continuation.
-- Explicit `relay_bps_output_validation` buffers output and validates JSON or a
-  self-contained offline schema locally. It is not constrained decoding;
+- A JSON schema with explicit `strict: false` buffers output and validates the
+  unchanged self-contained schema locally without a Relay-private request flag.
+  `relay_bps_output_validation: false` opts out; the explicit `true` option also
+  enables the existing local JSON-object mode. Neither is constrained decoding;
   `strict: true`, invalid/incomplete output, and external references fail.
+  Omitted strictness still requires explicit opt-in. JSON and streaming catalog
+  discovery withhold the complete answer until terminal validation succeeds.
   Admission checks native and converted output formats before reserving a BPS
   member; catalog/access discovery stays independent. Incompatible BPS routes
   cannot consume selection capacity ahead of a compatible native route. A BPS-only
-  pool still rejects unsupported structured output; no schema or approval check is dropped.
+  pool still rejects native strict output; no schema or approval check is dropped.
 - Generation 401 invalidates only its rejected token incarnation and returns
   without another generation. The next request prepares fresh authorization.
   Account-wide 429 and model-access blocks retain separate scopes/deadlines.

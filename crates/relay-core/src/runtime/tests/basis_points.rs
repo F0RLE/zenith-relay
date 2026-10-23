@@ -18,6 +18,7 @@ mod request_timezone;
 mod retry_admission;
 mod routing;
 mod siwc;
+mod structured_output;
 
 struct AccessReply {
     status: StatusCode,

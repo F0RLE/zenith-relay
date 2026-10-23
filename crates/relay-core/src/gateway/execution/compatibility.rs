@@ -435,12 +435,20 @@ mod tests {
                 "required":["approved"],"additionalProperties":false}
         }}});
         for stream in [false, true] {
-            assert_eq!(
-                basis_points_route_error(&request, stream, &tier, DefaultServiceTier::Standard)
-                    .and_then(|error| error.parameter()),
-                Some("text.format")
-            );
+            assert!(basis_points_route_error(
+                &request,
+                stream,
+                &tier,
+                DefaultServiceTier::Standard
+            )
+            .is_none());
         }
+        request["relay_bps_output_validation"] = json!(false);
+        assert_eq!(
+            basis_points_route_error(&request, false, &tier, DefaultServiceTier::Standard)
+                .and_then(|error| error.parameter()),
+            Some("text.format")
+        );
         request["relay_bps_output_validation"] = json!(true);
         assert!(
             basis_points_route_error(&request, false, &tier, DefaultServiceTier::Standard)

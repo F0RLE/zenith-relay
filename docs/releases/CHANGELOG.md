@@ -30,6 +30,10 @@ recoverable account deletion. Changes below are grouped by area.
 
 #### Protocol adapters and Excel / Basis Points
 
+- BPS accepts explicitly non-strict JSON-schema output without private client
+  flags. It validates the unchanged schema before releasing JSON or streaming
+  replies; invalid or incomplete output fails without repeating generation.
+  Native strict output still requires a compatible route.
 - Request details separate the model declared by the upstream response from
   requested and routed models without treating it as verified identity.
   BPS tool failures identify the validation stage and why executable calls are
@@ -419,6 +423,10 @@ recoverable account deletion. Changes below are grouped by area.
 
 #### Адаптеры протоколов и Excel / Basis Points
 
+- BPS принимает JSON-схему с явно нестрогим режимом без специальных флагов клиента.
+  Исходная схема проверяется до выдачи JSON или потока; неверный или незавершённый
+  ответ завершается ошибкой без повторной генерации. Для нативного строгого
+  режима по-прежнему нужен совместимый маршрут.
 - В деталях запроса отдельно показана модель из ответа источника — без выдачи
   её за подтверждённую личность модели. Ошибки BPS-инструментов поясняют этап
   проверки и запрет перегенерации исполняемых вызовов. При неоднозначном отказе
