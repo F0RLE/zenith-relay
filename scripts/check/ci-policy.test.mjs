@@ -99,6 +99,31 @@ describe("desktop CI", () => {
     );
   });
 
+  test("Linux checks use the canonical archive for direct and mirror-list APT sources", () => {
+    for (const jobName of ["check", "check-web"]) {
+      const steps = build.jobs[jobName].steps;
+      const mirrorIndex = steps.findIndex((step) => step.run?.includes("sudo sed -i -E"));
+      expect(mirrorIndex, jobName).toBeGreaterThan(-1);
+      const script = steps[mirrorIndex].run;
+      expect(script).toContain("/etc/apt/sources.list.d/ubuntu.sources");
+      const replacements = [...script.matchAll(/s\|([^|]+)\|([^|]+)\|g/g)];
+      expect(replacements).toHaveLength(2);
+      for (const source of [
+        "http://azure.archive.ubuntu.com/ubuntu/",
+        "https://azure.archive.ubuntu.com/ubuntu/",
+        "mirror+file:/etc/apt/apt-mirrors.txt",
+      ]) {
+        const rewritten = replacements.reduce((value, [, pattern, replacement]) =>
+          value.replace(new RegExp(pattern, "g"), replacement), `URIs: ${source}`);
+        expect(rewritten).toBe("URIs: https://archive.ubuntu.com/ubuntu/");
+      }
+      expect(steps[mirrorIndex]["continue-on-error"]).toBeUndefined();
+      const browser = steps.findIndex((step) => step.run?.startsWith("bunx --no-install playwright install"));
+      expect(browser).toBeGreaterThan(mirrorIndex);
+      expect(steps[browser]["timeout-minutes"]).toBe(10);
+    }
+  });
+
   test("pool admission contention runs alongside the ordinary core suite", () => {
     const steps = build.jobs.check.steps;
     const core = steps.findIndex((step) => step.run === "cargo test --manifest-path crates/relay-core/Cargo.toml --locked");
