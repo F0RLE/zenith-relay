@@ -33,11 +33,13 @@ for (const scenario of [
         return Array.from(copy.children).map((child) => ({
           alignment: getComputedStyle(child).textAlign,
           offset: Math.abs(child.getBoundingClientRect().left + child.getBoundingClientRect().width / 2 - bounds.left - bounds.width / 2),
+          fits: child.getBoundingClientRect().left >= bounds.left - 1 && child.getBoundingClientRect().right <= bounds.right + 1,
         }));
       }));
       for (const value of copyAlignment) {
         expect(value.alignment).toBe("center");
         expect(value.offset).toBeLessThanOrEqual(1);
+        expect(value.fits).toBe(true);
       }
       expect(await summary.locator("dt, dd").evaluateAll((elements) => elements.every((element) => getComputedStyle(element).textAlign === "center"))).toBe(true);
       expect(await summary.locator(".usage-metrics strong").evaluateAll((elements) => elements.every((element) => element.clientHeight <= parseFloat(getComputedStyle(element).lineHeight) + 1))).toBe(true);

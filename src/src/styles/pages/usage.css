@@ -1913,7 +1913,7 @@
 @container usage (max-width: 580px) {
   .usage-metrics > .usage-metric { min-height: 86px; padding: 12px; }
   .usage-metrics .usage-metric-copy { gap: 5px; }
-  .usage-metrics .usage-metric-copy > strong { font-size: clamp(18px, 6cqw, 22px); }
+  .usage-metrics .usage-metric-copy > strong { font-size: clamp(16px, 6cqw, 22px); }
   .usage-overview { margin-bottom: 14px; }
   .usage-overview-details { padding: 12px; gap: 12px; }
   .usage-token-totals,
