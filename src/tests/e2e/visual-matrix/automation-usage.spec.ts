@@ -224,7 +224,7 @@ for (const viewport of viewports) {
 
     await page.getByRole("tab", { name: "Модели" }).click();
     const aggregate = page.locator(".usage-aggregate-table");
-    await expect(aggregate.getByRole("columnheader")).toHaveText(["Модель", "Запросы", "Входные токены", "Выходные токены", "Прочитано из кэша", "API-экв."]);
+    await expect(aggregate.getByRole("columnheader")).toHaveText(["Модель", "Запросы клиента", "Входные токены", "Выходные токены", "Прочитано из кэша", "API-экв."]);
     expect(await aggregate.locator("th, td").evaluateAll((cells) => cells.every((cell) => cell.scrollWidth <= cell.clientWidth && cell.scrollHeight <= cell.clientHeight + 1))).toBe(true);
     expect(await aggregate.locator("xpath=..").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     await page.screenshot({ path: `output/playwright/usage-models-ru-dark-${viewport.width}x${viewport.height}.png` });

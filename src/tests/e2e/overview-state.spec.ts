@@ -53,6 +53,7 @@ for (const legacy of [false, true]) {
     await installTauriMock(page, { mode: "local", locale: "en", populated: true });
     await page.goto("/");
     await expect(page.locator(".overview-chart.tokens .overview-chart-summary")).toHaveText("28");
+    await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("relay.overviewAnalyticsCache.v1") ?? "[]").length)).toBeGreaterThan(0);
     if (legacy) await page.evaluate(() => {
       const key = "relay.overviewAnalyticsCache.v1";
       const entries = JSON.parse(localStorage.getItem(key)!) as Array<{ value: {
@@ -83,6 +84,7 @@ for (const invalid of ["bucket", "totals"] as const) {
     await installTauriMock(page, { mode: "local", locale: "en", populated: true });
     await page.goto("/");
     await expect(page.locator(".overview-analytics")).toHaveClass(/has-data/);
+    await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("relay.overviewAnalyticsCache.v1") ?? "[]").length)).toBeGreaterThan(0);
     await page.evaluate((invalid) => {
       const key = "relay.overviewAnalyticsCache.v1";
       const entries = JSON.parse(localStorage.getItem(key)!) as Array<{ value: { totals: unknown; buckets: unknown[] } }>;
