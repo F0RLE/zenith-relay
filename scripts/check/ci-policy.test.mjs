@@ -71,13 +71,6 @@ describe("desktop CI", () => {
     expect(needs(build.jobs.build)).toEqual(["check", "check-windows", "check-web"]);
   });
 
-  test("Windows checks compile the native controller and test only synthetic process ownership", () => {
-    const step = build.jobs["check-windows"].steps.find((step) => step.run === "./scripts/check/check-dev-controller.ps1");
-    expect(step).toBeDefined();
-    expect(step.if).toBeUndefined();
-    expect(step["continue-on-error"]).toBeUndefined();
-  });
-
   test("web preview is checked independently and must pass before packaging", () => {
     const web = build.jobs["check-web"];
     expect(web).toBeDefined();

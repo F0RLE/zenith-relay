@@ -224,22 +224,12 @@ To opt into automatic Rust rebuilds/restarts, use `bun run app:dev:watch`
 or `bun run start --watch`. Do not route the editing agent through that
 watch-mode instance: use a separate stable Relay for the agent instead.
 
-On Windows, the optional native development controller has mouse-only Start,
-Rebuild and Start, Stop, and log buttons. Build `scripts/build/dev-control.cs`
-and `scripts/build/dev-control.job.cs` with the .NET Framework C# compiler,
-referencing `System.Windows.Forms.dll`, `System.Drawing.dll`, and
-`System.Web.Extensions.dll`, using `/target:winexe`. Run the resulting executable
-with `--repo <checkout>` when it is not beside `zenith-platform-workspace`.
-It uses the same no-watch debug workflow; frontend hot reload remains enabled.
-Start does not stop an already running Relay. Stop/rebuild require confirmation
-and terminate only the process tree started by this controller, including its
-Cargo and Vite children. Closing the controller also stops its own tree. Finish
-agent requests before stopping or rebuilding. This uses the working profile,
-not an isolated test profile. `--check --self-test --report <json>` validates the
-controls and process ownership using synthetic children, without running Relay.
-Run `./scripts/check/check-dev-controller.ps1` for the same compile and synthetic
-ownership checks required by Windows CI. Child commands start only after their
-bootstrap belongs to the controller's job; failed assignment cannot orphan builds.
+Codex desktop actions are provided in `.codex/environments/environment.toml`.
+Use **Relay · Dev** from the Run menu to start the no-watch debug workflow in
+Codex's terminal. After an agent task finishes, stop that terminal command and
+run the action again to compile and apply Rust edits. Frontend hot reload stays
+enabled. TypeScript, UI tests, Rust check, documentation checks, and dependency
+setup are separate actions; opening a chat does not run them automatically.
 
 On Windows, Relay's scripts prefer the portable toolchain in
 `%USERPROFILE%\Development\visual-studio\build-tools` and initialize MSVC,
