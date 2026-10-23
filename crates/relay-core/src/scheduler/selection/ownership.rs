@@ -22,7 +22,7 @@ impl PoolScheduler {
         candidate_id: &str,
         now_ms: u64,
     ) -> bool {
-        if !self.candidates.contains_key(candidate_id) {
+        if self.is_retired() || !self.candidates.contains_key(candidate_id) {
             return false;
         }
         self.prompt_affinity.bind(key, candidate_id, now_ms);
@@ -40,7 +40,7 @@ impl PoolScheduler {
         candidate_id: &str,
         now_ms: u64,
     ) -> bool {
-        if !self.candidates.contains_key(candidate_id) {
+        if self.is_retired() || !self.candidates.contains_key(candidate_id) {
             return false;
         }
         let key = key.into();
@@ -57,8 +57,16 @@ impl PoolScheduler {
             self.prompt_affinity.bind(key, candidate_id, now_ms);
             return true;
         }
-        self.prompt_affinity
-            .bind_if_unbound_or_same(key, candidate_id, now_ms)
+        let bound = self
+            .prompt_affinity
+            .bind_if_unbound_or_same(&key, candidate_id, now_ms);
+        if !bound {
+            // Keep the durable owner, but remember successful spillovers so a
+            // busy owner does not send every continuation to another cold member.
+            self.prompt_affinity
+                .remember_alternative(&key, candidate_id, now_ms);
+        }
+        bound
     }
 
     pub fn restore_response_affinity(
@@ -83,7 +91,12 @@ impl PoolScheduler {
         expires_at_ms: u64,
         now_ms: u64,
     ) -> bool {
-        if !self.candidates.contains_key(candidate_id) || expires_at_ms <= now_ms {
+        let key = key.into();
+        if self.is_retired()
+            || !self.candidates.contains_key(candidate_id)
+            || expires_at_ms <= now_ms
+            || self.prompt_affinity.contains(&key, now_ms)
+        {
             return false;
         }
         self.prompt_affinity
@@ -175,16 +188,30 @@ impl PoolScheduler {
         self.prompt_affinity.contains(key, now_ms)
     }
 
+    pub(crate) fn prompt_affinity_snapshot(&self, key: &str, now_ms: u64) -> Option<(String, u64)> {
+        self.prompt_affinity
+            .get_with_expiry(key, now_ms)
+            .map(|(candidate_id, expires_at_ms)| (candidate_id.to_owned(), expires_at_ms))
+    }
+
     pub fn invalidate_response_affinity(&mut self, key: &str) -> bool {
         self.response_affinity.invalidate(key)
     }
 
     pub fn invalidate_prompt_affinity(&mut self, key: &str) -> bool {
-        self.prompt_affinity.invalidate(key)
+        !self.is_retired() && self.prompt_affinity.invalidate(key)
     }
 
-    /// Reuse ordinary automatic admission, preferring the current physical
-    /// owner on ties. The caller must materialize saved history before clearing
+    pub(crate) fn invalidate_prompt_affinity_for_candidate(
+        &mut self,
+        key: &str,
+        candidate_id: &str,
+    ) -> bool {
+        !self.is_retired() && self.prompt_affinity.invalidate_if_owner(key, candidate_id)
+    }
+
+    /// Reuse ordinary cache-aware admission for the current physical owner.
+    /// The caller must materialize saved history before clearing
     /// its binding; this predicate never moves the request or spends a trial.
     pub(crate) fn automatic_response_owner_should_yield(
         &mut self,
@@ -221,7 +248,17 @@ impl PoolScheduler {
         let Some(owner_member) = self.member_key_for(&owner_id) else {
             return false;
         };
-        request.preferred = Some(owner_id);
+        // The probe has no hard owner, so projection deduplicates protocol
+        // aliases. Prefer the admitted route of the same physical member;
+        // the saved opaque response binding itself must remain unchanged.
+        request.preferred = request.allowed_candidates.as_ref().and_then(|allowed| {
+            allowed
+                .iter()
+                .find(|candidate_id| {
+                    self.member_key_for(candidate_id).as_ref() == Some(&owner_member)
+                })
+                .cloned()
+        });
         self.rotation
             .select(&request, now_ms)
             .is_some_and(|selected| {

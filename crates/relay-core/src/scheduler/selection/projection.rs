@@ -284,6 +284,26 @@ impl PoolScheduler {
             .and_then(|candidate_id| self.candidates.get(candidate_id))
             .and_then(|candidate| members.get(&members::member_key(candidate)))
             .map(|candidate| candidate.id.clone());
+        let mut warm_fallbacks = Vec::new();
+        if let Some(key) = selection_request.prompt_affinity_key {
+            for candidate_id in self
+                .prompt_affinity
+                .alternatives(key, selection_request.now_ms)
+            {
+                let Some(candidate) = self
+                    .candidates
+                    .get(&candidate_id)
+                    .and_then(|candidate| members.get(&members::member_key(candidate)))
+                else {
+                    continue;
+                };
+                if prompt_preferred.as_deref() != Some(candidate.id.as_str())
+                    && !warm_fallbacks.contains(&candidate.id)
+                {
+                    warm_fallbacks.push(candidate.id.clone());
+                }
+            }
+        }
         if affinity_candidate_id.is_none() {
             allowed_candidate_ids = members
                 .into_values()
@@ -298,6 +318,7 @@ impl PoolScheduler {
             allowed_candidate_ids,
         );
         rotation_request.preferred = prompt_preferred;
+        rotation_request.warm_fallbacks = warm_fallbacks;
         Some(rotation_request)
     }
 

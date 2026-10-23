@@ -30,32 +30,8 @@ impl GatewayRuntime {
                 }
             }
         }
-        if let (Some(key), Some(store)) =
-            (prompt_affinity_key, self.response_affinity_store.as_ref())
-        {
-            let cached = self.lock_scheduler().has_prompt_affinity(key, now_ms);
-            if !cached {
-                if let Ok(Some(binding)) = store.find(key, now_ms) {
-                    let owner = self
-                        .lock_scheduler()
-                        .candidate(&binding.candidate_id)
-                        .map(|candidate| candidate.id.clone())
-                        .or_else(|| {
-                            self.legacy_source_candidate_ids
-                                .get(&binding.candidate_id)
-                                .cloned()
-                                .flatten()
-                        });
-                    if let Some(owner) = owner {
-                        self.lock_scheduler().restore_prompt_affinity(
-                            binding.key,
-                            &owner,
-                            binding.expires_at_ms,
-                            now_ms,
-                        );
-                    }
-                }
-            }
+        if let Some(key) = prompt_affinity_key {
+            self.restore_prompt_affinity_from_store(key, now_ms);
         }
         let attempted_members = budget.attempted_members();
         let mut exclusions = self.lock_scheduler().routes_for_members(&attempted_members);

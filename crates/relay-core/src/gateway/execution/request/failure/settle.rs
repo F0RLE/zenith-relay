@@ -109,7 +109,7 @@ pub(super) fn settle_collected_rejection(
         }
     }
     if cache_write_rejected {
-        runtime.invalidate_prompt_affinity(prompt_affinity_key.as_deref());
+        runtime.invalidate_prompt_affinity(prompt_affinity_key.as_deref(), &route.candidate_id);
     }
     if failure.execution.certainty == ExecutionCertainty::NotSent
         && (affinity_miss

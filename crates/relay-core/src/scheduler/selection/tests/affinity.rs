@@ -177,6 +177,36 @@ fn successful_quota_rebalance_moves_prompt_affinity_to_the_warmed_member() {
 }
 
 #[test]
+fn slight_parallel_load_keeps_prompt_affinity_and_its_diagnostics() {
+    let mut scheduler = PoolScheduler::new();
+    scheduler.upsert(oauth_candidate("owner"));
+    scheduler.upsert(oauth_candidate("other"));
+    assert!(scheduler.bind_prompt_affinity("cache:thread", "owner", 100));
+    let lease = scheduler
+        .reserve_request("owner", "gpt-5", 100, false)
+        .unwrap();
+    let selected = scheduler
+        .select(SelectionRequest {
+            model: "gpt-5",
+            allowed_protocols: &[WireApi::Responses],
+            scope: &CandidateScope::default(),
+            tried: &HashSet::new(),
+            response_affinity_key: None,
+            prompt_affinity_key: Some("cache:thread"),
+            now_ms: 101,
+        })
+        .unwrap();
+
+    assert_eq!(selected.candidate_id, "owner");
+    assert!(!selected.response_affinity_hit);
+    assert_eq!(
+        selected.diagnostics.reason,
+        SelectionReason::PromptCacheAffinity
+    );
+    scheduler.release_reservation(lease);
+}
+
+#[test]
 fn successful_load_spillover_keeps_prompt_owner_inside_the_resource_band() {
     let mut scheduler = PoolScheduler::new();
     for (id, remaining) in [("owner", 8_000), ("spillover", 8_100)] {
@@ -187,6 +217,11 @@ fn successful_load_spillover_keeps_prompt_owner_inside_the_resource_band() {
     }
     assert!(scheduler.bind_prompt_affinity("cache:thread", "owner", 100));
     let lease = scheduler
+        .reserve_request("owner", "gpt-5", 100, false)
+        .unwrap();
+    // A larger load gap still spills over; a single extra request may retain
+    // the warm owner without changing durable ownership after a real spill.
+    let second_lease = scheduler
         .reserve_request("owner", "gpt-5", 100, false)
         .unwrap();
     let selected = scheduler
@@ -203,6 +238,7 @@ fn successful_load_spillover_keeps_prompt_owner_inside_the_resource_band() {
     assert_eq!(selected.candidate_id, "spillover");
     assert!(!scheduler.bind_prompt_affinity_sticky("cache:thread", "spillover", 102));
     scheduler.release_reservation(lease);
+    scheduler.release_reservation(second_lease);
     assert_eq!(
         scheduler.prompt_affinity.get("cache:thread", 103),
         Some("owner")

@@ -26,6 +26,254 @@ fn preferred_request(id: u64, candidate_id: &str) -> RotationRequest {
 }
 
 #[test]
+fn warm_fallbacks_only_break_automatic_ties_and_never_bypass_capacity() {
+    for mode in [
+        RotationMode::Automatic,
+        RotationMode::RoundRobin,
+        RotationMode::Failover,
+    ] {
+        let cold = candidate("a-cold", 10, 100);
+        let mut warm = candidate("z-warm", 0, 1);
+        warm.max_concurrency = 1;
+        let mut engine = engine_with([cold, warm]);
+        engine.mode = mode;
+        let mut request = request(1);
+        request.warm_fallbacks = vec!["z-warm".to_string()];
+        assert_eq!(
+            engine.select(&request, 100).unwrap().candidate_id,
+            if mode == RotationMode::Automatic {
+                "z-warm"
+            } else {
+                "a-cold"
+            }
+        );
+        let busy = engine
+            .reserve(&request.clone().with_owner("z-warm"), 100)
+            .unwrap();
+        assert_eq!(engine.select(&request, 100).unwrap().candidate_id, "a-cold");
+        assert!(engine.release_unstarted(busy.lease_id));
+    }
+}
+
+#[test]
+fn cache_affinity_keeps_a_ready_member_with_one_extra_in_flight_request() {
+    let mut warm = candidate("warm", 0, 1);
+    warm.max_concurrency = 4;
+    let mut idle = candidate("idle", 0, 1);
+    idle.max_concurrency = 4;
+    let mut engine = engine_with([warm, idle]);
+    let busy = engine.reserve(&request(1).with_owner("warm"), 100).unwrap();
+
+    let selected = engine.select(&preferred_request(2, "warm"), 100).unwrap();
+    assert_eq!(selected.candidate_id, "warm");
+    assert_eq!(selected.reason, RotationSelectionReason::WeightedRotation);
+    assert!(engine.release_unstarted(busy.lease_id));
+}
+
+#[test]
+fn cache_affinity_load_margin_never_overrides_capacity_or_a_larger_load_gap() {
+    for (capacity, in_flight) in [(1, 1), (4, 2), (4, 3)] {
+        let mut warm = candidate("warm", 0, 1);
+        warm.max_concurrency = capacity;
+        let mut engine = engine_with([warm, candidate("idle", 0, 1)]);
+        let leases = (1..=in_flight)
+            .map(|id| {
+                engine
+                    .reserve(&request(id).with_owner("warm"), 100)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        let selected = engine.select(&preferred_request(20, "warm"), 100).unwrap();
+        assert_eq!(selected.candidate_id, "idle");
+        for lease in leases {
+            assert!(engine.release_unstarted(lease.lease_id));
+        }
+    }
+}
+
+#[test]
+fn cache_affinity_load_margin_preserves_quota_and_independent_load_balancing() {
+    let mut warm = candidate("warm", 0, 1);
+    warm.max_concurrency = 4;
+    let mut idle = candidate("idle", 0, 1);
+    idle.max_concurrency = 4;
+    let mut engine = engine_with([warm, idle]);
+    for (id, remaining) in [("warm", 8_000), ("idle", 8_100)] {
+        assert!(engine.sync_candidate_state(
+            id,
+            true,
+            false,
+            AuthState::Ready,
+            QuotaState::Available,
+            RateState::Ready,
+        ));
+        assert!(engine.set_quota_remaining(id, Some(remaining), Some(100)));
+    }
+    let busy = engine.reserve(&request(1).with_owner("warm"), 100).unwrap();
+    assert_eq!(
+        engine.select(&request(2), 100).unwrap().candidate_id,
+        "idle"
+    );
+    assert_eq!(
+        engine
+            .select(&preferred_request(3, "warm"), 100)
+            .unwrap()
+            .candidate_id,
+        "warm"
+    );
+
+    assert!(engine.set_quota_remaining("idle", Some(9_000), Some(100)));
+    let selected = engine.select(&preferred_request(4, "warm"), 100).unwrap();
+    assert_eq!(selected.candidate_id, "idle");
+    assert_eq!(selected.reason, RotationSelectionReason::QuotaHeadroom);
+    assert!(engine.release_unstarted(busy.lease_id));
+}
+
+#[test]
+fn cache_affinity_load_margin_compares_normalized_physical_capacity() {
+    for (warm_capacity, other_capacity, warm_load, other_load, expected) in
+        [(4, 8, 2, 1, "other"), (8, 4, 3, 1, "warm")]
+    {
+        let mut warm = candidate("warm", 0, 1);
+        warm.max_concurrency = warm_capacity;
+        let mut other = candidate("other", 0, 1);
+        other.max_concurrency = other_capacity;
+        let mut engine = engine_with([warm, other]);
+        let mut leases = Vec::new();
+        for id in 1..=warm_load {
+            leases.push(
+                engine
+                    .reserve(&request(id).with_owner("warm"), 100)
+                    .unwrap(),
+            );
+        }
+        for id in 100..100 + other_load {
+            leases.push(
+                engine
+                    .reserve(&request(id).with_owner("other"), 100)
+                    .unwrap(),
+            );
+        }
+        assert_eq!(
+            engine
+                .select(&preferred_request(200, "warm"), 100)
+                .unwrap()
+                .candidate_id,
+            expected
+        );
+        for lease in leases {
+            assert!(engine.release_unstarted(lease.lease_id));
+        }
+    }
+}
+
+#[test]
+fn cache_affinity_load_margin_does_not_override_health_or_latency() {
+    for warm_health in [
+        HealthRuntime {
+            failure_score_milli: HEALTH_FAILURE_SWITCH_MARGIN_MILLI,
+            observed_at_ms: Some(100),
+            ..HealthRuntime::default()
+        },
+        HealthRuntime {
+            first_output_latency_ms: Some(1_000),
+            latency_observed_at_ms: Some(100),
+            ..HealthRuntime::default()
+        },
+    ] {
+        let mut warm = candidate("warm", 0, 1);
+        warm.max_concurrency = 4;
+        let mut engine = engine_with([warm, candidate("idle", 0, 1)]);
+        engine
+            .health
+            .insert(("warm".into(), "responses:gpt".into()), warm_health);
+        engine.health.insert(
+            ("idle".into(), "responses:gpt".into()),
+            HealthRuntime {
+                first_output_latency_ms: Some(100),
+                latency_observed_at_ms: Some(100),
+                ..HealthRuntime::default()
+            },
+        );
+        let busy = engine.reserve(&request(1).with_owner("warm"), 100).unwrap();
+        assert_eq!(
+            engine
+                .select(&preferred_request(2, "warm"), 100)
+                .unwrap()
+                .candidate_id,
+            "idle"
+        );
+        assert!(engine.release_unstarted(busy.lease_id));
+    }
+}
+
+#[test]
+fn cache_affinity_load_margin_preserves_material_provider_credit_leads() {
+    let mut warm = candidate("warm", 0, 1);
+    warm.max_concurrency = 4;
+    let mut engine = engine_with([warm, candidate("idle", 0, 1)]);
+    assert!(engine.set_provider_credits("warm", Some(500_000_000), false, Some(100)));
+    assert!(engine.set_provider_credits("idle", Some(501_000_000), false, Some(100)));
+    let busy = engine.reserve(&request(1).with_owner("warm"), 100).unwrap();
+    assert_eq!(
+        engine
+            .select(&preferred_request(2, "warm"), 100)
+            .unwrap()
+            .candidate_id,
+        "warm"
+    );
+
+    assert!(engine.set_provider_credits("idle", Some(515_000_000), false, Some(100)));
+    let selected = engine.select(&preferred_request(3, "warm"), 100).unwrap();
+    assert_eq!(selected.candidate_id, "idle");
+    assert_eq!(selected.reason, RotationSelectionReason::ProviderCredits);
+    assert!(engine.release_unstarted(busy.lease_id));
+}
+
+#[test]
+#[ignore = "Synthetic admission probe; no provider calls or billed cache measurements."]
+fn measure_cache_affinity_under_parallel_load() {
+    use std::time::Instant;
+
+    const WARMUPS: u64 = 20;
+    const TRIALS: usize = 9;
+    const ITERATIONS: u64 = 1_000;
+    let mut warm = candidate("warm", 0, 1);
+    warm.max_concurrency = 4;
+    let mut idle = candidate("idle", 0, 1);
+    idle.max_concurrency = 4;
+    let mut engine = engine_with([warm, idle]);
+    let busy = engine.reserve(&request(1).with_owner("warm"), 100).unwrap();
+    for id in 2..WARMUPS + 2 {
+        let lease = engine.reserve(&preferred_request(id, "warm"), 100).unwrap();
+        assert!(engine.release_unstarted(lease.lease_id));
+    }
+
+    let mut durations = Vec::with_capacity(TRIALS);
+    let mut warm_selections = 0_u64;
+    for trial in 0..TRIALS {
+        let start = Instant::now();
+        for iteration in 0..ITERATIONS {
+            let id = WARMUPS + 2 + trial as u64 * ITERATIONS + iteration;
+            let lease = engine.reserve(&preferred_request(id, "warm"), 100).unwrap();
+            warm_selections += u64::from(lease.candidate_id == "warm");
+            assert!(engine.release_unstarted(lease.lease_id));
+        }
+        durations.push(start.elapsed().as_nanos() / u128::from(ITERATIONS));
+    }
+    durations.sort_unstable();
+    println!(
+        "cache-affinity admission: warm selections {warm_selections}/{}, ns/reserve+release median={} min={} max={}",
+        TRIALS as u64 * ITERATIONS,
+        durations[TRIALS / 2],
+        durations[0],
+        durations[TRIALS - 1],
+    );
+    assert!(engine.release_unstarted(busy.lease_id));
+}
+
+#[test]
 fn balanced_quota_margin_preserves_affinity_without_hiding_a_material_lead() {
     let mut engine = engine_with([candidate("a", 0, 1), candidate("b", 0, 1)]);
     for (id, remaining) in [("a", 8_100), ("b", 8_000)] {

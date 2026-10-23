@@ -301,6 +301,9 @@ pub struct RotationRequest {
     /// Soft locality preference, considered only within the ordinary
     /// Automatic selection group. It cannot replace a recovery trial.
     pub preferred: Option<String>,
+    /// Previously successful alternatives, in recency order. They only break
+    /// ties inside the admitted group and receive no extra load margin.
+    pub warm_fallbacks: Vec<String>,
     pub tried: BTreeSet<String>,
     /// Principal/spend policy is a hard gate independent of priority. An
     /// empty set permits nothing; None is for an explicitly unrestricted pool.
@@ -320,6 +323,7 @@ impl RotationRequest {
             operation: RotationOperation::Text,
             owner: None,
             preferred: None,
+            warm_fallbacks: Vec::new(),
             tried: BTreeSet::new(),
             allowed_candidates: None,
         }

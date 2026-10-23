@@ -372,7 +372,7 @@ fn settle_account_failure(
     }
     let rejection_state = settle_route_failure(runtime, lease, route, &failure, response_headers);
     if classified.cache_write_rejected {
-        runtime.invalidate_prompt_affinity(prompt_affinity_key.as_deref());
+        runtime.invalidate_prompt_affinity(prompt_affinity_key.as_deref(), &route.candidate_id);
     }
     if (classified.cache_write_rejected && !route_forbids_fallback(route, status, failure.category))
         || retryable_route_failure(route, status, failure.category, has_previous_response_id)

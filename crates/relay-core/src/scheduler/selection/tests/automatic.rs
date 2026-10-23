@@ -403,7 +403,7 @@ fn stale_monitoring_is_neutral_for_accounts_and_sources() {
 }
 
 #[test]
-fn prompt_affinity_never_overrides_lower_load_or_explicit_order() {
+fn prompt_affinity_has_a_bounded_load_margin_and_never_overrides_explicit_order() {
     let mut scheduler = policy::mixed(PoolRoutingMode::Automatic);
     scheduler.bind_prompt_affinity("cache:test", "api-b", 100);
     assert_eq!(
@@ -412,11 +412,20 @@ fn prompt_affinity_never_overrides_lower_load_or_explicit_order() {
     );
     assert!(scheduler.reserve_for("api-b", "gpt-5", 100));
     for _ in 0..12 {
+        assert_eq!(
+            rotation::dispatch(&mut scheduler, 100, Some("cache:test")),
+            "api-b"
+        );
+        assert_ne!(rotation::dispatch(&mut scheduler, 100, None), "api-b");
+    }
+    assert!(scheduler.reserve_for("api-b", "gpt-5", 100));
+    for _ in 0..12 {
         assert_ne!(
             rotation::dispatch(&mut scheduler, 100, Some("cache:test")),
             "api-b"
         );
     }
+    assert!(scheduler.release_for("api-b", Some("gpt-5")));
     assert!(scheduler.release_for("api-b", Some("gpt-5")));
     let mut policy = scheduler.pool_routing.clone().unwrap();
     policy.mode = PoolRoutingMode::InOrder;
@@ -506,9 +515,12 @@ fn automatic_response_owner_yields_when_another_credit_balance_leads_by_fifteen(
 
 #[test]
 fn automatic_response_owner_uses_the_same_load_priority_as_new_requests() {
-    for (busy, owner_quota, other_quota, expected) in [
-        ("api-a", 8_000, 9_000, false),
-        ("account", 9_000, 8_000, true),
+    for (busy, in_flight, owner_quota, other_quota, expected) in [
+        ("api-a", 1, 8_000, 9_000, false),
+        ("api-a", 2, 8_000, 9_000, false),
+        ("account", 1, 9_000, 8_000, false),
+        ("account", 2, 9_000, 8_000, true),
+        ("account", 1, 8_000, 9_000, true),
     ] {
         let mut scheduler = policy::mixed(PoolRoutingMode::Automatic);
         scheduler.candidates.get_mut("api-b").unwrap().enabled = false;
@@ -518,9 +530,14 @@ fn automatic_response_owner_uses_the_same_load_priority_as_new_requests() {
             member.quota_updated_at_ms = Some(100);
         }
         assert!(scheduler.bind_response_affinity("response", "account", 100));
-        let lease = scheduler
-            .reserve_request(busy, "gpt-5", 100, false)
-            .unwrap();
+        assert!(scheduler.bind_prompt_affinity("cache:owner", "account", 100));
+        let leases = (0..in_flight)
+            .map(|_| {
+                scheduler
+                    .reserve_request(busy, "gpt-5", 100, false)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
             scheduler.automatic_response_owner_should_yield(
                 "response",
@@ -531,9 +548,23 @@ fn automatic_response_owner_uses_the_same_load_priority_as_new_requests() {
                 100,
             ),
             expected,
-            "busy member: {busy}"
+            "busy member: {busy}, in flight: {in_flight}"
         );
-        scheduler.release_reservation(lease);
+        let selected = scheduler
+            .select(SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses, WireApi::ChatCompletions],
+                scope: &CandidateScope::default(),
+                tried: &HashSet::new(),
+                response_affinity_key: None,
+                prompt_affinity_key: Some("cache:owner"),
+                now_ms: 100,
+            })
+            .unwrap();
+        assert_eq!(selected.candidate_id != "account", expected);
+        for lease in leases {
+            scheduler.release_reservation(lease);
+        }
     }
 }
 

@@ -266,9 +266,10 @@ fn continue_after_cache_write_rejection(
     if !terminal_body.is_some_and(super::super::super::errors::prompt_cache_write_rejected) {
         return false;
     }
-    scope
-        .runtime
-        .invalidate_prompt_affinity(scope.request.prompt_affinity_key.as_deref());
+    scope.runtime.invalidate_prompt_affinity(
+        scope.request.prompt_affinity_key.as_deref(),
+        &scope.route.candidate_id,
+    );
     let failure =
         classified_terminal_failure(status, category, scope.source_error_origin, terminal);
     record_connect_failure_with_outcome(

@@ -179,7 +179,10 @@ impl PoolScheduler {
                 super::rotation::RotationSelectionReason::QuotaHeadroom
                     | super::rotation::RotationSelectionReason::ProviderCredits
             )
-            && rotation_request.preferred.as_deref() == Some(selected.candidate_id.as_str())
+            && (rotation_request.preferred.as_deref() == Some(selected.candidate_id.as_str())
+                || rotation_request
+                    .warm_fallbacks
+                    .contains(&selected.candidate_id))
         {
             SelectionReason::PromptCacheAffinity
         } else {

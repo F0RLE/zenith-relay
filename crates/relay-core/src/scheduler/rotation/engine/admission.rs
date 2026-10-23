@@ -92,7 +92,7 @@ impl RotationEngine {
         // Only automatic selection compares resource headroom. Resolve its
         // explanation after selection, without scanning balances for owners,
         // recovery requests or manual/round-robin routing.
-        let least_loaded = self.least_loaded_group(ready_candidates);
+        let least_loaded = self.cache_aware_load_group(ready_candidates, request);
         if least_loaded.len() < ready_candidates.len() {
             return RotationSelectionReason::LeastLoaded;
         }
@@ -147,6 +147,14 @@ impl RotationEngine {
                 !candidate.recovery && request.preferred.as_deref() == Some(&candidate.id)
             }) {
                 return Some(preferred.clone());
+            }
+            for alternative in &request.warm_fallbacks {
+                if let Some(warm) = candidate_group
+                    .iter()
+                    .find(|candidate| !candidate.recovery && candidate.id == *alternative)
+                {
+                    return Some(warm.clone());
+                }
             }
         }
         if self.mode == RotationMode::RoundRobin {
@@ -297,6 +305,43 @@ impl RotationEngine {
             .collect()
     }
 
+    fn cache_aware_load_group(
+        &self,
+        ready: &[ReadyCandidate],
+        request: &RotationRequest,
+    ) -> Vec<ReadyCandidate> {
+        let mut candidates = self.least_loaded_group(ready);
+        let Some(least_loaded) = candidates.first() else {
+            return candidates;
+        };
+        let Some(preferred_id) = request.preferred.as_deref() else {
+            return candidates;
+        };
+        let Some(preferred) = ready
+            .iter()
+            .find(|candidate| !candidate.recovery && candidate.id == preferred_id)
+        else {
+            return candidates;
+        };
+
+        // Keep a warm member eligible with at most one extra existing request
+        // relative to the least normalized load. Readiness already enforces
+        // physical capacity; quota, credits and soft health still filter this
+        // group below. Do not queue or relax limits just to preserve a cache.
+        let preferred_load = u64::from(preferred.in_flight.saturating_sub(1))
+            * u64::from(least_loaded.effective_capacity);
+        let baseline_load =
+            u64::from(least_loaded.in_flight) * u64::from(preferred.effective_capacity);
+        if preferred_load <= baseline_load
+            && !candidates
+                .iter()
+                .any(|candidate| candidate.id == preferred.id)
+        {
+            candidates.push(preferred.clone());
+        }
+        candidates
+    }
+
     pub(super) fn selection_group(
         &self,
         ready: &[ReadyCandidate],
@@ -326,10 +371,10 @@ impl RotationEngine {
                 .collect(),
             RotationMode::RoundRobin | RotationMode::WeightedRoundRobin => ready.to_vec(),
             RotationMode::Automatic => {
-                // Spread independent concurrent work across the least-loaded
-                // physical members first. Quota and credit balances decide
-                // among members at the same normalized load.
-                let mut candidates = self.least_loaded_group(ready);
+                // Independent work uses the least-loaded physical members.
+                // A warm owner may stay within the bounded load margin;
+                // resource and health checks apply equally to that owner.
+                let mut candidates = self.cache_aware_load_group(ready, request);
                 let best_quota = candidates
                     .iter()
                     .filter_map(|candidate| self.fresh_quota_remaining(&candidate.id, now_ms))

@@ -128,7 +128,10 @@ pub(super) async fn handle_upgrade_rejection(
         .as_deref()
         .is_some_and(super::super::super::errors::prompt_cache_write_rejected)
     {
-        runtime.invalidate_prompt_affinity(scope.request.prompt_affinity_key.as_deref());
+        runtime.invalidate_prompt_affinity(
+            scope.request.prompt_affinity_key.as_deref(),
+            &route.candidate_id,
+        );
         record_connect_failure_with_hint(
             &scope.trace(),
             &failure,

@@ -1,5 +1,7 @@
 use super::*;
 
+mod persistence;
+
 #[test]
 fn response_affinity_persists_and_removes_the_same_scheduler_binding() {
     let store = Arc::new(RecordedResponseAffinityStore::default());
