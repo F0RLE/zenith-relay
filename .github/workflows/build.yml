@@ -34,7 +34,7 @@ jobs:
       - run: bun install --frozen-lockfile
         working-directory: src
       - name: Test development scripts
-        run: bun test ./scripts/check ./scripts/lib ./scripts/maintenance
+        run: bun test ./scripts/check ./scripts/lib ./scripts/maintenance ./scripts/build
       - name: Check documentation links
         run: bun ./scripts/check/check-docs.mjs
       - uses: dtolnay/rust-toolchain@1.98.1

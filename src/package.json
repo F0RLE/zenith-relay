@@ -27,6 +27,7 @@
     "verify": "bun run test:unit && bun run build && bun run check:bundle-size && bun ../scripts/build/cargo.mjs test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1",
     "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
     "app:dev": "bun ../scripts/build/tauri-dev.mjs",
+    "app:dev:watch": "bun ../scripts/build/tauri-dev.mjs --watch",
     "app:build": "bun ../scripts/build/tauri-build.mjs"
   },
   "dependencies": {

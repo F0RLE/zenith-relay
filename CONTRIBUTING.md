@@ -212,6 +212,18 @@ bun scripts/setup/start-dev.mjs
 the desktop app. The setup, start, and `app:*` commands work from the repository
 root and from `src`. Use
 `bun run setup` when you only want to prepare the checkout.
+
+For a prepared checkout, use `bun run app:dev`. Rust auto-restart is disabled
+by default, so editing backend code does not terminate pool requests made by
+the agent doing the work. Frontend hot reload remains enabled. Rust changes
+take effect only after you explicitly stop and restart the dev command;
+finish active agent requests before restarting. This is not data or process
+isolation from your working Relay profile.
+
+To opt into automatic Rust rebuilds/restarts, use `bun run app:dev:watch`
+or `bun run start --watch`. Do not route the editing agent through that
+watch-mode instance: use a separate stable Relay for the agent instead.
+
 On Windows, Relay's scripts prefer the portable toolchain in
 `%USERPROFILE%\Development\visual-studio\build-tools` and initialize MSVC,
 the Windows SDK, CMake, and MSBuild together. Keep the SDK in
@@ -378,7 +390,7 @@ The regular Build workflow also runs these tests against the proposed changes
 in its unprivileged `pull_request` context.
 
 For build, setup, check, or cleanup scripts, run
-`bun test ./scripts/check ./scripts/lib ./scripts/maintenance`. The Build workflow
+`bun test ./scripts/check ./scripts/lib ./scripts/maintenance ./scripts/build`. The Build workflow
 runs this same suite.
 
 ### Frontend and desktop

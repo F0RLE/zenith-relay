@@ -7,12 +7,14 @@ const root = repoRoot();
 const setupScript = join(root, "scripts", "setup", "setup-dev.mjs");
 const tauriScript = join(root, "scripts", "build", "tauri-dev.mjs");
 const wantsBrowsers = process.argv.includes("--with-browsers");
+const wantsWatch = process.argv.includes("--watch");
 const helpRequested = process.argv.includes("--help") || process.argv.includes("-h");
 
 if (helpRequested) {
-  console.log("Usage: bun scripts/setup/start-dev.mjs [--with-browsers]");
+  console.log("Usage: bun scripts/setup/start-dev.mjs [--with-browsers] [--watch]");
   console.log("Install locked dependencies and start the Relay desktop app.");
   console.log("Add --with-browsers when Playwright Chromium is needed for e2e tests.");
+  console.log("Rust auto-restart is off by default. --watch enables restarts and interrupts active requests.");
   process.exit(0);
 }
 
@@ -45,4 +47,4 @@ function run(label, script, args = []) {
 }
 
 run("install dependencies", setupScript, wantsBrowsers ? ["--with-browsers"] : []);
-run("start Relay", tauriScript);
+run("start Relay", tauriScript, wantsWatch ? ["--watch"] : []);

@@ -41,7 +41,7 @@ describe("desktop CI", () => {
     const steps = build.jobs.check.steps;
     const install = steps.findIndex((step) => step.run === "bun install --frozen-lockfile"
       && step["working-directory"] === "src");
-    const scripts = steps.findIndex((step) => step.run === "bun test ./scripts/check ./scripts/lib ./scripts/maintenance");
+    const scripts = steps.findIndex((step) => step.run === "bun test ./scripts/check ./scripts/lib ./scripts/maintenance ./scripts/build");
     const docs = steps.findIndex((step) => step.run === "bun ./scripts/check/check-docs.mjs");
     expect(install).toBeGreaterThan(-1);
     expect(scripts).toBeGreaterThan(install);
