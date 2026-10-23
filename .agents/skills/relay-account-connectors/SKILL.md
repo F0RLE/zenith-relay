@@ -26,9 +26,11 @@ workflow.
   Compare it with the provider's official contract and record the inspected
   commit and paths. New API's product-user OAuth is unrelated to provider
   account credentials.
-- Trace `src-tauri/src/local_pool/accounts/oauth/`, `oauth_flow/`, and
-  `commands/oauth/{flow,checkpoint,completion,account}.rs`. Imports belong to
-  `accounts/import_orchestrator/` and the shared `crates/relay-core/src/accounts/import/`.
+- Trace `src-tauri/src/local_pool/accounts/oauth/` and
+  `src-tauri/src/local_pool/accounts/oauth_flow/`, then
+  `src-tauri/src/local_pool/commands/oauth/{flow,checkpoint,completion,account}.rs`.
+  Imports belong to `src-tauri/src/local_pool/accounts/import_orchestrator/`
+  and the shared `crates/relay-core/src/accounts/import/`.
   These paths are currently ChatGPT-specific: reuse lifecycle primitives, but
   introduce a typed provider credential when needed instead of pretending a
   new provider is a Codex or Excel client.

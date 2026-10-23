@@ -1,17 +1,23 @@
 # Account implementation references
 
-Use the relevant files at these inspected revisions, then verify the current
-provider contract. Source examples establish implementation ideas, not provider
-permission, account access, or compatibility. Read callers when a helper alone
-does not establish its lifecycle.
+Default-branch references rechecked on **2026-10-23**. The listed source files
+and repository licenses were retrieved at these immutable revisions. This is
+an updated file index, not live OAuth acceptance or an adoption of upstream
+behavior. Read callers when a helper alone does not establish its lifecycle.
 
-| Repository | Inspected commit | License |
-| --- | --- | --- |
-| [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) | `091ff27f31285ec4fd1dd5823b44f7f51fb8f48b` | MIT |
-| [OpenCodex](https://github.com/lidge-jun/opencodex) | `33b321853aff76045617824793cc7cbc1d4084e7` | MIT |
-| [New API](https://github.com/QuantumNous/new-api) | `ba0e478e061ee0c824922d89c05620de878103cf` | AGPL-3.0 |
-| [EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI) | `74ef3e16ab347161c7dbb7bddb531b0a3b950770` | MIT |
-| [CLIProxyAPI-Rust](https://github.com/IuCC123/CLIProxyAPI-Rust) | `7a3c8c2e017fafe9a3dc9a72dba5697feffcb992` | Unlicense |
+| Repository | Rechecked revision | License | Rechecked paths |
+| --- | --- | --- | --- |
+| [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) | `d946c4fba6fc9a5cfbca1f3d85184d62ad2fb683` | MIT | `sdk/auth/{interfaces,codex_device}.go`, `sdk/cliproxy/auth/{auto_refresh_loop,conductor_persistence}.go` |
+| [OpenCodex](https://github.com/lidge-jun/opencodex) | `3d9ba72aa5b04b4bbea5a2871a181942afa720e7` | MIT | `src/oauth/{callback-server,token-guardian}.ts`, `src/oauth/account-import/service.ts` |
+| [New API](https://github.com/QuantumNous/new-api) | `33c61a24234aa20cb10e8a644304322c476361de` | AGPL-3.0 | `service/codex_oauth.go`, `service/codex_credential_refresh.go`, `service/codex_credential_refresh_task.go` |
+| [EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI) | `1d5198eb672a0e0e3257a275bd2b9e42951dbdeb` | MIT | `src-tauri/src/agents/native_oauth.rs` |
+| [CLIProxyAPI-Rust](https://github.com/IuCC123/CLIProxyAPI-Rust) | `b07936ba6b1a9faf557af44575f7d982f38636b0` | Unlicense | `src/oauth.rs` |
+
+The login/import and refresh notes below intentionally retain the exact older
+revisions used for those behavior comparisons; they do not claim those details
+were re-audited at the refreshed heads. Verify the current official provider
+contract before implementation. Source examples do not establish provider
+permission, account access, or compatibility.
 
 ## Login and import
 

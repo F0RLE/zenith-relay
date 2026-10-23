@@ -1,22 +1,31 @@
 # Adapter implementation references
 
-Historical source pointers for targeted comparisons. They do not define Relay's
-contract or prove model quality. Use [official contracts](contracts.md) first;
-recheck the exact revision, file license, and attribution before copying code.
+Current file pointers and separately pinned historical comparisons. They do not
+define Relay's contract or prove model quality. Use [official contracts](contracts.md)
+first; check file-specific licensing and attribution before copying code.
 
-| Repository | Inspected revision | Recorded license | Relevant paths |
-| --- | --- | --- | --- |
-| QuantumNous/new-api | `ba0e478e061ee0c824922d89c05620de878103cf` | AGPL-3.0 | `relaykit/relayconvert/{request_registry,response_registry}.go`, `relaykit/dto/reasoning_state.go` |
-| router-for-me/CLIProxyAPI | `091ff27f31285ec4fd1dd5823b44f7f51fb8f48b` | MIT | `sdk/translator/registry.go`, `internal/translator/` |
-| router-for-me/EasyCLIProxyAPI | `74ef3e16ab347161c7dbb7bddb531b0a3b950770` | MIT | `src-tauri/src/core_runtime.rs`; manages a separate CLIProxyAPI binary |
-| lidge-jun/opencodex | `33b321853aff76045617824793cc7cbc1d4084e7` | MIT | `src/responses/{reasoning-envelope,thought-signature-replay}.ts`, `src/adapters/openai-chat/tool-{call-validation,name-registry}.ts` |
-| zyycn/codex-proxy-rs | `1280c437b4376518130455bcc63e844c845f8852` | Apache-2.0 | `backend/crates/providers/openai/src/{request_identity.rs,transport/headers.rs}`, `backend/crates/providers/openai/tests/transport/canonical.rs` |
-| ranxi2001/sub2api | `05fa22f8f977b3c591712a2cecec09e42308f724` | LGPL-3.0 | `backend/internal/service/basispoints/{tool_images,history_messages,stream,terminal_tools_test,structured_output}.go` |
-| vercel/ai | `ba05943b69ad070558bb5bc912da99ec66d7d263` | Apache-2.0 | `packages/openai/src/responses/convert-to-openai-responses-input.ts`, Anthropic and Google prompt serializers |
-| IuCC123/CLIProxyAPI-Rust | `7a3c8c2e017fafe9a3dc9a72dba5697feffcb992` | Unlicense | `src/{ir,sse}.rs`, `src/formats/claude.rs` |
-| jeremychone/rust-genai | `092bc0ff53c203454f23393cac5825cfb1943a06` | MIT OR Apache-2.0 in Cargo.toml | `src/chat/{tool/tool_call,chat_request}.rs`, `src/adapter/adapters/{gemini,anthropic}/` |
+Default-branch revisions, listed files and repository license declarations were
+rechecked on **2026-10-23**. The new heads below are a refreshed source index,
+not a claim that every upstream behavior or compatibility change was accepted.
+Earlier comparison revisions remain explicit so past evidence is not silently
+attributed to different code.
+
+| Repository | Rechecked revision | Earlier comparison | License | Rechecked paths |
+| --- | --- | --- | --- | --- |
+| QuantumNous/new-api | `33c61a24234aa20cb10e8a644304322c476361de` | `ba0e478e061ee0c824922d89c05620de878103cf` | AGPL-3.0 | `relaykit/relayconvert/{request_registry,response_registry}.go`, `relaykit/dto/reasoning_state.go` |
+| router-for-me/CLIProxyAPI | `d946c4fba6fc9a5cfbca1f3d85184d62ad2fb683` | `091ff27f31285ec4fd1dd5823b44f7f51fb8f48b` | MIT | `sdk/translator/registry.go` |
+| router-for-me/EasyCLIProxyAPI | `1d5198eb672a0e0e3257a275bd2b9e42951dbdeb` | `74ef3e16ab347161c7dbb7bddb531b0a3b950770` | MIT | `src-tauri/src/core_runtime.rs` |
+| lidge-jun/opencodex | `3d9ba72aa5b04b4bbea5a2871a181942afa720e7` | `33b321853aff76045617824793cc7cbc1d4084e7` | MIT | `src/responses/reasoning-envelope.ts`, `src/adapters/openai-chat/tool-name-registry.ts` |
+| zyycn/codex-proxy-rs | `e033e21994d08e86d4df71cf5c72e374a7a09987` | `1280c437b4376518130455bcc63e844c845f8852` | Apache-2.0 | `backend/crates/providers/openai/src/{request_identity.rs,transport/headers.rs}` |
+| ranxi2001/sub2api | `7c6851cae25518f6e8e2541fc5394aad7c3c426c` | `05fa22f8f977b3c591712a2cecec09e42308f724` | LGPL-3.0 | `backend/internal/service/basispoints/{tool_images,history_messages,stream,structured_output}.go` |
+| vercel/ai | `1bf6d85bfc0b395194e1a7aa79d0057b0c74a75a` | `ba05943b69ad070558bb5bc912da99ec66d7d263` | Apache-2.0 | `packages/openai/src/responses/convert-to-openai-responses-input.ts` |
+| IuCC123/CLIProxyAPI-Rust | `b07936ba6b1a9faf557af44575f7d982f38636b0` | `7a3c8c2e017fafe9a3dc9a72dba5697feffcb992` | Unlicense | `src/{ir,sse}.rs`, `src/formats/claude.rs` |
+| jeremychone/rust-genai | `7f221f150bcf4d8063f654e70ecf64cb5fbfe13a` | `092bc0ff53c203454f23393cac5825cfb1943a06` | MIT OR Apache-2.0 in Cargo.toml | `src/chat/{tool/tool_call,chat_request}.rs` |
 
 ## Additional inspected revisions
+
+Historical behavior comparisons below retain their original revisions and
+release labels. They are not a list of the newest releases.
 
 Sub2API `production` at `974a47f2ed722798566727a342df1eab3140dc94`
 (LGPL-3.0) supplied comparison scenarios in

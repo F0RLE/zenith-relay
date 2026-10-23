@@ -10,6 +10,10 @@ the receiving component before editing. Use the version-matching official
 [communication guide](https://v2.tauri.app/develop/calling-frontend/) or available
 Context7 for API details; do not copy an unrelated tutorial implementation.
 
+For the current subscriptions and the late-registration cleanup pattern,
+use the focused [Relay event example](references/relay-events.md). Reuse the
+existing hook and event owners instead of adding another subscription manager.
+
 - Use existing events for notifications or channels for operation-specific
   streaming. Prefer typed payloads over interpolating data into JavaScript.
 - Keep side effects, secret access, and validation in Rust. Emit only the

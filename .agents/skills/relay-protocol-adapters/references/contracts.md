@@ -85,9 +85,25 @@ wrong-type MIME values are not an absent setting.
 
 ## Typed contract references
 
-Use these inspected official SDK revisions to reproduce field-level checks;
-fetch the exact endpoint's current documentation before changing the contract.
-They are references, not dependencies or copied converters.
+### Current SDK source index
+
+Default-branch SDK revisions and the linked source files were rechecked on
+**2026-10-23**. This index refresh does not update Relay's dependencies or prove
+support for every field exposed by a newer SDK. Read the exact endpoint's
+official documentation and the relevant type before changing the contract.
+
+| SDK | Rechecked revision | Rechecked source |
+| --- | --- | --- |
+| OpenAI TypeScript | `4c11b87c3e5e4fcddeeffc85b55502b2296f49fd` | [Responses types](https://github.com/openai/openai-node/blob/4c11b87c3e5e4fcddeeffc85b55502b2296f49fd/src/resources/responses/responses.ts) |
+| OpenAI Python | `81792ff040a2ca2b70348163049d3d69d5ba95cf` | [Retry owner](https://github.com/openai/openai-python/blob/81792ff040a2ca2b70348163049d3d69d5ba95cf/src/openai/_base_client.py), [function-call type](https://github.com/openai/openai-python/blob/81792ff040a2ca2b70348163049d3d69d5ba95cf/src/openai/types/responses/response_function_tool_call.py) |
+| Anthropic TypeScript | `bc9cbb0a5bce1d50f2589e556f7e81f7fcbc4aab` | [Messages types](https://github.com/anthropics/anthropic-sdk-typescript/blob/bc9cbb0a5bce1d50f2589e556f7e81f7fcbc4aab/src/resources/messages/messages.ts) |
+| Google Gen AI TypeScript | `0dd787c23d76139982d7acb01e3c99978f563007` | [Generate Content types](https://github.com/googleapis/js-genai/blob/0dd787c23d76139982d7acb01e3c99978f563007/src/types.ts) |
+
+### Earlier field-level checks
+
+The pinned sources below preserve the revisions used for individual field-level
+comparisons. They are historical evidence, not newest-version labels or copied
+converters; do not replace their hashes without rechecking the associated claim.
 
 - [Responses nullable output fields](https://github.com/openai/openai-node/blob/17e0f08e83e2381efa075b1bbe9ed5eb7b63a6e1/src/resources/responses/responses.ts):
   message `phase`, reasoning `encrypted_content`, and function/custom tool

@@ -10,6 +10,10 @@ version. Use the version-matching official
 [command guide](https://v2.tauri.app/develop/calling-rust/) or available Context7
 for exact signatures; do not expand permissions to bypass a command error.
 
+For the repository's actual registration, wrapper and argument conventions,
+use the focused [Relay IPC example](references/relay-ipc.md). Reuse its owners
+rather than introducing a parallel invocation or diagnostics layer.
+
 - Add behavior to its Rust owner and wire it through the existing registration
   path. Keep the TypeScript wrapper and serialized argument/result shape aligned.
 - Validate runtime input in Rust; a TypeScript type assertion is not validation
