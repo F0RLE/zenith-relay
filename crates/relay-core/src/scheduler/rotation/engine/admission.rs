@@ -244,6 +244,41 @@ impl RotationEngine {
             })
     }
 
+    /// Follow a successful resource rebalance, not a temporary load spillover.
+    /// Use the admission margins and fresh observations rather than request
+    /// completion order to decide whether the durable cache owner should move.
+    pub(crate) fn has_material_resource_lead(
+        &self,
+        candidate_id: &str,
+        owner_id: &str,
+        now_ms: u64,
+    ) -> bool {
+        if self.mode != RotationMode::Automatic {
+            return false;
+        }
+        match (
+            self.fresh_quota_remaining(candidate_id, now_ms),
+            self.fresh_quota_remaining(owner_id, now_ms),
+        ) {
+            (Some(remaining), Some(owner_remaining)) => {
+                remaining.saturating_sub(owner_remaining) >= QUOTA_SWITCH_MARGIN_BASIS_POINTS
+            }
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => match (
+                self.fresh_provider_credits(candidate_id, now_ms),
+                self.fresh_provider_credits(owner_id, now_ms),
+            ) {
+                (Some(credits), Some(owner_credits)) => {
+                    credits.saturating_sub(owner_credits)
+                        >= PROVIDER_CREDIT_SWITCH_MARGIN_MICRO_UNITS
+                }
+                (Some(_), None) => true,
+                _ => false,
+            },
+        }
+    }
+
     fn least_loaded_group(&self, ready_candidates: &[ReadyCandidate]) -> Vec<ReadyCandidate> {
         let compare_load = |left: &ReadyCandidate, right: &ReadyCandidate| {
             (u64::from(left.in_flight) * u64::from(right.effective_capacity))

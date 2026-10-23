@@ -31,8 +31,9 @@ impl PoolScheduler {
 
     /// Persist prompt affinity without allowing a temporary spillover
     /// candidate to become the new durable owner.  The existing owner is
-    /// refreshed when the same candidate completes successfully and can only
-    /// be replaced after it has been invalidated by the failure path.
+    /// refreshed when the same candidate completes successfully. A successful
+    /// material resource rebalance may replace it using the admission margins;
+    /// temporary load and completion order alone never move the owner.
     pub fn bind_prompt_affinity_sticky(
         &mut self,
         key: impl Into<String>,
@@ -41,6 +42,20 @@ impl PoolScheduler {
     ) -> bool {
         if !self.candidates.contains_key(candidate_id) {
             return false;
+        }
+        let key = key.into();
+        let move_owner = self
+            .prompt_affinity
+            .get(&key, now_ms)
+            .is_some_and(|owner_id| {
+                owner_id != candidate_id
+                    && self
+                        .rotation
+                        .has_material_resource_lead(candidate_id, owner_id, now_ms)
+            });
+        if move_owner {
+            self.prompt_affinity.bind(key, candidate_id, now_ms);
+            return true;
         }
         self.prompt_affinity
             .bind_if_unbound_or_same(key, candidate_id, now_ms)

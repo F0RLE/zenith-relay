@@ -53,6 +53,86 @@ fn balanced_quota_margin_preserves_affinity_without_hiding_a_material_lead() {
 }
 
 #[test]
+fn cache_owner_rebalance_uses_fresh_quota_margins_not_completion_order() {
+    for (remaining, owner_remaining, expected) in [
+        (Some(8_000), Some(8_100), false),
+        (Some(8_100), Some(8_000), false),
+        (Some(8_499), Some(8_000), false),
+        (Some(8_500), Some(8_000), true),
+        (Some(9_000), Some(8_000), true),
+        (Some(9_000), None, true),
+        (None, Some(8_000), false),
+        (None, None, false),
+    ] {
+        let mut engine = engine_with([candidate("owner", 0, 1), candidate("next", 0, 1)]);
+        for (id, quota) in [("owner", owner_remaining), ("next", remaining)] {
+            assert!(engine.sync_candidate_state(
+                id,
+                true,
+                false,
+                AuthState::Ready,
+                if quota.is_some() {
+                    QuotaState::Available
+                } else {
+                    QuotaState::Unknown
+                },
+                RateState::Ready,
+            ));
+            assert!(engine.set_quota_remaining(id, quota, Some(100)));
+        }
+        assert_eq!(
+            engine.has_material_resource_lead("next", "owner", 100),
+            expected
+        );
+        assert!(!engine.has_material_resource_lead("next", "owner", 99));
+        assert!(!engine.has_material_resource_lead(
+            "next",
+            "owner",
+            101 + engine.quota_stale_after_ms
+        ));
+        engine.set_mode(RotationMode::RoundRobin);
+        assert!(!engine.has_material_resource_lead("next", "owner", 100));
+    }
+}
+
+#[test]
+fn cache_owner_rebalance_uses_credit_margin_without_overriding_known_quota() {
+    for (next_credits, owner_credits, expected) in [
+        (Some(500_000_000), Some(499_000_000), false),
+        (Some(500_000_000), Some(485_000_001), false),
+        (Some(500_000_000), Some(485_000_000), true),
+        (Some(500_000_000), None, true),
+        (None, Some(500_000_000), false),
+        (None, None, false),
+    ] {
+        let mut engine = engine_with([candidate("owner", 0, 1), candidate("next", 0, 1)]);
+        for (id, credits) in [("owner", owner_credits), ("next", next_credits)] {
+            assert!(engine.set_provider_credits(id, credits, false, Some(100)));
+        }
+        assert_eq!(
+            engine.has_material_resource_lead("next", "owner", 100),
+            expected
+        );
+        assert!(!engine.has_material_resource_lead("next", "owner", 99));
+        assert!(!engine.has_material_resource_lead(
+            "next",
+            "owner",
+            101 + engine.quota_stale_after_ms
+        ));
+        assert!(engine.sync_candidate_state(
+            "owner",
+            true,
+            false,
+            AuthState::Ready,
+            QuotaState::Available,
+            RateState::Ready,
+        ));
+        assert!(engine.set_quota_remaining("owner", Some(8_000), Some(100)));
+        assert!(!engine.has_material_resource_lead("next", "owner", 100));
+    }
+}
+
+#[test]
 fn balanced_small_quota_differences_do_not_starve_equal_request_shares() {
     let mut engine = engine_with([candidate("a", 0, 1), candidate("b", 0, 1)]);
     for (id, remaining) in [("a", 8_100), ("b", 8_000)] {
