@@ -9,7 +9,7 @@ for (const scenario of [
   { width: 840, locale: "ru", theme: "dark" },
   { width: 390, locale: "en", theme: "light" },
   { width: 360, locale: "ru", theme: "dark" },
-  // Reproduce wider fallback-font metrics on Windows as well as Linux.
+  // Wider glyphs and tracking reproduce Linux fallback wrapping on Windows too.
   { width: 1080, locale: "ru", theme: "dark", font: "Verdana, sans-serif" },
   { width: 360, locale: "ru", theme: "dark", font: "Verdana, sans-serif" },
 ] as const) {
@@ -30,7 +30,10 @@ for (const scenario of [
         },
       });
       await page.goto("/");
-      if ("font" in scenario) await page.addStyleTag({ content: `.usage-overview * { font-family: ${scenario.font}; }` });
+      if ("font" in scenario) await page.addStyleTag({ content: `
+        .usage-overview * { font-family: ${scenario.font}; }
+        .usage-metric-copy > span { letter-spacing: 0.04em; }
+      ` });
       await page.getByRole("button", { name: scenario.locale === "ru" ? "Использование" : "Usage", exact: true }).click();
       const summary = page.locator(".usage-overview");
       await expect(summary.locator(".usage-token-totals dd")).toHaveCount(cacheWriteKnown ? 4 : 3);

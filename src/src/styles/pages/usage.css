@@ -198,7 +198,7 @@
 .usage-secondary-metrics {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  grid-template-columns: fit-content(60%) minmax(0, 1fr);
   gap: 12px;
   padding-left: 20px;
   border-left: 1px solid color-mix(in srgb, var(--relay-border) 60%, transparent);
@@ -1878,7 +1878,7 @@
 }
 
 @container usage (max-width: 580px) {
-  .usage-metrics > .usage-metric { min-height: 72px; padding: 10px; }
+  .usage-metrics > .usage-metric { min-height: 72px; padding: 8px 10px; }
   .usage-metrics .usage-metric-copy { gap: 5px; }
   .usage-metrics .usage-metric-copy > strong { font-size: clamp(16px, 6cqw, 22px); }
   .usage-overview { margin-bottom: 14px; }
