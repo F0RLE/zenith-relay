@@ -470,6 +470,11 @@ opaque response ownership cannot.
 Soft prompt affinity follows the admitted native route of its physical member
 when protocol aliases are deduplicated. It cannot restore an excluded member
 or move an opaque continuation to another route.
+After a successful automatic resource rebalance, the durable prompt-cache
+binding follows the warmed member when its fresh quota or credit evidence has
+the same material lead required by admission. Temporary load spillover and
+small resource differences leave the owner unchanged; an older owner's late
+response cannot reverse the move without a new material resource lead.
 
 Automatic response-owner yield probes the same admission policy with the current
 physical owner preferred on ties. Load, fresh quota, independent credit evidence,
@@ -785,9 +790,14 @@ own field-level review; third-party proxies are comparisons, not specifications.
 Completed Responses items remain immutable between `output_item.done` and the
 terminal snapshot. Only documented nullable fields may alternate between omission
 and `null`: message `phase`, reasoning `encrypted_content`, and tool `caller`.
-Non-null values, content, identities, arguments, and lifecycle states still must
-match. Mismatch diagnostics name only fixed protocol fields, never provider keys
-or values.
+Completed reasoning's string `encrypted_content` comes from
+`response.output_item.done`, as required for replay by the official Responses SDK.
+Before comparing the terminal snapshot, retain that exact opaque value even if
+the terminal omits, nulls or replaces its copy. Invalid terminal ciphertext types
+still fail. Other non-null values, content, identities, arguments, and lifecycle
+states must match. Without a completed reasoning item, the terminal remains the
+source of continuation state. Mismatch diagnostics name only fixed protocol
+fields, never provider keys or values.
 
 ### Conversation and routing contracts
 
