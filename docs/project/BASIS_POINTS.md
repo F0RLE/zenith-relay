@@ -49,6 +49,9 @@ is observed and regression-tested, not guaranteed by public OpenAI documentation
   enters diagnostics. BPS executable-tool failures additionally name a static
   validation stage and `repair_skipped=executable_tool`;
   these labels never authorize another generation or include tool names/values.
+  Tool-identity failures additionally distinguish missing/invalid names, unknown
+  tools, ambiguous names, conflicting legacy names, and reference/name mismatch
+  with a static `tool_identity_reason`; no requested or declared name is logged.
   Buffered and streaming discovery preserve these fields
   in both the client error and request usage record, without regeneration.
   Completed client calls cannot reuse a call ID already present in supplied
@@ -203,6 +206,18 @@ is observed and regression-tested, not guaranteed by public OpenAI documentation
 
 ## Catalogs, discovery and cache boundaries
 
+- The complete current catalog determines the stable prologue and discovery
+  mode. `tool_choice: none`, named function/custom choices, and `allowed_tools`
+  restrict the current turn after history instead of filtering that prologue.
+  A visible contract is not permission to call it: schema lookup, preload and
+  completed-call validation remain scoped to the permitted tools. With no
+  permitted tools, a final text-only guard forbids transport and catalog calls.
+  An actually empty catalog still uses the ordinary no-tools preparation.
+  Explicit named/allowed selections preload their small permitted contracts
+  under the existing eight-tool/16 KiB eager budget, respecting explicit
+  deferral, so stable discovery presentation does not require a lookup just
+  to recover a small selected schema. Checkpoints borrow the exact prepared
+  prologue instead of rendering a different filtered catalog a second time.
 - Catalogs use compact schema presentation without changing the original
   validator. Complex/unknown JSON Schema constructs remain complete JSON.
   Compact property names and annotation keywords have deterministic ordering,
@@ -263,10 +278,17 @@ is observed and regression-tested, not guaranteed by public OpenAI documentation
   history. Current declarations remain empty and output validation rejects tool
   calls; historical context never restores tool permissions. Missing, expired,
   oversized, or mismatched hints keep the ordinary text-only preparation.
-  Tool-enabled preparation, reasoning effort, and client compaction thresholds
-  are unchanged. This includes tool-less compaction sent through ordinary
+  Reasoning effort and client compaction thresholds are unchanged. This includes
+  tool-less compaction sent through ordinary
   Responses, not a change to `/responses/compact`. Prefix continuity does not
   guarantee provider cache hits or lower latency on the undocumented transport.
+- Debug context comparison fingerprints the actual BPS body after preloads and
+  attachment resolution, including subsequent catalog-discovery sends. It
+  reports account changes, prefix/history changes and effective reasoning effort
+  without storing prompts, tool arguments or fingerprints. The successful final
+  send establishes the next client-request baseline; lookup usage stays separate.
+  These local observations are not provider cache-miss verdicts. Debug-off makes
+  no fingerprints, and diagnostics never alter cache keys, retention or requests.
 - Discovery is a request-local read-only operation, not hosted `tool_search`.
   It allows at most eight lookup rounds, eight tools per lookup, 4 MiB retained
   input added by discovery, and 16 MiB per response. Admitted conversation
@@ -285,6 +307,10 @@ is observed and regression-tested, not guaranteed by public OpenAI documentation
   Invalid arguments to a recognized local catalog lookup return a bounded
   tool error for correction under the same budget and owner; they do not
   authorize replay or repair of executable client calls.
+  Legacy `tool`/`name` and `args`/`arguments` envelope fields are normalized at
+  the shared transport boundary, so local lookup recognition, result removal,
+  and client translation use the same identity. Conflicting name fields fail;
+  referenced payloads and custom input stay opaque at this boundary.
   A mixed completed response consumes local lookups and returns its validated
   client calls without another generation; it never executes those tools inside
   Relay or clones schemas that will not be sent. Those lookups do not count as
@@ -327,7 +353,10 @@ is observed and regression-tested, not guaranteed by public OpenAI documentation
   remain separate, and discovery continuations reuse uploaded file references.
   Within one request, at most four image jobs resolve concurrently after all
   images pass validation. Bytes, input order, and input-ordered failures stay
-  unchanged; cancellation/failure drops pending work before generation.
+  unchanged. Each completion frees a slot without waiting for earlier images;
+  only completed IDs/errors wait for their input position. An observed failure
+  stops admitting new jobs while earlier uploads resolve the input-ordered error.
+  Cancellation/failure drops pending work before generation.
 - Opaque `previous_response_id`, non-Standard tiers, native strict output,
   native web search/image generation, and Agent Identity are unsupported.
   Full supplied history reconstructs the tool catalog; the preload hint cache

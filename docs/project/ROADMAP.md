@@ -3,7 +3,7 @@
 Open Desktop work and acceptance, not shipped features or a progress log.
 Current contracts are in [PLANNING.md](PLANNING.md); development and release
 checks are in [CONTRIBUTING.md](../../CONTRIBUTING.md).
-Future Hosted work has its own [delivery plan](HOSTED_RELAY_ROADMAP.md).
+Future Hosted work has its own [delivery plan](../hosted/HOSTED_RELAY_ROADMAP.md).
 
 ## Local runtime P0 — finish and accept the current runtime
 

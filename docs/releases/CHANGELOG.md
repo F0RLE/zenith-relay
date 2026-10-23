@@ -30,6 +30,13 @@ recoverable account deletion. Changes below are grouped by area.
 
 #### Protocol adapters and Excel / Basis Points
 
+- Full-history tool continuations no longer lose their native state when a
+  client serializes function-argument object fields in another order, including
+  nested file-tool options. Fingerprints normalize object order only in a
+  comparison copy; arrays, exact values, original native arguments and reasoning
+  stay intact. A reordered-input replay regression fails before the fix and
+  passes afterward; the loopback file-create/result/final-answer cycle succeeds,
+  while changed history still fails before dispatch.
 - Request details separate the model declared by the upstream response from
   requested and routed models without treating it as verified identity.
   BPS tool failures identify the validation stage and why executable calls are
@@ -38,9 +45,20 @@ recoverable account deletion. Changes below are grouped by area.
   disabled by default. It does not limit response bodies, BPS or native WS;
   expiry never automatically repeats possibly accepted work or disables accounts.
 - BPS keeps turn-local tool choices and serial-call constraints outside its
-  stable catalog/history prefix. Account Responses requests without a client
+  stable catalog/history prefix, including `none`, named function/custom and
+  `allowed_tools` choices. Synthetic before/after probes retain all four leading
+  input items instead of zero for restricted turns (38,407 compact / 34,177
+  discovery JSON bytes, not tokens or observed provider cache hits).
+  Small selected schemas preload within existing limits; discovery checkpoints
+  reuse the prepared prologue instead of rendering it again.
+  Account Responses requests without a client
   cache key derive an opaque context-scoped key consistently over HTTP and
   WebSocket; explicit keys, API-source bodies and routing limits stay unchanged.
+- Debug cache-context fingerprinting reuses one bounded serialization buffer
+  without changing digests or byte/item limits. Reproducible local before/after
+  measurements and preparation-time tradeoffs are recorded in
+  [Contributing](../../CONTRIBUTING.md#protocol-optimization-probes); provider
+  cache-hit, first-token and billing improvements still need live acceptance.
 - BPS supports explicitly framed multiline function strings without nested
   JSON escaping, retaining original argument-schema checks and opaque custom
   input. Local stream failures use Responses error fields and ordered sequence
@@ -138,6 +156,12 @@ recoverable account deletion. Changes below are grouped by area.
 
 #### Pool, routing, and models
 
+- Automatic rotation keeps a warm route eligible across a one-request normalized
+  load difference instead of immediately sending the conversation to a cold member.
+  Capacity, material quota/credit leads, health and opaque ownership remain enforced;
+  unrelated work still spreads by load, with no new wait or provider cache-policy change.
+  [Synthetic comparison](../../CONTRIBUTING.md#cache-affinity-admission-comparison)
+  records route reuse and local overhead, not a live cache-hit or billing claim.
 - Automatic rotation can move self-contained tool conversations to a better
   eligible member. Opaque continuations and unpaired results retain their owner
   unless validated local replay restores complete history. Both quota windows
@@ -188,6 +212,19 @@ recoverable account deletion. Changes below are grouped by area.
 
 #### Desktop UI and Access
 
+- Overview displays completed analytics before saving its derived cache, coalesces
+  writes and flushes pending data when hidden or leaving the page. Pool activity
+  no longer repeatedly serializes unchanged source-statistics inventory; actual
+  snapshot updates and explicit refreshes retain their existing behavior.
+- Usage coalesces request-ID typing into a settled read and cancels unfinished
+  searches on clear or tab change. Cached reports share unchanged filter-choice
+  arrays without reusing stale totals, send records or missing projections.
+- Existing setups reveal navigation before the first runtime snapshot. Settings
+  and Help remain usable while it loads; data pages show a retryable failure
+  instead of empty inventory, without recording failed startup as data-ready.
+- Hidden windows coalesce activity until visible instead of rendering on a 16 ms
+  timer. Activity-only updates reuse account-label projections, and startup no
+  longer fetches and retains an unused all-time Usage report.
 - Closed action menus mount their contents only when opened, reducing hidden UI
   work while preserving keyboard and dismissal controls.
 - Removes the retired personal-server runtime and Desktop management client,
@@ -419,6 +456,13 @@ recoverable account deletion. Changes below are grouped by area.
 
 #### Адаптеры протоколов и Excel / Basis Points
 
+- Продолжения после инструментов больше не теряют исходное состояние, если
+  клиент переставил поля JSON-аргументов, в том числе вложенные параметры
+  файлового инструмента. Порядок нормализуется только в копии для сравнения;
+  массивы, точные значения, исходные аргументы и reasoning не меняются.
+  Тест переставленных аргументов падает до правки и проходит после неё; локальная
+  цепочка создания файла, результата и финального ответа работает, а реально
+  изменённая история по-прежнему отклоняется до отправки.
 - В деталях запроса отдельно показана модель из ответа источника — без выдачи
   её за подтверждённую личность модели. Ошибки BPS-инструментов поясняют этап
   проверки и запрет перегенерации исполняемых вызовов. При неоднозначном отказе
@@ -427,9 +471,19 @@ recoverable account deletion. Changes below are grouped by area.
   выключенный по умолчанию. Он не ограничивает тело ответа, BPS и native WS;
   истечение срока не повторяет потенциально принятый запрос и не отключает аккаунт.
 - BPS больше не меняет стабильный префикс каталога и истории при смене настроек
-  вызова инструментов. Для аккаунтных Responses без клиентского ключа кэша
+  вызова инструментов, включая `none`, выбор функции/custom и `allowed_tools`.
+  В синтетическом сравнении до/после сохраняются все четыре начальных элемента
+  вместо нуля: 38 407 байт JSON в compact и 34 177 в discovery — это не токены
+  и не измеренный кеш-хит провайдера. Небольшие выбранные схемы загружаются сразу
+  в прежних лимитах; checkpoint использует готовый пролог без повторного рендера.
+  Для аккаунтных Responses без клиентского ключа кэша
   используется непрозрачный ключ контекста, одинаковый в HTTP и WebSocket;
   явные ключи, тела запросов к API-источникам и ограничения ротации сохранены.
+- Диагностические отпечатки контекста используют один ограниченный буфер
+  сериализации; дайджесты и лимиты байт/элементов не меняются. Локальные замеры
+  до/после и компромиссы времени подготовки описаны в
+  [Contributing](../../CONTRIBUTING.md#protocol-optimization-probes). Рост кеш-хита,
+  ускорение первого токена и снижение стоимости требуют отдельной live-проверки.
 - BPS передаёт сложные многострочные аргументы функций в явном обрамлении без
   вложенного JSON-экранирования; исходные схемы и сырые входы custom-инструментов
   сохраняются. Локальные ошибки стрима используют поля Responses и правильную
@@ -535,6 +589,12 @@ recoverable account deletion. Changes below are grouped by area.
 
 #### Пул, маршрутизация и модели
 
+- Автоматическая ротация сохраняет прогретый маршрут среди кандидатов при разнице
+  нормализованной нагрузки в один запрос, не отправляя диалог сразу на холодного участника.
+  Ёмкость, существенная разница квоты/кредитов, здоровье и непрозрачное владение сохраняются;
+  независимые запросы распределяются по нагрузке без нового ожидания или смены политики кеша провайдера.
+  [Синтетическое сравнение](../../CONTRIBUTING.md#cache-affinity-admission-comparison)
+  фиксирует повторное использование маршрута и локальные расходы, а не реальный cache hit или экономию.
 - Автоматическая ротация может передать диалог с полной историей инструментов
   более подходящему участнику. Непрозрачные продолжения и результаты без вызова
   сохраняют владельца, пока проверенное локальное восстановление не даст полную
@@ -586,6 +646,19 @@ recoverable account deletion. Changes below are grouped by area.
 
 #### Интерфейс и Доступ
 
+- Обзор показывает готовую аналитику до сохранения её кеша, объединяет записи
+  и сохраняет ожидающие данные при скрытии или закрытии страницы. Активность пула
+  больше не сериализует повторно неизменный список статистики API; новые снимки
+  состояния и явные обновления обрабатываются по прежним правилам.
+- Usage объединяет ввод ID запроса в одно чтение после паузы и отменяет незавершённый
+  поиск при очистке или смене вкладки. Отчёты используют общие неизменные списки
+  фильтров без подмены свежих итогов, отправлений или отсутствующих проекций.
+- После первоначальной настройки навигация появляется до первого снимка состояния.
+  Настройки и помощь доступны во время загрузки; страницы данных предлагают повтор
+  при ошибке вместо пустого списка. Ошибка запуска не отмечается как готовность данных.
+- Скрытое окно объединяет активность до возвращения вместо перерисовки по таймеру
+  16 мс. Обновления нагрузки используют готовые подписи аккаунтов, а запуск больше
+  не загружает и не удерживает неиспользуемый отчёт Usage за всё время.
 - Закрытые меню действий создают пункты только при открытии, уменьшая скрытую
   работу интерфейса; управление с клавиатуры и закрытие сохранены.
 - Удалён старый личный сервер и его клиент управления, включая развёртывание,

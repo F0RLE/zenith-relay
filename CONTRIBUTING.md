@@ -51,7 +51,7 @@ Relay is separate from production Zenith Gateway and Control.
 Never copy production Zenith credentials, customer data, inventory, or internal
 business logic into Relay. User secrets use the existing credential store or
 protected local storage; transfer is explicit and confirmed. Future Hosted vault
-requirements belong in the [Hosted design](docs/project/HOSTED_RELAY_ARCHITECTURE.md).
+requirements belong in the [Hosted design](docs/hosted/HOSTED_RELAY_ARCHITECTURE.md).
 Diagnostics, screenshots, snapshots, and fixtures contain no secrets or raw
 prompt/response bodies. Explicit credential exports are not support bundles.
 
@@ -65,7 +65,7 @@ prompt/response bodies. Explicit credential exports are not support bundles.
 - Keep Desktop secrets in the existing credential store or protected local
   storage. The retired personal-server runtime and management client are not
   current integration targets; future Hosted vault and administration contracts
-  belong to the [Hosted design](docs/project/HOSTED_RELAY_ARCHITECTURE.md).
+  belong to the [Hosted design](docs/hosted/HOSTED_RELAY_ARCHITECTURE.md).
 - Provider credentials and pool request keys have separate owners and purposes.
   Use the intended request key for a `/v1` pool profile, not a provider login
   credential. Never expose either in diagnostics, snapshots, or examples;
@@ -220,16 +220,22 @@ take effect only after you explicitly stop and restart the dev command;
 finish active agent requests before restarting. This is not data or process
 isolation from your working Relay profile.
 
+Codex's **Relay · Dev** action uses the same `bun run app:dev` workflow and
+native default profile as ordinary terminal development. It does not create a
+separate profile or copy accounts. An explicit absolute `ZENITH_RELAY_DEV_DATA_DIR`
+can still select another debug profile when deliberately configured.
+
 To opt into automatic Rust rebuilds/restarts, use `bun run app:dev:watch`
 or `bun run start --watch`. Do not route the editing agent through that
 watch-mode instance: use a separate stable Relay for the agent instead.
 
 Codex desktop actions are provided in `.codex/environments/environment.toml`.
-Use **Relay · Dev** from the Run menu to start the no-watch debug workflow in
+Use **Relay · Dev** from the Run menu to start the normal no-watch debug workflow in
 Codex's terminal. After an agent task finishes, stop that terminal command and
 run the action again to compile and apply Rust edits. Frontend hot reload stays
-enabled. TypeScript, UI tests, Rust check, documentation checks, and dependency
-setup are separate actions; opening a chat does not run them automatically.
+enabled. The action list contains only Dev, TypeScript, UI tests, and Rust check;
+opening a chat does not run them automatically. Documentation checks and dependency
+setup remain available through the commands documented here, outside the action list.
 
 On Windows, Relay's scripts prefer the portable toolchain in
 `%USERPROFILE%\Development\visual-studio\build-tools` and initialize MSVC,
@@ -264,21 +270,10 @@ bun run setup:browsers
 
 ## Documentation policy
 
-Use one owner per subject:
-
-| Content | File |
-| --- | --- |
-| Product/download/first run | `README.md` |
-| Development/checks/releases | `CONTRIBUTING.md` |
-| Current contracts and core map | `docs/project/PLANNING.md` |
-| BPS executor contract | `docs/project/BASIS_POINTS.md` |
-| Open Desktop work and acceptance | `docs/project/ROADMAP.md` |
-| Planned Hosted delivery and acceptance | `docs/project/HOSTED_RELAY_ROADMAP.md` |
-| Target Hosted product contract (not shipped) | `docs/project/HOSTED_RELAY_ARCHITECTURE.md` |
-| Target Hosted web presentation (not shipped) | `docs/project/HOSTED_RELAY_WEB_DESIGN.md` |
-| Desktop user steps/error recovery | `docs/help/<locale>/README.md` |
-| User-visible release history | `docs/releases/CHANGELOG.md` |
-| Catalog policy/export | `catalog/README.md` and versioned catalog JSON |
+Use one owner per subject. The [documentation index](docs/README.md#find-the-right-document)
+lists the owning guides; its [repository tree](docs/README.md#repository-tree)
+separates source directories from generated local artifacts. Keep that navigation
+in one place rather than copying a second document inventory here.
 
 `AGENTS.md` owns repository guidance; legal terms stay in `LICENSE` and the
 Contributor Agreement. Keep screenshots under `docs/screenshots/`.
@@ -410,6 +405,46 @@ bun run build
 bun run test:e2e
 ~~~
 
+#### Renderer responsiveness checks
+
+From `src`, the focused renderer checks are:
+
+~~~powershell
+bun test tests/runtimeDisplay.test.ts tests/usagePageSharing.test.ts tests/analyticsPersistence.test.ts
+bunx --no-install playwright test tests/e2e/operations/startup.spec.ts tests/e2e/frontend-activity.spec.ts tests/e2e/runtime-refresh.spec.ts tests/e2e/usage-performance.spec.ts tests/e2e/overview-persistence.spec.ts
+~~~
+
+The account projection fixture uses 500 synthetic accounts and 100 gateway-only
+updates: direct projection resolves 50,000 labels; the bounded current projection
+resolves 500, preserving account-array identity across those updates. New account
+facts, a changed privacy resolver and runtime clearing must invalidate it.
+The visibility fixture retains the final activity from a hidden burst without
+rendering intermediate states or reviving an older completed request. Startup
+checks hold the runtime for 20 seconds while navigation, Settings and Help work,
+then verify data readiness separately. Snapshot failure remains retryable, and
+the unused all-time Usage preload must not return. These checks establish avoided
+work and responsiveness, not a measured WebView2 working-set or RSS reduction.
+
+The Usage fixture types the 19-character `req_synthetic_local` ID and observes one
+settled report read; clearing input or leaving the request tab cancels unfinished
+searches. A separate fixture retains eight reports with 1,000 identical model
+choices: sharing keeps one model-choice array instead of eight, while each
+report's totals and event arrays remain independent. New, reordered and missing
+choices must not be replaced by cached values. This measures avoided reads and
+retained array identities, not native-process memory in bytes.
+
+Analytics persistence is checked independently of provider reads. A burst of
+20 updates makes no synchronous writes and produces one deferred write of the
+latest state. Lifecycle flush cancels its timer; even a stale scheduled callback
+cannot write a newer generation. The browser case checks page-exit flush, absence
+of a duplicate delayed write and a subsequent reload. Pool statistics are checked
+across five rendered activity updates: the source-inventory signature is not
+serialized again until a full inventory snapshot arrives. Existing source-refresh
+cases still verify updated observations and one-shot explicit refresh intent.
+The storage operation remains synchronous when flushed; this removes it from
+the report-completion path, not into a worker thread. The 250 ms derived-cache
+window is not a durability guarantee during a process crash.
+
 For a release UI or layout change, run the focused Playwright suites as well:
 
 ~~~powershell
@@ -496,6 +531,91 @@ bun scripts/build/cargo.mjs clippy --manifest-path crates/relay-core/Cargo.toml 
 bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked
 ~~~
 
+### Protocol optimization probes
+
+Before changing preparation or cache-affinity behavior, run the relevant
+synthetic probe against the current working tree, then repeat it after the
+change with the same machine, build profile, payloads, warmup and trial counts.
+Keep unrelated local changes in both baselines; do not reset to `HEAD`.
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --target-dir src-tauri/target --locked --release --lib measure_bps_turn_prefix_reuse -- --ignored --nocapture --test-threads=1
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --target-dir src-tauri/target --locked --release --lib measure_cache_context_fingerprinting -- --ignored --nocapture --test-threads=1
+~~~
+
+The BPS probe reports preparation time and equal leading prepared input items
+when only tool choice changes. It uses 48 synthetic tools and three historical
+messages, five warmups, seven trials and 25 preparations per trial. These are
+JSON bytes and local CPU durations, not tokens, billed cache hits or TTFT.
+The fingerprint probe uses 48 synthetic tools and 16/256 escaped-text messages,
+20 warmups, nine trials and 100 captures per trial. It measures the opt-in
+debug comparison path, not ordinary debug-off request processing.
+
+Report regressions and tradeoffs as well as improvements. Native forwarding,
+original tool schemas, current-call restrictions and complete continuation
+must still pass their ordinary tests. Live provider cache reuse needs observed
+cached/input token counts in a controlled installed-app run; a stable prefix
+or faster local hashing does not establish that result.
+
+#### Recorded comparison: 2026-10-23
+
+Windows, AMD Ryzen 5 5600X, optimized release profile, one test thread, no
+provider I/O. The baseline includes the pre-existing dirty worktree, with only
+the synthetic probes added before the runtime changes. Times below are medians
+of per-trial averages, not individual-request latency percentiles.
+
+For the same declarations/history with `none`, named or `allowed_tools` choices:
+
+| BPS presentation | Equal leading input items before | After | Serialized equal-prefix bytes after |
+| --- | ---: | ---: | ---: |
+| Compact | 0/4 | 4/4 | 38,407 |
+| Discovery | 0/4 | 4/4 | 34,177 |
+
+Unrestricted `auto` retains 4/4 items in both versions. These byte counts
+serialize the equal leading input-item array; they are neither token counts
+nor a measurement of the provider's rendered/cacheable prefix. The constant
+catalog-permission clarification adds 180 bytes to this synthetic prologue.
+Call restrictions remain after history; lookup/preload and returned calls
+still use only the current permitted tools. Selected small schemas are ready
+without a discovery-only generation, within the unchanged eager limits and
+explicit deferral rules. Checkpoints reuse that exact prepared prologue.
+
+| BPS presentation / choice | Preparation before, microseconds | After, microseconds |
+| --- | ---: | ---: |
+| Compact / auto | 336.424 | 339.932 |
+| Compact / none | 112.740 | 206.872 |
+| Compact / named | 123.552 | 212.040 |
+| Compact / allowed | 122.864 | 213.464 |
+| Discovery / auto | 221.072 | 220.044 |
+| Discovery / none | 111.764 | 132.604 |
+| Discovery / named | 124.340 | 144.160 |
+| Discovery / allowed | 122.336 | 145.432 |
+
+Retaining the catalog intentionally costs about 0.088-0.094 ms of extra local
+preparation in restricted compact turns, and 0.020-0.023 ms in discovery.
+It removes the measured prefix rewrite; it is not a claim that every local
+preparation became faster or that total input tokens decreased. The unrestricted
+timing ranges overlap before/after, so no general `auto` speedup is claimed.
+
+| Debug fingerprint fixture | Before, microseconds | After, microseconds | Reduction |
+| --- | ---: | ---: | ---: |
+| 16 items / 42,925 request bytes | 76.882 | 48.818 | 36.5% |
+| 256 items / 549,445 request bytes | 781.145 | 588.304 | 24.7% |
+
+Each capture includes the same reference-equality checks in both versions.
+The trial ranges were 76.579-79.947 -> 48.587-51.100 microseconds and
+778.672-807.915 -> 587.533-590.578 microseconds respectively. One reusable
+8 KiB buffer replaces repeated tiny hash updates; reference tests retain the
+original salted JSON digests, exact byte budget, item cap and failure behavior.
+Debug-off requests already skip this work and do not gain this reduction.
+
+The design follows the stable-prefix/tool-definition guidance in the official
+[prompt caching guide](https://developers.openai.com/api/docs/guides/prompt-caching)
+and [cache diagnostics](https://developers.openai.com/api/docs/guides/prompt-caching/diagnostics),
+read on 2026-10-23. BPS remains an undocumented account transport; public API
+retention/breakpoint fields were not added. Live provider cache-hit ratio,
+TTFT, billing and installed-application acceptance were not measured here.
+
 ### Pool rotation acceptance
 
 The ordinary core suite includes lifecycle churn and repeated local HTTP,
@@ -533,6 +653,52 @@ installed executable's identity. Include unequal generation durations, quota
 resets, cancellations, and account replacement; verify outcomes and ownership,
 not only the visible reply. Do not replace or restart the user's app as part of
 a synthetic check.
+
+#### Cache-affinity admission comparison
+
+The 2026-10-23 comparison uses the same Windows host, optimized release profile
+and pre-existing dirty worktree before and after the cache-aware load margin.
+Reproduce the admission fixture with:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --target-dir src-tauri/target --locked --release --lib measure_cache_affinity_under_parallel_load -- --ignored --nocapture --test-threads=1
+~~~
+
+Two synthetic physical members each allow four concurrent requests. The preferred
+member retains one background reservation; the other is idle. After 20 warmups,
+nine trials each reserve and release 1,000 preferred requests. Times are medians
+of trial averages, not individual-request percentiles or provider latency.
+
+| Measurement | Before | After |
+| --- | ---: | ---: |
+| Preferred-member selections | 0/9,000 | 9,000/9,000 |
+| Reserve and release, microseconds | 1.961 | 2.176 |
+| Trial-average range, microseconds | 1.931-2.326 | 2.153-2.445 |
+
+The local admission tradeoff is an additional 0.215 microseconds in this fixture,
+not a measured first-token speedup. Ordinary work without affinity still uses the
+least normalized load. Regressions cover both sides of the load margin, saturated
+and unequal physical capacities, material quota/credit leads, soft health/latency,
+explicit order, diagnostics, and consistent optional response-owner yield.
+
+Repeating the existing protocol probes preserves all four leading BPS input items
+for every tested tool choice: 38,407 compact / 34,177 discovery serialized bytes
+before and after. Preparation and fingerprinting code is unchanged by this patch;
+the repeated timings do not establish a speedup:
+
+| Unchanged-path probe | Before, microseconds | After, microseconds |
+| --- | ---: | ---: |
+| BPS compact / auto | 340.500 | 390.928 |
+| BPS discovery / auto | 223.408 | 220.348 |
+| Debug fingerprint / 16 items | 49.915 | 50.294 |
+| Debug fingerprint / 256 items | 596.376 | 597.818 |
+
+The compact/auto trial-average ranges were 332.632-348.828 before and
+342.880-474.332 after. Report this slower observed run rather than claiming all
+processing became faster. The admission fixture measures route reuse, not actual
+cached tokens or invoice savings. Payloads, reasoning, tools, provider cache
+controls and opaque-continuation ownership remain unchanged. Installed-app,
+provider cache-hit, actual billing and end-to-end latency acceptance remain open.
 
 ### Manual quality observations
 

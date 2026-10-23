@@ -1,7 +1,7 @@
 # Hosted Relay Architecture
 
 **Target product contract, not shipped behavior.** Current Desktop contracts are in
-[PLANNING.md](PLANNING.md); implementation order is in the [Hosted roadmap](HOSTED_RELAY_ROADMAP.md#delivery-stages).
+[PLANNING.md](../project/PLANNING.md); implementation order is in the [Hosted roadmap](HOSTED_RELAY_ROADMAP.md#delivery-stages).
 
 Navigation: [design gates](#specification-before-implementation) ·
 [product](#decision) · [website](#customer-website) ·

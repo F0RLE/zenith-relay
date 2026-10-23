@@ -2,7 +2,7 @@
 
 Planned Hosted implementation and acceptance, not shipped features or a progress
 log. The [Hosted architecture](HOSTED_RELAY_ARCHITECTURE.md) owns target contracts;
-the [Desktop roadmap](ROADMAP.md) owns current-runtime work. Development and
+the [Desktop roadmap](../project/ROADMAP.md) owns current-runtime work. Development and
 release checks are in [CONTRIBUTING.md](../../CONTRIBUTING.md).
 
 ## Hosted multi-user Relay

@@ -15,7 +15,7 @@ Navigation: [core layout](#core-layout) · [Desktop](#desktop-workspace) ·
 Relay is a local-first desktop application. The retired personal-server runtime
 is removed. It is separate from production Zenith Gateway and Control. Production
 credentials, customer data, inventory, billing, and routing logic do not belong
-here. [Hosted Relay](HOSTED_RELAY_ARCHITECTURE.md) is a proposal, not a shipped service.
+here. [Hosted Relay](../hosted/HOSTED_RELAY_ARCHITECTURE.md) is a proposal, not a shipped service.
 
 | Area | Owns |
 | --- | --- |
@@ -25,7 +25,7 @@ here. [Hosted Relay](HOSTED_RELAY_ARCHITECTURE.md) is a proposal, not a shipped 
 | `web` | Independent Hosted UI preview; no live Hosted backend |
 | `catalog` | Versioned model reference data and export contract |
 | `scripts` | Build, setup, verification, release and maintenance commands; shared helpers in `lib` |
-| `docs/project`, `docs/help`, `docs/releases` | Architecture and plans, localized user steps, release history |
+| `docs/project`, `docs/hosted`, `docs/help`, `docs/releases` | Current contracts and Desktop roadmap, future Hosted plans, localized user steps, release history; navigation in `docs/README.md` |
 
 The renderer does not read secrets, call providers, or decide routing. Desktop
 uses `relay-core` in-process. Closing the desktop window leaves the local process
@@ -137,12 +137,36 @@ than guessing from the default route (which may use a VPN). While visible, it
 refreshes on focus, reconnection and every 15 seconds without changing the listener.
 
 Startup paints a themed, localized HTML loader before importing the React UI.
-It reports interface/data loading, not invented progress percentages. The shell
-is revealed after a successful initial snapshot and paint; slow or failed startup
-offers a window reload without clearing settings. Render failures reveal the
-existing error boundary. Secondary pages load on navigation intent, not all at
-startup. Existing first-frame and interactive metrics track renderer readiness,
-not provider or gateway health.
+It reports interface/data loading, not invented progress percentages. For an
+existing setup, the shell is revealed after its first paint without waiting for
+the runtime snapshot. Navigation, Settings and Help remain usable while data
+loads; data-dependent pages show loading or a retryable read failure, never a
+false empty inventory. First-run setup retains the HTML loading/reload fallback.
+Bundle failures can reload without clearing settings, and render failures reveal
+the existing error boundary. Secondary pages load on navigation intent, not all
+at startup. The interactive metric still waits for a successful initial snapshot
+and paint; revealing navigation does not record backend readiness or health.
+
+Account-label projection reuses one current accounts-array/privacy-resolver pair
+across activity-only gateway updates, and clears that projection with the runtime.
+Hidden windows retain only the latest per-candidate activity overlay, including
+zero-count tombstones, without scheduling renderer flush timers. Visibility
+restores one coalesced update through the normal ordering checks. Usage is loaded
+by its active screen rather than preloading an unused all-time report at startup.
+Usage commits request-ID typing after a 250 ms pause; clearing or leaving the
+request tab cancels the pending timer, and pagination resets only on commit.
+Pending draft input is marked busy without issuing intermediate report reads.
+Successive reports share exactly equal filter-choice arrays, not totals or send
+records. Changed choices and absent legacy projections remain authoritative;
+mode reset releases the last shared choices with the existing report cache.
+Overview publishes its in-memory report before persisting its derived cache.
+One pending 250 ms timer coalesces writes of the latest eight scopes without
+retaining a serialized copy per update. Document hiding/page exit flushes the
+pending write and cancels its timer; storage failure remains non-fatal. These
+snapshots are a revalidated display cache, not the durable usage database.
+Pool source-statistics signatures follow a stable inventory projection rather
+than activity-driven display order. Activity alone does not reserialize sources;
+new inventory snapshots retain the existing refresh and generation checks.
 
 ## State and secret boundaries
 
@@ -459,7 +483,11 @@ are preserved, and temporary health does not rewrite configured choices.
 ## Pool and execution
 
 Automatic selection first filters compatible, enabled, available members, then
-compares normalized load. Fresh positive quota takes precedence, including the
+compares normalized load. Independent work uses the least-loaded members. A
+warm preferred member remains in that group when subtracting one of its existing
+requests puts it at or below the least normalized load. This bounded affinity
+margin does not add a wait, bypass shared physical capacity, or change member
+limits. Fresh positive quota takes precedence within the group, including the
 explicit linked-connection ranking reference for SIWC with unknown quota; candidates
 less than five percentage points below the best fresh quota remain in the same
 selection band. At a lead of five points or more the lower remainder yields.
@@ -475,9 +503,28 @@ binding follows the warmed member when its fresh quota or credit evidence has
 the same material lead required by admission. Temporary load spillover and
 small resource differences leave the owner unchanged; an older owner's late
 response cannot reverse the move without a new material resource lead.
+Prompt binding writes, invalidations, and lazy restores are ordered per opaque
+key across runtime replacements without holding the scheduler lock during
+storage I/O. Late refreshes cannot shorten a newer expiry, lazy restoration
+cannot replace a live owner, and retired runtimes cannot change prompt bindings.
+Cache-write rejection clears only the failing candidate's own prompt binding;
+a spillover or former owner's rejection cannot discard the current warm owner.
+Successful load spillovers also retain up to four volatile alternative-member
+hints per prompt binding, ordered by their last successful observation. If the
+primary owner is outside the admitted group, Automatic prefers a previously
+successful alternative within that same load/resource/health group before
+weighted rotation. Alternatives receive no extra load margin, do not replace
+the durable owner, and cannot override explicit routing or opaque ownership.
+Hints use the binding TTL without extending the primary owner's expiry; owner
+replacement/expiry, candidate removal and candidate-scoped cache rejection clear
+the corresponding hints. They contain only candidate IDs and expiry times, not
+prompts or provider state, and are not restored from durable storage. Success is
+a reuse hint, not proof that the provider retained a cache; usage counters remain
+the provider-reported values, including genuine zero-cache sends after a switch.
 
-Automatic response-owner yield probes the same admission policy with the current
-physical owner preferred on ties. Load, fresh quota, independent credit evidence,
+Automatic response-owner yield probes the same cache-aware admission policy with
+the current physical owner preferred within the bounded load margin. Load,
+fresh quota, independent credit evidence,
 and soft health therefore cannot disagree with ordinary request selection.
 A recovery trial or another protocol alias is not a reason to move ownership.
 The executor must still materialize reusable history before clearing an opaque
@@ -567,6 +614,21 @@ Partial histories, unpaired results, unresolved references, or foreign ciphertex
 cannot release ownership. Unknown response references return
 `409 response_continuation_unavailable`. Compaction checkpoints explicitly
 replace the predecessor; they are not discarded to force a retry.
+
+Desktop routing-graph replacements reuse the host's bounded volatile adapter
+and native replay stores together with route fingerprints. Late completions
+write into the same stores; ownership checks still reject another key, model,
+endpoint, or API-source credential. A new host/process starts empty: conversation state
+is not persisted to recover a restarted application.
+Full-history continuation keys compare parsed function-argument objects
+independently of member order, including nested objects in arrays, following
+the [JSON object contract](https://www.rfc-editor.org/rfc/rfc8259#section-4). The
+comparison sorts only a temporary parsed copy; outgoing arguments, retained
+native blocks and opaque reasoning remain unchanged. Strings, exact numbers,
+array order, call IDs/names, model and route ownership still distinguish history.
+Adapter compatibility failures before candidate reservation are recorded as
+Relay-local request failures for HTTP and WebSocket. Such records have no
+provider attempt, token usage, cooldown, or account-health side effect.
 
 An explicit pre-output `invalid_encrypted_content` rejection can repair one
 reasoning item on the existing account route. Multiple items require a unique
@@ -942,15 +1004,25 @@ Absent an explicit account choice, the assigned proxy's timezone is automatic;
 an account disable or explicit account source still wins. Proxy-sourced policy
 does not fall back to an account zone. Host-local bindings are not presets.
 
-Desktop proxy import and opening storage automatically check unlocated proxies once;
-manual checks refresh an existing result. The bounded HTTPS lookup uses
-`https://ipwho.is/?fields=success,ip,country_code,timezone.id`, following its
-[official field contract](https://ipwhois.io/documentation), through the selected
-proxy without account credentials, redirects, or a direct-network fallback.
-Only a valid returned IANA identifier is stored, never a guess from a country,
-IP prefix, or numeric UTC offset. Geolocation failure can fall back to the
-existing Cloudflare connectivity trace inside the same 12-second budget; that
-trace does not invent a timezone. A failed check retains the known zone; a
+Desktop proxy import and opening storage automatically check unlocated or legacy
+proxies once; manual checks refresh an existing result. The HTTPS exit-IP probe
+uses `https://www.cloudflare.com/cdn-cgi/trace` through the selected proxy without
+account credentials, redirects, or a direct-network fallback, bounded to 12 seconds
+including HTTP admission. Its displayed duration excludes optional geolocation
+and is labeled as an HTTPS check, not ICMP or provider latency.
+
+Exit country is taken from the same Cloudflare trace as the observed exit IP.
+It remains available if optional city/timezone discovery fails. No local geography
+database, file import, license key, or user setup is required. The bounded optional
+lookup uses `https://ipwho.is/{observed-ip}` through the selected proxy, with only
+IP, country, region, city, and `timezone.id` fields and a separate 3-second budget.
+The returned IP must match the original exit; a conflicting country discards city
+and timezone rather than mixing locations. This also handles rotating proxies.
+The proxy gateway hostname and login selectors are never treated as observed
+geography. Cards show only exit location, IP, and HTTPS duration; timezone and
+lookup details are in the diagnostic tooltip. Only a valid IANA identifier is
+stored, never a guess from a country,
+IP prefix, or numeric UTC offset. A failed check retains the known zone; a
 confirmed changed exit without a valid zone clears stale state. Proxy identity
 and check timestamps fence stale results. Persistence precedes a hot update of
 the running bound accounts, including common-proxy inheritance; the scheduler,
@@ -1024,8 +1096,27 @@ preloading/fallback, rather than counting the soon-to-be-replaced body twice.
 Cached tokens still occupy context; never subtract them from the displayed
 window or remove valid instructions/tools merely to reduce the counter.
 
-Usage records one final row per logical request and separate retained physical
-attempts. Exact `requestId` history is not an additional cost/tokens total.
+Usage retains one final result per logical client request and one consumption
+record per physical send (`requestId`, `attempt`). The Usage list shows sends
+directly, including retries and tool discovery, with each send's observed tokens
+and API equivalent. Repeated observations replace the same send; late corrections
+do not replace the logical outcome. Summary request counts, success and timing
+use logical results; consumption, pricing, model/member attribution and quota
+equivalents use all sends. Attempt elapsed times are never added together.
+Schema 36 adds retained earlier sends to existing rollups once, preserving archived
+aggregates. Missing historical sends or unknown usage are not reconstructed.
+Request filter choices come from distinct values in retained physical-send
+history within the selected period, not the current page or a fixed list.
+Requested/routed models, pool members, protocols, transports and error categories
+share this history projection across report tabs. Current inventory supplies
+labels/catalog ordering, not extra filter values; retained removed members stay
+selectable. Selections do not hide alternatives, and expanding the advanced panel
+does not issue another report query. Period and outcome choices remain fixed
+query modes rather than inferred provider capabilities.
+Older Desktop hosts that omit model/member filter fields use an unfiltered,
+events-free aggregate read for the same period. This compatibility path does
+not substitute current inventory or one page of events; supported empty arrays
+remain empty, and concurrent fallback reads for the same period join in flight.
 Deleting/expiring usage removes corresponding attempts; missing earlier history
 is not reconstructed. Actual retry/stop decisions are recorded when known.
 An interim successful-HTTP `tool_discovery` observation without error metadata
@@ -1134,9 +1225,17 @@ the [LiteLLM catalog](https://github.com/BerriAI/litellm/blob/main/model_prices_
 
 Debug context comparison uses bounded, salted in-memory fingerprints, never
 stored prompts or arguments. It does not prove provider prefix reuse or a cache
-hit. Native Responses and SIWC Responses share this diagnostic path, including
-the HTTP bridge for WebSocket clients; debug-off requests collect no context
-fingerprints. Client cache controls and reasoning settings remain unchanged.
+hit. Native Responses, SIWC and BPS Responses share this diagnostic path,
+including the HTTP bridge for WebSocket clients; debug-off requests collect no
+context fingerprints. BPS snapshots the actual dispatched body after catalog
+preloads and attachment resolution, and refreshes it for each discovery send.
+Completion compares the last dispatched prefix rather than a stale route copy;
+discovery usage remains separately recorded and does not complete the client
+request's comparison baseline. Client cache controls and reasoning settings
+remain unchanged; BPS diagnostics never add provider comparison/retention fields.
+Serialization uses one reusable 8 KiB scratch buffer per capture, flushing at
+each fingerprint boundary; salts, digests, exact byte budgets and item limits
+are unchanged. This optimization remains debug-only, not provider cache storage.
 In debug mode SIWC can request the provider's official prompt-cache comparison
 against the last successful, non-overlapping response on the same local key,
 client session/cache scope, account and model. This uses the existing bounded
@@ -1266,7 +1365,7 @@ an account or transfers credentials. Hosted is not a migration of that runtime.
 Hosted tenants, customer identities/keys, wallets, payments, and billing are not
 Desktop features. PostgreSQL checkpoints, encrypted payload
 retention, SDK idempotency, and settlement are planned in
-[HOSTED_RELAY_ARCHITECTURE.md](HOSTED_RELAY_ARCHITECTURE.md).
+[Hosted architecture](../hosted/HOSTED_RELAY_ARCHITECTURE.md).
 
 Distributed scheduling, account resale, fingerprint spoofing, sharing concealment,
 and automatic transfer of opaque conversations between accounts are outside the

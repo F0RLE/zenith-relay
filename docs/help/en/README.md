@@ -264,20 +264,18 @@ Proxies are optional. In **Connections → Proxies → Import**, add one address
 per line, then assign a proxy in the account's settings. You can also select
 a sign-in proxy using the lock in the sign-in dialog.
 
-**Test proxy** shows the exit IP, country, latency, and check time.
-The result survives a restart, so check its date too.
-A successful connection test does not prove access to a model.
-Relay does not bypass a failed assigned proxy with a direct connection.
+**Test proxy** shows country/city, exit IP, and HTTPS-check time, not ICMP ping.
+Hover for timezone and the saved check date.
+Success does not prove model access; a failed proxy never falls back to direct.
 
-Relay checks new proxies automatically and determines the timezone from their
-exit IP. Opening storage also checks proxies without a detected timezone once.
-The timezone appears on the card and applies to future bound account requests
-without saving or restarting Relay or the client application. Explicit account
-timezone choices, including **Don't replace**, remain in force.
-The lookup uses IPWhois through the selected proxy and sends no account tokens.
-If the service cannot determine a valid timezone, Relay does not guess it from
-the country; **Test proxy** can refresh the result later. A failed check keeps
-the known timezone, but a changed exit without a detected zone clears stale data.
+Location is automatic: country comes from the exit-IP check; city and timezone
+are optional online lookups. No geography database or setup is needed.
+If city lookup fails, the known exit country stays visible.
+
+New, unlocated, and legacy proxies are checked once automatically; use
+**Test proxy** to refresh. The detected timezone applies without restarting,
+unless overridden in the account's timezone settings.
+
 Each card shows account and API-source assignments. Deleting an account proxy
 asks for confirmation and returns those accounts to the common proxy, or to a
 direct connection when no common proxy is set and direct access is permitted.
@@ -700,11 +698,13 @@ for catalog options.
 
 SSE text can stream during tool discovery; buffered replies have no first/last-token
 timing. Debug context comparisons omit conversation text and do not prove the
-cause of a cache miss. Lookup usage appears as separate request attempts.
+cause of a cache miss. Lookup consumption appears in **Sends**.
 
-Each Relay request ID has one record and final result. **Request activity** shows
-its attempts, provider errors and recorded stop reason regardless of report
-filters. Missing history is marked; attempts expire with the request log.
+**Sends** lists each model call with its own result, tokens and API equivalent,
+including retries and tool lookup. Consumption includes every recorded send;
+**Client requests** and success rate count the final result only once. Open a row
+for its provider error or stop reason. Timings are elapsed from the client request
+start, not additive. Missing usage is not estimated; sends expire with the log.
 
 ## 6. Recovery
 

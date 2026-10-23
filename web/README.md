@@ -88,8 +88,8 @@ ID запроса находится под названием модели в �
 [проверки web-preview](../CONTRIBUTING.md#web-preview). CI проверяет этот пакет
 отдельно; это не проверка готовности Hosted backend или реальной WebView-интеграции.
 
-Контракты: [Hosted architecture](../docs/project/HOSTED_RELAY_ARCHITECTURE.md),
-[web design](../docs/project/HOSTED_RELAY_WEB_DESIGN.md),
-[H13/H14 roadmap](../docs/project/HOSTED_RELAY_ROADMAP.md#h13--default-web-application-and-typed-transport).
+Контракты: [Hosted architecture](../docs/hosted/HOSTED_RELAY_ARCHITECTURE.md),
+[web design](../docs/hosted/HOSTED_RELAY_WEB_DESIGN.md),
+[H13/H14 roadmap](../docs/hosted/HOSTED_RELAY_ROADMAP.md#h13--default-web-application-and-typed-transport).
 Текущий UI следует согласованному виду Relay; настоящие сессии, ключи, платежи,
 каталог, RU/EN для web, API-совместимость и полная приёмка H13/H14 ещё не реализованы.

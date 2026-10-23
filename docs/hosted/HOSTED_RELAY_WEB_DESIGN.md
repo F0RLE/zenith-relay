@@ -5,7 +5,7 @@ This document defines Relay's original visual system, screen composition,
 interaction states and design acceptance. It introduces no runtime code, mock
 application, dependency, deployment or claim that a working screen exists.
 
-[Architecture](HOSTED_RELAY_ARCHITECTURE.md) owns permissions, routes, data meanings,
+[Hosted architecture](HOSTED_RELAY_ARCHITECTURE.md) owns permissions, routes, data meanings,
 money, security and service behavior. [Hosted roadmap](HOSTED_RELAY_ROADMAP.md#hosted-implementation-work-packages)
 owns implementation order and evidence. This document owns how those contracts
 are presented; it must not invent a second wallet, API or authorization model.
