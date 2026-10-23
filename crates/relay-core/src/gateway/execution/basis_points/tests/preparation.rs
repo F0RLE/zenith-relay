@@ -591,7 +591,7 @@ fn boolean_property_schema_is_valid_with_closed_additional_properties() {
 }
 
 #[test]
-fn disabled_tools_do_not_teach_the_transport() {
+fn disabled_tools_keep_catalog_context_but_forbid_execution() {
     let request = json!({
         "model": "gpt-6-astra",
         "input": "hello",
@@ -604,11 +604,102 @@ fn disabled_tools_do_not_teach_the_transport() {
     });
     let prepared = prepare_request(&request).unwrap();
     let input = prepared["input"].as_array().unwrap();
-    let text = input[0]["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("Return the answer as assistant text."));
-    assert!(!text.contains("run_officejs"));
-    assert_eq!(input.len(), 2);
+    let mut unrestricted = request.clone();
+    unrestricted.as_object_mut().unwrap().remove("tool_choice");
+    assert_eq!(
+        &input[..2],
+        prepare_request(&unrestricted).unwrap()["input"]
+            .as_array()
+            .unwrap()
+    );
+    let policy = input[2]["content"][0]["text"].as_str().unwrap();
+    assert!(policy.contains("Return the answer as assistant text."));
+    assert!(policy.contains("Do not call any tools, including the transport or catalog lookup."));
+    assert!(policy.contains("Client tool_choice: \"none\"."));
+    assert_eq!(input.len(), 3);
     assert_eq!(input[1]["role"], "user");
+}
+
+#[test]
+fn turn_restrictions_preserve_catalog_history_and_reject_disallowed_calls() {
+    for mode in ["auto", "compact", "full", "discovery"] {
+        let mut request = request_with_tool();
+        request["relay_bps_tool_catalog"] = json!(mode);
+        request["tools"].as_array_mut().unwrap().push(json!({
+            "type":"custom","name":"apply_patch","description":"Synthetic patch tool"
+        }));
+        request["input"] = json!([
+            {"role":"user","content":"Synthetic first turn"},
+            {"role":"assistant","content":"Synthetic answer"},
+            {"role":"user","content":"Synthetic next turn"}
+        ]);
+        let baseline = prepare_request(&request).unwrap();
+        let prefix = &baseline["input"].as_array().unwrap()[..4];
+        for (choice, denied) in [
+            (json!("none"), "exec_command"),
+            (
+                json!({"type":"function","name":"exec_command"}),
+                "apply_patch",
+            ),
+            (
+                json!({"type":"custom","name":"apply_patch"}),
+                "exec_command",
+            ),
+            (
+                json!({"type":"allowed_tools","mode":"auto",
+                "tools":[{"type":"function","name":"exec_command"}]}),
+                "apply_patch",
+            ),
+        ] {
+            let mut restricted = request.clone();
+            restricted["tool_choice"] = choice;
+            let original = restricted.clone();
+            let prepared = prepare_request(&restricted).unwrap();
+            assert_eq!(
+                &prepared["input"].as_array().unwrap()[..4],
+                prefix,
+                "mode={mode}"
+            );
+            assert_eq!(restricted, original);
+            let response = json!({"status":"completed","output":[{
+                "type":"function_call","name":"run_officejs","call_id":"call_synthetic",
+                "arguments":json!({"references":[denied],"code":"synthetic"}).to_string()
+            }]});
+            assert_eq!(
+                translate_response(&serde_json::to_vec(&response).unwrap(), &restricted)
+                    .unwrap_err()
+                    .parameter(),
+                Some("output.run_officejs.tool_choice")
+            );
+        }
+    }
+}
+
+#[test]
+fn discovery_checkpoints_borrow_the_exact_prepared_catalog_with_instruction_offsets() {
+    use super::super::{catalog::client_tools, prepare};
+
+    for instructions in [
+        Value::Null,
+        json!(""),
+        json!("Synthetic project instructions."),
+    ] {
+        let mut request = request_with_tool();
+        request["instructions"] = instructions;
+        request["relay_bps_tool_catalog"] = json!("discovery");
+        request["tools"].as_array_mut().unwrap().push(json!({
+            "type":"custom","name":"apply_patch","description":"Synthetic patch tool"
+        }));
+        request["tool_choice"] = json!({"type":"function","name":"exec_command"});
+        let upstream = prepare_request(&request).unwrap();
+        let expected = prepare::tool_instructions(&client_tools(&request).unwrap(), &request);
+        assert_eq!(
+            prepare::prepared_tool_instructions(&request, &upstream),
+            Some(expected.as_str())
+        );
+        assert!(expected.contains("apply_patch"));
+        assert!(prepare::prepared_tool_instructions(&request, &json!({})).is_none());
+    }
 }
 
 #[test]

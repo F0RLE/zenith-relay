@@ -24,6 +24,7 @@ pub(super) struct ActiveRequest {
 pub(super) struct PreparedRequest {
     pub(super) candidate: Fingerprint,
     pub(super) upstream: Option<Arc<RequestFingerprint>>,
+    pub(super) observed_at_ms: u64,
 }
 
 pub(super) struct CompletedRequest {
@@ -165,16 +166,25 @@ impl StoreState {
         let Some(prepared) = active.prepared.take() else {
             return;
         };
-        // Another request can begin after this payload was prepared. Correct the
-        // persisted classification at completion rather than falsely blaming an
-        // overlapping client for a cache-prefix rewrite.
-        if observed.overlapping.load(Ordering::Relaxed) {
-            let provider = diagnostics.provider.take();
-            let response_id = diagnostics.provider_response_id.take();
-            *diagnostics = super::diagnostics(&observed, prepared.upstream.as_deref(), now_ms);
-            diagnostics.provider = provider;
-            diagnostics.provider_response_id = response_id;
+        // Use the last dispatched payload, not an earlier route clone: BPS can
+        // preload contracts and make discovery continuations within one request.
+        // Preserve provider evidence and correct concurrent-client classifications.
+        let provider = diagnostics.provider.take();
+        let response_id = diagnostics.provider_response_id.take();
+        let comparison_at = if observed.overlapping.load(Ordering::Relaxed) {
+            now_ms
+        } else {
+            prepared.observed_at_ms
+        };
+        *diagnostics = super::diagnostics(&observed, prepared.upstream.as_deref(), comparison_at);
+        if diagnostics.baseline == CacheContextBaseline::CompletedRequest {
+            diagnostics.candidate_changed = observed
+                .previous
+                .as_ref()
+                .map(|previous| candidate != previous.candidate);
         }
+        diagnostics.provider = provider;
+        diagnostics.provider_response_id = response_id;
         if !event.success {
             return;
         }

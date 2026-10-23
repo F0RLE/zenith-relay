@@ -80,6 +80,88 @@ async fn uploads_overlap_with_a_bound_and_preserve_bytes_and_input_order() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn mixed_uploads_refill_slots_without_waiting_for_input_order() {
+    let mut body = image_sequence(8);
+    let jobs = expect_jobs(stage_input_images(&body));
+    let mut expected = body.clone();
+    for (index, job) in jobs.iter().enumerate() {
+        set_image_part(
+            &mut expected,
+            job.input_index,
+            job.content_index,
+            &format!("file-{index}"),
+        );
+    }
+    let active = AtomicUsize::new(0);
+    let peak = AtomicUsize::new(0);
+    let calls = AtomicUsize::new(0);
+    let started = tokio::time::Instant::now();
+    let result = resolve_input_images(&mut body, jobs, |image| {
+        let active = &active;
+        let peak = &peak;
+        let calls = &calls;
+        async move {
+            let _guard = ActiveUpload::start(active, peak);
+            calls.fetch_add(1, Ordering::SeqCst);
+            let index = *image.bytes.last().unwrap();
+            let delay = if index == 0 || index == 4 { 200 } else { 40 };
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+            Ok(format!("file-{index}"))
+        }
+    })
+    .await;
+    let elapsed = started.elapsed();
+    assert!(result.is_ok());
+    assert_eq!(body, expected);
+    assert_eq!(calls.load(Ordering::SeqCst), 8);
+    assert_eq!(peak.load(Ordering::SeqCst), MAX_CONCURRENT_UPLOADS);
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+    println!(
+        "synthetic mixed uploads=8, unchanged bytes/output, concurrency=4: {}ms (virtual time, not provider latency)",
+        elapsed.as_millis()
+    );
+    assert_eq!(elapsed, Duration::from_millis(240));
+}
+
+#[tokio::test(start_paused = true)]
+async fn out_of_order_failure_stops_new_work_and_preserves_earlier_results() {
+    let mut body = image_sequence(MAX_CONCURRENT_UPLOADS + 3);
+    let mut expected = body.clone();
+    set_image_part(&mut expected, 0, 0, "file-0");
+    let jobs = expect_jobs(stage_input_images(&body));
+    let active = AtomicUsize::new(0);
+    let peak = AtomicUsize::new(0);
+    let calls = AtomicUsize::new(0);
+    let result = resolve_input_images(&mut body, jobs, |image| {
+        let active = &active;
+        let peak = &peak;
+        let calls = &calls;
+        async move {
+            let _guard = ActiveUpload::start(active, peak);
+            calls.fetch_add(1, Ordering::SeqCst);
+            let index = *image.bytes.last().unwrap();
+            let delay = match index {
+                0 => 200,
+                1 => 20,
+                _ => 40,
+            };
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+            if index == 1 {
+                Err(invalid_image("synthetic out-of-order upload rejection"))
+            } else {
+                Ok(format!("file-{index}"))
+            }
+        }
+    })
+    .await;
+    assert!(matches!(result, Err(AttachmentFailure::Reject(failure))
+        if failure.message == "synthetic out-of-order upload rejection"));
+    assert_eq!(body, expected);
+    assert_eq!(calls.load(Ordering::SeqCst), MAX_CONCURRENT_UPLOADS);
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
 async fn upload_error_keeps_input_order_and_drops_pending_work() {
     let mut body = image_sequence(MAX_CONCURRENT_UPLOADS + 3);
     let jobs = expect_jobs(stage_input_images(&body));
@@ -127,6 +209,39 @@ async fn cancelling_image_resolution_drops_all_in_flight_uploads() {
     drop(pending);
     assert_eq!(active.load(Ordering::SeqCst), 0);
     assert_eq!(calls.load(Ordering::SeqCst), MAX_CONCURRENT_UPLOADS);
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancellation_drops_refilled_uploads_and_out_of_order_results() {
+    let mut body = image_sequence(8);
+    let original = body.clone();
+    let jobs = expect_jobs(stage_input_images(&body));
+    let active = AtomicUsize::new(0);
+    let peak = AtomicUsize::new(0);
+    let calls = AtomicUsize::new(0);
+    let mut pending = Box::pin(resolve_input_images(&mut body, jobs, |image| {
+        let active = &active;
+        let peak = &peak;
+        let calls = &calls;
+        async move {
+            let _guard = ActiveUpload::start(active, peak);
+            calls.fetch_add(1, Ordering::SeqCst);
+            if image.bytes.last() == Some(&1) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Ok("file-1".to_string())
+            } else {
+                std::future::pending().await
+            }
+        }
+    }));
+    assert!(futures_util::poll!(&mut pending).is_pending());
+    tokio::time::advance(Duration::from_millis(20)).await;
+    assert!(futures_util::poll!(&mut pending).is_pending());
+    assert_eq!(calls.load(Ordering::SeqCst), MAX_CONCURRENT_UPLOADS + 1);
+    assert_eq!(active.load(Ordering::SeqCst), MAX_CONCURRENT_UPLOADS);
+    drop(pending);
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+    assert_eq!(body, original);
 }
 
 #[tokio::test(start_paused = true)]

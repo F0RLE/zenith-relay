@@ -2,6 +2,8 @@ use super::*;
 use crate::gateway::execution::basis_points::presentation::OPTION;
 use crate::gateway::execution::basis_points::{prepare_request, translate_response};
 
+mod identity;
+
 fn request() -> Value {
     json!({"model":"synthetic-model","input":"hello","stream":true,"relay_bps_tool_catalog":"discovery","tools":[
         {"type":"namespace","name":"files","tools":[
@@ -159,6 +161,7 @@ fn working_tools_are_ready_without_loading_the_entire_catalog() {
     request["tool_choice"] = json!({"type":"function","name":"files.read"});
     let selected = DiscoverySession::new(&request, true).unwrap().unwrap();
     assert!(!selected.loaded.contains("exec_command"));
+    assert_eq!(selected.loaded, BTreeSet::from(["files.read".to_string()]));
     let error = translate_response(
         &serde_json::to_vec(&response("exec_command", json!({"cmd":"echo synthetic"}))).unwrap(),
         &request,
@@ -207,7 +210,7 @@ fn remembered_names_use_current_schemas_and_never_restore_removed_or_disallowed_
     let mut upstream = prepare_request(&request).unwrap();
     let before = upstream.clone();
     session.preload(&names, &mut upstream).unwrap();
-    assert!(session.loaded.is_empty());
+    assert_eq!(session.loaded, BTreeSet::from(["files.read".to_string()]));
     assert_eq!(upstream, before);
 }
 
@@ -553,6 +556,70 @@ fn choices_scope_lookup_and_small_catalogs_stay_compact() {
             Some(OPTION)
         );
     }
+}
+
+#[test]
+fn automatic_discovery_uses_the_full_catalog_but_retains_turn_local_authority() {
+    let mut request = request();
+    request.as_object_mut().unwrap().remove(OPTION);
+    request["tools"]
+        .as_array_mut()
+        .unwrap()
+        .extend((0..32).map(|index| {
+            json!({
+                "type":"function","name":format!("synthetic_{index}"),
+                "description":"Synthetic catalog description. ".repeat(64),
+                "parameters":{"type":"object"}
+            })
+        }));
+    let baseline = prepare_request(&request).unwrap();
+    request["tool_choice"] = json!({"type":"function","name":"files.read"});
+    let session = DiscoverySession::new(&request, true).unwrap().unwrap();
+    assert_eq!(session.tools.len(), 1);
+    assert_eq!(session.loaded, BTreeSet::from(["files.read".to_string()]));
+    assert!(lookup(&session.tools, &json!({"names":["files.write"]})).is_err());
+    let prepared = prepare_request(&request).unwrap();
+    assert_eq!(prepared["input"][0], baseline["input"][0]);
+    assert!(prepared["input"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Tool index:"));
+    let mut diagnostics = ToolUseDiagnostics {
+        client_context: Some(Default::default()),
+        ..Default::default()
+    };
+    capture(&request, &mut diagnostics);
+    let catalog = diagnostics.basis_points_catalog.unwrap();
+    assert_eq!(catalog.mode, "discovery");
+    assert_eq!(catalog.loaded_tool_count, 1);
+    request["tool_choice"] = json!("none");
+    assert!(DiscoverySession::new(&request, true).unwrap().is_none());
+    assert_eq!(
+        prepare_request(&request).unwrap()["input"][0],
+        baseline["input"][0]
+    );
+}
+
+#[test]
+fn explicitly_selected_preloads_keep_existing_deferral_and_size_limits() {
+    let mut request = request();
+    request["tool_choice"] = json!({"type":"function","name":"files.read"});
+    request["tools"][0]["tools"][0]["defer_loading"] = json!(true);
+    assert!(DiscoverySession::new(&request, true)
+        .unwrap()
+        .unwrap()
+        .loaded
+        .is_empty());
+    request["tools"][0]["tools"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("defer_loading");
+    request["tools"][0]["tools"][0]["description"] = json!("x".repeat(17 * 1024));
+    assert!(DiscoverySession::new(&request, true)
+        .unwrap()
+        .unwrap()
+        .loaded
+        .is_empty());
 }
 
 #[test]

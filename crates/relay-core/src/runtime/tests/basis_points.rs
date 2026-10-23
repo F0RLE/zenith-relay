@@ -10,6 +10,7 @@ use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use tokio::sync::{Notify, Semaphore};
 
+mod cache_context;
 mod catalog_discovery;
 mod quota_rotation;
 mod rate_limits;

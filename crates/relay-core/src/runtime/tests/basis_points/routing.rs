@@ -157,6 +157,24 @@ async fn websocket_routes_a_bps_only_model_through_http_without_trying_native_re
     assert_eq!(native.state.generation_requests.load(Ordering::SeqCst), 0);
     let recorded = crate::poison::mutex(&events);
     assert_eq!(recorded.len(), 2);
+    for (index, event) in recorded.iter().enumerate() {
+        let context = event
+            .routing
+            .as_ref()
+            .unwrap()
+            .cache_context
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            context.baseline,
+            if index == 0 {
+                crate::usage::CacheContextBaseline::FirstObservation
+            } else {
+                crate::usage::CacheContextBaseline::CompletedRequest
+            }
+        );
+        assert!(context.provider.is_none());
+    }
     for event in recorded.iter() {
         assert_eq!(event.transport, crate::UsageTransport::Websocket);
         let transport = event.routing.as_ref().unwrap().transport.as_ref().unwrap();

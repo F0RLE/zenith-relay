@@ -31,6 +31,7 @@ enum AdapterDiagnostic {
     Json(JsonParseDiagnostic),
     Shape(ShapeDiagnostic),
     Schema(SchemaDiagnostic),
+    ToolIdentity(&'static str),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -83,6 +84,11 @@ impl AdapterError {
 
     pub(crate) const fn with_diagnostics_from(mut self, cause: Self) -> Self {
         self.diagnostic = cause.diagnostic;
+        self
+    }
+
+    pub(crate) const fn with_tool_identity_diagnostic(mut self, reason: &'static str) -> Self {
+        self.diagnostic = Some(AdapterDiagnostic::ToolIdentity(reason));
         self
     }
 
@@ -328,6 +334,9 @@ impl fmt::Display for AdapterError {
                 diagnostic.schema_depth,
                 diagnostic.instance_depth
             )?;
+        }
+        if let Some(AdapterDiagnostic::ToolIdentity(reason)) = self.diagnostic {
+            write!(formatter, " (tool_identity_reason={reason})")?;
         }
         Ok(())
     }

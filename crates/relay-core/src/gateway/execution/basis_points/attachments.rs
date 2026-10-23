@@ -14,7 +14,7 @@ use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE};
 use reqwest::StatusCode;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 const MAX_UPLOAD_RESPONSE_BYTES: usize = 256 * 1024;
@@ -124,19 +124,37 @@ where
     F: std::future::Future<Output = Result<String, AttachmentFailure>>,
 {
     let upload = &upload;
-    // Keep input/error order; dropping the request also drops every upload future.
-    let mut pending = stream::iter(jobs)
-        .map(|job| async move {
-            let file_id = match job.job {
-                ImageJob::File(file_id) => file_id,
-                ImageJob::Upload(image) => upload(image).await?,
-            };
-            Ok((job.input_index, job.content_index, file_id))
-        })
-        .buffered(MAX_CONCURRENT_UPLOADS);
-    while let Some(result) = pending.next().await {
-        let (input_index, content_index, file_id) = result?;
-        set_image_part(request_fields, input_index, content_index, &file_id);
+    let mut jobs = jobs.into_iter().enumerate().map(|(index, job)| async move {
+        let file_id = match job.job {
+            ImageJob::File(file_id) => Ok(file_id),
+            ImageJob::Upload(image) => upload(image).await,
+        };
+        (index, job.input_index, job.content_index, file_id)
+    });
+    let mut pending = stream::FuturesUnordered::new();
+    for job in jobs.by_ref().take(MAX_CONCURRENT_UPLOADS) {
+        pending.push(job);
+    }
+    // Refill freed slots without waiting for a slow earlier image. Buffer only
+    // completed IDs/errors so body updates and failures retain input order.
+    let mut completed = BTreeMap::new();
+    let mut next = 0;
+    let mut failed = false;
+    while let Some((index, input_index, content_index, file_id)) = pending.next().await {
+        failed |= file_id.is_err();
+        completed.insert(index, (input_index, content_index, file_id));
+        while let Some((input_index, content_index, file_id)) = completed.remove(&next) {
+            let file_id = file_id?;
+            set_image_part(request_fields, input_index, content_index, &file_id);
+            next += 1;
+        }
+        // Once any failure is known, only finish earlier pending jobs to select
+        // the input-ordered error. Dropping this request drops all upload futures.
+        if !failed {
+            if let Some(job) = jobs.next() {
+                pending.push(job);
+            }
+        }
     }
     Ok(())
 }

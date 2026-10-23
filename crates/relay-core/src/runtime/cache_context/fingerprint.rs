@@ -4,7 +4,7 @@ use crate::usage::{
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
 
 const MAX_FINGERPRINT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_INPUT_ITEMS: usize = 1_024;
@@ -26,7 +26,7 @@ struct InputFingerprint {
 
 impl RequestFingerprint {
     pub(super) fn capture(request: &Value, salt: &[u8; 32]) -> Option<Self> {
-        let mut remaining = MAX_FINGERPRINT_BYTES;
+        let mut fingerprints = JsonFingerprinter::new(salt);
         let mut sections = Vec::new();
         for (section, field) in [
             (CacheContextSection::Model, "model"),
@@ -43,10 +43,14 @@ impl RequestFingerprint {
             (CacheContextSection::ContextManagement, "context_management"),
             (CacheContextSection::Truncation, "truncation"),
         ] {
-            sections.push((
-                section,
-                fingerprint(&request.get(field), salt, &mut remaining)?.0,
-            ));
+            let value = request.get(field).or_else(|| {
+                // BPS exposes the effective effort as a top-level string.
+                // Observe it without changing the provider request shape.
+                (field == "reasoning")
+                    .then(|| request.get("reasoning_effort"))
+                    .flatten()
+            });
+            sections.push((section, fingerprints.fingerprint(&value)?.0));
         }
         for (section, value) in [
             (
@@ -58,7 +62,7 @@ impl RequestFingerprint {
                 request.pointer("/text/verbosity"),
             ),
         ] {
-            sections.push((section, fingerprint(&value, salt, &mut remaining)?.0));
+            sections.push((section, fingerprints.fingerprint(&value)?.0));
         }
         // comparison_response_id requests diagnostics; it does not alter caching.
         let cache_policy = (
@@ -68,7 +72,7 @@ impl RequestFingerprint {
         );
         sections.push((
             CacheContextSection::CachePolicy,
-            fingerprint(&cache_policy, salt, &mut remaining)?.0,
+            fingerprints.fingerprint(&cache_policy)?.0,
         ));
         let mut input = Vec::new();
         let mut input_bytes = 0;
@@ -81,7 +85,7 @@ impl RequestFingerprint {
             return None;
         }
         for item in items {
-            let (digest, bytes) = fingerprint(item, salt, &mut remaining)?;
+            let (digest, bytes) = fingerprints.fingerprint(item)?;
             input.push(InputFingerprint {
                 digest,
                 kind: input_kind(item),
@@ -169,35 +173,54 @@ pub(super) fn identity(salt: &[u8; 32], parts: &[&[u8]]) -> Fingerprint {
     digest.finalize().into()
 }
 
-fn fingerprint(
-    value: &impl Serialize,
-    salt: &[u8; 32],
-    remaining: &mut u64,
-) -> Option<(Fingerprint, u64)> {
-    let mut writer = FingerprintWriter {
-        digest: Sha256::new(),
-        bytes: 0,
-        remaining,
-    };
-    writer.digest.update(salt);
-    serde_json::to_writer(&mut writer, value).ok()?;
-    Some((writer.digest.finalize().into(), writer.bytes))
+struct JsonFingerprinter<'a> {
+    salt: &'a [u8; 32],
+    writer: BufWriter<FingerprintWriter>,
 }
 
-struct FingerprintWriter<'a> {
+impl<'a> JsonFingerprinter<'a> {
+    fn new(salt: &'a [u8; 32]) -> Self {
+        Self {
+            salt,
+            writer: BufWriter::with_capacity(
+                8 * 1024,
+                FingerprintWriter {
+                    digest: Sha256::new(),
+                    bytes: 0,
+                    remaining: MAX_FINGERPRINT_BYTES,
+                },
+            ),
+        }
+    }
+
+    fn fingerprint(&mut self, value: &impl Serialize) -> Option<(Fingerprint, u64)> {
+        // Reuse one small buffer across sections/items. Flush before finalizing
+        // each digest so boundaries, byte counts and the shared budget stay exact.
+        self.writer.get_mut().digest.update(self.salt);
+        serde_json::to_writer(&mut self.writer, value).ok()?;
+        self.writer.flush().ok()?;
+        let inner = self.writer.get_mut();
+        Some((
+            std::mem::take(&mut inner.digest).finalize().into(),
+            std::mem::take(&mut inner.bytes),
+        ))
+    }
+}
+
+struct FingerprintWriter {
     digest: Sha256,
     bytes: u64,
-    remaining: &'a mut u64,
+    remaining: u64,
 }
 
-impl Write for FingerprintWriter<'_> {
+impl Write for FingerprintWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if bytes.len() as u64 > *self.remaining {
+        if bytes.len() as u64 > self.remaining {
             return Err(io::Error::other("fingerprint budget exceeded"));
         }
         self.digest.update(bytes);
         self.bytes += bytes.len() as u64;
-        *self.remaining -= bytes.len() as u64;
+        self.remaining -= bytes.len() as u64;
         Ok(bytes.len())
     }
 
@@ -222,4 +245,86 @@ fn input_kind(item: &Value) -> CacheInputKind {
             _ => CacheInputKind::Other,
         },
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn bps_cache_fingerprint_detects_effective_reasoning_changes() {
+        let salt = [7; 32];
+        let before =
+            RequestFingerprint::capture(&json!({"reasoning_effort":"low","input":[]}), &salt)
+                .unwrap();
+        let after =
+            RequestFingerprint::capture(&json!({"reasoning_effort":"high","input":[]}), &salt)
+                .unwrap();
+        assert_eq!(
+            after.changes_from(&before),
+            vec![CacheContextSection::Reasoning]
+        );
+    }
+
+    #[test]
+    fn buffered_fingerprints_match_original_json_bytes_and_boundaries() {
+        let salt = [7; 32];
+        let mut fingerprints = JsonFingerprinter::new(&salt);
+        let mut bytes = 0;
+        for value in [
+            Value::Null,
+            json!({"text":"Synthetic \"quotes\", \\paths,\n\tкириллица\u{0}"}),
+            serde_json::from_str::<Value>(r#"{"large":90071992547409931234567,"small":1e-100}"#)
+                .unwrap(),
+            json!({"text":"Synthetic \"escaped\" text. ".repeat(4096)}),
+            json!([true, false, null, {"ordered":1,"keys":2}]),
+        ] {
+            let serialized = serde_json::to_vec(&value).unwrap();
+            let mut expected = Sha256::new();
+            expected.update(salt);
+            expected.update(&serialized);
+            let expected: Fingerprint = expected.finalize().into();
+            assert_eq!(
+                fingerprints.fingerprint(&value),
+                Some((expected, serialized.len() as u64))
+            );
+            bytes += serialized.len() as u64;
+            assert_eq!(
+                fingerprints.writer.get_ref().remaining,
+                MAX_FINGERPRINT_BYTES - bytes
+            );
+        }
+    }
+
+    #[test]
+    fn buffering_does_not_bypass_aggregate_byte_limits_or_serialization_errors() {
+        let salt = [7; 32];
+        let mut fingerprints = JsonFingerprinter::new(&salt);
+        fingerprints.writer.get_mut().remaining = 8;
+        assert!(fingerprints.fingerprint(&Value::Null).is_some());
+        assert!(fingerprints.fingerprint(&Value::Null).is_some());
+        assert!(fingerprints.fingerprint(&Value::Null).is_none());
+
+        let mut fingerprints = JsonFingerprinter::new(&salt);
+        fingerprints.writer.get_mut().remaining = 1;
+        assert!(fingerprints.fingerprint(&json!("x")).is_none());
+
+        struct Invalid;
+        impl Serialize for Invalid {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("synthetic serialization failure"))
+            }
+        }
+        assert!(JsonFingerprinter::new(&salt)
+            .fingerprint(&Invalid)
+            .is_none());
+        assert!(RequestFingerprint::capture(
+            &json!({"input":vec![Value::Null; MAX_INPUT_ITEMS + 1]}),
+            &salt
+        )
+        .is_none());
+    }
+
+    mod measurements;
 }

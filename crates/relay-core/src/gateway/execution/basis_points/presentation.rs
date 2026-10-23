@@ -1,5 +1,5 @@
 //! A complete trusted catalog with a smaller, deterministic model-facing view.
-use super::catalog::{client_tool_call_name, ClientTool};
+use super::catalog::{client_tool_call_name, selected_tools, ClientTool};
 use super::prepare::describe_tools;
 use super::schema::{parameter_schema, prompt_schema, PROMPT_SCHEMA_NOTATION};
 use crate::protocol::AdapterError;
@@ -73,6 +73,12 @@ pub(super) fn loaded_names(tools: &[&ClientTool], request: &Value) -> BTreeSet<S
         .collect();
     let mut eager_bytes = 0;
     let mut eager_count = 0;
+    // Keep a small explicitly selected tool ready without a discovery-only
+    // generation. The caller already restricted this slice to permitted tools;
+    // explicit deferral and the existing count/byte budgets still apply.
+    let explicit_selection = request["tool_choice"]["type"]
+        .as_str()
+        .is_some_and(|kind| matches!(kind, "function" | "custom" | "allowed_tools"));
     let mut ordered = tools.to_vec();
     ordered.sort_by_cached_key(|tool| tool.key());
     for tool in ordered {
@@ -82,7 +88,7 @@ pub(super) fn loaded_names(tools: &[&ClientTool], request: &Value) -> BTreeSet<S
                 tool.name.as_str(),
                 "exec_command" | "apply_patch" | "write_stdin"
             );
-        if deferred == Some(true) || !(deferred == Some(false) || core_tool) {
+        if deferred == Some(true) || !(deferred == Some(false) || core_tool || explicit_selection) {
             continue;
         }
         let bytes = describe_tools(&[tool], false).len();
@@ -132,11 +138,15 @@ pub(super) fn describe_catalog(tools: &[&ClientTool], request: &Value) -> String
     text
 }
 
-pub(super) fn loaded_contracts(tools: &[ClientTool], request: &Value) -> Option<String> {
-    if !uses_discovery(tools, request) {
+pub(super) fn loaded_contracts(
+    catalog: &[ClientTool],
+    callable: &[ClientTool],
+    request: &Value,
+) -> Option<String> {
+    if !uses_discovery(catalog, request) {
         return None;
     }
-    let mut ordered = tools.iter().collect::<Vec<_>>();
+    let mut ordered = callable.iter().collect::<Vec<_>>();
     ordered.sort_by_cached_key(|tool| tool.key());
     let loaded = loaded_names(&ordered, request);
     let known = ordered
@@ -174,7 +184,8 @@ pub(super) fn diagnostics(tools: &[ClientTool], request: &Value) -> BasisPointsC
     ordered.sort_by_cached_key(|tool| tool.key());
     let discovery = uses_discovery(tools, request);
     let full = requested_mode(request) == Ok(CatalogMode::Full);
-    let loaded = loaded_names(&ordered, request);
+    let callable = selected_tools(request, tools);
+    let loaded = loaded_names(&callable.iter().collect::<Vec<_>>(), request);
     BasisPointsCatalogDiagnostics {
         mode: if discovery {
             "discovery"

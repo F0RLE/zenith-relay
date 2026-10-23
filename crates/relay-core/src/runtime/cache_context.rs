@@ -1,4 +1,4 @@
-//! Bounded, process-local comparisons for native Responses only.
+//! Bounded, process-local comparisons for Responses account transports.
 //! No content, identity, salt, or digest is serialized or logged.
 
 use super::{AccountTransport, ExecutorRoute, GatewayRuntime};
@@ -185,6 +185,7 @@ impl CacheContextStore {
             active.prepared = candidate.map(|candidate| store::PreparedRequest {
                 candidate,
                 upstream: upstream.clone(),
+                observed_at_ms: now_ms,
             });
             if diagnostics.baseline == CacheContextBaseline::CompletedRequest {
                 diagnostics.candidate_changed = candidate
@@ -305,7 +306,9 @@ impl GatewayRuntime {
             || !route.adapter.is_passthrough()
             || !matches!(
                 route.account_transport,
-                AccountTransport::NativeResponses | AccountTransport::Siwc
+                AccountTransport::NativeResponses
+                    | AccountTransport::Siwc
+                    | AccountTransport::ExcelBasisPoints
             )
         {
             return;
@@ -328,6 +331,23 @@ impl GatewayRuntime {
 
     pub(crate) fn finish_cache_context(&self, event: &mut UsageEvent, now_ms: u64) {
         self.cache_context_store.finish(event, now_ms);
+    }
+
+    /// Discovery preloads and attachment resolution can change the prepared
+    /// BPS body. Refresh the bounded snapshot at each actual dispatch, including
+    /// discovery continuations; never modify the wire request or collect when off.
+    pub(crate) fn observe_basis_points_dispatch(&self, route: &ExecutorRoute, upstream: &Value) {
+        if route.account_transport != AccountTransport::ExcelBasisPoints {
+            return;
+        }
+        if let Some(observation) = route.cache_context_observation.as_ref() {
+            self.cache_context_store.prepare(
+                observation,
+                upstream,
+                &route.candidate_id,
+                super::runtime_now_ms(),
+            );
+        }
     }
 }
 

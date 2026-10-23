@@ -1165,7 +1165,14 @@ fn current_tools_override_history_and_keep_namespaces() {
     let instructions = prepared["input"][0]["content"][0]["text"].as_str().unwrap();
     assert!(instructions.contains("functions.exec (custom): LATEST_DEFINITION"));
     assert!(!instructions.contains("OLD_DEFINITION"));
-    assert!(!instructions.contains("clock.sleep"));
+    assert!(instructions.contains("clock.sleep"));
+    let denied = tool_response(r#"{"tool":"clock.sleep","args":{}}"#);
+    assert_eq!(
+        translate_response(&denied, &request)
+            .unwrap_err()
+            .parameter(),
+        Some("output.run_officejs.tool_choice")
+    );
     assert!(prepared["input"]
         .as_array()
         .unwrap()

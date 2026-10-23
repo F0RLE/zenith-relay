@@ -1,6 +1,7 @@
 use super::*;
 
 mod batch;
+mod identity;
 mod lookup_recovery;
 mod streaming;
 mod text_only;
@@ -38,6 +39,7 @@ async fn catalog_discovery_uses_one_budget_and_preserves_client_tool_roundtrip()
         (true, true, true),
     ] {
         let mut request = catalog_request(stream);
+        request["prompt_cache_key"] = json!("synthetic-discovery-cache");
         request["tools"].as_array_mut().unwrap().push(json!({
             "type":"function","name":"later","description":"Previously discovered but not called",
             "parameters":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}
@@ -138,6 +140,17 @@ async fn catalog_discovery_uses_one_budget_and_preserves_client_tool_roundtrip()
                 Some(crate::AttemptOutcome::ToolDiscovery)
             );
             assert!(events[1].success);
+            let sent = crate::poison::mutex(&server.state.generation_bodies);
+            for (event, body) in events.iter().zip(sent.iter()) {
+                let context = event.routing.as_ref().unwrap().cache_context.as_ref();
+                assert_eq!(context.is_some(), debug);
+                if let Some(context) = context {
+                    assert_eq!(
+                        context.upstream_history.input_items,
+                        Some(body["input"].as_array().unwrap().len() as u32)
+                    );
+                }
+            }
             if stream {
                 assert!(events[1].ttft_ms.is_some());
             } else {
@@ -202,6 +215,26 @@ async fn catalog_discovery_uses_one_budget_and_preserves_client_tool_roundtrip()
         let next_input = bodies.last().unwrap()["input"].to_string();
         assert!(next_input.contains("Previously discovered but not called"));
         let events = crate::poison::mutex(&events);
+        if debug {
+            let context = events
+                .last()
+                .unwrap()
+                .routing
+                .as_ref()
+                .unwrap()
+                .cache_context
+                .as_ref()
+                .unwrap();
+            assert_eq!(
+                context.baseline,
+                crate::usage::CacheContextBaseline::CompletedRequest
+            );
+            assert_eq!(context.candidate_changed, Some(false));
+            assert_eq!(
+                context.upstream_history.input_items,
+                Some(bodies.last().unwrap()["input"].as_array().unwrap().len() as u32)
+            );
+        }
         let catalog = events
             .last()
             .unwrap()

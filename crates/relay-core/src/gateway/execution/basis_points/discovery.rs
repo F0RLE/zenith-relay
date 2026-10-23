@@ -21,8 +21,7 @@ pub(in crate::gateway::execution) fn capture(request: &Value, tool_use: &mut Too
         return;
     }
     if let Ok(tools) = client_tools(request) {
-        tool_use.basis_points_catalog =
-            Some(diagnostics(&selected_tools(request, &tools), request));
+        tool_use.basis_points_catalog = Some(diagnostics(&tools, request));
         tool_use.deferred_tool_search = false;
     }
 }
@@ -46,8 +45,15 @@ impl DiscoverySession {
         request: &Value,
         diagnostics_enabled: bool,
     ) -> Result<Option<Self>, AdapterError> {
-        let tools = selected_tools(request, &client_tools(request)?);
+        let tools = client_tools(request)?;
         if !uses_discovery(&tools, request) {
+            return Ok(None);
+        }
+        // Catalog presentation is stable across turn-local restrictions. Keep
+        // lookup/preload authority restricted without switching presentation
+        // modes merely because the current turn permits fewer tools.
+        let tools = selected_tools(request, &tools);
+        if tools.is_empty() {
             return Ok(None);
         }
         let loaded = loaded_names(&tools.iter().collect::<Vec<_>>(), request);

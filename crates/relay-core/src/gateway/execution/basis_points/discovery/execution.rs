@@ -70,11 +70,9 @@ pub(in crate::gateway::execution) fn prepare_dispatch(
             model,
             &upstream["input"],
         );
-        session.prompt_prefix = prefix_scope.map(|scope| {
-            (
-                scope,
-                super::super::prepare::tool_instructions(&session.tools, original),
-            )
+        session.prompt_prefix = prefix_scope.and_then(|scope| {
+            super::super::prepare::prepared_tool_instructions(original, &upstream)
+                .map(|text| (scope, text.to_owned()))
         });
         let loaded = runtime.basis_points_catalog_store.load(
             local_key_id,
@@ -306,6 +304,7 @@ pub(in crate::gateway) async fn dispatch_continuation(
     owner: &crate::runtime::AuthorizationIncarnation,
     upstream: &Value,
 ) -> Result<AuthorizedResponse, crate::runtime::AuthorizedRequestError> {
+    runtime.observe_basis_points_dispatch(route, upstream);
     let request = runtime
         .request_client(&route.candidate_id)
         .post(route.upstream_url.clone())

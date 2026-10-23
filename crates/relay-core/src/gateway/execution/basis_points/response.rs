@@ -124,6 +124,28 @@ pub(super) fn validate_tool_completion(item: &Value) -> Result<(), AdapterError>
     Ok(())
 }
 
+fn invalid_tool_identity(reason: &'static str) -> AdapterError {
+    invalid_tool_output("output.run_officejs.tool").with_tool_identity_diagnostic(reason)
+}
+
+fn transport_tool_name(envelope: &Map<String, Value>) -> Result<&str, AdapterError> {
+    let name = envelope
+        .get("tool")
+        .or_else(|| envelope.get("name"))
+        .ok_or_else(|| invalid_tool_identity("missing_name"))?
+        .as_str()
+        .filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| invalid_tool_identity("invalid_name"))?;
+    if envelope.contains_key("tool")
+        && envelope
+            .get("name")
+            .is_some_and(|other| other.as_str() != Some(name))
+    {
+        return Err(invalid_tool_identity("conflicting_names"));
+    }
+    Ok(name)
+}
+
 pub(super) fn parse_transport_envelope(
     tool_call_item: &Map<String, Value>,
 ) -> Result<(Map<String, Value>, bool), AdapterError> {
@@ -193,6 +215,16 @@ pub(super) fn parse_transport_envelope(
         inner = parse_json_object(Some(nested_code))
             .and_then(|nested_code_value| nested_code_value.as_object().cloned())
             .ok_or_else(|| invalid_tool_output("output.run_officejs.code"))?;
+    }
+    // Normalize only the already-supported legacy envelope field aliases.
+    // Discovery and client translation must see the same identity and payload;
+    // never infer a tool name or inspect referenced/custom payload contents here.
+    let name = transport_tool_name(&inner)?.to_string();
+    inner.insert("tool".to_string(), Value::String(name));
+    if !inner.contains_key("args") {
+        if let Some(arguments) = inner.get("arguments").cloned() {
+            inner.insert("args".to_string(), arguments);
+        }
     }
     Ok((inner, direct_call))
 }
@@ -264,18 +296,23 @@ pub(in crate::gateway) fn translate_response_value(
             continue;
         }
         let (inner, direct_call) = parse_transport_envelope(output_object)?;
-        let tool_name = inner
-            .get("tool")
-            .or_else(|| inner.get("name"))
-            .and_then(Value::as_str)
-            .filter(|tool_name| !tool_name.is_empty())
-            .ok_or_else(|| invalid_tool_output("output.run_officejs.tool"))?;
+        let tool_name = transport_tool_name(&inner)?;
         let tool = if let Some(tool) = tool_spec(&tools, tool_name) {
             tool
         } else if tool_spec(&all_tools, tool_name).is_some() {
             return Err(invalid_tool_output("output.run_officejs.tool_choice"));
         } else {
-            return Err(invalid_tool_output("output.run_officejs.tool"));
+            let reason = if all_tools
+                .iter()
+                .filter(|tool| tool.name == tool_name)
+                .count()
+                > 1
+            {
+                "ambiguous_name"
+            } else {
+                "unknown_tool"
+            };
+            return Err(invalid_tool_identity(reason));
         };
         let call_id = output_object
             .get("call_id")
@@ -321,7 +358,7 @@ pub(in crate::gateway) fn translate_response_value(
                 Some(arguments @ Value::String(code)) if !direct_call => {
                     if let Some(mut call) = parse_direct_tool_call(code) {
                         if call.get("tool").and_then(Value::as_str) != Some(tool_name) {
-                            return Err(invalid_tool_output("output.run_officejs.tool"));
+                            return Err(invalid_tool_identity("reference_name_mismatch"));
                         }
                         call.remove("args")
                             .ok_or_else(|| invalid_tool_output("output.run_officejs.args.object"))?

@@ -256,6 +256,37 @@ fn failure_wrong_candidate_and_retry_do_not_replace_baseline() {
 }
 
 #[test]
+fn completion_uses_the_final_dispatched_prefix_without_including_generation_time() {
+    let store = CacheContextStore::default();
+    let first = payload();
+    complete(&store, &first, "first", 10);
+    let observed = begin(&store, &first, "next", 20);
+    let initial = store.prepare(&observed, &first, "candidate-a", 21);
+    let mut upstream = first.clone();
+    upstream["input"].as_array_mut().unwrap().push(json!({
+        "type":"function_call_output", "call_id":"synthetic-discovery", "output":"Synthetic contract"
+    }));
+    store.prepare(&observed, &upstream, "candidate-a", 24);
+    let mut completed = event("next", "candidate-a", initial, true);
+    store.finish(&mut completed, 99);
+    let context = completed.routing.unwrap().cache_context.unwrap();
+    assert_eq!(
+        context.upstream_history.comparison,
+        CacheHistoryComparison::Appended
+    );
+    assert_eq!(context.upstream_history.input_items, Some(3));
+    assert_eq!(context.candidate_changed, Some(false));
+    assert_eq!(context.previous_completed_age_ms, Some(13));
+
+    let next = begin(&store, &first, "last", 100);
+    let context = store.prepare(&next, &upstream, "candidate-a", 101);
+    assert_eq!(
+        context.upstream_history.comparison,
+        CacheHistoryComparison::Unchanged
+    );
+}
+
+#[test]
 fn overlapping_requests_are_corrected_at_completion_and_never_become_baseline() {
     for reverse in [false, true] {
         let store = CacheContextStore::default();

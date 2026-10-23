@@ -150,6 +150,9 @@ pub(super) async fn dispatch_request_attempt(
         discovery_body =
             Some(serde_json::from_slice(&request_body).expect("prepared JSON is valid"));
     }
+    if let Some(body) = discovery_body.as_ref() {
+        runtime.observe_basis_points_dispatch(&route, body);
+    }
     let upstream_stream = stream || (account_route && !basis_points_route);
     let started = Instant::now();
     if let Some(preparation_started) = preparation_started {

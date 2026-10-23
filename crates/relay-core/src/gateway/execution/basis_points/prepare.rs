@@ -71,6 +71,8 @@ pub(super) fn tool_instructions(tools: &[ClientTool], request: &Value) -> String
          Interpret that result as the named client tool output. \
          Do not replay completed client calls merely to reconstruct history. \
          Repeated observations or new calls to the same tool are allowed when the task needs them; use a fresh invocation, not a replay of an old call. \
+         The catalog describes client tool contracts, not permission to execute them. \
+         Follow the current turn's Client tool_choice restrictions even when other contracts remain in context. \
          The available client tools are authoritative:\n{catalog}",
     )
 }
@@ -173,13 +175,28 @@ fn is_named_tool(tool: &ClientTool, bare: &str) -> bool {
     tool.name == bare || tool.name.ends_with(&suffix)
 }
 
-/// Keep a scoped historical catalog in context without restoring tool authority.
-pub(super) fn restore_text_only_prefix(request: &Value, upstream: &mut Value, prefix: String) {
-    let index = usize::from(
+fn tool_instruction_index(request: &Value) -> usize {
+    usize::from(
         request["instructions"]
             .as_str()
             .is_some_and(|text| !text.trim().is_empty()),
-    );
+    )
+}
+
+/// Borrow the already-rendered prologue, including its complete current catalog.
+pub(super) fn prepared_tool_instructions<'a>(
+    request: &Value,
+    upstream: &'a Value,
+) -> Option<&'a str> {
+    upstream["input"]
+        .get(tool_instruction_index(request))?
+        .pointer("/content/0/text")?
+        .as_str()
+}
+
+/// Keep a scoped historical catalog in context without restoring tool authority.
+pub(super) fn restore_text_only_prefix(request: &Value, upstream: &mut Value, prefix: String) {
+    let index = tool_instruction_index(request);
     let guard = tool_instructions(&[], request);
     let expected = text_message("developer", "input_text", guard.clone());
     let Some(input) = upstream["input"].as_array_mut() else {
@@ -311,7 +328,7 @@ pub(in crate::gateway::execution) fn prepare_request_with_timing(
     prologue.push(text_message(
         "developer",
         "input_text",
-        tool_instructions(&callable, request),
+        tool_instructions(&all_tools, request),
     ));
     if let Some(structured) = structured {
         prologue.push(text_message(
@@ -321,7 +338,7 @@ pub(in crate::gateway::execution) fn prepare_request_with_timing(
         ));
     }
     input_items.splice(0..0, prologue);
-    if let Some(contracts) = super::presentation::loaded_contracts(&callable, request) {
+    if let Some(contracts) = super::presentation::loaded_contracts(&all_tools, &callable, request) {
         // Newly needed contracts belong after history, never in the stable
         // index prefix. Loading one tool must not rewrite that prefix.
         input_items.push(text_message("developer", "input_text", contracts));
@@ -329,9 +346,14 @@ pub(in crate::gateway::execution) fn prepare_request_with_timing(
     let mut turn_policy = String::new();
     if let Some(choice) = request_object
         .get("tool_choice")
-        .filter(|choice| !matches!(choice.as_str(), Some("auto" | "none")))
+        .filter(|choice| choice.as_str() != Some("auto"))
     {
         turn_policy.push_str(&format!("Client tool_choice: {choice}."));
+    }
+    if !all_tools.is_empty() && callable.is_empty() {
+        turn_policy.push_str(
+            " No client tools are permitted this turn. Do not call any tools, including the transport or catalog lookup. Return the answer as assistant text.",
+        );
     }
     if !callable.is_empty()
         && request_object.get("parallel_tool_calls") == Some(&Value::Bool(false))
