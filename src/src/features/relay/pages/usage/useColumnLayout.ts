@@ -11,7 +11,7 @@ export type ErrorColumnId = typeof ERROR_COLUMN_IDS[number];
 type ColumnDrag<ColumnId extends string> = { column: ColumnId; pointerId: number; target: ColumnId; after: boolean };
 export const REQUEST_TABLE_LAYOUT_KEY = "relay.usageRequestTableLayout";
 export const REQUEST_COLUMN_MAX_WIDTH = 480;
-export const REQUEST_COLUMN_MIN_WIDTH: Record<RequestColumnId, number> = { time: 130, status: 100, model: 82, connection: 100, timing: 96, tokens: 72, equivalent: 92, request: 96 };
+export const REQUEST_COLUMN_MIN_WIDTH: Record<RequestColumnId, number> = { time: 130, status: 64, model: 82, connection: 100, timing: 96, tokens: 72, equivalent: 92, request: 96 };
 
 export function loadRequestTableLayout(): RequestTableLayout {
   const fallback = { order: [...REQUEST_COLUMN_IDS], widths: {} } satisfies RequestTableLayout;

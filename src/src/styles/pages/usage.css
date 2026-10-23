@@ -549,14 +549,23 @@
   font-variant-numeric: tabular-nums;
 }
 
-.usage-request-table col[data-column="time"] { width: 14%; }
-.usage-request-table col[data-column="status"] { width: 13%; }
-.usage-request-table col[data-column="model"] { width: 17%; }
-.usage-request-table col[data-column="connection"] { width: 14%; }
-.usage-request-table col[data-column="timing"] { width: 13%; }
-.usage-request-table col[data-column="tokens"] { width: 8%; }
+.usage-request-table col[data-column="time"] { width: 16%; }
+.usage-request-table col[data-column="status"] { width: 64px; }
+.usage-request-table col[data-column="model"] { width: 21%; }
+.usage-request-table col[data-column="connection"] { width: 20%; }
+.usage-request-table col[data-column="timing"] { width: 15%; }
+.usage-request-table col[data-column="tokens"] { width: 7%; }
 .usage-request-table col[data-column="equivalent"] { width: 10%; }
 .usage-request-table col[data-column="request"] { width: 11%; }
+
+.usage-request-connection {
+  display: block;
+  min-width: 0;
+}
+
+.usage-request-table .usage-model-value {
+  display: flex;
+}
 
 .usage-request-status {
   display: grid;
@@ -644,6 +653,14 @@
 .usage-column-heading:focus-visible { color: var(--relay-text); }
 
 @container usage (min-width: 581px) {
+  .usage-request-table :is(th, td)[data-column="status"] { padding-inline: 8px; }
+  .usage-request-connection,
+  .usage-request-table .usage-model-value code {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .usage-sortable-table :is(th, td):is([data-column="time"], [data-column="model"], [data-column="name"], [data-column="connection"]) {
     text-align: left;
   }
@@ -1871,13 +1888,9 @@
   .usage-scope-controls > .relay-icon-button { justify-self: end; }
   .usage-scope-controls[data-filter-count="3"] > :nth-child(3) { grid-column: 1 / -1; }
   .usage-request-table [data-column="tokens"] { display: none; }
-  .usage-request-table col[data-column="time"] { width: 14%; }
-  .usage-request-table col[data-column="status"] { width: 14%; }
-  .usage-request-table col[data-column="model"] { width: 18%; }
-  .usage-request-table col[data-column="connection"] { width: 15%; }
-  .usage-request-table col[data-column="timing"] { width: 14%; }
-  .usage-request-table col[data-column="equivalent"] { width: 11%; }
-  .usage-request-table col[data-column="request"] { width: 14%; }
+  .usage-request-table col[data-column="connection"] { width: 19%; }
+  .usage-request-table col[data-column="equivalent"] { width: 12%; }
+  .usage-request-table col[data-column="request"] { width: 17%; }
   .usage-sortable-table th { font-size: 11px; }
   .usage-sortable-table th,
   .usage-sortable-table td { padding-inline: 6px; }
