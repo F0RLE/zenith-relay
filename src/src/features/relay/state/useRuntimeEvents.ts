@@ -45,12 +45,10 @@ export function useRuntimeEvents({
     let unlistenUsage: (() => void) | undefined;
     let unlistenRuntimeActivity: (() => void) | undefined;
     let runtimeActivityFrame: number | undefined;
-    let runtimeActivityFallbackTimer: number | undefined;
     let runtimeActivityFlushQueued = false;
     let pendingRuntimeActivity: RuntimeActivityState | null = null;
     const flushRuntimeActivity = () => {
       runtimeActivityFrame = undefined;
-      runtimeActivityFallbackTimer = undefined;
       runtimeActivityFlushQueued = false;
       if (!active || modeRef.current !== "local") {
         pendingRuntimeActivity = null;
@@ -82,21 +80,20 @@ export function useRuntimeEvents({
       });
     };
     const scheduleRuntimeActivityFlush = () => {
-      if (runtimeActivityFlushQueued) return;
+      if (runtimeActivityFlushQueued || document.visibilityState !== "visible") return;
       runtimeActivityFlushQueued = true;
-      if (document.visibilityState === "visible") {
-        runtimeActivityFrame = window.requestAnimationFrame(flushRuntimeActivity);
-      } else {
-        // Background documents may throttle animation frames indefinitely.
-        runtimeActivityFallbackTimer = window.setTimeout(flushRuntimeActivity, 16);
-      }
+      runtimeActivityFrame = window.requestAnimationFrame(flushRuntimeActivity);
     };
     const handleActivityVisibilityChange = () => {
-      if (document.visibilityState === "hidden" && runtimeActivityFrame !== undefined) {
-        window.cancelAnimationFrame(runtimeActivityFrame);
+      if (document.visibilityState !== "visible") {
+        if (runtimeActivityFrame !== undefined) window.cancelAnimationFrame(runtimeActivityFrame);
         runtimeActivityFrame = undefined;
-        flushRuntimeActivity();
+        runtimeActivityFlushQueued = false;
+        return;
       }
+      // Events still update the latest per-candidate overlay while hidden.
+      // Publish it once on return instead of cloning/rendering every 16 ms.
+      if (pendingRuntimeActivity) scheduleRuntimeActivityFlush();
     };
     document.addEventListener("visibilitychange", handleActivityVisibilityChange);
     const scheduleUsageRefresh = () => {
@@ -171,7 +168,6 @@ export function useRuntimeEvents({
       if (runtimeRefreshTimer !== undefined) window.clearTimeout(runtimeRefreshTimer);
       if (usageRefreshTimer !== undefined) window.clearTimeout(usageRefreshTimer);
       if (runtimeActivityFrame !== undefined) window.cancelAnimationFrame(runtimeActivityFrame);
-      if (runtimeActivityFallbackTimer !== undefined) window.clearTimeout(runtimeActivityFallbackTimer);
       pendingRuntimeActivity = null;
       document.removeEventListener("visibilitychange", handleActivityVisibilityChange);
       unlisten?.();

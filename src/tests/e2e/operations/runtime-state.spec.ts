@@ -253,7 +253,7 @@ test("Overview restores the last analytics snapshot when re-entered", async ({ p
   await expect(page.locator(".overview-analytics")).toHaveAttribute("aria-busy", "false");
 });
 
-test("open request details follow the terminal fallback result", async ({ page }) => {
+test("open send details never adopt a later physical send of the same request", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, usageFailure: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
@@ -277,10 +277,17 @@ test("open request details follow the terminal fallback result", async ({ page }
   });
   await emitTauriEvent(page, "zenith-state-changed", null);
 
+  // The refreshed page contains send 2. The open dialog still belongs to
+  // send 1, even though both sends share the same client request ID.
+  await expect(page.getByRole("row").filter({ has: page.getByRole("button", { name: "Request details: req_synthetic_local" }) }).locator('td[data-column="timing"]')).toHaveText("128 ms / 16.2 s");
+  await expect(dialog.getByText("Failed", { exact: true })).toBeVisible();
+  await expect(error.locator(".request-outcome-heading > code")).toHaveText("HTTP 502");
+  await expect(dialog.getByText("428 ms", { exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
   await expect(dialog.getByText("Success", { exact: true })).toBeVisible();
   await expect(dialog.locator(".request-details-error")).toHaveCount(0);
   await expect(dialog.getByText("16.2 s", { exact: true })).toBeVisible();
-  await expect(page.getByRole("row").filter({ has: page.getByRole("button", { name: "Request details: req_synthetic_local" }) }).locator('td[data-column="timing"]')).toHaveText("128 ms / 16.2 s");
 });
 
 test("switching modes ignores a late failure from the previous mode", async ({ page }) => {

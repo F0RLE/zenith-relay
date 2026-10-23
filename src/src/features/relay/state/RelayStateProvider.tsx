@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { setWindowBackgroundColor } from "../../../platform/desktop";
@@ -12,7 +12,7 @@ import { useRelayPreferences } from "./useRelayPreferences";
 import { useRelayRuntime } from "./useRelayRuntime";
 import { useRelayUsage } from "./useRelayUsage";
 import { RelayStateContexts, type PerformOptions, type RelayContextValue, type RelayUsageContextValue } from "./relayStateContext";
-import { projectRuntimeAccountLabels } from "./runtimeDisplay";
+import { createRuntimeAccountLabelProjector } from "./runtimeDisplay";
 
 export { useRelayState } from "./relayStateContext";
 export type { Feedback } from "./relayStateContext";
@@ -50,26 +50,6 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     resetUsage,
     reportErrorFeedback,
   });
-  const prefetchedUsageMode = useRef<"local" | null>(null);
-
-  // Warm the default Usage view once the runtime snapshot is ready. The
-  // result is retained by useRelayUsage, so opening the page is immediate;
-  // UsagePage still performs its normal background refresh afterwards.
-  useEffect(() => {
-    if (!runtime || mode === "hosted") return;
-    if (prefetchedUsageMode.current === mode) return;
-    prefetchedUsageMode.current = mode;
-    const query = {
-      page: 1,
-      pageSize: 50,
-      includeEvents: false,
-      includeModels: false,
-      includePoolMembers: false,
-    };
-    void loadLocalUsage(query).catch(() => {
-      // UsagePage retries and reports the error when it is opened.
-    });
-  }, [loadLocalUsage, mode, runtime]);
   const {
     onboardingComplete,
     finishOnboarding,
@@ -192,9 +172,10 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     });
   }, [accountIdentitiesVisible, accountIndex, canRevealAccountIdentities, mode, revealedAccountIdentities]);
 
+  const projectAccountLabels = useMemo(createRuntimeAccountLabelProjector, []);
   const displayRuntime = useMemo(
-    () => projectRuntimeAccountLabels(runtime, accountDisplayName),
-    [accountDisplayName, runtime],
+    () => projectAccountLabels(runtime, accountDisplayName),
+    [accountDisplayName, projectAccountLabels, runtime],
   );
   const relayContextValue = useMemo<RelayContextValue>(() => ({
     mode,

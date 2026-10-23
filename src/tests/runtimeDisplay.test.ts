@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { AccountSummary, RuntimeSnapshot } from "../src/features/relay/api/types";
-import { projectRuntimeAccountLabels } from "../src/features/relay/state/runtimeDisplay";
+import { createRuntimeAccountLabelProjector, projectRuntimeAccountLabels } from "../src/features/relay/state/runtimeDisplay";
 
 function account(overrides: Partial<AccountSummary> = {}): AccountSummary {
   return {
@@ -82,5 +82,49 @@ describe("runtime account display projection", () => {
     expect(projected?.accounts).toBe(snapshot.accounts);
     expect(projected?.accounts[0]).toBe(first);
     expect(projected?.accounts[1]).toBe(second);
+  });
+
+  test("activity-only snapshots reuse one account projection instead of cloning every account again", () => {
+    const snapshot = runtime(Array.from({ length: 500 }, (_, index) => account({ id: `account-${index}` })));
+    let baselineCalls = 0;
+    let memoizedCalls = 0;
+    const baselineName = () => { baselineCalls += 1; return "Hidden account"; };
+    const memoizedName = () => { memoizedCalls += 1; return "Hidden account"; };
+    const project = createRuntimeAccountLabelProjector();
+    const initial = project(snapshot, memoizedName);
+    for (let revision = 1; revision <= 100; revision += 1) {
+      const updated = { ...snapshot, gateway: { ...snapshot.gateway, candidateCount: revision } };
+      projectRuntimeAccountLabels(updated, baselineName);
+      const displayed = project(updated, memoizedName);
+      expect(displayed?.accounts).toBe(initial?.accounts);
+      expect(displayed?.gateway).toBe(updated.gateway);
+    }
+    expect(baselineCalls).toBe(50_000);
+    expect(memoizedCalls).toBe(500);
+    expect(snapshot.accounts[0].label).toBe("Imported account name");
+  });
+
+  test("new account facts invalidate the projection even if labels stay unchanged", () => {
+    const project = createRuntimeAccountLabelProjector();
+    const snapshot = runtime([account()]);
+    const name = () => "Hidden account";
+    const first = project(snapshot, name);
+    const changed = runtime([{ ...snapshot.accounts[0], inPool: false, health: "requires_reauth" }]);
+    const second = project(changed, name);
+    expect(second?.accounts).not.toBe(first?.accounts);
+    expect(second?.accounts[0]).toMatchObject({ inPool: false, health: "requires_reauth" });
+  });
+
+  test("privacy changes and mode clearing cannot reuse old visible identities", () => {
+    const project = createRuntimeAccountLabelProjector();
+    const snapshot = runtime([account()]);
+    const visibleName = () => "Synthetic visible name";
+    let hiddenCalls = 0;
+    const hiddenName = () => { hiddenCalls += 1; return "Hidden account"; };
+    expect(project(snapshot, visibleName)?.accounts[0].label).toBe("Synthetic visible name");
+    expect(project(snapshot, hiddenName)?.accounts[0].label).toBe("Hidden account");
+    expect(project(null, hiddenName)).toBeNull();
+    expect(project(snapshot, hiddenName)?.accounts[0].label).toBe("Hidden account");
+    expect(hiddenCalls).toBe(2);
   });
 });

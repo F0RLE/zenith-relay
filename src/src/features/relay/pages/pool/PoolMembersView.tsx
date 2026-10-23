@@ -72,7 +72,8 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
       ? "∞"
       : formatNumber(providerCredits.availableCredits, i18n.resolvedLanguage ?? i18n.language, { maximumFractionDigits: 1 });
   const visibleModelIds = runtime?.gateway.visibleModelIds ?? EMPTY_VISIBLE_MODELS;
-  const sourceMembers = members.filter((member): member is Extract<Member, { kind: "source" }> => member.kind === "source");
+  // Statistics follow inventory facts, not the activity-driven display order.
+  const sourceMembers = useMemo(() => poolMembers.filter((member): member is Extract<Member, { kind: "source" }> => member.kind === "source"), [poolMembers]);
   const { stats: sourceStats, refresh: readSourceStats } = useSourceStats(mode, sourceMembers);
   const memberTimestamps = useMemo(() => members.flatMap((member) => [
     ...(member.kind === "account" ? [

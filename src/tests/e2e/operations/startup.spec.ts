@@ -34,33 +34,77 @@ for (const appearance of [
   });
 }
 
-test("slow startup remains recoverable instead of revealing an unfinished workspace", async ({ page }) => {
+test("slow runtime loading does not block navigation, settings or help", async ({ page }) => {
   await page.clock.install();
   await installTauriMock(page, { locale: "ru", theme: "dark", runtimeStateDelayMs: 20_000 });
   await page.goto("/");
-  await expect(page.locator("html")).toHaveAttribute("data-startup-state", "runtime");
-  await page.clock.fastForward(11_000);
-  await expect(page.locator("#splash-message")).toHaveText("Запуск занимает больше времени");
-  await expect(page.getByRole("button", { name: "Перезагрузить", exact: true })).toBeVisible();
-  await expect(page.locator(".app-workspace")).toHaveAttribute("inert", "");
+  await expect(page.locator("#splash-screen")).toHaveCount(0);
+  await expect(page.locator(".relay-content .relay-loading")).toBeVisible();
+  expect(await page.evaluate(() => performance.getEntriesByName("zenith:interactive", "measure"))).toEqual([]);
+  await page.getByRole("button", { name: "Настройки", exact: true }).click();
+  await expect(page.locator(".settings-page")).toBeVisible();
+  await page.getByRole("button", { name: "Помощь", exact: true }).click();
+  await expect(page.locator('.relay-shell[data-page="help"] .relay-page')).toBeVisible();
+  await page.getByRole("button", { name: "Пул", exact: true }).click();
+  await expect(page.locator(".relay-content .relay-loading")).toBeVisible();
+  await expect(page.locator(".pool-controls")).toHaveCount(0);
+  await page.screenshot({ path: "output/playwright/startup-runtime-pending-ru-dark.png" });
   await page.locator(".window-controls .minimize").click();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "plugin:window|minimize"))).toBe(true);
-  await expect(page.locator("html")).not.toHaveAttribute("data-startup-ready", "true");
-  await page.screenshot({ path: "output/playwright/startup-slow-ru-dark.png" });
-  await page.clock.fastForward(10_000);
-  await expect(page.locator("#splash-screen")).toHaveCount(0);
-  await expect(page.locator(".relay-shell")).toBeVisible();
+  await page.clock.fastForward(20_000);
+  await expect(page.locator(".pool-controls")).toBeVisible();
 });
 
 test("local snapshot failure is not recorded as successful startup", async ({ page }) => {
   await page.clock.install();
   await installTauriMock(page, { mode: "local", runtimeState: "error", locale: "en" });
   await page.goto("/");
-  await expect(page.locator("#splash-message")).toHaveText("Relay could not start");
-  await expect(page.getByRole("button", { name: "Reload", exact: true })).toBeVisible();
+  await expect(page.locator("#splash-screen")).toHaveCount(0);
+  await expect(page.locator(".relay-content")).toContainText("Could not refresh the selected runtime.");
+  await expect(page.getByRole("button", { name: "Retry", exact: true })).toBeVisible();
+  await page.screenshot({ path: "output/playwright/startup-runtime-error-en-light.png" });
   await page.clock.fastForward(12_000);
   expect(await page.evaluate(() => performance.getEntriesByName("zenith:interactive", "measure"))).toEqual([]);
-  await expect(page.locator(".app-workspace")).toHaveAttribute("inert", "");
+  await expect(page.locator("#root")).not.toHaveAttribute("inert");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(page.locator(".settings-page")).toBeVisible();
+});
+
+test("a failed initial snapshot can retry without reloading the renderer", async ({ page }) => {
+  await installTauriMock(page, { locale: "en" });
+  await page.addInitScript(() => {
+    const internals = (window as unknown as {
+      __TAURI_INTERNALS__: { invoke: (name: string, args?: unknown, options?: unknown) => Promise<unknown> };
+    }).__TAURI_INTERNALS__;
+    const invoke = internals.invoke.bind(internals);
+    let fail = true;
+    internals.invoke = (name, args, options) => {
+      if (name === "get_local_runtime_state" && fail) {
+        fail = false;
+        return Promise.reject({ code: "invalid_state", message: "Synthetic initial snapshot failure" });
+      }
+      return invoke(name, args, options);
+    };
+  });
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "Retry", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Stop API", exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => performance.getEntriesByName("zenith:interactive", "measure").length)).toBe(1);
+});
+
+test("startup does not retain an unused all-time Usage report", async ({ page }) => {
+  await installTauriMock(page, { locale: "en" });
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "Stop API", exact: true })).toBeVisible();
+  const usageReads = () => page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { range?: string; includeEvents?: boolean } } }>;
+  }).__TAURI_TEST_INVOKES__.filter(({ command }) => command === "get_local_usage_page").map(({ args }) => args.input));
+  await expect.poll(async () => (await usageReads()).length).toBeGreaterThan(0);
+  expect((await usageReads()).every((input) => input?.range === "custom")).toBe(true);
+  await page.getByRole("button", { name: "Usage", exact: true }).click();
+  await expect(page.locator(".usage-page")).toBeVisible();
+  await expect.poll(async () => (await usageReads()).filter((input) => input?.range === undefined && input.includeEvents === true).length).toBe(1);
 });
 
 test("a failed UI bundle can be reloaded without losing preferences", async ({ page }) => {

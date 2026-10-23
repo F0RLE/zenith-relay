@@ -1,6 +1,7 @@
 import type { Analytics } from "./overviewAnalyticsModel";
 import type { UsageTotals } from "../../api/types";
 import { emptyUsageTotals } from "../../usageTotals";
+import { createAnalyticsPersistence } from "./analyticsPersistence";
 
 const MAX_CACHED_ANALYTICS = 8;
 const ANALYTICS_REVALIDATION_COOLDOWN_MS = 1_000;
@@ -9,6 +10,17 @@ type AnalyticsCacheEntry = { analytics: Analytics; updatedAt: number };
 const analyticsCache = new Map<string, AnalyticsCacheEntry>();
 const analyticsInFlight = new Map<string, Promise<Analytics | null>>();
 let cacheHydrated = false;
+const persistence = createAnalyticsPersistence(persistCache, (work) => {
+  const timer = globalThis.setTimeout(work, 250);
+  return () => globalThis.clearTimeout(timer);
+});
+
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", persistence.flush);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") persistence.flush();
+  });
+}
 
 function validCounter(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
@@ -76,7 +88,9 @@ export function rememberOverviewAnalytics(scope: string, analytics: Analytics) {
     if (oldestScope === undefined) break;
     analyticsCache.delete(oldestScope);
   }
-  persistCache();
+  // Publish the in-memory report now; serialize only the latest bounded
+  // cache later, or flush it when the document is hidden/closed.
+  persistence.request();
 }
 
 export function isOverviewAnalyticsFresh(scope: string, now = Date.now()) {

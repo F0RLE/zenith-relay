@@ -3,10 +3,11 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ComponentType } from "react";
 import { useTranslation } from "react-i18next";
 import { APP_VERSION } from "../../../platform/desktop";
+import { revealStartupShell } from "../../../platform/startup";
 import type { PageId, RelayMode } from "../api/types";
 import { OverviewPage } from "../pages/overview/OverviewPage";
 import { useRelayState, type Feedback } from "../state/RelayStateProvider";
-import { ErrorDetailsDialog, IconButton } from "../components/Ui";
+import { Button, EmptyState, ErrorDetailsDialog, IconButton } from "../components/Ui";
 import { useAppUpdates, type UpdateCheckState } from "../hooks/useAppUpdates";
 import { UpdateDialog } from "./UpdateDialog";
 import { HostedDevelopmentPage } from "../pages/hosted/HostedDevelopmentPage";
@@ -43,7 +44,18 @@ const pages: Array<{ id: PageId; icon: typeof LayoutDashboard; preload?: () => v
 
 export function RelayShell() {
   const { t } = useTranslation();
-  const { mode, setMode, page, setPage, feedback, clearFeedback, loading } = useRelayState();
+  const { mode, setMode, page, setPage, feedback, clearFeedback, loading, runtime } = useRelayState();
+  const pageNeedsRuntime = mode === "local" && page !== "settings" && page !== "help";
+  useEffect(() => {
+    let secondFrame = 0;
+    const firstFrame = requestAnimationFrame(() => {
+      secondFrame = requestAnimationFrame(revealStartupShell);
+    });
+    return () => {
+      cancelAnimationFrame(firstFrame);
+      cancelAnimationFrame(secondFrame);
+    };
+  }, []);
   const sidebarPreference = useRef<boolean | null>(null);
   const [collapsed, setCollapsed] = useState(() => window.matchMedia?.("(max-width: 1023px)").matches ?? false);
   useEffect(() => {
@@ -249,7 +261,9 @@ export function RelayShell() {
             previous page hidden in the DOM while the next lazy chunk loads,
             so automation and assistive tech would still resolve the old
             page's nodes after navigation. */}
-        {loading ? <div className="relay-loading">{t("common.loading")}</div> : (
+        {pageNeedsRuntime && !runtime ? (
+          loading ? <div className="relay-loading" role="status">{t("common.loading")}</div> : <RuntimeUnavailable />
+        ) : (
           <Suspense key={page} fallback={<div className="relay-loading">{t("common.loading")}</div>}>
             <Page
               page={page}
@@ -289,6 +303,27 @@ export function RelayShell() {
       ) : null}
     </div>
   );
+}
+
+function RuntimeUnavailable() {
+  const { t } = useTranslation();
+  const { refresh } = useRelayState();
+  const [retrying, setRetrying] = useState(false);
+  const retry = async () => {
+    if (retrying) return;
+    setRetrying(true);
+    try {
+      await refresh();
+    } catch {
+      // Keep the failed state visible; an unsuccessful retry is not empty data.
+    } finally {
+      setRetrying(false);
+    }
+  };
+  return <div className="relay-page"><EmptyState
+    title={t("feedback.refreshFailed")}
+    action={<Button variant="secondary" busy={retrying} onClick={() => void retry()}>{t("common.retry")}</Button>}
+  /></div>;
 }
 
 function ModeIcon({ mode }: { mode: RelayMode }) {

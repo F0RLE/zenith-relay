@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { relayCommands } from "../api/commands";
 import type { RelayMode, SourceSummary } from "../api/types";
 import { projectedSourceStats, settledSourceStats, type SourceStatsState } from "../sourceStatsModel";
@@ -8,8 +8,8 @@ import { projectedSourceStats, settledSourceStats, type SourceStatsState } from 
 export function useSourceStats(mode: RelayMode, sources: readonly SourceSummary[]) {
   const sourcesRef = useRef(sources);
   sourcesRef.current = sources;
-  const scope = JSON.stringify([mode, sources.map((source) => [source.id, source.baseUrl, source.secretAvailable, source.refreshRevision]).sort()]);
-  const observations = JSON.stringify(sources.map((source) => [source.id, source.providerStats]).sort());
+  const scope = useMemo(() => JSON.stringify([mode, sources.map((source) => [source.id, source.baseUrl, source.secretAvailable, source.refreshRevision]).sort()]), [mode, sources]);
+  const observations = useMemo(() => JSON.stringify(sources.map((source) => [source.id, source.providerStats]).sort()), [sources]);
   const [snapshot, setSnapshot] = useState<{ scope: string; bySource: Record<string, SourceStatsState> }>({ scope, bySource: {} });
   const setStats = useCallback((update: (previousStats: Record<string, SourceStatsState>) => Record<string, SourceStatsState>) => {
     setSnapshot((previousSnapshot) => ({ scope, bySource: update(previousSnapshot.scope === scope ? previousSnapshot.bySource : {}) }));
