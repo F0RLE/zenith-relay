@@ -100,6 +100,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+      - name: Check native development controller
+        run: ./scripts/check/check-dev-controller.ps1
       - name: Run Windows Rust tests
         # The test keyring is process-global, so its system key must not be mutated concurrently.
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1
