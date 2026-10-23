@@ -6,7 +6,11 @@ test("model pricing edits long Flex without changing the application context mod
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, sourceDetectedModelPrices: {
     "gpt-5.4": {
       inputMicroUsdPerMillion: 1_000_000, outputMicroUsdPerMillion: 2_000_000,
-      above272k: { standard: { input: 2_000_000, output: 4_000_000 } },
+      flex: { input: 500_000, output: 1_000_000 },
+      above272k: {
+        standard: { input: 2_000_000, output: 4_000_000 },
+        flex: { input: 1_000_000, output: 2_000_000 },
+      },
     },
   } });
   await page.goto("/");

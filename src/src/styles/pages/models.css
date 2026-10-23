@@ -396,6 +396,12 @@
   }
 }
 
+@media (max-width: 360px) {
+  .model-reasoning-dialog .relay-dialog-body {
+    padding-inline: 10px;
+  }
+}
+
 .model-rule-actions .pool-speed-control {
   flex: 1 1 auto;
   width: auto;

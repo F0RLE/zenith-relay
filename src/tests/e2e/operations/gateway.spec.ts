@@ -97,7 +97,17 @@ test("API degraded-route switch is on for ChatGPT accounts and saves immediately
 });
 
 test("local commands are reachable from the operational UI", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountOAuthClientKind: "excel_bps", importDescription: "# Seller package\n\n- Two Business accounts" });
+  await installTauriMock(page, {
+    mode: "local", locale: "en", populated: true, accountOAuthClientKind: "excel_bps",
+    importDescription: "# Seller package\n\n- Two Business accounts",
+    sourceDetectedModelPrices: {
+      "gpt-5.4": {
+        inputMicroUsdPerMillion: 1_000_000,
+        cachedInputMicroUsdPerMillion: 250_000,
+        outputMicroUsdPerMillion: 2_000_000,
+      },
+    },
+  });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await expect(page.getByRole("tab", { name: "Accounts" })).toBeVisible();

@@ -276,7 +276,7 @@ test("explicit cache-write prices remain visible without a Messages route", asyn
   expect(await dialog.locator(".relay-dialog-body").evaluate((body) => body.scrollWidth <= body.clientWidth)).toBe(true);
 });
 
-test("OpenAI cache-write price is one 30-minute field", async ({ page }) => {
+test("generic cache-write price does not invent a retention window", async ({ page }) => {
   await installTauriMock(page, {
     mode: "local",
     locale: "en",
@@ -290,7 +290,13 @@ test("OpenAI cache-write price is one 30-minute field", async ({ page }) => {
         inputMicroUsdPerMillion: 200_000,
         outputMicroUsdPerMillion: 1_200_000,
         cachedInputMicroUsdPerMillion: 20_000,
-        cacheWrite5mMicroUsdPerMillion: 250_000,
+        cacheWriteMicroUsdPerMillion: 250_000,
+      },
+      "claude-opus-4-8": {
+        inputMicroUsdPerMillion: 1_400_000,
+        outputMicroUsdPerMillion: 7_000_000,
+        cacheWrite5mMicroUsdPerMillion: 2_100_000,
+        cacheWrite1hMicroUsdPerMillion: 4_200_000,
       },
     },
   });
@@ -303,10 +309,12 @@ test("OpenAI cache-write price is one 30-minute field", async ({ page }) => {
 
   const openai = dialog.locator(".source-price-group").filter({ hasText: "OpenAI" });
   await openai.locator("summary").click();
-  await expect(openai.locator(".member-price-grid-head")).toContainText("Cache write 30 min");
+  await expect(openai.locator(".member-price-grid-head")).toContainText("Cache write");
+  await expect(openai.locator(".member-price-grid-head")).not.toContainText("30 min");
   await expect(openai.locator(".member-price-grid-head")).not.toContainText("5 min");
   await expect(openai.locator(".member-price-grid-head")).not.toContainText("1 hr");
-  await expect(openai.getByRole("textbox", { name: "30-minute cache write price for gpt-5.6-luna" })).toHaveAttribute("placeholder", "0.25");
+  await expect(openai.getByRole("textbox", { name: "Cache write price for gpt-5.6-luna", exact: true })).toHaveAttribute("placeholder", "0.25");
+  await expect(openai.getByRole("textbox", { name: /(?:5-minute|30-minute|1-hour) cache write price/i })).toHaveCount(0);
   await expect(openai.getByRole("textbox", { name: /cache write price for gpt-5.4/i })).toHaveCount(0);
   await expect(openai.locator(".source-price-row").filter({ hasText: "gpt-5.4" }).locator(".source-price-empty")).toHaveCount(1);
 

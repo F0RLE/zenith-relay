@@ -562,14 +562,15 @@
   font-variant-numeric: tabular-nums;
 }
 
-.usage-request-table col[data-column="time"] { width: 16%; }
+/* Flexible columns share the remainder without expanding fixed icon/ID columns. */
+.usage-request-table col[data-column="time"] { width: 20%; }
 .usage-request-table col[data-column="status"] { width: 64px; }
-.usage-request-table col[data-column="model"] { width: 21%; }
-.usage-request-table col[data-column="connection"] { width: 20%; }
-.usage-request-table col[data-column="timing"] { width: 15%; }
-.usage-request-table col[data-column="tokens"] { width: 7%; }
-.usage-request-table col[data-column="equivalent"] { width: 10%; }
-.usage-request-table col[data-column="request"] { width: 11%; }
+.usage-request-table col[data-column="model"] { width: 25%; }
+.usage-request-table col[data-column="connection"] { width: 24%; }
+.usage-request-table col[data-column="timing"] { width: 19%; }
+.usage-request-table col[data-column="tokens"] { width: 76px; }
+.usage-request-table col[data-column="equivalent"] { width: 12%; }
+.usage-request-table col[data-column="request"] { width: 110px; }
 
 .usage-request-connection {
   display: block;

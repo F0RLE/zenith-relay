@@ -52,7 +52,12 @@ for (const scenario of [
       }
       for (const column of ["tokens", "request"]) {
         const heading = table.locator(`th[data-column="${column}"] .usage-column-heading > span`);
-        expect(await heading.evaluate((element) => element.getBoundingClientRect().height)).toBeLessThanOrEqual(17);
+        const bounds = await heading.evaluate((element) => ({
+          width: element.getBoundingClientRect().width,
+          height: element.getBoundingClientRect().height,
+          cellWidth: element.closest("th")!.getBoundingClientRect().width,
+        }));
+        expect(bounds.height, `${column}: ${JSON.stringify(bounds)}`).toBeLessThanOrEqual(17);
       }
     }
     expect(await table.locator("td").evaluateAll((elements) => elements.filter((element) => element.getBoundingClientRect().width > 0)
