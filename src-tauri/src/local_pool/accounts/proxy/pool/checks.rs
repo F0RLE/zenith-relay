@@ -9,6 +9,7 @@ fn checked(proxy_id: &str, time: u64, ip: &str, timezone: Option<&str>) -> Proxy
         country_code: Some("NL".into()),
         timezone: timezone.map(str::to_owned),
         error_code: None,
+        ..ProxyCheckResult::default()
     }
 }
 

@@ -10,9 +10,9 @@ const CHECK_URL: &str = "https://www.cloudflare.com/cdn-cgi/trace";
 const MAX_RESPONSE_BYTES: usize = 4_096;
 static CHECK_LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
-mod location;
+mod lookup;
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyCheckResult {
     pub proxy_id: String,
@@ -22,34 +22,72 @@ pub struct ProxyCheckResult {
     pub country_code: Option<String>,
     #[serde(default)]
     pub timezone: Option<String>,
+    #[serde(default)]
+    pub region: Option<String>,
+    #[serde(default)]
+    pub city: Option<String>,
+    #[serde(default)]
+    pub location_source: Option<String>,
+    #[serde(default)]
+    pub location_error_code: Option<String>,
     pub error_code: Option<String>,
 }
 
 pub async fn check(proxy_id: String, proxy: &ProxyConfig, checked_at_ms: u64) -> ProxyCheckResult {
+    check_at(proxy_id, proxy, checked_at_ms, CHECK_URL, lookup::BASE_URL).await
+}
+
+async fn check_at(
+    proxy_id: String,
+    proxy: &ProxyConfig,
+    checked_at_ms: u64,
+    check_url: &str,
+    location_base: &str,
+) -> ProxyCheckResult {
     let _permit = CHECK_LIMIT
         .acquire()
         .await
         .expect("proxy check limiter is never closed");
     let started = Instant::now();
-    let check_result = location::lookup(proxy, Duration::from_secs(12)).await;
-    let (ip, country_code, timezone, error_code) = match check_result {
-        Ok(location) => (
-            Some(location.ip),
-            location.country_code,
-            location.timezone,
-            None,
-        ),
-        Err(code) => (None, None, None, Some(code.to_owned())),
-    };
-    ProxyCheckResult {
+    let budget = Duration::from_secs(12);
+    // Measure only the bounded HTTPS exit-IP probe, never optional geolocation.
+    let probe = tokio::time::timeout(budget, proxy_check_request(proxy, check_url, budget))
+        .await
+        .unwrap_or(Err(error_codes::PROXY_CHECK_TIMEOUT));
+    let elapsed_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+    let mut result = ProxyCheckResult {
         proxy_id,
         checked_at_ms,
-        elapsed_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-        ip,
-        country_code,
-        timezone,
-        error_code,
+        elapsed_ms,
+        ..ProxyCheckResult::default()
+    };
+    match probe {
+        Ok((ip, country_code)) => {
+            result.ip = Some(ip);
+            result.country_code = country_code;
+            result.location_source = result.country_code.as_ref().map(|_| "cloudflare".into());
+            match lookup::lookup(
+                proxy,
+                ip,
+                result.country_code.as_deref(),
+                location_base,
+                Duration::from_secs(3),
+            )
+            .await
+            {
+                Ok(location) => {
+                    result.country_code = Some(location.country_code);
+                    result.region = location.region;
+                    result.city = location.city;
+                    result.timezone = location.timezone;
+                    result.location_source = Some("ipwhois".into());
+                }
+                Err(code) => result.location_error_code = Some(code.into()),
+            }
+        }
+        Err(code) => result.error_code = Some(code.to_owned()),
     }
+    result
 }
 
 async fn proxy_check_request(
@@ -172,8 +210,72 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn country_is_available_without_database_or_optional_geolocation() {
+        let (proxy, server) = mock_proxy().await;
+        let result = check_at(
+            "synthetic".into(),
+            &proxy,
+            1,
+            "http://unreachable.invalid/trace",
+            "http://unreachable.invalid/unavailable/",
+        )
+        .await;
+        assert_eq!(result.ip.unwrap().to_string(), "203.0.113.9");
+        assert!(result.error_code.is_none());
+        assert_eq!(result.country_code.as_deref(), Some("NL"));
+        assert_eq!(result.location_source.as_deref(), Some("cloudflare"));
+        assert!(result.timezone.is_none());
+        assert_eq!(
+            result.location_error_code.as_deref(),
+            Some("proxy_location_unavailable")
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn legacy_saved_checks_remain_readable_without_claiming_observed_geography() {
+        let result: ProxyCheckResult = serde_json::from_value(serde_json::json!({
+            "proxyId": "synthetic", "checkedAtMs": 1, "elapsedMs": 5,
+            "ip": "203.0.113.9", "countryCode": "NL", "timezone": "Europe/Amsterdam", "errorCode": null,
+        })).unwrap();
+        assert!(result.location_source.is_none());
+        assert_eq!(result.timezone.as_deref(), Some("Europe/Amsterdam"));
+    }
+
+    #[tokio::test]
+    async fn automatic_city_lookup_does_not_inflate_the_https_probe_duration() {
+        let (proxy, server) = mock_proxy().await;
+        let started = Instant::now();
+        let result = check_at(
+            "synthetic".into(),
+            &proxy,
+            1,
+            "http://unreachable.invalid/trace",
+            "http://unreachable.invalid/",
+        )
+        .await;
+        assert!(result.error_code.is_none());
+        assert_eq!(result.country_code.as_deref(), Some("NL"));
+        assert_eq!(result.city.as_deref(), Some("Amsterdam"));
+        assert_eq!(result.timezone.as_deref(), Some("Europe/Amsterdam"));
+        assert_eq!(result.location_source.as_deref(), Some("ipwhois"));
+        assert!(started.elapsed().as_millis() >= u128::from(result.elapsed_ms) + 40);
+        server.abort();
+    }
+
     async fn mock_proxy() -> (ProxyConfig, tokio::task::JoinHandle<()>) {
         let app = Router::new()
+            .route(
+                "/203.0.113.9",
+                get(|| async {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    axum::Json(serde_json::json!({
+                        "success": true, "ip": "203.0.113.9", "country_code": "NL",
+                        "city": "Amsterdam", "timezone": {"id": "Europe/Amsterdam"},
+                    }))
+                }),
+            )
             .route(
                 "/trace",
                 get(|headers: HeaderMap| async move {
