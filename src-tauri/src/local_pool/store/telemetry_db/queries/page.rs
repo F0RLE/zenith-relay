@@ -136,6 +136,10 @@ impl TelemetryDb {
         let (page, page_size) = query.normalized_page();
         let connection = self.lock_connection()?;
         let (where_sql, query_parameters) = usage_filter(query);
+        let filter_options = query
+            .include_filter_options
+            .then(|| usage_filter_options(&connection, query))
+            .transpose()?;
         let use_all_time_rollups = is_unfiltered_all_time(query);
         let mut totals =
             self.cached_usage_totals(&connection, query, &where_sql, &query_parameters)?;
@@ -149,13 +153,14 @@ impl TelemetryDb {
         } else {
             Vec::new()
         };
-        let (mut api_equivalents_by_model, pricing_sources) = usage_model_equivalents(
+        let equivalents = usage_model_equivalents(
             &connection,
             &where_sql,
             &query_parameters,
             resolver,
             use_all_time_rollups,
         )?;
+        let mut api_equivalents_by_model = equivalents.models;
         if query.includes_models() {
             for group in &mut model_groups {
                 group.totals.api_equivalent = api_equivalents_by_model
@@ -169,7 +174,7 @@ impl TelemetryDb {
         for estimate in api_equivalents_by_model.values() {
             totals.api_equivalent.merge(*estimate);
         }
-        let pool_members = if query.includes_pool_members() {
+        let mut pool_members = if query.includes_pool_members() {
             usage_groups(
                 &connection,
                 &where_sql,
@@ -179,42 +184,31 @@ impl TelemetryDb {
         } else {
             Vec::new()
         };
+        for group in &mut pool_members {
+            group.totals.api_equivalent = equivalents
+                .members
+                .get(&group.key)
+                .copied()
+                .unwrap_or_default();
+        }
         let buckets = usage_buckets(&connection, &where_sql, &query_parameters, query, resolver)?;
-        let usage_event_table = if query.request_id.is_some() {
-            "request_attempts"
-        } else {
-            "request_logs"
-        };
-        let total_event_count = if query.request_id.is_some() {
-            connection
-                .query_row(
-                    &format!("SELECT COUNT(*) FROM {usage_event_table}{where_sql}"),
-                    params_from_iter(query_parameters.iter()),
-                    |row| row.get::<_, i64>(0).map(|count| count.max(0) as u64),
-                )
-                .map_err(db_error)?
-        } else {
-            totals.requests
-        };
+        let send_count_sql = super::super::usage::send_projection("1", &where_sql);
+        let total_event_count = connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM ({send_count_sql})"),
+                params_from_iter(query_parameters.iter().chain(query_parameters.iter())),
+                |row| row.get::<_, i64>(0).map(|count| count.max(0) as u64),
+            )
+            .map_err(db_error)?;
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
         let mut events = if query.includes_events() {
-            let event_page_sql = format!(
-                "SELECT {USAGE_LOG_COLUMNS}
-                 FROM {usage_event_table}{where_sql} ORDER BY rowid DESC LIMIT ? OFFSET ?"
-            );
-            let mut statement = connection.prepare(&event_page_sql).map_err(db_error)?;
-            let mut event_parameters = query_parameters;
-            event_parameters.push(SqlValue::Integer(i64::from(page_size)));
-            event_parameters.push(SqlValue::Integer(zenith_relay_core::usage::sql_u64(offset)));
-            let page_events = statement
-                .query_map(
-                    params_from_iter(event_parameters.iter()),
-                    usage_log_from_row,
-                )
-                .map_err(db_error)?;
-            page_events
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(db_error)?
+            usage_send_page(
+                &connection,
+                &where_sql,
+                &query_parameters,
+                page_size,
+                offset,
+            )?
         } else {
             Vec::new()
         };
@@ -245,9 +239,11 @@ impl TelemetryDb {
             );
         }
         let total_pages = UsageQuery::page_count(total_event_count, page_size);
-        let pricing_metadata = resolver.pricing_metadata(totals.api_equivalent, &pricing_sources);
+        let pricing_metadata =
+            resolver.pricing_metadata(totals.api_equivalent, &equivalents.sources);
         Ok(LocalUsagePage {
             events,
+            filter_options,
             total: total_event_count,
             page,
             page_size,
@@ -259,4 +255,67 @@ impl TelemetryDb {
             pricing: pricing_metadata,
         })
     }
+}
+
+/// Sort only storage keys, then decode the requested page under the same lock.
+/// Loading full JSON rows before LIMIT makes first entry scale with all retained
+/// diagnostic payloads, even though the screen renders only 50 sends.
+fn usage_send_page(
+    connection: &rusqlite::Connection,
+    where_sql: &str,
+    parameters: &[SqlValue],
+    page_size: u32,
+    offset: u64,
+) -> Result<Vec<UsageLog>> {
+    let conjunction = if where_sql.is_empty() {
+        " WHERE "
+    } else {
+        " AND "
+    };
+    let legacy = super::super::usage::LEGACY_SEND_PREDICATE;
+    let sql = format!(
+        "SELECT rowid AS storage_id, 1 AS is_attempt, created_at, ABS(id) AS sort_id
+         FROM request_attempts{where_sql}
+         UNION ALL
+         SELECT rowid AS storage_id, 0 AS is_attempt, created_at, ABS(id) AS sort_id
+         FROM request_logs{where_sql}{conjunction}{legacy}
+         ORDER BY created_at DESC, sort_id DESC LIMIT ? OFFSET ?"
+    );
+    let mut statement = connection.prepare(&sql).map_err(db_error)?;
+    let mut page_parameters: Vec<_> = parameters
+        .iter()
+        .chain(parameters.iter())
+        .cloned()
+        .collect();
+    page_parameters.push(SqlValue::Integer(i64::from(page_size)));
+    page_parameters.push(SqlValue::Integer(zenith_relay_core::usage::sql_u64(offset)));
+    let keys = statement
+        .query_map(params_from_iter(page_parameters.iter()), |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?))
+        })
+        .map_err(db_error)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(db_error)?;
+    let mut attempts = connection
+        .prepare(&format!(
+            "SELECT {USAGE_LOG_COLUMNS} FROM request_attempts WHERE rowid = ?1"
+        ))
+        .map_err(db_error)?;
+    let mut requests = connection
+        .prepare(&format!(
+            "SELECT {USAGE_LOG_COLUMNS} FROM request_logs WHERE rowid = ?1"
+        ))
+        .map_err(db_error)?;
+    keys.into_iter()
+        .map(|(rowid, is_attempt)| {
+            let statement = if is_attempt {
+                &mut attempts
+            } else {
+                &mut requests
+            };
+            statement
+                .query_row([rowid], usage_log_from_row)
+                .map_err(db_error)
+        })
+        .collect()
 }

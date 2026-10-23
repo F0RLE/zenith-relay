@@ -186,7 +186,26 @@ export function logicalRequestRows(rows: readonly UsageRow[]): UsageRow[] {
 }
 
 export function totalsFromRows(rows: UsageRow[]): UsageTotals {
-  return totalsFromUsageSamples(rows.map(usageTotalsSampleFromRow));
+  const uniqueSends = physicalRequestRows(rows);
+  const sends = totalsFromUsageSamples(uniqueSends.map(usageTotalsSampleFromRow));
+  const requests = totalsFromUsageSamples(logicalRequestRows(uniqueSends).map(usageTotalsSampleFromRow));
+  return { ...requests,
+    inputTokens: sends.inputTokens, cachedInputTokens: sends.cachedInputTokens,
+    cachedInputSamples: sends.cachedInputSamples, cacheWriteInputTokens: sends.cacheWriteInputTokens ?? 0,
+    cacheWriteInputSamples: sends.cacheWriteInputSamples ?? 0, reasoningTokens: sends.reasoningTokens,
+    outputTokens: sends.outputTokens, totalTokens: sends.totalTokens, apiEquivalent: sends.apiEquivalent,
+  };
+}
+
+/** Each upstream send is visible once; repeated observations replace that send. */
+export function physicalRequestRows(rows: readonly UsageRow[]): UsageRow[] {
+  const sends = new Map<string, UsageRow>();
+  for (const row of rows) {
+    const key = row.requestId ? `${row.requestId}:${row.attempt}` : `record:${row.id}`;
+    const previous = sends.get(key);
+    if (!previous || Date.parse(row.time) >= Date.parse(previous.time)) sends.set(key, row);
+  }
+  return [...sends.values()].sort((a, b) => Date.parse(b.time) - Date.parse(a.time) || b.attempt - a.attempt);
 }
 
 function usageTotalsSampleFromRow(row: UsageRow): UsageTotalsSample {

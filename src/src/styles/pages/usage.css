@@ -80,8 +80,9 @@
 }
 
 .usage-metrics > .usage-metric {
-  min-height: 122px;
-  padding: 20px clamp(12px, 1.5cqw, 20px);
+  min-height: 80px;
+  align-items: center;
+  padding: 12px clamp(12px, 1.5cqw, 20px);
 }
 
 .usage-metrics > .usage-metric + .usage-metric {
@@ -136,7 +137,7 @@
 }
 
 .usage-metrics .usage-metric-copy {
-  gap: 8px;
+  gap: 5px;
 }
 
 .usage-metrics .usage-metric-copy > span {
@@ -145,7 +146,7 @@
 }
 
 .usage-metrics .usage-metric-copy > strong {
-  font-size: clamp(18px, 2.4cqw, 30px);
+  font-size: clamp(18px, 2.4cqw, 26px);
   line-height: 1.2;
   letter-spacing: -0.025em;
 }
@@ -154,7 +155,7 @@
   display: grid;
   grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
   gap: 20px;
-  padding: 16px 20px;
+  padding: 10px 20px;
   border-top: 1px solid color-mix(in srgb, var(--relay-border) 60%, transparent);
 }
 
@@ -175,7 +176,7 @@
   min-width: 0;
   display: grid;
   align-content: start;
-  gap: 5px;
+  gap: 4px;
 }
 
 .usage-token-totals dt {
@@ -208,7 +209,7 @@
 }
 
 .usage-secondary-metrics .usage-metric-copy {
-  gap: 5px;
+  gap: 4px;
 }
 
 .usage-secondary-metrics .usage-metric-copy > span {
@@ -317,45 +318,6 @@
   border: 0;
   border-radius: 10px;
   background: var(--relay-surface);
-}
-
-.usage-filter-panel > header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-height: 28px;
-  margin-bottom: 12px;
-}
-
-.usage-filter-panel h2 {
-  margin: 0;
-  color: var(--relay-secondary);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.usage-filter-panel > header > div {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.usage-filter-panel > header .relay-button,
-.usage-filter-panel > header .relay-icon-button {
-  min-height: 28px;
-  height: 28px;
-  border: 0;
-  background: transparent;
-}
-
-.usage-filter-panel > header .relay-button {
-  padding: 0 8px;
-  font-size: 12px;
-}
-
-.usage-filter-panel > header .relay-icon-button {
-  width: 28px;
 }
 
 .usage-filters {
@@ -1184,7 +1146,9 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
+  align-items: center;
   justify-content: center;
+  text-align: center;
   gap: 6px;
   padding: 0 18px;
   border-inline-start: 1px solid var(--relay-border);
@@ -1197,7 +1161,7 @@
 .request-details-metric:only-child {
   flex-direction: row;
   align-items: baseline;
-  justify-content: space-between;
+  justify-content: center;
 }
 
 .request-details-metric > dt {
@@ -1885,12 +1849,12 @@
 }
 
 @container usage (max-width: 1000px) {
-  .usage-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .usage-overview-details { grid-template-columns: minmax(0, 1fr); gap: 14px; }
-  .usage-secondary-metrics { padding: 0; border: 0; }
+  .usage-overview-details { gap: 12px; padding: 10px 16px; }
+  .usage-secondary-metrics { gap: 8px; padding-left: 12px; }
 }
 
 @container usage (max-width: 760px) {
+  .usage-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .usage-view-toolbar { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
   .usage-scope-controls,
   .usage-scope-controls:has(> .usage-clear-filters) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -1899,6 +1863,8 @@
   .usage-metrics > .usage-metric:nth-child(odd) { border-inline-start: 0; }
   .usage-metrics > .usage-metric:nth-child(n+3) { border-top: 1px solid color-mix(in srgb, var(--relay-border) 60%, transparent); }
   .usage-metrics > .usage-metric:nth-child(3):last-child { grid-column: 1 / -1; }
+  .usage-overview-details { grid-template-columns: minmax(0, 1fr); }
+  .usage-secondary-metrics { padding: 0; border: 0; }
   .usage-account-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .usage-scope-controls > .relay-icon-button { justify-self: end; }
   .usage-scope-controls[data-filter-count="3"] > :nth-child(3) { grid-column: 1 / -1; }
@@ -1912,11 +1878,11 @@
 }
 
 @container usage (max-width: 580px) {
-  .usage-metrics > .usage-metric { min-height: 86px; padding: 12px; }
+  .usage-metrics > .usage-metric { min-height: 72px; padding: 10px 12px; }
   .usage-metrics .usage-metric-copy { gap: 5px; }
   .usage-metrics .usage-metric-copy > strong { font-size: clamp(16px, 6cqw, 22px); }
   .usage-overview { margin-bottom: 14px; }
-  .usage-overview-details { padding: 12px; gap: 12px; }
+  .usage-overview-details { padding: 10px 12px; gap: 10px; }
   .usage-token-totals,
   .usage-secondary-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .usage-token-totals { row-gap: 8px; }

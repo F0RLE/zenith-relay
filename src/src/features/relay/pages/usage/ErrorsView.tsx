@@ -19,7 +19,7 @@ export function ErrorsView({ rows, formatTime, onSelect }: { rows: UsageRow[]; f
     connection: { label: t("usage.poolMember"), cell: (row) => row.connection },
     origin: { label: t("usage.errorOrigin"), cell: (row) => formatErrorOrigin(row.errorOrigin, t) },
     error: { label: t("usage.errorCategory"), cell: (row) => <span data-relay-tooltip={row.errorCategory ?? undefined}>{formatErrorCategory(row.errorCategory, t)}</span> },
-    request: { label: t("usage.requestId"), cell: (row) => <button type="button" className="request-link" aria-haspopup="dialog" aria-label={`${t("usage.requestDetails")}: ${row.requestId ?? "-"}`} data-relay-tooltip={row.requestId ?? undefined} onClick={() => onSelect(row)}><code>{compactRequestId(row.requestId)}</code>{row.attempt > 1 ? <small className="usage-request-sends">{t("usage.execution.sendCount", { count: row.attempt })}</small> : null}</button> },
+    request: { label: t("usage.requestId"), cell: (row) => <button type="button" className="request-link" aria-haspopup="dialog" aria-label={`${t("usage.requestDetails")}: ${row.requestId ?? "-"}`} data-relay-tooltip={row.requestId ?? undefined} onClick={() => onSelect(row)}><code>{compactRequestId(row.requestId)}</code>{row.attempt > 1 ? <small className="usage-request-sends">{t("usage.execution.send", { number: row.attempt })}</small> : null}</button> },
   };
   if (!rows.length) return <EmptyState title={t("usage.noErrors")} />;
   return <div className="relay-table-wrap"><table className="relay-table usage-error-table usage-sortable-table">

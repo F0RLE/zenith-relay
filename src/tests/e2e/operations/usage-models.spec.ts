@@ -92,7 +92,7 @@ test("account usage keeps API equivalent, payback, and provider quota windows se
 
   await page.getByRole("tab", { name: "Models" }).click();
   await expect(page.locator(".usage-aggregate-table thead th")).toHaveText([
-    "Model", "Requests", "Input tokens", "Output tokens", "Cache reads", "API equiv.",
+    "Model", "Client requests", "Input tokens", "Output tokens", "Cache reads", "API equiv.",
   ]);
   await page.setViewportSize({ width: 840, height: 560 });
   await expect(accountUsage).toBeVisible();
@@ -279,7 +279,7 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await expect(account.locator(".usage-token-breakdown span")).toHaveText(["In20", "Out8", "Cache read12", "Cache write4", "Reason5"]);
   await expect(page.locator(".usage-metrics > .usage-metric")).toHaveCount(3);
 
-  await page.getByRole("tab", { name: "Requests" }).click();
+  await page.getByRole("tab", { name: "Sends" }).click();
   await expect(page.locator(".usage-secondary-metrics")).toContainText("Generation speed6.7 tok/s");
   await expect(page.locator(".usage-secondary-metrics")).toContainText("E2E speed18.7 tok/s");
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
@@ -302,13 +302,16 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await expect(details).toContainText("Quota at selection63.00%");
 });
 
-test("partial API equivalents state their coverage without an asterisk", async ({ page }) => {
+test("partial API equivalents show coverage only in the tooltip without an asterisk", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, usageUnpricedTokens: 7 });
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
 
   const metric = page.locator(".usage-metrics > div").filter({ hasText: "API equivalent" });
-  await expect(metric).toContainText("21 priced · 7 unpriced");
+  await expect(metric.locator("small")).toHaveCount(0);
+  await expect(metric).not.toContainText("21 priced · 7 unpriced");
+  await metric.hover();
+  await expect(page.getByRole("tooltip")).toContainText("21 priced · 7 unpriced");
   await expect(metric).not.toContainText("*");
   await expect(page.locator('.usage-request-table tbody td[data-column="equivalent"]')).not.toContainText("*");
 });

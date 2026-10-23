@@ -208,7 +208,7 @@ fn usage_survives_database_reopen() {
     std::fs::remove_dir_all(root).unwrap();
 }
 #[test]
-fn usage_aggregate_replaces_only_the_accepted_attempt() {
+fn usage_aggregate_replaces_each_send_without_losing_earlier_usage() {
     let root = std::env::temp_dir().join(format!(
         "zenith-relay-usage-aggregate-{}",
         uuid::Uuid::new_v4()
@@ -274,7 +274,7 @@ fn usage_aggregate_replaces_only_the_accepted_attempt() {
             },
         )
         .unwrap();
-    assert_eq!(row, (20, 1, 7, 1, 0, 7, 0, 8, 1, 28, 1));
+    assert_eq!(row, (110, 2, 18, 2, 0, 7, 11, 17, 2, 127, 2));
 
     database
         .record(&aggregate_test_event(
@@ -315,7 +315,7 @@ fn usage_aggregate_replaces_only_the_accepted_attempt() {
             },
         )
         .unwrap();
-    assert_eq!(row, (30, 1, 9, 1, 0, 0, 9, 12, 1, 42, 1));
+    assert_eq!(row, (120, 2, 20, 2, 0, 0, 20, 21, 2, 141, 2));
     assert_eq!(database.list(10).unwrap().len(), 1);
     database.clear().unwrap();
     assert!(
@@ -397,19 +397,42 @@ fn usage_totals_cache_tracks_new_and_replaced_events() {
     assert_eq!(replaced.totals.generation_ms, 60);
     assert_eq!(replaced.totals.generation_samples, 1);
     assert_eq!(replaced.totals.generation_output_tokens, 2);
-    assert_eq!(replaced.totals.input_tokens, 50);
-    assert_eq!(replaced.totals.reasoning_tokens, 4);
-    assert_eq!(replaced.totals.output_tokens, 16);
-    assert_eq!(replaced.totals.total_tokens, 66);
+    assert_eq!(replaced.totals.input_tokens, 70);
+    assert_eq!(replaced.totals.reasoning_tokens, 6);
+    assert_eq!(replaced.totals.output_tokens, 24);
+    assert_eq!(replaced.totals.total_tokens, 94);
     assert_eq!(replaced.totals.speed_output_tokens, 4);
     assert_eq!(replaced.totals.speed_duration_ms, 100);
 
     second.attempt = 1;
     second.input_tokens = Some(1_000);
     database.record(&second).unwrap();
+    let corrected = database.usage_page(&UsageQuery::default()).unwrap().totals;
     assert_eq!(
-        database.usage_page(&UsageQuery::default()).unwrap().totals,
-        replaced.totals
+        (
+            corrected.requests,
+            corrected.successful_requests,
+            corrected.latency_ms
+        ),
+        (2, 1, 500)
+    );
+    assert_eq!(
+        (
+            corrected.input_tokens,
+            corrected.output_tokens,
+            corrected.total_tokens
+        ),
+        (1050, 28, 118)
+    );
+    assert_eq!(
+        corrected,
+        database
+            .usage_page(&UsageQuery {
+                from_ms: Some(0),
+                ..UsageQuery::default()
+            })
+            .unwrap()
+            .totals
     );
 
     drop(database);

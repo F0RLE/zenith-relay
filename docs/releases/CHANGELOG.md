@@ -212,6 +212,9 @@ recoverable account deletion. Changes below are grouped by area.
 
 #### Desktop UI and Access
 
+- Usage first entry sorts only send keys and decodes the selected page instead
+  of buffering full-history diagnostics. Narrow totals/filter reads and indexes
+  reduce database work; report loading no longer occupies the window event loop.
 - Overview displays completed analytics before saving its derived cache, coalesces
   writes and flushes pending data when hidden or leaving the page. Pool activity
   no longer repeatedly serializes unchanged source-statistics inventory; actual
@@ -646,6 +649,9 @@ recoverable account deletion. Changes below are grouped by area.
 
 #### Интерфейс и Доступ
 
+- Первый вход в «Использование» сортирует ключи отправок и загружает подробности
+  только выбранной страницы вместо всей истории. Облегчённые запросы итогов/фильтров
+  и индексы сокращают работу базы; чтение отчёта вынесено с потока окна.
 - Обзор показывает готовую аналитику до сохранения её кеша, объединяет записи
   и сохраняет ожидающие данные при скрытии или закрытии страницы. Активность пула
   больше не сериализует повторно неизменный список статистики API; новые снимки

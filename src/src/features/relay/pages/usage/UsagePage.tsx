@@ -19,9 +19,9 @@ import { CompactNumber } from "./usageReportParts";
 import { UsageMetric } from "./UsageMetric";
 import { UsagePagination } from "./UsagePagination";
 import { AccountUsageSummary } from "./AccountUsageSummary";
-import { logicalRequestRows, totalsFromRows, usageRowsFromLocal, type UsageRow } from "./usageData";
+import { physicalRequestRows, totalsFromRows, usageRowsFromLocal, type UsageRow } from "./usageData";
 import { formatUsageApiEquivalent } from "./usageFormatting";
-import { formatCompactNumber, formatFullNumber } from "../../usageTotals";
+import { formatFullNumber } from "../../usageTotals";
 
 type View = "requests" | "models" | "connections" | "errors";
 type Range = "all" | "daily" | "weekly" | "monthly";
@@ -29,6 +29,7 @@ const USAGE_SUMMARY_METRICS = ["requests", "success", "tokens", "equivalent", "g
 type UsageSummaryMetric = typeof USAGE_SUMMARY_METRICS[number];
 const REQUEST_SUMMARY_METRICS: UsageSummaryMetric[] = [...USAGE_SUMMARY_METRICS];
 const AGGREGATE_SUMMARY_METRICS: UsageSummaryMetric[] = ["requests", "tokens", "equivalent"];
+const REQUEST_SEARCH_DEBOUNCE_MS = 250;
 
 export function UsagePage() {
   const { t, i18n } = useTranslation();
@@ -44,6 +45,7 @@ export function UsagePage() {
   const [transport, setTransport] = useState("");
   const [errorQuery, setErrorQuery] = useState("");
   const [requestQuery, setRequestQuery] = useState("");
+  const [committedRequestQuery, setCommittedRequestQuery] = useState("");
   const [showMoreFilters, setShowMoreFilters] = useState(false);
   const [page, setPage] = useState(1);
   const [usageLoading, setUsageLoading] = useState(false);
@@ -54,11 +56,27 @@ export function UsagePage() {
   const usageSupported = mode === "local";
   const runtimeReady = runtime !== null;
   const requestFiltersActive = view === "requests";
+  const requestSearchPending = requestFiltersActive && requestQuery.trim() !== committedRequestQuery;
+  useEffect(() => {
+    if (!requestFiltersActive || !requestSearchPending) return;
+    const query = requestQuery.trim();
+    const commit = () => {
+      setPage(1);
+      setSelectedRequest(null);
+      setCommittedRequestQuery(query);
+    };
+    if (!query) {
+      commit();
+      return;
+    }
+    const timer = window.setTimeout(commit, REQUEST_SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [requestFiltersActive, requestQuery, requestSearchPending]);
   const usageQuery = useMemo<UsageQuery>(() => {
     const model = modelQuery.trim();
     const connection = connectionQuery.trim();
     const error = requestFiltersActive ? errorQuery.trim() : "";
-    const requestId = requestFiltersActive ? requestQuery.trim() : "";
+    const requestId = requestFiltersActive ? committedRequestQuery : "";
     const selectedWireApi: NonNullable<UsageQuery["wireApi"]> | undefined = requestFiltersActive && wireApi
       ? wireApi as NonNullable<UsageQuery["wireApi"]>
       : undefined;
@@ -82,14 +100,16 @@ export function UsagePage() {
       includeEvents: view === "requests" || view === "errors",
       includeModels: view === "models",
       includePoolMembers: view === "connections",
+      includeFilterOptions: true,
     };
-  }, [page, range, modelQuery, connectionQuery, wireApi, transport, status, errorQuery, requestQuery, view, requestFiltersActive]);
+  }, [page, range, modelQuery, connectionQuery, wireApi, transport, status, errorQuery, committedRequestQuery, view, requestFiltersActive]);
 
   useEffect(() => {
     if (!runtimeReady || !usageSupported) {
       setUsageLoading(false);
       return;
     }
+    if (requestSearchPending) return;
     let isActive = true;
     const usageChanged = appliedUsageRevision.current !== usageRevision;
     appliedUsageRevision.current = usageRevision;
@@ -99,7 +119,7 @@ export function UsagePage() {
       .catch(() => isActive && setUsageError(true))
       .finally(() => isActive && setUsageLoading(false));
     return () => { isActive = false; };
-  }, [mode, runtimeReady, usageRevision, usageSupported, usageQuery, loadLocalUsage]);
+  }, [mode, runtimeReady, usageRevision, usageSupported, usageQuery, loadLocalUsage, requestSearchPending]);
 
 
   useEffect(() => {
@@ -116,7 +136,7 @@ export function UsagePage() {
       removedAccount: t("usage.removedAccount"),
       unknownConnection: t("common.unknown"),
     };
-    return logicalRequestRows(usageRowsFromLocal(localUsagePage?.events ?? [], {
+    return physicalRequestRows(usageRowsFromLocal(localUsagePage?.events ?? [], {
       ...labels,
       accountLabels,
       sourceLabels,
@@ -125,20 +145,10 @@ export function UsagePage() {
   useEffect(() => {
     if (!selectedRequest) return;
     const currentRow = rows.find((row) => selectedRequest.requestId
-      ? row.requestId === selectedRequest.requestId
+      ? row.requestId === selectedRequest.requestId && row.attempt === selectedRequest.attempt
       : row.id === selectedRequest.id);
     if (currentRow && currentRow !== selectedRequest) setSelectedRequest(currentRow);
   }, [rows, selectedRequest]);
-  const loadAttempts = useCallback(async (query: UsageQuery) => {
-    const labels = {
-      backgroundConnection: t("codex.backgroundConnection"),
-      unknownAccount: t("accounts.importUnknownAccount"),
-      removedAccount: t("usage.removedAccount"),
-      unknownConnection: t("common.unknown"),
-    };
-    const result = await relayCommands.localUsagePage(query);
-    return { ...result, rows: usageRowsFromLocal(result.events, { ...labels, accountLabels, sourceLabels }) };
-  }, [t, accountLabels, sourceLabels]);
   const usagePage = mode === "local" ? localUsagePage : null;
   const totals = usagePage?.totals ?? totalsFromRows(rows);
   const averageGenerationSpeed = observedTokensPerSecond(totals.generationOutputTokens, totals.generationMs);
@@ -179,6 +189,7 @@ export function UsagePage() {
   };
   const canClear = mode === "local";
   const refreshUsage = async () => {
+    if (requestSearchPending) return;
     setUsageLoading(true);
     setUsageError(false);
     try {
@@ -196,31 +207,26 @@ export function UsagePage() {
   })), [accountDisplayName, accountLabels, mode, sourceLabels, t, usagePage?.poolMembers]);
   const modelOptionIds = useMemo(() => orderModelIdsBySnapshot(
     [
-      ...(runtime?.gateway.visibleModelIds ?? []),
-      ...(modelGroups?.map((group) => group.key) ?? []),
-      ...rows.flatMap((row) => row.model ? [row.model] : []),
+      ...(usagePage?.filterOptions?.models ?? []),
       ...(modelQuery ? [modelQuery] : []),
     ],
     runtime?.gateway.models ?? [],
     runtime?.gateway.modelCatalog,
-  ), [modelGroups, modelQuery, rows, runtime?.gateway.models, runtime?.gateway.modelCatalog, runtime?.gateway.visibleModelIds]);
+  ), [modelQuery, runtime?.gateway.models, runtime?.gateway.modelCatalog, usagePage?.filterOptions?.models]);
   const modelOptions = useMemo(() => [{ value: "", label: t("usage.anyModel") }, ...modelOptionIds.map((modelId) => ({ value: modelId, label: modelId }))], [modelOptionIds, t]);
-  const poolMemberOptionSource = useMemo(() => [
-    ...(poolMemberGroups ?? []),
-    ...(runtime?.accounts ?? []).map((account) => ({ key: account.id, label: account.label })),
-    ...(runtime?.sources ?? []).map((source) => ({ key: source.id, label: source.name })),
-    ...rows.map((row) => ({ key: row.candidateKey, label: row.connection })),
-  ], [poolMemberGroups, rows, runtime?.accounts, runtime?.sources]);
-  const poolMemberOptions = useMemo(() => [{ value: "", label: t("usage.anyPoolMember") }, ...Array.from(new Map(poolMemberOptionSource
-    .filter((group) => group.key)
-    .map((group) => ({ value: group.key, label: group.label || group.key }))
-    .sort((left, right) => left.label.localeCompare(right.label, i18n.language))
-    .map((option) => [option.value, option] as const)).values())], [i18n.language, poolMemberOptionSource, t]);
+  const poolMemberOptions = useMemo(() => [{ value: "", label: t("usage.anyPoolMember") },
+    ...Array.from(new Set([
+      ...(usagePage?.filterOptions?.poolMembers ?? []),
+      ...(connectionQuery ? [connectionQuery] : []),
+    ])).map((key) => ({ value: key, label: accountLabels.get(key) ?? sourceLabels.get(key) ?? key }))
+      .sort((left, right) => left.label.localeCompare(right.label, i18n.language)),
+  ], [accountLabels, connectionQuery, i18n.language, sourceLabels, t, usagePage?.filterOptions?.poolMembers]);
   const selectedAccount = runtime?.accounts.find((account) => account.id === connectionQuery);
   const errorRows = useMemo(() => rows.filter((usageRow) => !usageRow.success && requestStatusKind(usageRow) !== "pending"), [rows]);
   const clearFilters = () => {
     setRange("all"); setStatus("all"); setModelQuery(""); setConnectionQuery("");
     setWireApi(""); setTransport(""); setErrorQuery(""); setRequestQuery("");
+    setCommittedRequestQuery("");
     setPage(1); setSelectedRequest(null);
   };
   const visibleSummaryMetrics = view === "requests" ? REQUEST_SUMMARY_METRICS : AGGREGATE_SUMMARY_METRICS;
@@ -228,7 +234,7 @@ export function UsagePage() {
   const showModelFilter = view !== "models";
   const showPoolMemberFilter = view !== "connections";
   const additionalFilterCount = [wireApi, transport, errorQuery, requestQuery.trim()].filter(Boolean).length;
-  const scopeMenuProps = { showSelectionIndicator: false, fitContent: true };
+  const scopeMenuProps = { showSelectionIndicator: false };
   const scopeFilterCount = 1 + Number(showStatusFilter) + Number(showModelFilter) + Number(showPoolMemberFilter);
   const hasFilters = range !== "all"
     || (showStatusFilter && status !== "all")
@@ -245,7 +251,7 @@ export function UsagePage() {
     if (nextView === "connections") setConnectionQuery("");
   };
 
-  return <section className="relay-page relay-workspace-page usage-page">
+  return <section className="relay-page relay-workspace-page usage-page" aria-busy={usageLoading || requestSearchPending}>
     <PageHeader
       title={t("nav.usage")}
       navigation={<Tabs
@@ -253,7 +259,7 @@ export function UsagePage() {
         onChange={(nextView) => changeView(nextView as View)}
         label={t("usage.views")}
         items={[
-          { id: "requests", label: t("usage.requests") },
+          { id: "requests", label: t("usage.sends") },
           { id: "models", label: t("common.models") },
           { id: "connections", label: t("usage.poolMembers") },
           { id: "errors", label: t("overview.errors") },
@@ -327,7 +333,7 @@ export function UsagePage() {
       </div>
     </div>
     {requestFiltersActive && showMoreFilters ? <RequestFilters
-      rows={rows}
+      filterOptions={usagePage?.filterOptions}
       wireApi={wireApi}
       onWireApiChange={(value) => resetPage(() => setWireApi(value))}
       transport={transport}
@@ -335,11 +341,7 @@ export function UsagePage() {
       errorQuery={errorQuery}
       onErrorChange={(value) => resetPage(() => setErrorQuery(value))}
       requestQuery={requestQuery}
-      onRequestChange={(value) => resetPage(() => setRequestQuery(value))}
-      onReset={() => resetPage(() => {
-        setWireApi(""); setTransport(""); setErrorQuery(""); setRequestQuery("");
-      })}
-      onClose={() => setShowMoreFilters(false)}
+      onRequestChange={setRequestQuery}
     /> : null}
     {visibleSummaryMetrics.length ? (
       <UsageSummary
@@ -364,15 +366,15 @@ export function UsagePage() {
     {usageError ? <p role="alert" className="form-note error-text">{t("usage.loadFailed")}</p> : null}
     {(view === "requests" || view === "errors") && usagePage && usagePage.page === page && usagePage.totalPages > 1 ? (
       <UsagePagination
-        key={JSON.stringify([mode, view, status, range, modelQuery, connectionQuery, wireApi, transport, errorQuery, requestQuery])}
+        key={JSON.stringify([mode, view, status, range, modelQuery, connectionQuery, wireApi, transport, errorQuery, committedRequestQuery])}
         page={page}
         totalPages={usagePage.totalPages}
-        loading={usageLoading}
+        loading={usageLoading || requestSearchPending}
         onPageChange={changePage}
       />
     ) : null}
-    {selectedRequest ? <RequestDetails key={`${mode}:${selectedRequest.requestId ?? selectedRequest.id}`}
-      row={selectedRequest} local={mode === "local"} loadAttempts={loadAttempts} onClose={() => setSelectedRequest(null)} /> : null}
+    {selectedRequest ? <RequestDetails key={`${mode}:${selectedRequest.requestId ?? selectedRequest.id}:${selectedRequest.attempt}`}
+      row={selectedRequest} local={mode === "local"} onClose={() => setSelectedRequest(null)} /> : null}
   </section>;
 }
 
@@ -398,13 +400,13 @@ function UsageSummary({
   return (
     <section className="usage-overview" aria-label={t("usage.summary")}>
       <div className="usage-metrics">
-        {visibleMetrics.includes("requests") ? <UsageMetric label={t("usage.requests")} value={<CompactNumber value={totals.requests} locale={language} />} /> : null}
+        {visibleMetrics.includes("requests") ? <UsageMetric label={t("usage.clientRequests")} value={<CompactNumber value={totals.requests} locale={language} />} /> : null}
         {visibleMetrics.includes("success") ? (
           <UsageMetric
             className="usage-success-metric"
             label={t("common.success")}
             value={successRate == null ? "-" : `${successRate}%`}
-            detail={`${formatFullNumber(totals.successfulRequests, language)} / ${formatFullNumber(totals.requests, language)}`}
+            title={`${formatFullNumber(totals.successfulRequests, language)} / ${formatFullNumber(totals.requests, language)}`}
           />
         ) : null}
         {visibleMetrics.includes("tokens") ? (
@@ -419,11 +421,14 @@ function UsageSummary({
           <UsageMetric
             label={t("usage.apiEquivalent")}
             value={formatUsageApiEquivalent(totals.apiEquivalent, language, totals.apiEquivalent.microUsd >= 1_000_000 ? 2 : 4)}
-            detail={totals.apiEquivalent.unpricedTokens > 0 ? t("usage.apiEquivalentCoverage", {
-              priced: formatCompactNumber(totals.apiEquivalent.pricedTokens, language),
-              unpriced: formatCompactNumber(totals.apiEquivalent.unpricedTokens, language),
-            }) : undefined}
-            title={`${formatUsageApiEquivalent(totals.apiEquivalent, language)} · ${t("usage.apiEquivalentHint", { count: formatFullNumber(totals.apiEquivalent.unpricedTokens, language) })}`}
+            title={[
+              formatUsageApiEquivalent(totals.apiEquivalent, language),
+              totals.apiEquivalent.unpricedTokens > 0 ? t("usage.apiEquivalentCoverage", {
+                priced: formatFullNumber(totals.apiEquivalent.pricedTokens, language),
+                unpriced: formatFullNumber(totals.apiEquivalent.unpricedTokens, language),
+              }) : null,
+              t("usage.apiEquivalentHint", { count: formatFullNumber(totals.apiEquivalent.unpricedTokens, language) }),
+            ].filter(Boolean).join(" · ")}
           />
         ) : null}
       </div>

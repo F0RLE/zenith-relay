@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import type { LocalUsagePage, UsageQuery } from "../api/types";
 import { LatestRequestGate } from "./latestRequestGate";
+import { shareUsageFilterChoices } from "./usagePageSharing";
 
 export type RelayUsageCommands = {
   localUsagePage: (query: UsageQuery) => Promise<LocalUsagePage>;
@@ -28,6 +29,7 @@ export function useRelayUsage(commands: RelayUsageCommands) {
   const cache = useRef(new Map<string, UsageCacheEntry<LocalUsagePage>>());
   const inFlight = useRef(new Map<string, Promise<LocalUsagePage>>());
   const displayedQueryKey = useRef<string | null>(null);
+  const filterChoices = useRef<LocalUsagePage["filterOptions"]>(undefined);
 
   const loadLocalUsage = useCallback((query: UsageQuery, options: UsageLoadOptions = {}) => {
     const key = JSON.stringify(query);
@@ -39,6 +41,7 @@ export function useRelayUsage(commands: RelayUsageCommands) {
     }
     const cached = cache.current.get(key);
     if (cached) {
+      filterChoices.current = cached.data.filterOptions;
       setLocalUsagePage(cached.data);
       const age = Date.now() - cached.updatedAt;
       if (!options.force && age >= 0 && age < USAGE_REVALIDATION_COOLDOWN_MS) {
@@ -48,9 +51,11 @@ export function useRelayUsage(commands: RelayUsageCommands) {
       setLocalUsagePage(null);
     }
     const accept = (page: LocalUsagePage) => {
-      rememberUsage(cache.current, key, page);
+      const shared = shareUsageFilterChoices(page, filterChoices.current);
+      rememberUsage(cache.current, key, shared);
       displayedQueryKey.current = key;
-      setLocalUsagePage(page);
+      filterChoices.current = shared.filterOptions;
+      setLocalUsagePage(shared);
     };
     const existing = inFlight.current.get(key);
     // Re-adopt an existing query under the current filter's request gate.
@@ -69,6 +74,7 @@ export function useRelayUsage(commands: RelayUsageCommands) {
     inFlight.current.clear();
     cache.current.clear();
     displayedQueryKey.current = null;
+    filterChoices.current = undefined;
     setLocalUsagePage(null);
   }, []);
 

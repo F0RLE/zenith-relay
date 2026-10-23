@@ -4,6 +4,7 @@ import {
   codexRequestOriginFromErrorCategory,
   normalizeObservedServiceTier,
   logicalRequestRows,
+  physicalRequestRows,
   totalsFromRows,
   usageRowsFromLocal,
   type UsageRow,
@@ -72,8 +73,8 @@ describe("usage data", () => {
     expect(requestStatusKind({ ...pending, routing: null })).toBe("error");
     expect(requestStatusKind({ ...pending, success: true })).toBe("success");
     for (const [locale, translation, expected] of [
-      ["ru", ru, "Загрузка определений инструментов"],
-      ["en", en, "Loading tool contracts"],
+      ["ru", ru, "Поиск инструментов"],
+      ["en", en, "Tool lookup"],
     ] as const) {
       const i18n = createInstance();
       await i18n.init({ lng: locale, resources: { [locale]: { translation } }, initImmediate: false });
@@ -170,6 +171,21 @@ describe("usage data", () => {
     expect(totalsFromRows(requests).requests).toBe(2);
     expect(totalsFromRows(requests).successfulRequests).toBe(1);
     expect(logicalRequestRows([row({ id: 10, requestId: null }), row({ id: 11, requestId: null })])).toHaveLength(2);
+  });
+
+  test("send rows preserve all usage and deduplicate only the same physical send", () => {
+    const lookup = row({ id: 1, success: false, tokens: 15, inputTokens: 10, outputTokens: 5 });
+    const final = row({ id: 2, attempt: 2, duration: 8000 });
+    const corrected = { ...lookup, tokens: 25, inputTokens: 20, time: "2026-08-23T00:00:09Z" };
+    const rows = physicalRequestRows([lookup, final, corrected, final]);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toBe(corrected);
+    const totals = totalsFromRows(rows);
+    expect(totals.requests).toBe(1);
+    expect(totals.successfulRequests).toBe(1);
+    expect(totals.totalTokens).toBe(70);
+    expect(totals.latencyMs).toBe(8000);
+    expect(totals.apiEquivalent.microUsd).toBe(3_000_000);
   });
 
   test("short request labels preserve the differing suffix instead of repeating an identical prefix", () => {
@@ -369,7 +385,7 @@ describe("usage data", () => {
   test("aggregates usage and marks rows without a price as unpriced", () => {
     const totals = totalsFromRows([
       row(),
-      row({ id: "unpriced", success: false, tokens: 10, outputTokens: null, apiEquivalent: null }),
+      row({ id: "unpriced", requestId: "unpriced", success: false, tokens: 10, outputTokens: null, apiEquivalent: null }),
     ]);
 
     expect(totals).toMatchObject({

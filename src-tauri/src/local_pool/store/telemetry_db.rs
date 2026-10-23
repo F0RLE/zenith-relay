@@ -29,8 +29,8 @@ mod usage;
 use migrations::*;
 use usage::{
     account_pricing_aggregates, apply_usage_totals_delta, is_unfiltered_all_time, sql_u64,
-    usage_buckets, usage_filter, usage_groups, usage_log_from_row, usage_model_equivalents,
-    usage_totals,
+    usage_buckets, usage_filter, usage_filter_options, usage_groups, usage_log_from_row,
+    usage_model_equivalents, usage_totals,
 };
 
 #[cfg(test)]
@@ -114,8 +114,20 @@ pub struct CacheSession {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct UsageFilterOptions {
+    pub models: Vec<String>,
+    pub pool_members: Vec<String>,
+    pub wire_apis: Vec<String>,
+    pub transports: Vec<String>,
+    pub error_categories: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LocalUsagePage {
     pub events: Vec<UsageLog>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter_options: Option<UsageFilterOptions>,
     pub total: u64,
     pub page: u32,
     pub page_size: u32,

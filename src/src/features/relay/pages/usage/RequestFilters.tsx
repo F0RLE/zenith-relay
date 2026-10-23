@@ -1,11 +1,15 @@
 import { useTranslation } from "react-i18next";
-import { Search, X } from "lucide-react";
-import { Button, IconButton, OptionMenu } from "../../components/Ui";
-import type { UsageRow } from "./usageData";
-import { formatErrorCategory } from "./usageReportFormat";
+import { Search } from "lucide-react";
+import { OptionMenu } from "../../components/Ui";
+import type { UsageFilterOptions } from "../../api/types";
+import { formatErrorCategory, formatTransport, formatWireApi } from "./usageReportFormat";
+
+function availableValues(values: string[] | undefined, selected: string): string[] {
+  return Array.from(new Set([...(values ?? []), ...(selected ? [selected] : [])])).sort();
+}
 
 export function RequestFilters({
-  rows,
+  filterOptions,
   wireApi,
   onWireApiChange,
   transport,
@@ -14,10 +18,8 @@ export function RequestFilters({
   onErrorChange,
   requestQuery,
   onRequestChange,
-  onReset,
-  onClose,
 }: {
-  rows: UsageRow[];
+  filterOptions: Partial<UsageFilterOptions> | undefined;
   wireApi: string;
   onWireApiChange: (value: string) => void;
   transport: string;
@@ -26,32 +28,19 @@ export function RequestFilters({
   onErrorChange: (value: string) => void;
   requestQuery: string;
   onRequestChange: (value: string) => void;
-  onReset: () => void;
-  onClose: () => void;
 }) {
   const { t } = useTranslation();
-  const hasFilters = Boolean(wireApi || transport || errorQuery || requestQuery);
   const errorOptions = [
     { value: "", label: t("usage.anyErrorCategory") },
-    ...Array.from(new Set([
-      ...rows.flatMap((row) => row.errorCategory ? [row.errorCategory] : []),
-      ...(errorQuery ? [errorQuery] : []),
-    ])).sort().map((errorCategory) => ({ value: errorCategory, label: formatErrorCategory(errorCategory, t) })),
+    ...availableValues(filterOptions?.errorCategories, errorQuery)
+      .map((errorCategory) => ({ value: errorCategory, label: formatErrorCategory(errorCategory, t) })),
   ];
   const menuProps = {
     className: "filter-option-menu",
     showSelectionIndicator: false,
-    fitContent: true,
     align: "start" as const,
   };
   return <section id="usage-request-filters" className="usage-filter-panel" aria-label={t("usage.moreFilters")}>
-    <header>
-      <h2>{t("usage.moreFilters")}</h2>
-      <div>
-        {hasFilters ? <Button variant="ghost" onClick={onReset}>{t("common.reset")}</Button> : null}
-        <IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={onClose} />
-      </div>
-    </header>
     <div className="usage-filters">
       <div className="usage-filter-field">
         <span>{t("usage.protocol")}</span>
@@ -61,10 +50,8 @@ export function RequestFilters({
           onChange={onWireApiChange}
           options={[
             { value: "", label: t("usage.anyProtocol") },
-            { value: "responses", label: "Responses" },
-            { value: "messages", label: "Messages" },
-            { value: "chat_completions", label: "Chat Completions" },
-            { value: "gemini", label: "Gemini" },
+            ...availableValues(filterOptions?.wireApis, wireApi)
+              .map((value) => ({ value, label: formatWireApi(value, t) })),
           ]}
         />
       </div>
@@ -76,8 +63,8 @@ export function RequestFilters({
           onChange={onTransportChange}
           options={[
             { value: "", label: t("usage.anyTransport") },
-            { value: "http", label: t("usage.transports.http") },
-            { value: "websocket", label: t("usage.transports.websocket") },
+            ...availableValues(filterOptions?.transports, transport)
+              .map((value) => ({ value, label: formatTransport(value, t) })),
           ]}
         />
       </div>

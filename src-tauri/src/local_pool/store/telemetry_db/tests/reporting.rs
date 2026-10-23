@@ -45,7 +45,7 @@ fn history_purges_deleted_account_attempts_and_expires_with_the_final_row() {
 }
 
 #[test]
-fn exact_request_history_survives_reopen_without_inflating_totals() {
+fn sends_survive_reopen_without_inflating_logical_request_counts() {
     let root = std::env::temp_dir().join(format!("relay-attempts-{}", uuid::Uuid::new_v4()));
     let path = root.join("usage.sqlite");
     let database = TelemetryDb::open(&path).unwrap();
@@ -70,6 +70,14 @@ fn exact_request_history_survives_reopen_without_inflating_totals() {
     let database = TelemetryDb::open(&path).unwrap();
     assert_eq!(
         database.usage_page(&UsageQuery::default()).unwrap().total,
+        3
+    );
+    assert_eq!(
+        database
+            .usage_page(&UsageQuery::default())
+            .unwrap()
+            .totals
+            .requests,
         2
     );
     let history = database
@@ -432,6 +440,12 @@ fn cache_sessions_follow_the_latest_cache_touch_and_reported_window() {
                     [created_at, request_id],
                 )
                 .unwrap();
+            connection
+                .execute(
+                    "UPDATE request_attempts SET created_at = ?1 WHERE request_id = ?2",
+                    [created_at, request_id],
+                )
+                .unwrap();
         }
     }
 
@@ -578,6 +592,15 @@ fn cache_sessions_isolate_routes_and_ignore_misses_and_future_policies() {
             .unwrap()
             .execute(
                 "UPDATE request_logs SET created_at = ?1 WHERE request_id = ?2",
+                [format!("2026-10-18 {time}"), id.to_owned()],
+            )
+            .unwrap();
+        database
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE request_attempts SET created_at = ?1 WHERE request_id = ?2",
                 [format!("2026-10-18 {time}"), id.to_owned()],
             )
             .unwrap();

@@ -81,7 +81,8 @@ fn context_band_migration_reclassifies_retained_usage_and_preserves_archives() {
         .lock_connection()
         .unwrap()
         .execute_batch(
-            "DROP TABLE request_attempts;
+            "DROP VIEW usage_sends;
+         DROP TABLE request_attempts;
          DROP TRIGGER request_attempts_retention;
          DELETE FROM request_logs WHERE request_id = 'archived';
          UPDATE usage_candidate_rollups SET context_band = 'base';
@@ -129,6 +130,7 @@ fn context_band_migration_reclassifies_retained_usage_and_preserves_archives() {
         ))
         .unwrap();
     let expected = vec![
+        ("above_100k".into(), 110_000, 20),
         ("above_128k".into(), 130_000, 30),
         ("base".into(), 110_000, 20),
     ];
@@ -409,7 +411,9 @@ fn account_purchase_cost_migration_preserves_direct_values_and_removes_legacy_ec
         .lock()
         .unwrap()
         .execute_batch(
-            "ALTER TABLE request_logs DROP COLUMN cache_write_ttl;
+            "DROP VIEW usage_sends;
+                 DROP INDEX request_logs_unaggregated;
+                 ALTER TABLE request_logs DROP COLUMN cache_write_ttl;
                  ALTER TABLE request_logs DROP COLUMN usage_aggregate_recorded;
                  ALTER TABLE request_logs DROP COLUMN client_context_id;
                  ALTER TABLE request_logs DROP COLUMN upstream_error_json;

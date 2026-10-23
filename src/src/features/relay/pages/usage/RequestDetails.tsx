@@ -14,14 +14,11 @@ import { usageBreakdown } from "./usageBreakdown";
 import { formatUsageApiEquivalent } from "./usageFormatting";
 import { formatDurationMs, requestStatusKind, requestStatusLabel, formatErrorCategory, cacheRemainingLabel, prefixErrorOrigin } from "./usageReportFormat";
 import { RequestDetailMetric, RequestTokenValue, SpeedValue } from "./usageReportParts";
-import { RequestExecution } from "./RequestExecution";
 import { RequestParameters } from "./RequestParameters";
 import { RequestTechnicalDetails } from "./RequestTechnicalDetails";
-import type { AttemptPageLoader } from "./attemptHistory";
 
-export function RequestDetails({ row, local, onClose, loadAttempts }: {
+export function RequestDetails({ row, local, onClose }: {
   row: UsageRow; local: boolean; onClose: () => void;
-  loadAttempts: AttemptPageLoader;
 }) {
   const { t, i18n } = useTranslation();
   const { usageRevision } = useRelayUsageContext();
@@ -79,7 +76,7 @@ export function RequestDetails({ row, local, onClose, loadAttempts }: {
   const equivalentHint = t("usage.requestApiEquivalentHint", { count: row.apiEquivalent?.unpricedTokens ?? 0 });
   const hasTokens = [row.inputTokens, row.outputTokens, row.tokens, row.cachedInputTokens,
     row.cacheWriteInputTokens, row.reasoningTokens].some((value) => value != null);
-  const stopDecision = !row.success && row.attempt <= 1 && (routing?.attemptOutcome === "execution_uncertain"
+  const stopDecision = !row.success && (routing?.attemptOutcome === "execution_uncertain"
     || routing?.attemptOutcome === "client_disconnected") ? routing.attemptOutcome : null;
   const requestTimestamp = Date.parse(row.time);
   const requestTime = Number.isFinite(requestTimestamp)
@@ -157,7 +154,6 @@ export function RequestDetails({ row, local, onClose, loadAttempts }: {
       </section> : null}
       <RequestParameters row={row} />
     </div>
-    <RequestExecution row={row} loadPage={loadAttempts} />
     <RequestTechnicalDetails row={row} debugEnabled={debugEnabled} />
   </Dialog>;
 }

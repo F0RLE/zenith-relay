@@ -55,7 +55,7 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
     },
     model: { label: t("common.model"), cell: (row) => <UsageModel row={row} /> },
     connection: { label: t("usage.poolMember"), cell: (row) => <span className="usage-request-connection">{row.connection}</span> },
-    timing: { label: t("usage.timing"), cell: (row) => formatTiming(row.ttft, row.duration, i18n.resolvedLanguage ?? i18n.language, t) },
+    timing: { label: t("usage.timing"), cell: (row) => <span data-relay-tooltip={t("usage.elapsedTiming")}>{formatTiming(row.ttft, row.duration, i18n.resolvedLanguage ?? i18n.language, t)}</span> },
     tokens: { label: t("usage.tokens"), cell: (row) => row.tokens == null ? "-" : <CompactNumber value={row.tokens} locale={i18n.language} /> },
     equivalent: { label: t("usage.value"), cell: (row) => row.apiEquivalent ? formatUsageApiEquivalent(row.apiEquivalent, i18n.language) : "—" },
     request: {
@@ -70,7 +70,7 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
           onClick={() => onSelect(row)}
         >
           {t("usage.openDetails")}
-          {row.attempt > 1 ? <small className="usage-request-sends">{t("usage.execution.sendCount", { count: row.attempt })}</small> : null}
+          {row.attempt > 1 ? <small className="usage-request-sends">{t("usage.execution.send", { number: row.attempt })}</small> : null}
         </button>
       ),
     },

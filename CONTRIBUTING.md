@@ -445,6 +445,24 @@ The storage operation remains synchronous when flushed; this removes it from
 the report-completion path, not into a worker thread. The 250 ms derived-cache
 window is not a durability guarantee during a process crash.
 
+Native Usage first-entry checks run separately from browser mocks:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path src-tauri/Cargo.toml --locked local_pool::store::telemetry_db::tests -- --test-threads=1
+bun scripts/build/cargo.mjs test --manifest-path src-tauri/Cargo.toml --locked measure_usage_first_entry -- --ignored --nocapture --test-threads=1
+~~~
+
+Run these from the repository root. The timing fixture creates 10,000 synthetic
+logical results and matching sends, requests 50 rows plus full-period filter
+choices, and checks exact total tokens. A local debug run measured cold/warm
+reads of 79.93/60.65 ms before the narrow-query/index change and 44.84/26.66 ms
+after it. This covers SQLite, pricing and row decoding, not IPC, WebView rendering
+or an installed application's first-entry latency. The ordinary tests compare
+five pages across filters against the original send view, including legacy-only
+final sends with retained earlier attempts, and verify the covering/partial-index
+plans without timing thresholds. Index migration is append-only; SQL/report
+work stays on a blocking worker and startup must not prefetch unused Usage data.
+
 For a release UI or layout change, run the focused Playwright suites as well:
 
 ~~~powershell

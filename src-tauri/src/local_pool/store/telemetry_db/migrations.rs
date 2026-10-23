@@ -2,17 +2,21 @@ mod attempts;
 mod context_bands;
 mod early;
 mod late;
+mod send_usage;
 mod service_tiers;
 mod unknown_tiers;
+mod usage_reads;
 
 pub(super) use attempts::MIGRATION_033;
 pub(super) use context_bands::migrate_032;
 pub(super) use early::*;
 pub(super) use late::*;
+pub(super) use send_usage::migrate_036;
 pub(super) use service_tiers::migrate_034;
 pub(super) use unknown_tiers::migrate_035;
+pub(super) use usage_reads::MIGRATION_037;
 
-pub(super) const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 35;
+pub(super) const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 37;
 pub(super) const MAX_RESPONSE_AFFINITY_ROWS: usize = 16_384;
 pub(super) const MAX_STATE_JSON_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const ARCHIVE_USAGE_SQL: &str = concat!(
@@ -41,8 +45,8 @@ SELECT CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
         THEN cache_write_input_tokens ELSE 0 END), 0),
     COALESCE(SUM(output_tokens), 0), COUNT(output_tokens),
     COALESCE(SUM(total_tokens), 0), COUNT(total_tokens)
-FROM request_logs
-WHERE created_at < datetime('now', '-30 days')
+FROM usage_sends
+WHERE request_id IN (SELECT request_id FROM request_logs WHERE created_at < datetime('now', '-30 days'))
     AND usage_aggregate_recorded = 0
 GROUP BY 1, 2, 3, 4, 5
 ON CONFLICT(candidate_kind, candidate_id, model, price_class, context_band) DO UPDATE SET

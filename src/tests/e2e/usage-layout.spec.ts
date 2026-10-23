@@ -1,6 +1,18 @@
 import { expect, test, type Page } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
 
+async function expectRequestMetricsCentered(page: Page) {
+  const offCenter = await page.locator(".request-details-metric").evaluateAll((metrics) => metrics.flatMap((metric) => {
+    const rect = metric.getBoundingClientRect();
+    const center = rect.left + rect.width / 2;
+    return Array.from(metric.children).filter((child) => {
+      const bounds = child.getBoundingClientRect();
+      return Math.abs(bounds.left + bounds.width / 2 - center) > 1 || getComputedStyle(child).textAlign !== "center";
+    }).map((child) => child.tagName);
+  }));
+  expect(offCenter).toEqual([]);
+}
+
 async function expectReportFits(page: Page) {
   const overflow = await page.locator(".usage-page, .usage-view-toolbar, .usage-scope-controls, .usage-overview, .usage-overview-details, .usage-token-totals, .usage-token-totals dd, .usage-metric, .usage-metric-copy, .usage-filter-panel, .usage-filters, .usage-page .relay-table-wrap, .usage-sortable-table td, .usage-pagination, .usage-pagination-controls, .usage-pagination-form").evaluateAll((elements) => elements
     .filter((element) => element.getBoundingClientRect().width > 0)
@@ -57,16 +69,39 @@ for (const theme of ["light", "dark"] as const) {
         await page.locator(".usage-pagination-controls").screenshot({ path: `output/playwright/usage-pagination-control-${theme}-${width}.png` });
       }
 
-      await page.getByRole("button", { name: "Другие фильтры" }).click();
+      const filterToggle = page.getByRole("button", { name: "Другие фильтры", exact: true });
+      await filterToggle.click();
+      const filters = page.getByRole("region", { name: "Другие фильтры", exact: true });
+      await expect(filterToggle).toHaveAttribute("aria-expanded", "true");
+      await expect(filters.getByRole("heading")).toHaveCount(0);
+      await expect(filters.getByRole("button", { name: "Закрыть", exact: true })).toHaveCount(0);
+      await expect(filters.getByRole("button")).toHaveCount(3);
+      await expect(filters.getByRole("textbox", { name: "Идентификатор запроса", exact: true })).toBeVisible();
+      const filterRows = await filters.locator(".usage-filter-field").evaluateAll((fields) =>
+        new Set(fields.map((field) => Math.round(field.getBoundingClientRect().top))).size);
+      expect(filterRows).toBe(width >= 1160 ? 1 : 2);
       await expectReportFits(page);
       await page.locator(".usage-filters").getByRole("button", { name: /^Протокол:/ }).click();
       await page.getByRole("option", { name: "Responses", exact: true }).click();
       await expect(page.locator(".usage-filter-toggle-wrap small")).toHaveText("1");
       await expectReportFits(page);
+      await filterToggle.click();
+      await expect(filterToggle).toHaveAttribute("aria-expanded", "false");
+      await expect(filters).toHaveCount(0);
+      await expect(page.locator(".usage-filter-toggle-wrap small")).toHaveText("1");
+      await filterToggle.click();
+      await expect(filters.getByRole("button", { name: /^Протокол:/ })).toContainText("Responses");
+      await page.getByRole("button", { name: "Сбросить фильтры", exact: true }).click();
+      await expect(page.locator(".usage-filter-toggle-wrap small")).toHaveCount(0);
+      await expect(filters.getByRole("button", { name: /^Протокол:/ })).toContainText("Любой протокол");
+      if (width === 1160 || width === 390) {
+        await filters.screenshot({ path: `output/playwright/usage-filters-${theme}-${width}.png` });
+      }
 
       await page.getByRole("button", { name: "Сведения о запросе: req_synthetic_local" }).click();
       const dialog = page.getByRole("dialog", { name: "Сведения о запросе" });
       await expect(dialog.getByRole("tab")).toHaveCount(0);
+      await expectRequestMetricsCentered(page);
       await page.screenshot({ path: `output/playwright/usage-details-${theme}-${width}.png` });
       for (const technicalExpanded of [false, true]) {
         if (technicalExpanded) await dialog.locator(".request-technical-details > summary").click();
@@ -82,7 +117,7 @@ for (const theme of ["light", "dark"] as const) {
         if (width === 1160 || width === 390) await page.screenshot({ path: `output/playwright/${table.slice(1)}-${theme}-${width}.png` });
       }
 
-      await page.getByRole("tab", { name: "Запросы", exact: true }).click();
+      await page.getByRole("tab", { name: "Отправки", exact: true }).click();
       await page.getByRole("button", { name: /^Участник пула:/ }).click();
       await page.getByRole("option", { name: "Personal Plus", exact: true }).click();
       const account = page.locator(".usage-account-value");
@@ -98,6 +133,23 @@ for (const theme of ["light", "dark"] as const) {
           && element.scrollWidth <= element.clientWidth + 1;
       })).toBe(true);
       if (width === 1160 || width === 390) await page.screenshot({ path: `output/playwright/usage-account-${theme}-${width}.png` });
+    });
+  }
+}
+
+for (const locale of ["ru", "en"] as const) {
+  for (const width of [1160, 390]) {
+    test(`request headline metrics stay centered: ${locale} ${width}`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await installTauriMock(page, { mode: "local", locale, populated: true, theme: width === 1160 ? "dark" : "light" });
+      await page.goto("/");
+      await page.getByRole("button", { name: locale === "ru" ? "Использование" : "Usage", exact: true }).click();
+      await page.getByRole("button", { name: `${locale === "ru" ? "Сведения о запросе" : "Request details"}: req_synthetic_local`, exact: true }).click();
+      const metrics = page.locator(".request-details-metrics");
+      await expect(metrics.locator(".request-details-metric")).toHaveCount(4);
+      await expectRequestMetricsCentered(page);
+      expect(await metrics.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+      await metrics.screenshot({ path: `output/playwright/request-metrics-centered-${locale}-${width}.png` });
     });
   }
 }
@@ -157,11 +209,15 @@ for (const locale of ["ru", "en"] as const) {
       await expect(summary.locator(".usage-metrics strong").last()).toHaveText(locale === "ru" ? /3\s112,86\s\$/ : "≈$3,112.86");
       await expect(summary.locator(".usage-token-totals dd")).toHaveCount(4);
       await expect(summary.locator(".usage-metrics svg")).toHaveCount(0);
+      await expect(summary.locator(".usage-metrics small")).toHaveCount(0);
       await expectReportFits(page);
       await page.screenshot({ path: `output/playwright/usage-redesign-${locale}-${width}.png` });
       await summary.screenshot({ path: `output/playwright/usage-summary-clean-${locale}-${width}.png` });
+      await summary.locator(".usage-success-metric").hover();
+      await expect(page.getByRole("tooltip")).toHaveText(locale === "ru" ? /52\s692\s*\/\s*56\s498/ : "52,692 / 56,498");
       const equivalent = summary.locator(".usage-metrics > .usage-metric").last();
-      await expect(equivalent.locator("small")).toContainText(locale === "ru" ? "не оценено" : "unpriced");
+      await equivalent.hover();
+      await expect(page.getByRole("tooltip")).toContainText(locale === "ru" ? "не оценено" : "unpriced");
       await summary.locator(".usage-token-metric").focus();
       await page.keyboard.press("Tab");
       await expect(equivalent).toBeFocused();
@@ -170,7 +226,7 @@ for (const locale of ["ru", "en"] as const) {
   }
 
   for (const unpriced of [0, 28]) {
-    test(`usage price coverage is visible only for unpriced tokens: ${locale}, unpriced=${unpriced}`, async ({ page }) => {
+    test(`usage price coverage stays in the tooltip: ${locale}, unpriced=${unpriced}`, async ({ page }) => {
       await installTauriMock(page, {
         mode: "local", locale, populated: true,
         usageSummaryTotals: { apiEquivalent: { microUsd: unpriced ? 0 : 148, pricedTokens: 28 - unpriced, unpricedTokens: unpriced } },
@@ -178,10 +234,15 @@ for (const locale of ["ru", "en"] as const) {
       await page.goto("/");
       await page.getByRole("button", { name: locale === "ru" ? "Использование" : "Usage", exact: true }).click();
       const equivalent = page.locator(".usage-metrics > .usage-metric").last();
-      await expect(equivalent.locator("small")).toHaveCount(unpriced ? 1 : 0);
+      await expect(equivalent.locator("small")).toHaveCount(0);
+      await expect(page.getByRole("tooltip")).toHaveCount(0);
+      await equivalent.hover();
       if (unpriced) {
-        await expect(equivalent.locator("small")).toContainText(locale === "ru" ? "не оценено: 28" : "28 unpriced");
+        await expect(page.getByRole("tooltip")).toContainText(locale === "ru" ? "не оценено: 28" : "28 unpriced");
         await expect(equivalent.locator("strong")).toHaveText("—");
+      } else {
+        await expect(page.getByRole("tooltip")).toBeVisible();
+        await expect(page.getByRole("tooltip")).not.toContainText(locale === "ru" ? "Оценено:" : "priced ·");
       }
       await page.locator(".usage-range-menu button").click();
       await page.getByRole("option", { name: locale === "ru" ? "Всё время" : "All time", exact: true }).click();

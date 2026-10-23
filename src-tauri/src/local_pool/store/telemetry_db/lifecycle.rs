@@ -136,6 +136,12 @@ impl TelemetryDb {
         if version <= 34 {
             migrate_035(&mut connection)?;
         }
+        if version <= 35 {
+            migrate_036(&mut connection)?;
+        }
+        if version <= 36 {
+            connection.execute_batch(MIGRATION_037).map_err(db_error)?;
+        }
         connection
             .execute_batch(ARCHIVE_USAGE_SQL)
             .map_err(db_error)?;

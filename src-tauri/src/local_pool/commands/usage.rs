@@ -1,6 +1,6 @@
 use super::pricing_context;
 use crate::local_pool::{
-    error::CommandError,
+    error::{CommandError, ErrorCode, LocalPoolError},
     state::DesktopState,
     store::telemetry_db::{CacheSession, LocalUsagePage},
 };
@@ -9,11 +9,21 @@ use tauri::State;
 use zenith_relay_core::protocol::UsageQuery;
 
 #[tauri::command]
-pub fn get_local_usage_page(
+pub async fn get_local_usage_page(
     input: Option<UsageQuery>,
     state: State<'_, DesktopState>,
 ) -> Result<LocalUsagePage, CommandError> {
-    let usage_query = input;
+    // SQLite and pricing must not occupy the desktop event-loop thread.
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || load_local_usage_page(input, &state))
+        .await
+        .map_err(|_| LocalPoolError::new(ErrorCode::Io, "Local usage read was interrupted"))?
+}
+
+fn load_local_usage_page(
+    usage_query: Option<UsageQuery>,
+    state: &DesktopState,
+) -> Result<LocalUsagePage, CommandError> {
     let (gateway, sources, accounts) = {
         let store = state.store()?;
         (

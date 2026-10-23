@@ -36,14 +36,14 @@ impl TelemetryDb {
         }
         let sql = format!(
             "WITH history AS (
-                SELECT client_context_id, account_id, source_id, id, created_at,
+                SELECT client_context_id, account_id, source_id, ABS(id) AS id, created_at,
                     cached_input_tokens, cache_write_input_tokens, cache_write_ttl,
                     COALESCE(resolved_model, requested_model) AS model,
                     MIN(created_at) OVER (
                         PARTITION BY client_context_id, account_id, source_id,
                             COALESCE(resolved_model, requested_model)
                     ) AS started_at
-                FROM request_logs
+                FROM usage_sends
                 WHERE client_context_id IS NOT NULL
             ), latest AS (
                 SELECT *

@@ -1117,6 +1117,13 @@ Older Desktop hosts that omit model/member filter fields use an unfiltered,
 events-free aggregate read for the same period. This compatibility path does
 not substitute current inventory or one page of events; supported empty arrays
 remain empty, and concurrent fallback reads for the same period join in flight.
+Desktop report reads run in a blocking worker rather than on the window event
+loop. Send-page selection sorts storage keys before decoding only the requested
+rows; counts, consumption totals and filter choices use narrow projections instead
+of carrying diagnostic JSON through full-history sorts or aggregation. All paths
+retain the physical-send view's `(requestId, attempt)` legacy exclusion. Schema 37
+adds a covering history index and normally empty unaggregated-send indexes; it
+does not rewrite usage or replace the existing retention and pricing rules.
 Deleting/expiring usage removes corresponding attempts; missing earlier history
 is not reconstructed. Actual retry/stop decisions are recorded when known.
 An interim successful-HTTP `tool_discovery` observation without error metadata

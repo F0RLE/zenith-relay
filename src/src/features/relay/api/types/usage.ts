@@ -208,8 +208,18 @@ export type CacheSessionRecord = {
   cacheWriteTtl: string | null;
 };
 
+export type UsageFilterOptions = {
+  models: string[];
+  poolMembers: string[];
+  wireApis: string[];
+  transports: string[];
+  errorCategories: string[];
+};
+
 export type LocalUsagePage = {
   events: LocalUsage[];
+  /** Older desktop hosts can omit the projection or only provide advanced fields. */
+  filterOptions?: Partial<UsageFilterOptions>;
   total: number;
   page: number;
   pageSize: number;
@@ -265,4 +275,5 @@ export type UsageQuery = {
   includeEvents?: boolean;
   includeModels?: boolean;
   includePoolMembers?: boolean;
+  includeFilterOptions?: boolean;
 };

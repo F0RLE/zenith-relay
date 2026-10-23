@@ -4,6 +4,8 @@ import { installTauriMock } from "./tauri-mock";
 for (const scenario of [
   { width: 1660, locale: "ru", theme: "dark" },
   { width: 1160, locale: "en", theme: "light" },
+  { width: 1160, locale: "ru", theme: "dark" },
+  { width: 1080, locale: "ru", theme: "dark" },
   { width: 840, locale: "ru", theme: "dark" },
   { width: 390, locale: "en", theme: "light" },
   { width: 360, locale: "ru", theme: "dark" },
@@ -28,6 +30,7 @@ for (const scenario of [
       await page.getByRole("button", { name: scenario.locale === "ru" ? "Использование" : "Usage", exact: true }).click();
       const summary = page.locator(".usage-overview");
       await expect(summary.locator(".usage-token-totals dd")).toHaveCount(cacheWriteKnown ? 4 : 3);
+      await expect(summary.locator(".usage-metrics small")).toHaveCount(0);
       const copyAlignment = await summary.locator(".usage-metric-copy").evaluateAll((copies) => copies.flatMap((copy) => {
         const bounds = copy.getBoundingClientRect();
         return Array.from(copy.children).map((child) => ({
@@ -46,6 +49,18 @@ for (const scenario of [
       const secondary = summary.locator(".usage-secondary-metrics");
       expect(await secondary.evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(" ").length)).toBe(2);
       const tokens = summary.locator(".usage-token-totals");
+      const bounds = await summary.boundingBox();
+      const tokenBounds = await tokens.boundingBox();
+      const speedBounds = await secondary.boundingBox();
+      const primaryBounds = await summary.locator(".usage-metrics > .usage-metric").first().boundingBox();
+      expect(primaryBounds!.height).toBeLessThanOrEqual(80);
+      if (bounds!.width > 760) {
+        expect(Math.abs(tokenBounds!.y - speedBounds!.y)).toBeLessThanOrEqual(1);
+        expect(bounds!.height).toBeLessThanOrEqual(150);
+      } else {
+        expect(speedBounds!.y).toBeGreaterThanOrEqual(tokenBounds!.y + tokenBounds!.height);
+        expect(bounds!.height).toBeLessThanOrEqual(310);
+      }
       if (scenario.width >= 840) {
         expect(await tokens.evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(" ").filter((track) => parseFloat(track) > 0).length)).toBe(cacheWriteKnown ? 4 : 3);
       } else if (!cacheWriteKnown) {

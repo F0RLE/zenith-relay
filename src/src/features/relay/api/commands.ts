@@ -49,6 +49,7 @@ import type {
   WakeTask,
 } from "./types";
 import { sanitizeFeedbackError } from "../state/feedback";
+import { createUsagePageReader } from "./usagePage";
 
 export type LocalNetworkAccess = {
   enabled: boolean;
@@ -77,6 +78,9 @@ function invoke<T>(command: string, commandArgs?: Record<string, unknown>): Prom
   });
 }
 
+const readLocalUsagePage = createUsagePageReader((query) =>
+  invoke<LocalUsagePage>("get_local_usage_page", { input: query }));
+
 export const relayCommands = {
   localNetworkAccess: () => invoke<LocalNetworkAccess>("get_local_network_access"),
   setLocalNetworkAccess: (enabled: boolean, expectedEnabled: boolean) => invoke<LocalNetworkAccess>("update_local_network_access", { enabled, expectedEnabled }),
@@ -90,7 +94,7 @@ export const relayCommands = {
   onUsageRecorded: (callback: () => void) => listen("zenith-usage-recorded", callback),
   localState: () => invoke<RuntimeSnapshot>("get_local_runtime_state"),
   localRuntimeOrder: () => invoke<CandidateRuntimeSnapshot[]>("get_local_runtime_order"),
-  localUsagePage: (usageQuery: UsageQuery = {}) => invoke<LocalUsagePage>("get_local_usage_page", { input: usageQuery }),
+  localUsagePage: readLocalUsagePage,
   localCacheSessions: (usageQuery: UsageQuery = {}) => invoke<CacheSessionRecord[]>("get_local_cache_sessions", { input: usageQuery }),
   clearLocalUsage: () => invoke("clear_local_usage"),
 

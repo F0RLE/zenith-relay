@@ -1,4 +1,7 @@
-use super::usage::{usage_totals_from_event, usage_totals_from_sample, UsageTotalsSample};
+use super::usage::{
+    apply_usage_totals_delta, consumption_totals, request_totals, usage_totals_from_event,
+    usage_totals_from_sample, UsageTotalsSample,
+};
 use super::{
     db_error, sql_u64, ErrorCode, LocalPoolError, Result, TelemetryDb, UsageEvent,
     ARCHIVE_USAGE_SQL,
@@ -123,7 +126,16 @@ impl TelemetryDb {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
-        let previous_usage = previous_usage_log(&transaction, &event.request_id)?;
+        let previous_usage = previous_usage_log(&transaction, &event.request_id, None)?;
+        let previous_attempt =
+            previous_usage_log(&transaction, &event.request_id, Some(event.attempt))?.or_else(
+                || {
+                    previous_usage
+                        .as_ref()
+                        .filter(|old| old.attempt == i64::from(event.attempt))
+                        .cloned()
+                },
+            );
         let is_latest_attempt = previous_usage
             .as_ref()
             .is_none_or(|previous_usage| i64::from(event.attempt) >= previous_usage.attempt);
@@ -174,15 +186,12 @@ impl TelemetryDb {
                 .execute(&final_request_sql, usage_parameters)
                 .map_err(db_error)?
                 > 0;
-        if final_request_changed {
-            if let Some(previous_usage) = previous_usage
-                .as_ref()
-                .filter(|previous_usage| previous_usage.aggregated)
-            {
-                apply_aggregate_delta(&transaction, &previous_usage.aggregate, -1)?;
-            }
-            apply_aggregate_delta(&transaction, &UsageAggregate::from_event(event), 1)?;
+        // Usage belongs to the physical send, not to whichever send completed last.
+        // A correction to an older send must update its own model/member bucket.
+        if let Some(previous_attempt) = previous_attempt.as_ref().filter(|old| old.aggregated) {
+            apply_aggregate_delta(&transaction, &previous_attempt.aggregate, -1)?;
         }
+        apply_aggregate_delta(&transaction, &UsageAggregate::from_event(event), 1)?;
         // `last_insert_rowid` is unchanged by an upsert that takes the
         // conflict-update path. Only run retention after a new request row;
         // otherwise replacing a request whose old id is divisible by 256
@@ -198,16 +207,30 @@ impl TelemetryDb {
         transaction.commit().map_err(db_error)?;
         if retention_applied {
             self.clear_cached_usage_totals()?;
-        } else if final_request_changed {
-            let previous_totals = previous_usage
+        } else {
+            let mut previous_totals = previous_attempt
                 .as_ref()
-                .map(|previous_usage| usage_totals_from_sample(previous_usage.totals));
-            self.update_cached_usage_totals(previous_totals, usage_totals_from_event(event))?;
+                .map(|old| consumption_totals(usage_totals_from_sample(old.totals)))
+                .unwrap_or_default();
+            let mut incoming_totals = consumption_totals(usage_totals_from_event(event));
+            if final_request_changed {
+                if let Some(old) = previous_usage.as_ref() {
+                    apply_usage_totals_delta(
+                        &mut previous_totals,
+                        request_totals(usage_totals_from_sample(old.totals)),
+                        true,
+                    );
+                }
+                apply_usage_totals_delta(
+                    &mut incoming_totals,
+                    request_totals(usage_totals_from_event(event)),
+                    true,
+                );
+            }
+            self.update_cached_usage_totals(Some(previous_totals), incoming_totals)?;
         }
         drop(connection);
-        if final_request_changed || retention_applied {
-            self.invalidate_usage_cache();
-        }
+        self.invalidate_usage_cache();
         Ok(())
     }
 
@@ -231,6 +254,7 @@ impl TelemetryDb {
     }
 }
 
+#[derive(Clone)]
 struct PreviousUsageLog {
     attempt: i64,
     aggregated: bool,
@@ -241,18 +265,24 @@ struct PreviousUsageLog {
 fn previous_usage_log(
     transaction: &Transaction<'_>,
     request_id: &str,
+    attempt: Option<u16>,
 ) -> Result<Option<PreviousUsageLog>> {
+    let table = if attempt.is_some() {
+        "request_attempts"
+    } else {
+        "request_logs"
+    };
     transaction
         .query_row(
-            "SELECT attempt,
+            &format!("SELECT attempt,
                 usage_aggregate_recorded,
                 CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
                 COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model, ''),
                 input_tokens, cached_input_tokens, cache_write_input_tokens, cache_write_ttl,
                 output_tokens, total_tokens, applied_service_tier, success, latency_ms, ttft_ms, generation_ms,
                 reasoning_tokens
-             FROM request_logs WHERE request_id = ?1",
-            [request_id],
+             FROM {table} WHERE request_id = ?1 AND (?2 IS NULL OR attempt = ?2)"),
+            params![request_id, attempt],
             |row| {
                 Ok(PreviousUsageLog {
                     attempt: row.get(0)?,

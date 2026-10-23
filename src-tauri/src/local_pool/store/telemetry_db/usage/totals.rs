@@ -48,6 +48,7 @@ pub(in crate::local_pool::store::telemetry_db) fn usage_totals_from_sample(
         latency_ms: sample.latency_ms,
         input_tokens: sample.input_tokens.unwrap_or_default(),
         cached_input_tokens: sample.cached_input_tokens.unwrap_or_default(),
+        cached_input_samples: u64::from(sample.cached_input_tokens.is_some()),
         reasoning_tokens: sample.reasoning_tokens.unwrap_or_default(),
         output_tokens: sample.output_tokens.unwrap_or_default(),
         total_tokens: sample.total_tokens.unwrap_or_default(),
@@ -125,6 +126,38 @@ pub(in crate::local_pool::store::telemetry_db) fn apply_usage_totals_delta(
     adjust!(speed_duration_ms);
 }
 
+/// Physical sends contribute consumption; only the logical result contributes
+/// request counts and timings (attempt latency is elapsed from the same start).
+pub(in crate::local_pool::store::telemetry_db) fn consumption_totals(
+    totals: UsageTotals,
+) -> UsageTotals {
+    UsageTotals {
+        input_tokens: totals.input_tokens,
+        cached_input_tokens: totals.cached_input_tokens,
+        cached_input_samples: totals.cached_input_samples,
+        cache_write_input_tokens: totals.cache_write_input_tokens,
+        cache_write_input_samples: totals.cache_write_input_samples,
+        reasoning_tokens: totals.reasoning_tokens,
+        output_tokens: totals.output_tokens,
+        total_tokens: totals.total_tokens,
+        ..UsageTotals::default()
+    }
+}
+
+pub(in crate::local_pool::store::telemetry_db) fn request_totals(
+    mut totals: UsageTotals,
+) -> UsageTotals {
+    let consumption = consumption_totals(totals.clone());
+    apply_usage_totals_delta(&mut totals, consumption, false);
+    totals
+}
+
+pub(super) fn combine_totals(requests: UsageTotals, sends: UsageTotals) -> UsageTotals {
+    let mut totals = request_totals(requests);
+    apply_usage_totals_delta(&mut totals, consumption_totals(sends), true);
+    totals
+}
+
 pub(in crate::local_pool::store::telemetry_db) fn is_unfiltered_all_time(
     query: &UsageQuery,
 ) -> bool {
@@ -188,6 +221,9 @@ pub(in crate::local_pool::store::telemetry_db) fn usage_filter(
     if let Some(success) = query.success {
         clauses.push("success = ?");
         query_parameters.push(SqlValue::Integer(i64::from(success)));
+        if !success {
+            clauses.push("NOT (COALESCE(json_extract(routing_json, '$.attemptOutcome'), '') = 'tool_discovery' AND error_category IS NULL AND http_status >= 200 AND http_status < 300)");
+        }
     }
     if let Some(error_category) = query.error_category.as_deref() {
         clauses.push("error_category = ?");

@@ -137,6 +137,7 @@ export type {
   UsageBucket,
   CacheSessionRecord,
   LocalUsagePage,
+  UsageFilterOptions,
   UsageExportRow,
   UsageQuery,
 } from "./types/usage";

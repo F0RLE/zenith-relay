@@ -42,8 +42,8 @@ export function AggregateView({ rows, groups, field, empty }: { rows: UsageRow[]
   const { bind, drag } = useColumnDrag(moveColumn, moveColumnBy);
   const columns: Record<AggregateColumnId, { label: string; cell: (group: AggregateRow) => ReactNode }> = {
     name: { label: field === "model" ? t("common.model") : t("usage.poolMember"), cell: (group) => <span className="usage-aggregate-name" data-relay-tooltip={group.name}>{group.name}</span> },
-    requests: { label: t("usage.requests"), cell: (group) => <CompactNumber value={group.requests} locale={i18n.language} /> },
-    success: { label: t("common.success"), cell: (group) => `${Math.round(group.success / group.requests * 100)}%` },
+    requests: { label: t("usage.clientRequests"), cell: (group) => <CompactNumber value={group.requests} locale={i18n.language} /> },
+    success: { label: t("common.success"), cell: (group) => group.requests ? `${Math.round(group.success / group.requests * 100)}%` : "—" },
     breakdown: { label: t("usage.tokens"), cell: (group) => <TokenBreakdown group={group} locale={i18n.language} /> },
     total: { label: t("usage.totalTokens"), cell: (group) => <CompactNumber value={group.tokens} locale={i18n.language} /> },
     speed: { label: t("usage.generationSpeedShort"), cell: (group) => <SpeedValue value={group.generationSpeed} locale={i18n.resolvedLanguage ?? i18n.language} unit={t("usage.tokensPerSecondUnit")} /> },

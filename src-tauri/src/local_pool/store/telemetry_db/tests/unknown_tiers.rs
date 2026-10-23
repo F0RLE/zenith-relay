@@ -48,7 +48,10 @@ fn unknown_tier_migration_reclassifies_retained_events_and_preserves_archives() 
         .lock()
         .unwrap()
         .execute_batch(
-            "UPDATE usage_candidate_rollups SET price_class = 'standard',
+            "DROP VIEW usage_sends;
+         DROP INDEX request_attempts_created_at;
+         DROP INDEX request_attempts_account_created;
+         UPDATE usage_candidate_rollups SET price_class = 'standard',
             input_tokens = input_tokens + 700, input_samples = input_samples + 1,
             output_tokens = output_tokens + 7, output_samples = output_samples + 1,
             total_tokens = total_tokens + 707, total_samples = total_samples + 1
@@ -81,7 +84,7 @@ fn unknown_tier_migration_reclassifies_retained_events_and_preserves_archives() 
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 35);
+        assert_eq!(version, LOCAL_DATABASE_SCHEMA_VERSION);
         let events: u32 = connection
             .query_row("SELECT count(*) FROM request_logs", [], |row| row.get(0))
             .unwrap();

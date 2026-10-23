@@ -223,6 +223,10 @@ pub struct UsageQuery {
     /// legacy behavior for API clients that do not send the projection hint.
     #[serde(default)]
     pub include_pool_members: Option<bool>,
+    /// Include distinct request-filter values for the selected time range,
+    /// independent of pagination and other report filters.
+    #[serde(default)]
+    pub include_filter_options: bool,
 }
 
 impl UsageQuery {

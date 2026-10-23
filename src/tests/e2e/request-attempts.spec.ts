@@ -50,7 +50,7 @@ for (const locale of ["en", "ru"] as const) {
 for (const mode of ["local"] as const) {
   for (const locale of ["en", "ru"] as const) {
     test(`${mode} ${locale} catalog discovery never displays an HTTP 200 failure`, async ({ page }) => {
-      const pendingLabel = locale === "en" ? "Loading tool contracts" : "Загрузка определений инструментов";
+      const pendingLabel = locale === "en" ? "Tool lookup" : "Поиск инструментов";
       const detailsLabel = locale === "en" ? "Request details" : "Сведения о запросе";
       await page.setViewportSize({ width: 390, height: 844 });
       await installTauriMock(page, {
@@ -74,50 +74,58 @@ for (const mode of ["local"] as const) {
 }
 
 for (const mode of ["local"] as const) {
-  test(`${mode} shows all sends inside one request without changing its final result`, async ({ page }) => {
+  test(`${mode} shows each send with its own consumption and keeps logical counts`, async ({ page }) => {
     await installTauriMock(page, { mode, locale: "en", populated: true, usageAttempts: true });
     await page.goto("/");
     await page.getByRole("button", { name: "Usage", exact: true }).click();
-    await page.getByRole("button", { name: `Request details: req_synthetic_${mode}` }).click();
+    const rows = page.locator(".usage-request-table tbody tr");
+    await expect(rows).toHaveCount(3);
+    await expect(rows.locator('td[data-column="tokens"]')).toHaveText(["84", "56", "28"]);
+    await expect(rows.last().getByRole("img", { name: "Tool lookup" })).toHaveAttribute("data-status", "info");
+    await expect(rows.nth(1).getByRole("img", { name: "Upstream failure" })).toHaveAttribute("data-status", "error");
+    await expect(page.locator(".usage-overview .usage-metric").filter({ hasText: "Client requests" }).locator("strong")).toHaveText("1");
+    await expect(page.locator(".usage-token-metric strong")).toHaveText("168");
+    await page.screenshot({ path: "output/playwright/usage-physical-sends.png" });
+    await rows.first().getByRole("button", { name: /^Request details:/ }).click();
     const details = page.getByRole("dialog", { name: "Request details" });
-    await expect(page.locator(".usage-request-table tbody tr")).toHaveCount(1);
     await expect(details.getByRole("tab", { name: "Attempts", exact: true })).toHaveCount(0);
-    const sends = details.locator(".request-execution-list > li");
-    await expect(sends).toHaveCount(3);
-    await expect(sends.first()).toBeVisible();
-    await expect(sends.nth(0)).toHaveAttribute("aria-label", "Send 1");
-    await expect(sends.nth(0).locator(".request-send-heading")).toContainText("Since request start:");
-    await expect(sends.nth(0)).toContainText("HTTP 400");
-    await expect(sends.nth(1)).toContainText("Selecting another connection");
-    await expect(sends.nth(2)).toContainText("Success");
+    await expect(details.locator(".request-execution")).toHaveCount(0);
     await expect(details.locator(".request-details-identity")).toContainText("Success");
     await expect(details.locator(".request-details-error")).toHaveCount(0);
     const queries = await page.evaluate(() =>
       (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ args: { input?: Record<string, unknown> } }> })
         .__TAURI_TEST_INVOKES__.map((call) => call.args.input).filter((query) => query?.requestId));
-    expect(queries.some((query) => query?.page === 2)).toBe(true);
-    expect(queries.every((query) => query?.success === undefined && query?.range === undefined)).toBe(true);
+    expect(queries).toHaveLength(0);
+    await page.keyboard.press("Escape");
+    await rows.last().getByRole("button", { name: /^Request details:/ }).click();
+    await expect(details.locator(".request-details-status")).toHaveText("Tool lookup");
+    await expect(details.locator(".request-details-error")).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await page.getByRole("tab", { name: "Models", exact: true }).click();
+    const lookupGroup = page.locator(".usage-aggregate-table tbody tr").filter({ hasText: "lookup-model" });
+    await expect(lookupGroup.locator('td[data-column="requests"]')).toHaveText("0");
+    await expect(lookupGroup.locator('td[data-column="input"]')).toHaveText("20");
+    await expect(lookupGroup.locator('td[data-column="output"]')).toHaveText("8");
+    await expect(lookupGroup).not.toContainText("NaN");
+    await page.getByRole("tab", { name: "Errors", exact: true }).click();
+    await expect(page.locator(".usage-error-table tbody tr")).toHaveCount(1);
+    await page.getByRole("tab", { name: "Sends", exact: true }).click();
+    await rows.last().getByRole("button", { name: /^Request details:/ }).click();
     await page.setViewportSize({ width: 390, height: 800 });
-    await sends.nth(0).scrollIntoViewIfNeeded();
-    await expect(sends.nth(0)).toBeVisible();
-    await sends.nth(2).scrollIntoViewIfNeeded();
-    await expect(sends.nth(2)).toBeInViewport({ ratio: 1 });
     expect(await details.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
   });
 }
 
-test("history failure is visible instead of an empty successful report", async ({ page }) => {
+test("send details no longer depend on a second history request", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, usageAttempts: true, usageAttemptsFail: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
-  await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
+  await page.getByRole("button", { name: "Request details: req_synthetic_local" }).first().click();
   const details = page.getByRole("dialog", { name: "Request details" });
-  await expect(details.locator(".request-execution .request-section-badge")).toContainText("Unavailable");
-  await expect(details.getByText("History is unavailable. Showing the saved request outcome.")).toBeVisible();
+  await expect(details.locator(".request-execution")).toHaveCount(0);
   await expect(details.getByText("No attempts found.", { exact: false })).toHaveCount(0);
   await expect(details.locator(".request-details-identity")).toContainText("Success");
-  await details.getByRole("button", { name: "Refresh", exact: true }).click();
-  await expect(details.getByText("History is unavailable. Showing the saved request outcome.")).toBeVisible();
+  await expect(details.getByRole("button", { name: "Refresh", exact: true })).toHaveCount(0);
 });
 
 test("single successful requests omit history and empty diagnostic sections", async ({ page }) => {
@@ -164,18 +172,16 @@ for (const outcome of ["execution_uncertain", "client_disconnected", null] as co
     });
     await page.goto("/");
     await page.getByRole("button", { name: "Usage", exact: true }).click();
-    await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
+    await page.getByRole("button", { name: "Request details: req_synthetic_local" }).first().click();
     const details = page.getByRole("dialog", { name: "Request details" });
-    await expect(details.locator(".request-execution-list > li")).toHaveCount(3);
-    await expect(details.locator(".request-stop-reason")).toHaveText(outcome === "execution_uncertain"
+    await expect(details.locator(".request-execution-list > li")).toHaveCount(0);
+    if (outcome) await expect(details.locator(".request-outcome-note")).toHaveText(outcome === "execution_uncertain"
       ? "Retry stopped: the previous send may have executed. Sending again could duplicate the request."
-      : outcome === "client_disconnected" ? "Retry stopped: the client disconnected."
-        : "The reason retries stopped was not recorded.");
-    await details.locator(".request-send-details").first().locator("summary").click();
-    await expect(details.locator(".request-send-details").first().locator("pre")).toHaveText("Synthetic provider failure");
+      : "Retry stopped: the client disconnected.");
+    else await expect(details.locator(".request-outcome-note")).toHaveCount(0);
+    await expect(details.locator(".request-details-error")).toContainText("Synthetic provider failure");
     await expect(details.locator(".request-details-identity")).toContainText("Failed");
     await expect(details.locator(".request-details-error")).toContainText("502");
-    await expect(details.locator(".request-execution-list > li").first()).toContainText("HTTP 400");
   });
 }
 
@@ -185,8 +191,8 @@ test("partial history does not invent missing sends", async ({ page }) => {
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
   const details = page.getByRole("dialog", { name: "Request details" });
-  await expect(details.locator(".request-execution .request-section-badge")).toContainText("Incomplete");
-  await expect(details.getByText("Part of the history is missing. Showing only saved sends.")).toBeVisible();
+  await expect(page.locator(".usage-request-table tbody tr")).toHaveCount(1);
+  await expect(details.locator(".request-execution")).toHaveCount(0);
   await expect(details.locator(".request-execution-list > li")).toHaveCount(0);
   await expect(details.locator(".request-details-identity")).toContainText("Success");
 });
@@ -225,10 +231,10 @@ for (const theme of ["dark", "light"] as const) {
         usageFailure: true, usageAttemptOutcome: "execution_uncertain" });
       await page.goto("/");
       await page.getByRole("button", { name: "Использование", exact: true }).click();
-      await page.getByRole("button", { name: "Сведения о запросе: req_synthetic_local" }).click();
+      await page.getByRole("button", { name: "Сведения о запросе: req_synthetic_local" }).first().click();
       const details = page.getByRole("dialog", { name: "Сведения о запросе" });
-      await expect(details.locator(".request-execution-list > li")).toHaveCount(3);
-      await expect(details.locator(".request-execution-list > li").first()).toBeVisible();
+      await expect(details.locator(".request-execution")).toHaveCount(0);
+      await expect(details.locator(".request-outcome-note")).toBeVisible();
       expect(await details.locator(".relay-dialog-body, .request-send-content, .request-history-notice, .request-details-list dd")
         .evaluateAll((elements) => elements.every((element) => element.scrollWidth <= element.clientWidth + 1))).toBe(true);
       await page.screenshot({ path: `output/playwright/request-balanced-execution-${theme}-${width}.png` });

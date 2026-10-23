@@ -2,10 +2,13 @@ use super::*;
 use zenith_relay_core::{
     ErrorOrigin, SelectionReason, TerminalOutputKind, ToolChoiceMode, WireApi,
 };
+mod filter_options;
 mod maintenance;
+mod performance;
 mod pricing;
 mod reporting;
 mod rollups;
+mod send_usage;
 mod unknown_tiers;
 
 fn aggregate_test_event(
