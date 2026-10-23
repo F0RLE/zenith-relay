@@ -1,5 +1,5 @@
-import type { ApiModelPriceOverride, ModelSummary, SourceSummary } from "../api/types";
-import { PRICE_CONTEXT_THRESHOLDS, type LongContextRates, type PriceContextBand, type TokenPrice, type TokenRateSet } from "../api/types/pricing";
+import type { ApiModelPriceOverride, SourceSummary } from "../api/types";
+import { PRICE_CONTEXT_THRESHOLDS, type LongContextRates, type PriceContextBand, type ResolvedModelPrice, type TokenPrice, type TokenRateSet } from "../api/types/pricing";
 import { formatEditableModelPrice, parseEditableModelPrice } from "../modelPricing";
 import { modelIdKey, uniqueModelIds } from "../modelGroups";
 
@@ -9,6 +9,7 @@ export type SourceRateDraft = {
   cached: string;
   cacheWrite5m: string;
   cacheWrite1h: string;
+  cacheWrite?: string;
 };
 export type PriceSchedule = "standard" | "flex" | "priority" | "ultrafast";
 export type PriceBand = "base" | PriceContextBand;
@@ -23,39 +24,47 @@ const emptyDraft = (): SourcePriceDraft => ({ input: "", output: "", cached: "",
 const contextBands = Object.keys(PRICE_CONTEXT_THRESHOLDS) as PriceContextBand[];
 const hasRates = (rates: TokenRateSet | undefined) => rates != null && Object.values(rates).some((value) => value != null);
 
-export function sourcePriceQuote(detected: ApiModelPriceOverride | undefined, model: ModelSummary | undefined): TokenPrice | undefined {
+export function sourcePriceQuote(detected: ApiModelPriceOverride | undefined, resolved: ResolvedModelPrice | undefined): TokenPrice | undefined {
+  // A saved manual fallback is displayed through drafts, not as an automatic
+  // placeholder: resetting it must not expose that same price as "automatic".
+  if (resolved) return resolved.source === "manual" ? undefined : resolved.quote ?? undefined;
   if (detected) {
     const {
       inputMicroUsdPerMillion: input, outputMicroUsdPerMillion: output,
       cachedInputMicroUsdPerMillion: cacheRead, cacheWrite5mMicroUsdPerMillion: cacheWrite5m,
-      cacheWrite1hMicroUsdPerMillion: cacheWrite1h, ...schedules
+      cacheWrite1hMicroUsdPerMillion: cacheWrite1h,
+      cacheWriteMicroUsdPerMillion: cacheWrite, ...schedules
     } = detected;
-    return { input, output, cacheRead: cacheRead ?? undefined, cacheWrite5m: cacheWrite5m ?? undefined, cacheWrite1h: cacheWrite1h ?? undefined, ...schedules };
+    return { input, output, cacheRead: cacheRead ?? undefined, cacheWrite5m: cacheWrite5m ?? undefined, cacheWrite1h: cacheWrite1h ?? undefined, cacheWrite: cacheWrite ?? undefined, ...schedules };
   }
-  return model?.tokenPrice ?? (model?.inputMicroUsdPerMillion != null && model.outputMicroUsdPerMillion != null ? {
-    input: model.inputMicroUsdPerMillion, output: model.outputMicroUsdPerMillion,
-    cacheRead: model.cachedInputMicroUsdPerMillion ?? undefined,
-    cacheWrite5m: model.cacheWrite5mMicroUsdPerMillion ?? undefined,
-    cacheWrite1h: model.cacheWrite1hMicroUsdPerMillion ?? undefined,
-  } : undefined);
+  // Older snapshots can still use this source's discovered quote, but a
+  // pool-wide model quote has no source ownership and must never leak here.
+  return undefined;
 }
 
 export function sourcePriceOverride(quote: TokenPrice | undefined): ApiModelPriceOverride | undefined {
   if (!quote) return undefined;
-  const { input, output, cacheRead, cacheWrite5m, cacheWrite1h, ...schedules } = quote;
+  const { input, output, cacheRead, cacheWrite5m, cacheWrite1h, cacheWrite, ...schedules } = quote;
   return {
     inputMicroUsdPerMillion: input, outputMicroUsdPerMillion: output,
     cachedInputMicroUsdPerMillion: cacheRead, cacheWrite5mMicroUsdPerMillion: cacheWrite5m,
-    cacheWrite1hMicroUsdPerMillion: cacheWrite1h, ...schedules,
+    cacheWrite1hMicroUsdPerMillion: cacheWrite1h, cacheWriteMicroUsdPerMillion: cacheWrite, ...schedules,
   };
 }
 
-/** A flat or unknown quote must not invent long-context tariffs. */
-export function publishedPriceBands(price: TokenPrice | undefined, draft?: SourcePriceDraft): PriceBand[] {
+const hasDraftRates = (draft: SourceRateDraft | undefined) => draft != null && Object.values(draft).some((value) => typeof value === "string" && value.trim() !== "");
+
+/** A quote is price evidence, not proof that an inference route supports a tier. */
+export function publishedPriceTiers(price: TokenPrice | undefined, draft?: SourcePriceDraft): PriceSchedule[] {
+  return ["standard", ...(["flex", "priority", "ultrafast"] as const).filter((tier) =>
+    hasRates(price?.[tier]) || hasDraftRates(draft?.schedules?.[tier])
+    || contextBands.some((band) => hasRates(price?.[band]?.[tier]) || hasDraftRates(draft?.schedules?.[`${band}.${tier}`])))];
+}
+
+/** Price thresholds belong to a particular quote and tier, not the context limit. */
+export function publishedPriceBands(price: TokenPrice | undefined, draft?: SourcePriceDraft, tier: PriceSchedule = "standard"): PriceBand[] {
   return ["base", ...contextBands.filter((band) =>
-    Object.values(price?.[band] ?? {}).some(hasRates)
-    || Object.entries(draft?.schedules ?? {}).some(([key, rates]) =>
-      key.startsWith(`${band}.`) && rates && Object.values(rates).some((value) => value.trim() !== "")))];
+    hasRates(price?.[band]?.[tier]) || hasDraftRates(draft?.schedules?.[`${band}.${tier}`]))];
 }
 
 export function priceContextRanges(bands: readonly PriceBand[]) {
@@ -75,6 +84,7 @@ export function sourcePriceCacheWrites(price: TokenPrice | undefined, draft?: So
   return {
     fiveMinutes: rates.some((rate) => rate?.cacheWrite5m != null) || drafts.some((rate) => Boolean(rate?.cacheWrite5m.trim())),
     oneHour: rates.some((rate) => rate?.cacheWrite1h != null) || drafts.some((rate) => Boolean(rate?.cacheWrite1h.trim())),
+    generic: rates.some((rate) => rate?.cacheWrite != null) || drafts.some((rate) => Boolean(rate?.cacheWrite?.trim())),
   };
 }
 
@@ -116,6 +126,7 @@ export function sourcePriceDrafts(prices: Record<string, ApiModelPriceOverride>)
     cached: formatEditableModelPrice(price.cachedInputMicroUsdPerMillion),
     cacheWrite5m: formatEditableModelPrice(price.cacheWrite5mMicroUsdPerMillion),
     cacheWrite1h: formatEditableModelPrice(price.cacheWrite1hMicroUsdPerMillion),
+    ...(price.cacheWriteMicroUsdPerMillion == null ? {} : { cacheWrite: formatEditableModelPrice(price.cacheWriteMicroUsdPerMillion) }),
     schedules: scheduleDrafts(price),
   }]));
 }
@@ -128,13 +139,15 @@ export function parseSourcePriceDrafts(drafts: SourcePriceDrafts): Record<string
     const cached = optionalSourcePrice(draft.cached);
     const cacheWrite5m = optionalSourcePrice(draft.cacheWrite5m);
     const cacheWrite1h = optionalSourcePrice(draft.cacheWrite1h);
-    if (inputPrice == null || outputPrice == null || cached === null || cacheWrite5m === null || cacheWrite1h === null) return null;
+    const cacheWrite = optionalSourcePrice(draft.cacheWrite);
+    if (inputPrice == null || outputPrice == null || cached === null || cacheWrite5m === null || cacheWrite1h === null || cacheWrite === null) return null;
     prices[model] = {
       inputMicroUsdPerMillion: inputPrice,
       outputMicroUsdPerMillion: outputPrice,
       ...(cached == null ? {} : { cachedInputMicroUsdPerMillion: cached }),
       ...(cacheWrite5m == null ? {} : { cacheWrite5mMicroUsdPerMillion: cacheWrite5m }),
       ...(cacheWrite1h == null ? {} : { cacheWrite1hMicroUsdPerMillion: cacheWrite1h }),
+      ...(cacheWrite == null ? {} : { cacheWriteMicroUsdPerMillion: cacheWrite }),
     };
     for (const [key, schedule] of Object.entries(draft.schedules ?? {})) {
       if (!schedule) continue;
@@ -166,6 +179,7 @@ export function rateDraft(rates: TokenRateSet): SourceRateDraft {
     cached: formatEditableModelPrice(rates.cacheRead),
     cacheWrite5m: formatEditableModelPrice(rates.cacheWrite5m),
     cacheWrite1h: formatEditableModelPrice(rates.cacheWrite1h),
+    ...(rates.cacheWrite == null ? {} : { cacheWrite: formatEditableModelPrice(rates.cacheWrite) }),
   };
 }
 
@@ -184,12 +198,14 @@ function scheduleDrafts(price: ApiModelPriceOverride) {
 
 export function selectedPriceRates(price: TokenPrice | undefined, band: PriceBand, tier: PriceSchedule): TokenRateSet {
   if (!price) return {};
-  const { input, output, cacheRead, cacheWrite5m, cacheWrite1h } = price;
-  const base = tier === "standard" ? { input, output, cacheRead, cacheWrite5m, cacheWrite1h } : price[tier] ?? {};
+  const { input, output, cacheRead, cacheWrite5m, cacheWrite1h, cacheWrite } = price;
+  const base = tier === "standard" ? { input, output, cacheRead, cacheWrite5m, cacheWrite1h, cacheWrite } : price[tier] ?? {};
   const above = band === "base" ? undefined : contextBands
     .filter((candidate) => PRICE_CONTEXT_THRESHOLDS[candidate] <= PRICE_CONTEXT_THRESHOLDS[band])
     .reverse().map((candidate) => price[candidate]?.[tier]).find(hasRates);
-  return { ...base, ...above };
+  // Match Rust's TokenRateSet::overlay: an absent field never erases a
+  // same-tier base rate, while a measured zero remains a real override.
+  return { ...base, ...Object.fromEntries(Object.entries(above ?? {}).filter(([, value]) => value != null)) };
 }
 
 export function updateSourcePriceScheduleDraft(
@@ -212,7 +228,7 @@ export function updateSourcePriceScheduleDraft(
 
 function parseRateDraft(draft: SourceRateDraft): TokenRateSet | null {
   const rates: TokenRateSet = {};
-  const fields = { input: "input", output: "output", cached: "cacheRead", cacheWrite5m: "cacheWrite5m", cacheWrite1h: "cacheWrite1h" } as const;
+  const fields = { input: "input", output: "output", cached: "cacheRead", cacheWrite5m: "cacheWrite5m", cacheWrite1h: "cacheWrite1h", cacheWrite: "cacheWrite" } as const;
   for (const field of Object.keys(fields) as SourcePriceDraftField[]) {
     const value = optionalSourcePrice(draft[field]);
     if (value === null) return null;
@@ -221,8 +237,9 @@ function parseRateDraft(draft: SourceRateDraft): TokenRateSet | null {
   return rates;
 }
 
-function optionalSourcePrice(priceText: string) {
-  return priceText.trim() === "" ? undefined : parseEditableModelPrice(priceText);
+function optionalSourcePrice(priceText: string | undefined) {
+  const text = priceText ?? "";
+  return text.trim() === "" ? undefined : parseEditableModelPrice(text);
 }
 
 function isContextBand(band: string | undefined): band is PriceContextBand {

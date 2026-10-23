@@ -1,5 +1,5 @@
 import { ChevronDown, RotateCcw } from "lucide-react";
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 import type { SourceSummary } from "../api/types";
 import { groupModels, memberModelCatalog, modelIdKey, orderModelIdsBySnapshot } from "../modelGroups";
@@ -18,6 +18,7 @@ import {
   sourcePriceCacheWrites,
   priceScheduleKey,
   publishedPriceBands,
+  publishedPriceTiers,
   priceContextRanges,
   selectedPriceRates,
   type PriceBand,
@@ -36,20 +37,25 @@ type SourcePriceEditorProps = {
   presentation?: "disclosure" | "tab" | "member";
 };
 
+const cacheWriteColumns = [
+  { kind: "generic", field: "cacheWrite", label: "sources.cacheWritePrice", labelFor: "sources.cacheWritePriceFor" },
+  { kind: "fiveMinutes", field: "cacheWrite5m", label: "sources.cacheWrite5mPrice", labelFor: "sources.cacheWrite5mPriceFor" },
+  { kind: "oneHour", field: "cacheWrite1h", label: "sources.cacheWrite1hPrice", labelFor: "sources.cacheWrite1hPriceFor" },
+] as const;
+
 export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onToggleModel, presentation = "disclosure" }: SourcePriceEditorProps) {
   const { t } = useTranslation();
   const { runtime } = useRelayState();
   const [selections, setSelections] = useState<Record<string, { band: PriceBand; tier: PriceSchedule }>>({});
   const compactRows = presentation === "member" || presentation === "tab";
   const models = orderModelIdsBySnapshot(sourcePriceModels(source), runtime?.gateway.models ?? [], runtime?.gateway.modelCatalog);
-  const catalogModels = new Map(
-    (runtime?.gateway.models ?? []).map((model) => [modelIdKey(model.id), model]),
-  );
   const catalog = memberModelCatalog(runtime?.gateway);
   const groups = groupModels(models, {
     metadata: (model) => catalog.get(modelIdKey(model)),
   });
   const detectedPrices = new Map(Object.entries(source.detectedModelPrices ?? {}).map(([model, price]) => [modelIdKey(model), price]));
+  const resolvedPrices = new Map(Object.entries(source.resolvedModelPrices ?? {}).map(([model, price]) => [modelIdKey(model), price]));
+  const messagesCacheWriteModels = new Set(sourceModelsWithCacheWritePricing(source).map(modelIdKey));
   const modelSelectionEnabled = Boolean(enabledModels && onToggleModel);
   const enabledModelIds = new Set((enabledModels ?? []).map((model) => modelIdKey(model)));
   const enabledCount = modelSelectionEnabled
@@ -57,41 +63,26 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
     : models.length;
   const reset = (model: string) => onChange(removeSourcePriceDraft(drafts, model));
   const title = t(modelSelectionEnabled ? "sources.modelsAndCost" : "sources.editorPricesTab");
-  const hint = t("sources.apiCostHint");
   const manualOverrideCount = Object.keys(drafts).length;
   const count = modelSelectionEnabled
     ? `${t("common.enabled")}: ${enabledCount}/${models.length}`
     : t(manualOverrideCount ? "sources.manualPrices" : "sources.automaticPrices", { count: manualOverrideCount });
   const cacheWritePrices = (model: string) => {
     const key = modelIdKey(model);
-    return sourcePriceCacheWrites(sourcePriceQuote(detectedPrices.get(key), catalogModels.get(key)), drafts[key]);
+    const writes = sourcePriceCacheWrites(sourcePriceQuote(detectedPrices.get(key), resolvedPrices.get(key)), drafts[key]);
+    const manualWindows = messagesCacheWriteModels.has(key) && !writes.generic;
+    return { ...writes, fiveMinutes: writes.fiveMinutes || manualWindows, oneHour: writes.oneHour || manualWindows };
   };
-  // A Messages route permits manual cache-write pricing. Explicit price data
-  // stays visible even when the source's catalog uses another protocol.
-  const cacheWriteModels = new Set(
-    [
-      ...sourceModelsWithCacheWritePricing(source),
-      ...models.filter((model) => {
-        const prices = cacheWritePrices(model);
-        return prices.fiveMinutes || prices.oneHour;
-      }),
-    ].map((model) => modelIdKey(model)),
-  );
   const content = (
     <div className="source-price-content">
+      {presentation !== "member" ? <small className="form-note">{t("sources.apiCostUnit")}</small> : null}
       <div className="source-price-groups">
         {groups.map((group) => {
-        const anthropicWrites = group.provider === "anthropic" && group.models.some((model) => cacheWriteModels.has(modelIdKey(model)));
-        const openAiWrites = group.provider === "openai" && group.models.some((model) => cacheWritePrices(model).fiveMinutes);
-        const cacheWriteKind = anthropicWrites ? "anthropic" : openAiWrites ? "openai" : "none";
+        const writeColumns = cacheWriteColumns.filter((column) => group.models.some((model) => cacheWritePrices(model)[column.kind]));
         const groupEnabledCount = modelSelectionEnabled
           ? group.models.filter((model) => enabledModelIds.has(modelIdKey(model))).length
           : group.models.length;
-        const writeHeadings = cacheWriteKind === "anthropic"
-          ? <><span>{t("sources.cacheWrite5mPrice")}</span><span>{t("sources.cacheWrite1hPrice")}</span></>
-          : cacheWriteKind === "openai"
-            ? <span>{t("sources.cacheWrite30mPrice")}</span>
-            : null;
+        const writeHeadings = writeColumns.map((column) => <span key={column.field}>{t(column.label)}</span>);
         return (
           <details key={group.id} className="source-price-group" open={presentation === "member" || undefined}>
           <summary>
@@ -103,7 +94,8 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
             </span>
             <ChevronDown aria-hidden />
           </summary>
-          <div className={`source-price-table${compactRows ? " source-price-table-compact" : ""}`} data-cache-write={cacheWriteKind}>
+          <div className={`source-price-table${compactRows ? " source-price-table-compact" : ""}`}
+            style={{ "--source-price-columns": 3 + writeColumns.length, "--member-price-columns": 3 + writeColumns.length } as CSSProperties}>
             {compactRows ? (
               <div className="member-price-grid-head">
                 <span>{t("common.model")}</span>
@@ -128,11 +120,24 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
             {group.models.map((model) => {
               const key = modelIdKey(model);
               const savedDraft = drafts[key];
-              const catalogModel = catalogModels.get(key);
-              const quote = sourcePriceQuote(detectedPrices.get(key), catalogModel);
-              const bands = publishedPriceBands(quote, savedDraft);
+              const resolved = resolvedPrices.get(key);
+              const quote = sourcePriceQuote(detectedPrices.get(key), resolved);
+              const priceSource = resolved?.source ?? (detectedPrices.has(key) ? "provider" : "unpriced");
+              const referencePrice = priceSource === "liteLlmExact" || priceSource === "liteLlmCanonical";
+              const originKey = priceSource === "provider" ? "sources.priceSourceProvider"
+                : priceSource === "liteLlmExact" ? "sources.priceSourceReference"
+                : priceSource === "liteLlmCanonical" ? "sources.priceSourceCanonical"
+                : priceSource === "manual" ? "sources.priceSourceManual" : "sources.priceSourceUnknown";
+              const origin = [
+                t(originKey),
+                referencePrice && resolved?.stale ? t("sources.priceReferenceStale") : null,
+                savedDraft && priceSource !== "manual" ? t("sources.priceManualFallback") : null,
+              ].filter(Boolean).join(" · ");
+              const tiers = publishedPriceTiers(quote, savedDraft);
               const previous = selections[key] ?? { band: "base", tier: "standard" };
-              const selection = { ...previous, band: bands.includes(previous.band) ? previous.band : "base" as const };
+              const tier = tiers.includes(previous.tier) ? previous.tier : "standard";
+              const bands = publishedPriceBands(quote, savedDraft, tier);
+              const selection = { tier, band: bands.includes(previous.band) ? previous.band : "base" as const };
               const draft = selection.band === "base" && selection.tier === "standard"
                 ? savedDraft : savedDraft?.schedules?.[priceScheduleKey(selection.band, selection.tier)];
               const rates = selectedPriceRates(quote, selection.band, selection.tier);
@@ -149,9 +154,7 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
                   : max == null ? `> ${min / 1000}k` : `${min / 1000}–${max / 1000}k`,
               }));
               const requiredBase = selection.band === "base" && selection.tier === "standard";
-              const showAnthropicWrites = cacheWriteKind === "anthropic" && cacheWriteModels.has(key);
-              const showOpenAiWrite = cacheWriteKind === "openai" && cacheWritePrices(model).fiveMinutes;
-              const writePrices = { fiveMinutes: rates.cacheWrite5m, oneHour: rates.cacheWrite1h };
+              const writes = cacheWritePrices(model);
               const enabled = !modelSelectionEnabled || enabledModelIds.has(key);
               return (
                 <div
@@ -170,24 +173,20 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
                       onChange={() => onToggleModel?.(model)}
                     />
                   ) : null}
-                  <code data-relay-tooltip={model}>{model}</code>
-                  <div className="source-price-schedule">
-                    <div className="source-price-picker">
-                      <span>{t("sources.priceTier")}</span>
+                  <code tabIndex={0} data-price-source={priceSource} data-relay-tooltip={`${model}\n${origin}`}>{model}</code>
+                  {tiers.length > 1 || bands.length > 1 ? <div className="source-price-schedule">
+                    {tiers.length > 1 ? <div className="source-price-picker">
                       <OptionMenu className="source-price-tier" label={t("sources.priceTierFor", { model })}
                         value={selection.tier} align="start" fitContent
-                        options={[{ value: "standard", label: "Standard" }, { value: "flex", label: "Flex" }, { value: "priority", label: "Fast" }, { value: "ultrafast", label: "Ultrafast" }]}
+                        options={tiers.map((value) => ({ value, label: { standard: "Standard", flex: "Flex", priority: "Priority", ultrafast: "Ultrafast" }[value] }))}
                         onChange={(value) => select(selection.band, value as PriceSchedule)} />
-                    </div>
-                    <div className="source-price-picker">
-                      <span>{t("sources.priceContext")}</span>
-                      {bands.length > 1 ? (
-                        <OptionMenu className="source-price-context" label={t("sources.priceContextFor", { model })}
-                          value={selection.band} align="start" fitContent options={contextOptions}
-                          onChange={(value) => select(value as PriceBand)} />
-                      ) : <small className="source-price-flat">{t("sources.flatContextPrice")}</small>}
-                    </div>
-                  </div>
+                    </div> : null}
+                    {bands.length > 1 ? <div className="source-price-picker">
+                      <OptionMenu className="source-price-context" label={t("sources.priceContextFor", { model })}
+                        value={selection.band} align="start" fitContent options={contextOptions}
+                        onChange={(value) => select(value as PriceBand)} />
+                    </div> : null}
+                  </div> : null}
                 </div>
                 <div className="source-price-fields">
                   <PriceInput
@@ -214,36 +213,18 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
                     invalid={draft != null && draft.cached.trim() !== "" && parseEditableModelPrice(draft.cached) == null}
                     onChange={(priceText) => setField(key, "cached", priceText)}
                   />
-                  {showAnthropicWrites ? <>
-                    <PriceInput
-                      label={t("sources.cacheWrite5mPriceFor", { model })}
-                      caption={compactRows ? t("sources.cacheWrite5mPrice") : undefined}
-                      value={draft?.cacheWrite5m ?? ""}
-                      placeholder={formatModelPricePlaceholder(writePrices.fiveMinutes)}
-                      invalid={draft != null && draft.cacheWrite5m.trim() !== "" && parseEditableModelPrice(draft.cacheWrite5m) == null}
-                      onChange={(priceText) => setField(key, "cacheWrite5m", priceText)}
-                    />
-                    <PriceInput
-                      label={t("sources.cacheWrite1hPriceFor", { model })}
-                      caption={compactRows ? t("sources.cacheWrite1hPrice") : undefined}
-                      value={draft?.cacheWrite1h ?? ""}
-                      placeholder={formatModelPricePlaceholder(writePrices.oneHour)}
-                      invalid={draft != null && draft.cacheWrite1h.trim() !== "" && parseEditableModelPrice(draft.cacheWrite1h) == null}
-                      onChange={(priceText) => setField(key, "cacheWrite1h", priceText)}
-                    />
-                  </> : showOpenAiWrite ? (
-                    <PriceInput
-                      label={t("sources.cacheWrite30mPriceFor", { model })}
-                      caption={compactRows ? t("sources.cacheWrite30mPrice") : undefined}
-                      value={draft?.cacheWrite5m ?? ""}
-                      placeholder={formatModelPricePlaceholder(writePrices.fiveMinutes)}
-                      invalid={draft != null && draft.cacheWrite5m.trim() !== "" && parseEditableModelPrice(draft.cacheWrite5m) == null}
-                      onChange={(priceText) => setField(key, "cacheWrite5m", priceText)}
-                    />
-                  )
-                    : cacheWriteKind === "anthropic" ? <><span className="source-price-empty" aria-hidden /><span className="source-price-empty" aria-hidden /></>
-                    : cacheWriteKind === "openai" ? <span className="source-price-empty" aria-hidden />
-                    : null}
+                  {writeColumns.map((column) => {
+                    if (!writes[column.kind]) return <span key={column.field} className="source-price-empty" aria-hidden />;
+                    const value = draft?.[column.field] ?? "";
+                    return <PriceInput key={column.field}
+                      label={t(column.labelFor, { model })}
+                      caption={compactRows ? t(column.label) : undefined}
+                      value={value}
+                      placeholder={formatModelPricePlaceholder(rates[column.field])}
+                      invalid={value.trim() !== "" && parseEditableModelPrice(value) == null}
+                      onChange={(priceText) => setField(key, column.field, priceText)}
+                    />;
+                  })}
                 </div>
                 {savedDraft ? <IconButton label={t("sources.useDefaultPrice", { model })} icon={<RotateCcw aria-hidden />} onClick={() => reset(key)} /> : <span className="source-price-action" />}
                 </div>
@@ -254,7 +235,6 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
         );
       })}
       </div>
-      {presentation !== "member" ? <small className="form-note">{t("sources.apiCostUnit")}</small> : null}
     </div>
   );
   const className = `source-price-section source-editor-panel${modelSelectionEnabled ? " source-model-configuration" : ""}`;
@@ -266,7 +246,6 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
           <span>{count}</span>
         </header>
         {content}
-        <p className="form-note source-price-note">{t("sources.priceScheduleHint")}</p>
       </section>
     );
   }
@@ -274,7 +253,7 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
     return (
       <section className={`${className} source-price-tab member-price-section`}>
         <header className="source-price-tab-heading">
-          <span><strong>{title}</strong><small>{hint}</small></span>
+          <span><strong>{title}</strong></span>
           <small className={`source-price-tab-status ${manualOverrideCount ? "source-price-tab-status-manual" : "source-price-tab-status-api"}`}>{count}</small>
         </header>
         {content}
@@ -284,7 +263,7 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
   return (
     <details className={className}>
     <summary className="source-editor-panel-summary">
-      <span><strong>{title}</strong><small>{hint}</small></span>
+      <span><strong>{title}</strong></span>
       <small>{count}</small>
     </summary>
     {content}

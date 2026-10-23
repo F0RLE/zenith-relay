@@ -347,11 +347,11 @@
   justify-content: center;
   padding: 10px 12px;
   border: 1px solid var(--relay-border);
-  border-radius: 8px;
+  border-radius: 9px;
   background: var(--relay-surface);
   color: var(--relay-secondary);
   font: inherit;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
   line-height: 18px;
   text-align: center;
@@ -371,9 +371,14 @@
 }
 
 .model-reasoning-options button.selected {
-  border-color: color-mix(in srgb, var(--relay-accent) 20%, var(--relay-border));
-  background: var(--relay-accent-soft);
-  color: var(--relay-accent);
+  border-color: transparent;
+  background: var(--relay-accent);
+  color: var(--relay-on-accent);
+  box-shadow: 0 1px 2px rgb(5 78 58 / 22%);
+}
+
+.model-reasoning-options button.selected:is(:hover, :focus-visible):not(:disabled) {
+  background: var(--relay-accent-hover);
 }
 
 .model-reasoning-options button:disabled {
@@ -657,18 +662,6 @@
   --member-price-columns: 3;
 }
 
-.member-price-section:has(.source-price-table[data-cache-write="anthropic"]) {
-  --member-price-columns: 5;
-}
-
-.source-price-table[data-cache-write="anthropic"] {
-  --member-price-columns: 5;
-}
-
-.source-price-table[data-cache-write="openai"] {
-  --member-price-columns: 4;
-}
-
 .member-price-section .source-price-table {
   overflow: visible;
 }
@@ -741,12 +734,6 @@
   gap: 2px;
 }
 
-.source-price-picker > span {
-  color: var(--relay-muted);
-  font-size: 10px;
-  font-weight: 400;
-}
-
 .source-price-picker .relay-option-trigger {
   width: 100%;
   min-width: 0;
@@ -754,19 +741,6 @@
   padding: 3px 6px;
   font-size: 11px;
   border-radius: 5px;
-}
-
-.source-price-flat {
-  display: flex;
-  align-items: center;
-  min-height: 28px;
-  color: var(--relay-muted);
-  font-size: 11px;
-  font-weight: 400;
-}
-
-.source-price-note {
-  margin: 0;
 }
 
 .member-price-section .source-price-row > .relay-icon-button,

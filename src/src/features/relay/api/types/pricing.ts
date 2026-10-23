@@ -107,6 +107,7 @@ export type ApiModelPriceOverride = PriceSchedules & {
   cachedInputMicroUsdPerMillion?: number | null | undefined;
   cacheWrite5mMicroUsdPerMillion?: number | null | undefined;
   cacheWrite1hMicroUsdPerMillion?: number | null | undefined;
+  cacheWriteMicroUsdPerMillion?: number | null | undefined;
   outputMicroUsdPerMillion: number;
 };
 
@@ -116,6 +117,7 @@ export type TokenRateSet = {
   cacheRead?: number | undefined;
   cacheWrite5m?: number | undefined;
   cacheWrite1h?: number | undefined;
+  cacheWrite?: number | undefined;
 };
 
 export type LongContextRates = {
@@ -128,4 +130,13 @@ export type LongContextRates = {
 export type TokenPrice = TokenRateSet & PriceSchedules & {
   input: number;
   output: number;
+};
+
+/** Source-scoped query-time evidence, not a pool-wide price or an invoice. */
+export type ResolvedModelPrice = {
+  quote: TokenPrice | null;
+  source: Exclude<PricingSourceSummary, "mixed">;
+  catalogRevision: string | null;
+  catalogFetchedAtMs: number | null;
+  stale: boolean;
 };

@@ -40,6 +40,7 @@ export function modelSignature(models: ModelSummary[]) {
     model.cachedInputMicroUsdPerMillion,
     model.cacheWrite5mMicroUsdPerMillion,
     model.cacheWrite1hMicroUsdPerMillion,
+    model.cacheWriteMicroUsdPerMillion,
     model.outputMicroUsdPerMillion,
     model.customPrice,
     model.reasoningLevels?.join(","),

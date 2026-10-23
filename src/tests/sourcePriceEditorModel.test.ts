@@ -9,6 +9,7 @@ import {
   updateSourcePriceScheduleDraft,
   selectedPriceRates,
   publishedPriceBands,
+  publishedPriceTiers,
   priceContextRanges,
   sourcePriceQuote,
   sourcePriceOverride,
@@ -38,15 +39,72 @@ const source = (overrides: Partial<SourceSummary> = {}): SourceSummary => ({
 });
 
 describe("source price editor model", () => {
+  test("context overlays preserve same-tier values for absent fields but keep explicit zeroes", () => {
+    const price = {
+      input: 1_000_000, output: 2_000_000, cacheRead: 100_000,
+      priority: { input: 3_000_000, output: 4_000_000, cacheRead: 200_000 },
+      above200k: { priority: { input: undefined, output: 0, cacheRead: undefined } },
+    };
+    expect(selectedPriceRates(price, "above200k", "priority")).toEqual({ input: 3_000_000, output: 0, cacheRead: 200_000 });
+    expect(selectedPriceRates(price, "above200k", "flex")).toEqual({});
+  });
+  test("price schedules and thresholds require evidence for the selected tier", () => {
+    expect(publishedPriceTiers(undefined)).toEqual(["standard"]);
+    const price = {
+      input: 1_000_000, output: 2_000_000,
+      flex: {}, priority: { input: 0 },
+      above200k: { standard: { input: 2_000_000 } },
+      above272k: { priority: { output: 4_000_000 } },
+      above512k: { ultrafast: { input: 0 } },
+    };
+    expect(publishedPriceTiers(price)).toEqual(["standard", "priority", "ultrafast"]);
+    expect(publishedPriceBands(price)).toEqual(["base", "above200k"]);
+    expect(publishedPriceBands(price, undefined, "priority")).toEqual(["base", "above272k"]);
+    expect(publishedPriceBands(price, undefined, "flex")).toEqual(["base"]);
+    const draft = sourcePriceDrafts({ model: {
+      inputMicroUsdPerMillion: 1, outputMicroUsdPerMillion: 2,
+      flex: { input: 0 }, above100k: { flex: { output: 3 } },
+    } }).model;
+    expect(publishedPriceTiers(undefined, draft)).toEqual(["standard", "flex"]);
+    expect(publishedPriceBands(undefined, draft, "flex")).toEqual(["base", "above100k"]);
+    expect(publishedPriceBands(undefined, draft)).toEqual(["base"]);
+  });
+
+  test("source-scoped resolution is authoritative and manual reset never becomes automatic", () => {
+    const detected = { inputMicroUsdPerMillion: 80_000, outputMicroUsdPerMillion: 400_000 };
+    const evidence = { source: "liteLlmExact" as const, quote: { input: 1_000_000, output: 2_000_000 },
+      catalogRevision: "synthetic", catalogFetchedAtMs: 1, stale: false };
+    expect(sourcePriceQuote(detected, evidence)).toEqual(evidence.quote);
+    expect(sourcePriceQuote(undefined, { ...evidence, source: "manual" })).toBeUndefined();
+    expect(sourcePriceQuote(detected, { ...evidence, source: "unpriced", quote: null })).toBeUndefined();
+    expect(sourcePriceQuote(undefined, undefined)).toBeUndefined();
+    expect(sourcePriceQuote(detected, undefined)).toMatchObject({ input: 80_000, output: 400_000 });
+  });
+  test("generic creation prices round-trip without a manufactured TTL or multiplier", () => {
+    const price = {
+      inputMicroUsdPerMillion: 1_000_000, outputMicroUsdPerMillion: 2_000_000,
+      cacheWriteMicroUsdPerMillion: 870_000,
+      flex: { cacheWrite: 0 },
+    };
+    const quote = sourcePriceQuote(price, undefined);
+    expect(quote?.cacheWrite).toBe(870_000);
+    expect(quote?.cacheWrite5m).toBeUndefined();
+    expect(sourcePriceOverride(quote)).toMatchObject(price);
+    expect(parseSourcePriceDrafts(sourcePriceDrafts({ model: price }))).toEqual({ model: price });
+    expect(sourcePriceCacheWrites(quote)).toEqual({ generic: true, fiveMinutes: false, oneHour: false });
+    expect(selectedPriceRates(quote, "base", "flex")).toEqual({ cacheWrite: 0 });
+  });
   test("context choices come only from published or saved model prices", () => {
     expect(publishedPriceBands(undefined)).toEqual(["base"]);
     expect(publishedPriceBands({ input: 1, output: 2, above200k: { standard: {} } })).toEqual(["base"]);
-    expect(publishedPriceBands({ input: 1, output: 2, above272k: { flex: { input: 0 } } })).toEqual(["base", "above272k"]);
+    expect(publishedPriceBands({ input: 1, output: 2, above272k: { flex: { input: 0 } } })).toEqual(["base"]);
+    expect(publishedPriceBands({ input: 1, output: 2, above272k: { flex: { input: 0 } } }, undefined, "flex")).toEqual(["base", "above272k"]);
     const draft = sourcePriceDrafts({ model: {
       inputMicroUsdPerMillion: 1, outputMicroUsdPerMillion: 2,
       above128k: { priority: { cacheRead: 0 } },
     } }).model;
-    expect(publishedPriceBands(undefined, draft)).toEqual(["base", "above128k"]);
+    expect(publishedPriceBands(undefined, draft)).toEqual(["base"]);
+    expect(publishedPriceBands(undefined, draft, "priority")).toEqual(["base", "above128k"]);
     expect(priceContextRanges(["base", "above100k", "above512k"])).toEqual([
       { band: "base", min: undefined, max: 100_000 },
       { band: "above100k", min: 100_000, max: 512_000 },
@@ -67,8 +125,10 @@ describe("source price editor model", () => {
     expect(sourcePriceOverride(quote)).toMatchObject(price);
     expect(selectedPriceRates(quote, "above512k", "standard")).toMatchObject({ input: 2_000_000, output: 2_000_000 });
     expect(selectedPriceRates(quote, "above512k", "flex")).toEqual({ input: 0 });
-    expect(sourcePriceCacheWrites(quote)).toEqual({ fiveMinutes: false, oneHour: true });
-    expect(publishedPriceBands(quote)).toEqual(["base", "above100k", "above128k", "above512k"]);
+    expect(sourcePriceCacheWrites(quote)).toEqual({ fiveMinutes: false, oneHour: true, generic: false });
+    expect(publishedPriceBands(quote)).toEqual(["base", "above100k"]);
+    expect(publishedPriceBands(quote, undefined, "flex")).toEqual(["base", "above128k"]);
+    expect(publishedPriceBands(quote, undefined, "priority")).toEqual(["base", "above512k"]);
   });
 
   test("editing long Flex preserves the base, published tiers, and exact zero cache prices", () => {

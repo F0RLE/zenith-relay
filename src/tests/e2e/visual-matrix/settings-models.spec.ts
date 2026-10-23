@@ -201,38 +201,60 @@ test("source editor keeps discovery compact and routing controls internal", asyn
   await page.screenshot({ path: "output/playwright/source-discovery-pricing.png" });
 });
 
-test("reasoning modes stay balanced with the full backend level set", async ({ page }) => {
-  await installTauriMock(page, {
-    locale: "en",
-    mode: "local",
-    theme: "dark",
-    populated: true,
-    mixedModels: true,
-    modelReasoning: { "claude-opus-4-8": ["none", "low", "medium", "high", "xhigh", "max"] },
+for (const theme of ["light", "dark"] as const) {
+  test(`reasoning modes stay balanced with the full backend level set ${theme}`, async ({ page }) => {
+    await installTauriMock(page, {
+      locale: "ru",
+      mode: "local",
+      theme,
+      populated: true,
+      mixedModels: true,
+      modelReasoning: { "claude-opus-4-8": ["none", "low", "medium", "high", "xhigh", "max"] },
+    });
+    await page.setViewportSize({ width: 1160, height: 760 });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Пул", exact: true }).click();
+    await page.getByRole("tab", { name: "Правила моделей", exact: true }).click();
+    const model = page.locator('.model-rules tbody tr[data-model-id="claude-opus-4-8"]');
+    await model.locator("[data-model-reasoning-edit]").click();
+
+    const dialog = page.getByRole("dialog", { name: "Режимы размышления" });
+    const options = dialog.locator(".model-reasoning-options button");
+    await expect(options).toHaveCount(6);
+    await expect(dialog.locator("footer")).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: "Закрыть", exact: true })).toHaveCount(1);
+    const max = dialog.getByRole("checkbox", { name: "Максимальное", exact: true });
+    const primaryBackground = theme === "dark" ? "rgb(128, 180, 154)" : "rgb(21, 100, 77)";
+    await expect(max).toHaveCSS("background-color", primaryBackground);
+    await expect(max).toHaveCSS("color", theme === "dark" ? "rgb(16, 32, 24)" : "rgb(255, 254, 250)");
+    expect(await dialog.locator(".model-reasoning-options").evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(" ").length)).toBe(3);
+    expect(await options.evaluateAll((items) => new Set(items.map((item) => Math.round(item.getBoundingClientRect().top))).size)).toBe(2);
+    expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await page.screenshot({ path: `output/playwright/model-reasoning-dialog-ru-${theme}-1160x760.png` });
+
+    await page.setViewportSize({ width: 520, height: 620 });
+    expect(await options.evaluateAll((items) => new Set(items.map((item) => Math.round(item.getBoundingClientRect().top))).size)).toBe(2);
+    expect(await dialog.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight && element.scrollWidth <= element.clientWidth;
+    })).toBe(true);
+    await page.screenshot({ path: `output/playwright/model-reasoning-dialog-ru-${theme}-520x620.png` });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await dialog.locator(".model-reasoning-options").evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(" ").length)).toBe(2);
+    expect(await options.evaluateAll((items) => new Set(items.map((item) => Math.round(item.getBoundingClientRect().top))).size)).toBe(3);
+    expect(await dialog.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight && element.scrollWidth <= element.clientWidth;
+    })).toBe(true);
+    await page.screenshot({ path: `output/playwright/model-reasoning-dialog-ru-${theme}-390x844.png` });
+    await max.hover();
+    await expect(max).toHaveCSS("background-color", theme === "dark" ? "rgb(160, 204, 179)" : "rgb(16, 76, 59)");
+    await max.click();
+    await expect(max).toHaveAttribute("aria-checked", "false");
+    await expect(max).not.toHaveCSS("background-color", primaryBackground);
   });
-  await page.setViewportSize({ width: 1160, height: 760 });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await page.getByRole("tab", { name: "Model Rules" }).click();
-  const model = page.locator('.model-rules tbody tr[data-model-id="claude-opus-4-8"]');
-  await model.getByRole("button", { name: "Set reasoning modes for claude-opus-4-8" }).click();
-
-  const dialog = page.getByRole("dialog", { name: "Reasoning modes" });
-  const options = dialog.locator(".model-reasoning-options button");
-  await expect(options).toHaveCount(6);
-  expect(await dialog.locator(".model-reasoning-options").evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(" ").length)).toBe(3);
-  expect(await options.evaluateAll((items) => new Set(items.map((item) => Math.round(item.getBoundingClientRect().top))).size)).toBe(2);
-  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-  await page.screenshot({ path: "output/playwright/model-reasoning-dialog-ru-dark-1160x760.png" });
-
-  await page.setViewportSize({ width: 520, height: 620 });
-  expect(await options.evaluateAll((items) => new Set(items.map((item) => Math.round(item.getBoundingClientRect().top))).size)).toBe(2);
-  expect(await dialog.evaluate((element) => {
-    const rect = element.getBoundingClientRect();
-    return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight && element.scrollWidth <= element.clientWidth;
-  })).toBe(true);
-  await page.screenshot({ path: "output/playwright/model-reasoning-dialog-ru-dark-520x620.png" });
-});
+}
 
 test("prompt cache policy fits the Russian dark source editor", async ({ page }) => {
   await installTauriMock(page, {

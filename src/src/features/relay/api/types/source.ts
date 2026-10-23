@@ -1,5 +1,5 @@
 import type { DefaultServiceTier, OperationalStatus } from "./common";
-import type { ApiEquivalentSummary, ApiModelPriceOverride } from "./pricing";
+import type { ApiEquivalentSummary, ApiModelPriceOverride, ResolvedModelPrice } from "./pricing";
 
 export type SourceWireApi = "responses" | "chat_completions" | "messages" | "gemini";
 
@@ -68,6 +68,8 @@ export type SourceSummary = {
   recoveryDelaySeconds: number;
   modelPriceOverrides?: Record<string, ApiModelPriceOverride>;
   detectedModelPrices?: Record<string, ApiModelPriceOverride>;
+  /** This source's resolver output. Never substitute a different pool member. */
+  resolvedModelPrices?: Record<string, ResolvedModelPrice>;
   apiEquivalent: ApiEquivalentSummary;
   secretAvailable: boolean;
   lastErrorCode: string | null;

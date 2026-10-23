@@ -179,6 +179,7 @@ function mergeModelSummary(existingSummary: ModelSummary, incomingSummary: Model
   merged.cachedInputMicroUsdPerMillion = preferIncoming(existingSummary.cachedInputMicroUsdPerMillion, incomingSummary.cachedInputMicroUsdPerMillion) ?? null;
   merged.cacheWrite5mMicroUsdPerMillion = preferIncoming(existingSummary.cacheWrite5mMicroUsdPerMillion, incomingSummary.cacheWrite5mMicroUsdPerMillion) ?? null;
   merged.cacheWrite1hMicroUsdPerMillion = preferIncoming(existingSummary.cacheWrite1hMicroUsdPerMillion, incomingSummary.cacheWrite1hMicroUsdPerMillion) ?? null;
+  merged.cacheWriteMicroUsdPerMillion = preferIncoming(existingSummary.cacheWriteMicroUsdPerMillion, incomingSummary.cacheWriteMicroUsdPerMillion) ?? null;
   merged.outputMicroUsdPerMillion = preferIncoming(existingSummary.outputMicroUsdPerMillion, incomingSummary.outputMicroUsdPerMillion) ?? null;
   merged.imageRequestPrices = unionImagePrices(existingSummary.imageRequestPrices, incomingSummary.imageRequestPrices);
   merged.reasoningLevels = unionReasoningLevels(existingSummary.reasoningLevels, incomingSummary.reasoningLevels);

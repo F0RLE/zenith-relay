@@ -780,24 +780,12 @@
 
 .source-price-grid-head,
 .source-price-row {
-  min-width: 620px;
+  min-width: calc(284px + var(--source-price-columns, 3) * 112px);
   display: grid;
-  grid-template-columns: minmax(178px, 1.45fr) repeat(3, minmax(104px, 1fr)) 34px;
+  grid-template-columns: minmax(178px, 1.45fr) repeat(var(--source-price-columns, 3), minmax(104px, 1fr)) 34px;
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
-}
-
-.source-price-table:not(.source-price-table-compact)[data-cache-write="anthropic"] > .source-price-grid-head,
-.source-price-table:not(.source-price-table-compact)[data-cache-write="anthropic"] > .source-price-row {
-  min-width: 820px;
-  grid-template-columns: minmax(178px, 1.45fr) repeat(5, minmax(104px, 1fr)) 34px;
-}
-
-.source-price-table:not(.source-price-table-compact)[data-cache-write="openai"] > .source-price-grid-head,
-.source-price-table:not(.source-price-table-compact)[data-cache-write="openai"] > .source-price-row {
-  min-width: 740px;
-  grid-template-columns: minmax(178px, 1.45fr) repeat(4, minmax(104px, 1fr)) 34px;
 }
 
 .source-price-grid-head {

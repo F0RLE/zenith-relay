@@ -3,7 +3,7 @@ import { BrainCircuit, ChevronDown, ChevronRight, GripVertical } from "lucide-re
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { DefaultServiceTier, ModelSummary } from "../../api/types";
-import { Button, Dialog, EmptyState, IconButton, ToggleSwitch } from "../../components/Ui";
+import { Dialog, EmptyState, IconButton, ToggleSwitch } from "../../components/Ui";
 import { currentPoolModelSummaries, groupModelSummaries } from "../../modelSummaries";
 import { formatReasoningEffort } from "../../poolFormatting";
 import {
@@ -505,7 +505,7 @@ function ModelReasoningDialog({ model, onClose }: { model: ModelSummary; onClose
     if (updatedLevels === allowedLevelsRef.current) return;
     void saveLevels(updatedLevels);
   };
-  return <Dialog className="model-reasoning-dialog" title={t("models.reasoningTitle")} onClose={onClose} footer={<Button variant="primary" onClick={onClose}>{t("common.close")}</Button>}>
+  return <Dialog className="model-reasoning-dialog" title={t("models.reasoningTitle")} onClose={onClose}>
     <div className="model-reasoning-form">
       <code className="model-reasoning-model" data-relay-tooltip={model.id}>{model.id}</code>
       <div className="model-reasoning-options" role="group" aria-label={t("models.reasoningTitle")}>

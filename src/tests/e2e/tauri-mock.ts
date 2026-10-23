@@ -1,4 +1,5 @@
 import type { Page } from "../bun-playwright";
+import type { ResolvedModelPrice } from "../../src/features/relay/api/types/pricing";
 import type { ApiModelPriceOverride, ModelSummary, SourceStats, UpstreamErrorDetails, SourceProtocolBinding, SourceProtocolConfig, WakeTask, ToolPolicy, RequestTimezonePolicy, RequestTimezoneUpdate, AccountSummary } from "../../src/features/relay/api/types";
 import type { CacheContextDiagnostics, CacheSessionRecord, RoutingDiagnostics, ProxyPoolEntry, RelayMode, UsageTotals } from "../../src/features/relay/api/types";
 
@@ -27,6 +28,7 @@ export type MockOptions = {
   sourceStatsDelayMs?: number[];
   sourceStatsById?: Record<string, SourceStats>;
   accountCount?: number;
+  accountLabel?: string;
   accountRouteKinds?: Array<NonNullable<AccountSummary["oauthClientKind"]>>;
   accountRoutesGrouped?: boolean;
   accountRouteSelectError?: boolean;
@@ -140,6 +142,7 @@ export type MockOptions = {
   modelContextFailOnce?: boolean;
   modelSpeed?: Record<string, "standard" | "fast" | "ultrafast">;
   sourceDetectedModelPrices?: Record<string, ApiModelPriceOverride>;
+  sourceResolvedModelPrices?: Record<string, ResolvedModelPrice>;
   sourceErrorCode?: string;
   sourceRefreshError?: boolean;
   sourceCreateError?: string;
@@ -281,6 +284,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       recoveryDelaySeconds: 0,
       modelPriceOverrides: {},
       detectedModelPrices: input.sourceDetectedModelPrices ?? {},
+      resolvedModelPrices: input.sourceResolvedModelPrices,
       apiEquivalent: { microUsd: 8_500, pricedTokens: 1_400, unpricedTokens: 0 },
       secretAvailable: input.sourceSecretAvailable ?? true,
       lastErrorCode: input.sourceErrorCode ?? null,
@@ -301,8 +305,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       oauthClientKind: input.accountOAuthClientKind ?? "codex",
       credentialDiagnostics: input.accountCredentialDiagnostics,
       id: "account_synthetic",
-      label: "Personal Plus",
-      identityHint: distinctAccountIdentityHints ? "p***@example.test" : "Personal Plus",
+      label: input.accountLabel ?? "Personal Plus",
+      identityHint: distinctAccountIdentityHints ? "p***@example.test" : input.accountLabel ?? "Personal Plus",
       enabled: true,
       inPool: input.poolMembers ?? true,
       draining: false,
@@ -350,8 +354,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       const variant = accountVariants[index % accountVariants.length];
       const item = structuredClone(account);
       item.id = `account_synthetic_${index + 1}`;
-      item.label = variant.label;
-      item.identityHint = distinctAccountIdentityHints ? ["p***@example.test", "b***@example.test", "r***@example.test", "q***@example.test", "s***@example.test", "t***@example.test"][index % 6] : variant.label;
+      item.label = index === 0 ? account.label : variant.label;
+      item.identityHint = distinctAccountIdentityHints ? ["p***@example.test", "b***@example.test", "r***@example.test", "q***@example.test", "s***@example.test", "t***@example.test"][index % 6] : item.label;
       item.authState = { state: "active" };
       item.subscription.planType = variant.plan;
       item.subscription.activeUntilMs = variant.activeUntilMs;

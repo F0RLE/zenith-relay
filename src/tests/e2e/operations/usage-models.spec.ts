@@ -441,6 +441,8 @@ test("local model reasoning defaults are compact and use backend modes", async (
   await expect(dialog.locator(".model-reasoning-company")).toHaveCount(0);
   await expect(dialog.getByLabel("Custom mode")).toHaveCount(0);
   await expect(dialog.getByRole("button", { name: "Add", exact: true })).toHaveCount(0);
+  await expect(dialog.locator("footer")).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Close", exact: true })).toHaveCount(1);
   await page.screenshot({ path: "output/playwright/model-reasoning-dialog-compact-en-840x560.png" });
   const max = dialog.getByRole("checkbox", { name: "Max" });
   await expect(max).toHaveAttribute("aria-checked", "true");
@@ -451,6 +453,12 @@ test("local model reasoning defaults are compact and use backend modes", async (
     input: { modelId: "claude-opus-4-8", allowedLevels: ["low", "medium", "high", "xhigh"] },
   });
   await expect(max).toHaveAttribute("aria-checked", "false");
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await claude.getByRole("button", { name: "Set reasoning modes for claude-opus-4-8" }).click();
+  await expect(dialog.getByRole("checkbox", { name: "Max" })).toHaveAttribute("aria-checked", "false");
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
 });
 
 test("model availability errors stay visible", async ({ page }) => {

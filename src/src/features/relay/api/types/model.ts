@@ -56,6 +56,7 @@ export type ModelSummary = {
   cachedInputMicroUsdPerMillion?: number | null;
   cacheWrite5mMicroUsdPerMillion?: number | null;
   cacheWrite1hMicroUsdPerMillion?: number | null;
+  cacheWriteMicroUsdPerMillion?: number | null;
   outputMicroUsdPerMillion: number | null;
   tokenPrice?: TokenPrice | null;
   imageRequestPrices?: ImageRequestPrice[];

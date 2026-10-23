@@ -42,9 +42,6 @@
 .source-edit-dialog .source-price-group > summary { padding: 12px 16px; background: transparent; border: 0; }
 .source-edit-dialog .source-price-group > summary:hover { color: var(--relay-accent); }
 .source-edit-dialog .source-price-group > summary span { font-size: 11px; font-variant-numeric: tabular-nums; }
-.source-edit-dialog .source-price-tab .source-price-table { --member-price-columns: 3; }
-.source-edit-dialog .source-price-tab .source-price-table[data-cache-write="anthropic"] { --member-price-columns: 5; }
-.source-edit-dialog .source-price-tab .source-price-table[data-cache-write="openai"] { --member-price-columns: 4; }
 .source-edit-dialog .source-price-row { border: 0; border-radius: 8px; }
 
 .relay-dialog.automation-dialog { width: min(660px, 100%); }
