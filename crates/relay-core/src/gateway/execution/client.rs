@@ -8,7 +8,8 @@ use super::super::now_ms;
 use super::super::request::{
     candidate_protocols, chat_request_has_supported_content, client_request_identity,
     codex_background_request_kind, forwarded_codex_headers, forwarded_messages_headers,
-    is_managed_codex_client, request_id, ServiceTierPolicy, CODEX_RESPONSES_LITE_HEADER,
+    is_managed_codex_client, normalize_codex_reasoning_placeholder, request_id, ServiceTierPolicy,
+    CODEX_RESPONSES_LITE_HEADER,
 };
 use super::request::{execute_request, RequestExecution};
 use crate::error_codes;
@@ -97,6 +98,9 @@ async fn execute_client_request_inner(
         .cloned()
         .unwrap_or_else(|| super::super::request::RequestToolPolicy::new(&runtime, &request_json));
     let managed_codex_client = is_managed_codex_client(&headers);
+    if client_wire_api == WireApi::Responses {
+        normalize_codex_reasoning_placeholder(&runtime, &key, &headers, &mut request_json);
+    }
     let captured_tier_policy = parts
         .extensions
         .get::<RoutedRequestIdentity>()

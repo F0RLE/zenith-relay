@@ -292,6 +292,8 @@ pub(crate) fn previous_response_not_found_value(error_payload: &Value) -> bool {
     [
         error_payload.pointer("/error/code"),
         error_payload.pointer("/error/type"),
+        error_payload.pointer("/response/error/code"),
+        error_payload.pointer("/response/error/type"),
     ]
     .into_iter()
     .flatten()
@@ -305,6 +307,7 @@ pub(crate) fn previous_response_not_found_value(error_payload: &Value) -> bool {
                 .eq_ignore_ascii_case(error_codes::RESPONSE_CONTINUATION_UNAVAILABLE)
     }) || [
         error_payload.pointer("/error/message"),
+        error_payload.pointer("/response/error/message"),
         error_payload.get("message"),
     ]
     .into_iter()
@@ -316,6 +319,7 @@ pub(crate) fn previous_response_not_found_value(error_payload: &Value) -> bool {
 fn previous_response_not_found_message(message: &str) -> bool {
     let message = message.trim().trim_end_matches('.').to_ascii_lowercase();
     message == "previous response not found"
+        || message == super::super::UNSTORED_PREVIOUS_RESPONSE_MESSAGE
         || (message.starts_with("previous response with id ") && message.ends_with(" not found"))
         || message.starts_with("no response found for previous_response_id ")
 }

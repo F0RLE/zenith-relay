@@ -65,6 +65,7 @@ const RULES: &[Rule] = &[
             "previous response not found",
             "no response found for previous_response_id",
             "unknown or expired previous_response_id",
+            super::super::UNSTORED_PREVIOUS_RESPONSE_MESSAGE,
         ],
         error_codes::UPSTREAM_PREVIOUS_RESPONSE_NOT_FOUND,
     ),

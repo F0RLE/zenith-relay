@@ -723,6 +723,12 @@ refusals, not an account-wide credential failure or a reason to rotate.
 Encrypted-history repair refuses ambiguous multiple reasoning ciphertexts and
 encrypted compaction checkpoints without modifying history.
 
+A structured validation refusal that the service does not retain past Responses
+uses the existing missing-response recovery, including terminal SSE errors.
+Only a complete local replay owned by the requesting key and original route may
+repair that continuation before client output. Generic unsupported parameters
+or ambiguous execution do not establish a safe replay.
+
 Errors retain origin (`Relay`, `Account`, `Provider`), category, status, timings,
 and safe provider IDs. Prompts, raw bodies, arguments, credentials, and
 authorization headers do not enter diagnostics. Stable codes live in
@@ -1338,6 +1344,15 @@ model route does not advertise; omission would let OpenCode restore its built-in
 defaults. Models without evidenced effort levels retain the provider's default
 mode. Refresh can re-enable a newly supported effort, removes stale generated
 variants, and preserves genuinely custom user variants.
+
+Managed Codex Responses requests using Relay's reserved model aliases treat
+`reasoning.effort: none` as a picker placeholder only when reference metadata
+confirms thinking, publishes no explicit control method, and the configured
+route union advertises no effort choices. HTTP and WebSocket ingress remove
+only that placeholder and retain other reasoning fields. Ordinary API clients,
+raw model IDs, unknown metadata and models with evidenced controls keep their
+original request. This is client compatibility policy, not an inference that
+missing metadata means a provider cannot reason or accept a control.
 OpenCode's built-in `Default` is the provider-default mode, not an advertised
 effort, and cannot be removed by the model variant configuration. Clients that
 cache the profile at startup must reload before its new effort list takes effect.

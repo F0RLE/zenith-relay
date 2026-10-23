@@ -162,6 +162,7 @@ fn bad_request_affinity_recovery_requires_a_structured_missing_response_error() 
     for payload in [
         br#"{"error":{"code":"previous_response_not_found"}}"#.as_slice(),
         br#"{"message":"Previous response with id 'resp_123' not found."}"#.as_slice(),
+        br#"{"error":{"message":"previous_response_id is not supported: this service does not retain past responses"}}"#.as_slice(),
     ] {
         assert!(recoverable_response_affinity_miss(
             StatusCode::BAD_REQUEST,
@@ -173,6 +174,8 @@ fn bad_request_affinity_recovery_requires_a_structured_missing_response_error() 
     for payload in [
         br#"{"error":{"code":"invalid_request","message":"Invalid request body."}}"#.as_slice(),
         b"Previous response with id 'resp_123' not found.".as_slice(),
+        br#"{"error":{"message":"previous_response_id is not supported"}}"#.as_slice(),
+        br#"{"error":{"message":"This service does not retain past responses after an internal failure"}}"#.as_slice(),
     ] {
         assert!(!recoverable_response_affinity_miss(
             StatusCode::BAD_REQUEST,

@@ -44,6 +44,8 @@ pub(super) use headers::{
     forwarded_responses_headers, is_managed_codex_client,
 };
 pub(super) use identity::{client_context_fingerprint, client_request_identity};
+mod codex_reasoning;
+pub(in crate::gateway) use codex_reasoning::normalize_codex_reasoning_placeholder;
 pub(in crate::gateway) use normalization::coerce_responses_input_array;
 pub(super) use normalization::{
     apply_account_prompt_cache_key, normalize_account_request, normalize_basis_points_request,

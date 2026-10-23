@@ -89,6 +89,7 @@ struct NativeReplayUpstreamState {
 enum NativeReplayRejection {
     #[default]
     PreviousResponseRequiresWebsocket,
+    StatelessResponses,
     InvalidFunctionCallOutputCallId,
     GenericInvalidRequest,
     ZenithGatewayInvalidRequest,
@@ -440,13 +441,6 @@ async fn spawn_gemini_upstream() -> (TestServer, UpstreamState) {
         )
         .with_state(state.clone());
     (spawn(app).await, state)
-}
-
-async fn spawn_native_replay_upstream() -> (TestServer, NativeReplayUpstreamState) {
-    spawn_native_replay_upstream_with_rejection(
-        NativeReplayRejection::PreviousResponseRequiresWebsocket,
-    )
-    .await
 }
 
 async fn spawn_native_replay_upstream_with_rejection(
@@ -846,6 +840,10 @@ async fn native_replay_upstream_responses(
                 "previous_response_id is only supported on Responses WebSocket v2",
                 "websocket_required",
             ),
+            NativeReplayRejection::StatelessResponses => (
+                "previous_response_id is not supported: this service does not retain past responses",
+                "invalid_request_error",
+            ),
             NativeReplayRejection::InvalidFunctionCallOutputCallId => (
                 "Invalid call_id for function_call_output",
                 "invalid_function_call_output_call_id",
@@ -862,6 +860,16 @@ async fn native_replay_upstream_responses(
                 "invalid_request",
             ),
         };
+        if matches!(state.rejection, NativeReplayRejection::StatelessResponses)
+            && request.get("stream").and_then(Value::as_bool) == Some(true)
+        {
+            let event = json!({"type":"response.failed", "response":{"error":{"message":message,"code":code}}});
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, "text/event-stream")
+                .body(Body::from(format!("data: {event}\n\n")))
+                .unwrap();
+        }
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({

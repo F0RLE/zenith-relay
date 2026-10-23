@@ -3,7 +3,17 @@ use zenith_relay_core::AttemptOutcome;
 
 #[tokio::test]
 async fn native_responses_replays_http_tool_continuation_when_upstream_requires_websocket() {
-    let (upstream, state) = spawn_native_replay_upstream().await;
+    assert_http_tool_continuation_replay(NativeReplayRejection::PreviousResponseRequiresWebsocket)
+        .await;
+}
+
+#[tokio::test]
+async fn native_responses_replays_http_tool_continuation_after_stateless_rejection() {
+    assert_http_tool_continuation_replay(NativeReplayRejection::StatelessResponses).await;
+}
+
+async fn assert_http_tool_continuation_replay(rejection: NativeReplayRejection) {
+    let (upstream, state) = spawn_native_replay_upstream_with_rejection(rejection).await;
     let (gateway, _) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
     let client = reqwest::Client::new();
     let tools = json!([{
@@ -293,7 +303,19 @@ async fn native_responses_stream_keeps_tool_history_after_generic_gateway_reject
 
 #[tokio::test]
 async fn native_responses_stream_replays_tool_continuation_when_upstream_requires_websocket() {
-    let (upstream, state) = spawn_native_replay_upstream().await;
+    assert_stream_tool_continuation_replay(
+        NativeReplayRejection::PreviousResponseRequiresWebsocket,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn native_responses_stream_replays_tool_continuation_after_stateless_rejection() {
+    assert_stream_tool_continuation_replay(NativeReplayRejection::StatelessResponses).await;
+}
+
+async fn assert_stream_tool_continuation_replay(rejection: NativeReplayRejection) {
+    let (upstream, state) = spawn_native_replay_upstream_with_rejection(rejection).await;
     let (gateway, _) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
     let client = reqwest::Client::new();
     let first = client
