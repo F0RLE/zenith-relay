@@ -782,6 +782,13 @@ disable reasoning, or turn unsupported controls into prompt text. Official
 references and the [conversation acceptance matrix](../../.agents/skills/relay-protocol-adapters/references/acceptance.md)
 own field-level review; third-party proxies are comparisons, not specifications.
 
+Completed Responses items remain immutable between `output_item.done` and the
+terminal snapshot. Only documented nullable fields may alternate between omission
+and `null`: message `phase`, reasoning `encrypted_content`, and tool `caller`.
+Non-null values, content, identities, arguments, and lifecycle states still must
+match. Mismatch diagnostics name only fixed protocol fields, never provider keys
+or values.
+
 ### Conversation and routing contracts
 
 - Messages `metadata.user_id` is opaque user attribution, not prompt content.
@@ -1060,6 +1067,60 @@ Desktop request details itemize input, cache read/write, and output using the
 same query-time catalog snapshot and component rounding as the request total.
 Reasoning stays included in output, not a second charge. Missing breakdowns or
 rates remain unavailable; a measured zero is distinct from an unknown cost.
+
+Source editors receive source-scoped resolved quotes and provenance from the
+same query-time catalog and resolver as usage. A pool-wide model summary is
+not a fallback for another source; it may describe a different member's quote.
+Price provenance appears on hover or keyboard focus, not as row copy. Rows
+show only editable prices and selectors with multiple available choices.
+Manual fallback drafts stay separate from automatic placeholders, including
+after reset. The editor shows USD per million tokens before the price rows.
+Price schedule choices require explicit rates or saved manual evidence, and
+input-token price thresholds are scoped to the selected schedule. Neither a
+maximum context window nor an inference speed capability creates a tariff.
+Missing schedules are not offered as universal Flex/Priority/Ultrafast options.
+Generic and explicitly windowed cache-write prices can coexist in one row;
+provider grouping does not hide a quoted component.
+
+Applied-tier classification is shared by request details, SQL groups, quota
+windows and archive keys. An absent/default/standard tier retains the legacy
+base estimate; an explicit unsupported tier is unpriced, never Standard.
+Keep its normalized provider name in aggregates instead of collapsing new
+names into one bucket. No other tier supplies its input, output or cache rate,
+including a zero rate. Same-tier context overlays preserve absent base fields
+and apply explicit zeroes identically in the editor and the estimator.
+Local migration 035 reclassifies retained tier evidence transactionally and
+idempotently; old migration decoding stays fixed. Earlier archived aggregates
+without their original tier retain their historical classification rather than
+inventing recoverable evidence. Ordinary catalog-rate refreshes need no migration.
+
+Cache-creation prices and cache retention are separate metadata. Preserve a
+provider's explicit generic creation tariff independently of Messages-specific
+window tariffs; do not label it with an assumed TTL or derive other rates using
+fixed multipliers. Source adapters interpret their published field semantics.
+The LiteLLM adapter applies Anthropic's default-window meaning only to known
+Anthropic provider contracts, not to other hosts or model names. Compatible
+catalog discovery retains untagged creation prices as generic even on Messages
+endpoints. A read-price TTL map without a matching usage dimension is usable
+only when all supplied rates agree; it never selects the cheapest window.
+A missing or mixed TTL can use a generic tariff only when no different published
+window tariff makes the rate ambiguous. Otherwise the affected tokens remain
+unpriced. Rates, tiers and context bands refresh from catalog data without a
+usage-schema migration; observing a TTL never establishes a missing price.
+Provider usage is normalized before pricing: Messages input excludes its cache
+read/write counters, while Gemini prompt input and Chat Completions prompt input
+already include cache hits. DeepSeek's `prompt_cache_hit_tokens` is a read-counter
+alias, not additional input or a cache write. Gemini thoughts join generated
+output once. This request-token estimate does not measure separately billed
+cache-storage token-time, hosted tools, grounding, or other non-token charges;
+it is not a complete provider invoice.
+Source contracts: [OpenAI pricing](https://developers.openai.com/api/docs/pricing),
+[GPT-6.1 Sol price schedules](https://developers.openai.com/api/docs/models/gpt-6.1-sol),
+[Anthropic caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching),
+[Gemini usage](https://ai.google.dev/api/generate-content#UsageMetadata),
+[Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing),
+[DeepSeek usage](https://api-docs.deepseek.com/api/create-chat-completion), and
+the [LiteLLM catalog](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json).
 
 Debug context comparison uses bounded, salted in-memory fingerprints, never
 stored prompts or arguments. It does not prove provider prefix reuse or a cache

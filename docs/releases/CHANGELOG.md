@@ -233,6 +233,24 @@ recoverable account deletion. Changes below are grouped by area.
 
 ### Fixed
 
+- Explicit unknown provider tiers remain unpriced instead of borrowing Standard
+  rates. Raw tier names survive aggregation; retained history is reclassified
+  once without rewriting archived evidence or older migrations. Context-price
+  overlays preserve missing fields and explicit zeroes consistently.
+
+- Source price editors use their own resolved quote with provenance in tooltips
+  instead of borrowing a pool member's price. Only evidenced price schedules
+  and schedule-specific input thresholds appear; mixed cache-write components
+  stay visible, and USD-per-million units precede the rows.
+
+- Cache-write estimates retain explicitly published generic creation prices
+  instead of treating them as an unrelated cache window. Request totals and
+  history use the same catalog rates; the price editor no longer assumes a
+  retention duration for a generic write price.
+- Compatible catalogs no longer inherit Anthropic cache windows from their
+  protocol or an unrelated provider. Ambiguous cache-read window prices stay
+  unknown, and DeepSeek cache-hit usage survives native and converted responses.
+
 - SIWC tool requests include the required developer role on generated
   `additional_tools` input items, preventing upstream `input[0].role` rejections
   without changing tool names, call history or retry behavior.
@@ -612,6 +630,23 @@ recoverable account deletion. Changes below are grouped by area.
   сортировки; обычный ответ без инструментов в автоматическом режиме не вызывает предупреждение.
 
 ### Исправления
+
+- Неизвестный тариф провайдера больше не считается по Standard. Названия новых
+  тарифов сохраняются в агрегатах; доступная история переклассифицируется один
+  раз без подмены архивных данных и старых миграций. Пороги цен одинаково
+  обрабатывают пропущенные поля и явно нулевые ставки в редакторе и расчёте.
+
+- Редактор цен использует расчёт выбранного источника; происхождение доступно
+  в подсказке, без подстановки тарифа другого участника пула. Меню содержит только схемы
+  с данными и их пороги входных токенов; общий тариф записи и тарифы отдельных
+  окон кэша не скрывают друг друга, единицы USD за миллион видны до строк.
+
+- Оценка записи в кэш учитывает явно опубликованный общий тариф, не подменяя
+  его чужим окном хранения. Суммы запросов и история используют одинаковые
+  цены каталога; редактор больше не приписывает общему тарифу срок хранения.
+- Совместимые каталоги больше не наследуют окна кэша Anthropic по протоколу
+  или чужому провайдеру. Неоднозначная цена чтения остаётся неизвестной,
+  а cache-hit DeepSeek сохраняется в нативных и преобразованных ответах.
 
 - SIWC передаёт обязательную роль developer в создаваемых блоках
   `additional_tools`: запросы с инструментами больше не теряют `input[0].role`.
