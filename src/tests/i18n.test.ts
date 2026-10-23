@@ -5,7 +5,8 @@ import { parseSync } from "rolldown/utils";
 import { en } from "../src/i18n/locales/en";
 import { ru } from "../src/i18n/locales/ru";
 import type { AccountSummary, CandidateRuntimeSnapshot } from "../src/features/relay/api/types";
-import { currentAccountErrorCode, formatDetailedRemainingTime, formatRemainingTime, quotaWindowLabel, transientCandidateTone } from "../src/features/relay/components/Ui";
+import { currentAccountErrorCode, transientCandidateTone } from "../src/features/relay/accountStatus";
+import { formatDetailedRemainingTime, formatRemainingTime, quotaWindowLabel } from "../src/features/relay/quotaFormatting";
 import { sanitizeFeedbackError } from "../src/features/relay/state/feedback";
 
 describe("Relay translations", () => {
@@ -165,6 +166,6 @@ function flatten(value: object, prefix = "", result: string[] = []) {
 function walk(directory: string): string[] {
   return readdirSync(directory).flatMap((name) => {
     const path = join(directory, name);
-    return statSync(path).isDirectory() ? walk(path) : path.endsWith(".tsx") ? [path] : [];
+    return statSync(path).isDirectory() ? walk(path) : /\.tsx?$/.test(path) ? [path] : [];
   });
 }

@@ -3,9 +3,9 @@ mod identity;
 mod mutation;
 
 pub(super) use document::{
-    bytes_hash, desktop_bool, document_has_provider, key_hash, parse_config,
-    root_model_catalog_json, root_model_provider, root_model_reasoning_effort,
-    root_openai_base_url, validate_config_shape,
+    bytes_hash, desktop_bool, document_has_provider, key_hash, parse_config, root_chatgpt_base_url,
+    root_model, root_model_catalog_json, root_model_provider, root_model_reasoning_effort,
+    root_openai_base_url, root_review_model, validate_config_shape,
 };
 pub(super) use identity::{
     auth_content, external_account_provider_took_over, external_model_catalog,
@@ -14,6 +14,7 @@ pub(super) use identity::{
     previous_config_matches,
 };
 pub(super) use mutation::{
-    attach_config, enable_show_ultra_picker, reasoning_effort_for_attach, remove_managed_provider,
-    restore_config, restore_local_config, restore_root_string, set_managed_websockets,
+    attach_config, clear_account_routing_overrides, enable_show_ultra_picker,
+    reasoning_effort_for_attach, remove_managed_provider, remove_relay_provider_tables,
+    restore_local_config, restore_root_string, set_managed_websockets,
 };

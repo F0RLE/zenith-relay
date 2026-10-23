@@ -1,8 +1,14 @@
 use super::*;
+use crate::providers::chatgpt::{BasisPointsCapturedHeaders, BasisPointsHeader};
 
 #[test]
 fn basis_points_headers_match_excel_client_contract() {
-    let headers = basis_points_headers("account-1");
+    let captured = BasisPointsCapturedHeaders::from_entries(vec![BasisPointsHeader {
+        name: "user-agent".to_string(),
+        values: vec!["captured-agent/1".to_string()],
+    }])
+    .unwrap();
+    let headers = basis_points_headers("account-1", Some("user-1"), Some(&captured));
     assert_eq!(
         headers
             .get("x-openai-internal-basispoints-client-host")
@@ -24,45 +30,28 @@ fn basis_points_headers_match_excel_client_contract() {
     assert_eq!(headers.get("x-stainless-lang").unwrap(), "js");
     assert_eq!(
         headers.get("x-stainless-package-version").unwrap(),
-        "7.25.0"
+        "6.31.0"
     );
     assert_eq!(headers.get("x-stainless-retry-count").unwrap(), "0");
     assert_eq!(
         headers.get("x-stainless-runtime").unwrap(),
         "browser:chrome"
     );
-    assert_eq!(
-        headers.get("user-agent").unwrap(),
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
-    );
-    assert_eq!(
-        headers.get("x-stainless-runtime-version").unwrap(),
-        "154.0.0"
-    );
-    assert_eq!(
-        headers
-            .get("x-openai-internal-basispoints-browser-ua-brands")
-            .unwrap(),
-        "\"Chromium\";v=\"154\", \"Google Chrome\";v=\"154\", \"Not A(Brand\";v=\"99\""
-    );
-    assert_eq!(
-        headers
-            .get("x-openai-internal-basispoints-browser-name")
-            .unwrap(),
-        "Chrome"
-    );
-    assert_eq!(
-        headers
-            .get("x-openai-internal-basispoints-browser-ua-platform")
-            .unwrap(),
-        "\"Windows\""
-    );
+    assert_eq!(headers.get("user-agent").unwrap(), "captured-agent/1");
+    assert_eq!(headers.get("x-openai-account-user-id").unwrap(), "user-1");
+    assert!(headers.get("x-stainless-runtime-version").is_none());
+    assert!(headers
+        .get("x-openai-internal-basispoints-browser-name")
+        .is_none());
+    assert!(headers
+        .get("x-openai-internal-basispoints-browser-ua-platform")
+        .is_none());
     assert!(headers
         .get("x-openai-internal-basispoints-oiiice-host")
         .is_none());
 }
 #[test]
-fn basis_points_switch_changes_only_oauth_account_routes_immediately() {
+fn ordinary_accounts_use_native_responses() {
     let oauth = quota_runtime(QuotaSnapshot::default());
     let key = oauth.authenticate_secret("local-secret").unwrap();
     let transport = || {
@@ -78,10 +67,6 @@ fn basis_points_switch_changes_only_oauth_account_routes_immediately() {
             .account_transport
     };
     assert_eq!(transport(), AccountTransport::NativeResponses);
-    oauth.set_basis_points_enabled(true);
-    assert_eq!(transport(), AccountTransport::ExcelBasisPoints);
-    oauth.set_basis_points_enabled(false);
-    assert_eq!(transport(), AccountTransport::NativeResponses);
 
     let agent = AgentIdentityCredential::new(
         "MC4CAQAwBQYDK2VwBCIEIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g".into(),
@@ -93,7 +78,6 @@ fn basis_points_switch_changes_only_oauth_account_routes_immediately() {
     let key = identity_runtime
         .authenticate_secret("local-secret")
         .unwrap();
-    identity_runtime.set_basis_points_enabled(true);
     assert_eq!(
         identity_runtime
             .executor_route(

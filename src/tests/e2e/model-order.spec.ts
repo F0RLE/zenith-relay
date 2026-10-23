@@ -19,7 +19,7 @@ test("catalog families from any provider keep the backend block order", async ({
   await expect(page.locator(".model-group-content strong")).toHaveText(["Future Company", "OpenAI"]);
 });
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`${mode} model order resets groups and rows without changing model policy`, async ({ page }) => {
     await installTauriMock(page, {
       mode, locale: "en", populated: true,
@@ -58,7 +58,8 @@ for (const mode of ["local", "remote"] as const) {
 
     await page.screenshot({ path: `output/playwright/model-order-${mode}-desktop.png` });
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.getByRole("button", { name: "Collapse sidebar", exact: true }).click();
+    await expect(page.locator(".relay-shell")).toHaveClass(/sidebar-collapsed/);
+    await expect(page.getByRole("button", { name: "Expand sidebar", exact: true })).toBeVisible();
     await expect(reset).toBeVisible();
     const bounds = await reset.boundingBox();
     expect(bounds && bounds.x >= 0 && bounds.x + bounds.width <= 390).toBeTruthy();
@@ -86,13 +87,6 @@ for (const mode of ["local", "remote"] as const) {
   });
 }
 
-test("old remote server does not offer an unsupported order reset", async ({ page }) => {
-  await installTauriMock(page, { mode: "remote", locale: "en", populated: true, remoteFeatures: ["models", "sources"] });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await page.getByRole("tab", { name: "Model Rules", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Reset model order", exact: true })).toHaveCount(0);
-});
 
 test("model order reset fits the Russian dark compact toolbar", async ({ page }) => {
   await installTauriMock(page, { locale: "ru", theme: "dark", populated: true, mixedModels: true });

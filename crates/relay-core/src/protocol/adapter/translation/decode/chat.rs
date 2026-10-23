@@ -5,9 +5,9 @@ use super::super::{
 use crate::WireApi;
 use serde_json::Value;
 
-pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
+pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
     checked(
-        value,
+        request_body,
         &[
             "model",
             "stream",
@@ -19,24 +19,37 @@ pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
             "max_completion_tokens",
             "temperature",
             "top_p",
+            "presence_penalty",
+            "frequency_penalty",
+            "seed",
             "stop",
             "response_format",
             "reasoning_effort",
             "stream_options",
             "n",
             "store",
+            "metadata",
         ],
     )?;
-    if optional_u64(value, "n")?.is_some_and(|n| n != 1)
-        || optional_bool(value, "store")? == Some(true)
+    if optional_u64(request_body, "n")?.is_some_and(|n| n != 1)
+        || optional_bool(request_body, "store")? == Some(true)
     {
         return Err(AdapterError::parameter_unsupported());
     }
-    if let Some(options) = value.get("stream_options").filter(|v| !v.is_null()) {
+    if let Some(options) = request_body
+        .get("stream_options")
+        .filter(|stream_options_value| !stream_options_value.is_null())
+    {
         checked(options, &["include_usage"])?;
+        optional_bool(options, "include_usage")
+            .map_err(|error| error.with_parameter("stream_options.include_usage"))?;
     }
-    let mut request = Request::default();
-    for message in value
+    let mut decoded_request = Request {
+        metadata: super::super::options::metadata(request_body, WireApi::ChatCompletions)?,
+        ..Default::default()
+    };
+    super::content::sampling_extensions(&mut decoded_request, request_body, false)?;
+    for message in request_body
         .get("messages")
         .and_then(Value::as_array)
         .ok_or_else(AdapterError::invalid_request)?
@@ -47,27 +60,83 @@ pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
                 "role",
                 "content",
                 "tool_calls",
+                "function_call",
                 "tool_call_id",
+                "name",
                 "reasoning_content",
+                "reasoning",
+                "refusal",
             ],
         )?;
-        let reasoning = message
-            .get("reasoning_content")
+        if message.get("name").is_some_and(|name| !name.is_null())
+            && message.get("role").and_then(Value::as_str) != Some("function")
+        {
+            return Err(AdapterError::parameter_unsupported_for("messages[].name"));
+        }
+        let refusal = message
+            .get("refusal")
+            .filter(|value| !value.is_null())
+            .map(|value| {
+                value.as_str().ok_or_else(|| {
+                    AdapterError::invalid_request().with_parameter("messages[].refusal")
+                })
+            })
+            .transpose()?;
+        if refusal.is_some() && message.get("role").and_then(Value::as_str) != Some("assistant") {
+            return Err(AdapterError::invalid_request().with_parameter("messages[].refusal"));
+        }
+        let calls = message
+            .get("tool_calls")
+            .filter(|value| !value.is_null())
+            .map(|value| {
+                value.as_array().ok_or_else(|| {
+                    AdapterError::invalid_request().with_parameter("messages[].tool_calls")
+                })
+            })
+            .transpose()?;
+        let legacy_call = message
+            .get("function_call")
             .filter(|value| !value.is_null());
-        if reasoning.is_some() && super::content::role(message)? != Role::Assistant {
+        if legacy_call.is_some() && calls.is_some_and(|calls| !calls.is_empty()) {
+            return Err(AdapterError::invalid_request().with_parameter("messages[].function_call"));
+        }
+        let reasoning = super::super::chat_reasoning_text(
+            message,
+            AdapterError::invalid_request().with_parameter("messages[].reasoning"),
+        )?;
+        if reasoning.is_some()
+            && super::content::role(message, WireApi::ChatCompletions)? != Role::Assistant
+        {
             return Err(AdapterError::invalid_request());
         }
-        if message.get("role").and_then(Value::as_str) == Some("tool") {
-            request.messages.push(Message {
+        if matches!(
+            message.get("role").and_then(Value::as_str),
+            Some("tool" | "function")
+        ) {
+            if legacy_call.is_some() || calls.is_some_and(|calls| !calls.is_empty()) {
+                return Err(AdapterError::invalid_request().with_parameter("messages[].tool_calls"));
+            }
+            let (tool_result_id, tool_result_name) =
+                if message.get("role").and_then(Value::as_str) == Some("function") {
+                    // Legacy `function` role carries `name`, not `tool_call_id`.
+                    (String::new(), required_text(message, "name")?.to_string())
+                } else {
+                    (
+                        required_text(message, "tool_call_id")?.to_string(),
+                        String::new(),
+                    )
+                };
+            decoded_request.messages.push(Message {
                 role: Role::User,
                 blocks: vec![Block::ToolResult {
-                    id: required_text(message, "tool_call_id")?.into(),
-                    name: String::new(),
-                    content: super::content::plain_text(
+                    id: tool_result_id,
+                    name: tool_result_name,
+                    content: super::content::tool_result_blocks(
                         message.get("content").unwrap_or(&Value::Null),
                         WireApi::ChatCompletions,
                     )?,
                     is_error: false,
+                    raw_text: false,
                 }],
             });
             continue;
@@ -76,18 +145,32 @@ pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
             message.get("content").unwrap_or(&Value::Null),
             WireApi::ChatCompletions,
         )?;
-        if let Some(reasoning) = reasoning {
-            blocks.insert(
-                0,
-                Block::Reasoning(
-                    reasoning
-                        .as_str()
-                        .ok_or_else(AdapterError::invalid_request)?
-                        .into(),
-                ),
-            );
+        let role = super::content::role(message, WireApi::ChatCompletions)?;
+        if let Some(refusal) = refusal {
+            if blocks
+                .iter()
+                .any(|block| matches!(block, Block::Refusal(_)))
+            {
+                let content_refusal = blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        Block::Refusal(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>();
+                if content_refusal != refusal {
+                    return Err(
+                        AdapterError::invalid_request().with_parameter("messages[].refusal")
+                    );
+                }
+            } else {
+                blocks.push(Block::Refusal(refusal.into()));
+            }
         }
-        if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
+        if let Some(reasoning) = reasoning {
+            blocks.insert(0, Block::Reasoning(reasoning.into()));
+        }
+        if let Some(calls) = calls {
             for call in calls {
                 checked(call, &["id", "type", "function"])?;
                 if required_text(call, "type")? != "function" {
@@ -104,36 +187,53 @@ pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
                 });
             }
         }
-        request.messages.push(Message {
-            role: super::content::role(message)?,
-            blocks,
-        });
+        // Legacy single `function_call` field (pre-tool_calls format).
+        if let Some(legacy_call) = legacy_call {
+            checked(legacy_call, &["name", "arguments"])?;
+            blocks.push(Block::ToolCall {
+                id: String::new(),
+                name: required_text(legacy_call, "name")?.into(),
+                arguments: legacy_call
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .into(),
+            });
+        }
+        decoded_request.messages.push(Message { role, blocks });
     }
-    request.tools = super::content::tools(value.get("tools"), WireApi::ChatCompletions)?;
-    request.tool_choice =
-        super::content::choice(value.get("tool_choice"), WireApi::ChatCompletions)?;
-    request.parallel_tools = optional_bool(value, "parallel_tool_calls")?;
+    decoded_request.tools =
+        super::content::tools(request_body.get("tools"), WireApi::ChatCompletions)?;
+    decoded_request.tool_choice =
+        super::content::choice(request_body.get("tool_choice"), WireApi::ChatCompletions)?;
+    decoded_request.parallel_tools = optional_bool(request_body, "parallel_tool_calls")?;
     super::content::common(
-        &mut request,
-        value,
-        if value.get("max_completion_tokens").is_some() {
-            "max_completion_tokens"
-        } else {
-            "max_tokens"
-        },
+        &mut decoded_request,
+        request_body,
+        "max_completion_tokens",
         "top_p",
         "stop",
     )?;
-    request.output_format =
-        super::content::output_format(value.get("response_format").unwrap_or(&Value::Null))?;
-    request.reasoning = value
+    let old_limit = optional_u64(request_body, "max_tokens")?;
+    if decoded_request
+        .max_tokens
+        .zip(old_limit)
+        .is_some_and(|(limit, old_limit)| limit != old_limit)
+    {
+        return Err(AdapterError::invalid_request().with_parameter("max_completion_tokens"));
+    }
+    decoded_request.max_tokens = decoded_request.max_tokens.or(old_limit);
+    decoded_request.output_format =
+        super::content::output_format(request_body.get("response_format").unwrap_or(&Value::Null))?;
+    decoded_request.reasoning = request_body
         .get("reasoning_effort")
-        .filter(|v| !v.is_null())
-        .map(|v| {
-            v.as_str()
+        .filter(|reasoning_effort_value| !reasoning_effort_value.is_null())
+        .map(|reasoning_effort_value| {
+            reasoning_effort_value
+                .as_str()
                 .map(|effort| Reasoning::Effort(effort.into()))
                 .ok_or_else(AdapterError::invalid_request)
         })
         .transpose()?;
-    Ok(request)
+    Ok(decoded_request)
 }

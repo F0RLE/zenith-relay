@@ -51,8 +51,8 @@ impl zenith_relay_core::scheduler::refresh::SourceStatsRead for RefreshRead {
 
 pub(crate) type RefreshReadResult = Result<RefreshRead>;
 
-pub(crate) fn cache_observation(value: &RefreshReadResult) -> bool {
-    matches!(value, Ok(read) if !matches!(read, RefreshRead::Authorization(_)))
+pub(crate) fn cache_observation(refresh_result: &RefreshReadResult) -> bool {
+    matches!(refresh_result, Ok(read) if !matches!(read, RefreshRead::Authorization(_)))
 }
 
 impl DesktopState {
@@ -140,11 +140,11 @@ impl DesktopState {
 }
 
 fn automatic_eligible(account: &LocalAccountRecord) -> bool {
-    account.remote_location.is_none() && account.account.is_automatic_quota_monitoring_eligible()
+    account.recovery.is_none() && account.account.is_automatic_quota_monitoring_eligible()
 }
 
 async fn active_members(state: &DesktopState) -> BTreeSet<String> {
-    state
+    let mut activity = state
         .gateway
         .runtime()
         .await
@@ -154,7 +154,31 @@ async fn active_members(state: &DesktopState) -> BTreeSet<String> {
                 zenith_relay_core::scheduler::refresh::RECENT_ACTIVITY_WINDOW_MS,
             )
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if let Ok(store) = state.store() {
+        include_linked_account_activity(&mut activity, &store.gateway().account_routes);
+    }
+    activity
+}
+
+fn include_linked_account_activity(
+    activity: &mut BTreeSet<String>,
+    groups: &[crate::local_pool::models::AccountRouteGroup],
+) {
+    for group in groups {
+        if group
+            .account_ids
+            .iter()
+            .any(|id| activity.contains(&zenith_relay_core::scheduler::account_member_key(id)))
+        {
+            activity.extend(
+                group
+                    .account_ids
+                    .iter()
+                    .map(|id| zenith_relay_core::scheduler::account_member_key(id)),
+            );
+        }
+    }
 }
 
 fn recently_used(at: Option<u64>) -> bool {

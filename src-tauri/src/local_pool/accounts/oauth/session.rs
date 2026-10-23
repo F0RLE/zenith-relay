@@ -1,8 +1,10 @@
 use super::error::{OAuthError, OAuthErrorCode};
 use super::exchange::OAuthCallback;
 use super::parse::set_once;
-use super::{MAX_CALLBACK_URL_BYTES, MAX_TOKEN_BYTES, PENDING_TTL_MS};
+use super::{OAuthClientKind, MAX_CALLBACK_URL_BYTES, MAX_TOKEN_BYTES, PENDING_TTL_MS};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fmt;
 use url::Url;
 use zenith_relay_core::normalize_error_code;
@@ -11,13 +13,21 @@ use zenith_relay_core::url_has_userinfo;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OAuthPendingSession {
+    #[serde(default)]
+    pub(super) client_kind: OAuthClientKind,
     pub(super) redirect_uri: String,
     pub(super) state: String,
     pub(super) code_verifier: String,
     pub(super) created_at_ms: u64,
+    #[serde(default)]
+    pub(super) siwc: Option<super::siwc::SiwcPending>,
 }
 
 impl OAuthPendingSession {
+    pub fn client_kind(&self) -> OAuthClientKind {
+        self.client_kind
+    }
+
     pub fn redirect_uri(&self) -> &str {
         &self.redirect_uri
     }
@@ -28,6 +38,52 @@ impl OAuthPendingSession {
 
     pub fn expires_at_ms(&self) -> u64 {
         self.created_at_ms.saturating_add(PENDING_TTL_MS)
+    }
+
+    pub fn validate_authorization_url(&self, authorization_url: &str) -> Result<(), OAuthError> {
+        let authorization = super::validate_authorization_url(
+            self.client_kind,
+            authorization_url,
+            &self.redirect_uri,
+        )?;
+        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(self.code_verifier.as_bytes()));
+        if let Some(siwc) = self.siwc.as_ref() {
+            if authorization
+                .query_pairs()
+                .any(|(key, value)| key == "prompt" && value == "consent")
+                != siwc.consent
+            {
+                return Err(OAuthError::new(OAuthErrorCode::InvalidConfiguration, false));
+            }
+            for (key, value) in [
+                ("client_id", &siwc.client_id),
+                ("ext_agent_host_id", &siwc.host_id),
+                ("nonce", &siwc.nonce),
+            ] {
+                if !authorization
+                    .query_pairs()
+                    .any(|(k, v)| k == key && v == value.as_str())
+                {
+                    return Err(OAuthError::new(OAuthErrorCode::InvalidConfiguration, false));
+                }
+            }
+        } else if self.client_kind == OAuthClientKind::Siwc {
+            return Err(OAuthError::new(OAuthErrorCode::InvalidConfiguration, false));
+        }
+        if !(43..=128).contains(&self.code_verifier.len())
+            || !self.code_verifier.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
+            })
+            || !authorization
+                .query_pairs()
+                .any(|(key, value)| key == "state" && value == self.state)
+            || !authorization
+                .query_pairs()
+                .any(|(key, value)| key == "code_challenge" && value == challenge)
+        {
+            return Err(OAuthError::new(OAuthErrorCode::InvalidConfiguration, false));
+        }
+        Ok(())
     }
 
     pub fn parse_callback(
@@ -56,17 +112,21 @@ impl OAuthPendingSession {
         }
 
         let mut code = None;
-        let mut state = None;
+        let mut callback_state = None;
         let mut provider_error = None;
-        for (key, value) in callback_url.query_pairs() {
+        let mut client_id = None;
+        let mut scope = None;
+        for (key, query_value) in callback_url.query_pairs() {
             match key.as_ref() {
-                "code" => set_once(&mut code, value.into_owned())?,
-                "state" => set_once(&mut state, value.into_owned())?,
-                "error" => set_once(&mut provider_error, value.into_owned())?,
+                "code" => set_once(&mut code, query_value.into_owned())?,
+                "state" => set_once(&mut callback_state, query_value.into_owned())?,
+                "error" => set_once(&mut provider_error, query_value.into_owned())?,
+                "client_id" => set_once(&mut client_id, query_value.into_owned())?,
+                "scope" => set_once(&mut scope, query_value.into_owned())?,
                 _ => {}
             }
         }
-        if state.as_deref() != Some(self.state.as_str()) {
+        if callback_state.as_deref() != Some(self.state.as_str()) {
             return Err(OAuthError::new(OAuthErrorCode::StateMismatch, false));
         }
         if let Some(provider_error) = provider_error {
@@ -80,7 +140,25 @@ impl OAuthPendingSession {
         let code = code
             .filter(|code| !code.trim().is_empty() && code.len() <= MAX_TOKEN_BYTES)
             .ok_or_else(|| OAuthError::new(OAuthErrorCode::MissingAuthorizationCode, false))?;
-        Ok(OAuthCallback { code })
+        if self.client_kind == OAuthClientKind::Siwc {
+            let pending = self
+                .siwc
+                .as_ref()
+                .ok_or_else(|| OAuthError::new(OAuthErrorCode::InvalidConfiguration, false))?;
+            let bootstrap = pending.client_id
+                == zenith_relay_core::providers::chatgpt::SIWC_BOOTSTRAP_CLIENT_ID;
+            if bootstrap && client_id.is_none()
+                || client_id.as_deref().is_some_and(|id| {
+                    !super::siwc::valid_client_id(id) || (!bootstrap && id != pending.client_id)
+                })
+            {
+                return Err(OAuthError::new(OAuthErrorCode::InvalidCallback, false));
+            }
+            if client_id.is_none() {
+                client_id = Some(pending.client_id.clone());
+            }
+        }
+        Ok(OAuthCallback { code, client_id })
     }
 }
 

@@ -181,9 +181,13 @@ pub enum OperationalStatus {
 impl OperationalStatus {
     /// Runtime availability can narrow rotation eligibility, but cannot erase
     /// a persisted disable, quota wait, or configuration failure.
-    pub fn with_runtime_available(self, available: Option<bool>) -> Self {
+    pub fn with_runtime_available(self, available: Option<bool>, quota_wait: bool) -> Self {
         if self == Self::Rotation && available == Some(false) {
-            Self::Unavailable
+            if quota_wait {
+                Self::QuotaWait
+            } else {
+                Self::Unavailable
+            }
         } else {
             self
         }
@@ -199,19 +203,29 @@ fn live_availability_only_narrows_rotation_status() {
         OperationalStatus::Unavailable,
     ] {
         for available in [None, Some(false), Some(true)] {
-            assert_eq!(status.with_runtime_available(available), status);
+            for quota_wait in [false, true] {
+                assert_eq!(status.with_runtime_available(available, quota_wait), status);
+            }
         }
     }
     assert_eq!(
-        OperationalStatus::Rotation.with_runtime_available(Some(false)),
+        OperationalStatus::Rotation.with_runtime_available(Some(false), false),
         OperationalStatus::Unavailable
     );
     assert_eq!(
-        OperationalStatus::Rotation.with_runtime_available(None),
+        OperationalStatus::Rotation.with_runtime_available(None, false),
         OperationalStatus::Rotation
     );
     assert_eq!(
-        OperationalStatus::Rotation.with_runtime_available(Some(true)),
+        OperationalStatus::Rotation.with_runtime_available(Some(true), false),
+        OperationalStatus::Rotation
+    );
+    assert_eq!(
+        OperationalStatus::Rotation.with_runtime_available(Some(false), true),
+        OperationalStatus::QuotaWait
+    );
+    assert_eq!(
+        OperationalStatus::Rotation.with_runtime_available(Some(true), true),
         OperationalStatus::Rotation
     );
 }
@@ -238,24 +252,31 @@ pub fn operational_status(
     }
 }
 
-pub fn account_operational_state(input: AccountOperationalInput<'_>) -> AccountOperationalState {
+pub fn account_operational_state(
+    operational_input: AccountOperationalInput<'_>,
+) -> AccountOperationalState {
     let health = account_candidate_health(
-        input.auth_state,
-        input.health,
-        input.subscription.status,
-        input.last_error_code,
+        operational_input.auth_state,
+        operational_input.health,
+        operational_input.subscription.status,
+        operational_input.last_error_code,
     );
-    let quota =
-        CandidateQuota::from_snapshot(input.quota, input.now_ms, input.quota_stale_after_ms);
-    let configured_available =
-        !input.draining && input.secret_available && input.proxy_available && health.is_eligible();
+    let quota = CandidateQuota::from_snapshot(
+        operational_input.quota,
+        operational_input.now_ms,
+        operational_input.quota_stale_after_ms,
+    );
+    let configured_available = !operational_input.draining
+        && operational_input.secret_available
+        && operational_input.proxy_available
+        && health.is_eligible();
     let status = operational_status(
-        input.enabled,
+        operational_input.enabled,
         quota == CandidateQuota::Exhausted,
         configured_available,
         None,
     );
-    let routing_block_reason = account_routing_block_reason(&input, health, quota);
+    let routing_block_reason = account_routing_block_reason(&operational_input, health, quota);
     AccountOperationalState {
         status,
         health,
@@ -331,7 +352,7 @@ mod tests {
             QuotaRefreshStatus::Pending
         );
 
-        let state = account_operational_state(AccountOperationalInput {
+        let operational_state = account_operational_state(AccountOperationalInput {
             enabled: true,
             in_pool: true,
             draining: false,
@@ -345,7 +366,7 @@ mod tests {
             now_ms: 0,
             quota_stale_after_ms: 60_000,
         });
-        assert!(state.routing_eligible);
-        assert_eq!(state.routing_block_reason, None);
+        assert!(operational_state.routing_eligible);
+        assert_eq!(operational_state.routing_block_reason, None);
     }
 }

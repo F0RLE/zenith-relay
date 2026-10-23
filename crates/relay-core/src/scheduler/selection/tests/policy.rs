@@ -17,6 +17,82 @@ pub(super) fn dispatch(scheduler: &mut PoolScheduler) -> String {
 }
 
 #[test]
+fn failover_keeps_the_primary_until_its_capacity_is_full() {
+    let mut scheduler = mixed(PoolRoutingMode::Failover);
+    let mut policy = scheduler.pool_routing.clone().unwrap();
+    policy.members[0].max_concurrency = 1;
+    scheduler.set_pool_routing(policy).unwrap();
+    for _ in 0..5 {
+        assert_eq!(dispatch(&mut scheduler), "account");
+    }
+    let lease = scheduler
+        .reserve_request("account", "gpt-5", 100, false)
+        .unwrap();
+    assert_eq!(dispatch(&mut scheduler), "api-a");
+    assert_eq!(scheduler.active_request_count("account"), 1);
+    scheduler.release_reservation(lease);
+    assert_eq!(dispatch(&mut scheduler), "account");
+}
+
+#[test]
+fn weighted_round_robin_shares_are_per_physical_member_not_protocol_alias() {
+    let mut scheduler = mixed(PoolRoutingMode::WeightedRoundRobin);
+    scheduler.candidates.get_mut("account").unwrap().enabled = false;
+    let mut alias = candidate("api-a::chat");
+    alias.source_id = "api-a".into();
+    alias.protocol = WireApi::ChatCompletions;
+    scheduler.upsert(alias);
+    let mut policy = scheduler.pool_routing.clone().unwrap();
+    for member in &mut policy.members {
+        member.weight = if member.id == "api-b" { 3 } else { 1 };
+    }
+    scheduler.set_pool_routing(policy).unwrap();
+    let mut counts = BTreeMap::new();
+    for _ in 0..40 {
+        let id = dispatch(&mut scheduler);
+        let member = super::super::members::member_key(&scheduler.candidates[&id]);
+        *counts.entry(member).or_insert(0) += 1;
+    }
+    assert_eq!(counts["source:api-a"], 10);
+    assert_eq!(counts["source:api-b"], 30);
+}
+
+#[test]
+fn strategy_changes_keep_active_owners_and_existing_cooldowns() {
+    let mut scheduler = mixed(PoolRoutingMode::Automatic);
+    let lease = scheduler
+        .reserve_request("account", "gpt-5", 100, false)
+        .unwrap();
+    scheduler.bind_response_affinity("response", "account", 100);
+    scheduler
+        .candidates
+        .get_mut("api-a")
+        .unwrap()
+        .cooldowns
+        .insert("gpt-5".into(), 200);
+    for mode in [
+        PoolRoutingMode::Failover,
+        PoolRoutingMode::WeightedRoundRobin,
+        PoolRoutingMode::RoundRobin,
+        PoolRoutingMode::Automatic,
+    ] {
+        let mut policy = scheduler.pool_routing.clone().unwrap();
+        policy.mode = mode;
+        scheduler.set_pool_routing(policy).unwrap();
+        assert_eq!(scheduler.active_request_count("account"), 1);
+        assert_eq!(
+            scheduler.response_affinity.get("response", 100),
+            Some("account")
+        );
+        assert_eq!(
+            scheduler.candidates["api-a"].cooldowns.get("gpt-5"),
+            Some(&200)
+        );
+    }
+    assert!(scheduler.release_reservation(lease));
+}
+
+#[test]
 fn saved_order_skips_unavailable_accounts_and_falls_back_between_apis() {
     let mut scheduler = mixed(PoolRoutingMode::InOrder);
     assert_eq!(dispatch(&mut scheduler), "account");
@@ -60,7 +136,7 @@ fn saved_order_can_place_apis_before_accounts_without_type_gates() {
 }
 
 #[test]
-fn round_robin_weights_count_physical_members_once() {
+fn legacy_round_robin_cycles_saved_members_and_ignores_weights() {
     let mut scheduler = mixed(PoolRoutingMode::RoundRobin);
     let mut alias = candidate("api-a::chat");
     alias.source_id = "api-a".into();
@@ -80,14 +156,14 @@ fn round_robin_weights_count_physical_members_once() {
         let member = super::super::members::member_key(&scheduler.candidates[&id]);
         *counts.entry(member).or_insert(0) += 1;
     }
-    assert_eq!(counts["account:account"], 20);
-    assert_eq!(counts["source:api-a"], 20);
-    assert_eq!(counts["source:api-b"], 60);
+    assert_eq!(counts["account:account"], 34);
+    assert_eq!(counts["source:api-a"], 33);
+    assert_eq!(counts["source:api-b"], 33);
 }
 
 #[test]
-fn previews_do_not_advance_rotation_and_hot_updates_keep_active_leases() {
-    let mut scheduler = mixed(PoolRoutingMode::RoundRobin);
+fn previews_do_not_advance_manual_cursor_and_hot_updates_keep_active_leases() {
+    let mut scheduler = mixed(PoolRoutingMode::InOrder);
     for _ in 0..10 {
         assert_eq!(
             select(&mut scheduler, &HashSet::new())
@@ -107,7 +183,7 @@ fn previews_do_not_advance_rotation_and_hot_updates_keep_active_leases() {
     assert_eq!(scheduler.active_request_count("api-a"), 1);
     assert_eq!(dispatch(&mut scheduler), "api-b");
     assert!(scheduler.release_for("api-a", Some("gpt-5")));
-    assert_eq!(dispatch(&mut scheduler), "api-a");
+    assert_eq!(dispatch(&mut scheduler), "account");
 }
 
 #[test]

@@ -7,13 +7,13 @@ use super::execution::{execute_client_request, wait_for_recovery, CandidateRetry
 use super::execution::{repair_responses_item_prefixes, ResponsesItemPrefixRepairs};
 use super::now_ms;
 use super::request::{
-    apply_codex_routing_hint, client_context_fingerprint, codex_client_version,
-    forwarded_codex_headers, CODEX_RESPONSES_LITE_HEADER,
+    apply_codex_routing_hint, codex_client_version, forwarded_codex_headers,
+    CODEX_RESPONSES_LITE_HEADER,
 };
 use super::response::{apply_usage, emit_usage, route_error_origin, usage_event, UsageAttempt};
 use super::streaming::{
-    has_output_delta, has_semantic_output, is_compaction_payload, is_empty_responses_incomplete,
-    is_known_non_output_event, parse_sse_event, NativeReplayCapture, MAX_SSE_EVENT_BYTES,
+    has_generation_evidence, has_output_delta, has_semantic_output, is_compaction_payload,
+    is_empty_responses_terminal, is_known_non_output_event, parse_sse_event, NativeReplayCapture,
 };
 use super::turn_state::request_scope;
 use crate::error_codes;
@@ -21,19 +21,18 @@ use crate::protocol::ClientWireApi;
 use crate::runtime::{
     AuthenticatedKey, AuthorizationIncarnation, CandidateLease, ExecutorPrepareError, ExecutorRoute,
 };
-use crate::{ErrorOrigin, GatewayRuntime, UsageEvent, WireApi};
+use crate::{ErrorOrigin, GatewayRuntime, UsageEvent, UsageTransport, WireApi};
 use axum::body::Body;
 use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use reqwest_websocket::{
     CloseCode as UpstreamCloseCode, Message as UpstreamMessage, Upgrade,
     WebSocket as UpstreamWebSocket,
 };
 use serde_json::{json, Value};
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::{interval_at, sleep_until, timeout, Instant as TokioInstant, MissedTickBehavior};
@@ -42,10 +41,11 @@ mod bridge;
 mod events;
 mod failure;
 mod fallback;
+mod io;
 mod request;
 mod upstream;
 
-use bridge::{bridge, semantic_output_payload};
+use bridge::{bridge, semantic_output_payload, semantic_output_value};
 use fallback::bridge_http_fallback;
 #[cfg(test)]
 use fallback::{
@@ -61,9 +61,10 @@ use events::{
     terminal_failure_status, EventTerminal, EventTerminalOutcome,
 };
 use failure::{send_gateway_error, GatewayFailure};
-use request::ClientRequest;
+use io::send_message;
+use request::{ClientRequest, PreparedPayload};
 
-const MAX_WEBSOCKET_MESSAGE_BYTES: usize = super::request::MAX_CLIENT_REQUEST_BODY_BYTES;
+const MAX_WEBSOCKET_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_WEBSOCKET_ERROR_BYTES: usize = 1024 * 1024;
 const INITIAL_MESSAGE_TIMEOUT: Duration = Duration::from_secs(60);
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -103,41 +104,66 @@ async fn handle_connection(
     key: AuthenticatedKey,
     headers: HeaderMap,
 ) {
-    let request = match read_initial_request(&mut downstream, &runtime, &key, &headers).await {
-        Ok(request) => request,
+    let client_request = match read_initial_request(&mut downstream, &runtime, &key, &headers).await
+    {
+        Ok(client_request) => client_request,
         Err((failure, stream_id)) => {
             send_gateway_error(&mut downstream, &failure, None, stream_id.as_deref()).await;
             return;
         }
     };
 
-    let request_id = request.request_id.clone();
-    if let Some(kind) = request.background_kind {
-        if !runtime.codex_background_tasks_enabled() {
+    let request_id = client_request.request_id.clone();
+    if let Some(kind) = client_request.background_kind {
+        if !runtime.codex_background_request_enabled(kind) {
             runtime.blocked_codex_background_event(
-                &request.request_id,
+                &client_request.request_id,
                 &key.id,
-                &request.requested_model,
+                &client_request.requested_model,
                 WireApi::Responses,
+                UsageTransport::Websocket,
                 kind,
             );
-            let mut payload = serde_json::json!({
-                "type": "response.completed",
-                "response": {"id": format!("resp_relay_blocked_{}", request.request_id), "object": "response", "status": "completed", "output": [], "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}, "metadata": {"zenith_relay": {"blocked": true, "request_type": kind}}}
-            });
-            if let Some(stream_id) = request.stream_id.as_deref() {
-                payload["stream_id"] = json!(stream_id);
-            }
-            let _ = downstream
-                .send(Message::Text(payload.to_string().into()))
+            if let Some(failure) = GatewayFailure::blocked_memory(kind) {
+                send_gateway_error(
+                    &mut downstream,
+                    &failure,
+                    Some(&request_id),
+                    client_request.stream_id.as_deref(),
+                )
                 .await;
-            let _ = downstream.send(Message::Close(None)).await;
+                return;
+            }
+            let mut blocked_response_payload = serde_json::json!({
+                "type": "response.completed",
+                "response": {"id": format!("resp_relay_blocked_{}", client_request.request_id), "object": "response", "status": "completed", "output": [], "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}, "metadata": {"zenith_relay": {"blocked": true, "request_type": kind}}}
+            });
+            if let Some(stream_id) = client_request.stream_id.as_deref() {
+                blocked_response_payload["stream_id"] = json!(stream_id);
+            }
+            if send_message(
+                &mut downstream,
+                Message::Text(blocked_response_payload.to_string().into()),
+            )
+            .await
+            .is_ok()
+            {
+                let _ = send_message(&mut downstream, Message::Close(None)).await;
+            }
             return;
         }
     }
-    let fallback_request = request.clone();
+    let fallback_request = client_request.clone();
     if !runtime.codex_websockets_enabled() {
-        bridge_http_fallback(downstream, runtime, key, headers, fallback_request).await;
+        bridge_http_fallback(
+            downstream,
+            runtime,
+            key,
+            headers,
+            fallback_request,
+            crate::usage::TransportFallbackReason::WebsocketDisabled,
+        )
+        .await;
         return;
     }
     let connected = match connect_upstream_while_client_connected(
@@ -145,7 +171,7 @@ async fn handle_connection(
         &runtime,
         &key,
         &headers,
-        request,
+        client_request,
         true,
         0,
     )
@@ -153,7 +179,15 @@ async fn handle_connection(
     {
         Ok(connected) => connected,
         Err(failure) if failure.category == error_codes::UPSTREAM_WEBSOCKET_UNSUPPORTED => {
-            bridge_http_fallback(downstream, runtime, key, headers, fallback_request).await;
+            bridge_http_fallback(
+                downstream,
+                runtime,
+                key,
+                headers,
+                fallback_request,
+                crate::usage::TransportFallbackReason::WebsocketUnavailable,
+            )
+            .await;
             return;
         }
         Err(failure) => {
@@ -195,15 +229,20 @@ async fn read_initial_request(
             })?;
         match message {
             Message::Text(text) => {
-                return ClientRequest::parse(runtime, key, headers, text.as_bytes())
+                return ClientRequest::prepare(runtime, key, headers, text.as_bytes(), None)
+                    .await
                     .map_err(|failure| (failure, ClientRequest::error_stream_id(text.as_bytes())));
             }
             Message::Binary(bytes) => {
-                return ClientRequest::parse(runtime, key, headers, &bytes)
+                return ClientRequest::prepare(runtime, key, headers, &bytes, None)
+                    .await
                     .map_err(|failure| (failure, ClientRequest::error_stream_id(&bytes)));
             }
             Message::Ping(payload) => {
-                if downstream.send(Message::Pong(payload)).await.is_err() {
+                if send_message(downstream, Message::Pong(payload))
+                    .await
+                    .is_err()
+                {
                     return Err((GatewayFailure::client_closed(), None));
                 }
             }

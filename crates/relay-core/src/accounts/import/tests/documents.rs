@@ -122,6 +122,43 @@ fn parses_nested_account_subscription_metadata_for_opaque_tokens() {
 }
 
 #[test]
+fn token_expiry_is_retained_for_the_credential_not_only_the_preview() {
+    let parsed = parse_import(
+        r#"{"access_token":"at-synthetic","expires_at":"2026-10-19T14:17:45Z"}"#,
+        None,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(parsed.items[0].expires_at_ms, Some(1_792_419_465_000));
+    let unknown = parse_import(r#"{"access_token":"at-synthetic"}"#, None, &[]).unwrap();
+    assert_eq!(unknown.items[0].expires_at_ms, None);
+}
+
+#[test]
+fn id_token_expiry_never_becomes_the_access_token_expiry() {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    let token = |expires| {
+        format!(
+            "header.{}.signature",
+            URL_SAFE_NO_PAD.encode(serde_json::json!({"exp": expires}).to_string()),
+        )
+    };
+    for (access_token, expected) in [
+        (token(2_000), Some(2_000_000)),
+        ("opaque-access-token".to_string(), None),
+    ] {
+        let parsed = parse_import(
+            &serde_json::json!({"id_token": token(1_000), "access_token": access_token})
+                .to_string(),
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(parsed.items[0].expires_at_ms, expected);
+    }
+}
+
+#[test]
 fn parses_login_notes_nested_beside_the_account_email() {
     let parsed = parse_import(
         r#"{

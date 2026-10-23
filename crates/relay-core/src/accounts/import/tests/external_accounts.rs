@@ -1,6 +1,87 @@
 use super::*;
 
 #[test]
+fn siwc_token_hints_cannot_be_imported_as_legacy_codex() {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    for claims in [
+        serde_json::json!({"scope":"openid chatgpt.tokens.use.direct"}),
+        serde_json::json!({"client_id":"oaiapp_synthetic"}),
+        serde_json::json!({"aud":["oaiapp_synthetic"]}),
+    ] {
+        let token = format!(
+            "e30.{}.synthetic",
+            URL_SAFE_NO_PAD.encode(claims.to_string())
+        );
+        let parsed = parse_import(
+            &serde_json::json!({"access_token":token}).to_string(),
+            None,
+            &[],
+        )
+        .unwrap();
+        assert!(parsed.items.is_empty());
+        assert_eq!(
+            parsed.preview.rows[0].error.as_ref().unwrap().code,
+            ImportIssueCode::UnsupportedValue
+        );
+    }
+}
+
+#[test]
+fn import_rejects_free_bps_but_keeps_native_free_and_paid_or_unknown_bps() {
+    let input = serde_json::json!([
+        {"oauth_client_kind":"codex","access_token":"synthetic-native","plan_type":"free"},
+        {"oauth_client_kind":"excel_bps","access_token":"synthetic-bps-free","plan_type":"Free"},
+        {"oauth_client_kind":"excel_bps","access_token":"synthetic-bps-alias","plan_type":"chatgpt_free_tier"},
+        {"oauth_client_kind":"excel_bps","access_token":"synthetic-bps-paid","plan_type":"plus"},
+        {"oauth_client_kind":"excel_bps","access_token":"synthetic-bps-unknown"}
+    ]);
+    let parsed = parse_import(&input.to_string(), None, &[]).unwrap();
+    assert_eq!(parsed.preview.rows.len(), 5);
+    assert_eq!(parsed.items.len(), 3);
+    for row in &parsed.preview.rows[1..3] {
+        assert_eq!(row.status, ImportPreviewStatus::Invalid);
+        assert_eq!(
+            row.error.as_ref().unwrap().code,
+            ImportIssueCode::BasisPointsFreeAccountUnsupported
+        );
+    }
+    assert!(parsed.preview.rows[0].error.is_none());
+    assert!(parsed.preview.rows[3].error.is_none());
+    assert!(parsed.preview.rows[4].error.is_none());
+}
+
+#[test]
+fn import_paid_metadata_cannot_hide_a_free_bps_token_claim() {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    let token = format!(
+        "e30.{}.synthetic",
+        URL_SAFE_NO_PAD.encode(
+            serde_json::json!({
+                "client_id": crate::providers::chatgpt::BASIS_POINTS_OAUTH_CLIENT_ID,
+                "https://api.openai.com/auth": {"chatgpt_plan_type":"free"}
+            })
+            .to_string()
+        )
+    );
+    let parsed = parse_import(
+        &serde_json::json!({
+            "oauth_client_kind":"excel_bps",
+            "plan_type":"plus",
+            "access_token":token
+        })
+        .to_string(),
+        None,
+        &[],
+    )
+    .unwrap();
+    assert!(parsed.items.is_empty());
+    assert_eq!(
+        parsed.preview.rows[0].error.as_ref().unwrap().code,
+        ImportIssueCode::BasisPointsFreeAccountUnsupported
+    );
+}
+
+#[test]
 fn parses_sub2api_agent_identity_accounts() {
     let input = serde_json::json!({
         "type": "sub2api-data",

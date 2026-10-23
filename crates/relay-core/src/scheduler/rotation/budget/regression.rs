@@ -1,6 +1,26 @@
 use super::*;
 
 #[tokio::test(start_paused = true)]
+async fn http_headers_deadline_cannot_be_extended_by_retry_or_transport_handoff() {
+    let budget = SharedRequestBudget::for_incoming_request(4);
+    let first = budget.http_headers_deadline(std::time::Duration::from_secs(30));
+    tokio::time::advance(std::time::Duration::from_secs(10)).await;
+    let fallback = budget.clone();
+    assert_eq!(
+        fallback.http_headers_deadline(std::time::Duration::from_secs(60)),
+        first
+    );
+    let tighter = fallback.http_headers_deadline(std::time::Duration::from_secs(5));
+    assert!(tighter < first);
+    tokio::time::advance(std::time::Duration::from_secs(6)).await;
+    assert!(
+        budget.http_headers_deadline(std::time::Duration::from_secs(30))
+            < tokio::time::Instant::now()
+    );
+    assert_eq!(budget.dispatches(), 0);
+}
+
+#[tokio::test(start_paused = true)]
 async fn retry_window_starts_at_rejection_and_survives_transport_handoff() {
     let budget = SharedRequestBudget::for_incoming_request(8);
     budget.configure_retry_window(30_000, false);

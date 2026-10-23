@@ -64,7 +64,7 @@ pub(super) struct JournalSecrets<'a, S> {
 }
 
 impl<S: SecretBackend> JournalSecrets<'_, S> {
-    fn update(&self, secret_ref: &str, value: Option<&str>) -> Result<()> {
+    fn update(&self, secret_ref: &str, secret_value: Option<&str>) -> Result<()> {
         let before = self.backend.load(secret_ref)?;
         if self
             .changes
@@ -74,11 +74,11 @@ impl<S: SecretBackend> JournalSecrets<'_, S> {
         {
             return Err(profile_restore_blocked());
         }
-        match value {
-            Some(value) => self.backend.save(secret_ref, value)?,
+        match secret_value {
+            Some(secret_value) => self.backend.save(secret_ref, secret_value)?,
             None => self.backend.delete(secret_ref)?,
         }
-        let after = value.map(str::to_owned);
+        let after = secret_value.map(str::to_owned);
         self.changes
             .borrow_mut()
             .entry(secret_ref.to_owned())
@@ -106,7 +106,9 @@ impl<S: SecretBackend> JournalSecrets<'_, S> {
                 continue;
             }
             match &change.before {
-                Some(value) => self.backend.save(secret_ref, value)?,
+                Some(previous_secret_value) => {
+                    self.backend.save(secret_ref, previous_secret_value)?
+                }
                 None => self.backend.delete(secret_ref)?,
             }
         }
@@ -120,8 +122,8 @@ impl<S: SecretBackend> JournalSecrets<'_, S> {
 }
 
 impl<S: SecretBackend> SecretBackend for JournalSecrets<'_, S> {
-    fn save(&self, secret_ref: &str, value: &str) -> Result<()> {
-        self.update(secret_ref, Some(value))
+    fn save(&self, secret_ref: &str, secret_value: &str) -> Result<()> {
+        self.update(secret_ref, Some(secret_value))
     }
 
     fn load(&self, secret_ref: &str) -> Result<Option<String>> {
@@ -148,8 +150,8 @@ pub(super) fn run<S: SecretBackend, T>(
     }
     let mut files = BTreeMap::new();
     fs::create_dir_all(codex_home).map_err(io_error)?;
-    for name in [CONFIG_FILE, AUTH_FILE] {
-        let path = journal_path(&codex_home.join(name));
+    for file_name in [CONFIG_FILE, AUTH_FILE] {
+        let path = journal_path(&codex_home.join(file_name));
         let before = read_optional_bytes(&path)?;
         files.insert(
             path,
@@ -165,9 +167,9 @@ pub(super) fn run<S: SecretBackend, T>(
         backend: secrets,
         changes: RefCell::new(BTreeMap::new()),
     };
-    let result = operation(&secrets);
+    let operation_result = operation(&secrets);
     let files = FILE_CHANGES
         .with_borrow_mut(Option::take)
         .unwrap_or_default();
-    result.map_err(|error| with_rollback(error, secrets.rollback(&files)))
+    operation_result.map_err(|error| with_rollback(error, secrets.rollback(&files)))
 }

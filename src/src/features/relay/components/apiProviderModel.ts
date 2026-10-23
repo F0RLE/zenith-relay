@@ -1,6 +1,7 @@
 import type { SourceWireApi } from "../api/types";
+import type { ApiKeyPageProvider } from "../../../platform/desktop";
 
-export type ApiProviderKind = "zenith" | "openai" | "openrouter" | "custom";
+export type ApiProviderKind = ApiKeyPageProvider | "custom";
 export type ApiProviderValue = {
   kind: ApiProviderKind | null;
   name: string;
@@ -15,7 +16,10 @@ export type ApiProviderValue = {
 
 export type ApiProviderDefinition = Omit<ApiProviderValue, "apiKey">;
 
-export const providerOrder: ApiProviderKind[] = ["openai", "openrouter", "zenith", "custom"];
+export const providerOrder: ApiProviderKind[] = [
+  "openai", "anthropic", "gemini", "deepseek", "groq", "mistral",
+  "moonshot", "kimi", "minimax", "openrouter", "zenith", "custom",
+];
 
 export const providerDefaults: Record<ApiProviderKind, ApiProviderDefinition> = {
   zenith: {
@@ -42,6 +46,70 @@ export const providerDefaults: Record<ApiProviderKind, ApiProviderDefinition> = 
     officialProviderFamily: null,
     wireApi: "chat_completions",
   },
+  anthropic: {
+    kind: "anthropic",
+    name: "Anthropic",
+    baseUrl: "https://api.anthropic.com/v1",
+    pricingProvider: "anthropic",
+    officialProviderFamily: "anthropic",
+    wireApi: "messages",
+  },
+  gemini: {
+    kind: "gemini",
+    name: "Google Gemini",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+    pricingProvider: "gemini",
+    officialProviderFamily: "gemini",
+    wireApi: "gemini",
+  },
+  deepseek: {
+    kind: "deepseek",
+    name: "DeepSeek",
+    baseUrl: "https://api.deepseek.com/v1",
+    pricingProvider: "deepseek",
+    officialProviderFamily: "deepseek",
+    wireApi: "chat_completions",
+  },
+  groq: {
+    kind: "groq",
+    name: "Groq",
+    baseUrl: "https://api.groq.com/openai/v1",
+    pricingProvider: "groq",
+    officialProviderFamily: "groq",
+    wireApi: "chat_completions",
+  },
+  mistral: {
+    kind: "mistral",
+    name: "Mistral",
+    baseUrl: "https://api.mistral.ai/v1",
+    pricingProvider: "mistral",
+    officialProviderFamily: "mistral",
+    wireApi: "chat_completions",
+  },
+  moonshot: {
+    kind: "moonshot",
+    name: "Moonshot / Kimi API",
+    baseUrl: "https://api.moonshot.ai/v1",
+    pricingProvider: "moonshot",
+    officialProviderFamily: "moonshot",
+    wireApi: "responses",
+  },
+  kimi: {
+    kind: "kimi",
+    name: "Kimi Code",
+    baseUrl: "https://api.kimi.ai/coding/v1/messages",
+    pricingProvider: null,
+    officialProviderFamily: null,
+    wireApi: "messages",
+  },
+  minimax: {
+    kind: "minimax",
+    name: "MiniMax",
+    baseUrl: "https://api.minimax.io/v1",
+    pricingProvider: "minimax",
+    officialProviderFamily: "minimax",
+    wireApi: "chat_completions",
+  },
   custom: {
     kind: "custom",
     name: "",
@@ -64,33 +132,33 @@ export function defaultApiProviderValue(): ApiProviderValue {
   };
 }
 
-export function selectApiProvider(value: ApiProviderValue, kind: ApiProviderKind): ApiProviderValue {
+export function selectApiProvider(providerValue: ApiProviderValue, kind: ApiProviderKind): ApiProviderValue {
   const definition = providerDefaults[kind];
   return {
     ...definition,
-    apiKey: value.apiKey,
+    apiKey: providerValue.apiKey,
     pricingProvider: definition.pricingProvider ?? null,
     officialProviderFamily: definition.officialProviderFamily ?? null,
   };
 }
 
-export function apiProviderReady(value: ApiProviderValue) {
+export function apiProviderReady(providerValue: ApiProviderValue) {
   return Boolean(
-    value.kind
-      && value.apiKey.trim()
-      && value.name.trim()
-      && value.baseUrl.trim(),
+    providerValue.kind
+      && providerValue.apiKey.trim()
+      && providerValue.name.trim()
+      && providerValue.baseUrl.trim(),
   );
 }
 
-export function apiProviderSourceInput(value: ApiProviderValue) {
+export function apiProviderSourceInput(providerValue: ApiProviderValue) {
   return {
-    name: value.name.trim(),
-    baseUrl: value.baseUrl.trim(),
-    apiKey: value.apiKey.trim(),
-    pricingProvider: value.pricingProvider?.trim() || null,
-    officialProviderFamily: value.officialProviderFamily?.trim() || null,
-    wireApi: value.wireApi,
+    name: providerValue.name.trim(),
+    baseUrl: providerValue.baseUrl.trim(),
+    apiKey: providerValue.apiKey.trim(),
+    pricingProvider: providerValue.pricingProvider?.trim() || null,
+    officialProviderFamily: providerValue.officialProviderFamily?.trim() || null,
+    wireApi: providerValue.wireApi,
     // New sources rely on endpoint/service discovery. Persisted bindings are
     // accepted only as migration hints for existing or mixed-protocol sources.
     protocolBindings: [],

@@ -1,4 +1,5 @@
 mod adapters;
+mod catalog_refresh;
 mod catalog_warning;
 mod coordination;
 mod paths;
@@ -34,6 +35,7 @@ use zenith_relay_core::{
     model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogLoader},
     pricing::{CatalogStatus, PricingCatalog, PricingCatalogLoader},
     scheduler::refresh::{service::RefreshService, RefreshLimits},
+    RuntimeContinuationStores,
 };
 
 pub(super) use zenith_relay_core::unix_time_ms as now_ms;
@@ -66,6 +68,7 @@ pub struct DesktopStateOwner {
     model_metadata: Arc<ModelMetadataCatalogLoader>,
     store: Arc<Mutex<LocalPoolStore>>,
     token_authority: Arc<TokenAuthority>,
+    pub(in crate::local_pool) continuation_state: RuntimeContinuationStores,
     pub(super) refresh: Arc<RefreshService<super::refresh::RefreshReadResult>>,
     pub(super) refresh_started: std::sync::atomic::AtomicBool,
     wake: Arc<Mutex<WakeCoordinator>>,
@@ -75,6 +78,7 @@ pub struct DesktopStateOwner {
     failed_usage_writes: Arc<AtomicU64>,
     failed_affinity_writes: Arc<AtomicU64>,
     catalog_refresh_error: Arc<Mutex<Option<String>>>,
+    pub(in crate::local_pool) client_catalog_refresh: catalog_refresh::CatalogRefreshQueue,
     background_session_active: watch::Sender<bool>,
     quota_account_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
     subscription_refresh_lock: AsyncMutex<()>,
@@ -120,6 +124,20 @@ impl DesktopState {
                 }
             });
         let mut store = LocalPoolStore::open(root.clone())?;
+        let mut accounts = store.accounts().to_vec();
+        let mut membership_changed = false;
+        for account in &mut accounts {
+            if account.account.in_pool
+                && super::accounts::records::can_account_join_pool(account)
+                    .is_ok_and(|eligible| !eligible)
+            {
+                account.account.in_pool = false;
+                membership_changed = true;
+            }
+        }
+        if membership_changed {
+            store.replace_accounts_and_keys(accounts, store.keys().to_vec())?;
+        }
         let telemetry = store.database();
         let pricing = Arc::new(
             PricingCatalogLoader::open(paths.pricing_catalog_file())
@@ -161,6 +179,7 @@ impl DesktopState {
                 model_metadata,
                 store: Arc::new(Mutex::new(store)),
                 token_authority,
+                continuation_state: RuntimeContinuationStores::default(),
                 refresh: RefreshService::with_cache_policy(
                     RefreshLimits::default(),
                     super::refresh::cache_observation,
@@ -174,6 +193,7 @@ impl DesktopState {
                 failed_usage_writes,
                 failed_affinity_writes,
                 catalog_refresh_error,
+                client_catalog_refresh: catalog_refresh::CatalogRefreshQueue::default(),
                 background_session_active,
                 quota_account_locks: Arc::new(Mutex::new(HashMap::new())),
                 subscription_refresh_lock: AsyncMutex::new(()),
@@ -231,12 +251,12 @@ impl DesktopState {
         duration_ms: f64,
         context: Option<&str>,
     ) {
-        let telemetry = self.telemetry.clone();
-        let name = name.to_string();
-        let context = context.map(str::to_owned);
-        tauri::async_runtime::spawn_blocking(move || {
-            let _ = telemetry.record_performance(&name, duration_ms, context.as_deref());
-        });
+        tauri::async_runtime::spawn_blocking(performance_sample_job(
+            &self.telemetry,
+            name,
+            duration_ms,
+            context,
+        ));
     }
 
     pub async fn setup_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
@@ -341,6 +361,24 @@ impl DesktopState {
                 return;
             }
         }
+    }
+}
+
+fn performance_sample_job(
+    telemetry: &Arc<TelemetryDb>,
+    name: &str,
+    duration_ms: f64,
+    context: Option<&str>,
+) -> impl FnOnce() + Send + 'static {
+    // Optional queued metrics must not extend the storage owner's lifetime.
+    let telemetry = Arc::downgrade(telemetry);
+    let operation_name = name.to_owned();
+    let context = context.map(str::to_owned);
+    move || {
+        let Some(telemetry) = telemetry.upgrade() else {
+            return;
+        };
+        let _ = telemetry.record_performance(&operation_name, duration_ms, context.as_deref());
     }
 }
 

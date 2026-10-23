@@ -20,11 +20,11 @@ pub(in crate::local_pool) async fn read_account_quota_once(
     let quota_lock = state.quota_account_lock(&scope.fence.account_id)?;
     let _quota_guard = quota_lock.lock().await;
     scope.validate(state)?;
-    let result = read_account_quota(state, scope, force_subscription_refresh).await;
-    if let Err(error) = &result {
+    let quota_result = read_account_quota(state, scope, force_subscription_refresh).await;
+    if let Err(error) = &quota_result {
         record_read_error(state, scope, RefreshReadKind::Quota, error).await;
     }
-    result
+    quota_result
 }
 
 async fn read_account_quota(
@@ -35,11 +35,18 @@ async fn read_account_quota(
     let account_id = &scope.fence.account_id;
     let mut prepared = refresh::request_authorization(state, &scope.fence).await?;
     scope.validate(state)?;
+    if prepared.oauth_client_kind == zenith_relay_core::providers::chatgpt::OAuthClientKind::Siwc {
+        return Ok(AccountQuotaRefreshResponse {
+            account: scope.initial_account.clone(),
+            quota: AccountQuotaOutcome::Skipped,
+            exhaustion_transitions: Vec::new(),
+        });
+    }
     let http_scope = scope.http_scope(state);
     let now_ms = current_time_ms();
     let request_timeout =
         Duration::from_secs(state.store()?.gateway().quota_request_timeout_seconds);
-    let account_before_refresh = &scope.before;
+    let account_before_refresh = &scope.initial_account;
     let mut subscription = account_before_refresh.account.subscription.clone();
     if subscription.active_until_ms.is_none() {
         if let Some(active_until_ms) = prepared.tokens.as_ref().and_then(|tokens| {
@@ -88,11 +95,15 @@ async fn read_account_quota(
     .await?;
     subscription::respect_quota_retry_after(state, scope, &refreshed);
     scope.validate(state)?;
-    if prepared.tokens.is_some() && quota_refresh_was_unauthorized(&refreshed) {
+    if let Some(rejected_tokens) = prepared
+        .tokens
+        .as_ref()
+        .filter(|_| quota_refresh_was_unauthorized(&refreshed))
+    {
         match recover_account_authorization(
             state,
             account_id,
-            prepared.tokens.as_ref().map(TokenSet::generation),
+            Some(rejected_tokens.generation()),
             current_time_ms(),
         )
         .await
@@ -112,7 +123,7 @@ async fn read_account_quota(
                 subscription::respect_quota_retry_after(state, scope, &refreshed);
             }
             Err(_) if account_auth_is_access_only(state, account_id)? => {
-                mark_access_only_reauthentication(state, account_id).await?;
+                mark_access_only_reauthentication(state, account_id, rejected_tokens).await?;
             }
             Err(_) if !account_requires_reauthentication(state, account_id)? => {
                 refreshed = Ok(QuotaRefreshOutcome::Failed {
@@ -166,7 +177,12 @@ async fn read_account_quota(
         apply_quota_read(&mut store, scope, quota, subscription, None)?
     };
     if zenith_relay_core::quota::subscription_plan_changed(
-        applied.previous.account.subscription.plan_type.as_deref(),
+        applied
+            .previous_account
+            .account
+            .subscription
+            .plan_type
+            .as_deref(),
         applied.account.account.subscription.plan_type.as_deref(),
     ) {
         state
@@ -175,15 +191,15 @@ async fn read_account_quota(
     }
     sync_refreshed_account_or_rollback(
         state,
-        applied.previous,
+        applied.previous_account,
         applied.account.clone(),
-        applied.value.models_changed,
+        applied.refresh_result.models_changed,
     )
     .await?;
     Ok(AccountQuotaRefreshResponse {
         account: applied.account,
-        quota: applied.value.outcome,
-        exhaustion_transitions: applied.value.exhaustion_transitions,
+        quota: applied.refresh_result.outcome,
+        exhaustion_transitions: applied.refresh_result.exhaustion_transitions,
     })
 }
 

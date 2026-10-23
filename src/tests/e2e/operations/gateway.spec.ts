@@ -12,26 +12,31 @@ test("application chrome is not text-selectable", async ({ page }) => {
   await expect(page.locator("input").first()).toHaveCSS("user-select", "text");
 });
 
-test("Gateway exposes an explicit Codex WebSocket switch", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+for (const mode of ["local"] as const) {
+test(`${mode} WebSocket changes require confirmation in both directions`, async ({ page }) => {
+  await installTauriMock(page, { mode, locale: "en", populated: true });
   await page.goto("/");
   await openGatewayApplication(page);
 
   const settings = page.locator(".gateway-settings-panel");
   await expect(settings).toBeVisible();
-  await expect(settings.getByRole("heading", { name: "ChatGPT background tasks" })).toBeVisible();
   await expect(settings.getByRole("heading", { name: "WebSocket for ChatGPT" })).toBeVisible();
 
   const websocket = settings.getByRole("checkbox", { name: "Use WebSocket in ChatGPT" });
   await expect(websocket).toBeChecked();
-  await websocket.uncheck();
+  await websocket.click();
+  const restartDialog = page.getByRole("dialog", { name: "Restart ChatGPT" });
+  await expect(restartDialog).toBeVisible();
+  await restartDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(websocket).toBeChecked();
+  await websocket.click();
+  await restartDialog.getByRole("button", { name: "Apply and restart" }).click();
   await expect(websocket).not.toBeChecked();
   await expect(settings.getByText("Disabled · HTTP is used", { exact: true })).toBeVisible();
 
   await websocket.click();
-  const restartDialog = page.getByRole("dialog", { name: "Restart ChatGPT" });
   await expect(restartDialog).toBeVisible();
-  await restartDialog.getByRole("button", { name: "Restart and enable" }).click();
+  await restartDialog.getByRole("button", { name: "Apply and restart" }).click();
   await expect(websocket).toBeChecked();
   await expect(settings.getByText("Enabled", { exact: true })).toBeVisible();
 
@@ -41,44 +46,44 @@ test("Gateway exposes an explicit Codex WebSocket switch", async ({ page }) => {
     .filter((call) => call.command === "set_local_codex_websockets")
     .map((call) => call.args.input?.enabled));
   expect(websocketCalls).toEqual([false, true]);
+  const restarts = await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string }>;
+  }).__TAURI_TEST_INVOKES__.filter((call) => ["stop_managed_codex_profile", "launch_managed_codex_profile"].includes(call.command)).map((call) => call.command));
+  expect(restarts).toEqual(["stop_managed_codex_profile", "launch_managed_codex_profile", "stop_managed_codex_profile", "launch_managed_codex_profile"]);
 });
+}
 
-for (const mode of ["local", "remote"] as const) {
+
+for (const mode of ["local"] as const) {
   test(`${mode} API route recovery switch saves and retains its state`, async ({ page }) => {
-    await installTauriMock(page, { mode, locale: "en", populated: true, remoteFeatures: ["route_recovery_v1"] });
+    await installTauriMock(page, { mode, locale: "en", populated: true });
     await page.goto("/");
     await openGatewayApi(page);
     const recovery = page.getByRole("checkbox", { name: "Wait for route recovery", exact: true });
     await expect(recovery).not.toBeChecked();
     await recovery.click();
     await expect(recovery).toBeChecked();
-    await page.getByRole("tab", { name: "ChatGPT", exact: true }).click();
+    await openGatewayApplication(page);
     await expect(recovery).toHaveCount(0);
-    await page.getByRole("tab", { name: "API", exact: true }).click();
+    await openGatewayApi(page);
     await expect(recovery).toBeChecked();
     await recovery.click();
     await expect(recovery).not.toBeChecked();
     const values = await page.evaluate(() => (window as unknown as {
-      __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { enabled?: boolean; action?: { type: string }; payload?: { enabled: boolean } } } }>;
-    }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_local_chatgpt_retry_until_available"
-      || call.command === "execute_remote_server_action" && call.args.input?.action?.type === "set_chatgpt_retry_until_available")
-      .map((call) => call.args.input?.enabled ?? call.args.input?.payload?.enabled));
+      __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { enabled?: boolean } } }>;
+    }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_local_chatgpt_retry_until_available")
+      .map((call) => call.args.input?.enabled));
     expect(values).toEqual([true, false]);
   });
 }
 
-test("old remote server does not advertise cross-protocol route recovery", async ({ page }) => {
-  await installTauriMock(page, { mode: "remote", locale: "en", populated: true, remoteFeatures: ["chatgpt_retry_until_available"] });
-  await page.goto("/");
-  await openGatewayApi(page);
-  await expect(page.getByRole("checkbox", { name: "Wait for route recovery" })).toHaveCount(0);
-});
 
 test("API degraded-route switch is on for ChatGPT accounts and saves immediately", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
-  await openGatewayApi(page);
-  const toggle = page.getByRole("checkbox", { name: "Degraded routes", exact: true });
+  await page.getByRole("button", { name: "Access", exact: true }).click();
+  await page.getByRole("tab", { name: "Accounts", exact: true }).click();
+  const toggle = page.getByRole("checkbox", { name: "Reject model substitution", exact: true });
   await expect(toggle).toBeChecked();
   await expect(page.getByText("For ChatGPT accounts. Reject responses reporting a different model or an internal downgrade id such as degrade2.")).toBeVisible();
   await toggle.click();
@@ -92,13 +97,23 @@ test("API degraded-route switch is on for ChatGPT accounts and saves immediately
 });
 
 test("local commands are reachable from the operational UI", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true, codexBindings: false, importDescription: "# Seller package\n\n- Two Business accounts" });
+  await installTauriMock(page, {
+    mode: "local", locale: "en", populated: true, accountOAuthClientKind: "excel_bps",
+    importDescription: "# Seller package\n\n- Two Business accounts",
+    sourceDetectedModelPrices: {
+      "gpt-5.4": {
+        inputMicroUsdPerMillion: 1_000_000,
+        cachedInputMicroUsdPerMillion: 250_000,
+        outputMicroUsdPerMillion: 2_000_000,
+      },
+    },
+  });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await expect(page.getByRole("tab", { name: "Accounts" })).toBeVisible();
-  await expect(page.getByRole("tab").allTextContents()).resolves.toEqual(["Accounts", "Sources", "Proxies", "Automations"]);
+  await expect(page.getByRole("tab").allTextContents()).resolves.toEqual(["Accounts", "Sources", "Proxies", "Automations", "Trash"]);
   await page.getByRole("tab", { name: "Sources" }).click();
-  const sourceRow = page.getByRole("row").filter({ hasText: "Example compatible API" });
+  const sourceRow = page.locator(".source-card").filter({ hasText: "Example compatible API" });
   await sourceRow.getByRole("button", { name: "Launch", exact: true }).click();
   await page.getByRole("dialog", { name: "Where do you want to launch this source?" }).getByRole("button", { name: "ChatGPT", exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "launch_codex_source"))).toBe(true);
@@ -118,14 +133,19 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await expect.poll(() => page.evaluate(() => {
     const call = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { modelPriceOverrides?: Record<string, unknown> } } }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "update_local_source");
     return call?.args.input?.modelPriceOverrides?.["gpt-5.4"];
-  })).toEqual({ inputMicroUsdPerMillion: 1_250_000, outputMicroUsdPerMillion: 3_500_000 });
+  })).toEqual({
+    inputMicroUsdPerMillion: 1_250_000,
+    cachedInputMicroUsdPerMillion: 250_000,
+    outputMicroUsdPerMillion: 3_500_000,
+  });
   await page.getByRole("tab", { name: "Accounts" }).click();
   await page.getByRole("button", { name: "Sign in" }).first().click();
   const oauthDialog = page.getByRole("dialog", { name: "Sign in" });
-  await expect(oauthDialog.getByText("Waiting for sign-in", { exact: true })).toBeVisible();
   await expect(oauthDialog.getByText("Time remaining", { exact: true })).toBeVisible();
+  await expect(oauthDialog.getByRole("radio", { name: "Codex", exact: true })).toBeChecked();
+  await oauthDialog.getByText("ChatGPT (SIWC)", { exact: true }).click();
   await expect(oauthDialog.getByRole("button", { name: "Copy sign-in link" })).toBeVisible();
-  const open = oauthDialog.getByRole("button", { name: "Open sign-in window" });
+  const open = oauthDialog.getByRole("button", { name: "Open sign-in window", exact: true });
   await expect(open).toBeEnabled();
   await open.click();
   const reopen = oauthDialog.getByRole("button", { name: /Open again in|Reopen sign-in window/ });
@@ -135,7 +155,7 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await expect(reopen).toBeDisabled();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "resume_codex_oauth"))).toBe(true);
   await expect(oauthDialog.getByText("Sign-in did not finish automatically", { exact: true })).toHaveCount(0);
-  await page.getByRole("button", { name: "Cancel" }).click();
+  await oauthDialog.getByRole("button", { name: "Close" }).click();
 
   await page.getByRole("button", { name: "Import", exact: true }).click();
   const importDialog = page.getByRole("dialog", { name: "Import accounts" });
@@ -148,9 +168,10 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await expect(imported).toBeChecked();
   await expect(secondImported).toBeChecked();
   await expect(existing).not.toBeChecked();
-  await importDialog.getByLabel("Add selected to pool after import").check();
+  await importDialog.getByLabel("Add selected to pool after import", { exact: true }).check();
   await expect(importDialog.getByLabel("Assign a stored proxy")).not.toBeChecked();
   await importDialog.getByRole("button", { name: "Import 2 account(s)" }).click();
+  await expect(page.getByRole("dialog", { name: "Add a regular account to the pool?", exact: true })).toHaveCount(0);
   await expect(importDialog).toBeHidden();
   const importCalls = await page.evaluate(() => {
     const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { selectedItemIds?: string[]; addToPool?: boolean; discoverModels?: boolean; probeQuota?: boolean } } }> }).__TAURI_TEST_INVOKES__;
@@ -207,16 +228,17 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
 
   await openGatewayApi(page);
   await expect(page.locator(".gateway-api-connection-panel")).toBeVisible();
-  await page.locator(".relay-page-actions .relay-action-menu summary").click();
+  await page.locator(".gateway-api-controls .relay-action-menu summary").click();
   await page.getByRole("menuitem", { name: "Restart API" }).click();
   await page.getByRole("spinbutton", { name: "Port" }).fill("15001");
   await page.getByRole("spinbutton", { name: "Port" }).press("Enter");
   await expect(page.getByRole("spinbutton", { name: "Port" })).toHaveValue("15001");
   await expect(page.getByText("http://127.0.0.1:15001/v1")).toBeVisible();
-  await page.getByRole("tab", { name: "ChatGPT", exact: true }).click();
+  await openGatewayApplication(page);
   await expect(page.locator(".gateway-settings-panel")).toBeVisible();
-  await expect(page.getByRole("button", { name: /^Account:/ })).toHaveAttribute("data-value", "auto");
-  await expect(page.getByRole("heading", { name: "ChatGPT account" })).toBeVisible();
+  const accountBinding = page.getByRole("button", { name: /^Account:/ });
+  await expect(accountBinding).toHaveAttribute("data-value", "none");
+  await expect(accountBinding).toBeDisabled();
   const gatewayCalls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { port?: number } }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "restart_local_gateway" || call.command === "update_local_gateway_port"));
   expect(gatewayCalls).toEqual([{ command: "restart_local_gateway", args: {} }, { command: "update_local_gateway_port", args: { port: 15001 } }]);
   const policyCalls = await page.evaluate(() => {
@@ -282,7 +304,7 @@ test("source launch picker starts the selected source in OpenCode", async ({ pag
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("tab", { name: "Sources", exact: true }).click();
 
-  const sourceRow = page.getByRole("row").filter({ hasText: "Example compatible API" });
+  const sourceRow = page.locator(".source-card").filter({ hasText: "Example compatible API" });
   await sourceRow.getByRole("button", { name: "Launch", exact: true }).click();
   const picker = page.getByRole("dialog", { name: "Where do you want to launch this source?" });
   await picker.getByRole("button", { name: "OpenCode", exact: true }).click();
@@ -329,7 +351,7 @@ test("reset rejection uses redacted diagnostics and leaves the credit available"
   await expect(page.getByRole("button", { name: "Reset available: 1 · Reset weekly quota", exact: true })).toBeEnabled();
 });
 
-test("secret fields expose only the themed reveal control", async ({ page }) => {
+test("secret fields expose themed copy and reveal controls without native duplicates", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
@@ -337,33 +359,42 @@ test("secret fields expose only the themed reveal control", async ({ page }) => 
   await page.getByRole("button", { name: "Add source", exact: true }).click();
   await page.getByRole("radio", { name: /^OpenAI/ }).click();
   await expect(page.locator(".secret-field")).toHaveCount(1);
-  await expect(page.locator(".secret-field > button")).toHaveCount(1);
+  await expect(page.locator(".secret-field-actions button")).toHaveCount(2);
+  await expect(page.locator(".secret-field-actions button[aria-pressed]")).toHaveCount(1);
+  await expect(page.locator(".secret-field-actions button[data-copied]")).toBeDisabled();
+  const secret = page.locator(".secret-field input");
+  await secret.fill("synthetic-api-key");
+  await secret.press("ControlOrMeta+A");
+  await secret.press("ControlOrMeta+C");
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("synthetic-api-key");
+  await page.locator(".secret-field-actions button[data-copied]").click();
+  await expect(secret).toHaveAttribute("type", "password");
 });
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`${mode} mixed rotation reorders accounts and API providers and retains weights`, async ({ page }) => {
     await installTauriMock(page, { mode, locale: "en", populated: true, sourceCount: 2 });
     await page.goto("/");
     await page.getByRole("button", { name: "Pool", exact: true }).click();
     await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
     const dialog = page.getByRole("dialog", { name: "Pool rotation", exact: true });
-    await dialog.getByRole("radio", { name: "In order", exact: true }).click();
+    await dialog.getByRole("radio", { name: "Round robin", exact: true }).click();
     const order = dialog.getByRole("list", { name: "Member order" });
     await expect(order.getByRole("listitem")).toHaveCount(3);
     const api = order.locator('[data-member-id="source:source_synthetic"]');
     const account = order.locator('[data-member-id="account:account_synthetic"]');
     await api.getByRole("button", { name: "Reorder Example compatible API" }).dragTo(account);
     await expect(order.getByRole("listitem").first()).toContainText("Example compatible API");
-    await dialog.getByRole("radio", { name: "Round robin", exact: true }).click();
+    await dialog.getByRole("radio", { name: "Automatic", exact: true }).click();
     await dialog.getByLabel("Request share: Example compatible API", { exact: true }).fill("3");
     await dialog.getByLabel("Concurrent requests: Example compatible API", { exact: true }).fill("2");
     await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
     await expect(dialog).toBeHidden();
     await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
-    await expect(dialog.getByRole("radio", { name: "Round robin", exact: true })).toHaveAttribute("aria-checked", "true");
+    await expect(dialog.getByRole("radio", { name: "Automatic", exact: true })).toHaveAttribute("aria-checked", "true");
     await expect(dialog.getByLabel("Request share: Example compatible API", { exact: true })).toHaveValue("3");
     await expect(dialog.getByLabel("Concurrent requests: Example compatible API", { exact: true })).toHaveValue("2");
-    await dialog.getByRole("radio", { name: "In order", exact: true }).click();
+    await dialog.getByRole("radio", { name: "Round robin", exact: true }).click();
     await expect(order.getByRole("listitem").first()).toContainText("Example compatible API");
     await expect(dialog.getByLabel("Request share: Example compatible API", { exact: true })).toHaveCount(0);
     await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
@@ -376,7 +407,7 @@ test("dialogs keep editable focus and close a nested option list before the dial
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("tab", { name: "Sources" }).click();
 
-  const sourceRow = page.getByRole("row").filter({ hasText: "Example compatible API" });
+  const sourceRow = page.locator(".source-card").filter({ hasText: "Example compatible API" });
   const sourceEdit = sourceRow.getByRole("button", { name: "Edit" });
   await sourceEdit.click();
   const sourceDialog = page.getByRole("dialog", { name: "Edit source" });

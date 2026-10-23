@@ -8,8 +8,8 @@ use std::net::IpAddr;
 pub(super) fn valid_local_host(headers: &HeaderMap) -> bool {
     let Some(host) = headers
         .get(HOST)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
+        .and_then(|header_value| header_value.to_str().ok())
+        .and_then(|host_text| host_text.parse::<axum::http::uri::Authority>().ok())
     else {
         return false;
     };
@@ -62,7 +62,7 @@ pub(super) fn authenticate_client(
             };
             headers
                 .get(header)
-                .and_then(|value| value.to_str().ok())
+                .and_then(|header_value| header_value.to_str().ok())
                 .and_then(|secret| runtime.authenticate_secret(secret))
         })
 }

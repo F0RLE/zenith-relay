@@ -3,9 +3,24 @@ use crate::{AdapterRequestContext, CacheWriteTtl, SourceAdapter};
 use serde_json::json;
 mod history;
 mod matrix;
+mod responses_snapshots;
+mod responses_tool_search;
+mod responses_tools;
+mod responses_usage;
 mod terminal;
+mod tool_arguments;
 mod tools;
+mod validation;
 
+mod architecture;
+mod chains;
+mod chat_usage;
+mod citations;
+mod documents;
+mod messages_options;
+mod messages_reasoning;
+mod messages_tool_search;
+mod output_formats;
 mod reasoning;
 
 fn input(protocol: WireApi) -> Value {
@@ -44,24 +59,32 @@ fn prepare(
     request: &Value,
     stream: bool,
 ) -> crate::PreparedAdapterRequest {
-    let adapter = SourceAdapter::between(client, upstream).unwrap();
-    adapter
-        .prepare_request(AdapterRequestContext {
-            client_wire_api: client,
-            request,
-            model: "test",
-            stream,
-            reasoning_mode: if adapter.is_passthrough() {
-                MessagesReasoningMode::Disabled
-            } else {
-                MessagesReasoningMode::Adaptive
-            },
-            cache_write_ttl: CacheWriteTtl::Provider,
-            previous: None,
-            response_scope: "source-test",
-            response_id_seed: "request-test",
-        })
+    try_convert(client, upstream, request, stream)
         .unwrap_or_else(|error| panic!("{client:?} -> {upstream:?}: {error}"))
+}
+
+fn try_convert(
+    client: WireApi,
+    upstream: WireApi,
+    request: &Value,
+    stream: bool,
+) -> AdapterResult<crate::PreparedAdapterRequest> {
+    let adapter = SourceAdapter::between(client, upstream).unwrap();
+    adapter.prepare_request(AdapterRequestContext {
+        client_wire_api: client,
+        request,
+        model: "test",
+        stream,
+        reasoning_mode: if adapter.is_passthrough() {
+            MessagesReasoningMode::Disabled
+        } else {
+            MessagesReasoningMode::Adaptive
+        },
+        cache_write_ttl: CacheWriteTtl::Provider,
+        previous: None,
+        response_scope: "source-test",
+        response_id_seed: "request-test",
+    })
 }
 
 fn sse(protocol: WireApi) -> Vec<u8> {

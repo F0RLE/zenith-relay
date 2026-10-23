@@ -1,4 +1,7 @@
-use super::usage::{usage_totals_from_event, usage_totals_from_sample, UsageTotalsSample};
+use super::usage::{
+    apply_usage_totals_delta, consumption_totals, request_totals, usage_totals_from_event,
+    usage_totals_from_sample, UsageTotalsSample,
+};
 use super::{
     db_error, sql_u64, ErrorCode, LocalPoolError, Result, TelemetryDb, UsageEvent,
     ARCHIVE_USAGE_SQL,
@@ -7,7 +10,67 @@ use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use std::sync::atomic::Ordering;
 
 mod aggregate;
-use aggregate::{apply_aggregate_delta, UsageAggregate};
+pub(super) use aggregate::{apply_aggregate_delta, UsageAggregate};
+
+enum UsageRecordKind {
+    FinalRequest,
+    AttemptHistory,
+}
+
+impl UsageRecordKind {
+    fn upsert_sql(&self) -> String {
+        let (table_name, conflict_columns) = match self {
+            Self::FinalRequest => ("request_logs", "request_id"),
+            Self::AttemptHistory => ("request_attempts", "request_id, attempt"),
+        };
+        format!(
+            "INSERT INTO {table_name} (
+                request_id, attempt, local_key_id, source_id, candidate_id, account_id,
+                requested_model, resolved_model, wire_api, transport, success, http_status,
+                error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens,
+                cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens,
+                service_tier, applied_service_tier, routing_json, tool_use_json, error_origin,
+                requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl,
+                usage_aggregate_recorded, client_context_id, upstream_error_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, 1, ?31, ?32)
+            ON CONFLICT({conflict_columns}) DO UPDATE SET
+                created_at = CURRENT_TIMESTAMP,
+                attempt = excluded.attempt,
+                local_key_id = excluded.local_key_id,
+                source_id = excluded.source_id,
+                candidate_id = excluded.candidate_id,
+                account_id = excluded.account_id,
+                requested_model = excluded.requested_model,
+                resolved_model = excluded.resolved_model,
+                wire_api = excluded.wire_api,
+                transport = excluded.transport,
+                success = excluded.success,
+                http_status = excluded.http_status,
+                error_category = excluded.error_category,
+                latency_ms = excluded.latency_ms,
+                ttft_ms = excluded.ttft_ms,
+                generation_ms = excluded.generation_ms,
+                input_tokens = excluded.input_tokens,
+                cached_input_tokens = excluded.cached_input_tokens,
+                cache_write_input_tokens = excluded.cache_write_input_tokens,
+                reasoning_tokens = excluded.reasoning_tokens,
+                output_tokens = excluded.output_tokens,
+                total_tokens = excluded.total_tokens,
+                service_tier = excluded.service_tier,
+                applied_service_tier = excluded.applied_service_tier,
+                routing_json = excluded.routing_json,
+                tool_use_json = excluded.tool_use_json,
+                error_origin = excluded.error_origin,
+                requested_reasoning_effort = excluded.requested_reasoning_effort,
+                effective_reasoning_effort = excluded.effective_reasoning_effort,
+                cache_write_ttl = excluded.cache_write_ttl,
+                client_context_id = excluded.client_context_id,
+                upstream_error_json = excluded.upstream_error_json,
+                usage_aggregate_recorded = 1
+            WHERE excluded.attempt >= {table_name}.attempt"
+        )
+    }
+}
 
 impl TelemetryDb {
     pub fn record(&self, event: &UsageEvent) -> Result<()> {
@@ -63,129 +126,117 @@ impl TelemetryDb {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
-        let previous = previous_usage_log(&transaction, &event.request_id)?;
-        let accepted = previous
+        let previous_usage = previous_usage_log(&transaction, &event.request_id, None)?;
+        let previous_attempt =
+            previous_usage_log(&transaction, &event.request_id, Some(event.attempt))?.or_else(
+                || {
+                    previous_usage
+                        .as_ref()
+                        .filter(|old| old.attempt == i64::from(event.attempt))
+                        .cloned()
+                },
+            );
+        let is_latest_attempt = previous_usage
             .as_ref()
-            .is_none_or(|previous| i64::from(event.attempt) >= previous.attempt);
-        let changed = accepted
+            .is_none_or(|previous_usage| i64::from(event.attempt) >= previous_usage.attempt);
+        let usage_parameters = params![
+            event.request_id,
+            event.attempt,
+            event.local_key_id,
+            event.source_id,
+            event.candidate_id,
+            event.account_id,
+            event.requested_model,
+            event.resolved_model,
+            event.wire_api.as_str(),
+            event.transport.as_str(),
+            event.success,
+            event.http_status,
+            event.error_category,
+            sql_u64(event.latency_ms),
+            event.ttft_ms.map(sql_u64),
+            event.generation_ms.map(sql_u64),
+            event.input_tokens.map(sql_u64),
+            event.cached_input_tokens.map(sql_u64),
+            event.cache_write_input_tokens.map(sql_u64),
+            event.reasoning_tokens.map(sql_u64),
+            event.output_tokens.map(sql_u64),
+            event.total_tokens.map(sql_u64),
+            event.service_tier.as_str(),
+            event.applied_service_tier.as_deref(),
+            routing_json,
+            tool_use_json,
+            event.error_origin().map(|origin| origin.as_str()),
+            requested_reasoning_effort,
+            effective_reasoning_effort,
+            event
+                .cache_write_ttl
+                .as_deref()
+                .and_then(zenith_relay_core::usage::normalize_reported_cache_ttls,),
+            event.client_context_id,
+            upstream_error_json,
+        ];
+        let attempt_history_sql = UsageRecordKind::AttemptHistory.upsert_sql();
+        transaction
+            .execute(&attempt_history_sql, usage_parameters)
+            .map_err(db_error)?;
+        let final_request_sql = UsageRecordKind::FinalRequest.upsert_sql();
+        let final_request_changed = is_latest_attempt
             && transaction
-                .execute(
-                "INSERT INTO request_logs (
-                    request_id, attempt, local_key_id, source_id, candidate_id, account_id,
-                    requested_model, resolved_model, wire_api, success, http_status,
-                    error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens,
-                    cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens,
-                    service_tier, applied_service_tier, routing_json, tool_use_json, error_origin,
-                    requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl,
-                    usage_aggregate_recorded, client_context_id, upstream_error_json
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, 1, ?30, ?31)
-                ON CONFLICT(request_id) DO UPDATE SET
-                    created_at = CURRENT_TIMESTAMP,
-                    attempt = excluded.attempt,
-                    local_key_id = excluded.local_key_id,
-                    source_id = excluded.source_id,
-                    candidate_id = excluded.candidate_id,
-                    account_id = excluded.account_id,
-                    requested_model = excluded.requested_model,
-                    resolved_model = excluded.resolved_model,
-                    wire_api = excluded.wire_api,
-                    success = excluded.success,
-                    http_status = excluded.http_status,
-                    error_category = excluded.error_category,
-                    latency_ms = excluded.latency_ms,
-                    ttft_ms = excluded.ttft_ms,
-                    generation_ms = excluded.generation_ms,
-                    input_tokens = excluded.input_tokens,
-                    cached_input_tokens = excluded.cached_input_tokens,
-                    cache_write_input_tokens = excluded.cache_write_input_tokens,
-                    reasoning_tokens = excluded.reasoning_tokens,
-                    output_tokens = excluded.output_tokens,
-                    total_tokens = excluded.total_tokens,
-                    service_tier = excluded.service_tier,
-                    applied_service_tier = excluded.applied_service_tier,
-                    routing_json = excluded.routing_json,
-                    tool_use_json = excluded.tool_use_json,
-                    error_origin = excluded.error_origin,
-                    requested_reasoning_effort = excluded.requested_reasoning_effort,
-                    effective_reasoning_effort = excluded.effective_reasoning_effort,
-                    cache_write_ttl = excluded.cache_write_ttl,
-                    client_context_id = excluded.client_context_id,
-                    upstream_error_json = excluded.upstream_error_json,
-                    usage_aggregate_recorded = 1
-                WHERE excluded.attempt >= request_logs.attempt",
-                params![
-                    event.request_id,
-                    event.attempt,
-                    event.local_key_id,
-                    event.source_id,
-                    event.candidate_id,
-                    event.account_id,
-                    event.requested_model,
-                    event.resolved_model,
-                    event.wire_api.as_str(),
-                    event.success,
-                    event.http_status,
-                    event.error_category,
-                    sql_u64(event.latency_ms),
-                    event.ttft_ms.map(sql_u64),
-                    event.generation_ms.map(sql_u64),
-                    event.input_tokens.map(sql_u64),
-                    event.cached_input_tokens.map(sql_u64),
-                    event.cache_write_input_tokens.map(sql_u64),
-                    event.reasoning_tokens.map(sql_u64),
-                    event.output_tokens.map(sql_u64),
-                    event.total_tokens.map(sql_u64),
-                    event.service_tier.as_str(),
-                    event.applied_service_tier.as_deref(),
-                    routing_json,
-                    tool_use_json,
-                    event.error_origin().map(|origin| origin.as_str()),
-                    requested_reasoning_effort,
-                    effective_reasoning_effort,
-                    event.cache_write_ttl.as_deref().and_then(
-                        zenith_relay_core::usage::normalize_reported_cache_ttls,
-                    ),
-                    event.client_context_id,
-                    upstream_error_json,
-                ],
-            )
-            .map_err(db_error)?
-            > 0;
-        if changed {
-            if let Some(previous) = previous.as_ref().filter(|previous| previous.aggregated) {
-                apply_aggregate_delta(&transaction, &previous.aggregate, -1)?;
-            }
-            apply_aggregate_delta(&transaction, &UsageAggregate::from_event(event), 1)?;
+                .execute(&final_request_sql, usage_parameters)
+                .map_err(db_error)?
+                > 0;
+        // Usage belongs to the physical send, not to whichever send completed last.
+        // A correction to an older send must update its own model/member bucket.
+        if let Some(previous_attempt) = previous_attempt.as_ref().filter(|old| old.aggregated) {
+            apply_aggregate_delta(&transaction, &previous_attempt.aggregate, -1)?;
         }
+        apply_aggregate_delta(&transaction, &UsageAggregate::from_event(event), 1)?;
         // `last_insert_rowid` is unchanged by an upsert that takes the
         // conflict-update path. Only run retention after a new request row;
         // otherwise replacing a request whose old id is divisible by 256
         // would rescan and rewrite the usage database repeatedly.
-        let archived = previous.is_none() && changed && transaction.last_insert_rowid() % 256 == 0;
-        if archived {
+        let retention_applied = previous_usage.is_none()
+            && final_request_changed
+            && transaction.last_insert_rowid() % 256 == 0;
+        if retention_applied {
             transaction
                 .execute_batch(ARCHIVE_USAGE_SQL)
                 .map_err(db_error)?;
         }
         transaction.commit().map_err(db_error)?;
-        if archived {
+        if retention_applied {
             self.clear_cached_usage_totals()?;
-        } else if changed {
-            let previous_totals = previous
+        } else {
+            let mut previous_totals = previous_attempt
                 .as_ref()
-                .map(|previous| usage_totals_from_sample(previous.totals));
-            self.update_cached_usage_totals(previous_totals, usage_totals_from_event(event))?;
+                .map(|old| consumption_totals(usage_totals_from_sample(old.totals)))
+                .unwrap_or_default();
+            let mut incoming_totals = consumption_totals(usage_totals_from_event(event));
+            if final_request_changed {
+                if let Some(old) = previous_usage.as_ref() {
+                    apply_usage_totals_delta(
+                        &mut previous_totals,
+                        request_totals(usage_totals_from_sample(old.totals)),
+                        true,
+                    );
+                }
+                apply_usage_totals_delta(
+                    &mut incoming_totals,
+                    request_totals(usage_totals_from_event(event)),
+                    true,
+                );
+            }
+            self.update_cached_usage_totals(Some(previous_totals), incoming_totals)?;
         }
         drop(connection);
-        if changed || archived {
-            self.invalidate_usage_cache();
-        }
+        self.invalidate_usage_cache();
         Ok(())
     }
 
     pub fn clear(&self) -> Result<()> {
         self.lock_connection()?
-            .execute_batch("DELETE FROM request_logs; DELETE FROM usage_candidate_rollups;")
+            .execute_batch("DELETE FROM request_logs; DELETE FROM request_attempts; DELETE FROM usage_candidate_rollups;")
             .map_err(db_error)?;
         self.clear_cached_usage_totals()?;
         self.invalidate_usage_cache();
@@ -203,6 +254,7 @@ impl TelemetryDb {
     }
 }
 
+#[derive(Clone)]
 struct PreviousUsageLog {
     attempt: i64,
     aggregated: bool,
@@ -213,29 +265,35 @@ struct PreviousUsageLog {
 fn previous_usage_log(
     transaction: &Transaction<'_>,
     request_id: &str,
+    attempt: Option<u16>,
 ) -> Result<Option<PreviousUsageLog>> {
+    let table = if attempt.is_some() {
+        "request_attempts"
+    } else {
+        "request_logs"
+    };
     transaction
         .query_row(
-            "SELECT attempt,
+            &format!("SELECT attempt,
                 usage_aggregate_recorded,
                 CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
                 COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model, ''),
                 input_tokens, cached_input_tokens, cache_write_input_tokens, cache_write_ttl,
-                output_tokens, total_tokens, success, latency_ms, ttft_ms, generation_ms,
+                output_tokens, total_tokens, applied_service_tier, success, latency_ms, ttft_ms, generation_ms,
                 reasoning_tokens
-             FROM request_logs WHERE request_id = ?1",
-            [request_id],
+             FROM {table} WHERE request_id = ?1 AND (?2 IS NULL OR attempt = ?2)"),
+            params![request_id, attempt],
             |row| {
                 Ok(PreviousUsageLog {
                     attempt: row.get(0)?,
                     aggregated: row.get(1)?,
-                    aggregate: UsageAggregate::from_row(row, 2)?,
+                    aggregate: UsageAggregate::from_row_current(row, 2)?,
                     totals: UsageTotalsSample {
-                        success: row.get(11)?,
-                        latency_ms: non_negative_i64(row.get(12)?),
-                        ttft_ms: row.get::<_, Option<i64>>(13)?.map(non_negative_i64),
-                        generation_ms: row.get::<_, Option<i64>>(14)?.map(non_negative_i64),
-                        reasoning_tokens: row.get::<_, Option<i64>>(15)?.map(non_negative_i64),
+                        success: row.get(12)?,
+                        latency_ms: non_negative_i64(row.get(13)?),
+                        ttft_ms: row.get::<_, Option<i64>>(14)?.map(non_negative_i64),
+                        generation_ms: row.get::<_, Option<i64>>(15)?.map(non_negative_i64),
+                        reasoning_tokens: row.get::<_, Option<i64>>(16)?.map(non_negative_i64),
                         input_tokens: row.get::<_, Option<i64>>(5)?.map(non_negative_i64),
                         cached_input_tokens: row.get::<_, Option<i64>>(6)?.map(non_negative_i64),
                         cache_write_input_tokens: row
@@ -251,6 +309,6 @@ fn previous_usage_log(
         .map_err(db_error)
 }
 
-fn non_negative_i64(value: i64) -> u64 {
-    value.max(0) as u64
+fn non_negative_i64(signed_count: i64) -> u64 {
+    signed_count.max(0) as u64
 }

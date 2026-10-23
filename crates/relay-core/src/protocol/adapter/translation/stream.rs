@@ -8,51 +8,72 @@ mod messages;
 mod output;
 mod responses;
 
-const MAX_EVENT_BYTES: usize = 16 * 1024 * 1024;
-const MAX_TRANSCRIPT_BYTES: usize = 64 * 1024 * 1024;
-
 #[derive(Debug)]
 pub struct TranslationStream {
-    request: TranslationRequest,
-    response: Response,
+    translation_request: TranslationRequest,
+    decoded_response: Response,
     pending: Vec<u8>,
-    output: VecDeque<Vec<u8>>,
+    pending_frames: VecDeque<Vec<u8>>,
     indices: BTreeMap<String, usize>,
+    response_annotations: BTreeMap<(u64, u64, u64), citations::UrlCitation>,
+    response_items: BTreeMap<u64, responses::OutputItemState>,
+    chat_completion: crate::protocol::completion::ChatStreamCompletion,
+    chat_annotations: Vec<Value>,
+    usage_snapshot: Option<Value>,
+    messages_completion: crate::protocol::completion::MessagesStreamCompletion,
+    gemini_completion: crate::protocol::completion::GeminiStreamCompletion,
+    native_indices: BTreeMap<String, usize>,
+    native_closed: BTreeSet<usize>,
+    gemini_calls: super::super::gemini::GeminiFunctionCalls,
     closed: BTreeSet<usize>,
     emitted: Vec<Block>,
+    finished_message_blocks: usize,
     started: bool,
     finish_reason: Option<Finish>,
     saw_refusal: bool,
+    refusal_explanation: Option<String>,
     terminal: bool,
-    completed: Option<MessagesBridgeResponse>,
+    completed: Option<TranslatedResponse>,
     upstream_error: Option<Value>,
-    received: usize,
     sequence: u64,
 }
 
 impl TranslationStream {
-    pub fn new(request: TranslationRequest) -> Self {
-        let response = Response {
-            id: request.response_id.clone(),
+    pub fn new(translation_request: TranslationRequest) -> Self {
+        let decoded_response = Response {
+            id: translation_request.response_id.clone(),
             blocks: Vec::new(),
+            citations: BTreeMap::new(),
             usage: Usage::default(),
             finish: Finish::Stop,
+            native_output: Vec::new(),
         };
         Self {
-            request,
-            response,
+            translation_request,
+            decoded_response,
             pending: Vec::new(),
-            output: VecDeque::new(),
+            pending_frames: VecDeque::new(),
             indices: BTreeMap::new(),
+            response_annotations: BTreeMap::new(),
+            response_items: BTreeMap::new(),
+            chat_completion: crate::protocol::completion::ChatStreamCompletion::default(),
+            chat_annotations: Vec::new(),
+            usage_snapshot: None,
+            messages_completion: crate::protocol::completion::MessagesStreamCompletion::default(),
+            gemini_completion: crate::protocol::completion::GeminiStreamCompletion::default(),
+            native_indices: BTreeMap::new(),
+            native_closed: BTreeSet::new(),
+            gemini_calls: super::super::gemini::GeminiFunctionCalls::default(),
             closed: BTreeSet::new(),
             emitted: Vec::new(),
+            finished_message_blocks: 0,
             started: false,
             finish_reason: None,
             saw_refusal: false,
+            refusal_explanation: None,
             terminal: false,
             completed: None,
             upstream_error: None,
-            received: 0,
             sequence: 0,
         }
     }
@@ -61,36 +82,54 @@ impl TranslationStream {
         if self.terminal {
             return;
         }
-        self.received = self.received.saturating_add(bytes.len());
-        if self.pending.len().saturating_add(bytes.len()) > MAX_EVENT_BYTES
-            || self.received > MAX_TRANSCRIPT_BYTES
-        {
-            self.fail();
-            return;
-        }
-        self.pending = crate::protocol::push_pending_sse_frames(
+        let pending = crate::protocol::push_pending_sse_frames(
             std::mem::take(&mut self.pending),
             bytes,
             self,
             |stream| stream.terminal,
             |stream, event| {
-                if stream.consume(event).is_err() {
-                    stream.fail();
+                if let Err(error) = stream.consume(event) {
+                    stream.fail(error);
                 }
             },
         );
+        match pending {
+            Ok(pending) => self.pending = pending,
+            Err(()) => self
+                .fail(AdapterError::upstream_stream_invalid().with_parameter("stream.event_size")),
+        }
     }
 
     pub fn finish(&mut self) {
+        if self.terminal {
+            return;
+        }
+        if self.awaiting_upstream_end() && self.pending.iter().all(u8::is_ascii_whitespace) {
+            if let Err(error) = self.complete() {
+                self.fail(error);
+            }
+        } else {
+            self.fail(AdapterError::upstream_stream_invalid().with_parameter("stream.terminal"));
+        }
+    }
+    pub(in crate::protocol::adapter) fn awaiting_upstream_end(&self) -> bool {
+        !self.terminal
+            && self.translation_request.upstream == WireApi::Gemini
+            && self.finish_reason.is_some()
+    }
+    pub(in crate::protocol::adapter) fn abort(&mut self) {
         if !self.terminal {
-            self.fail();
+            self.fail(AdapterError::upstream_stream_invalid().with_parameter("stream.transport"));
         }
     }
     pub fn pop_output(&mut self) -> Option<Vec<u8>> {
-        self.output.pop_front()
+        self.pending_frames.pop_front()
     }
-    pub fn completed(&self) -> Option<&MessagesBridgeResponse> {
+    pub fn completed(&self) -> Option<&TranslatedResponse> {
         self.completed.as_ref()
+    }
+    pub(in crate::protocol::adapter) fn take_completed(&mut self) -> Option<TranslatedResponse> {
+        self.completed.take()
     }
     pub fn is_terminal(&self) -> bool {
         self.terminal
@@ -100,79 +139,178 @@ impl TranslationStream {
     }
 
     fn consume(&mut self, bytes: &[u8]) -> AdapterResult<()> {
-        std::str::from_utf8(bytes).map_err(|_| AdapterError::upstream_stream_invalid())?;
-        let data = crate::protocol::sse_data(bytes);
-        if data.is_empty() {
+        std::str::from_utf8(bytes).map_err(|_| {
+            AdapterError::upstream_stream_invalid().with_parameter("stream.encoding")
+        })?;
+        let sse_payload = crate::protocol::sse_data(bytes);
+        if sse_payload.is_empty() {
             return Ok(());
         }
-        if data == b"[DONE]" {
-            if self.request.upstream != WireApi::ChatCompletions || self.finish_reason.is_none() {
-                return Err(AdapterError::upstream_stream_invalid());
+        if sse_payload.as_ref() == b"[DONE]" {
+            let completed = match self.translation_request.upstream {
+                WireApi::ChatCompletions => self.chat_completion.outcome().is_terminal(),
+                WireApi::Gemini => self.awaiting_upstream_end(),
+                _ => false,
+            };
+            if !completed || self.finish_reason.is_none() {
+                return Err(AdapterError::upstream_stream_invalid().with_parameter("stream.done"));
             }
             return self.complete();
         }
-        let value: Value =
-            serde_json::from_slice(&data).map_err(|_| AdapterError::upstream_stream_invalid())?;
-        if value.get("error").is_some_and(|error| !error.is_null())
-            || value.get("type").and_then(Value::as_str) == Some("error")
+        let event_payload: Value = serde_json::from_slice(&sse_payload)
+            .map_err(|_| AdapterError::upstream_stream_invalid().with_parameter("stream.json"))?;
+        self.observe_usage(&event_payload);
+        if event_payload
+            .get("error")
+            .is_some_and(|error| !error.is_null())
+            || event_payload.get("type").and_then(Value::as_str) == Some("error")
         {
-            self.upstream_error = Some(value);
+            self.upstream_error = Some(event_payload);
             return Err(AdapterError::upstream_stream_invalid());
         }
-        self.merge_usage(response::usage(self.request.upstream, &value));
-        let terminal = match self.request.upstream {
-            WireApi::ChatCompletions => self.chat(&value)?,
-            WireApi::Responses => self.responses(&value)?,
-            WireApi::Messages => self.messages(&value)?,
-            WireApi::Gemini => self.gemini(&value)?,
+        let terminal = match self.translation_request.upstream {
+            WireApi::ChatCompletions => self.chat(&event_payload)?,
+            WireApi::Responses => self.responses(&event_payload).map_err(|error| {
+                if error.parameter().is_some() {
+                    error
+                } else {
+                    error.with_parameter(responses::diagnostic_parameter(&event_payload))
+                }
+            })?,
+            WireApi::Messages => self.messages(&event_payload)?,
+            WireApi::Gemini => self.gemini(&event_payload)?,
         };
-        self.emit_changes()?;
-        if terminal {
-            self.complete()?;
+        if terminal && self.translation_request.upstream != WireApi::Gemini {
+            self.complete().map_err(|error| {
+                if error.parameter().is_some() {
+                    error
+                } else {
+                    error.with_parameter("stream.complete")
+                }
+            })?;
+        } else {
+            self.emit_changes(false).map_err(|error| {
+                if error.parameter().is_some() {
+                    error
+                } else {
+                    error.with_parameter("stream.output")
+                }
+            })?;
         }
         Ok(())
     }
 
-    fn merge_usage(&mut self, usage: Usage) {
-        let current = &mut self.response.usage;
-        current.input = usage.input.or(current.input);
-        current.output = usage.output.or(current.output);
-        current.total = usage.total.or(current.total);
-        current.cached = usage.cached.or(current.cached);
-        current.reasoning = usage.reasoning.or(current.reasoning);
-        current.cache_write = usage.cache_write.or(current.cache_write);
-        current.cache_write_5m = usage.cache_write_5m.or(current.cache_write_5m);
-        current.cache_write_1h = usage.cache_write_1h.or(current.cache_write_1h);
+    fn observe_usage(&mut self, payload: &Value) {
+        let field = if self.translation_request.upstream == WireApi::Gemini {
+            "usageMetadata"
+        } else {
+            "usage"
+        };
+        let usage = payload
+            .get(field)
+            .or_else(|| payload.pointer("/message/usage"))
+            .or_else(|| payload.pointer("/response/usage"));
+        if let Some(usage) = usage {
+            crate::protocol::merge_usage(&mut self.usage_snapshot, usage);
+            // Recompute from the merged raw counters so overflow becomes unknown,
+            // rather than retaining an older, lower derived value.
+            let mut usage_wrapper = serde_json::Map::new();
+            usage_wrapper.insert(
+                field.to_owned(),
+                self.usage_snapshot.clone().unwrap_or(Value::Null),
+            );
+            self.decoded_response.usage = response::usage(
+                self.translation_request.upstream,
+                &Value::Object(usage_wrapper),
+            );
+        }
     }
 
     fn insert(&mut self, key: String, block: Block) -> AdapterResult<usize> {
         if self.indices.contains_key(&key) {
             return Err(AdapterError::upstream_stream_invalid());
         }
-        let index = self.response.blocks.len();
+        let index = self.decoded_response.blocks.len();
         self.indices.insert(key, index);
-        self.response.blocks.push(block);
+        self.decoded_response.blocks.push(block);
         Ok(index)
     }
 
     fn complete(&mut self) -> AdapterResult<()> {
-        self.response.finish = self
+        if self.translation_request.upstream == WireApi::ChatCompletions {
+            citations::set_chat_annotations(
+                &mut self.decoded_response,
+                Some(&Value::Array(std::mem::take(&mut self.chat_annotations))),
+            )?;
+        }
+        if self.translation_request.upstream == WireApi::Gemini
+            && !self.gemini_completion.outcome().is_terminal()
+        {
+            return Err(AdapterError::upstream_stream_invalid());
+        }
+        self.decoded_response.finish = self
             .finish_reason
             .ok_or_else(AdapterError::upstream_stream_invalid)?;
-        response::validate_calls(&self.response.blocks)?;
-        let completed = self.request.clone().complete(self.response.clone())?;
-        self.emit_changes()?;
-        self.emit_end(&completed.response_body)?;
-        self.completed = Some(completed);
+        if self.translation_request.upstream == WireApi::Gemini
+            && self.decoded_response.finish == Finish::Stop
+            && self.decoded_response.blocks.is_empty()
+        {
+            return Err(AdapterError::upstream_stream_invalid());
+        }
+        if self.translation_request.upstream == WireApi::Messages
+            && self.decoded_response.finish == Finish::Tools
+        {
+            for block in &mut self.decoded_response.blocks {
+                if let Block::ToolCall { arguments, .. } = block {
+                    if arguments.is_empty() {
+                        *arguments = "{}".into();
+                    }
+                }
+            }
+        }
+        response::validate_calls(&self.decoded_response.blocks, self.decoded_response.finish)?;
+        let native_output = std::mem::take(&mut self.decoded_response.native_output);
+        let completed_response = self.translation_request.complete(Response {
+            native_output,
+            ..self.decoded_response.clone()
+        })?;
+        self.emit_changes(true)?;
+        self.emit_end(&completed_response.response_body)?;
+        self.completed = Some(completed_response);
         self.terminal = true;
         Ok(())
     }
 
-    fn fail(&mut self) {
+    fn fail(&mut self, failure: AdapterError) {
         self.terminal = true;
-        let error = json!({"type":"api_error","code":crate::error_codes::ADAPTER_UPSTREAM_STREAM_INVALID,"message":"Upstream stream cannot be represented by the selected route"});
-        match self.request.client {
-            WireApi::Responses => self.event("response.failed", json!({"type":"response.failed","response":{"id":self.response.id,"object":"response","status":"failed","output":[],"error":error}})),
+        if self.translation_request.client == WireApi::Responses
+            && self
+                .upstream_error
+                .as_ref()
+                .and_then(|error| error.get("type"))
+                .and_then(Value::as_str)
+                == Some("response.failed")
+        {
+            if let Some(event) = self.upstream_error.clone() {
+                self.event("response.failed", event);
+                return;
+            }
+        }
+        // Adapter errors contain only static diagnostics. Keep their cause and
+        // field in the error envelope without echoing any provider payload.
+        let message = match failure.parameter() {
+            Some(parameter) => format!(
+                "Upstream stream conversion failed at {parameter}: {}",
+                failure
+            ),
+            None => format!("Upstream stream conversion failed: {failure}"),
+        };
+        let mut error = json!({"type":"api_error","code":crate::error_codes::ADAPTER_UPSTREAM_STREAM_INVALID,"message":message});
+        if let Some(parameter) = failure.parameter() {
+            error["param"] = parameter.into();
+        }
+        match self.translation_request.client {
+            WireApi::Responses => self.event("response.failed", json!({"type":"response.failed","response":{"id":self.decoded_response.id,"object":"response","status":"failed","output":[],"error":error}})),
             WireApi::Messages => self.event("error", json!({"type":"error","error":error})),
             _ => self.event("", json!({"error":error})),
         }

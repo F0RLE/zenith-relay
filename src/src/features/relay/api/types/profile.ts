@@ -2,6 +2,28 @@ import type { DefaultServiceTier, ToolPolicy } from "./common";
 import type { ApiModelPriceOverride } from "./pricing";
 import type { SourceProtocolBinding, SourceWireApi } from "./source";
 
+export type LaunchApplication = "chatgpt" | "claude-desktop" | "opencode";
+
+export type LaunchPathSetting = {
+  path: string | null;
+  detectedPath: string | null;
+};
+
+export type ClaudeDesktopStatus = {
+  configured: boolean;
+  modelCount: number;
+  hasRecovery: boolean;
+  snapshotName?: string | null;
+  snapshotCreatedAtMs?: number | null;
+  running: boolean;
+  path: string;
+};
+
+export type ClaudeDesktopConnection = {
+  modelCount: number;
+  backupCreated: boolean;
+};
+
 export type OpenCodeConfigStatus = {
   configured: boolean;
   modelCount: number;

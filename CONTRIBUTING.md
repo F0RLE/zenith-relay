@@ -4,98 +4,75 @@ Zenith Relay is a local-first desktop application. Keep changes small, prove
 the behavior they alter, and do not move private Zenith backend concerns into
 this repository.
 
+Navigation: [setup](#development-setup) · [checks](#verification) ·
+[documentation](#documentation-policy) · [release flow](#change-and-release-flow) ·
+[agent guidance](#agent-guidance) · [protocol references](#api-and-protocol-references).
+
 ## License and contributor agreement
 
-Zenith Relay is published under **AGPL-3.0-only**, as recorded in [LICENSE](LICENSE)
-and the package manifests. AGPL grants permission to use, modify, and distribute
-the project; it does not transfer a contributor's copyright to the maintainer.
-Keep its standard license text intact.
+Zenith Relay is **AGPL-3.0-only**. Keep the [LICENSE](LICENSE) text intact.
+The assignment terms are only in the
+[Contributor Agreement](CONTRIBUTOR_LICENSE_AGREEMENT.md). Read that file
+before a pull request. This section does not restate them.
 
-Before submitting a PR, read the [Contributor Agreement, version
-1.0](CONTRIBUTOR_LICENSE_AGREEMENT.md). It assigns copyright in your accepted,
-original Contribution to the Project Owner, `F0RLE`, and permits relicensing of
-rights the Project Owner actually receives. You retain a license to reuse your
-own Contribution. Existing AGPL grants and third-party licenses remain in force.
-This agreement does not apply retroactively to earlier contributions or impose
-extra conditions on people who only use, distribute, or fork the project.
+For each pull request, describe the change and the checks, then check the
+single Contributor Agreement checkbox yourself. Keep its wording unchanged.
+A release note may be in the contributor's own language and may include a
+screenshot. If the change is entirely yours and names no other rights holder
+or excluded material, no extra form is required.
 
-For each PR, describe the change and validation, open the agreement linked in
-the template, and check **one Contributor Agreement checkbox** yourself. The
-checkbox covers agreement, assignment, authority, and required disclosures
-together. Keep its wording unchanged. If the Contribution is entirely your own
-and has no other rights holders or excluded material, no extra ownership form
-or separate consent comment is required by this workflow.
+When it applies, name co-authors, employer ownership, and included third-party
+material with its source and license. Get consent from each relevant rights
+holder. Do not put private identity or employer documents in the pull request.
 
-Only when relevant, list co-authors, employer ownership, and included
-pre-existing or third-party material with its source and license. Obtain
-consent from every relevant rights holder; co-authors can repeat the same
-confirmation in comments under their own accounts. An authorized employer
-representative or a separate signed instrument may be needed. Do not publish
-private identity or employer documents in the PR.
+The checkbox links to the agreement on `main`. Do not add a version or pin a
+release branch. A pull request does not change the accepted agreement until
+that text is on `main`. If the text on `main` changes, read it again and give
+fresh consent before acceptance. To withdraw consent before acceptance, say so
+in the pull request and clear the checkbox.
 
-Use the agreement version in the PR's **base branch**, not changed terms
-proposed by that PR. Keep consent accurate when updating the PR. If the
-agreement version changes, read it and give fresh consent before acceptance.
-To withdraw consent before acceptance, say so explicitly in the PR and clear
-the checkbox.
+`Release context` checks the template and the checkbox. It does not verify
+identity, employer authority, or co-author consent. The maintainer reviews
+those records before acceptance.
 
-The `Release context` check validates the template and confirmation. It does
-not verify legal identity, employer authority, or co-author consent. Before
-acceptance, the maintainer must review those records and retain the accepted
-commits, agreement version, and consent. Complete any legally required separate
-signature or identity formalities privately before accepting the Contribution.
-
-Only dependency maintenance PRs from GitHub's `dependabot[bot]` that touch
-manifests, lockfiles, or Actions workflow files are exempt from the human PR
-template. That exemption does not assign ownership of dependencies or cover
-original work by human authors; the maintainer must review provenance and obtain
-their consent separately. Other bot PRs are not exempt.
+Only `dependabot[bot]` pull requests that change manifests, lockfiles, or
+Actions workflow files skip the human template. That exemption does not assign
+dependency ownership or cover human work. Other bot pull requests are not
+exempt.
 
 ## Repository boundaries
 
-| Area | Owns |
-| --- | --- |
-| <code>src/src</code> | React UI, i18n, typed snapshot rendering, and Tauri command wrappers. |
-| <code>src-tauri/src</code> | Desktop storage, OS secret services, OAuth callbacks, local process lifecycle, profile attach and recovery. |
-| <code>crates/relay-core</code> | Shared account/source state, scheduler, gateway execution, quota, protocol, and redacted usage logic. |
-| <code>relay-server</code> | Standalone user-managed runtime, encrypted vault, SQLite state, migrations, and management API. |
-
-The frontend does not access files, secrets, provider endpoints, or client
-configuration directly. Keep private provider economy, customer billing,
-Zenith inventory, and public gateway business logic out of this repository.
+The [architecture](docs/project/PLANNING.md#scope-and-ownership) owns the module
+map and current contracts. Keep I/O, credentials, and routing out of the renderer.
+Relay is separate from production Zenith Gateway and Control.
 
 ## Secret and logic boundary
 
-Zenith Relay is a separate desktop/personal-pool product. It must not receive
-or forward Zenith production credentials, customer API keys, backend tokens,
-account-pool inventory, provider cabinet credentials, or internal Gateway and
-Control API business/routing logic. Do not copy those values into code,
-fixtures, documentation, tests, or support artifacts.
-
-User-owned provider secrets belong in the existing desktop credential store or
-the encrypted vault of a server owned by that user. A desktop-to-server transfer
-is allowed only through an explicit, confirmed management operation targeting
-that user-managed Relay Server. It is not an upload to Zenith production.
-
-Remote state, usage, telemetry, exports, diagnostics, screenshots, and API
-snapshots must stay redacted. They may contain identifiers, models, timings,
-status, and aggregates, but never raw credentials, cookies, authorization
-headers, prompts, response bodies, or provider session material.
+Never copy production Zenith credentials, customer data, inventory, or internal
+business logic into Relay. User secrets use the existing credential store or
+protected local storage; transfer is explicit and confirmed. Future Hosted vault
+requirements belong in the [Hosted design](docs/hosted/HOSTED_RELAY_ARCHITECTURE.md).
+Diagnostics, screenshots, snapshots, and fixtures contain no secrets or raw
+prompt/response bodies. Explicit credential exports are not support bundles.
 
 ## Safety rules
 
 - Use stable dependencies only.
 - Never put credentials, cookies, authorization headers, session exports, or
-  account identities in source, fixtures, screenshots, logs, snapshots, exports,
-  telemetry, or support output.
-- Keep desktop secrets in the existing credential-store path and server secrets
-  in the existing encrypted vault.
-- Management tokens and pool request keys are different credentials. Do not
-  accept either one in the other's boundary.
-- Never use a management token as a `/v1` profile credential, and never expose
-  either credential in a snapshot, log, export, or example.
+  account identities in source, fixtures, screenshots, logs, snapshots,
+  telemetry, or support exports. Credential-bearing account exports require
+  an explicit user action and must stay out of support output.
+- Keep Desktop secrets in the existing credential store or protected local
+  storage. The retired personal-server runtime and management client are not
+  current integration targets; future Hosted vault and administration contracts
+  belong to the [Hosted design](docs/hosted/HOSTED_RELAY_ARCHITECTURE.md).
+- Provider credentials and pool request keys have separate owners and purposes.
+  Use the intended request key for a `/v1` pool profile, not a provider login
+  credential. Never expose either in diagnostics, snapshots, or examples;
+  credential exports require the explicit user action described above.
 - Preserve the distinction between quota monitoring and routing eligibility.
-  Do not reinstate a Free-account routing policy or a hard-coded quota window.
+  Native Free accounts can join the pool. Reject known Free plans only for
+  Excel / Basis Points imports and requests; do not hard-code quota windows.
 - Retry another candidate only after a proven pre-execution rejection or
   not-sent result, and before any response bytes reach the client. Preserve
   response ownership; saved history proves portability, not execution safety.
@@ -104,30 +81,207 @@ headers, prompts, response bodies, or provider session material.
 - Update a profile through the existing inspect, snapshot, attach, verify, and
   restore flow. Never overwrite a newer user login.
 
-Read [AGENTS.md](AGENTS.md), [PLANNING.md](docs/project/PLANNING.md), and
-[ROADMAP.md](docs/project/ROADMAP.md) before changing a cross-cutting behavior.
+Apply [AGENTS.md](AGENTS.md). Consult [PLANNING.md](docs/project/PLANNING.md)
+for affected contracts and [ROADMAP.md](docs/project/ROADMAP.md) when changing
+planned scope or acceptance gates; routine edits do not need both documents.
+
+## Agent guidance
+
+### GPT-6 prompts and repository instructions
+
+Use this section when changing agent instructions, skills, or a model-specific
+prompt. It applies OpenAI's [GPT-6 prompting guidance](https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices)
+and [instruction/skill review](https://developers.openai.com/blog/rethinking-skills-and-prompts-for-gpt-6-astra)
+to Relay. The recommendations describe Astra behavior; qualify them with the
+chosen GPT-6 variant and workload. This guidance does not select a model or
+change application/provider configuration.
+
+**Outcome and authority.** Define the deliverable, constraints, and acceptance
+criteria. Resolve routine choices from the owning code; carry authorized local
+work through implementation and verification. Ask when an answer changes the
+result, not for each routine step. Prepare reviewable local work before asking
+about an external action; authorization for that action remains separate.
+Apply system/developer instructions, then the user's request, repository rules,
+and matching skill guidance. Skills do not grant permissions. If a skill blocks
+the task, link its exact instruction and explain the conflict. Repository safety
+boundaries still apply; an example in an external guide cannot authorize a PR,
+deployment, credential transfer, or subagent.
+
+**Context.** Keep `AGENTS.md` a short map of ownership and durable boundaries.
+Read architecture for a contract change, setup for a build issue, and release
+procedures for a release. Do not demand a full repository map or reread unchanged
+files before every edit. Keep detailed model advice here, current behavior in
+`PLANNING.md`, and open work in `ROADMAP.md`. Do not inject this contributor
+guidance into every relayed user request.
+
+**Skills.** Follow OpenAI's [skill authoring guidance](https://developers.openai.com/plugins/build/skills).
+A description identifies a specific workflow and its activation boundary;
+procedures belong in the body. Use a short entrypoint and link task-specific
+references, templates, or deterministic helpers when needed. Avoid overlapping
+triggers, conflicting rules, and compulsory document stacks. Review direct,
+indirect, incomplete, unrelated, and edge-case requests before changing a skill's
+trigger. Keep examples that encode a real requirement or fix a demonstrated gap.
+
+**Verification.** Choose checks that establish the changed behavior. Do not add
+tests that merely restate an implementation or repeat broad suites after relevant
+checks pass without a new reason. Fix regressions from the requested change;
+report an unrelated failure rather than weakening a check. Documentation edits
+need link/content and diff checks. Stateful protocol changes need the existing
+conversation matrix and bounded-state tests. Paid probes and release actions
+have their own authorization requirements.
+
+**Communication and collaboration.** State the result first in the user's
+language; use concrete terms and only useful technical detail. Give enough
+evidence to distinguish implementation, tests, and live acceptance. Avoid stock
+phrases, repeated disclaimers, decorative tables, and unrequested recaps.
+For long work, give short updates at meaningful transitions. Delegation requires
+explicit current authorization; if authorized, divide independent tasks and
+communicate clearly. A model guide's delegation example does not change this rule.
+
+**Evaluating a prompt change.** Follow OpenAI's
+[evaluation-led optimization](https://developers.openai.com/api/docs/guides/model-optimization).
+Begin with a working prompt. Change one group of instructions at a time and
+compare representative tasks for correctness,
+completion, tool roundtrips, latency, total usage, and cost. Check both cold
+starts and growing conversations. A smaller JSON body, fewer turns, or a faster
+answer alone does not prove better quality or lower total cost. Keep required
+tool schemas, reasoning state, and user constraints intact.
+
+**Model and transport compatibility.** Use the exact model and endpoint requested.
+Check the current [model guide](https://developers.openai.com/api/docs/guides/latest-model#limitations)
+before changing reasoning effort, verbosity, sampling, caching, or tool controls;
+sibling models need not share support. OpenAI's public capabilities do not prove
+BPS/account-transport or third-party API support. Protocol and BPS behavior stays
+in its existing owner. Adopting a public feature requires a scoped implementation
+and protocol acceptance, not just a link to its documentation.
+
+A task request can state the contract without prescribing every tool call:
+
+~~~text
+Goal: <observable result>.
+Scope: <Relay component; preserve unrelated local work>.
+Acceptance: <required behavior and relevant checks>.
+Constraints: <compatibility, data, and side-effect boundaries>.
+Delivery: implement locally, fix caused regressions, report results/checks/gaps.
+~~~
+
+## API and protocol references
+
+Use official documentation and SDK types for the exact endpoint/version:
+[contract references](.agents/skills/relay-protocol-adapters/references/contracts.md).
+Compatible API names do not establish identical features. BPS/account transport
+behavior is observed, not specified by the public OpenAI API.
+
+Follow the [protocol skill](.agents/skills/relay-protocol-adapters/SKILL.md) and
+its complete conversation matrix. Third-party comparisons need an inspected
+revision, file paths, and retained license/attribution; they are not the spec
+or a replacement runtime. A passing first answer does not prove tool continuation.
+
+## Account connector references
+
+Use [account connectors](.agents/skills/relay-account-connectors/SKILL.md) for
+OAuth, sign-in/import, and reauthentication; use
+[pool lifecycle](.agents/skills/relay-account-pool-lifecycle/SKILL.md) for renewal,
+quota, admission, execution ownership, and removal. Reuse Relay's authority and
+scheduler. A working login alone does not establish pool compatibility.
+
+## Development setup
+
+Clone this repository. The commands below are the same on Windows, macOS, and
+Linux. Install Bun, Rust, and the native tools listed below before running
+`bun run setup`; it installs the locked project dependencies:
+
+- [Bun](https://bun.sh) 1.4.2 or newer.
+- [rustup](https://rustup.rs). The committed `rust-toolchain.toml` selects the
+  Rust version.
+- Native libraries for the desktop shell:
+  - Windows: MSVC, Windows SDK, CMake, Ninja, and the WebView2 runtime.
+    Relay supports a portable bundle and a regular Visual Studio Build Tools
+    installation when no portable bundle is present.
+  - macOS: Xcode Command Line Tools.
+  - Linux: GTK 3, WebKitGTK 4.1, librsvg, and a secret service such as
+    gnome-keyring. The Build workflow lists the packages CI installs.
+
+Prepare the locked dependencies and start the desktop app:
+
+~~~sh
+bun scripts/setup/start-dev.mjs
+~~~
+
+`bun run start` installs the locked frontend and Rust dependencies, then starts
+the desktop app. The setup, start, and `app:*` commands work from the repository
+root and from `src`. Use
+`bun run setup` when you only want to prepare the checkout.
+
+For a prepared checkout, use `bun run app:dev`. Rust auto-restart is disabled
+by default, so editing backend code does not terminate pool requests made by
+the agent doing the work. Frontend hot reload remains enabled. Rust changes
+take effect only after you explicitly stop and restart the dev command;
+finish active agent requests before restarting. This is not data or process
+isolation from your working Relay profile.
+
+Codex's **Relay · Dev** action uses the same `bun run app:dev` workflow and
+native default profile as ordinary terminal development. It does not create a
+separate profile or copy accounts. An explicit absolute `ZENITH_RELAY_DEV_DATA_DIR`
+can still select another debug profile when deliberately configured.
+
+To opt into automatic Rust rebuilds/restarts, use `bun run app:dev:watch`
+or `bun run start --watch`. Do not route the editing agent through that
+watch-mode instance: use a separate stable Relay for the agent instead.
+
+Codex desktop actions are provided in `.codex/environments/environment.toml`.
+Use **Relay · Dev** from the Run menu to start the normal no-watch debug workflow in
+Codex's terminal. After an agent task finishes, stop that terminal command and
+run the action again to compile and apply Rust edits. Frontend hot reload stays
+enabled. The action list contains only Dev, TypeScript, UI tests, and Rust check;
+opening a chat does not run them automatically. Documentation checks and dependency
+setup remain available through the commands documented here, outside the action list.
+
+On Windows, Relay's scripts prefer the portable toolchain in
+`%USERPROFILE%\Development\visual-studio\build-tools` and initialize MSVC,
+the Windows SDK, CMake, and MSBuild together. Keep the SDK in
+`%USERPROFILE%\Development\windows-sdk` or set `ZENITH_WINDOWS_SDK_ROOT` to
+its portable location. When portable MSVC is present, the scripts do not fall
+back to a system Windows SDK. Set `ZENITH_MSVC_ROOT` when the portable MSVC
+bundle is stored elsewhere. Rust checks should use the repository wrapper so
+the same environment is applied:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked
+~~~
+
+When cloned inside the Zenith workspace, setup can call the sibling
+`scripts/setup/setup-development.ps1` to install missing portable Windows tools
+under `Development`. This installer is not included in a standalone Relay
+clone. Standalone contributors must prepare native tools first. The workspace
+installer requires `winget` and an elevated PowerShell window;
+`-InstallBuildTools` forces a repair. For a direct `cargo` invocation from the
+workspace, load the same portable environment first:
+
+~~~powershell
+. ..\scripts\setup\use-development-env.ps1
+~~~
+
+Playwright browsers are optional and kept out of the default setup:
+
+~~~sh
+bun run setup:browsers
+~~~
 
 ## Documentation policy
 
-The tracked human-facing documentation is deliberately small:
+Use one owner per subject. The [documentation index](docs/README.md#find-the-right-document)
+lists the owning guides; its [repository tree](docs/README.md#repository-tree)
+separates source directories from generated local artifacts. Keep that navigation
+in one place rather than copying a second document inventory here.
 
-~~~text
-README.md
-CONTRIBUTING.md
-docs/project/PLANNING.md
-docs/project/ROADMAP.md
-docs/releases/CHANGELOG.md
-docs/help/<locale>/README.md
-docs/screenshots/*.png
-~~~
-
-<code>AGENTS.md</code> is repository guidance. <code>LICENSE</code> and
-<code>CONTRIBUTOR_LICENSE_AGREEMENT.md</code> are legal documents, and
-<code>relay-server/openapi.yaml</code> is the machine-readable server contract.
-Do not add parallel architecture, design, handoff, or historical planning
-documents. Put implemented contracts in
-<code>docs/project/PLANNING.md</code>, accepted unfinished work in
-<code>docs/project/ROADMAP.md</code>, and user steps in localized Help files.
+`AGENTS.md` owns repository guidance; legal terms stay in `LICENSE` and the
+Contributor Agreement. Keep screenshots under `docs/screenshots/`.
+Hosted deployment procedures belong to its future operator guide, not bundled
+Desktop Help; the Help document size gate remains unchanged.
+Do not add parallel architecture/handoff documents, transcripts, completed TODOs,
+or per-model tables copied from generated data. Publishing an export is separate
+from generating it. Mark proposals as proposals, not available features.
 
 ### Changelog and release notes
 
@@ -136,9 +290,17 @@ Record every user-visible change in
 `Unreleased`, grouped by behavior rather than by branch. Include the relevant
 PR or commit in the entry when the change is ready for review. When publishing
 a tag, move the shipped entries into a dated version section and leave
-`Unreleased` available for the next cycle. Release-body translations used by
-the updater remain separate and must use the `relay-notes:<locale>` markers
-described below.
+`Unreleased` available for the next cycle.
+
+Use the same localized layout in `Unreleased` and dated releases: the version
+heading, `<!-- relay-notes:en -->`, the complete English notes, then
+`<!-- relay-notes:ru -->` and the complete Russian notes. Keep `### Changed` /
+`### Изменения` and, when needed, `### Fixed` / `### Исправления` inside each
+locale block. Group longer lists with `####` topic headings; keep both locales
+aligned by topic, changes, and PR/commit references. Do not append a second
+summary or leave changes outside the locale blocks: the updater omits unmarked
+text once locale markers are present. The release workflow extracts one version
+section before the updater selects its locale.
 
 Keep the audience boundary explicit: changelog entries and updater notes are
 for users. Do not put test counts, CI job status, formatter or audit output,
@@ -175,13 +337,52 @@ bun run screenshots
 ## Verification
 
 Run the narrowest relevant checks while iterating. Before a commit that changes
-the frontend, desktop host, shared runtime, or server, run the corresponding
+the frontend, desktop host, shared runtime, or web preview, run the corresponding
 commands below.
+
+Changes only to contributor documentation need content/link and diff checks.
+After the locked frontend dependencies are installed, run from the repository root:
+
+~~~powershell
+bun ./scripts/check/check-docs.mjs
+git diff --check -- '*.md' '*.markdown'
+~~~
+
+The same link check is `bun run check:docs` from `src`. It checks required entry
+documents, tracked and non-ignored new Markdown files, local links/images, filename
+case and GitHub-style heading/HTML anchors. Code examples and HTML comments are not
+links. External URLs are not fetched; the optional parent workspace `AGENTS.md`
+link is not required in a standalone checkout. Review content accuracy separately;
+a passing link check does not establish implemented behavior or live acceptance.
+The existing bundled Help size gate still applies to user-guide changes.
+
+For behavior changes, reuse existing coverage or add regression cases that
+exercise the affected contract when tests are in scope. Avoid tests that
+merely repeat implementation, renamed identifiers, or document wording.
+After relevant checks pass, expand or repeat them only for new changes,
+failures, or an unresolved concern.
+
+These two checks are the same ones CI runs. They need Bun, not PowerShell.
+Use the branch targeted by the pull request as the base reference:
+
+~~~sh
+git fetch origin
+BASE_REF=origin/main
+bun ./scripts/check/check-agent-guardrails.mjs "$BASE_REF"
+bun ./scripts/check/check-duplicate-code.mjs "$BASE_REF"
+~~~
+
+Replace `origin/main` with the target branch for a release or development pull
+request. From `src`, the same commands are
+`bun run check:guardrails -- "$BASE_REF"` and
+`bun run check:duplicates -- "$BASE_REF"`.
+Local guardrails also check non-ignored, untracked Rust source files without
+changing the Git index.
 
 For PR template or metadata-workflow changes, run the isolated policy tests:
 
 ~~~powershell
-bun test ./.github/tools/pr-metadata.test.mjs
+bun test ./scripts/check/pr-metadata.test.mjs
 ~~~
 
 The metadata workflow loads its validator from the PR's base commit. It must
@@ -189,6 +390,10 @@ never check out or execute PR-head code in `pull_request_target`, interpolate
 PR text into scripts, or require write permissions or repository secrets.
 The regular Build workflow also runs these tests against the proposed changes
 in its unprivileged `pull_request` context.
+
+For build, setup, check, or cleanup scripts, run
+`bun test ./scripts/check ./scripts/lib ./scripts/maintenance ./scripts/build`. The Build workflow
+runs this same suite.
 
 ### Frontend and desktop
 
@@ -200,58 +405,366 @@ bun run build
 bun run test:e2e
 ~~~
 
+#### Renderer responsiveness checks
+
+From `src`, the focused renderer checks are:
+
+~~~powershell
+bun test tests/runtimeDisplay.test.ts tests/usagePageSharing.test.ts tests/analyticsPersistence.test.ts
+bunx --no-install playwright test tests/e2e/operations/startup.spec.ts tests/e2e/frontend-activity.spec.ts tests/e2e/runtime-refresh.spec.ts tests/e2e/usage-performance.spec.ts tests/e2e/overview-persistence.spec.ts
+~~~
+
+The account projection fixture uses 500 synthetic accounts and 100 gateway-only
+updates: direct projection resolves 50,000 labels; the bounded current projection
+resolves 500, preserving account-array identity across those updates. New account
+facts, a changed privacy resolver and runtime clearing must invalidate it.
+The visibility fixture retains the final activity from a hidden burst without
+rendering intermediate states or reviving an older completed request. Startup
+checks hold the runtime for 20 seconds while navigation, Settings and Help work,
+then verify data readiness separately. Snapshot failure remains retryable, and
+the unused all-time Usage preload must not return. These checks establish avoided
+work and responsiveness, not a measured WebView2 working-set or RSS reduction.
+
+The Usage fixture types the 19-character `req_synthetic_local` ID and observes one
+settled report read; clearing input or leaving the request tab cancels unfinished
+searches. A separate fixture retains eight reports with 1,000 identical model
+choices: sharing keeps one model-choice array instead of eight, while each
+report's totals and event arrays remain independent. New, reordered and missing
+choices must not be replaced by cached values. This measures avoided reads and
+retained array identities, not native-process memory in bytes.
+
+Analytics persistence is checked independently of provider reads. A burst of
+20 updates makes no synchronous writes and produces one deferred write of the
+latest state. Lifecycle flush cancels its timer; even a stale scheduled callback
+cannot write a newer generation. The browser case checks page-exit flush, absence
+of a duplicate delayed write and a subsequent reload. Pool statistics are checked
+across five rendered activity updates: the source-inventory signature is not
+serialized again until a full inventory snapshot arrives. Existing source-refresh
+cases still verify updated observations and one-shot explicit refresh intent.
+The storage operation remains synchronous when flushed; this removes it from
+the report-completion path, not into a worker thread. The 250 ms derived-cache
+window is not a durability guarantee during a process crash.
+
+Native Usage first-entry checks run separately from browser mocks:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path src-tauri/Cargo.toml --locked local_pool::store::telemetry_db::tests -- --test-threads=1
+bun scripts/build/cargo.mjs test --manifest-path src-tauri/Cargo.toml --locked measure_usage_first_entry -- --ignored --nocapture --test-threads=1
+~~~
+
+Run these from the repository root. The timing fixture creates 10,000 synthetic
+logical results and matching sends, requests 50 rows plus full-period filter
+choices, and checks exact total tokens. A local debug run measured cold/warm
+reads of 79.93/60.65 ms before the narrow-query/index change and 44.84/26.66 ms
+after it. This covers SQLite, pricing and row decoding, not IPC, WebView rendering
+or an installed application's first-entry latency. The ordinary tests compare
+five pages across filters against the original send view, including legacy-only
+final sends with retained earlier attempts, and verify the covering/partial-index
+plans without timing thresholds. Index migration is append-only; SQL/report
+work stays on a blocking worker and startup must not prefetch unused Usage data.
+
 For a release UI or layout change, run the focused Playwright suites as well:
 
 ~~~powershell
 cd src
-bunx playwright test tests/e2e/visual-matrix
-bunx playwright test tests/e2e/operations
+bunx --no-install playwright test tests/e2e/visual-matrix
+bunx --no-install playwright test tests/e2e/operations
 bun run screenshots
 ~~~
 
 The visual matrix is the responsive/appearance gate. The operations folder is
 the interaction and state-transition gate. The screenshots command regenerates
 only the committed `docs/screenshots` assets.
+The browser scripts invoke the installed Playwright CLI through `bunx --no-install`
+so it keeps its Node interpreter instead of inheriting Bun's Windows browser
+transport and temporary-profile limitations. No package is downloaded by these
+scripts.
 
 <code>bun run verify</code> runs the unit tests, frontend build (including the
 TypeScript build), and desktop Rust tests. Packaging or updater changes also require:
 
 ~~~powershell
-cd src
 bun run app:build
 ~~~
+
+Run it from the repository root or from `src`. To build only the executable,
+without an installer:
+
+~~~powershell
+bun run app:build --no-bundle
+~~~
+
+On Windows, the executable is written to
+`src-tauri/target/release/zenith-relay.exe`. Building does not replace or
+restart an installed Relay.
+
+### Web preview
+
+From `web`, verify the independent web preview:
+
+~~~powershell
+bun install --frozen-lockfile
+bun run test
+bun run build
+bun run test:e2e
+~~~
+
+Browser tests use only loopback. Install their Chromium with
+`bunx --no-install playwright install chromium`, or set
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to an existing executable. The Build workflow
+checks this package separately before packaging. These checks do not establish
+Hosted backend readiness or real WebView integration.
+
+### Build artifacts
+
+Stop builds and browser tests before cleanup. From the repository root:
+
+~~~powershell
+bun scripts/maintenance/clean.mjs
+~~~
+
+The default removes only `src/.build`, `src/dist`, and `web/dist`. Add `--all`
+to also remove test reports, Desktop browser captures, Rust targets, and Tauri
+permission schemas. **This includes the locally built release executable.**
+From `src`, the equivalent commands are `bun run clean` and `bun run clean:all`.
+
+Paths are anchored to this checkout, not the caller's working directory. All
+targets and their parents inside the checkout are checked before removal;
+links, non-directories, or unreadable metadata abort cleanup. Removal errors
+stop the command, but already removed artifacts are not restored.
+Root-level `.build` worktrees, other `gen` contents, committed `docs/screenshots`,
+user data, and installed applications are not targets.
+
+Cleanup paths and their validation live next to the command in
+`scripts/maintenance/artifact-paths.mjs`; `scripts/lib` is for shared tooling.
+Run `bun test ./scripts/maintenance/clean.test.mjs` after cleanup-tooling changes.
+These synthetic checks do not delete build artifacts; CI runs them too.
 
 ### Shared runtime
 
 ~~~powershell
-cargo fmt --manifest-path crates/relay-core/Cargo.toml --all -- --check
-cargo check --manifest-path crates/relay-core/Cargo.toml --all-targets --locked
-cargo clippy --manifest-path crates/relay-core/Cargo.toml --all-targets --locked -- -D warnings
-cargo test --manifest-path crates/relay-core/Cargo.toml --locked
+bun scripts/build/cargo.mjs fmt --manifest-path crates/relay-core/Cargo.toml --all -- --check
+bun scripts/build/cargo.mjs check --manifest-path crates/relay-core/Cargo.toml --all-targets --locked
+bun scripts/build/cargo.mjs clippy --manifest-path crates/relay-core/Cargo.toml --all-targets --locked -- -D warnings
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked
 ~~~
 
-### User-managed server
+### Protocol optimization probes
+
+Before changing preparation or cache-affinity behavior, run the relevant
+synthetic probe against the current working tree, then repeat it after the
+change with the same machine, build profile, payloads, warmup and trial counts.
+Keep unrelated local changes in both baselines; do not reset to `HEAD`.
 
 ~~~powershell
-cargo fmt --manifest-path relay-server/Cargo.toml --all -- --check
-cargo check --manifest-path relay-server/Cargo.toml --all-targets --locked
-cargo clippy --manifest-path relay-server/Cargo.toml --all-targets --locked -- -D warnings
-cargo test --manifest-path relay-server/Cargo.toml --locked
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --target-dir src-tauri/target --locked --release --lib measure_bps_turn_prefix_reuse -- --ignored --nocapture --test-threads=1
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --target-dir src-tauri/target --locked --release --lib measure_cache_context_fingerprinting -- --ignored --nocapture --test-threads=1
 ~~~
 
-Use the real server acceptance gate in
-[ROADMAP.md](docs/project/ROADMAP.md) before
-claiming that the remote pool works in production. Unit and mocked browser
-tests cannot prove real account, proxy, streaming, or server persistence
-behavior.
+The BPS probe reports preparation time and equal leading prepared input items
+when only tool choice changes. It uses 48 synthetic tools and three historical
+messages, five warmups, seven trials and 25 preparations per trial. These are
+JSON bytes and local CPU durations, not tokens, billed cache hits or TTFT.
+The fingerprint probe uses 48 synthetic tools and 16/256 escaped-text messages,
+20 warmups, nine trials and 100 captures per trial. It measures the opt-in
+debug comparison path, not ordinary debug-off request processing.
+
+Report regressions and tradeoffs as well as improvements. Native forwarding,
+original tool schemas, current-call restrictions and complete continuation
+must still pass their ordinary tests. Live provider cache reuse needs observed
+cached/input token counts in a controlled installed-app run; a stable prefix
+or faster local hashing does not establish that result.
+
+#### Recorded comparison: 2026-10-23
+
+Windows, AMD Ryzen 5 5600X, optimized release profile, one test thread, no
+provider I/O. The baseline includes the pre-existing dirty worktree, with only
+the synthetic probes added before the runtime changes. Times below are medians
+of per-trial averages, not individual-request latency percentiles.
+
+For the same declarations/history with `none`, named or `allowed_tools` choices:
+
+| BPS presentation | Equal leading input items before | After | Serialized equal-prefix bytes after |
+| --- | ---: | ---: | ---: |
+| Compact | 0/4 | 4/4 | 38,407 |
+| Discovery | 0/4 | 4/4 | 34,177 |
+
+Unrestricted `auto` retains 4/4 items in both versions. These byte counts
+serialize the equal leading input-item array; they are neither token counts
+nor a measurement of the provider's rendered/cacheable prefix. The constant
+catalog-permission clarification adds 180 bytes to this synthetic prologue.
+Call restrictions remain after history; lookup/preload and returned calls
+still use only the current permitted tools. Selected small schemas are ready
+without a discovery-only generation, within the unchanged eager limits and
+explicit deferral rules. Checkpoints reuse that exact prepared prologue.
+
+| BPS presentation / choice | Preparation before, microseconds | After, microseconds |
+| --- | ---: | ---: |
+| Compact / auto | 336.424 | 339.932 |
+| Compact / none | 112.740 | 206.872 |
+| Compact / named | 123.552 | 212.040 |
+| Compact / allowed | 122.864 | 213.464 |
+| Discovery / auto | 221.072 | 220.044 |
+| Discovery / none | 111.764 | 132.604 |
+| Discovery / named | 124.340 | 144.160 |
+| Discovery / allowed | 122.336 | 145.432 |
+
+Retaining the catalog intentionally costs about 0.088-0.094 ms of extra local
+preparation in restricted compact turns, and 0.020-0.023 ms in discovery.
+It removes the measured prefix rewrite; it is not a claim that every local
+preparation became faster or that total input tokens decreased. The unrestricted
+timing ranges overlap before/after, so no general `auto` speedup is claimed.
+
+| Debug fingerprint fixture | Before, microseconds | After, microseconds | Reduction |
+| --- | ---: | ---: | ---: |
+| 16 items / 42,925 request bytes | 76.882 | 48.818 | 36.5% |
+| 256 items / 549,445 request bytes | 781.145 | 588.304 | 24.7% |
+
+Each capture includes the same reference-equality checks in both versions.
+The trial ranges were 76.579-79.947 -> 48.587-51.100 microseconds and
+778.672-807.915 -> 587.533-590.578 microseconds respectively. One reusable
+8 KiB buffer replaces repeated tiny hash updates; reference tests retain the
+original salted JSON digests, exact byte budget, item cap and failure behavior.
+Debug-off requests already skip this work and do not gain this reduction.
+
+The design follows the stable-prefix/tool-definition guidance in the official
+[prompt caching guide](https://developers.openai.com/api/docs/guides/prompt-caching)
+and [cache diagnostics](https://developers.openai.com/api/docs/guides/prompt-caching/diagnostics),
+read on 2026-10-23. BPS remains an undocumented account transport; public API
+retention/breakpoint fields were not added. Live provider cache-hit ratio,
+TTFT, billing and installed-application acceptance were not measured here.
+
+### Pool rotation acceptance
+
+The ordinary core suite includes lifecycle churn and repeated local HTTP,
+SSE, WebSocket, and image waves. These fixtures use synthetic credentials and
+loopback providers; they do not consume account quota. The Build workflow also
+runs the opt-in queue test at the per-principal limit:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --lib large_mixed_queue_reaches_per_principal_limit_without_starvation -- --ignored --nocapture
+~~~
+
+Measure scheduler overhead separately from provider latency:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --lib scheduling_latency_under_contention -- --ignored --nocapture
+~~~
+
+For an extended loopback run, execute 240 mixed waves (5,760 requests) with
+shared member limits and alternating source availability:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --test accounts extended_mixed_transport_soak -- --ignored --nocapture
+~~~
+
+The local probe reports mutex-wait and reservation p50/p95/p99 in nanoseconds
+for 2, 16, and 64 members with four competing threads. It has no provider I/O
+or hardware-dependent pass threshold. Compare repeated runs of the same build
+profile and machine; these values are not model first-token measurements.
+The queue check reports local admission-wait p50/p95/p99, verifies bounded
+retained metadata, service across principals, and release after draining; it is
+not a process-memory or live-provider soak.
+
+Live acceptance still requires an explicitly authorized isolated pool and the
+installed executable's identity. Include unequal generation durations, quota
+resets, cancellations, and account replacement; verify outcomes and ownership,
+not only the visible reply. Do not replace or restart the user's app as part of
+a synthetic check.
+
+#### Cache-affinity admission comparison
+
+The 2026-10-23 comparison uses the same Windows host, optimized release profile
+and pre-existing dirty worktree before and after the cache-aware load margin.
+Reproduce the admission fixture with:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --target-dir src-tauri/target --locked --release --lib measure_cache_affinity_under_parallel_load -- --ignored --nocapture --test-threads=1
+~~~
+
+Two synthetic physical members each allow four concurrent requests. The preferred
+member retains one background reservation; the other is idle. After 20 warmups,
+nine trials each reserve and release 1,000 preferred requests. Times are medians
+of trial averages, not individual-request percentiles or provider latency.
+
+| Measurement | Before | After |
+| --- | ---: | ---: |
+| Preferred-member selections | 0/9,000 | 9,000/9,000 |
+| Reserve and release, microseconds | 1.961 | 2.176 |
+| Trial-average range, microseconds | 1.931-2.326 | 2.153-2.445 |
+
+The local admission tradeoff is an additional 0.215 microseconds in this fixture,
+not a measured first-token speedup. Ordinary work without affinity still uses the
+least normalized load. Regressions cover both sides of the load margin, saturated
+and unequal physical capacities, material quota/credit leads, soft health/latency,
+explicit order, diagnostics, and consistent optional response-owner yield.
+
+Repeating the existing protocol probes preserves all four leading BPS input items
+for every tested tool choice: 38,407 compact / 34,177 discovery serialized bytes
+before and after. Preparation and fingerprinting code is unchanged by this patch;
+the repeated timings do not establish a speedup:
+
+| Unchanged-path probe | Before, microseconds | After, microseconds |
+| --- | ---: | ---: |
+| BPS compact / auto | 340.500 | 390.928 |
+| BPS discovery / auto | 223.408 | 220.348 |
+| Debug fingerprint / 16 items | 49.915 | 50.294 |
+| Debug fingerprint / 256 items | 596.376 | 597.818 |
+
+The compact/auto trial-average ranges were 332.632-348.828 before and
+342.880-474.332 after. Report this slower observed run rather than claiming all
+processing became faster. The admission fixture measures route reuse, not actual
+cached tokens or invoice savings. Payloads, reasoning, tools, provider cache
+controls and opaque-continuation ownership remain unchanged. Installed-app,
+provider cache-hit, actual billing and end-to-end latency acceptance remain open.
+
+### Manual quality observations
+
+`quality_probe` is a development example, not a startup/background monitor.
+Use it only when live generation is explicitly authorized; it consumes quota
+and may cost money. Start with one model and two samples. Compare models with
+the same batch and explicit supported effort, using an isolated pool preset or
+a request key scoped to the intended members. A model ID alone does not select
+an account or prove the upstream protocol.
+
+With an already running local Relay and an existing scoped **pool request key**
+in `ZENITH_RELAY_PROBE_KEY` (not a management token or provider credential):
+
+~~~powershell
+bun scripts/build/cargo.mjs run --manifest-path crates/relay-core/Cargo.toml --locked --example quality_probe -- --allow-requests http://127.0.0.1:PORT/v1 model-a,model-b 2 high
+~~~
+
+Replace `PORT` and the model IDs with the intended local endpoint and exact
+catalog IDs. Supply the environment variable securely; do not put credentials
+in commands, source, fixtures, or reports. The probe rejects external hosts,
+URLs containing credentials/query/fragment, proxies, and redirects. The request
+limit is 1–4 models × 1–8 samples (maximum 32), sequential, with no retry or
+external judge. This is **not a token or monetary budget**: BPS ignores
+`max_output_tokens`, so use conservative batches and account-side limits.
+
+JSON-lines reports contain local-reference correctness, inconclusive counts,
+latency and numeric usage; they omit raw prompts, answers, and credentials.
+Wrong well-formed answers count as incorrect. Transport errors, refusals,
+unfinished output and invalid answer shapes count as inconclusive. The probe
+does not quarantine, disable, or reconfigure anything; normal gateway requests
+still affect usage/quota and ordinary route health. This is not an isolated
+provider observation channel, and a mixed pool cannot yield account-specific
+quality conclusions. A small sample is not proof of degradation or its absence.
+
+Local, synthetic checks do not send provider requests:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --lib quality::tests
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --example quality_probe
+~~~
 
 ## Change and release flow
 
 1. Inspect the active branch and working tree. Preserve unrelated local work.
 2. Change the owning layer and update its callers only when its contract
    changes.
-3. Add or update the smallest regression test that would fail without the
-   behavior.
+3. For behavior changes, use coverage that would detect a regression. Add or
+   update a focused case when existing coverage leaves a meaningful gap.
 4. Run the relevant checks and regenerate screenshots if their UI changed.
 5. Review the diff for secret leakage, stale Help wording, and generated-file
    noise.
@@ -265,15 +778,23 @@ behavior.
    after the release checks pass; reserve a <code>production-ready</code> claim
    for the live acceptance gates in <code>docs/project/ROADMAP.md</code>.
 
+### Continuous integration
+
+Pull requests and pushes to <code>main</code> run checks only. They do not build
+installers or publish artifacts. Pushing a <code>v*</code> tag builds the desktop
+installers and, after those checks pass, publishes the GitHub Release and updater
+manifest. A manual Build run retains desktop installers as Actions artifacts
+without publishing, even when started from a tag.
+
 ### macOS distribution
 
 macOS builds use Tauri's ad-hoc identity (`APPLE_SIGNING_IDENTITY=-`); they do
-not need an Apple Developer Program membership or Apple secrets. CI checks the
-app inside the DMG and the updater archive for a valid ad-hoc signature, then
-publishes after all platform builds succeed. Release assets include SHA-256
-checksums. Ad-hoc signing does not establish a trusted developer identity and
-is not Apple notarization, so downloaded apps still require the one-time macOS
-approval described in the localized Help. Test fresh installation and in-app
+not need an Apple Developer Program membership or Apple secrets. The release
+build checks the app inside the DMG and the updater archive for a valid ad-hoc
+signature before publishing. Release assets include SHA-256 checksums. Ad-hoc
+signing does not establish a trusted developer identity and is not Apple
+notarization, so downloaded apps still require the one-time macOS approval
+described in the localized Help. Test fresh installation and in-app
 updating on separate Intel and Apple Silicon Macs before claiming that those
 flows work end to end. Never remove quarantine from the whole system or all
 downloads. The `TAURI_SIGNING_PRIVATE_KEY` secret remains required for signed
@@ -281,14 +802,13 @@ in-app updates; it is separate from macOS code signing.
 
 ### GitHub merge requirements
 
-In GitHub branch protection or rulesets for the development/release branches
-and <code>main</code>, require PRs, the <code>Release context</code> status check,
-an up-to-date branch, and code-owner review for the paths in
-<code>.github/CODEOWNERS</code>. Restrict
-bypass permissions to the intended maintainers. These files alone do not enable
-branch protection. A PR author cannot approve their own PR as a code owner;
-owner-authored policy changes need another authorized reviewer or an explicitly
-managed maintainer exception.
+Maintainers should configure branch protection or rulesets for the branches
+that accept changes. Require pull requests, the <code>Release context</code>
+status check, an up-to-date branch, and code-owner review for the paths in
+<code>.github/CODEOWNERS</code>. Restrict bypass permissions to the intended
+maintainers. These files alone do not enable branch protection. A PR author
+cannot approve their own PR as a code owner; owner-authored policy changes need
+another authorized reviewer or an explicitly managed maintainer exception.
 
 GitHub loads the <code>pull_request_target</code> workflow from the repository's
 default branch; this workflow explicitly loads the validator from the PR's base
@@ -299,18 +819,19 @@ before making the check required. If an Actions event policy blocks
 before relying on the check. Do not enable unreviewed workflows or broaden token
 permissions as a workaround.
 
-Policy changes use the agreement currently in the base branch and must not use
-their proposed wording to authorize themselves. Keep the template's agreement
-link pointed at the reviewed version in the designated development/release
-branch. When changing that link or agreement terms, update the template,
-validator, and tests together; terms changes also require a new version and
-fresh consent on open PRs. Update those PRs against the new base before merging.
+A policy change must not use its own proposed wording to authorize itself.
+The template links to the agreement on `main`, with no version and no
+release-branch pin. Changing the link or the agreement requires the template,
+validator, and tests to change together. Open pull requests need fresh consent
+after the new text is on `main`.
 
 ### Updater changelog for release admins
 
 The updater changelog is read from the GitHub Release body. In the published
 Release, put each translation after a <code>relay-notes:&lt;locale&gt;</code>
-marker. A section continues until the next marker:
+marker. A section continues until the next marker. A pull request note can stay
+in the contributor's own language and can include a screenshot; add the locale
+markers when publishing the Release, not in the pull request.
 
 ~~~markdown
 <!-- relay-notes:en -->

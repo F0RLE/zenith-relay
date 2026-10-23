@@ -3,27 +3,29 @@ use super::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use zenith_relay_core::{
-    deserialize_model_reasoning_allowed_levels, normalize_model_ids,
-    normalize_model_reasoning_allowed_levels, normalize_model_service_tier_overrides,
-    ApiModelPriceOverride, DefaultServiceTier,
+    deserialize_model_reasoning_allowed_levels, normalize_model_context_policies,
+    normalize_model_ids, normalize_model_reasoning_allowed_levels,
+    normalize_model_service_tier_overrides, ApiModelPriceOverride, DefaultServiceTier,
+    ModelContextPolicy,
 };
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BindScope {
     Localhost,
+    Lan,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewaySettings {
+    /// Explicit UI associations; each connection retains its own credential authority.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub account_routes: Vec<AccountRouteGroup>,
     #[serde(default)]
     pub tool_policy: zenith_relay_core::ToolPolicy,
-    /// Use the explicitly labelled Excel/Basis Points route for compatible
-    /// OAuth accounts. The physical account candidate and its quota remain
-    /// shared with native Responses traffic.
     #[serde(default)]
-    pub basis_points_enabled: bool,
+    pub request_timezone: zenith_relay_core::RequestTimezonePolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_routing: Option<zenith_relay_core::PoolRoutingPolicy>,
     pub enabled: bool,
@@ -46,6 +48,10 @@ pub struct GatewaySettings {
     pub chatgpt_interface_quota_reserve_basis_points: u64,
     #[serde(default = "default_codex_background_tasks_enabled")]
     pub codex_background_tasks_enabled: bool,
+    #[serde(default = "default_codex_background_tasks_enabled")]
+    pub codex_memory_extraction_enabled: bool,
+    #[serde(default = "default_codex_background_tasks_enabled")]
+    pub codex_memory_consolidation_enabled: bool,
     #[serde(default = "default_codex_websockets_enabled")]
     pub codex_websockets_enabled: bool,
     /// Legacy persisted key for API text-route recovery, including non-ChatGPT
@@ -71,14 +77,17 @@ pub struct GatewaySettings {
     #[serde(default)]
     pub model_service_tier_overrides: BTreeMap<String, DefaultServiceTier>,
     #[serde(default)]
+    pub model_context_policies: BTreeMap<String, ModelContextPolicy>,
+    #[serde(default)]
     pub model_display_order: Vec<String>,
 }
 
 impl Default for GatewaySettings {
     fn default() -> Self {
         Self {
+            account_routes: Vec::new(),
             tool_policy: Default::default(),
-            basis_points_enabled: false,
+            request_timezone: Default::default(),
             enabled: false,
             bind_scope: BindScope::Localhost,
             port: DEFAULT_GATEWAY_PORT,
@@ -93,6 +102,8 @@ impl Default for GatewaySettings {
             chatgpt_interface_quota_reserve_basis_points:
                 DEFAULT_CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS,
             codex_background_tasks_enabled: true,
+            codex_memory_extraction_enabled: true,
+            codex_memory_consolidation_enabled: true,
             codex_websockets_enabled: true,
             chatgpt_retry_until_available: false,
             block_degraded_routes_enabled: true,
@@ -102,12 +113,36 @@ impl Default for GatewaySettings {
             model_price_overrides: BTreeMap::new(),
             model_reasoning_allowed_levels: BTreeMap::new(),
             model_service_tier_overrides: BTreeMap::new(),
+            model_context_policies: BTreeMap::new(),
             model_display_order: Vec::new(),
         }
     }
 }
 
 impl GatewaySettings {
+    pub fn account_route_group(&self, account_id: &str) -> Option<&AccountRouteGroup> {
+        self.account_routes
+            .iter()
+            .find(|group| group.account_ids.iter().any(|id| id == account_id))
+    }
+
+    pub fn account_route_is_selected(&self, account_id: &str) -> bool {
+        self.account_route_group(account_id)
+            .is_none_or(|group| group.selected_account_id == account_id)
+    }
+
+    pub fn retain_account_routes(&mut self, accounts: &[LocalAccountRecord]) {
+        if self.account_routes.is_empty() {
+            return;
+        }
+        let ids = accounts
+            .iter()
+            .map(|account| account.account.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        self.account_routes
+            .retain(|group| group.account_ids.iter().all(|id| ids.contains(id.as_str())));
+    }
+
     pub fn pool_routing_for(
         &self,
         sources: &[ProviderSourceRecord],
@@ -126,23 +161,31 @@ impl GatewaySettings {
                         m.weight,
                     )
                 })
-                .chain(accounts.iter().filter(|m| m.account.in_pool).map(|m| {
-                    (
-                        zenith_relay_core::PoolMemberKind::Account,
-                        m.account.id.clone(),
-                        m.priority,
-                        m.weight,
-                    )
-                }))
+                .chain(
+                    accounts
+                        .iter()
+                        .filter(|m| {
+                            m.account.in_pool && self.account_route_is_selected(&m.account.id)
+                        })
+                        .map(|m| {
+                            (
+                                zenith_relay_core::PoolMemberKind::Account,
+                                m.account.id.clone(),
+                                m.priority,
+                                m.weight,
+                            )
+                        }),
+                )
                 .collect(),
         )
     }
 
     pub fn validate(&self) -> Result<(), &'static str> {
+        zenith_relay_core::accounts::validate_account_route_groups(&self.account_routes)?;
+        self.request_timezone.validate()?;
         if self.port < 1024 {
             return Err("gateway port must be between 1024 and 65535");
         }
-        self.tool_policy.clone().normalized()?;
         if self.client_host != "127.0.0.1" && self.client_host != "localhost" {
             return Err("local gateway host must be localhost or 127.0.0.1");
         }
@@ -174,6 +217,7 @@ impl GatewaySettings {
         validate_model_price_overrides(&self.model_price_overrides)?;
         normalize_model_reasoning_allowed_levels(self.model_reasoning_allowed_levels.clone())?;
         normalize_model_service_tier_overrides(self.model_service_tier_overrides.clone())?;
+        normalize_model_context_policies(self.model_context_policies.clone())?;
         if normalize_model_ids(self.model_display_order.iter()) != self.model_display_order {
             return Err("model display order is invalid");
         }

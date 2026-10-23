@@ -8,6 +8,7 @@ use serde::Deserialize;
 /// first token.
 pub(in crate::gateway) struct FastResponseDelta {
     pub(in crate::gateway) output_index: Option<u64>,
+    pub(in crate::gateway) sequence_number: Option<u64>,
     pub(in crate::gateway) nonempty_text: bool,
 }
 
@@ -16,24 +17,30 @@ pub(in crate::gateway) struct FastResponseDelta {
 /// Streaming time is dominated by `response.*.delta` frames. Usage, terminal
 /// status, identifiers, tool items, and anything else that can change
 /// settlement stay on the full parser. A `None` result is not an error.
-pub(in crate::gateway) fn fast_response_delta_json(payload: &[u8]) -> Option<FastResponseDelta> {
-    if !payload.windows(6).any(|window| window == b".delta") {
+pub(in crate::gateway) fn fast_response_delta_json(
+    sse_json_payload: &[u8],
+) -> Option<FastResponseDelta> {
+    if !sse_json_payload
+        .windows(6)
+        .any(|window| window == b".delta")
+    {
         return None;
     }
-    let parsed: FastDeltaBody<'_> = serde_json::from_slice(payload).ok()?;
+    let parsed: FastDeltaBody<'_> = serde_json::from_slice(sse_json_payload).ok()?;
     if parsed.has_slow_fields() {
         return None;
     }
-    let kind = parsed.kind?;
+    let event_type = parsed.event_type?;
     // Same text-delta names as `has_output_delta`. Other `response.*.delta`
     // events, including compaction, can change route ownership or replay and
     // stay on the full parser.
-    if !super::is_responses_output_delta_type(kind) {
+    if !super::is_responses_output_delta_type(event_type) {
         return None;
     }
     Some(FastResponseDelta {
         output_index: parsed.output_index,
-        nonempty_text: parsed.delta.is_some_and(|delta| !delta.is_empty()),
+        sequence_number: parsed.sequence_number,
+        nonempty_text: parsed.delta_text.is_some_and(|delta| !delta.0.is_empty()),
     })
 }
 
@@ -44,14 +51,21 @@ pub(in crate::gateway::streaming) fn fast_response_delta(
     fast_response_delta_json(single_json_data(frame)?)
 }
 
+// Serde only borrows Cow directly; the wrapper preserves borrowing inside Option.
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct DeltaText<'a>(#[serde(borrow)] std::borrow::Cow<'a, str>);
+
 #[derive(Deserialize)]
 struct FastDeltaBody<'a> {
     #[serde(borrow, default, rename = "type")]
-    kind: Option<&'a str>,
-    #[serde(borrow, default)]
-    delta: Option<&'a str>,
+    event_type: Option<&'a str>,
+    #[serde(borrow, default, rename = "delta")]
+    delta_text: Option<DeltaText<'a>>,
     #[serde(default)]
     output_index: Option<u64>,
+    #[serde(default)]
+    sequence_number: Option<u64>,
     #[serde(default)]
     usage: Option<IgnoredAny>,
     #[serde(default, rename = "usageMetadata")]
@@ -62,8 +76,8 @@ struct FastDeltaBody<'a> {
     response: Option<IgnoredAny>,
     #[serde(default)]
     message: Option<IgnoredAny>,
-    #[serde(default)]
-    body: Option<IgnoredAny>,
+    #[serde(default, rename = "body")]
+    response_body: Option<IgnoredAny>,
     #[serde(default)]
     service_tier: Option<IgnoredAny>,
     #[serde(default)]
@@ -74,8 +88,8 @@ struct FastDeltaBody<'a> {
     content_block: Option<IgnoredAny>,
     #[serde(default)]
     id: Option<IgnoredAny>,
-    #[serde(default)]
-    item: Option<IgnoredAny>,
+    #[serde(default, rename = "item")]
+    response_item: Option<IgnoredAny>,
     #[serde(default)]
     status: Option<IgnoredAny>,
     #[serde(default)]
@@ -89,29 +103,29 @@ impl FastDeltaBody<'_> {
             || self.error.is_some()
             || self.response.is_some()
             || self.message.is_some()
-            || self.body.is_some()
+            || self.response_body.is_some()
             || self.service_tier.is_some()
             || self.choices.is_some()
             || self.candidates.is_some()
             || self.content_block.is_some()
             || self.id.is_some()
-            || self.item.is_some()
+            || self.response_item.is_some()
             || self.status.is_some()
             || self.model.is_some()
     }
 }
 
 fn single_json_data(frame: &[u8]) -> Option<&[u8]> {
-    let mut payload = None;
+    let mut data_payload = None;
     for line in crate::protocol::sse_lines(frame) {
         if line.is_empty() || line.first() == Some(&b':') {
             continue;
         }
-        if let Some(value) = line.strip_prefix(b"data:") {
-            if payload.is_some() {
+        if let Some(line_payload) = line.strip_prefix(b"data:") {
+            if data_payload.is_some() {
                 return None;
             }
-            payload = Some(value.strip_prefix(b" ").unwrap_or(value));
+            data_payload = Some(line_payload.strip_prefix(b" ").unwrap_or(line_payload));
             continue;
         }
         match line.split(|byte| *byte == b':').next() {
@@ -119,11 +133,11 @@ fn single_json_data(frame: &[u8]) -> Option<&[u8]> {
             _ => return None,
         }
     }
-    let payload = trim_ascii(payload?);
-    payload
+    let data_payload = trim_ascii(data_payload?);
+    data_payload
         .first()
         .is_some_and(|byte| *byte == b'{')
-        .then_some(payload)
+        .then_some(data_payload)
 }
 
 fn trim_ascii(bytes: &[u8]) -> &[u8] {
@@ -158,6 +172,56 @@ mod tests {
             fast_response_delta_json(json).unwrap().output_index,
             Some(2)
         );
+    }
+
+    #[test]
+    fn escaped_text_and_tool_arguments_use_the_validated_fast_path() {
+        for event_type in [
+            "response.output_text.delta",
+            "response.function_call_arguments.delta",
+        ] {
+            for text in [
+                "hello",
+                "line\nnext\tvalue",
+                "\"quoted\"",
+                "C:\\synthetic\\file",
+                "😀",
+                "\0",
+            ] {
+                let payload = serde_json::to_vec(&serde_json::json!({
+                    "type":event_type, "output_index":2, "sequence_number":7, "delta":text
+                }))
+                .unwrap();
+                let delta = fast_response_delta_json(&payload).unwrap();
+                assert!(delta.nonempty_text);
+                assert_eq!(delta.output_index, Some(2));
+                assert_eq!(delta.sequence_number, Some(7));
+                let decoded: super::FastDeltaBody<'_> = serde_json::from_slice(&payload).unwrap();
+                assert_eq!(
+                    decoded.delta_text.as_ref().map(|delta| delta.0.as_ref()),
+                    Some(text)
+                );
+                if text == "hello" {
+                    assert!(matches!(
+                        decoded.delta_text,
+                        Some(super::DeltaText(std::borrow::Cow::Borrowed(_)))
+                    ));
+                }
+            }
+        }
+        assert!(
+            !fast_response_delta_json(br#"{"type":"response.output_text.delta","delta":null}"#)
+                .unwrap()
+                .nonempty_text
+        );
+        assert!(fast_response_delta_json(
+            br#"{"type":"response.output_text.delta","delta":"\uD800"}"#
+        )
+        .is_none());
+        assert!(fast_response_delta_json(
+            br#"{"type":"response.output_text.delta","delta":"\n","model":"gpt-other"}"#
+        )
+        .is_none());
     }
 
     #[test]

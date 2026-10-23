@@ -1,48 +1,19 @@
-import type { DocumentedCacheRetentionMinimum } from "../../api/types";
+import type { CacheSessionRecord } from "../../api/types";
+import type { UsageRow } from "./usageData";
 
-export function documentedCacheRetentionMinimum(
-  model: string | null | undefined,
-  cachedInputTokens: number | null | undefined,
-  cacheWriteInputTokens: number | null | undefined,
-  reportedCacheWriteTtl?: string | null,
-): DocumentedCacheRetentionMinimum | null {
-  if (reportedCacheWriteTtl) return null;
-  if ((cachedInputTokens ?? 0) <= 0 && (cacheWriteInputTokens ?? 0) <= 0) return null;
-  return isGpt56OrLater(model) ? "30m" : null;
-}
-
-/** Provider-reported cache-write windows, or the documented OpenAI minimum when usage omits one. */
+/** A model name does not establish the selected provider's retention policy. */
 export function cacheWriteDurationWindows(
   ttl: string | null | undefined,
-  documented: DocumentedCacheRetentionMinimum | null,
 ): string[] {
-  const reported = (ttl ?? "")
+  return [...new Set((ttl ?? "")
     .split(",")
     .map((window) => window.trim().toLowerCase())
-    .filter((window) => /^\d{1,5}(?:ms|s|m|h|d)$/.test(window));
-  if (reported.length) return reported;
-  return documented === "30m" ? ["30m"] : [];
-}
-
-function isGpt56OrLater(model: string | null | undefined): boolean {
-  if (!model) return false;
-  return model.split(/[/:]/).some((part) => isGpt56OrLaterComponent(part));
-}
-
-function isGpt56OrLaterComponent(component: string): boolean {
-  const match = /^gpt-(\d+)(?:\.(\d+))?(.*)$/i.exec(component.trim());
-  if (!match) return false;
-  const major = Number(match[1]);
-  const minor = Number(match[2] ?? 0);
-  const suffix = match[3] ?? "";
-  if (suffix !== "" && suffix[0] !== "." && suffix[0] !== "-") return false;
-  if (suffix.startsWith(".") && !/^\.\d+(?:-|\.|$)/.test(suffix)) return false;
-  return major >= 6 || (major === 5 && minor >= 6);
+    .filter((window) => (cacheWindowMs(window) ?? 0) > 0))];
 }
 
 const CACHE_WINDOW_MS: Record<string, number> = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 };
 
-export type CacheLifetimeExpiry = "open" | "minimum_elapsed" | "elapsed" | "unknown";
+export type CacheLifetimeExpiry = "open" | "elapsed" | "unknown";
 
 export type CacheLifetime = {
   windows: string[];
@@ -51,23 +22,42 @@ export type CacheLifetime = {
   expiry: CacheLifetimeExpiry;
 };
 
-/** Estimate from the last cache write or read. A reported window wins; GPT-5.6+ falls back to a 30-minute minimum. */
+export type CacheTouch = { cacheWriteTtl: string | null; touchedAt: string };
+
+type CacheRequest = Pick<UsageRow, "clientContextId" | "candidateKind" | "candidateKey"
+  | "routedModel" | "requestedModel" | "cacheWriteTtl" | "time" | "cachedInputTokens" | "cacheWriteInputTokens">;
+
+/** A miss cannot move the last observed touch; other routes cannot supply it. */
+export function cacheTouchForRow(row: CacheRequest, sessions: readonly CacheSessionRecord[]): CacheTouch | null {
+  const own = (row.cachedInputTokens ?? 0) > 0 || (row.cacheWriteInputTokens ?? 0) > 0
+    ? { cacheWriteTtl: row.cacheWriteTtl, touchedAt: row.time } : null;
+  const session = row.clientContextId ? sessions.find((candidate) =>
+    candidate.clientContextId === row.clientContextId
+    && candidate.candidateKind === row.candidateKind
+    && candidate.candidateId === row.candidateKey
+    && candidate.model === (row.routedModel ?? row.requestedModel)
+    && Number.isFinite(Date.parse(candidate.touchedAt))) : null;
+  if (!session) return own;
+  if (own && Date.parse(own.touchedAt) > Date.parse(session.touchedAt)) {
+    return { touchedAt: own.touchedAt, cacheWriteTtl: own.cacheWriteTtl ?? session.cacheWriteTtl };
+  }
+  return { cacheWriteTtl: session.cacheWriteTtl, touchedAt: session.touchedAt };
+}
+
+/** Mixed windows describe independent prefixes, not one cache with the longest TTL. */
 export function cacheLifetime(
-  input: { model: string | null; cacheWriteTtl: string | null; touchedAt: string },
+  input: CacheTouch,
   nowMs: number,
 ): CacheLifetime {
-  const documented = documentedCacheRetentionMinimum(input.model, 1, 0, input.cacheWriteTtl);
-  const windows = cacheWriteDurationWindows(input.cacheWriteTtl, documented);
-  const durations = windows.map(cacheWindowMs).filter((value): value is number => value != null);
-  const windowMs = durations.length ? Math.max(...durations) : null;
+  const windows = cacheWriteDurationWindows(input.cacheWriteTtl);
+  const windowMs = windows.length === 1 ? cacheWindowMs(windows[0]!) : null;
   const touchedMs = Date.parse(input.touchedAt);
-  if (windowMs == null || !Number.isFinite(touchedMs)) {
+  if (windowMs == null || !Number.isFinite(touchedMs) || !Number.isFinite(nowMs)) {
     return { windows, windowMs: null, remainingMs: null, expiry: "unknown" };
   }
-  const remainingMs = Math.max(0, windowMs - (nowMs - touchedMs));
-  const openAiMinimum = windows.length === 1 && windows[0] === "30m" && (documented === "30m" || isGpt56OrLater(input.model));
+  const remainingMs = Math.max(0, windowMs - Math.max(0, nowMs - touchedMs));
   if (remainingMs > 0) return { windows, windowMs, remainingMs, expiry: "open" };
-  return { windows, windowMs, remainingMs: 0, expiry: openAiMinimum ? "minimum_elapsed" : "elapsed" };
+  return { windows, windowMs, remainingMs: 0, expiry: "elapsed" };
 }
 
 function cacheWindowMs(window: string): number | null {

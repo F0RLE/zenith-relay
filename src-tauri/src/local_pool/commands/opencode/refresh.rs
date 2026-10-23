@@ -1,20 +1,21 @@
 use super::*;
 
-fn owns_connection(config: &Map<String, Value>, base: &str, secret: &str) -> bool {
+fn owns_connection(config: &Map<String, Value>, base_url: &str, secret: &str) -> bool {
     let Some(providers) = config.get("provider").and_then(Value::as_object) else {
         return false;
     };
     let mut found = false;
-    for (protocol, id, npm) in protocols::GROUPS {
-        let Some(provider) = providers.get(id) else {
+    for (protocol, provider_id, npm) in protocols::GROUPS {
+        let Some(provider) = providers.get(provider_id) else {
             continue;
         };
         found = true;
-        let Ok(base) = protocols::base_url(base, protocol) else {
+        let Ok(protocol_base_url) = protocols::base_url(base_url, protocol) else {
             return false;
         };
         if provider.get("npm").and_then(Value::as_str) != Some(npm)
-            || provider.pointer("/options/baseURL").and_then(Value::as_str) != Some(&base)
+            || provider.pointer("/options/baseURL").and_then(Value::as_str)
+                != Some(&protocol_base_url)
             || provider.pointer("/options/apiKey").and_then(Value::as_str) != Some(secret)
         {
             return false;
@@ -37,7 +38,11 @@ pub(in crate::local_pool) async fn refresh_active_opencode_catalog(
     if !config
         .get("provider")
         .and_then(Value::as_object)
-        .is_some_and(|providers| providers.keys().any(|id| protocols::managed_id(id)))
+        .is_some_and(|providers| {
+            providers
+                .keys()
+                .any(|provider_id| protocols::managed_id(provider_id))
+        })
     {
         return Ok(());
     }
@@ -52,6 +57,7 @@ pub(in crate::local_pool) async fn refresh_active_opencode_catalog(
         )
     };
     let mut updated = false;
+    let mut model_order = Vec::new();
     if let Some(key) = key {
         if let Some(secret) = secret_store::load(&key.secret_ref)? {
             if owns_connection(&config, &snapshot.gateway.base_url, &secret) {
@@ -61,6 +67,12 @@ pub(in crate::local_pool) async fn refresh_active_opencode_catalog(
                     &secret,
                     &snapshot.gateway.models,
                 )?;
+                model_order = snapshot
+                    .gateway
+                    .models
+                    .iter()
+                    .map(|model| model.id.clone())
+                    .collect();
                 updated = true;
             }
         }
@@ -71,24 +83,21 @@ pub(in crate::local_pool) async fn refresh_active_opencode_catalog(
                 continue;
             };
             if owns_connection(&config, &source.base_url, &secret) {
-                protocols::apply_source(
-                    &mut config,
-                    source,
-                    &secret,
-                    &state.model_metadata_catalog(),
-                    false,
-                )?;
+                let metadata = state.model_metadata_catalog();
+                protocols::apply_source(&mut config, source, &secret, &metadata, false)?;
+                model_order = metadata.order_model_ids(&source.models);
                 updated = true;
                 break;
             }
         }
     }
     // A newer login or external edit owns the file once its endpoint or key changes.
-    if updated
-        && fs::read(&path).ok().as_deref() == Some(original.as_slice())
-        && read_config(&path)? != config
-    {
-        write_config(&path, &config)?;
+    if updated && fs::read(&path).ok().as_deref() == Some(original.as_slice()) {
+        let serialized = serialize_config_with_model_order(&config, &model_order)
+            .map_err(LocalPoolError::invalid_state)?;
+        if format!("{serialized}\n").as_bytes() != original {
+            write_config_with_model_order(&path, &config, &model_order)?;
+        }
     }
     Ok(())
 }

@@ -17,9 +17,11 @@ struct ModelsResponse {
 #[derive(Deserialize)]
 struct ModelEntry {
     slug: String,
+    #[serde(default)]
+    visibility: Option<String>,
 }
 
-pub(super) fn parse_models(body: &[u8]) -> Result<Vec<String>, ModelDiscoveryFailure> {
+pub(super) fn parse_siwc_models(body: &[u8]) -> Result<Vec<String>, ModelDiscoveryFailure> {
     let response: ModelsResponse = serde_json::from_slice(body)
         .map_err(|_| ModelDiscoveryFailure::new(ModelDiscoveryFailureCode::InvalidResponse))?;
     if response.models.len() > MAX_MODELS {
@@ -28,7 +30,40 @@ pub(super) fn parse_models(body: &[u8]) -> Result<Vec<String>, ModelDiscoveryFai
         ));
     }
     let mut seen = HashSet::new();
-    Ok(response
+    let mut models = Vec::new();
+    for model in response.models {
+        if model.visibility.as_deref() != Some("list") {
+            continue;
+        }
+        if model.slug.is_empty()
+            || model.slug.len() > MAX_MODEL_SLUG_BYTES
+            || model.slug.chars().any(char::is_control)
+        {
+            return Err(ModelDiscoveryFailure::new(
+                ModelDiscoveryFailureCode::InvalidResponse,
+            ));
+        }
+        if seen.insert(crate::model_id_key(&model.slug)) {
+            models.push(model.slug);
+        }
+    }
+    Ok(models)
+}
+
+pub(super) fn parse_models(
+    models_response_body: &[u8],
+) -> Result<Vec<String>, ModelDiscoveryFailure> {
+    let models_response: ModelsResponse = serde_json::from_slice(models_response_body)
+        .map_err(|_| ModelDiscoveryFailure::new(ModelDiscoveryFailureCode::InvalidResponse))?;
+    if models_response.models.len() > MAX_MODELS {
+        return Err(ModelDiscoveryFailure::new(
+            ModelDiscoveryFailureCode::InvalidResponse,
+        ));
+    }
+    // Discovery retains inventory. All presentation uses the shared model
+    // catalog, independently of upstream array positions or picker priorities.
+    let mut seen = HashSet::new();
+    Ok(models_response
         .models
         .into_iter()
         // This endpoint is the account's authoritative model inventory.
@@ -40,7 +75,7 @@ pub(super) fn parse_models(body: &[u8]) -> Result<Vec<String>, ModelDiscoveryFai
             (!slug.is_empty()
                 && slug.len() <= MAX_MODEL_SLUG_BYTES
                 && !slug.chars().any(char::is_control)
-                && seen.insert(slug.to_string()))
+                && seen.insert(crate::model_id_key(slug)))
             .then(|| slug.to_string())
         })
         .collect())

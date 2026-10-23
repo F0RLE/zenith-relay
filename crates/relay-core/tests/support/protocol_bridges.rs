@@ -1,4 +1,123 @@
 use super::*;
+use zenith_relay_core::{
+    ResponseAffinityBinding, ResponseAffinityStore, RuntimeContinuationStores,
+};
+
+#[derive(Default)]
+struct MemoryAffinityStore {
+    bindings: Mutex<std::collections::BTreeMap<String, ResponseAffinityBinding>>,
+}
+
+impl ResponseAffinityStore for MemoryAffinityStore {
+    fn load(&self, now_ms: u64) -> Result<Vec<ResponseAffinityBinding>, String> {
+        Ok(self
+            .bindings
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|binding| binding.expires_at_ms > now_ms)
+            .cloned()
+            .collect())
+    }
+
+    fn find(&self, key: &str, now_ms: u64) -> Result<Option<ResponseAffinityBinding>, String> {
+        Ok(self
+            .bindings
+            .lock()
+            .unwrap()
+            .get(key)
+            .filter(|binding| binding.expires_at_ms > now_ms)
+            .cloned())
+    }
+
+    fn upsert(&self, binding: &ResponseAffinityBinding) -> Result<(), String> {
+        self.bindings
+            .lock()
+            .unwrap()
+            .insert(binding.key.clone(), binding.clone());
+        Ok(())
+    }
+
+    fn delete(&self, key: &str) -> Result<(), String> {
+        self.bindings.lock().unwrap().remove(key);
+        Ok(())
+    }
+
+    fn delete_candidate(&self, candidate_id: &str) -> Result<(), String> {
+        self.bindings
+            .lock()
+            .unwrap()
+            .retain(|_, binding| binding.candidate_id != candidate_id);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn responses_bridge_tool_roundtrip_survives_runtime_replacement() {
+    let (upstream, state) = spawn_messages_upstream().await;
+    let options = GatewayRuntimeOptions {
+        continuation_state: Some(RuntimeContinuationStores::default()),
+        response_affinity_store: Some(Arc::new(MemoryAffinityStore::default())),
+        ..Default::default()
+    };
+    let (first, _) = spawn_messages_bridge_gateway_with_options(
+        &upstream.base_url,
+        &state,
+        MessagesReasoningMode::Budget,
+        options.clone(),
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{}/v1/responses", first.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model":"claude-test", "input":"Use the file tool", "reasoning":{"effort":"high"},
+            "tools":[{"type":"function","name":"read_file","parameters":{"type":"object"}}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: Value = response.json().await.unwrap();
+    let previous = response["id"].as_str().unwrap();
+    let call_id = response["output"][0]["call_id"].as_str().unwrap();
+    drop(first);
+
+    let (replacement, events) = spawn_messages_bridge_gateway_with_options(
+        &upstream.base_url,
+        &state,
+        MessagesReasoningMode::Budget,
+        options,
+    )
+    .await;
+    let response = client
+        .post(format!("{}/v1/responses", replacement.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model":"claude-test", "previous_response_id":previous,
+            "input":[{"type":"function_call_output", "call_id":call_id, "output":"synthetic result"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: Value = response.json().await.unwrap();
+    assert_eq!(
+        response["output"][0]["content"][0]["text"],
+        "Tool result received"
+    );
+    let bodies = state.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0]["messages"][1]["content"][0]["type"], "tool_use");
+    assert_eq!(
+        bodies[0]["messages"][2]["content"][0]["tool_use_id"],
+        call_id
+    );
+    let recorded = events.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert!(recorded[0].success);
+}
 
 #[tokio::test]
 async fn responses_to_messages_bridge_translates_tool_turn_and_preserves_continuation() {
@@ -114,6 +233,7 @@ async fn bridge_skips_incompatible_candidate_without_cooling_it() {
             name: format!("Synthetic {id}"),
             base_url: format!("{}/v1", upstream.base_url),
             api_key: SOURCE_KEY.to_string(),
+            proxy_url: None,
             wire_api: WireApi::Messages,
             models: vec!["claude-test".to_string()],
         },
@@ -464,6 +584,145 @@ async fn responses_to_gemini_bridge_uses_native_routes_for_plain_and_streaming_r
 }
 
 #[tokio::test]
+async fn responses_to_gemini_full_history_restores_native_tool_state() {
+    for stream in [false, true] {
+        let native_parts = json!([
+            {"text":"","thoughtSignature":"synthetic-empty-signature"},
+            {"text":"","thought":true},
+            {"text":"Working ","thoughtSignature":"synthetic-text-signature"},
+            {"text":"now"},
+            {"text":" "},
+            {"functionCall":{"name":"apply_patch","args":{"input":"synthetic patch"}},
+                "thoughtSignature":"synthetic-call-signature"}
+        ]);
+        let state = UpstreamState::default();
+        let mut upstream_parts = native_parts.as_array().unwrap().clone();
+        upstream_parts.insert(0, json!({"text":""}));
+        upstream_parts.insert(4, json!({"text":""}));
+        upstream_parts.push(json!({"text":""}));
+        let upstream_parts = Value::Array(upstream_parts);
+        let handler = move |State(state): State<UpstreamState>,
+                            uri: axum::http::Uri,
+                            Json(body): Json<Value>| {
+            let upstream_parts = upstream_parts.clone();
+            async move {
+                let continued = body["contents"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|content| content["parts"].as_array().unwrap())
+                    .any(|part| part.get("functionResponse").is_some());
+                state.bodies.lock().unwrap().push(body);
+                let parts = if continued {
+                    json!([{"text":"Done"}])
+                } else {
+                    upstream_parts
+                };
+                let reply = json!({"candidates":[{
+                    "content":{"role":"model","parts":parts},"finishReason":"STOP"
+                }],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":3,"totalTokenCount":5}});
+                if uri.path().ends_with(":streamGenerateContent") {
+                    Response::builder()
+                        .header(CONTENT_TYPE, "text/event-stream")
+                        .body(Body::from(format!("data: {reply}\n\n")))
+                        .unwrap()
+                } else {
+                    Json(reply).into_response()
+                }
+            }
+        };
+        let upstream = spawn(
+            Router::new()
+                .route(
+                    "/v1/models/gemini-test:generateContent",
+                    post(handler.clone()),
+                )
+                .route(
+                    "/v1/models/gemini-test:streamGenerateContent",
+                    post(handler),
+                )
+                .with_state(state.clone()),
+        )
+        .await;
+        let (gateway, events) = spawn_gemini_bridge_gateway(&upstream.base_url).await;
+        let client = reqwest::Client::new();
+        let first_input = json!([
+            {"type":"message","role":"developer","content":[{"type":"input_text","text":"Synthetic instruction"}]},
+            {"type":"message","role":"developer","content":[{"type":"input_text","text":"Synthetic rule"}]},
+            {"type":"message","role":"user","content":[{"type":"input_text","text":"Synthetic environment"}]},
+            {"type":"message","role":"user","content":[{"type":"input_text","text":"Create a file"}]}
+        ]);
+        let mut request = json!({
+            "model":"gemini-test","input":first_input,"stream":stream,
+            "tools":[{"type":"custom","name":"apply_patch","format":{"type":"text"}}]
+        });
+        let first = client
+            .post(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let response: Value = if stream {
+            first
+                .text()
+                .await
+                .unwrap()
+                .lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+                .find(|event| event["type"] == "response.completed")
+                .unwrap()["response"]
+                .clone()
+        } else {
+            first.json().await.unwrap()
+        };
+        let mut output = response["output"].as_array().unwrap().clone();
+        let call_id = output
+            .iter()
+            .find(|item| item["type"] == "custom_tool_call")
+            .unwrap()["call_id"]
+            .clone();
+        for item in &mut output {
+            if item["type"] == "message" {
+                item.as_object_mut().unwrap().remove("status");
+                for part in item["content"].as_array_mut().unwrap() {
+                    part.as_object_mut().unwrap().remove("annotations");
+                }
+            }
+        }
+        request["input"].as_array_mut().unwrap().extend(output);
+        request["input"].as_array_mut().unwrap().push(json!({
+            "type":"custom_tool_call_output","call_id":call_id,"output":"Synthetic patch applied"
+        }));
+        let continued = client
+            .post(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(continued.status(), StatusCode::OK);
+        assert!(continued.text().await.unwrap().contains("Done"));
+        let bodies = state.bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies[1]["contents"][1]["parts"], native_parts);
+        assert_eq!(
+            bodies[1]["contents"][2]["parts"][0]["functionResponse"],
+            json!({"name":"apply_patch","response":{"output":"Synthetic patch applied"}})
+        );
+        assert_eq!(
+            bodies[1]["systemInstruction"],
+            bodies[0]["systemInstruction"]
+        );
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|event| event.success));
+    }
+}
+
+#[tokio::test]
 async fn gemini_terminal_without_output_reaches_responses_bridge_and_native_stream() {
     for (name, upstream_body, reason) in [
         (
@@ -740,7 +999,7 @@ async fn responses_to_messages_bridge_preserves_effort_and_rejects_incompatible_
 }
 
 #[tokio::test]
-async fn legacy_disabled_reasoning_mode_is_ignored_and_opaque_tools_are_rejected() {
+async fn legacy_disabled_reasoning_mode_is_ignored_and_unmatched_forced_tools_are_rejected() {
     let (upstream, state) = spawn_messages_upstream().await;
     let (gateway, _) =
         spawn_messages_bridge_gateway(&upstream.base_url, &state, MessagesReasoningMode::Disabled)
@@ -766,7 +1025,8 @@ async fn legacy_disabled_reasoning_mode_is_ignored_and_opaque_tools_are_rejected
         .json(&json!({
             "model": "claude-test",
             "input": "tool",
-            "tools": [{"type": "web_search"}]
+            "tools": [{"type": "function", "name": "lookup", "parameters": {"type": "object"}}],
+            "tool_choice": {"type": "function", "name": "missing"}
         }))
         .send()
         .await
@@ -774,11 +1034,32 @@ async fn legacy_disabled_reasoning_mode_is_ignored_and_opaque_tools_are_rejected
     assert_eq!(opaque_tool.status(), StatusCode::BAD_REQUEST);
     let body: Value = opaque_tool.json().await.unwrap();
     assert_eq!(body["error"]["code"], "adapter_tool_unsupported");
-    let requests = state.requests.lock().unwrap();
+    {
+        let requests = state.requests.lock().unwrap();
+        let bodies = state.bodies.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0]["thinking"]["type"], "adaptive");
+    }
+
+    // A hosted tool has no Messages equivalent: reject it before upstream I/O.
+    let hosted_only = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "claude-test",
+            "input": "tool",
+            "tools": [{"type": "web_search"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hosted_only.status(), StatusCode::BAD_REQUEST);
+    let body: Value = hosted_only.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "adapter_tool_unsupported");
+    assert_eq!(state.requests.lock().unwrap().len(), 1);
     let bodies = state.bodies.lock().unwrap();
-    assert_eq!(requests.len(), 1);
     assert_eq!(bodies.len(), 1);
-    assert_eq!(bodies[0]["thinking"]["type"], "adaptive");
 }
 
 #[tokio::test]

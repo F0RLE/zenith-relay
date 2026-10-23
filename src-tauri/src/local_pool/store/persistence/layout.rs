@@ -13,19 +13,13 @@ struct LegacyMetadata {
     schema_version: u32,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LegacyRemoteTargets {
-    active: Option<crate::local_pool::models::RemoteTargetRecord>,
-}
-
 pub(super) fn load_legacy_state(root: &Path) -> Result<Option<PersistedState>> {
     let metadata_path = root.join("metadata.json");
     if !metadata_path.exists() {
         if LEGACY_STATE_FILES
             .iter()
             .skip(1)
-            .any(|name| root.join(name).exists())
+            .any(|file_name| root.join(file_name).exists())
         {
             return Err(LocalPoolError::new(
                 ErrorCode::RecoveryRequired,
@@ -44,25 +38,21 @@ pub(super) fn load_legacy_state(root: &Path) -> Result<Option<PersistedState>> {
             ),
         ));
     }
-    let remote_target = if root.join("remote-target.json").exists() {
-        read_legacy_json::<LegacyRemoteTargets>(&root.join("remote-target.json"))?.active
-    } else {
-        None
-    };
     Ok(Some(PersistedState {
         gateway: read_legacy_json(&root.join("settings.json"))?,
         sources: read_legacy_json(&root.join("connections.json"))?,
         accounts: read_legacy_json(&root.join("accounts.json"))?,
+        account_trash: Vec::new(),
         keys: read_legacy_json(&root.join("pool-keys.json"))?,
         automations: read_legacy_json(&root.join("automations.json"))?,
-        remote_target,
-        ownership_operation: None,
         refresh_revisions: None,
         source_refresh_revisions: None,
     }))
 }
 
-fn read_legacy_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
+pub(in crate::local_pool::store) fn read_legacy_json<T: DeserializeOwned>(
+    path: &Path,
+) -> Result<T> {
     let metadata = fs::symlink_metadata(path).map_err(legacy_io_error)?;
     if !metadata.is_file()
         || metadata.file_type().is_symlink()
@@ -86,8 +76,8 @@ fn read_legacy_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
 }
 
 pub(in crate::local_pool::store) fn cleanup_legacy_state_files(root: &Path) -> Result<()> {
-    for name in LEGACY_STATE_FILES {
-        let path = root.join(name);
+    for file_name in LEGACY_STATE_FILES {
+        let path = root.join(file_name);
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
                 fs::remove_file(&path).map_err(legacy_io_error)?;

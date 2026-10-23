@@ -6,8 +6,8 @@ use super::parse::{
 };
 use super::session::OAuthPendingSession;
 use super::{
-    CALLBACK_PATH, CODEX_OAUTH_CALLBACK_PORTS, CODEX_OAUTH_CLIENT_ID, CODEX_OAUTH_ISSUER,
-    CODEX_OAUTH_ORIGINATOR, CODEX_OAUTH_SCOPE, MAX_TOKEN_RESPONSE_BYTES,
+    OAuthClientKind, BASIS_POINTS_OAUTH_REDIRECT_URI, CALLBACK_PATH, CODEX_OAUTH_CALLBACK_PORTS,
+    CODEX_OAUTH_ISSUER, CODEX_OAUTH_ORIGINATOR, MAX_TOKEN_RESPONSE_BYTES,
 };
 use crate::local_pool::random_urlsafe;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -30,7 +30,9 @@ use zenith_relay_core::ProxyConfig;
 
 #[derive(Clone)]
 pub struct CodexOAuthClient {
-    http: reqwest::Client,
+    pub(super) http: reqwest::Client,
+    pub(super) siwc: Option<super::siwc::SiwcPending>,
+    kind: OAuthClientKind,
     authorize_endpoint: Url,
     token_endpoint: Url,
 }
@@ -42,15 +44,26 @@ impl CodexOAuthClient {
     }
 
     pub fn new_with_proxy(proxy: Option<&ProxyConfig>) -> Result<Self, OAuthError> {
+        Self::new_with_proxy_for_kind(OAuthClientKind::Codex, proxy)
+    }
+
+    pub fn new_with_proxy_for_kind(
+        kind: OAuthClientKind,
+        proxy: Option<&ProxyConfig>,
+    ) -> Result<Self, OAuthError> {
         let issuer = Url::parse(CODEX_OAUTH_ISSUER)
             .map_err(|_| OAuthError::new(OAuthErrorCode::InvalidConfiguration, false))?;
         let authorize_endpoint = issuer
-            .join("oauth/authorize")
+            .join(kind.authorize_path())
             .map_err(|_| OAuthError::new(OAuthErrorCode::InvalidConfiguration, false))?;
         let token_endpoint = issuer
-            .join("oauth/token")
+            .join(if kind == OAuthClientKind::Siwc {
+                "api/accounts/oauth/token"
+            } else {
+                "oauth/token"
+            })
             .map_err(|_| OAuthError::new(OAuthErrorCode::InvalidConfiguration, false))?;
-        Self::with_endpoints_and_proxy(authorize_endpoint, token_endpoint, proxy)
+        Self::with_endpoints_and_proxy_for_kind(kind, authorize_endpoint, token_endpoint, proxy)
     }
 
     #[cfg(test)]
@@ -58,10 +71,16 @@ impl CodexOAuthClient {
         authorize_endpoint: Url,
         token_endpoint: Url,
     ) -> Result<Self, OAuthError> {
-        Self::with_endpoints_and_proxy(authorize_endpoint, token_endpoint, None)
+        Self::with_endpoints_and_proxy_for_kind(
+            OAuthClientKind::Codex,
+            authorize_endpoint,
+            token_endpoint,
+            None,
+        )
     }
 
-    fn with_endpoints_and_proxy(
+    fn with_endpoints_and_proxy_for_kind(
+        kind: OAuthClientKind,
         authorize_endpoint: Url,
         token_endpoint: Url,
         proxy: Option<&ProxyConfig>,
@@ -77,24 +96,65 @@ impl CodexOAuthClient {
         .build()
         .map_err(|_| OAuthError::new(OAuthErrorCode::InvalidConfiguration, false))?;
         Ok(Self {
+            siwc: None,
             http,
+            kind,
             authorize_endpoint,
             token_endpoint,
         })
     }
 
+    pub fn kind(&self) -> OAuthClientKind {
+        self.kind
+    }
+
+    pub fn for_kind(&self, kind: OAuthClientKind) -> Self {
+        let mut client = self.clone();
+        client.kind = kind;
+        client.authorize_endpoint.set_path(kind.authorize_path());
+        client
+            .token_endpoint
+            .set_path(if kind == OAuthClientKind::Siwc {
+                "/api/accounts/oauth/token"
+            } else {
+                "/oauth/token"
+            });
+        client
+    }
+
     pub fn begin(&self, callback_port: u16, now_ms: u64) -> Result<OAuthStart, OAuthError> {
-        if !CODEX_OAUTH_CALLBACK_PORTS.contains(&callback_port) {
+        if (self.kind == OAuthClientKind::Codex
+            && !CODEX_OAUTH_CALLBACK_PORTS.contains(&callback_port))
+            || (self.kind == OAuthClientKind::Siwc && callback_port == 0)
+        {
             return Err(OAuthError::new(OAuthErrorCode::InvalidCallbackPort, false));
         }
 
-        let redirect_uri = format!("http://localhost:{callback_port}{CALLBACK_PATH}");
+        let redirect_uri = match self.kind {
+            OAuthClientKind::Codex => format!("http://localhost:{callback_port}{CALLBACK_PATH}"),
+            OAuthClientKind::Siwc => format!("http://127.0.0.1:{callback_port}{CALLBACK_PATH}"),
+            OAuthClientKind::ExcelBps => BASIS_POINTS_OAUTH_REDIRECT_URI.to_string(),
+        };
         let code_verifier = random_urlsafe(64);
         let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
-        let state = random_urlsafe(32);
+        let oauth_state = match self.kind {
+            OAuthClientKind::Codex | OAuthClientKind::Siwc => random_urlsafe(32),
+            OAuthClientKind::ExcelBps => format!("bps.{}.PC", random_urlsafe(32)),
+        };
         let pending = OAuthPendingSession {
+            siwc: if self.kind == OAuthClientKind::Siwc {
+                let mut siwc = self
+                    .siwc
+                    .clone()
+                    .ok_or_else(|| OAuthError::new(OAuthErrorCode::InvalidConfiguration, false))?;
+                siwc.nonce = random_urlsafe(32);
+                Some(siwc)
+            } else {
+                None
+            },
+            client_kind: self.kind,
             redirect_uri,
-            state,
+            state: oauth_state,
             code_verifier,
             created_at_ms: now_ms,
         };
@@ -103,15 +163,46 @@ impl CodexOAuthClient {
         authorization_url
             .query_pairs_mut()
             .append_pair("response_type", "code")
-            .append_pair("client_id", CODEX_OAUTH_CLIENT_ID)
+            .append_pair(
+                "client_id",
+                pending
+                    .siwc
+                    .as_ref()
+                    .map_or(self.kind.client_id(), |s| s.client_id.as_str()),
+            )
             .append_pair("redirect_uri", &pending.redirect_uri)
-            .append_pair("scope", CODEX_OAUTH_SCOPE)
+            .append_pair("scope", self.kind.scope())
             .append_pair("code_challenge", &code_challenge)
             .append_pair("code_challenge_method", "S256")
-            .append_pair("id_token_add_organizations", "true")
-            .append_pair("codex_cli_simplified_flow", "true")
-            .append_pair("originator", CODEX_OAUTH_ORIGINATOR)
             .append_pair("state", &pending.state);
+        if self.kind == OAuthClientKind::Codex {
+            authorization_url
+                .query_pairs_mut()
+                .append_pair("id_token_add_organizations", "true")
+                .append_pair("codex_cli_simplified_flow", "true")
+                .append_pair("originator", CODEX_OAUTH_ORIGINATOR);
+        } else if let Some(siwc) = pending.siwc.as_ref() {
+            authorization_url
+                .query_pairs_mut()
+                .append_pair("resource", super::siwc::RESOURCE)
+                .append_pair("ext_agent_host_id", &siwc.host_id)
+                .append_pair("nonce", &siwc.nonce);
+            if siwc.client_id == zenith_relay_core::providers::chatgpt::SIWC_BOOTSTRAP_CLIENT_ID {
+                authorization_url
+                    .query_pairs_mut()
+                    .append_pair("agent_name_hint", "Zenith Relay");
+            }
+            if siwc.consent {
+                authorization_url
+                    .query_pairs_mut()
+                    .append_pair("prompt", "consent");
+            }
+        } else {
+            authorization_url
+                .query_pairs_mut()
+                .append_pair("audience", "https://api.openai.com/v1")
+                .append_pair("platform", "PC");
+        }
 
         Ok(OAuthStart {
             authorization_url,
@@ -125,24 +216,38 @@ impl CodexOAuthClient {
         callback: OAuthCallback,
         now_ms: u64,
     ) -> Result<OAuthTokenSet, OAuthError> {
+        if pending.client_kind() != self.kind {
+            return Err(OAuthError::new(OAuthErrorCode::InvalidConfiguration, false));
+        }
+        let issued_client_id = callback
+            .client_id
+            .as_deref()
+            .unwrap_or(self.kind.client_id());
+        if self.kind == OAuthClientKind::Siwc
+            && (!super::siwc::valid_client_id(issued_client_id) || pending.siwc.is_none())
+        {
+            return Err(OAuthError::new(OAuthErrorCode::InvalidCallback, false));
+        }
         let (response, permit) = management_http_gate()
             .send(
                 &self.http,
                 self.http
-                    .post(self.token_endpoint.clone())
+                    .post(self.token_endpoint())
                     .form(&AuthorizationCodeRequest {
                         grant_type: "authorization_code",
                         code: callback.code(),
                         redirect_uri: &pending.redirect_uri,
-                        client_id: CODEX_OAUTH_CLIENT_ID,
+                        client_id: issued_client_id,
                         code_verifier: &pending.code_verifier,
+                        resource: (self.kind == OAuthClientKind::Siwc)
+                            .then_some(super::siwc::RESOURCE),
                     }),
                 HttpClass::Auth,
             )
             .await
             .map_err(|_| OAuthError::new(OAuthErrorCode::Transport, true))?;
         let status = response.status();
-        let body = collect_limited(response, MAX_TOKEN_RESPONSE_BYTES)
+        let token_response_body = collect_limited(response, MAX_TOKEN_RESPONSE_BYTES)
             .await
             .map_err(|error| match error {
                 LimitedBodyError::Transport => OAuthError::new(OAuthErrorCode::Transport, true),
@@ -154,13 +259,32 @@ impl CodexOAuthClient {
         if !status.is_success() {
             return Err(OAuthError {
                 code: OAuthErrorCode::TokenEndpointRejected,
-                provider_code: token_refresh_provider_error_code(&body),
+                provider_code: token_refresh_provider_error_code(&token_response_body),
                 http_status: Some(status.as_u16()),
                 retryable: status.is_server_error() || status.as_u16() == 429,
             });
         }
 
-        parse_token_response(&body, now_ms)
+        if let Some(siwc) = pending.siwc.as_ref() {
+            let registration = super::siwc::SiwcRegistration {
+                client_id: issued_client_id.to_string(),
+                host_id: siwc.host_id.clone(),
+                issuer: super::siwc::ISSUER.into(),
+                subject: siwc.subject.clone().unwrap_or_default(),
+                scopes: Vec::new(),
+                earliest_refresh_at_ms: None,
+                requires_reauthentication: false,
+            };
+            return self
+                .validate_siwc_tokens(
+                    &token_response_body,
+                    registration,
+                    Some(&siwc.nonce),
+                    now_ms,
+                )
+                .await;
+        }
+        self.parse_tokens(&token_response_body, now_ms)
     }
 
     pub async fn exchange_refresh_token(
@@ -168,30 +292,36 @@ impl CodexOAuthClient {
         refresh_token: &str,
         now_ms: u64,
     ) -> Result<OAuthTokenSet, TokenRefreshFailure> {
+        if self.kind == OAuthClientKind::Siwc {
+            return Err(TokenRefreshFailure::new(
+                TokenRefreshFailureKind::Transient,
+                "siwc_registration_required",
+            ));
+        }
         validate_token(refresh_token).map_err(|_| {
             TokenRefreshFailure::new(
                 TokenRefreshFailureKind::Transient,
                 error_codes::INVALID_REFRESH_TOKEN,
             )
         })?;
+        let request = self.http.post(self.token_endpoint());
+        let payload = RefreshTokenRequest {
+            client_id: self.kind.client_id(),
+            grant_type: "refresh_token",
+            refresh_token,
+        };
+        let request = match self.kind {
+            OAuthClientKind::Codex => request.json(&payload),
+            OAuthClientKind::ExcelBps | OAuthClientKind::Siwc => request.form(&payload),
+        };
         let (response, permit) = management_http_gate()
-            .send(
-                &self.http,
-                self.http
-                    .post(self.token_endpoint.clone())
-                    .json(&RefreshTokenRequest {
-                        client_id: CODEX_OAUTH_CLIENT_ID,
-                        grant_type: "refresh_token",
-                        refresh_token,
-                    }),
-                HttpClass::Auth,
-            )
+            .send(&self.http, request, HttpClass::Auth)
             .await
             .map_err(|_| {
                 TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "transport")
             })?;
         let status = response.status();
-        let body = collect_limited(response, MAX_TOKEN_RESPONSE_BYTES)
+        let token_response_body = collect_limited(response, MAX_TOKEN_RESPONSE_BYTES)
             .await
             .map_err(|error| match error {
                 LimitedBodyError::Transport => {
@@ -204,7 +334,7 @@ impl CodexOAuthClient {
             })?;
         drop(permit);
         if !status.is_success() {
-            let code = token_refresh_provider_error_code(&body)
+            let code = token_refresh_provider_error_code(&token_response_body)
                 .unwrap_or_else(|| "token_refresh_failed".into());
             return Err(TokenRefreshFailure::new(
                 token_refresh_failure_kind(&code),
@@ -212,9 +342,30 @@ impl CodexOAuthClient {
             ));
         }
 
-        parse_token_response(&body, now_ms).map_err(|_| {
-            TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "invalid_response")
-        })
+        self.parse_tokens(&token_response_body, now_ms)
+            .map_err(|_| {
+                TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "invalid_response")
+            })
+    }
+
+    fn parse_tokens(
+        &self,
+        token_response_body: &[u8],
+        now_ms: u64,
+    ) -> Result<OAuthTokenSet, OAuthError> {
+        let tokens = parse_token_response(token_response_body, now_ms)?;
+        self.kind
+            .validate_token_hints(tokens.id_token(), Some(tokens.access_token()))
+            .map_err(|_| OAuthError::new(OAuthErrorCode::InvalidResponse, false))?;
+        Ok(tokens)
+    }
+
+    fn token_endpoint(&self) -> Url {
+        let mut endpoint = self.token_endpoint.clone();
+        if self.kind == OAuthClientKind::ExcelBps {
+            endpoint.query_pairs_mut().append_pair("unified", "true");
+        }
+        endpoint
     }
 }
 
@@ -239,3 +390,6 @@ impl TokenRefreshAdapter for CodexOAuthClient {
         })
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -21,7 +21,7 @@ export async function initI18n(systemLocale?: string | null) {
     },
     returnNull: false,
   });
-  i18next.on("languageChanged", (value) => localStorage.setItem(LANGUAGE_KEY, normalizeLanguage(value)));
+  i18next.on("languageChanged", (languageCode) => localStorage.setItem(LANGUAGE_KEY, normalizeLanguage(languageCode)));
 
   return i18next;
 }

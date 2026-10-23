@@ -55,29 +55,24 @@ impl RotationEngine {
         request: &RotationRequest,
         now_ms: u64,
     ) -> Result<RotationLease, AdmissionError> {
-        let selection = self
-            .select(request, now_ms)
+        // Exclusive access keeps this snapshot stable until the lease is inserted.
+        let (ready, ordinary_alternatives) = self.selection_candidates(request, now_ms);
+        let group = self.selection_group(&ready, request, now_ms);
+        let selected = self
+            .choose_for_request(request, &group)
             .ok_or(AdmissionError::NoEligibleCandidate)?;
         if !matches!(
-            self.candidate_availability(request, &selection.candidate_id, now_ms),
+            self.candidate_availability(request, &selected.id, now_ms),
             CandidateAvailability::Ready { .. }
         ) {
             return Err(AdmissionError::CandidateChanged);
         }
-        let Some(runtime) = self.candidates.get(&selection.candidate_id) else {
+        let Some(runtime) = self.candidates.get(&selected.id) else {
             return Err(AdmissionError::InvalidCandidate);
         };
         if runtime.candidate.max_concurrency > 0
             && runtime.in_flight >= runtime.candidate.max_concurrency
         {
-            return Err(AdmissionError::CandidateChanged);
-        }
-        let (ready, ordinary_alternatives) = self.selection_candidates(request, now_ms);
-        let group = self.selection_group(&ready, now_ms);
-        let selected = self
-            .choose_for_request(request, &group)
-            .ok_or(AdmissionError::NoEligibleCandidate)?;
-        if selected.id != selection.candidate_id {
             return Err(AdmissionError::CandidateChanged);
         }
         let next_lease_id = self
@@ -154,7 +149,12 @@ impl RotationEngine {
                     .copied(),
             },
         );
-        self.advance_weighted_credit(&request.route_key, &group, &candidate_id);
+        self.advance_rotation_state(
+            &request.route_key,
+            &group,
+            &candidate_id,
+            request.owner.is_none(),
+        );
         Ok(RotationLease {
             lease_id,
             candidate_id,
@@ -172,8 +172,9 @@ impl RotationEngine {
         self.begin_dispatch_internal(lease_id, budget, false)
     }
 
-    /// Only the transport controller can retain a lease for an explicitly
-    /// rejected auth/endpoint repair. Budget charging follows every fence.
+    /// Only the transport controller can retain a lease for a proven repair
+    /// or a completed read-only tool turn. Every new generation is charged
+    /// after the same availability, scope, and authorization fences.
     pub(crate) fn begin_transport_dispatch(
         &mut self,
         lease_id: LeaseId,
@@ -196,8 +197,8 @@ impl RotationEngine {
         }
         // A verified auth/endpoint repair can retain the lease, but it must
         // present a newly charged, monotonically increasing wire dispatch.
-        if pending.attempt_id.is_some_and(|previous| {
-            !allow_retained_lease || previous.0 > u64::from(budget.dispatches())
+        if pending.attempt_id.is_some_and(|previous_dispatch| {
+            !allow_retained_lease || previous_dispatch.0 > u64::from(budget.dispatches())
         }) {
             return Err(DispatchStartError::AlreadyStarted);
         }
@@ -259,6 +260,17 @@ impl RotationEngine {
         budget: &RequestBudget,
         now_ms: u64,
     ) -> Result<RotationSettlement, SettlementError> {
+        self.settle_with_latency(lease_id, observation, budget, now_ms, None)
+    }
+
+    pub(crate) fn settle_with_latency(
+        &mut self,
+        lease_id: LeaseId,
+        observation: AttemptObservation,
+        budget: &RequestBudget,
+        now_ms: u64,
+        first_output_latency_ms: Option<u64>,
+    ) -> Result<RotationSettlement, SettlementError> {
         let Some(pending) = self.leases.get(&lease_id) else {
             return Err(SettlementError::UnknownLease);
         };
@@ -285,7 +297,15 @@ impl RotationEngine {
                 .and_then(|runtime| runtime.candidate.routes.get(&lease.route_key))
                 == Some(&lease.route);
         self.release_capacity(&lease);
-        if observation_current
+        let health = observation.health;
+        let (circuit, health_counted) = if observation_current {
+            self.update_circuit(&lease, health, now_ms)
+        } else {
+            // A removed candidate may be re-added under the same display ID.
+            // Its old outcome can release only its own capacity lease.
+            (self.circuit(&lease.candidate_id, &lease.route_key), false)
+        };
+        if health_counted
             && !lease.recovery
             && lease.attempt_id.is_some()
             && matches!(observation.health, HealthObservation::Success)
@@ -305,15 +325,19 @@ impl RotationEngine {
         // Health origin and replay evidence are independent. The driver must
         // prove a countable upstream failure; that never authorizes a retry
         // of possibly accepted work.
-        let health = observation.health;
-        let circuit = if observation_current {
-            self.update_circuit(&lease, health, now_ms)
-        } else {
-            // A removed candidate may be re-added under the same display ID.
-            // Its old outcome can release only its own capacity lease; it must
-            // not publish health or cooldown state into the new identity.
-            self.circuit(&lease.candidate_id, &lease.route_key)
-        };
+        if health_counted {
+            self.observe_health(&lease.candidate_id, &lease.route_key, health, now_ms);
+            if health == HealthObservation::Success {
+                if let Some(latency_ms) = first_output_latency_ms {
+                    self.observe_first_output_latency(
+                        &lease.candidate_id,
+                        &lease.route_key,
+                        latency_ms,
+                        now_ms,
+                    );
+                }
+            }
+        }
         let retry = match health {
             HealthObservation::Success => RetryDecision::Stop(RetryStopReason::Succeeded),
             HealthObservation::Busy

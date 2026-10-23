@@ -22,8 +22,8 @@ function account(overrides: Partial<AccountSummary>): AccountSummary {
     enabled: true,
     inPool: true,
     draining: false,
-    authState: { state: "ready" },
-    health: "ready",
+    authState: { state: "active" },
+    health: "healthy",
     operationalStatus: "rotation",
     models: [],
     allowedModels: [],
@@ -63,21 +63,21 @@ describe("account identity display", () => {
     const visible = account({ id: "visible", label: "Imported name", identityHint: "v1e2a3c4b5l6", secretAvailable: true });
     const hidden = account({ id: "hidden", label: "Another imported name", identityHint: "h1d2e3n4t5y6", secretAvailable: false });
     const index = buildAccountIdentityIndex([visible, hidden]);
-    const revealedIdentities = { "remote:visible": "visible@example.test", "remote:hidden": "hidden@example.test" };
+    const revealedIdentities = { "local:visible": "visible@example.test", "local:hidden": "hidden@example.test" };
 
-    expect(displayAccountIdentity({ index, accountId: visible.id, fallbackLabel: null, identitiesVisible: true, canReveal: true, mode: "remote", revealedIdentities })).toBe("visible@example.test");
-    expect(displayAccountIdentity({ index, accountId: hidden.id, fallbackLabel: null, identitiesVisible: true, canReveal: true, mode: "remote", revealedIdentities })).toBe("h1d2e3n4t5y6");
-    expect(displayAccountIdentity({ index, accountId: visible.id, fallbackLabel: null, identitiesVisible: false, canReveal: true, mode: "remote", revealedIdentities })).toBe("v1e2a3c4b5l6");
+    expect(displayAccountIdentity({ index, accountId: visible.id, fallbackLabel: null, identitiesVisible: true, canReveal: true, mode: "local", revealedIdentities })).toBe("visible@example.test");
+    expect(displayAccountIdentity({ index, accountId: hidden.id, fallbackLabel: null, identitiesVisible: true, canReveal: true, mode: "local", revealedIdentities })).toBe("h1d2e3n4t5y6");
+    expect(displayAccountIdentity({ index, accountId: visible.id, fallbackLabel: null, identitiesVisible: false, canReveal: true, mode: "local", revealedIdentities })).toBe("v1e2a3c4b5l6");
   });
 
   test("keeps revealed identities scoped to the active relay mode", () => {
     expect(replaceRevealedAccountIdentities(
-      { "local:one": "local@example.test", "remote:stale": "stale@example.test" },
-      "remote",
-      [{ accountId: "two", identity: "remote@example.test" }],
+      { "hosted:one": "hosted@example.test", "local:stale": "stale@example.test" },
+      "local",
+      [{ accountId: "two", identity: "local@example.test" }],
     )).toEqual({
-      "local:one": "local@example.test",
-      "remote:two": "remote@example.test",
+      "hosted:one": "hosted@example.test",
+      "local:two": "local@example.test",
     });
     expect(revealableAccountIds([
       account({ id: "available", secretAvailable: true }),

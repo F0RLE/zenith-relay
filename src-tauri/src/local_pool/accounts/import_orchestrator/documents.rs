@@ -49,9 +49,10 @@ pub(crate) fn read_import_documents(paths: Vec<PathBuf>) -> LocalResult<Vec<Stri
     for path in paths {
         if !path
             .extension()
-            .and_then(|value| value.to_str())
-            .is_some_and(|value| {
-                value.eq_ignore_ascii_case("json") || value.eq_ignore_ascii_case("txt")
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension_text| {
+                extension_text.eq_ignore_ascii_case("json")
+                    || extension_text.eq_ignore_ascii_case("txt")
             })
         {
             return Err(LocalPoolError::new(
@@ -110,7 +111,7 @@ pub(in crate::local_pool::accounts) fn normalize_import_input(
             let document = input.documents.into_iter().next().ok_or_else(|| {
                 LocalPoolError::new(ErrorCode::InvalidState, "import document is missing")
             })?;
-            return Ok((document, None));
+            return Ok((document.trim().to_string(), None));
         }
         let content = combine_import_documents(&input.documents)
             .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.message))?;

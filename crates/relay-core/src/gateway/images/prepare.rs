@@ -9,12 +9,9 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use futures_util::stream;
-use multer::{Constraints, Multipart, SizeLimit};
+use multer::Multipart;
 use serde_json::{Map, Value};
 use std::io;
-
-const MAX_IMAGE_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
-const MAX_IMAGE_UPLOAD_BYTES: u64 = 20 * 1024 * 1024;
 
 #[expect(
     clippy::result_large_err,
@@ -24,16 +21,16 @@ pub(super) async fn prepare_request(
     runtime: &GatewayRuntime,
     key: &AuthenticatedKey,
     headers: &HeaderMap,
-    body: Body,
+    request_body: Body,
     endpoint: ImageEndpoint,
 ) -> Result<PreparedImageRequest, Response<Body>> {
-    let raw_body = axum::body::to_bytes(body, MAX_IMAGE_REQUEST_BODY_BYTES)
+    let raw_body = axum::body::to_bytes(request_body, usize::MAX)
         .await
         .map_err(|_| {
             api_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "image request body exceeds 64 MiB",
-                error_codes::REQUEST_TOO_LARGE,
+                StatusCode::BAD_REQUEST,
+                "request body could not be read",
+                error_codes::INVALID_REQUEST,
             )
         })?;
     let content_type = headers
@@ -41,7 +38,7 @@ pub(super) async fn prepare_request(
         .cloned()
         .unwrap_or_else(|| HeaderValue::from_static("application/json"));
     let content_type_text = content_type.to_str().unwrap_or_default();
-    let (mut fields, input_images, mask_image) = if endpoint == ImageEndpoint::Edits
+    let (mut request_fields, input_images, mask_image) = if endpoint == ImageEndpoint::Edits
         && content_type_text
             .to_ascii_lowercase()
             .starts_with("multipart/form-data")
@@ -51,7 +48,7 @@ pub(super) async fn prepare_request(
         parse_json(&raw_body, endpoint)?
     };
 
-    let prompt = fields
+    let prompt = request_fields
         .get("prompt")
         .and_then(Value::as_str)
         .map(str::trim)
@@ -71,7 +68,7 @@ pub(super) async fn prepare_request(
         ));
     }
 
-    let requested_model = fields
+    let requested_model = request_fields
         .get("model")
         .and_then(Value::as_str)
         .map(str::trim)
@@ -97,9 +94,9 @@ pub(super) async fn prepare_request(
             error_codes::INVALID_IMAGE_MODEL,
         ));
     }
-    fields.insert("model".to_string(), Value::String(resolved_model.clone()));
+    request_fields.insert("model".to_string(), Value::String(resolved_model.clone()));
 
-    let stream = match fields.get("stream") {
+    let stream = match request_fields.get("stream") {
         Some(Value::Bool(stream)) => *stream,
         Some(_) => {
             return Err(api_error(
@@ -110,7 +107,7 @@ pub(super) async fn prepare_request(
         }
         None => false,
     };
-    let response_format = fields
+    let response_format = request_fields
         .get("response_format")
         .and_then(Value::as_str)
         .map(str::trim)
@@ -128,7 +125,7 @@ pub(super) async fn prepare_request(
     Ok(PreparedImageRequest {
         requested_model,
         resolved_model,
-        fields,
+        fields: request_fields,
         input_images,
         mask_image,
         raw_body,
@@ -140,8 +137,11 @@ pub(super) async fn prepare_request(
 }
 
 #[allow(clippy::result_large_err)]
-fn parse_json(body: &[u8], endpoint: ImageEndpoint) -> Result<ParsedImageFields, Response<Body>> {
-    let Ok(Value::Object(fields)) = serde_json::from_slice(body) else {
+fn parse_json(
+    request_body_bytes: &[u8],
+    endpoint: ImageEndpoint,
+) -> Result<ParsedImageFields, Response<Body>> {
+    let Ok(Value::Object(request_fields)) = serde_json::from_slice(request_body_bytes) else {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "request body must be a JSON object",
@@ -149,15 +149,15 @@ fn parse_json(body: &[u8], endpoint: ImageEndpoint) -> Result<ParsedImageFields,
         ));
     };
     if endpoint == ImageEndpoint::Generations {
-        return Ok((fields, Vec::new(), None));
+        return Ok((request_fields, Vec::new(), None));
     }
 
     let mut images = Vec::new();
-    if let Some(image) = fields.get("image").and_then(Value::as_str) {
+    if let Some(image) = request_fields.get("image").and_then(Value::as_str) {
         push_non_empty(&mut images, image);
     }
-    if let Some(values) = fields.get("images").and_then(Value::as_array) {
-        for image in values {
+    if let Some(image_entries) = request_fields.get("images").and_then(Value::as_array) {
+        for image in image_entries {
             if let Some(url) = image
                 .get("image_url")
                 .and_then(Value::as_str)
@@ -167,21 +167,21 @@ fn parse_json(body: &[u8], endpoint: ImageEndpoint) -> Result<ParsedImageFields,
             }
         }
     }
-    let mask = fields.get("mask").and_then(|mask| {
+    let mask = request_fields.get("mask").and_then(|mask| {
         mask.get("image_url")
             .and_then(Value::as_str)
             .or_else(|| mask.as_str())
             .map(str::trim)
-            .filter(|value| !value.is_empty())
+            .filter(|mask_value| !mask_value.is_empty())
             .map(str::to_string)
     });
-    Ok((fields, images, mask))
+    Ok((request_fields, images, mask))
 }
 
 #[allow(clippy::result_large_err)]
 pub(super) async fn parse_multipart(
     content_type: &str,
-    body: Bytes,
+    multipart_bytes: Bytes,
 ) -> Result<ParsedImageFields, Response<Body>> {
     let boundary = multer::parse_boundary(content_type).map_err(|_| {
         api_error(
@@ -190,54 +190,51 @@ pub(super) async fn parse_multipart(
             error_codes::INVALID_REQUEST,
         )
     })?;
-    let size_limit = SizeLimit::new()
-        .whole_stream(MAX_IMAGE_REQUEST_BODY_BYTES as u64)
-        .per_field(MAX_IMAGE_UPLOAD_BYTES);
-    let constraints = Constraints::new().size_limit(size_limit);
-    let body = stream::once(async move { Ok::<Bytes, io::Error>(body) });
-    let mut multipart = Multipart::with_constraints(body, boundary, constraints);
-    let mut fields = Map::new();
+    let multipart_body_stream =
+        stream::once(async move { Ok::<Bytes, io::Error>(multipart_bytes) });
+    let mut multipart = Multipart::new(multipart_body_stream, boundary);
+    let mut multipart_fields = Map::new();
     let mut images = Vec::new();
     let mut mask = None;
 
     while let Some(field) = multipart.next_field().await.map_err(multipart_error)? {
-        let name = field.name().unwrap_or_default().to_string();
+        let field_name = field.name().unwrap_or_default().to_string();
         let file_name = field.file_name().map(str::to_string);
         let content_type = field.content_type().map(ToString::to_string);
-        let bytes = field.bytes().await.map_err(multipart_error)?;
-        if matches!(name.as_str(), "image" | "image[]" | "mask") && file_name.is_some() {
-            if bytes.is_empty() {
+        let field_bytes = field.bytes().await.map_err(multipart_error)?;
+        if matches!(field_name.as_str(), "image" | "image[]" | "mask") && file_name.is_some() {
+            if field_bytes.is_empty() {
                 return Err(api_error(
                     StatusCode::BAD_REQUEST,
                     "uploaded image must not be empty",
                     error_codes::INVALID_REQUEST,
                 ));
             }
-            let data_url = image_data_url(&bytes, content_type.as_deref());
-            if name == "mask" {
+            let data_url = image_data_url(&field_bytes, content_type.as_deref());
+            if field_name == "mask" {
                 mask = Some(data_url);
             } else {
                 images.push(data_url);
             }
             continue;
         }
-        let value = String::from_utf8(bytes.to_vec()).map_err(|_| {
+        let field_text = String::from_utf8(field_bytes.to_vec()).map_err(|_| {
             api_error(
                 StatusCode::BAD_REQUEST,
                 "multipart text fields must be UTF-8",
                 error_codes::INVALID_REQUEST,
             )
         })?;
-        let value = value.trim();
-        if value.is_empty() {
+        let field_text = field_text.trim();
+        if field_text.is_empty() {
             continue;
         }
-        if matches!(name.as_str(), "image" | "image[]") {
-            images.push(value.to_string());
-        } else if name == "mask" {
-            mask = Some(value.to_string());
-        } else if matches!(name.as_str(), "stream") {
-            let parsed = match value.to_ascii_lowercase().as_str() {
+        if matches!(field_name.as_str(), "image" | "image[]") {
+            images.push(field_text.to_string());
+        } else if field_name == "mask" {
+            mask = Some(field_text.to_string());
+        } else if matches!(field_name.as_str(), "stream") {
+            let parsed = match field_text.to_ascii_lowercase().as_str() {
                 "1" | "true" | "yes" | "on" => true,
                 "0" | "false" | "no" | "off" => false,
                 _ => {
@@ -248,50 +245,39 @@ pub(super) async fn parse_multipart(
                     ))
                 }
             };
-            fields.insert(name, Value::Bool(parsed));
-        } else if matches!(name.as_str(), "n" | "output_compression" | "partial_images") {
-            let parsed = value.parse::<u64>().map_err(|_| {
+            multipart_fields.insert(field_name, Value::Bool(parsed));
+        } else if matches!(
+            field_name.as_str(),
+            "n" | "output_compression" | "partial_images"
+        ) {
+            let parsed = field_text.parse::<u64>().map_err(|_| {
                 api_error(
                     StatusCode::BAD_REQUEST,
                     "numeric multipart fields must be positive integers",
                     error_codes::INVALID_REQUEST,
                 )
             })?;
-            fields.insert(name, Value::Number(parsed.into()));
+            multipart_fields.insert(field_name, Value::Number(parsed.into()));
         } else {
-            fields.insert(name, Value::String(value.to_string()));
+            multipart_fields.insert(field_name, Value::String(field_text.to_string()));
         }
     }
-    Ok((fields, images, mask))
+    Ok((multipart_fields, images, mask))
 }
 
-fn multipart_error(error: multer::Error) -> Response<Body> {
-    let too_large = matches!(
-        error,
-        multer::Error::FieldSizeExceeded { .. } | multer::Error::StreamSizeExceeded { .. }
-    );
+fn multipart_error(_error: multer::Error) -> Response<Body> {
     api_error(
-        if too_large {
-            StatusCode::PAYLOAD_TOO_LARGE
-        } else {
-            StatusCode::BAD_REQUEST
-        },
-        if too_large {
-            "multipart image upload is too large"
-        } else {
-            "multipart image upload is invalid"
-        },
-        if too_large {
-            error_codes::REQUEST_TOO_LARGE
-        } else {
-            error_codes::INVALID_REQUEST
-        },
+        StatusCode::BAD_REQUEST,
+        "multipart image upload is invalid",
+        error_codes::INVALID_REQUEST,
     )
 }
 
 fn image_data_url(bytes: &[u8], content_type: Option<&str>) -> String {
     let content_type = content_type
-        .filter(|value| !value.trim().is_empty() && *value != "application/octet-stream")
+        .filter(|content_type| {
+            !content_type.trim().is_empty() && *content_type != "application/octet-stream"
+        })
         .unwrap_or_else(|| detect_image_content_type(bytes));
     format!("data:{content_type};base64,{}", STANDARD.encode(bytes))
 }
@@ -310,9 +296,9 @@ fn detect_image_content_type(bytes: &[u8]) -> &'static str {
     }
 }
 
-fn push_non_empty(target: &mut Vec<String>, value: &str) {
-    let value = value.trim();
-    if !value.is_empty() {
-        target.push(value.to_string());
+fn push_non_empty(target: &mut Vec<String>, text_value: &str) {
+    let text_value = text_value.trim();
+    if !text_value.is_empty() {
+        target.push(text_value.to_string());
     }
 }

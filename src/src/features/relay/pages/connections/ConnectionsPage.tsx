@@ -1,33 +1,30 @@
 import { useEffect, useState } from "react";
-import { LogIn, Plus, RefreshCw, Upload } from "lucide-react";
+import { LogIn, Plus, Upload } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { relayCommands } from "../../api/commands";
 import type { AccountSummary, SourceSummary, WakeTask } from "../../api/types";
-import { Button, IconButton, PageHeader, Tabs } from "../../components/Ui";
-import { useOAuthSignIn } from "../../hooks/useOAuthSignIn";
+import { Button, PageHeader, Tabs } from "../../components/Ui";
+import { useAccountSignIn } from "../../hooks/useAccountSignIn";
 import { useSourceRefresh } from "../../hooks/useSourceRefresh";
+import { useSourceStats } from "../../hooks/useSourceStats";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { AccountProxyDialog, BulkProxyDialog, ProxyImportDialog, ProxyStorageView } from "./ProxyDialogs";
-import { connectionInitialView, connectionViews, reconcileRemoteConnectionView, type ConnectionView } from "./connectionViewState";
+import { connectionInitialView, connectionViews, type ConnectionView } from "./connectionViewState";
 import { AccountsTable } from "./AccountsTable";
+import { AccountTrashView } from "./AccountTrashView";
 import { SourceDialog } from "./SourceDialog";
 import { AccountExportDialog } from "./AccountExportDialog";
 import { AutomationDialog, AutomationsList } from "./AutomationsView";
-import { OAuthAccountSetupDialog, OAuthDialog } from "./OAuthDialogs";
-import { DeployDialog, RemoteDialog, RemoteView } from "./RemoteViews";
-import { SourcesTable } from "./SourcesTable";
+import { SourcesList } from "./SourcesList";
 import { useProxyChecks } from "./useProxyChecks";
-import { rememberSignInProxyId } from "./signInProxyPreference";
-type DialogKind = "source" | "automation" | "remote" | "deploy" | "accountProxy" | "bulkProxies" | "proxyImport" | "oauthSetup" | "accountExport" | null;
+type DialogKind = "source" | "automation" | "accountProxy" | "bulkProxies" | "proxyImport" | "accountExport" | null;
 const CONNECTIONS_VIEW_REQUEST = "relay.connections.requestedView";
+const EMPTY_SOURCES: SourceSummary[] = [];
 export function ConnectionsPage({ onImport }: { onImport: () => void }) {
   const { t } = useTranslation();
   const { mode, runtime, busy, perform } = useRelayState();
   const [view, setView] = useState<ConnectionView>(() => connectionInitialView(
-    mode,
-    mode === "zenith" ? "sources" : "accounts",
+    "accounts",
     null,
-    runtime?.capabilities.features ?? [],
   ));
   const [dialog, setDialog] = useState<DialogKind>(null);
   const [query, setQuery] = useState("");
@@ -36,101 +33,57 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
   const [proxyAccount, setProxyAccount] = useState<AccountSummary | null>(null);
   const [bulkProxyAccountIds, setBulkProxyAccountIds] = useState<string[]>([]);
   const [exportAccountIds, setExportAccountIds] = useState<string[]>([]);
-  const [oauthAccountId, setOauthAccountId] = useState<string | null>(null);
-  const [signedInWithProxy, setSignedInWithProxy] = useState(false);
   const [proxyRevision, setProxyRevision] = useState(0);
   const proxyChecks = useProxyChecks(mode);
-  const oauth = useOAuthSignIn((result) => {
-    setOauthAccountId(result.account.id);
-    setDialog("oauthSetup");
-  });
-  const startOAuth = () => {
-    setSignedInWithProxy(false);
-    void oauth.start(false);
-  };
-  const useSignInProxy = (proxyId: string) => {
-    rememberSignInProxyId(proxyId);
-    setSignedInWithProxy(true);
-    void oauth.start(true, undefined, proxyId);
-  };
-  const reauthenticateAccount = (account: AccountSummary) => {
-    setSignedInWithProxy(false);
-    void oauth.start(false, account.id);
-  };
-  const remoteFeatures = new Set(runtime?.capabilities.features ?? []);
-  const supports = (feature: string) => mode !== "remote" || remoteFeatures.has(feature);
-  const availableViews = connectionViews(mode, runtime?.capabilities.features ?? []);
-  const canImportAccounts = mode !== "remote" || supports("account_batch_import");
-  const canManageProxies = supports("account_proxies");
-  const canExportAccounts = supports("account_export");
-  const showSourceToolbar = view === "sources" && Boolean(runtime?.sources.length);
+  const signIn = useAccountSignIn();
+  const startOAuth = () => signIn.start();
+  const availableViews = connectionViews();
+  const { stats: sourceStats, refresh: refreshSourceStats } = useSourceStats(mode, view === "sources" ? runtime?.sources ?? EMPTY_SOURCES : EMPTY_SOURCES);
 
   useEffect(() => {
-    const requested = mode === "zenith" ? null : sessionStorage.getItem(CONNECTIONS_VIEW_REQUEST);
-    setView((current) => connectionInitialView(mode, current, requested, runtime?.capabilities.features ?? []));
+    const requested = sessionStorage.getItem(CONNECTIONS_VIEW_REQUEST);
+    setView((previousView) => connectionInitialView(previousView, requested));
     setDialog(null);
     setEditingSource(null);
     setEditingAutomation(null);
     setProxyAccount(null);
     setBulkProxyAccountIds([]);
     setExportAccountIds([]);
-    setOauthAccountId(null);
   }, [mode]);
 
   useEffect(() => setQuery(""), [mode, view]);
-
-  useEffect(() => {
-    if (mode !== "remote") return;
-    if (!runtime) {
-      setView((current) => reconcileRemoteConnectionView(mode, false, current));
-      return;
-    }
-    if (!availableViews.includes(view)) setView("remote");
-  }, [mode, runtime, view]);
 
   const tabLabels: Record<ConnectionView, string> = {
     accounts: t("connections.accounts"),
     sources: t("connections.sources"),
     proxies: t("proxies.storage"),
     automations: t("connections.automations"),
-    remote: t("connections.remoteServer"),
+    trash: t("trash.title"),
   };
-  const tabs = availableViews.map((id) => ({ id, label: tabLabels[id] }));
+  const tabs = availableViews.map((viewId) => ({ id: viewId, label: tabLabels[viewId] }));
 
   const primaryLabel = view === "accounts"
-    ? mode === "local" ? t("accounts.signIn") : t("connections.import")
+    ? t("accounts.signIn")
     : view === "proxies"
       ? t("proxies.import")
     : view === "sources"
       ? t("sources.add")
-      : view === "automations"
-        ? t("automations.add")
-        : runtime ? t("remote.refresh") : t("remote.connect");
+      : t("automations.add");
 
   const primaryAction = () => {
-    if (view === "accounts" && !canImportAccounts) return;
-    if (view === "accounts" && mode === "local") {
+    if (view === "accounts") {
       startOAuth();
-      return;
-    }
-    if (view === "accounts" && mode === "remote") {
-      onImport();
       return;
     }
     if (view === "proxies") {
       setDialog("proxyImport");
       return;
     }
-    if (view === "remote" && runtime) {
-      void perform("remote-refresh", relayCommands.refreshRemoteCapabilities, "feedback.refreshed", { backgroundRefresh: true });
-      return;
-    }
     setEditingSource(null);
     setEditingAutomation(null);
     setDialog(
       view === "sources" ? "source"
-          : view === "automations" ? "automation"
-            : "remote",
+          : view === "automations" ? "automation" : null,
     );
   };
   const { report: sourceRefreshReport, refresh: refreshSourceData, refreshOne: refreshSingleSource } = useSourceRefresh({
@@ -138,32 +91,30 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
     sources: runtime?.sources ?? [],
     resetKey: `${mode}:${view}`,
     perform,
+    refreshStats: refreshSourceStats,
   });
 
   return (
     <section className="relay-page relay-workspace-page" data-view={view}>
       <PageHeader
         title={t("nav.connections")}
-        navigation={<Tabs value={view} items={tabs} onChange={(id) => { if (id === "sources") sessionStorage.setItem(CONNECTIONS_VIEW_REQUEST, id); else sessionStorage.removeItem(CONNECTIONS_VIEW_REQUEST); setView(id as ConnectionView); }} label={t("connections.views")} />}
-        actions={
+        navigation={<Tabs value={view} items={tabs} onChange={(nextView) => { if (nextView === "sources") sessionStorage.setItem(CONNECTIONS_VIEW_REQUEST, nextView); else sessionStorage.removeItem(CONNECTIONS_VIEW_REQUEST); setView(nextView as ConnectionView); }} label={t("connections.views")} />}
+        actions={view === "trash" ? undefined :
           <>
-            {view === "accounts" && mode === "local" ? (
-              <Button variant="secondary" icon={<Upload aria-hidden />} disabled={!canImportAccounts} title={!canImportAccounts ? t("remote.capabilityUnavailable") : undefined} onClick={onImport}>
+            {view === "accounts" ? (
+              <Button variant="secondary" icon={<Upload aria-hidden />} onClick={onImport}>
                 {t("connections.import")}
               </Button>
             ) : null}
             <Button
               variant="primary"
               icon={view === "accounts"
-                ? mode === "local" ? <LogIn aria-hidden /> : <Upload aria-hidden />
+                ? <LogIn aria-hidden />
                 : view === "proxies"
                   ? <Upload aria-hidden />
-                  : view === "remote" && runtime
-                    ? <RefreshCw aria-hidden />
-                    : <Plus aria-hidden />}
-              busy={view === "accounts" && mode === "local" && busy === "oauth-start"}
-              disabled={view === "accounts" && !canImportAccounts}
-              title={view === "accounts" && !canImportAccounts ? t("remote.capabilityUnavailable") : undefined}
+                  : <Plus aria-hidden />}
+              busy={view === "accounts" && busy === "oauth-start"}
+              disabled={view === "sources" && Boolean(busy)}
               onClick={primaryAction}
             >
               {primaryLabel}
@@ -171,44 +122,29 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
           </>
         }
       />
-      {showSourceToolbar ? <div className="table-toolbar connections-toolbar relay-compact-content">
-        <label className="search-field">
-          <span className="sr-only">{t("common.search")}</span>
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("common.search")} />
-        </label>
-        {sourceRefreshReport ? <span className="table-toolbar-result" role="status">{t("sources.refreshResult", sourceRefreshReport)}</span> : null}
-        <IconButton label={t("sources.refreshData")} icon={<RefreshCw aria-hidden />} busy={busy === "sources-refresh-all"} disabled={busy === "sources-refresh-all"} onClick={refreshSourceData} />
-      </div> : null}
-
-      {view === "sources" ? <SourcesTable query={query} onEdit={(source) => { setEditingSource(source); setDialog("source"); }} onRefresh={refreshSingleSource} /> : null}
+      {view === "sources" ? <SourcesList query={query} onQuery={setQuery} sourceStats={sourceStats} refreshReport={sourceRefreshReport ? t("sources.refreshResult", sourceRefreshReport) : null} onEdit={(source) => { setEditingSource(source); setDialog("source"); }} onRefresh={refreshSingleSource} onRefreshSelected={refreshSourceData} onRefreshAll={() => refreshSourceData()} /> : null}
       {view === "accounts" ? (
         <AccountsTable
           query={query}
           onQuery={setQuery}
-          canImport={canImportAccounts}
-          canManageProxies={canManageProxies}
-          canExport={canExportAccounts}
           onImport={onImport}
           onSignIn={startOAuth}
-          onReauthenticate={reauthenticateAccount}
+          onReauthenticate={signIn.reauthenticate}
           onProxy={(account) => { setProxyAccount(account); setDialog("accountProxy"); }}
           onBulkProxies={(accountIds) => { setBulkProxyAccountIds(accountIds); setDialog("bulkProxies"); }}
           onExport={(accountIds) => { setExportAccountIds(accountIds); setDialog("accountExport"); }}
         />
       ) : null}
+      {view === "trash" ? <AccountTrashView /> : null}
       {view === "proxies" ? <ProxyStorageView revision={proxyRevision} diagnostics={proxyChecks} onImport={() => setDialog("proxyImport")} /> : null}
       {view === "automations" ? <AutomationsList onEdit={(task) => { setEditingAutomation(task); setDialog("automation"); }} /> : null}
-      {view === "remote" ? <RemoteView onConnect={() => setDialog("remote")} onDeploy={() => setDialog("deploy")} /> : null}
 
       {dialog === "source" ? <SourceDialog source={editingSource} onClose={() => { setDialog(null); setEditingSource(null); }} /> : null}
-      {oauth.flow ? <OAuthDialog flow={oauth.flow} onCancel={oauth.cancel} onUseProxy={oauth.flow.targetAccountId ? undefined : useSignInProxy} /> : null}
+      {signIn.dialogs}
       {dialog === "automation" ? <AutomationDialog task={editingAutomation} onClose={() => { setDialog(null); setEditingAutomation(null); }} /> : null}
-      {dialog === "remote" ? <RemoteDialog onClose={() => setDialog(null)} /> : null}
-      {dialog === "deploy" ? <DeployDialog onClose={() => setDialog(null)} /> : null}
       {dialog === "accountProxy" && proxyAccount ? <AccountProxyDialog account={proxyAccount} onClose={() => { setDialog(null); setProxyAccount(null); }} /> : null}
       {dialog === "bulkProxies" ? <BulkProxyDialog accountIds={bulkProxyAccountIds} onClose={() => setDialog(null)} /> : null}
-      {dialog === "proxyImport" ? <ProxyImportDialog diagnostics={proxyChecks} onImported={() => setProxyRevision((value) => value + 1)} onClose={() => setDialog(null)} /> : null}
-      {dialog === "oauthSetup" && oauthAccountId ? <OAuthAccountSetupDialog accountId={oauthAccountId} preserveProxy={signedInWithProxy} onClose={() => { setDialog(null); setOauthAccountId(null); setSignedInWithProxy(false); }} /> : null}
+      {dialog === "proxyImport" ? <ProxyImportDialog diagnostics={proxyChecks} onImported={() => setProxyRevision((revision) => revision + 1)} onClose={() => setDialog(null)} /> : null}
       {dialog === "accountExport" ? <AccountExportDialog accountIds={exportAccountIds} onClose={() => { setDialog(null); setExportAccountIds([]); }} /> : null}
       {busy ? <span className="sr-only" aria-live="polite">{t("common.working")}</span> : null}
     </section>

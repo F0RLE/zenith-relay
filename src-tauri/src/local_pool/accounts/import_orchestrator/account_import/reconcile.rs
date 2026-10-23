@@ -43,14 +43,26 @@ pub(super) fn reconcile_imported_credentials(
         provider_account_id,
         material.provider_user_id.as_deref(),
         material.email.as_deref(),
+        material.oauth_client_kind,
     )?;
     let local_account_id = existing_account
         .as_ref()
         .map(|account| account.account.id.clone())
         .unwrap_or_else(|| format!("account_{}", Uuid::new_v4().simple()));
+    if existing_account.is_some() && material.siwc_registration.is_some() {
+        return Err(ImportItemError::new(error_codes::DUPLICATE_ITEM, "SIWC registration already exists; sign in again on the existing connection instead of replacing its tokens"));
+    }
     let old_credential = credential_store
         .load(&local_account_id)
         .map_err(credential_item_error)?;
+    if old_credential
+        .as_ref()
+        .is_some_and(|stored| stored.oauth_client_kind() != material.oauth_client_kind)
+    {
+        return Err(ImportItemError::recovery(
+            "import cannot replace credentials from a different OAuth client",
+        ));
+    }
     let preserved_refresh_token = material.refresh_token.is_none()
         && old_credential
             .as_ref()
@@ -76,15 +88,13 @@ pub(super) fn reconcile_imported_credentials(
         .saturating_add(1);
     let subscription_active_until_ms = material.subscription_active_until_ms;
     let mut credentials = material.into_stored(&local_account_id, issued_at_ms, generation)?;
-    if let Some(previous) = old_credential.as_ref() {
-        credentials = credentials.fill_missing_login_from(previous);
-    }
-    if let Some(proxy_url) = old_credential
-        .as_ref()
-        .and_then(StoredCodexCredentials::proxy_url)
-    {
+    if let Some(previous_credentials) = old_credential.as_ref() {
         credentials = credentials
-            .with_proxy_url(Some(proxy_url.to_string()))
+            .fill_missing_login_from(previous_credentials)
+            .with_proxy_route(
+                previous_credentials.proxy_url().map(str::to_owned),
+                previous_credentials.bypass_common_proxy(),
+            )
             .map_err(credential_item_error)?;
     }
     let proxy = effective_proxy_config(settings, &credentials).map_err(proxy_item_error)?;

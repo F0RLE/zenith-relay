@@ -1,4 +1,4 @@
-use super::source::valid_payload;
+use super::source::valid_source_payload;
 use super::*;
 use crate::model_metadata::MetadataCacheEnvelope;
 use crate::pricing::CatalogRefreshKind;
@@ -36,8 +36,8 @@ impl CacheDir {
 impl Drop for CacheDir {
     fn drop(&mut self) {
         if let Ok(entries) = std::fs::read_dir(&self.0) {
-            for entry in entries.flatten() {
-                let _ = std::fs::remove_file(entry.path());
+            for directory_entry in entries.flatten() {
+                let _ = std::fs::remove_file(directory_entry.path());
             }
         }
         let _ = std::fs::remove_dir(&self.0);
@@ -239,7 +239,7 @@ fn compact_source_preserves_json_contract_and_validates_canonical_content() {
     assert_eq!(encoded["payload"], payload);
     let decoded: SourceEnvelope = serde_json::from_value(encoded).unwrap();
     decoded.validate(0).unwrap();
-    assert_eq!(decoded.parse_payload().unwrap(), payload);
+    assert_eq!(decoded.parse_source_payload().unwrap(), payload);
 
     // Stored whitespace is not part of the content hash. Old and new cache
     // writers remain compatible without trusting unchecked raw JSON.
@@ -249,7 +249,7 @@ fn compact_source_preserves_json_contract_and_validates_canonical_content() {
     envelope.payload =
         Arc::from(RawValue::from_string(r#"{"vendor/model":false}"#.into()).unwrap());
     assert_eq!(envelope.validate(0), Err(ModelMetadataError::InvalidCache));
-    envelope.revision = payload_hash(&envelope.parse_payload().unwrap()).unwrap();
+    envelope.revision = metadata_payload_hash(&envelope.parse_source_payload().unwrap()).unwrap();
     assert_eq!(envelope.validate(0), Err(ModelMetadataError::InvalidCache));
 }
 
@@ -486,11 +486,17 @@ fn retry_backoff_is_bounded_and_payload_shapes_are_validated() {
         state.fail(ModelMetadataError::Network, 1);
         assert_eq!(state.deadline(2, 100).at_ms, expected + 1);
     }
-    assert!(!valid_payload(
+    assert!(!valid_source_payload(
         1,
         &serde_json::json!({"vendor": {"models": {}}})
     ));
-    assert!(!valid_payload(2, &serde_json::json!({"data": []})));
-    assert!(!valid_payload(3, &serde_json::json!({"sample_spec": {}})));
-    assert!(!valid_payload(3, &serde_json::json!({"model": "invalid"})));
+    assert!(!valid_source_payload(2, &serde_json::json!({"data": []})));
+    assert!(!valid_source_payload(
+        3,
+        &serde_json::json!({"sample_spec": {}})
+    ));
+    assert!(!valid_source_payload(
+        3,
+        &serde_json::json!({"model": "invalid"})
+    ));
 }

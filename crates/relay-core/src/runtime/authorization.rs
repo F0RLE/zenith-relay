@@ -1,6 +1,18 @@
 use super::AuthorizedRequestError;
 use crate::scheduler::rotation::ExecutionCertainty;
 
+/// Metadata and admission ownership shared by the first dispatch and its
+/// proven authorization repair. Reusing it keeps retries on the same budget.
+#[derive(Clone, Copy)]
+pub(crate) struct AuthorizationDispatch<'a> {
+    pub(crate) client_version: Option<&'a str>,
+    pub(crate) identity_policy: super::AuthorizationIdentityPolicy,
+    pub(crate) turn_scope: Option<&'a super::CodexTurnStateScope<'a>>,
+    pub(crate) budget: Option<&'a crate::scheduler::rotation::SharedRequestBudget>,
+    pub(crate) lease: Option<&'a super::CandidateLease>,
+    pub(crate) usage_event: Option<(&'a crate::UsageEvent, std::time::Instant)>,
+}
+
 mod dispatch;
 mod prepare;
 
@@ -10,6 +22,7 @@ impl AuthorizedRequestError {
     /// known to be pre-send; never transparently replay an unknown outcome.
     pub(crate) fn execution_certainty(&self) -> ExecutionCertainty {
         match self {
+            Self::ProgressTimeout | Self::HeadersTimeout => ExecutionCertainty::Unknown,
             Self::Transport(error) if !error.is_connect() => ExecutionCertainty::Unknown,
             _ => ExecutionCertainty::NotSent,
         }
@@ -43,14 +56,18 @@ mod tests {
             identity: None,
             token_generation: None,
             token_revision: None,
+            account_plan_supported: true,
             agent_task_id: agent.task_id().map(str::to_string),
             agent_credential_fingerprint: Some(agent_credential_fingerprint(agent)),
             agent_identity_revision: Some(0),
         };
         let first = prepare(&agent, 1_000);
-        let next = prepare(&agent, 2_000);
-        assert_ne!(first.authorization, next.authorization);
-        assert_eq!(first.turn_state_credential(), next.turn_state_credential());
+        let later_authorization = prepare(&agent, 2_000);
+        assert_ne!(first.authorization, later_authorization.authorization);
+        assert_eq!(
+            first.turn_state_credential(),
+            later_authorization.turn_state_credential()
+        );
         let changed_task = prepare(&agent.with_task_id("another-task".into()).unwrap(), 2_000);
         assert_ne!(
             first.turn_state_credential(),

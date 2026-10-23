@@ -18,15 +18,15 @@ export type UsageBreakdown = {
   total: number | null;
 };
 
-function nonNegative(value: number | null): number | null {
-  return value == null ? null : Math.max(0, value);
+function nonNegativeTokenCount(tokenCount: number | null): number | null {
+  return tokenCount == null ? null : Math.max(0, tokenCount);
 }
 
 /** Projects provider usage into nested input/output components for display. */
 export function usageBreakdown(input: UsageBreakdownInput): UsageBreakdown {
-  const reportedInput = nonNegative(input.inputTokens);
-  const reportedCacheRead = nonNegative(input.cachedInputTokens);
-  const reportedCacheWrite = nonNegative(input.cacheWriteInputTokens);
+  const reportedInput = nonNegativeTokenCount(input.inputTokens);
+  const reportedCacheRead = nonNegativeTokenCount(input.cachedInputTokens);
+  const reportedCacheWrite = nonNegativeTokenCount(input.cacheWriteInputTokens);
   const inputTotal = reportedInput ?? (
     reportedCacheRead == null && reportedCacheWrite == null
       ? null
@@ -42,10 +42,10 @@ export function usageBreakdown(input: UsageBreakdownInput): UsageBreakdown {
   const uncachedInput = inputTotal == null
     ? null
     : inputTotal - (cacheRead ?? 0) - (cacheWrite ?? 0);
-  const outputTotal = nonNegative(input.outputTokens);
+  const outputTotal = nonNegativeTokenCount(input.outputTokens);
   const reasoning = outputTotal == null || input.reasoningTokens == null
-    ? nonNegative(input.reasoningTokens)
-    : Math.min(outputTotal, nonNegative(input.reasoningTokens) ?? 0);
+    ? nonNegativeTokenCount(input.reasoningTokens)
+    : Math.min(outputTotal, nonNegativeTokenCount(input.reasoningTokens) ?? 0);
 
   return {
     inputTotal,
@@ -55,7 +55,7 @@ export function usageBreakdown(input: UsageBreakdownInput): UsageBreakdown {
     outputTotal,
     reasoning,
     visibleOutput: outputTotal == null ? null : outputTotal - (reasoning ?? 0),
-    total: nonNegative(input.totalTokens) ?? (
+    total: nonNegativeTokenCount(input.totalTokens) ?? (
       inputTotal == null || outputTotal == null ? null : inputTotal + outputTotal
     ),
   };

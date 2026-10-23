@@ -11,7 +11,7 @@ use crate::local_pool::accounts::authority::{
     StoredRefreshAdapter,
 };
 use crate::local_pool::accounts::credentials::{
-    bearer_authorization, CredentialRefresh, CredentialStore, StoredCodexCredentials,
+    bearer_authorization, CredentialStore, StoredCodexCredentials,
 };
 use crate::local_pool::accounts::oauth::CodexOAuthClient;
 use crate::local_pool::accounts::proxy::effective_proxy_config;
@@ -32,13 +32,11 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, State};
-use zenith_relay_core::accounts::{
-    AccountAuthState, ReauthReason, TokenPersistenceAdapter, TokenRefreshFailureKind, TokenSet,
-};
+use zenith_relay_core::accounts::{AccountAuthState, ReauthReason, TokenSet};
 use zenith_relay_core::error_codes;
 use zenith_relay_core::providers::chatgpt::{
     is_agent_identity_task_invalid_failure, merge_subscription_metadata_at,
-    subscription_refresh_due, AgentIdentityCredential, CodexModelsClient, CodexQuotaClient,
+    subscription_refresh_due, AccountModelsClient, AgentIdentityCredential, CodexQuotaClient,
     CodexSubscriptionClient, CodexSubscriptionMetadata, ModelDiscoveryFailure,
     ModelDiscoveryFailureCode, QuotaRefreshOutcome,
 };
@@ -54,13 +52,12 @@ mod quota;
 mod reads;
 mod types;
 
-pub(in crate::local_pool::accounts) use credentials::reconcile_force_refreshed_account_record;
-#[cfg(test)]
-pub(in crate::local_pool::accounts) use credentials::{
-    restore_force_refreshed_account_record, rollback_force_refreshed_before_authority,
-};
+pub(in crate::local_pool::accounts) use credentials::reconcile_registered_account_record;
+pub(crate) use credentials::sync_account_profile_bindings;
 pub(crate) use profile::sync_managed_account_profile;
-pub(crate) use quota::{prepare_account_credentials, prepare_preserved_remote_account_credentials};
+pub(crate) use quota::prepare_account_credentials;
+#[cfg(test)]
+pub(in crate::local_pool) use quota::quota_refresh_source;
 pub(in crate::local_pool::accounts) use quota::{
     refresh_account_quotas, refresh_manual_account_quota,
 };
@@ -80,19 +77,16 @@ pub(in crate::local_pool) use types::PreparedAccountAuthorization;
 pub(crate) use types::PreparedAccountCredentials;
 pub use types::{
     AccountQuotaOutcome, AccountQuotaRefreshItemResult, AccountQuotaRefreshResponse,
-    AccountQuotaRefreshStatus, ConfirmAccountImportResponse, CredentialRefreshResult,
-    CredentialRefreshStatus, ImportItemResult,
+    AccountQuotaRefreshStatus, ConfirmAccountImportResponse, ImportItemResult,
 };
 pub(in crate::local_pool::accounts) use types::{
     QUOTA_COMMAND_TIMEOUT_OVERHEAD, QUOTA_REFRESH_BATCH_SIZE, TOKEN_REFRESH_SKEW_MS,
 };
 
 #[cfg(test)]
+pub(in crate::local_pool::accounts) use credentials::is_credential_refresh_error_code;
 pub(in crate::local_pool::accounts) use credentials::{
-    classify_manual_refresh_failure, is_credential_refresh_error_code,
-};
-pub(in crate::local_pool::accounts) use credentials::{
-    persist_manual_refresh_failure, persisted_token_generation_is_newer, token_set_is_newer,
+    persist_authorization_failure, persisted_token_generation_is_newer, token_set_is_newer,
 };
 pub(in crate::local_pool::accounts) use types::MANAGED_PROFILE_OBSERVATION_LOCK;
 
@@ -153,7 +147,7 @@ async fn project_registered_account(
     let authority_state_changed = token_set_is_newer(authoritative_tokens, tokens)
         || authoritative_auth_state != AccountAuthState::Active;
     if authority_state_changed
-        && reconcile_force_refreshed_account_record(
+        && reconcile_registered_account_record(
             state,
             account_id,
             tokens,
@@ -200,20 +194,6 @@ pub async fn refresh_local_account_quota(
     quota.map_err(Into::into)
 }
 
-/// Explicitly exercises the stored refresh token even when the current access
-/// token is still usable. This is an account-health check requested by the
-/// user, not a routing prerequisite.
-#[tauri::command]
-pub async fn force_refresh_local_account_credentials(
-    account_id: String,
-    state: State<'_, DesktopState>,
-) -> CommandResult<CredentialRefreshResult> {
-    let _mutation = state.setup_guard().await;
-    credentials::force_refresh_account_credentials(&state, &account_id)
-        .await
-        .map_err(Into::into)
-}
-
 #[tauri::command]
 pub async fn refresh_all_local_account_quotas(
     app: AppHandle,
@@ -223,10 +203,11 @@ pub async fn refresh_all_local_account_quotas(
         .store()?
         .accounts()
         .iter()
-        .filter(|account| account.remote_location.is_none())
+        .filter(|account| account.recovery.is_none())
         .map(|account| account.account.id.clone())
         .collect::<Vec<_>>();
-    let results = refresh_account_quotas(&state, account_ids.clone()).await;
+    let targets = quota::quota_refresh_targets(&state, &account_ids)?;
+    let results = refresh_account_quotas(&state, targets).await;
     crate::local_pool::background::refresh_account_models_in_background(app, account_ids);
     Ok(results)
 }

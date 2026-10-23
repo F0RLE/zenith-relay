@@ -207,7 +207,7 @@ async fn chat_completions_preserves_native_tools_and_bridges_responses() {
 }
 
 #[tokio::test]
-async fn chat_completions_forwards_reasoning_without_admission_gate() {
+async fn native_chat_enforces_pool_reasoning_without_rewriting_allowed_effort() {
     let (chat_server, state) = spawn_upstream("chat-key", Vec::new()).await;
     let mut chat_source = source("chat", &chat_server, "chat-key", &["chat-model"], 0);
     chat_source.source.wire_api = WireApi::ChatCompletions;
@@ -234,7 +234,14 @@ async fn chat_completions_forwards_reasoning_without_admission_gate() {
         .send()
         .await
         .unwrap();
-    assert_eq!(low.status(), StatusCode::OK);
+    let low_status = low.status();
+    let low_body = low.text().await.unwrap();
+    assert_eq!(low_status, StatusCode::BAD_REQUEST, "{low_body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&low_body).unwrap()["error"]["code"],
+        "adapter_reasoning_unsupported"
+    );
+    assert!(state.requests.lock().unwrap().is_empty());
 
     let high = client
         .post(format!("{}/v1/chat/completions", gateway.base_url))
@@ -250,9 +257,8 @@ async fn chat_completions_forwards_reasoning_without_admission_gate() {
     assert_eq!(high.status(), StatusCode::OK);
 
     let requests = state.requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0].body["reasoning_effort"], "low");
-    assert_eq!(requests[1].body["reasoning_effort"], "high");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["reasoning_effort"], "high");
 }
 
 #[tokio::test]
@@ -388,13 +394,19 @@ async fn messages_passthrough_preserves_native_tool_use_headers_and_sse() {
         .bearer_auth(LOCAL_KEY)
         .json(&json!({
             "model": MODEL,
-            "messages": [{"role": "user", "content": "hello"}]
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [{
+                "type": "function",
+                "function": {"name": "PowerShell", "parameters": {"type": "object"}}
+            }]
         }))
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body: Value = response.json().await.unwrap();
+    let status = response.status();
+    let response_body = response.text().await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{response_body}");
+    let body: Value = serde_json::from_str(&response_body).unwrap();
     assert_eq!(body["object"], "chat.completion");
     assert_eq!(body["choices"][0]["message"]["content"], "I will continue.");
     assert_eq!(
@@ -445,7 +457,7 @@ async fn messages_passthrough_preserves_native_tool_use_headers_and_sse() {
 }
 
 #[tokio::test]
-async fn legacy_protocol_bindings_do_not_filter_automatic_routes() {
+async fn automatic_routes_prefer_matching_native_upstream_contract_per_model() {
     let (upstream, state) = spawn_upstream("source-key", Vec::new()).await;
     let mut mixed = source(
         "mixed",
@@ -570,19 +582,18 @@ async fn legacy_protocol_bindings_do_not_filter_automatic_routes() {
 
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 4);
-    assert!(events.iter().any(|event| {
-        event.wire_api == WireApi::Responses && event.candidate_id.as_deref() == Some("mixed")
-    }));
-    assert!(events.iter().any(|event| {
-        event.wire_api == WireApi::Messages
-            && event.candidate_id.as_deref() == Some("mixed::messages_to_responses")
-    }));
+    assert!(events
+        .iter()
+        .all(|event| event.candidate_id.as_deref() == Some("mixed")));
     assert_eq!(
         events
             .iter()
-            .filter(|event| event.wire_api == WireApi::Messages)
-            .count(),
-        3
+            .filter_map(|event| event
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.endpoint_kind.as_deref()))
+            .collect::<Vec<_>>(),
+        ["responses", "messages", "messages", "messages_to_responses"]
     );
 }
 
@@ -688,20 +699,11 @@ async fn round_robin_ignores_session_affinity_between_independent_requests() {
         ],
         vec![local_key("key", LOCAL_KEY, None)],
         GatewayRuntimeOptions {
-            tool_policy: Default::default(),
-            model_metadata_catalog: None,
-            max_retry_candidates: 3,
             pool_routing: Some(zenith_relay_core::PoolRoutingPolicy {
                 mode: zenith_relay_core::PoolRoutingMode::RoundRobin,
                 ..Default::default()
             }),
-            hidden_models: Vec::new(),
-            default_service_tier: Default::default(),
-            quota_stale_after_ms: zenith_relay_core::QUOTA_STALE_AFTER_MS,
-            image_base_model: None,
-            image_pricing_catalog: None,
-            model_reasoning_allowed_levels: Default::default(),
-            response_affinity_store: None,
+            ..Default::default()
         },
     )
     .await;

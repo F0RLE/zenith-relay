@@ -57,19 +57,11 @@ pub(in crate::local_pool::accounts) fn validate_account_record(
     account: &LocalAccountRecord,
 ) -> LocalResult<()> {
     validate_label(&account.account.label)?;
-    if let Some(location) = &account.remote_location {
-        if location.server_id.is_empty() || location.remote_account_id.is_empty() {
-            return Err(LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "remote account location is invalid",
-            ));
-        }
-        if account.account.enabled || account.account.in_pool {
-            return Err(LocalPoolError::new(
-                ErrorCode::Conflict,
-                "an account managed by a remote server cannot run locally",
-            ));
-        }
+    if account.recovery.is_some() && (account.account.enabled || account.account.in_pool) {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "account requires local recovery before use",
+        ));
     }
     if !account_model_state_is_valid(account) {
         return Err(LocalPoolError::new(
@@ -83,6 +75,16 @@ pub(in crate::local_pool::accounts) fn validate_account_record(
     let credentials = CredentialStore::from_backend(NativeSecretBackend)
         .require(&account.account.id)
         .map_err(credential_local_error)?;
+    super::super::records::validate_account_plan(
+        &credentials,
+        account.account.subscription.plan_type.as_deref(),
+    )?;
+    if account.account.in_pool {
+        super::super::records::validate_pool_account(
+            &credentials,
+            account.account.subscription.plan_type.as_deref(),
+        )?;
+    }
     if credentials.provider_account_id().is_none() {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,

@@ -29,8 +29,8 @@ mod usage;
 use migrations::*;
 use usage::{
     account_pricing_aggregates, apply_usage_totals_delta, is_unfiltered_all_time, sql_u64,
-    usage_buckets, usage_filter, usage_groups, usage_log_from_row, usage_model_equivalents,
-    usage_totals,
+    usage_buckets, usage_filter, usage_filter_options, usage_groups, usage_log_from_row,
+    usage_model_equivalents, usage_totals,
 };
 
 #[cfg(test)]
@@ -49,7 +49,7 @@ pub struct TelemetryDb {
 struct CachedUsageEquivalents {
     usage_revision: u64,
     pricing_revision: String,
-    value: UsageEquivalents,
+    equivalents: UsageEquivalents,
 }
 
 #[derive(Clone)]
@@ -57,7 +57,7 @@ struct CachedQuotaEquivalents {
     usage_revision: u64,
     pricing_revision: String,
     windows: Vec<(String, u64, u64)>,
-    value: HashMap<String, ApiEquivalentSummary>,
+    equivalents_by_account: HashMap<String, ApiEquivalentSummary>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -77,6 +77,7 @@ pub struct UsageLog {
     pub requested_reasoning_effort: Option<String>,
     pub effective_reasoning_effort: Option<String>,
     pub wire_api: String,
+    pub transport: String,
     pub service_tier: DefaultServiceTier,
     pub applied_service_tier: Option<ObservedServiceTier>,
     pub success: bool,
@@ -96,12 +97,15 @@ pub struct UsageLog {
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
     pub api_equivalent: ApiEquivalentSummary,
+    pub api_equivalent_breakdown: zenith_relay_core::usage::ApiEquivalentBreakdown,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CacheSession {
     pub client_context_id: String,
+    pub candidate_kind: String,
+    pub candidate_id: String,
     pub started_at: String,
     pub touched_at: String,
     pub model: Option<String>,
@@ -110,8 +114,20 @@ pub struct CacheSession {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct UsageFilterOptions {
+    pub models: Vec<String>,
+    pub pool_members: Vec<String>,
+    pub wire_apis: Vec<String>,
+    pub transports: Vec<String>,
+    pub error_categories: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LocalUsagePage {
     pub events: Vec<UsageLog>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter_options: Option<UsageFilterOptions>,
     pub total: u64,
     pub page: u32,
     pub page_size: u32,
@@ -149,9 +165,9 @@ fn test_pricing_context(
     PricingContext::from_price_overrides(price_overrides, source_price_overrides)
 }
 
-fn valid_performance_name(name: &str) -> bool {
+fn valid_performance_name(metric_name: &str) -> bool {
     matches!(
-        name,
+        metric_name,
         "native_startup"
             | "vault"
             | "sqlite"

@@ -45,6 +45,10 @@ impl StoragePaths {
         self.catalog_root().join("models-dev.json")
     }
 
+    pub(crate) fn application_launch_settings_file(&self) -> PathBuf {
+        self.data_root().join("preferences/application-launch.json")
+    }
+
     pub(crate) fn migration_root(&self) -> PathBuf {
         self.data_root().join("migrations")
     }
@@ -95,8 +99,12 @@ impl StoragePaths {
             .join("history-repair")
     }
 
-    pub(crate) fn ready_api_backup_root(&self) -> PathBuf {
-        self.profile_backup_root().join("client-config")
+    pub(crate) fn claude_desktop_recovery_file(&self) -> PathBuf {
+        self.claude_desktop_backup_root().join("connection.json")
+    }
+
+    pub(crate) fn claude_desktop_backup_root(&self) -> PathBuf {
+        self.recovery_root().join("applications/claude-desktop")
     }
 
     pub(crate) fn opencode_backup_root(&self) -> PathBuf {
@@ -119,6 +127,10 @@ mod tests {
             root.join("data/database/relay.sqlite")
         );
         assert_eq!(paths.vault_root(), root.join("data/vault"));
+        assert_eq!(
+            paths.application_launch_settings_file(),
+            root.join("data/preferences/application-launch.json")
+        );
         assert_eq!(
             paths.pricing_catalog_file(),
             root.join("data/catalogs/litellm-prices.json")

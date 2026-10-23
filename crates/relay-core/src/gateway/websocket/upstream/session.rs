@@ -17,14 +17,15 @@ pub(in crate::gateway::websocket) async fn connect_upstream_while_client_connect
 ) -> Result<Connected, GatewayFailure> {
     await_while_client_connected(
         downstream,
-        connect_upstream(
+        // Reconnects run inside the live bridge; keep the retry future off its stack.
+        Box::pin(connect_upstream(
             runtime,
             key,
             client_headers,
             request,
             allow_previous_response_reset,
             attempt_offset,
-        ),
+        )),
     )
     .await?
 }
@@ -41,18 +42,16 @@ pub(in crate::gateway::websocket) async fn await_while_client_connected<F: std::
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tokio::select! {
-            result = &mut future => return Ok(result),
+            connection_result = &mut future => return Ok(connection_result),
             _ = heartbeat.tick() => {
-                downstream
-                    .send(Message::Ping(Default::default()))
+                send_message(downstream, Message::Ping(Default::default()))
                     .await
                     .map_err(|_| GatewayFailure::client_closed())?;
             }
             message = downstream.recv() => {
                 match message {
-                    Some(Ok(Message::Ping(payload))) => {
-                        downstream
-                            .send(Message::Pong(payload))
+                    Some(Ok(Message::Ping(ping_payload))) => {
+                        send_message(downstream, Message::Pong(ping_payload))
                             .await
                             .map_err(|_| GatewayFailure::client_closed())?;
                     }

@@ -5,9 +5,28 @@ import { formatTokenSpeed } from "../../usageSpeed";
 import { formatCompactNumber, formatFullNumber } from "../../usageTotals";
 import type { UsageRow } from "./usageData";
 import { formatReasoningEffort } from "./usageReportFormat";
+import type { ApiEquivalentSummary } from "../../api/types";
+import { formatUsageApiEquivalent } from "./usageFormatting";
 
 export function RequestDetailMetric({ label, value }: { label: string; value: ReactNode }) {
-  return <div className="request-details-metric"><span>{label}</span><strong>{value}</strong></div>;
+  return <div className="request-details-metric"><dt>{label}</dt><dd>{value}</dd></div>;
+}
+
+export function RequestTokenValue({ tokens, price, included = false }: {
+  tokens: number | null;
+  price?: ApiEquivalentSummary | null | undefined;
+  included?: boolean;
+}) {
+  const { t, i18n } = useTranslation();
+  const known = tokens != null && price != null;
+  return <dd className="request-token-value">
+    <span className="request-token-count">{tokens == null ? "—" : formatFullNumber(tokens, i18n.language)}</span>
+    <span className={`request-token-cost${included ? " request-token-included" : ""}`}
+      data-relay-tooltip={included ? t("usage.outputPriceIncludedHint") : known
+        ? t("usage.requestApiEquivalentHint", { count: price.unpricedTokens }) : t("usage.tokenPriceUnavailable")}>
+      {included ? t("usage.outputPriceIncluded") : known ? formatUsageApiEquivalent(price, i18n.language, 6) : "—"}
+    </span>
+  </dd>;
 }
 
 export function SpeedValue({ value, locale, unit }: { value: number | null; locale: string; unit: string }) {

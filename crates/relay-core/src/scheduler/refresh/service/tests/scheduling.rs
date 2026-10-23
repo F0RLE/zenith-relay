@@ -5,13 +5,13 @@ async fn reset_event_accelerates_quota_without_changing_activity_or_models() {
     let service = RefreshService::new(RefreshLimits::default()).unwrap();
     let identity = registration(1, true).identity;
     for kind in [RefreshKind::Quota, RefreshKind::Models] {
-        let mut entry = registration(1, true);
-        entry.kind = kind;
+        let mut refresh_registration = registration(1, true);
+        refresh_registration.kind = kind;
         service
-            .register(entry, |_| {
+            .register(refresh_registration, |_| {
                 Box::pin(async {
                     RefreshResult {
-                        value: (),
+                        refresh_value: (),
                         outcome: RefreshOutcome::Success,
                     }
                 })
@@ -40,7 +40,7 @@ async fn reset_event_accelerates_quota_without_changing_activity_or_models() {
             .coordinator
             .entries
             .values()
-            .all(|entry| !entry.active));
+            .all(|refresh_entry| !refresh_entry.active));
     }
     service.respect_retry_after(&identity, RefreshKind::Quota, 60_000);
     assert!(service.schedule_after(&identity, RefreshKind::Quota, 0));
@@ -63,7 +63,7 @@ async fn repeated_activity_and_unregistered_members_do_not_wake_inventory_scans(
         .register(registration(1, false), |_| {
             Box::pin(async {
                 RefreshResult {
-                    value: (),
+                    refresh_value: (),
                     outcome: RefreshOutcome::Success,
                 }
             })
@@ -88,7 +88,7 @@ async fn becoming_eligible_schedules_once_without_resetting_every_reconciliation
     let work = |_| {
         Box::pin(async {
             RefreshResult {
-                value: (),
+                refresh_value: (),
                 outcome: RefreshOutcome::Success,
             }
         }) as BoxFuture<'static, RefreshResult<()>>
@@ -155,7 +155,7 @@ async fn retiring_member_unblocks_waiters_but_retains_running_traffic_capacity()
                 started.send(()).unwrap();
                 release.notified().await;
                 RefreshResult {
-                    value: 1,
+                    refresh_value: 1,
                     outcome: RefreshOutcome::Success,
                 }
             })
@@ -175,7 +175,7 @@ async fn retiring_member_unblocks_waiters_but_retains_running_traffic_capacity()
         .register(registration(2, true), |_| {
             Box::pin(async {
                 RefreshResult {
-                    value: 2,
+                    refresh_value: 2,
                     outcome: RefreshOutcome::Success,
                 }
             })
@@ -207,7 +207,7 @@ async fn completion_notification_observes_released_single_flight() {
             Box::pin(async move {
                 release.notified().await;
                 RefreshResult {
-                    value: (),
+                    refresh_value: (),
                     outcome: RefreshOutcome::Success,
                 }
             })
@@ -243,7 +243,7 @@ async fn a_hundred_manual_callers_join_and_canceling_the_first_keeps_shared_work
                 started.send(()).unwrap();
                 release.notified().await;
                 RefreshResult {
-                    value: 42,
+                    refresh_value: 42,
                     outcome: RefreshOutcome::Success,
                 }
             })
@@ -268,7 +268,7 @@ async fn a_hundred_manual_callers_join_and_canceling_the_first_keeps_shared_work
                 .unwrap()
                 .entries
                 .values()
-                .filter_map(|entry| entry.result.as_ref())
+                .filter_map(|refresh_entry| refresh_entry.completion_sender.as_ref())
                 .map(watch::Sender::receiver_count)
                 .sum::<usize>();
             if joined == 100 {
@@ -301,7 +301,7 @@ async fn retry_hint_survives_manual_requests_and_wall_clock_is_not_used() {
                 let now = clock.upgrade().unwrap().now_ms();
                 started.send(now).unwrap();
                 RefreshResult {
-                    value: 1,
+                    refresh_value: 1,
                     outcome: RefreshOutcome::FailedRetryAt(now + 60_000),
                 }
             })

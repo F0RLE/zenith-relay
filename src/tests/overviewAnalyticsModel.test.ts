@@ -10,6 +10,7 @@ import {
   type UsageSample,
 } from "../src/features/relay/pages/overview/overviewAnalyticsModel";
 import { sourceHost, sourcePort } from "../src/features/relay/sourceUrl";
+import { observedTokensPerSecond } from "../src/features/relay/usageSpeed";
 
 const sample = (overrides: Partial<UsageSample> = {}): UsageSample => ({
   createdAtMs: 1_000,
@@ -65,6 +66,17 @@ describe("overview analytics model", () => {
       speedDurationMs: 200,
       apiEquivalent: { microUsd: 2_000_000, pricedTokens: 100, unpricedTokens: 31 },
     });
+  });
+
+  test("weights generation speed by observed duration and excludes failures and buffered outliers", () => {
+    const totals = totalsFromSamples([
+      sample({ outputTokens: 30, reasoningTokens: 0, generationMs: 500 }),
+      sample({ outputTokens: 20, reasoningTokens: 0, generationMs: 1_500 }),
+      sample({ success: false, outputTokens: 100, generationMs: 100 }),
+      sample({ outputTokens: 52, reasoningTokens: 0, generationMs: 50 }),
+    ]);
+    expect(totals).toMatchObject({ generationOutputTokens: 48, generationMs: 2_000, generationSamples: 2 });
+    expect(observedTokensPerSecond(totals.generationOutputTokens, totals.generationMs)).toBe(24);
   });
 
   test("fills missing buckets and preserves explicit server buckets", () => {

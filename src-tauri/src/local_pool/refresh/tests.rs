@@ -7,7 +7,6 @@ use tokio::sync::{mpsc, Notify};
 use zenith_relay_core::protocol::RefreshStatus;
 use zenith_relay_core::{
     accounts::{AccountAuthMode, AccountAuthState, ReauthReason},
-    protocol::RemoteAccountLocation,
     quota::{QuotaWindow, QuotaWindowKind},
     scheduler::refresh::{
         service::{RefreshRegistration, RefreshResult},
@@ -83,11 +82,40 @@ fn enabled_local_accounts_are_monitored_outside_pool_but_not_after_logout_or_tra
     assert!(!automatic_eligible(&account));
     account.account.auth_state = AccountAuthState::DegradedAccessOnly;
     assert!(automatic_eligible(&account));
-    account.remote_location = Some(RemoteAccountLocation {
-        server_id: "synthetic-server".into(),
-        remote_account_id: "synthetic-remote".into(),
-    });
+    account.recovery = Some(serde_json::json!({ "reason": "recovery_required" }));
     assert!(!automatic_eligible(&account));
+}
+
+#[test]
+fn selected_route_activity_keeps_only_its_linked_quota_readers_active() {
+    use zenith_relay_core::scheduler::account_member_key;
+    let groups = vec![
+        crate::local_pool::models::AccountRouteGroup {
+            account_ids: vec!["siwc".into(), "bps".into(), "codex".into()],
+            selected_account_id: "siwc".into(),
+            notes_account_id: None,
+        },
+        crate::local_pool::models::AccountRouteGroup {
+            account_ids: vec!["other".into(), "unrelated".into()],
+            selected_account_id: "other".into(),
+            notes_account_id: None,
+        },
+    ];
+    let mut activity = BTreeSet::from([account_member_key("siwc")]);
+    include_linked_account_activity(&mut activity, &groups);
+    assert_eq!(
+        activity,
+        BTreeSet::from([
+            account_member_key("siwc"),
+            account_member_key("bps"),
+            account_member_key("codex"),
+        ])
+    );
+    include_linked_account_activity(&mut activity, &groups);
+    assert_eq!(activity.len(), 3);
+    activity.clear();
+    include_linked_account_activity(&mut activity, &groups);
+    assert!(activity.is_empty());
 }
 
 #[tokio::test]
@@ -114,14 +142,11 @@ async fn manual_quota_and_models_share_service_without_fabricating_missing_crede
 }
 
 #[tokio::test]
-async fn manual_remote_refresh_is_rejected_before_registration_or_credentials() {
+async fn manual_recovery_required_refresh_is_rejected_before_registration_or_credentials() {
     let state = state();
     let mut account = account();
     let id = account.account.id.clone();
-    account.remote_location = Some(RemoteAccountLocation {
-        server_id: "synthetic-server".into(),
-        remote_account_id: "synthetic-remote".into(),
-    });
+    account.recovery = Some(serde_json::json!({ "reason": "recovery_required" }));
     state
         .store()
         .unwrap()
@@ -280,7 +305,7 @@ async fn in_flight_projection_follows_durable_identity_not_retired_jobs() {
                     started.send(()).unwrap();
                     release.notified().await;
                     RefreshResult {
-                        value: Err(LocalPoolError::invalid_state("synthetic read")),
+                        refresh_value: Err(LocalPoolError::invalid_state("synthetic read")),
                         outcome: RefreshOutcome::Success,
                     }
                 })
@@ -345,7 +370,7 @@ fn reset_due_uses_reported_future_window_and_bounded_stable_jitter() {
         kind: QuotaWindowKind::Primary,
         provider_cycle_id: None,
         window_start_ms: None,
-        available_basis_points: Some(100),
+        available_basis_points: Some(5_000),
         explicitly_full: Some(false),
         reset_at_ms: Some(100_000),
         window_minutes: Some(300),
@@ -367,4 +392,43 @@ fn reset_due_uses_reported_future_window_and_bounded_stable_jitter() {
     assert_eq!(reset_due_delay(&response, 100_000), None);
     response.quota = AccountQuotaOutcome::Skipped;
     assert_eq!(reset_due_delay(&response, 90_000), None);
+}
+
+#[test]
+fn near_exhausted_quota_gets_bounded_automatic_verification() {
+    let mut account = account();
+    account.account.quota.primary = Some(QuotaWindow {
+        kind: QuotaWindowKind::Primary,
+        provider_cycle_id: None,
+        window_start_ms: None,
+        available_basis_points: Some(100),
+        explicitly_full: Some(false),
+        reset_at_ms: Some(7_200_000),
+        window_minutes: Some(300),
+        observed_at_ms: 100_000,
+        full_transition_fingerprint: None,
+        exhaustion_transition_fingerprint: None,
+    });
+    let mut response = AccountQuotaRefreshResponse {
+        account,
+        quota: AccountQuotaOutcome::Updated {
+            transitions: vec![],
+            exhaustion_transitions: vec![],
+        },
+        exhaustion_transitions: vec![],
+    };
+    assert_eq!(reset_due_delay(&response, 100_000), Some(60_000));
+    assert_eq!(
+        response
+            .account
+            .account
+            .quota
+            .primary
+            .as_ref()
+            .unwrap()
+            .available_basis_points,
+        Some(100)
+    );
+    response.quota = AccountQuotaOutcome::Skipped;
+    assert_eq!(reset_due_delay(&response, 100_000), None);
 }

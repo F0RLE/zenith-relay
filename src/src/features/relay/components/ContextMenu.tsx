@@ -1,6 +1,9 @@
 import { CheckCheck, ClipboardPaste, Copy, Scissors } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
+import { copyText } from "./ui/clipboard";
 
 type TextField = HTMLInputElement | HTMLTextAreaElement;
 
@@ -25,41 +28,101 @@ function textFieldFrom(target: EventTarget | null): TextField | null {
 
 async function writeClipboard(text: string) {
   try {
-    await navigator.clipboard.writeText(text);
+    await copyText(text);
     return true;
   } catch {
-    const fallback = document.createElement("textarea");
-    fallback.value = text;
-    fallback.style.position = "fixed";
-    fallback.style.opacity = "0";
-    document.body.appendChild(fallback);
-    fallback.select();
-    const copied = document.execCommand("copy");
-    fallback.remove();
-    return copied;
+    return false;
   }
 }
 
 function replaceSelection(field: TextField, start: number, end: number, value: string) {
-  const next = `${field.value.slice(0, start)}${value}${field.value.slice(end)}`;
+  const updatedText = `${field.value.slice(0, start)}${value}${field.value.slice(end)}`;
   const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(field), "value")?.set;
-  setter?.call(field, next);
+  setter?.call(field, updatedText);
   const caret = start + value.length;
   field.focus();
   field.setSelectionRange(caret, caret);
   field.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
-export function AppContextMenu() {
+export function ContextMenu({ position, children, onClose }: {
+  position: { x: number; y: number };
+  children: ReactNode;
+  onClose: (restoreFocus?: boolean) => void;
+}) {
   const { t } = useTranslation();
   const menuRef = useRef<HTMLDivElement>(null);
+  const [placement, setPlacement] = useState<{ left: number; top: number } | null>(null);
+
+  useLayoutEffect(() => {
+    if (!menuRef.current) return;
+    const margin = 8;
+    const rect = menuRef.current.getBoundingClientRect();
+    setPlacement({
+      left: Math.max(margin, Math.min(position.x, window.innerWidth - rect.width - margin)),
+      top: Math.max(margin + 36, Math.min(position.y, window.innerHeight - rect.height - margin)),
+    });
+    menuRef.current.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus({ preventScroll: true });
+  }, [position]);
+
+  useEffect(() => {
+    const outside = (event: PointerEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) onClose();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        onClose(true);
+      } else if (event.key === "Tab") {
+        onClose(true);
+      }
+    };
+    const dismiss = () => onClose();
+    document.addEventListener("pointerdown", outside);
+    document.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("resize", dismiss);
+    window.addEventListener("scroll", dismiss, true);
+    window.addEventListener("blur", dismiss);
+    return () => {
+      document.removeEventListener("pointerdown", outside);
+      document.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("resize", dismiss);
+      window.removeEventListener("scroll", dismiss, true);
+      window.removeEventListener("blur", dismiss);
+    };
+  }, [onClose]);
+
+  const focusMenuItem = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const menuItems = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
+    const activeIndex = menuItems.indexOf(document.activeElement as HTMLButtonElement);
+    const direction = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
+    const targetIndex = event.key === "Home" ? 0 : event.key === "End" ? menuItems.length - 1 : direction ? (activeIndex + direction + menuItems.length) % menuItems.length : -1;
+    if (targetIndex >= 0) {
+      event.preventDefault();
+      menuItems[targetIndex]?.focus();
+    }
+  };
+
+  return createPortal(<div
+    ref={menuRef}
+    className="app-context-menu relay-popover-panel"
+    role="menu"
+    aria-label={t("common.contextMenu")}
+    data-positioned={Boolean(placement)}
+    style={placement ?? undefined}
+    onKeyDown={focusMenuItem}
+    onContextMenu={(event) => event.preventDefault()}
+  >{children}</div>, document.body);
+}
+
+export function AppContextMenu() {
+  const { t } = useTranslation();
   const [context, setContext] = useState<ContextState | null>(null);
-  const [position, setPosition] = useState<{ left: number; top: number } | null>(null);
 
   const close = (restoreFocus = false) => {
     if (restoreFocus) context?.field?.focus();
     setContext(null);
-    setPosition(null);
   };
 
   useEffect(() => {
@@ -69,16 +132,14 @@ export function AppContextMenu() {
       const field = textFieldFrom(event.target);
       const selectionStart = field?.selectionStart ?? 0;
       const selectionEnd = field?.selectionEnd ?? selectionStart;
-      const protectsPassword = field instanceof HTMLInputElement && field.type === "password";
       const text = field
-        ? protectsPassword ? "" : field.value.slice(selectionStart, selectionEnd)
+        ? field.value.slice(selectionStart, selectionEnd)
         : window.getSelection()?.toString() ?? "";
       if (!field && !text) {
-        close();
+        setContext(null);
         return;
       }
       const targetRect = event.target instanceof Element ? event.target.getBoundingClientRect() : null;
-      setPosition(null);
       setContext({
         x: event.clientX || (targetRect?.left ?? 0) + 8,
         y: event.clientY || (targetRect?.top ?? 0) + 8,
@@ -93,66 +154,10 @@ export function AppContextMenu() {
     return () => document.removeEventListener("contextmenu", open);
   }, []);
 
-  useLayoutEffect(() => {
-    if (!context || !menuRef.current) return;
-    const margin = 8;
-    const rect = menuRef.current.getBoundingClientRect();
-    setPosition({
-      left: Math.max(margin, Math.min(context.x, window.innerWidth - rect.width - margin)),
-      top: Math.max(margin + 36, Math.min(context.y, window.innerHeight - rect.height - margin)),
-    });
-    menuRef.current.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
-  }, [context]);
-
-  useEffect(() => {
-    if (!context) return;
-    const outside = (event: PointerEvent) => {
-      if (!menuRef.current?.contains(event.target as Node)) close();
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      close(true);
-    };
-    const dismiss = () => close();
-    document.addEventListener("pointerdown", outside);
-    document.addEventListener("keydown", onKeyDown, true);
-    window.addEventListener("resize", dismiss);
-    window.addEventListener("scroll", dismiss, true);
-    window.addEventListener("blur", dismiss);
-    return () => {
-      document.removeEventListener("pointerdown", outside);
-      document.removeEventListener("keydown", onKeyDown, true);
-      window.removeEventListener("resize", dismiss);
-      window.removeEventListener("scroll", dismiss, true);
-      window.removeEventListener("blur", dismiss);
-    };
-  }, [context]);
-
   if (!context) return null;
   const hasSelection = Boolean(context.text);
-  const focusMenuItem = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    const items = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
-    const index = items.indexOf(document.activeElement as HTMLButtonElement);
-    const direction = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
-    const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : direction ? (index + direction + items.length) % items.length : -1;
-    if (event.key === "Tab") {
-      close();
-    } else if (next >= 0) {
-      event.preventDefault();
-      items[next]?.focus();
-    }
-  };
 
-  return <div
-    ref={menuRef}
-    className="app-context-menu relay-popover-panel"
-    role="menu"
-    aria-label={t("common.contextMenu")}
-    data-positioned={Boolean(position)}
-    style={position ?? undefined}
-    onKeyDown={focusMenuItem}
-  >
+  return <ContextMenu position={context} onClose={close}>
     {context.field && context.writable ? <button className="relay-popover-item" type="button" role="menuitem" disabled={!hasSelection} onClick={async () => {
       if (!context.text || !await writeClipboard(context.text)) return;
       replaceSelection(context.field!, context.selectionStart, context.selectionEnd, "");
@@ -176,5 +181,5 @@ export function AppContextMenu() {
       context.field?.select();
       close();
     }}><CheckCheck aria-hidden /><span>{t("common.selectAllText")}</span></button> : null}
-  </div>;
+  </ContextMenu>;
 }

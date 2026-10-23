@@ -1,15 +1,17 @@
 mod gateway;
 mod membership;
 
+use std::borrow::Cow;
+
 use super::{
-    persistence, LocalPoolStore, STATE_ACCOUNTS, STATE_AUTOMATIONS, STATE_KEYS,
+    persistence, LocalPoolStore, STATE_ACCOUNTS, STATE_AUTOMATIONS, STATE_GATEWAY, STATE_KEYS,
     STATE_REFRESH_REVISIONS, STATE_SOURCES, STATE_SOURCE_REVISIONS,
 };
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError, Result},
     models::{
-        AutomationRecords, LocalAccountRecord, LocalGatewayKeyRecord, ProviderSourceRecord,
-        MAX_LOCAL_ACCOUNTS,
+        AutomationRecords, GatewaySettings, LocalAccountRecord, LocalGatewayKeyRecord,
+        ProviderSourceRecord, MAX_LOCAL_ACCOUNTS,
     },
 };
 
@@ -74,7 +76,23 @@ impl LocalPoolStore {
         keys: Vec<LocalGatewayKeyRecord>,
         automations: AutomationRecords,
     ) -> Result<()> {
-        self.replace_all_records_inner(sources, accounts, keys, automations, &[])
+        self.replace_all_records_inner(sources, accounts, keys, automations, &[], None)
+    }
+
+    pub fn replace_account_routes(
+        &mut self,
+        accounts: Vec<LocalAccountRecord>,
+        gateway: GatewaySettings,
+        automations: AutomationRecords,
+    ) -> Result<()> {
+        self.replace_all_records_inner(
+            self.sources.clone(),
+            accounts,
+            self.keys.clone(),
+            automations,
+            &[],
+            Some(gateway),
+        )
     }
 
     fn replace_all_records_inner(
@@ -84,7 +102,34 @@ impl LocalPoolStore {
         keys: Vec<LocalGatewayKeyRecord>,
         automations: AutomationRecords,
         deleted_account_ids: &[String],
+        gateway: Option<GatewaySettings>,
     ) -> Result<()> {
+        let explicit_gateway = gateway.is_some();
+        let mut gateway = gateway.map_or(Cow::Borrowed(&self.gateway), Cow::Owned);
+        if !gateway.account_routes.is_empty()
+            && (explicit_gateway
+                || accounts
+                    .iter()
+                    .map(|account| &account.account.id)
+                    .ne(self.accounts.iter().map(|account| &account.account.id)))
+        {
+            gateway.to_mut().retain_account_routes(&accounts);
+        }
+        let gateway_changed = matches!(&gateway, Cow::Owned(next) if next != &self.gateway);
+        if gateway_changed {
+            gateway.validate().map_err(LocalPoolError::invalid_state)?;
+        }
+        if !gateway.account_routes.is_empty()
+            && accounts.iter().any(|account| {
+                account.account.in_pool && !gateway.account_route_is_selected(&account.account.id)
+            })
+        {
+            return Err(LocalPoolError::new(
+                ErrorCode::Conflict,
+                "Only the selected account route can participate in the pool",
+            ));
+        }
+        super::account_trash::validate_inventory(&accounts, &self.account_trash)?;
         if accounts.len() > MAX_LOCAL_ACCOUNTS {
             return Err(LocalPoolError::new(
                 ErrorCode::InvalidState,
@@ -97,55 +142,66 @@ impl LocalPoolStore {
             keys: keys != self.keys,
             automations: automations != self.automations,
         };
-        if !changed.any() {
+        if !changed.any() && !gateway_changed {
             return Ok(());
         }
 
-        let revisions = if changed.accounts {
+        let mut revisions = if changed.accounts {
             self.refresh_revisions
                 .with_accounts(&self.accounts, &accounts)?
         } else {
             self.refresh_revisions.clone()
         };
+        if gateway_changed {
+            revisions = revisions.with_gateway(&self.gateway, &gateway)?;
+        }
         let source_revisions = self
             .source_refresh_revisions
             .with_sources(&self.sources, &sources)?;
-        let mut values = Vec::with_capacity(6);
+        let mut state_entries = Vec::with_capacity(6);
+        if gateway_changed {
+            state_entries.push((
+                STATE_GATEWAY,
+                persistence::serialize_state(gateway.as_ref())?,
+            ));
+        }
         if source_revisions != self.source_refresh_revisions {
-            values.push((
+            state_entries.push((
                 STATE_SOURCE_REVISIONS,
                 persistence::serialize_state(&source_revisions)?,
             ));
         }
         if revisions != self.refresh_revisions {
-            values.push((
+            state_entries.push((
                 STATE_REFRESH_REVISIONS,
                 persistence::serialize_state(&revisions)?,
             ));
         }
         if changed.sources {
-            values.push((STATE_SOURCES, persistence::serialize_state(&sources)?));
+            state_entries.push((STATE_SOURCES, persistence::serialize_state(&sources)?));
         }
         if changed.accounts {
-            values.push((STATE_ACCOUNTS, persistence::serialize_state(&accounts)?));
+            state_entries.push((STATE_ACCOUNTS, persistence::serialize_state(&accounts)?));
         }
         if changed.keys {
-            values.push((STATE_KEYS, persistence::serialize_state(&keys)?));
+            state_entries.push((STATE_KEYS, persistence::serialize_state(&keys)?));
         }
         if changed.automations {
-            values.push((
+            state_entries.push((
                 STATE_AUTOMATIONS,
                 persistence::serialize_state(&automations)?,
             ));
         }
         if deleted_account_ids.is_empty() {
-            self.database.replace_state_json(&values)?;
+            self.database.replace_state_json(&state_entries)?;
         } else if deleted_account_ids.len() == 1 {
-            self.database
-                .replace_state_json_and_delete_account_data(&values, &deleted_account_ids[0])?;
+            self.database.replace_state_json_and_delete_account_data(
+                &state_entries,
+                &deleted_account_ids[0],
+            )?;
         } else {
             self.database
-                .replace_state_json_and_delete_accounts_data(&values, deleted_account_ids)?;
+                .replace_state_json_and_delete_accounts_data(&state_entries, deleted_account_ids)?;
         }
 
         let refresh_changed = self.refresh_registration_changed(&revisions, &accounts)
@@ -153,6 +209,9 @@ impl LocalPoolStore {
         self.source_refresh_revisions = source_revisions;
         self.sources = sources;
         self.accounts = accounts;
+        if let Cow::Owned(gateway) = gateway {
+            self.gateway = gateway;
+        }
         self.keys = keys;
         self.automations = automations;
         self.refresh_revisions = revisions;

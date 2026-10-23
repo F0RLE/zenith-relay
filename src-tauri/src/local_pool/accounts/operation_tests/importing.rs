@@ -137,6 +137,7 @@ async fn batch_confirm_persists_every_selected_account_and_credential() {
                     "refresh_token": format!("synthetic-refresh-{index}"),
                     "chatgpt_account_id": format!("synthetic-provider-{index}"),
                     "email": format!("member-{index}@example.test"),
+                    "expires_at": "2026-10-19T14:17:45Z",
                     "subscription_expires_at": format!("2026-08-0{index}T00:00:00Z")
                 }
             })
@@ -192,6 +193,7 @@ async fn batch_confirm_persists_every_selected_account_and_credential() {
     let mut provider_ids = HashSet::new();
     for account in &accounts {
         let credentials = credential_store.require(&account.account.id).unwrap();
+        assert_eq!(credentials.expires_at_ms(), Some(1_792_419_465_000));
         provider_ids.insert(credentials.provider_account_id().unwrap().to_string());
         credential_store.delete(&account.account.id).unwrap();
     }
@@ -199,7 +201,7 @@ async fn batch_confirm_persists_every_selected_account_and_credential() {
     assert!(accounts
         .iter()
         .all(|account| account.account.subscription.active_until_ms.is_some()));
-    assert!(accounts.iter().all(|account| account.account.in_pool));
+    assert!(accounts.iter().all(|account| !account.account.in_pool));
     assert!(state
         .store()
         .unwrap()
@@ -251,6 +253,13 @@ async fn access_only_reimport_preserves_existing_refresh_token() {
         .account
         .id
         .clone();
+    let credential_store = CredentialStore::from_backend(NativeSecretBackend);
+    let direct_credentials = credential_store
+        .require(&account_id)
+        .unwrap()
+        .with_proxy_route(None, true)
+        .unwrap();
+    credential_store.save(&direct_credentials).unwrap();
 
     let second = sessions
         .start(
@@ -276,10 +285,10 @@ async fn access_only_reimport_preserves_existing_refresh_token() {
     .unwrap();
 
     assert_eq!(response.results[0].status, ImportItemStatus::Succeeded);
-    let credential_store = CredentialStore::from_backend(NativeSecretBackend);
     let credentials = credential_store.require(&account_id).unwrap();
     assert_eq!(credentials.access_token(), "access-replacement");
     assert_eq!(credentials.refresh_token(), Some("refresh-original"));
+    assert!(credentials.bypass_common_proxy());
     assert_eq!(
         state
             .store()
@@ -423,18 +432,19 @@ fn api_key_auth_json_builds_a_safe_default_responses_source() {
         api_key: item.secrets().api_key().unwrap().to_string(),
         wire_api,
         models: vec!["gpt-test".into()],
+        proxy_url: None,
     };
     runtime.validate().unwrap();
-    let source = imported_source_record(
-        &item,
-        runtime,
-        "source:source_test".into(),
-        None,
-        Default::default(),
-        Default::default(),
-        Default::default(),
-        None,
-    );
+    let source = imported_source_record(ImportedSourceRecordInput {
+        import_item: &item,
+        runtime_source: runtime,
+        secret_ref: "source:source_test".into(),
+        existing: None,
+        protocol_config: Default::default(),
+        protocol_bindings: Default::default(),
+        detected_model_prices: Default::default(),
+        tested_at: None,
+    });
     let serialized = serde_json::to_string(&ImportItemResult::source_success(
         item.item_id,
         source.clone(),
@@ -465,6 +475,7 @@ fn source_duplicate_identity_updates_the_existing_local_record() {
         base_url: "https://api.example.test/v1".into(),
         secret_ref: "source:source_existing".into(),
         pricing_provider: None,
+        proxy_id: None,
         official_provider_family: None,
         wire_api: WireApi::ChatCompletions,
         protocol_config: Default::default(),
@@ -494,6 +505,7 @@ fn source_duplicate_identity_updates_the_existing_local_record() {
         api_key: "sk-private".into(),
         wire_api,
         models: vec!["new-model".into()],
+        proxy_url: None,
     };
     let discovered_bindings = vec![SourceProtocolBinding {
         wire_api: WireApi::ChatCompletions,
@@ -502,16 +514,16 @@ fn source_duplicate_identity_updates_the_existing_local_record() {
         cache_write_ttl: Default::default(),
         model_ids: vec!["new-model".into()],
     }];
-    let updated = imported_source_record(
-        &item,
-        runtime,
-        existing.secret_ref.clone(),
-        Some(&existing),
-        existing.protocol_config.clone(),
-        discovered_bindings.clone(),
-        existing.detected_model_prices.clone(),
-        None,
-    );
+    let updated = imported_source_record(ImportedSourceRecordInput {
+        import_item: &item,
+        runtime_source: runtime,
+        secret_ref: existing.secret_ref.clone(),
+        existing: Some(&existing),
+        protocol_config: existing.protocol_config.clone(),
+        protocol_bindings: discovered_bindings.clone(),
+        detected_model_prices: existing.detected_model_prices.clone(),
+        tested_at: None,
+    });
 
     assert_eq!(updated.id, existing.id);
     assert_eq!(updated.name, existing.name);
@@ -542,6 +554,7 @@ async fn source_import_rebuilds_legacy_protocol_routes_automatically() {
         base_url: "https://api.example.test/v1".into(),
         secret_ref: secret_ref.clone(),
         pricing_provider: None,
+        proxy_id: None,
         official_provider_family: None,
         wire_api: WireApi::Responses,
         protocol_config: Default::default(),

@@ -9,9 +9,9 @@ use tokio::{sync::watch, task::JoinSet};
 impl<T: Send + Sync + 'static> RefreshService<T> {
     pub(super) fn remove_entry(state: &mut State<T>, key: &RefreshKey) {
         state.coordinator.remove_kind(&key.identity, key.kind);
-        if let Some(entry) = state.entries.remove(key) {
-            if let Some(result) = entry.result {
-                result.send_replace(Some(Err(RefreshWaitError::Stale)));
+        if let Some(refresh_entry) = state.entries.remove(key) {
+            if let Some(completion_sender) = refresh_entry.completion_sender {
+                completion_sender.send_replace(Some(Err(RefreshWaitError::Stale)));
             }
         }
     }
@@ -28,7 +28,7 @@ impl<T: Send + Sync + 'static> RefreshService<T> {
 
     pub(super) fn signal(&self) {
         self.changed
-            .send_modify(|value| *value = value.wrapping_add(1));
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
     }
 
     async fn drive(
@@ -45,32 +45,37 @@ impl<T: Send + Sync + 'static> RefreshService<T> {
                 let Some(service) = service.upgrade() else {
                     break;
                 };
-                let mut state = service.state.lock().expect("refresh state poisoned");
-                if state.stopped {
+                let mut service_state = service.state.lock().expect("refresh state poisoned");
+                if service_state.stopped {
                     break;
                 }
                 let now = service.now_ms();
-                let mut started = false;
-                while let Some(job) = state.coordinator.claim_due(now) {
-                    started = true;
+                let mut job_started = false;
+                while let Some(job) = service_state.coordinator.claim_due(now) {
+                    job_started = true;
                     let key = RefreshKey {
                         identity: job.identity.clone(),
                         kind: job.kind,
                     };
-                    let entry = state.entries.get_mut(&key).expect("registered work");
-                    entry.result.get_or_insert_with(|| watch::channel(None).0);
-                    let work = entry.work.clone();
+                    let refresh_entry = service_state
+                        .entries
+                        .get_mut(&key)
+                        .expect("registered work");
+                    refresh_entry
+                        .completion_sender
+                        .get_or_insert_with(|| watch::channel(None).0);
+                    let work = refresh_entry.work.clone();
                     jobs.spawn(async move {
-                        let result = AssertUnwindSafe(async { work(job.clone()).await })
+                        let job_result = AssertUnwindSafe(async { work(job.clone()).await })
                             .catch_unwind()
                             .await;
-                        (job, result.map_err(|_| RefreshWaitError::Interrupted))
+                        (job, job_result.map_err(|_| RefreshWaitError::Interrupted))
                     });
                 }
-                if started {
+                if job_started {
                     service.notify_progress();
                 }
-                state
+                service_state
                     .coordinator
                     .next_wake()
                     .map(|at| Duration::from_millis(at.saturating_sub(now)))
@@ -78,9 +83,9 @@ impl<T: Send + Sync + 'static> RefreshService<T> {
             tokio::select! {
                 change = changed.changed() => { if change.is_err() { break; } }
                 completion = jobs.join_next(), if !jobs.is_empty() => {
-                    if let Some(Ok((job, result))) = completion {
+                    if let Some(Ok((job, job_result))) = completion {
                         let Some(service) = service.upgrade() else { break; };
-                        service.complete(job, result);
+                        service.complete(job, job_result);
                     }
                 }
                 _ = async {
@@ -93,16 +98,16 @@ impl<T: Send + Sync + 'static> RefreshService<T> {
         finished.send_replace(true);
     }
 
-    fn complete(&self, job: RefreshJob, result: Result<RefreshResult<T>, RefreshWaitError>) {
-        let mut state = self.state.lock().expect("refresh state poisoned");
+    fn complete(&self, job: RefreshJob, job_result: Result<RefreshResult<T>, RefreshWaitError>) {
+        let mut service_state = self.state.lock().expect("refresh state poisoned");
         let now = self.now_ms();
-        let outcome = result
+        let outcome = job_result
             .as_ref()
-            .map_or(RefreshOutcome::retry_after(now, None), |result| {
-                result.outcome
+            .map_or(RefreshOutcome::retry_after(now, None), |refresh_result| {
+                refresh_result.outcome
             });
         if !matches!(
-            state.coordinator.complete(&job, outcome, now),
+            service_state.coordinator.complete(&job, outcome, now),
             RefreshCompletion::Applied { .. }
         ) {
             return;
@@ -111,18 +116,19 @@ impl<T: Send + Sync + 'static> RefreshService<T> {
             identity: job.identity,
             kind: job.kind,
         };
-        if let Some(entry) = state.entries.get_mut(&key) {
-            let result = result.map(|result| Arc::new(result.value));
-            if let Ok(value) = &result {
-                if (self.cache_value)(value) {
-                    entry.cached = Some(value.clone());
+        if let Some(refresh_entry) = service_state.entries.get_mut(&key) {
+            let observation =
+                job_result.map(|refresh_result| Arc::new(refresh_result.refresh_value));
+            if let Ok(cached_value) = &observation {
+                if (self.is_cacheable)(cached_value) {
+                    refresh_entry.cached = Some(cached_value.clone());
                 }
             }
-            if let Some(sender) = entry.result.take() {
-                sender.send_replace(Some(result));
+            if let Some(completion_sender) = refresh_entry.completion_sender.take() {
+                completion_sender.send_replace(Some(observation));
             }
         }
-        drop(state);
+        drop(service_state);
         self.notify_progress();
     }
 }

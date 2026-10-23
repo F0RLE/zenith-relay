@@ -57,7 +57,7 @@ pub(super) async fn evaluate_weekly_exhaustions(
     response: &AccountQuotaRefreshResponse,
     fence: &AccountRefreshFence,
 ) -> Result<bool> {
-    if response.account.remote_location.is_some()
+    if response.account.recovery.is_some()
         || response
             .account
             .account

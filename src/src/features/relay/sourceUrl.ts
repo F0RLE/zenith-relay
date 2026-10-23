@@ -1,16 +1,16 @@
 /** Returns a compact source label without rejecting a user-entered URL. */
-export function sourceHost(value: string) {
+export function sourceHost(sourceText: string) {
   try {
-    return new URL(value).host;
+    return new URL(sourceText).host;
   } catch {
-    return value;
+    return sourceText;
   }
 }
 
 /** Returns an explicitly configured URL port without rejecting partial state. */
-export function sourcePort(value: string) {
+export function sourcePort(sourceText: string) {
   try {
-    return new URL(value).port;
+    return new URL(sourceText).port;
   } catch {
     return "";
   }

@@ -107,12 +107,6 @@ mod tests {
                 Some("synthetic-round-trip-access"),
                 "{format:?}"
             );
-            if format == AccountExportFormat::Cockpit {
-                assert_eq!(
-                    parsed.items[0].tags,
-                    std::collections::BTreeSet::from(["team".to_string(), "work".to_string()])
-                );
-            }
         }
     }
 
@@ -126,6 +120,9 @@ mod tests {
 
     fn fixture() -> AccountExportCredential {
         AccountExportCredential {
+            oauth_client_kind: Default::default(),
+            siwc_registration: None,
+            basis_points_headers: None,
             label: "Synthetic account".into(),
             email: Some("synthetic@example.test".into()),
             phone: None,

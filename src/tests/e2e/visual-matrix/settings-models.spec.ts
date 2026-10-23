@@ -29,8 +29,9 @@ for (const theme of ["light", "dark"] as const) {
       expect(pageBox).not.toBeNull();
       expect(headerBox).not.toBeNull();
       expect(groupsBox).not.toBeNull();
-      expect(Math.abs(groupsBox!.x + groupsBox!.width / 2 - (pageBox!.x + pageBox!.width / 2))).toBeLessThanOrEqual(2);
-      expect(groupsBox!.width).toBeGreaterThan(pageBox!.width - 80);
+      expect(Math.abs(groupsBox!.x - headerBox!.x)).toBeLessThanOrEqual(1);
+      expect(groupsBox!.width).toBeLessThanOrEqual(1040);
+      expect(Math.abs(groupsBox!.width - Math.min(1040, headerBox!.width))).toBeLessThanOrEqual(1);
       const topGap = groupsBox!.y - (headerBox!.y + headerBox!.height);
       expect(topGap).toBeGreaterThanOrEqual(-1);
       expect(topGap).toBeLessThanOrEqual(4);
@@ -123,9 +124,13 @@ test("sparse reference tables stay compact and centered in a wide window", async
 
   await page.getByRole("button", { name: "Подключения", exact: true }).click();
   await page.getByRole("tab", { name: "Источники API" }).click();
-  const sourceBoxes = await page.locator(".relay-page[data-view='sources'] > .relay-compact-content").evaluateAll((items) => items.map((item) => item.getBoundingClientRect().toJSON()));
-  expect(sourceBoxes).toHaveLength(2);
-  expect(sourceBoxes.every((box) => box.width <= 1080 && Math.abs(box.x + box.width / 2 - (pageBox!.x + pageBox!.width / 2)) <= 1)).toBe(true);
+  const sources = page.locator(".sources-workspace");
+  await expect(sources.locator(".source-card")).toHaveCount(1);
+  const sourceBox = await sources.boundingBox();
+  expect(sourceBox).not.toBeNull();
+  expect(sourceBox!.width).toBeLessThanOrEqual(pageBox!.width);
+  expect(Math.abs(sourceBox!.x + sourceBox!.width / 2 - (pageBox!.x + pageBox!.width / 2))).toBeLessThanOrEqual(1);
+  expect(await sources.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ path: "output/playwright/api-sources-centered-ru-dark-1648x1168.png" });
 });
 
@@ -145,7 +150,7 @@ test("source prices are grouped by provider and Messages models expose cache TTL
   await page.goto("/");
   await page.getByRole("button", { name: "Подключения", exact: true }).click();
   await page.getByRole("tab", { name: "Источники API" }).click();
-  await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Изменить" }).click();
+  await page.locator(".source-card").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Изменить" }).click();
   const dialog = page.getByRole("dialog", { name: "Изменить источник" });
   await dialog.getByRole("tab", { name: "Цены" }).click();
   await dialog.locator(".source-price-group > summary").filter({ hasText: "OpenAI" }).click();
@@ -177,7 +182,7 @@ test("source editor keeps discovery compact and routing controls internal", asyn
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("tab", { name: "Sources" }).click();
-  await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Edit" }).click();
+  await page.locator(".source-card").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Edit" }).click();
   const dialog = page.getByRole("dialog", { name: "Edit source" });
   await expect(dialog.locator('[role="tablist"]').first().getByRole("tab")).toHaveText(["General", "Pricing"]);
   await expect(dialog.getByLabel("Name", { exact: true })).toBeVisible();
@@ -196,37 +201,60 @@ test("source editor keeps discovery compact and routing controls internal", asyn
   await page.screenshot({ path: "output/playwright/source-discovery-pricing.png" });
 });
 
-test("reasoning modes stay balanced with the full backend level set", async ({ page }) => {
-  await installTauriMock(page, {
-    locale: "en",
-    mode: "local",
-    theme: "dark",
-    populated: true,
-    mixedModels: true,
-    modelReasoning: { "claude-opus-4-8": ["none", "low", "medium", "high", "xhigh", "max"] },
+for (const theme of ["light", "dark"] as const) {
+  test(`reasoning modes stay balanced with the full backend level set ${theme}`, async ({ page }) => {
+    await installTauriMock(page, {
+      locale: "ru",
+      mode: "local",
+      theme,
+      populated: true,
+      mixedModels: true,
+      modelReasoning: { "claude-opus-4-8": ["none", "low", "medium", "high", "xhigh", "max"] },
+    });
+    await page.setViewportSize({ width: 1160, height: 760 });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Пул", exact: true }).click();
+    await page.getByRole("tab", { name: "Правила моделей", exact: true }).click();
+    const model = page.locator('.model-rules tbody tr[data-model-id="claude-opus-4-8"]');
+    await model.locator("[data-model-reasoning-edit]").click();
+
+    const dialog = page.getByRole("dialog", { name: "Режимы размышления" });
+    const options = dialog.locator(".model-reasoning-options button");
+    await expect(options).toHaveCount(6);
+    await expect(dialog.locator("footer")).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: "Закрыть", exact: true })).toHaveCount(1);
+    const max = dialog.getByRole("checkbox", { name: "Максимальное", exact: true });
+    const primaryBackground = theme === "dark" ? "rgb(128, 180, 154)" : "rgb(21, 100, 77)";
+    await expect(max).toHaveCSS("background-color", primaryBackground);
+    await expect(max).toHaveCSS("color", theme === "dark" ? "rgb(16, 32, 24)" : "rgb(255, 254, 250)");
+    expect(await dialog.locator(".model-reasoning-options").evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(" ").length)).toBe(3);
+    expect(await options.evaluateAll((items) => new Set(items.map((item) => Math.round(item.getBoundingClientRect().top))).size)).toBe(2);
+    expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await page.screenshot({ path: `output/playwright/model-reasoning-dialog-ru-${theme}-1160x760.png` });
+
+    await page.setViewportSize({ width: 520, height: 620 });
+    expect(await options.evaluateAll((items) => new Set(items.map((item) => Math.round(item.getBoundingClientRect().top))).size)).toBe(2);
+    expect(await dialog.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight && element.scrollWidth <= element.clientWidth;
+    })).toBe(true);
+    await page.screenshot({ path: `output/playwright/model-reasoning-dialog-ru-${theme}-520x620.png` });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await dialog.locator(".model-reasoning-options").evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(" ").length)).toBe(2);
+    expect(await options.evaluateAll((items) => new Set(items.map((item) => Math.round(item.getBoundingClientRect().top))).size)).toBe(3);
+    expect(await dialog.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight && element.scrollWidth <= element.clientWidth;
+    })).toBe(true);
+    await page.screenshot({ path: `output/playwright/model-reasoning-dialog-ru-${theme}-390x844.png` });
+    await max.hover();
+    await expect(max).toHaveCSS("background-color", theme === "dark" ? "rgb(160, 204, 179)" : "rgb(16, 76, 59)");
+    await max.click();
+    await expect(max).toHaveAttribute("aria-checked", "false");
+    await expect(max).not.toHaveCSS("background-color", primaryBackground);
   });
-  await page.setViewportSize({ width: 1160, height: 760 });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await page.getByRole("tab", { name: "Model Rules" }).click();
-  const model = page.locator('.model-rules tbody tr[data-model-id="claude-opus-4-8"]');
-  await model.getByRole("button", { name: "Set reasoning modes for claude-opus-4-8" }).click();
-
-  const dialog = page.getByRole("dialog", { name: "Reasoning modes" });
-  const options = dialog.locator(".model-reasoning-options button");
-  await expect(options).toHaveCount(6);
-  expect(await options.evaluateAll((items) => new Set(items.map((item) => Math.round(item.getBoundingClientRect().top))).size)).toBe(1);
-  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-  await page.screenshot({ path: "output/playwright/model-reasoning-dialog-ru-dark-1160x760.png" });
-
-  await page.setViewportSize({ width: 520, height: 620 });
-  expect(await options.evaluateAll((items) => new Set(items.map((item) => Math.round(item.getBoundingClientRect().top))).size)).toBe(2);
-  expect(await dialog.evaluate((element) => {
-    const rect = element.getBoundingClientRect();
-    return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight && element.scrollWidth <= element.clientWidth;
-  })).toBe(true);
-  await page.screenshot({ path: "output/playwright/model-reasoning-dialog-ru-dark-520x620.png" });
-});
+}
 
 test("prompt cache policy fits the Russian dark source editor", async ({ page }) => {
   await installTauriMock(page, {
@@ -246,7 +274,7 @@ test("prompt cache policy fits the Russian dark source editor", async ({ page })
   await page.goto("/");
   await page.getByRole("button", { name: "Подключения", exact: true }).click();
   await page.getByRole("tab", { name: "Источники API" }).click();
-  await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Изменить" }).click();
+  await page.locator(".source-card").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Изменить" }).click();
   const dialog = page.getByRole("dialog", { name: "Изменить источник" });
   await expect(dialog.locator(".source-add-adapters")).toHaveCount(0);
   expect(await dialog.evaluate((element) => {

@@ -1,6 +1,8 @@
+mod account_trash;
 mod persistence;
 mod records;
 mod refresh;
+mod retired_accounts;
 mod source_refresh;
 pub(crate) use source_refresh::SourceRefreshFence;
 use source_refresh::{SourceRefreshRevisions, STATE_SOURCE_REVISIONS};
@@ -14,7 +16,7 @@ use crate::{
         error::{ErrorCode, LocalPoolError, Result},
         models::{
             AutomationRecords, GatewaySettings, LocalAccountRecord, LocalGatewayKeyRecord,
-            OwnershipOperationRecord, ProviderSourceRecord, RemoteTargetRecord, MAX_LOCAL_ACCOUNTS,
+            ProviderSourceRecord, TrashedLocalAccount, MAX_LOCAL_ACCOUNTS,
         },
     },
     storage_paths::StoragePaths,
@@ -30,10 +32,9 @@ use zenith_relay_core::PoolRoutingPolicy;
 const STATE_GATEWAY: &str = "gateway";
 const STATE_SOURCES: &str = "sources";
 const STATE_ACCOUNTS: &str = "accounts";
+const STATE_ACCOUNT_TRASH: &str = "account_trash";
 const STATE_KEYS: &str = "keys";
 const STATE_AUTOMATIONS: &str = "automations";
-const STATE_REMOTE_TARGET: &str = "remote_target";
-const STATE_OWNERSHIP_OPERATION: &str = "ownership_operation";
 const LEGACY_STATE_FILES: [&str; 7] = [
     "metadata.json",
     "settings.json",
@@ -41,7 +42,7 @@ const LEGACY_STATE_FILES: [&str; 7] = [
     "accounts.json",
     "pool-keys.json",
     "automations.json",
-    "remote-target.json",
+    retired_accounts::LEGACY_TARGET_FILE,
 ];
 const MAX_LEGACY_JSON_BYTES: u64 = 16 * 1024 * 1024;
 const SQLITE_SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
@@ -51,10 +52,9 @@ pub struct LocalPoolStore {
     gateway: GatewaySettings,
     sources: Vec<ProviderSourceRecord>,
     accounts: Vec<LocalAccountRecord>,
+    account_trash: Vec<TrashedLocalAccount>,
     keys: Vec<LocalGatewayKeyRecord>,
     automations: AutomationRecords,
-    remote_target: Option<RemoteTargetRecord>,
-    ownership_operation: Option<OwnershipOperationRecord>,
     refresh_revisions: RefreshRevisions,
     source_refresh_revisions: SourceRefreshRevisions,
     refresh_changed: tokio::sync::watch::Sender<u64>,
@@ -79,6 +79,8 @@ impl LocalPoolStore {
                 .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
         }
         let mut accounts = state.accounts;
+        account_trash::validate_inventory(&accounts, &state.account_trash)?;
+        retired_accounts::migrate(&database, &mut accounts)?;
         upgrade_saved_gateway(&database, &mut gateway, &sources, &accounts)?;
 
         let mut automations = state.automations;
@@ -119,11 +121,6 @@ impl LocalPoolStore {
                 persistence::serialize_state(&accounts)?,
             )])?;
         }
-        if let Some(operation) = &state.ownership_operation {
-            operation
-                .validate()
-                .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
-        }
         let refresh_revisions = match state.refresh_revisions {
             Some(revisions) => {
                 revisions.validate(&accounts)?;
@@ -158,10 +155,9 @@ impl LocalPoolStore {
             gateway,
             sources,
             accounts,
+            account_trash: state.account_trash,
             keys: state.keys,
             automations,
-            remote_target: state.remote_target,
-            ownership_operation: state.ownership_operation,
             refresh_revisions,
             source_refresh_revisions,
             refresh_changed: tokio::sync::watch::channel(0).0,
@@ -192,26 +188,18 @@ impl LocalPoolStore {
         &self.automations
     }
 
-    pub fn remote_target(&self) -> Option<&RemoteTargetRecord> {
-        self.remote_target.as_ref()
+    pub fn source(&self, source_id: &str) -> Option<&ProviderSourceRecord> {
+        self.sources.iter().find(|source| source.id == source_id)
     }
 
-    pub fn ownership_operation(&self) -> Option<&OwnershipOperationRecord> {
-        self.ownership_operation.as_ref()
+    pub fn key(&self, gateway_key_id: &str) -> Option<&LocalGatewayKeyRecord> {
+        self.keys.iter().find(|key| key.id == gateway_key_id)
     }
 
-    pub fn source(&self, id: &str) -> Option<&ProviderSourceRecord> {
-        self.sources.iter().find(|source| source.id == id)
-    }
-
-    pub fn key(&self, id: &str) -> Option<&LocalGatewayKeyRecord> {
-        self.keys.iter().find(|key| key.id == id)
-    }
-
-    pub fn account(&self, id: &str) -> Option<&LocalAccountRecord> {
+    pub fn account(&self, account_id: &str) -> Option<&LocalAccountRecord> {
         self.accounts
             .iter()
-            .find(|account| account.account.id == id)
+            .find(|account| account.account.id == account_id)
     }
 
     pub fn update_client_auth_observation(
@@ -220,18 +208,18 @@ impl LocalPoolStore {
         status: Option<String>,
         login_redirect_at_ms: Option<u64>,
     ) -> Result<bool> {
-        let Some(current) = self.account(account_id).cloned() else {
+        let Some(stored_account) = self.account(account_id).cloned() else {
             return Ok(false);
         };
-        if current.client_auth_status == status
-            && current.last_client_login_redirect_at_ms == login_redirect_at_ms
+        if stored_account.client_auth_status == status
+            && stored_account.last_client_login_redirect_at_ms == login_redirect_at_ms
         {
             return Ok(false);
         }
-        let mut updated = current;
-        updated.client_auth_status = status;
-        updated.last_client_login_redirect_at_ms = login_redirect_at_ms;
-        self.upsert_account(updated)?;
+        let mut updated_account = stored_account;
+        updated_account.client_auth_status = status;
+        updated_account.last_client_login_redirect_at_ms = login_redirect_at_ms;
+        self.upsert_account(updated_account)?;
         Ok(true)
     }
 }
@@ -246,18 +234,22 @@ fn upgrade_saved_gateway(
     // older build. Remove them on disk without changing any active controls.
     let remove_v1_scalars = database
         .state_json(STATE_GATEWAY)?
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        .is_some_and(|value| {
-            value.as_object().is_some_and(|fields| {
-                [
-                    "cooldownAfterFailures",
-                    "keepLastCandidateAvailable",
-                    "routingStrategy",
-                    "subscriptionPlanOrder",
-                ]
-                .iter()
-                .any(|key| fields.contains_key(*key))
-            })
+        .and_then(|gateway_state_text| {
+            serde_json::from_str::<serde_json::Value>(&gateway_state_text).ok()
+        })
+        .is_some_and(|gateway_state_json| {
+            gateway_state_json
+                .as_object()
+                .is_some_and(|gateway_state_fields| {
+                    [
+                        "cooldownAfterFailures",
+                        "keepLastCandidateAvailable",
+                        "routingStrategy",
+                        "subscriptionPlanOrder",
+                    ]
+                    .iter()
+                    .any(|key| gateway_state_fields.contains_key(*key))
+                })
         });
     let upgrade_policy = !gateway
         .pool_routing

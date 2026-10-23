@@ -11,17 +11,8 @@ import {
 
 type RuntimeRoutingOrder = NonNullable<RuntimeSnapshot["gateway"]["routingOrder"]>;
 
-export function visibleLocalRoutingOrder(
-  base: RuntimeRoutingOrder,
-  overlay: ReadonlyMap<string, RuntimeActivitySnapshot>,
-) {
-  return applyRuntimeActivities(
-    base,
-    overlay.values(),
-  );
-}
-
 export function useRuntimeEvents({
+  requestRoutingRefresh,
   modeRef,
   pageRef,
   stateRevision,
@@ -33,6 +24,7 @@ export function useRuntimeEvents({
   setUsageRevision,
   runBackgroundRefresh,
 }: {
+  requestRoutingRefresh: () => void;
   modeRef: MutableRefObject<RelayMode>;
   pageRef: MutableRefObject<PageId>;
   stateRevision: MutableRefObject<number>;
@@ -53,12 +45,10 @@ export function useRuntimeEvents({
     let unlistenUsage: (() => void) | undefined;
     let unlistenRuntimeActivity: (() => void) | undefined;
     let runtimeActivityFrame: number | undefined;
-    let runtimeActivityFallbackTimer: number | undefined;
     let runtimeActivityFlushQueued = false;
     let pendingRuntimeActivity: RuntimeActivityState | null = null;
     const flushRuntimeActivity = () => {
       runtimeActivityFrame = undefined;
-      runtimeActivityFallbackTimer = undefined;
       runtimeActivityFlushQueued = false;
       if (!active || modeRef.current !== "local") {
         pendingRuntimeActivity = null;
@@ -68,9 +58,13 @@ export function useRuntimeEvents({
       pendingRuntimeActivity = null;
       if (pending) {
         const candidates = Object.fromEntries(runtimeActivityOverlay.current);
-        setRuntimeActivity((current) => compareRuntimeActivity(pending, current) > 0
-          ? { ...pending, candidates }
-          : current);
+        setRuntimeActivity((previousActivitySnapshot) => {
+          // A late event can still be new for a different candidate.
+          const latestActivity = compareRuntimeActivity(pending, previousActivitySnapshot) > 0
+            ? pending
+            : previousActivitySnapshot;
+          return { ...latestActivity, candidates };
+        });
       }
       if (document.visibilityState !== "visible" || !isRuntimeRefreshPage(pageRef.current)) return;
       setRuntime((snapshot) => {
@@ -79,28 +73,27 @@ export function useRuntimeEvents({
         const baseOrder = runtimeRoutingOrderBase.current.length
           ? runtimeRoutingOrderBase.current
           : currentOrder;
-        const nextOrder = visibleLocalRoutingOrder(baseOrder, runtimeActivityOverlay.current);
+        const nextOrder = applyRuntimeActivities(baseOrder, runtimeActivityOverlay.current.values());
         return nextOrder === currentOrder
           ? snapshot
           : { ...snapshot, gateway: { ...snapshot.gateway, routingOrder: nextOrder } };
       });
     };
     const scheduleRuntimeActivityFlush = () => {
-      if (runtimeActivityFlushQueued) return;
+      if (runtimeActivityFlushQueued || document.visibilityState !== "visible") return;
       runtimeActivityFlushQueued = true;
-      if (document.visibilityState === "visible") {
-        runtimeActivityFrame = window.requestAnimationFrame(flushRuntimeActivity);
-      } else {
-        // Background documents may throttle animation frames indefinitely.
-        runtimeActivityFallbackTimer = window.setTimeout(flushRuntimeActivity, 16);
-      }
+      runtimeActivityFrame = window.requestAnimationFrame(flushRuntimeActivity);
     };
     const handleActivityVisibilityChange = () => {
-      if (document.visibilityState === "hidden" && runtimeActivityFrame !== undefined) {
-        window.cancelAnimationFrame(runtimeActivityFrame);
+      if (document.visibilityState !== "visible") {
+        if (runtimeActivityFrame !== undefined) window.cancelAnimationFrame(runtimeActivityFrame);
         runtimeActivityFrame = undefined;
-        flushRuntimeActivity();
+        runtimeActivityFlushQueued = false;
+        return;
       }
+      // Events still update the latest per-candidate overlay while hidden.
+      // Publish it once on return instead of cloning/rendering every 16 ms.
+      if (pendingRuntimeActivity) scheduleRuntimeActivityFlush();
     };
     document.addEventListener("visibilitychange", handleActivityVisibilityChange);
     const scheduleUsageRefresh = () => {
@@ -109,7 +102,7 @@ export function useRuntimeEvents({
       usageRefreshTimer = window.setTimeout(() => {
         usageRefreshTimer = undefined;
         if (!active || document.visibilityState !== "visible" || !isUsageRefreshPage(pageRef.current)) return;
-        setUsageRevision((current) => current + 1);
+        setUsageRevision((previousRevision) => previousRevision + 1);
       }, usageRefreshDebounceMs(targetPage));
     };
     void relayCommands.onStateChanged(() => {
@@ -140,8 +133,8 @@ export function useRuntimeEvents({
         runtimeActivityOverlay.current.clear();
         runtimeActivityRuntimeId.current = runtimeId;
       }
-      const previous = runtimeActivityOverlay.current.get(activity.candidateId);
-      if (previous && compareRuntimeActivity(activity, previous) <= 0) return;
+      const previousActivity = runtimeActivityOverlay.current.get(activity.candidateId);
+      if (previousActivity && compareRuntimeActivity(activity, previousActivity) <= 0) return;
       // Keep both active and zero-count snapshots. A zero-count snapshot is a
       // tombstone for an older live poll state and must be applied to the next
       // base order as well as the current one.
@@ -155,6 +148,7 @@ export function useRuntimeEvents({
         };
       }
       scheduleRuntimeActivityFlush();
+      requestRoutingRefresh();
     }).then((stop) => {
       if (active) unlistenRuntimeActivity = stop;
       else stop();
@@ -174,12 +168,11 @@ export function useRuntimeEvents({
       if (runtimeRefreshTimer !== undefined) window.clearTimeout(runtimeRefreshTimer);
       if (usageRefreshTimer !== undefined) window.clearTimeout(usageRefreshTimer);
       if (runtimeActivityFrame !== undefined) window.cancelAnimationFrame(runtimeActivityFrame);
-      if (runtimeActivityFallbackTimer !== undefined) window.clearTimeout(runtimeActivityFallbackTimer);
       pendingRuntimeActivity = null;
       document.removeEventListener("visibilitychange", handleActivityVisibilityChange);
       unlisten?.();
       unlistenUsage?.();
       unlistenRuntimeActivity?.();
     };
-  }, [runBackgroundRefresh]);
+  }, [requestRoutingRefresh, runBackgroundRefresh]);
 }

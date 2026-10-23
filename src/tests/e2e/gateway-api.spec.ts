@@ -4,7 +4,7 @@ import { installTauriMock, type MockOptions } from "./tauri-mock";
 async function openApi(page: Page, options: MockOptions = {}) {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, ...options });
   await page.goto("/");
-  await page.getByRole("button", { name: "API", exact: true }).click();
+  await page.getByRole("button", { name: options.locale === "ru" ? "Доступ" : "Access", exact: true }).click();
   await expect(page.getByRole("tabpanel", { name: "API", exact: true })).toBeVisible();
 }
 
@@ -14,10 +14,11 @@ function keyCommands(page: Page) {
   }).__TAURI_TEST_INVOKES__.filter(({ command }) => /^(reveal|rotate)_(local|remote)_gateway_api_key$/.test(command)).map(({ command }) => command));
 }
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`${mode} API copies credentials only on request and confirms key replacement`, async ({ page }) => {
     await openApi(page, { mode });
     const tab = page.getByRole("tabpanel", { name: "API", exact: true });
+    await expect(tab.locator(".gateway-api-key [role='menu']")).toHaveCount(0);
     const address = await tab.locator(".gateway-api-address").innerText();
     await tab.getByRole("button", { name: "Copy address", exact: true }).click();
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(address);
@@ -30,10 +31,11 @@ for (const mode of ["local", "remote"] as const) {
     expect(await keyCommands(page)).toEqual([`reveal_${mode}_gateway_api_key`]);
     await expect(tab).not.toContainText("synthetic");
 
-    const menu = tab.locator(".relay-action-menu summary");
+    const menu = tab.locator(".gateway-api-key").getByLabel("API key actions", { exact: true });
     await menu.click();
     await page.getByRole("menuitem", { name: "Reissue API key" }).click();
     const confirmation = page.getByRole("dialog", { name: "Reissue API key" });
+    await expect(tab.locator(".gateway-api-key [role='menu']")).toHaveCount(0);
     await confirmation.getByRole("button", { name: "Cancel", exact: true }).click();
     expect(await keyCommands(page)).toEqual([`reveal_${mode}_gateway_api_key`]);
     await menu.click();
@@ -75,22 +77,6 @@ for (const running of [true, false]) {
   });
 }
 
-for (const scenario of [
-  { name: "no key support", features: ["local_gateway"], running: true, copy: false, rotate: false },
-  { name: "copy without rotation", features: ["local_gateway", "profile_attach"], running: true, copy: true, rotate: false },
-  { name: "rotation without profile attach", features: ["local_gateway", "profile_key_rotation"], running: true, copy: false, rotate: false },
-  { name: "stopped server", features: ["local_gateway", "profile_attach", "profile_key_rotation"], running: false, copy: false, rotate: false },
-]) {
-  test(`remote API respects capabilities: ${scenario.name}`, async ({ page }) => {
-    await openApi(page, { mode: "remote", remoteFeatures: scenario.features, gatewayRunning: scenario.running });
-    const tab = page.getByRole("tabpanel", { name: "API", exact: true });
-    await expect(tab.getByRole("spinbutton", { name: "Port" })).toHaveCount(0);
-    await expect(tab.getByRole("button", { name: "Copy key", exact: true })).toBeEnabled({ enabled: scenario.copy });
-    await tab.locator(".relay-action-menu summary").click();
-    await expect(page.getByRole("menuitem", { name: "Reissue API key" })).toBeEnabled({ enabled: scenario.rotate });
-    expect(await keyCommands(page)).toEqual([]);
-  });
-}
 
 test("a failed port update preserves the current address and the editable draft", async ({ page }) => {
   await openApi(page);
@@ -129,14 +115,18 @@ for (const theme of ["light", "dark"] as const) {
       const tab = page.getByRole("tabpanel", { name: "API", exact: true });
       await expect(tab.getByRole("button", { name: "Копировать адрес", exact: true })).toBeInViewport();
       await expect(tab.getByRole("button", { name: "Копировать ключ", exact: true })).toBeInViewport();
-      expect(await tab.evaluate((element) => Array.from(element.querySelectorAll("div, form, code, input, button, h3, p")).every((node) => {
-        if (!node.getClientRects().length) return true;
+      const overflow = await tab.evaluate((element) => Array.from(element.querySelectorAll("div, form, code, input, button, h3, p")).flatMap((node) => {
+        if (!node.getClientRects().length) return [];
         const rect = node.getBoundingClientRect();
-        return node.scrollWidth <= node.clientWidth + 1 && rect.left >= 0 && rect.right <= innerWidth;
-      }))).toBe(true);
-      await expect(tab.getByRole("spinbutton", { name: "Порт", exact: true })).toBeInViewport();
+        if (node.scrollWidth <= node.clientWidth + 1 && rect.left >= 0 && rect.right <= innerWidth) return [];
+        return [{ tag: node.tagName, className: node.className, width: node.clientWidth, scrollWidth: node.scrollWidth, left: rect.left, right: rect.right, viewportWidth: innerWidth }];
+      }));
+      expect(overflow).toEqual([]);
+      const port = tab.getByRole("spinbutton", { name: "Порт", exact: true });
+      await port.scrollIntoViewIfNeeded();
+      await expect(port).toBeInViewport();
       await page.locator(".gateway-page").screenshot({ path: `output/playwright/gateway-api-${theme}-${width}.png` });
-      await tab.locator(".relay-action-menu summary").click();
+      await tab.locator(".gateway-api-key summary").click();
       await expect(page.getByRole("menuitem", { name: "Перевыпустить API-ключ" })).toBeInViewport();
       const menu = tab.getByRole("menu");
       expect(await menu.evaluate((element) => {

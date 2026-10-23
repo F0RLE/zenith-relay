@@ -14,12 +14,12 @@ impl SourceReadHints {
         }
     }
     pub(crate) fn delay(&self) -> Option<u64> {
-        let value = self.retry_after_ms.load(Ordering::Relaxed);
-        (value > 0).then_some(value)
+        let retry_after_delay_ms = self.retry_after_ms.load(Ordering::Relaxed);
+        (retry_after_delay_ms > 0).then_some(retry_after_delay_ms)
     }
 }
 
 pub struct SourceRead<T> {
-    pub value: T,
+    pub read_value: T,
     pub retry_after_ms: Option<u64>,
 }

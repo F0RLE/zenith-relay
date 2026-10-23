@@ -1,6 +1,78 @@
 use super::*;
 
 #[test]
+fn prompt_affinity_follows_the_admitted_native_route_of_the_same_member() {
+    let mut scheduler = PoolScheduler::new();
+    scheduler.upsert(candidate("other"));
+    scheduler.upsert(candidate("preferred"));
+    let mut alias = candidate("preferred::chat");
+    alias.source_id = "preferred".into();
+    alias.protocol = WireApi::ChatCompletions;
+    scheduler.upsert(alias);
+    scheduler.set_native_route("preferred", true);
+    scheduler.bind_prompt_affinity("cache:thread", "preferred::chat", 0);
+
+    for protocols in [
+        vec![WireApi::Responses, WireApi::ChatCompletions],
+        vec![WireApi::Responses],
+    ] {
+        let selected = scheduler
+            .select(SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &protocols,
+                scope: &CandidateScope::default(),
+                tried: &HashSet::new(),
+                response_affinity_key: None,
+                prompt_affinity_key: Some("cache:thread"),
+                now_ms: 1,
+            })
+            .unwrap();
+        assert_eq!(selected.candidate_id, "preferred");
+        assert_eq!(
+            selected.diagnostics.reason,
+            SelectionReason::PromptCacheAffinity
+        );
+    }
+
+    scheduler.bind_response_affinity("response", "preferred::chat", 0);
+    assert!(scheduler
+        .select(SelectionRequest {
+            model: "gpt-5",
+            allowed_protocols: &[WireApi::Responses],
+            scope: &CandidateScope::default(),
+            tried: &HashSet::new(),
+            response_affinity_key: Some("response"),
+            prompt_affinity_key: Some("cache:thread"),
+            now_ms: 1,
+        })
+        .is_none());
+}
+
+#[test]
+fn remapped_prompt_affinity_cannot_restore_an_excluded_member() {
+    let mut scheduler = PoolScheduler::new();
+    scheduler.upsert(candidate("other"));
+    scheduler.upsert(candidate("preferred"));
+    let mut alias = candidate("preferred::chat");
+    alias.source_id = "preferred".into();
+    alias.protocol = WireApi::ChatCompletions;
+    scheduler.upsert(alias);
+    scheduler.bind_prompt_affinity("cache:thread", "preferred::chat", 0);
+    let selected = scheduler
+        .select(SelectionRequest {
+            model: "gpt-5",
+            allowed_protocols: &[WireApi::Responses],
+            scope: &CandidateScope::default(),
+            tried: &HashSet::from(["preferred".to_string()]),
+            response_affinity_key: None,
+            prompt_affinity_key: Some("cache:thread"),
+            now_ms: 1,
+        })
+        .unwrap();
+    assert_eq!(selected.candidate_id, "other");
+}
+
+#[test]
 fn prompt_cache_affinity_does_not_keep_a_smaller_quota() {
     let mut scheduler = PoolScheduler::new();
     let mut cached = oauth_candidate("cached");
@@ -60,6 +132,119 @@ fn prompt_cache_affinity_breaks_an_equal_quota_tie() {
         SelectionReason::PromptCacheAffinity
     );
 }
+#[test]
+fn successful_quota_rebalance_moves_prompt_affinity_to_the_warmed_member() {
+    let mut scheduler = PoolScheduler::new();
+    for (id, remaining) in [("owner", 4_000), ("next-a", 9_000), ("next-b", 9_000)] {
+        let mut member = oauth_candidate(id);
+        member.quota = CandidateQuota::Available(remaining);
+        member.quota_updated_at_ms = Some(100);
+        scheduler.upsert(member);
+    }
+    assert!(scheduler.bind_prompt_affinity("cache:thread", "owner", 100));
+    let select = |scheduler: &mut PoolScheduler, now_ms| {
+        scheduler
+            .select(SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                scope: &CandidateScope::default(),
+                tried: &HashSet::new(),
+                response_affinity_key: None,
+                prompt_affinity_key: Some("cache:thread"),
+                now_ms,
+            })
+            .unwrap()
+    };
+    let rebalanced = select(&mut scheduler, 101);
+    assert_ne!(rebalanced.candidate_id, "owner");
+    assert_eq!(
+        rebalanced.diagnostics.reason,
+        SelectionReason::QuotaHeadroom
+    );
+    assert!(scheduler.bind_prompt_affinity_sticky("cache:thread", &rebalanced.candidate_id, 102));
+
+    // A late response from the previous owner must not undo the rebalance.
+    assert!(!scheduler.bind_prompt_affinity_sticky("cache:thread", "owner", 103));
+    assert_eq!(
+        scheduler.prompt_affinity.get("cache:thread", 104),
+        Some(rebalanced.candidate_id.as_str())
+    );
+    let next = select(&mut scheduler, 104);
+    assert_eq!(next.candidate_id, rebalanced.candidate_id);
+    // The lower-quota member is still filtered out, so resource headroom
+    // remains the diagnostic even though affinity chooses between the leaders.
+    assert_eq!(next.diagnostics.reason, SelectionReason::QuotaHeadroom);
+}
+
+#[test]
+fn slight_parallel_load_keeps_prompt_affinity_and_its_diagnostics() {
+    let mut scheduler = PoolScheduler::new();
+    scheduler.upsert(oauth_candidate("owner"));
+    scheduler.upsert(oauth_candidate("other"));
+    assert!(scheduler.bind_prompt_affinity("cache:thread", "owner", 100));
+    let lease = scheduler
+        .reserve_request("owner", "gpt-5", 100, false)
+        .unwrap();
+    let selected = scheduler
+        .select(SelectionRequest {
+            model: "gpt-5",
+            allowed_protocols: &[WireApi::Responses],
+            scope: &CandidateScope::default(),
+            tried: &HashSet::new(),
+            response_affinity_key: None,
+            prompt_affinity_key: Some("cache:thread"),
+            now_ms: 101,
+        })
+        .unwrap();
+
+    assert_eq!(selected.candidate_id, "owner");
+    assert!(!selected.response_affinity_hit);
+    assert_eq!(
+        selected.diagnostics.reason,
+        SelectionReason::PromptCacheAffinity
+    );
+    scheduler.release_reservation(lease);
+}
+
+#[test]
+fn successful_load_spillover_keeps_prompt_owner_inside_the_resource_band() {
+    let mut scheduler = PoolScheduler::new();
+    for (id, remaining) in [("owner", 8_000), ("spillover", 8_100)] {
+        let mut member = oauth_candidate(id);
+        member.quota = CandidateQuota::Available(remaining);
+        member.quota_updated_at_ms = Some(100);
+        scheduler.upsert(member);
+    }
+    assert!(scheduler.bind_prompt_affinity("cache:thread", "owner", 100));
+    let lease = scheduler
+        .reserve_request("owner", "gpt-5", 100, false)
+        .unwrap();
+    // A larger load gap still spills over; a single extra request may retain
+    // the warm owner without changing durable ownership after a real spill.
+    let second_lease = scheduler
+        .reserve_request("owner", "gpt-5", 100, false)
+        .unwrap();
+    let selected = scheduler
+        .select(SelectionRequest {
+            model: "gpt-5",
+            allowed_protocols: &[WireApi::Responses],
+            scope: &CandidateScope::default(),
+            tried: &HashSet::new(),
+            response_affinity_key: None,
+            prompt_affinity_key: Some("cache:thread"),
+            now_ms: 101,
+        })
+        .unwrap();
+    assert_eq!(selected.candidate_id, "spillover");
+    assert!(!scheduler.bind_prompt_affinity_sticky("cache:thread", "spillover", 102));
+    scheduler.release_reservation(lease);
+    scheduler.release_reservation(second_lease);
+    assert_eq!(
+        scheduler.prompt_affinity.get("cache:thread", 103),
+        Some("owner")
+    );
+}
+
 #[test]
 fn sticky_prompt_affinity_does_not_rebind_to_spillover_candidate() {
     let mut scheduler = PoolScheduler::new();

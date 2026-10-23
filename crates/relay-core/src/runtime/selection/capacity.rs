@@ -30,20 +30,8 @@ impl GatewayRuntime {
                 }
             }
         }
-        if let (Some(key), Some(store)) =
-            (prompt_affinity_key, self.response_affinity_store.as_ref())
-        {
-            let cached = self.lock_scheduler().has_prompt_affinity(key, now_ms);
-            if !cached {
-                if let Ok(Some(binding)) = store.find(key, now_ms) {
-                    self.lock_scheduler().restore_prompt_affinity(
-                        binding.key,
-                        &binding.candidate_id,
-                        binding.expires_at_ms,
-                        now_ms,
-                    );
-                }
-            }
+        if let Some(key) = prompt_affinity_key {
+            self.restore_prompt_affinity_from_store(key, now_ms);
         }
         let attempted_members = budget.attempted_members();
         let mut exclusions = self.lock_scheduler().routes_for_members(&attempted_members);
@@ -98,35 +86,21 @@ impl GatewayRuntime {
         if hidden.contains(&crate::model_id_key(model)) {
             return (None, false);
         }
+        let selection_request = || SelectionRequest {
+            model,
+            allowed_protocols,
+            scope: &scope,
+            tried,
+            response_affinity_key,
+            prompt_affinity_key,
+            now_ms,
+        };
         let selection = match (lane, operation) {
-            (CandidateLeaseLane::Text, RotationOperation::Compaction) => scheduler
-                .select_compaction(SelectionRequest {
-                    model,
-                    allowed_protocols,
-                    scope: &scope,
-                    tried,
-                    response_affinity_key,
-                    prompt_affinity_key,
-                    now_ms,
-                }),
-            (CandidateLeaseLane::Text, _) => scheduler.select(SelectionRequest {
-                model,
-                allowed_protocols,
-                scope: &scope,
-                tried,
-                response_affinity_key,
-                prompt_affinity_key,
-                now_ms,
-            }),
-            (CandidateLeaseLane::Image, _) => scheduler.select_image(SelectionRequest {
-                model,
-                allowed_protocols,
-                scope: &scope,
-                tried,
-                response_affinity_key,
-                prompt_affinity_key,
-                now_ms,
-            }),
+            (CandidateLeaseLane::Text, RotationOperation::Compaction) => {
+                scheduler.select_compaction(selection_request())
+            }
+            (CandidateLeaseLane::Text, _) => scheduler.select(selection_request()),
+            (CandidateLeaseLane::Image, _) => scheduler.select_image(selection_request()),
         };
         let reserved = selection.and_then(|selection| {
             let reservation = scheduler.reserve_request_with_operation(
@@ -186,19 +160,8 @@ impl GatewayRuntime {
                 (selection, lease)
             })
         });
-        let capacity_blocked = reserved.is_none()
-            && scheduler.capacity_blocked_for(
-                SelectionRequest {
-                    model,
-                    allowed_protocols,
-                    scope: &scope,
-                    tried,
-                    response_affinity_key,
-                    prompt_affinity_key,
-                    now_ms,
-                },
-                operation,
-            );
+        let capacity_blocked =
+            reserved.is_none() && scheduler.capacity_blocked_for(selection_request(), operation);
         (reserved, capacity_blocked)
     }
 

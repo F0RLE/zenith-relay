@@ -239,7 +239,7 @@ async fn websocket_http_fallback_waits_through_silence_and_keeps_one_attempt() {
     assert_held(&gateway, &events);
     sender
         .send(Bytes::from_static(
-            b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"slow-response\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+            b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"slow-response\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
         ))
         .unwrap();
     assert_eq!(
@@ -310,4 +310,94 @@ async fn websocket_generation_waits_before_and_after_first_output() {
             0
         );
     }
+}
+
+#[tokio::test]
+async fn websocket_stalled_continuation_records_failure_and_releases_the_lease() {
+    let release = Arc::new(Notify::new());
+    let (upstream, state) = spawn_websocket_upstream_with_behavior(
+        WebSocketBehavior::StopReadingAfterSuccess(release.clone()),
+    )
+    .await;
+    let (gateway, events) = gateway_for_long_request(&upstream, true).await;
+    let mut socket = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap()
+        .into_websocket()
+        .await
+        .unwrap();
+    socket
+        .send(ClientWsMessage::Text(
+            json!({"type":"response.create","model":MODEL,"input":"synthetic"}).to_string(),
+        ))
+        .await
+        .unwrap();
+    receive_websocket_completion(&mut socket).await;
+
+    // Exceed the peer's receive window to exercise a pending socket write.
+    let sending = tokio::spawn(async move {
+        socket
+            .send(ClientWsMessage::Text(
+                json!({
+                    "type":"response.create",
+                    "model":MODEL,
+                    "previous_response_id":"ws-response",
+                    "input":"x".repeat(32 * 1024 * 1024)
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        socket
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while gateway.runtime.as_ref().unwrap().candidate_runtime_order()[0].in_flight == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the second request was not dispatched");
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(61)).await;
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::resume();
+    release.notify_one();
+    let _socket = tokio::time::timeout(Duration::from_secs(10), sending)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while events.lock().unwrap().len() < 2
+            || gateway.runtime.as_ref().unwrap().candidate_runtime_order()[0].in_flight != 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the interrupted continuation was not settled and recorded");
+    assert_eq!(state.requests.lock().unwrap().len(), 1);
+    assert_eq!(
+        gateway.runtime.as_ref().unwrap().candidate_runtime_order()[0].in_flight,
+        0
+    );
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(events[0].success);
+    assert!(!events[1].success);
+    assert_eq!(
+        events[1].error_category.as_deref(),
+        Some("upstream_transport")
+    );
+    assert_eq!(
+        events[1].routing.as_ref().unwrap().attempt_outcome,
+        Some(zenith_relay_core::AttemptOutcome::ExecutionUncertain)
+    );
+    assert_eq!(events[1].retry_at_ms, None);
+    assert_ne!(events[0].request_id, events[1].request_id);
 }

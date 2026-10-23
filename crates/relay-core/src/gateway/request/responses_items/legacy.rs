@@ -54,13 +54,13 @@ pub(in crate::gateway) fn remove_unpaired_responses_tool_call(
     else {
         return false;
     };
-    let Some(input) = request.get("input").and_then(Value::as_array) else {
+    let Some(input_items) = request.get("input").and_then(Value::as_array) else {
         return false;
     };
 
     let mut incomplete = Vec::new();
-    for (index, item) in input.iter().enumerate() {
-        let Some(call_type) = item.get("type").and_then(Value::as_str) else {
+    for (index, input_item) in input_items.iter().enumerate() {
+        let Some(call_type) = input_item.get("type").and_then(Value::as_str) else {
             continue;
         };
         let output_type = match call_type {
@@ -68,17 +68,21 @@ pub(in crate::gateway) fn remove_unpaired_responses_tool_call(
             "custom_tool_call" => "custom_tool_call_output",
             _ => continue,
         };
-        let call_id = item.get("call_id").and_then(Value::as_str);
-        let item_id = item.get("id").and_then(Value::as_str);
-        let has_output = input.iter().enumerate().skip(index + 1).any(|(_, output)| {
-            output.get("type").and_then(Value::as_str) == Some(output_type)
-                && output
-                    .get("call_id")
-                    .and_then(Value::as_str)
-                    .is_some_and(|output_id| {
-                        Some(output_id) == call_id || Some(output_id) == item_id
-                    })
-        });
+        let call_id = input_item.get("call_id").and_then(Value::as_str);
+        let item_id = input_item.get("id").and_then(Value::as_str);
+        let has_output = input_items
+            .iter()
+            .enumerate()
+            .skip(index + 1)
+            .any(|(_, output_item)| {
+                output_item.get("type").and_then(Value::as_str) == Some(output_type)
+                    && output_item
+                        .get("call_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|output_id| {
+                            Some(output_id) == call_id || Some(output_id) == item_id
+                        })
+            });
         if !has_output {
             incomplete.push((index, call_type, call_id, item_id));
         }
@@ -106,8 +110,10 @@ pub(in crate::gateway) fn remove_unpaired_responses_tool_call(
     true
 }
 
-fn missing_responses_tool_call_identity(payload: &[u8]) -> Option<(&'static str, Option<String>)> {
-    let text = String::from_utf8_lossy(payload);
+fn missing_responses_tool_call_identity(
+    error_response_body: &[u8],
+) -> Option<(&'static str, Option<String>)> {
+    let text = String::from_utf8_lossy(error_response_body);
     let normalized = text.to_ascii_lowercase();
     for (prefix, call_type) in [
         ("no tool output found for function call ", "function_call"),
@@ -124,7 +130,7 @@ fn missing_responses_tool_call_identity(payload: &[u8]) -> Option<(&'static str,
             continue;
         };
         let suffix = text[start + prefix.len()..].trim_start_matches(['"', '\'', '`']);
-        let id = suffix
+        let call_id = suffix
             .split(|character: char| {
                 character.is_whitespace()
                     || matches!(
@@ -136,20 +142,22 @@ fn missing_responses_tool_call_identity(payload: &[u8]) -> Option<(&'static str,
             .unwrap_or("")
             .trim_end_matches('.')
             .trim();
-        let id = (!id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control))
-            .then(|| id.to_string());
-        return Some((call_type, id));
+        let call_id =
+            (!call_id.is_empty() && call_id.len() <= 256 && !call_id.chars().any(char::is_control))
+                .then(|| call_id.to_string());
+        return Some((call_type, call_id));
     }
     normalized
         .contains("unanswered_function_call")
         .then_some(("function_call", None))
 }
 
-fn legacy_responses_call_id(item: &Value) -> Option<&str> {
-    item.get("call_id")
+fn legacy_responses_call_id(input_item: &Value) -> Option<&str> {
+    input_item
+        .get("call_id")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty() && value.len() <= 256)
+        .filter(|call_id| !call_id.is_empty() && call_id.len() <= 256)
 }
 
 fn next_legacy_responses_call_id(
@@ -174,15 +182,15 @@ fn next_legacy_responses_call_id(
 #[derive(Clone, Debug)]
 struct PendingLegacyResponsesCall {
     index: usize,
-    id: Option<String>,
+    call_id: Option<String>,
     item_id: Option<String>,
-    name: Option<String>,
+    tool_name: Option<String>,
     namespace: Option<String>,
     family: LegacyResponsesCallFamily,
 }
 
-fn legacy_responses_output_can_stand_alone(item_type: &str, name: Option<&str>) -> bool {
-    item_type == "function_call_output" && name.is_some()
+fn legacy_responses_output_can_stand_alone(item_type: &str, tool_name: Option<&str>) -> bool {
+    item_type == "function_call_output" && tool_name.is_some()
 }
 
 /// Repairs historical Responses links only after an explicit upstream rejection.
@@ -192,17 +200,18 @@ fn legacy_responses_output_can_stand_alone(item_type: &str, name: Option<&str>) 
 /// Plan every change before applying it: ambiguity or an anonymous orphan must
 /// never delete results, cross namespaces, or leave a partially repaired turn.
 pub(in crate::gateway) fn repair_legacy_responses_call_ids(request: &mut Value) -> bool {
-    let Some(input) = request.get("input").and_then(Value::as_array) else {
+    let Some(input_items) = request.get("input").and_then(Value::as_array) else {
         return false;
     };
-    if input.is_empty() || input.len() > MAX_LEGACY_RESPONSES_REPAIR_ITEMS {
+    if input_items.is_empty() || input_items.len() > MAX_LEGACY_RESPONSES_REPAIR_ITEMS {
         return false;
     }
 
-    let relevant_count = input
+    let relevant_count = input_items
         .iter()
-        .filter(|item| {
-            item.get("type")
+        .filter(|input_item| {
+            input_item
+                .get("type")
                 .and_then(Value::as_str)
                 .and_then(legacy_responses_call_family)
                 .is_some()
@@ -213,10 +222,10 @@ pub(in crate::gateway) fn repair_legacy_responses_call_ids(request: &mut Value) 
     }
 
     let mut used = std::collections::HashSet::with_capacity(relevant_count);
-    for item in input.iter() {
+    for input_item in input_items {
         for field in ["call_id", "id"] {
-            if let Some(id) = super::bounded_tool_call_id(item.get(field)) {
-                used.insert(id);
+            if let Some(item_identifier) = super::bounded_tool_call_id(input_item.get(field)) {
+                used.insert(item_identifier);
             }
         }
     }
@@ -225,11 +234,11 @@ pub(in crate::gateway) fn repair_legacy_responses_call_ids(request: &mut Value) 
     let mut assigned = HashSet::new();
     let mut edits = Vec::new();
 
-    for (index, item) in input.iter().enumerate() {
-        let Some(object) = item.as_object() else {
+    for (index, input_item) in input_items.iter().enumerate() {
+        let Some(input_object) = input_item.as_object() else {
             continue;
         };
-        let Some(item_type) = object
+        let Some(item_type) = input_object
             .get("type")
             .and_then(Value::as_str)
             .map(str::to_owned)
@@ -240,10 +249,11 @@ pub(in crate::gateway) fn repair_legacy_responses_call_ids(request: &mut Value) 
             continue;
         };
         if ["call_id", "id", "name", "namespace"].iter().any(|field| {
-            object.get(*field).is_some_and(|value| {
-                !value.is_null()
-                    && value.as_str().is_none_or(|value| {
-                        value != value.trim() || value.len() > MAX_LEGACY_RESPONSES_NAME_CHARS
+            input_object.get(*field).is_some_and(|field_value| {
+                !field_value.is_null()
+                    && field_value.as_str().is_none_or(|field_text| {
+                        field_text != field_text.trim()
+                            || field_text.len() > MAX_LEGACY_RESPONSES_NAME_CHARS
                     })
             })
         }) {
@@ -255,16 +265,17 @@ pub(in crate::gateway) fn repair_legacy_responses_call_ids(request: &mut Value) 
             continue;
         }
 
-        let existing_id = legacy_responses_call_id(item).map(str::to_owned);
-        let name = object
+        let existing_id = legacy_responses_call_id(input_item).map(str::to_owned);
+        let tool_name = input_object
             .get("name")
             .and_then(Value::as_str)
             .map(str::trim)
-            .filter(|value| {
-                !value.is_empty() && value.chars().count() <= MAX_LEGACY_RESPONSES_NAME_CHARS
+            .filter(|name_value| {
+                !name_value.is_empty()
+                    && name_value.chars().count() <= MAX_LEGACY_RESPONSES_NAME_CHARS
             })
             .map(str::to_string);
-        let namespace = object
+        let namespace = input_object
             .get("namespace")
             .and_then(Value::as_str)
             .map(str::to_owned);
@@ -272,15 +283,15 @@ pub(in crate::gateway) fn repair_legacy_responses_call_ids(request: &mut Value) 
         if is_call {
             if existing_id
                 .as_ref()
-                .is_some_and(|id| !assigned.insert(id.clone()))
+                .is_some_and(|existing_call_id| !assigned.insert(existing_call_id.clone()))
             {
                 return false;
             }
             pending.push(PendingLegacyResponsesCall {
                 index,
-                id: existing_id,
-                item_id: super::bounded_tool_call_id(object.get("id")),
-                name,
+                call_id: existing_id,
+                item_id: super::bounded_tool_call_id(input_object.get("id")),
+                tool_name,
                 namespace,
                 family,
             });
@@ -289,14 +300,15 @@ pub(in crate::gateway) fn repair_legacy_responses_call_ids(request: &mut Value) 
 
         let mut matches = pending.iter().enumerate().filter(|(_, call)| {
             call.family == family
-                && name
+                && tool_name
                     .as_ref()
-                    .is_none_or(|name| call.name.as_ref() == Some(name))
+                    .is_none_or(|tool_name| call.tool_name.as_ref() == Some(tool_name))
                 && namespace
                     .as_ref()
                     .is_none_or(|namespace| call.namespace.as_ref() == Some(namespace))
-                && existing_id.as_ref().is_none_or(|id| {
-                    call.id.as_ref() == Some(id) || call.item_id.as_ref() == Some(id)
+                && existing_id.as_ref().is_none_or(|existing_call_id| {
+                    call.call_id.as_ref() == Some(existing_call_id)
+                        || call.item_id.as_ref() == Some(existing_call_id)
                 })
         });
         let position = matches.next().map(|(position, _)| position);
@@ -305,7 +317,7 @@ pub(in crate::gateway) fn repair_legacy_responses_call_ids(request: &mut Value) 
         }
         let Some(position) = position else {
             if existing_id.is_some()
-                || legacy_responses_output_can_stand_alone(&item_type, name.as_deref())
+                || legacy_responses_output_can_stand_alone(&item_type, tool_name.as_deref())
             {
                 continue;
             }
@@ -313,12 +325,12 @@ pub(in crate::gateway) fn repair_legacy_responses_call_ids(request: &mut Value) 
         };
         let call = pending.remove(position);
         let call_id = call
-            .id
+            .call_id
             .clone()
             .or_else(|| existing_id.clone())
             .or(call.item_id)
             .unwrap_or_else(|| next_legacy_responses_call_id(call.index, &mut used));
-        if call.id.is_none() {
+        if call.call_id.is_none() {
             if !assigned.insert(call_id.clone()) {
                 return false;
             }
@@ -332,9 +344,9 @@ pub(in crate::gateway) fn repair_legacy_responses_call_ids(request: &mut Value) 
     if !pending.is_empty() || edits.is_empty() {
         return false;
     }
-    let input = request["input"].as_array_mut().expect("validated input");
+    let input_items = request["input"].as_array_mut().expect("validated input");
     for (index, call_id) in edits {
-        input[index]["call_id"] = Value::String(call_id);
+        input_items[index]["call_id"] = Value::String(call_id);
     }
     true
 }

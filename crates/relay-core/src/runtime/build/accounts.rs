@@ -7,7 +7,8 @@ use super::super::{
 use super::{AccountRuntimeParts, SourceRuntimeParts};
 use crate::pricing::PricingCatalog;
 use crate::providers::chatgpt::{
-    CodexIdentityEnvelope, RuntimeChatGptAccount, RuntimeChatGptAuth, BASIS_POINTS_RESPONSES_URL,
+    CodexIdentityEnvelope, OAuthClientKind, RuntimeChatGptAccount, RuntimeChatGptAuth,
+    BASIS_POINTS_RESPONSES_URL,
 };
 use crate::{
     CandidateKind, Error, ModelRegistry, PoolScheduler, Result, RuntimeCandidate, WireApi,
@@ -37,6 +38,15 @@ pub(super) fn build_accounts(
         require_runtime_value("account candidate id", &account.id)?;
         require_runtime_value("account source id", &account.source_id)?;
         require_runtime_value("ChatGPT account id", &account.chatgpt_account_id)?;
+        let excel = account.oauth_client_kind == OAuthClientKind::ExcelBps;
+        let siwc = account.oauth_client_kind == OAuthClientKind::Siwc;
+        if (excel || siwc)
+            && account_auth.is_some_and(|auth| auth.agent_identities.contains_key(&account.id))
+        {
+            return Err(Error::Validation(
+                "Excel OAuth cannot use ChatGPT Agent Identity".into(),
+            ));
+        }
         if account.weight == 0 {
             return Err(Error::Validation(
                 "account weight must be at least one".to_string(),
@@ -50,7 +60,11 @@ pub(super) fn build_accounts(
                 "runtime candidate ids must be unique".to_string(),
             ));
         }
-        let responses_url = normalized_responses_url(&account.responses_url)?;
+        let responses_url = normalized_responses_url(if siwc {
+            "https://api.openai.com/v1/responses"
+        } else {
+            &account.responses_url
+        })?;
         let basis_points_url = normalized_responses_url(BASIS_POINTS_RESPONSES_URL)?;
         passive_quotas.insert(
             account.id.clone(),
@@ -68,8 +82,15 @@ pub(super) fn build_accounts(
             .map_err(|message| Error::Validation(message.to_string()))?;
         let mut published_models = account.models.clone();
         let models = normalized_set(account.models.iter());
-        let image_main_model =
-            select_image_main_model_with_catalog(&models, image_base_model, image_pricing_catalog);
+        let image_main_model = (!excel && !siwc)
+            .then(|| {
+                select_image_main_model_with_catalog(
+                    &models,
+                    image_base_model,
+                    image_pricing_catalog,
+                )
+            })
+            .flatten();
         let mut candidate_models = models.clone();
         if image_main_model.is_some() {
             candidate_models.insert(IMAGE_API_MODEL.to_string());
@@ -81,7 +102,11 @@ pub(super) fn build_accounts(
             source_id: account.source_id.clone(),
             account_id: Some(account.id.clone()),
             protocol: WireApi::Responses,
-            enabled: account.enabled,
+            model_protocols: BTreeMap::new(),
+            enabled: account.enabled
+                && account
+                    .oauth_client_kind
+                    .supports_pool(account.subscription_plan_type.as_deref()),
             draining: account.draining,
             priority: account.priority,
             weight: account.weight,
@@ -91,7 +116,8 @@ pub(super) fn build_accounts(
             quota: account.quota,
             provider_credits_micro_units: account.quota_snapshot.available_credits_micro_units,
             provider_credits_unlimited: account.quota_snapshot.provider_credits_unlimited,
-            quota_updated_at_ms: account.quota_updated_at_ms,
+            provider_credits_observed_at_ms: account.quota_snapshot.provider_credits_observed_at_ms,
+            quota_updated_at_ms: account.quota_snapshot.quota_observed_at_ms(),
             quota_reset_at_ms: account.quota_snapshot.limiting_reset_at_ms(),
             cooldowns: BTreeMap::new(),
             last_used_at: account.last_used_at_ms,
@@ -111,13 +137,17 @@ pub(super) fn build_accounts(
         executors.insert(
             account.id.clone(),
             ChatGptAccountExecutor {
+                oauth_client_kind: account.oauth_client_kind,
+                subscription_plan_type: RwLock::new(account.subscription_plan_type),
                 id: account.id,
                 source_id: account.source_id,
                 chatgpt_account_id: account.chatgpt_account_id,
+                chatgpt_user_id: account.chatgpt_user_id,
+                basis_points_headers: account.basis_points_headers,
+                proxy_timezone: RwLock::new(account.proxy_timezone),
                 identity,
                 responses_url,
                 basis_points_url,
-                basis_points_enabled: AtomicBool::new(account.basis_points_enabled),
                 model_inventory: RwLock::new(AccountModelInventory {
                     configured_models: models,
                     image_main_model,
@@ -132,6 +162,8 @@ pub(super) fn build_accounts(
                 agent_identity: RwLock::new(auth.agent_identities.get(&candidate_id).cloned()),
                 agent_identity_revision: AtomicU64::new(0),
                 agent_task_lock: tokio::sync::Mutex::new(()),
+                basis_points_access: RwLock::new(None),
+                basis_points_access_refresh: tokio::sync::Mutex::new(()),
                 routing_cookies: super::super::routing_cookies::RoutingCookies::default(),
             },
         );

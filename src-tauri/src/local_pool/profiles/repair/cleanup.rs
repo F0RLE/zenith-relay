@@ -11,19 +11,22 @@ pub fn cleanup_expired_previews(state_root: &Path) -> Result<usize, String> {
     }
     let now = now_ms();
     let mut stale = Vec::new();
-    for entry in fs::read_dir(&directory).map_err(io_error)? {
-        let entry = entry.map_err(io_error)?;
-        let file_type = entry.file_type().map_err(io_error)?;
+    for directory_entry in fs::read_dir(&directory).map_err(io_error)? {
+        let directory_entry = directory_entry.map_err(io_error)?;
+        let file_type = directory_entry.file_type().map_err(io_error)?;
         if !file_type.is_file() || file_type.is_symlink() {
             continue;
         }
-        let path = entry.path();
-        let Some(session_id) = path.file_stem().and_then(|value| value.to_str()) else {
+        let path = directory_entry.path();
+        let Some(session_id) = path.file_stem().and_then(|file_stem| file_stem.to_str()) else {
             continue;
         };
-        if path.extension().and_then(|value| value.to_str()) != Some("json")
+        if path
+            .extension()
+            .and_then(|file_extension| file_extension.to_str())
+            != Some("json")
             || validate_id(session_id, "repair_").is_err()
-            || entry.metadata().map_err(io_error)?.len() > MAX_REPAIR_MANIFEST_BYTES
+            || directory_entry.metadata().map_err(io_error)?.len() > MAX_REPAIR_MANIFEST_BYTES
         {
             continue;
         }
@@ -55,19 +58,23 @@ pub(super) fn cleanup_history_repair_backups_preserving(
     }
     let now = now_ms();
     let mut backups = Vec::new();
-    for entry in fs::read_dir(backup_root).map_err(io_error)? {
-        let entry = entry.map_err(io_error)?;
-        let file_type = entry.file_type().map_err(io_error)?;
+    for directory_entry in fs::read_dir(backup_root).map_err(io_error)? {
+        let directory_entry = directory_entry.map_err(io_error)?;
+        let file_type = directory_entry.file_type().map_err(io_error)?;
         if !file_type.is_dir() || file_type.is_symlink() {
             continue;
         }
-        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+        let Some(name) = directory_entry.file_name().to_str().map(str::to_string) else {
             continue;
         };
         if validate_id(&name, "history_repair_").is_err() {
             continue;
         }
-        backups.push((backup_created_at_ms(&entry.path()), name, entry.path()));
+        backups.push((
+            backup_created_at_ms(&directory_entry.path()),
+            name,
+            directory_entry.path(),
+        ));
     }
     backups.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
     let mut keep = HashSet::new();

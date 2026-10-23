@@ -1,6 +1,114 @@
 use super::*;
 
 #[test]
+fn source_editor_prices_use_its_own_resolver_not_another_pool_member() {
+    let catalog = PricingCatalog::from_litellm_json(
+        r#"{"shared-model":{"litellm_provider":"openai","input_cost_per_token":0.000001,"output_cost_per_token":0.000002}}"#,
+    )
+    .unwrap();
+    let mut first = source_summary("first", &["SHARED-model", "unknown-model"]);
+    first.in_pool = false;
+    first.excluded_models.push("disabled-model".into());
+    let mut second = source_summary("second", &["shared-model"]);
+    let reference = TokenPrice {
+        input: 1_000_000,
+        output: 2_000_000,
+        ..Default::default()
+    };
+    let provider = TokenPrice {
+        cache_write: Some(0),
+        priority: crate::pricing::TokenRateSet {
+            input: Some(160_000),
+            ..Default::default()
+        },
+        ..test_token_price(80_000, 400_000)
+    };
+    let context = PricingContext {
+        source_evidence: BTreeMap::from([(
+            "second".into(),
+            BTreeMap::from([(
+                "shared-model".into(),
+                PriceEvidence {
+                    provider: Some(provider),
+                    manual: None,
+                },
+            )]),
+        )]),
+        ..Default::default()
+    };
+    first.resolve_model_prices(&catalog, &context);
+    second.resolve_model_prices(&catalog, &context);
+    assert_eq!(
+        first.resolved_model_prices["shared-model"].quote,
+        Some(reference)
+    );
+    assert_eq!(
+        first.resolved_model_prices["shared-model"].source,
+        PriceSource::LiteLlmExact
+    );
+    assert_eq!(first.resolved_model_prices["unknown-model"].quote, None);
+    assert_eq!(first.resolved_model_prices["disabled-model"].quote, None);
+    assert_eq!(
+        second.resolved_model_prices["shared-model"].quote,
+        Some(provider)
+    );
+    assert_eq!(
+        second.resolved_model_prices["shared-model"].source,
+        PriceSource::Provider
+    );
+    assert!(first.detected_model_prices.is_empty());
+    assert!(first.model_price_overrides.is_empty());
+
+    let mut encoded = serde_json::to_value(&first).unwrap();
+    assert_eq!(
+        encoded["resolvedModelPrices"]["shared-model"]["source"],
+        "liteLlmExact"
+    );
+    encoded
+        .as_object_mut()
+        .unwrap()
+        .remove("resolvedModelPrices");
+    let legacy: SourceSummary = serde_json::from_value(encoded).unwrap();
+    assert!(legacy.resolved_model_prices.is_empty());
+}
+
+#[test]
+fn source_price_projection_preserves_manual_provenance_and_unlisted_saved_models() {
+    let mut source = source_summary("manual", &[]);
+    source.model_price_overrides.insert(
+        "private-model".into(),
+        ApiModelPriceOverride {
+            input_micro_usd_per_million: 3_000_000,
+            output_micro_usd_per_million: 4_000_000,
+            ..Default::default()
+        },
+    );
+    let manual = test_token_price(3_000_000, 4_000_000);
+    let context = PricingContext {
+        source_evidence: BTreeMap::from([(
+            "manual".into(),
+            BTreeMap::from([(
+                "private-model".into(),
+                PriceEvidence {
+                    provider: None,
+                    manual: Some(manual),
+                },
+            )]),
+        )]),
+        ..Default::default()
+    };
+    source.resolve_model_prices(&PricingCatalog::empty(), &context);
+    assert_eq!(
+        source.resolved_model_prices["private-model"].source,
+        PriceSource::Manual
+    );
+    assert_eq!(
+        source.resolved_model_prices["private-model"].quote,
+        Some(manual)
+    );
+}
+
+#[test]
 fn pool_pricing_summary_reports_provider_evidence() {
     let source = source_summary("provider", &["gpt-test"]);
     let price = test_token_price(1_000_000, 2_000_000);
@@ -41,6 +149,11 @@ fn pool_model_price_keeps_messages_cache_creation_when_generic_route_wins_order(
         cache_write_5m: None,
         cache_write_1h: None,
         output: 2_000_000,
+        flex: crate::pricing::TokenRateSet::EMPTY,
+        priority: crate::pricing::TokenRateSet::EMPTY,
+        above_200k: crate::pricing::LongContextRates::EMPTY,
+        above_272k: crate::pricing::LongContextRates::EMPTY,
+        ..Default::default()
     };
     let messages_price = TokenPrice {
         cache_write_5m: Some(1_250_000),

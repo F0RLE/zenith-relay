@@ -54,23 +54,24 @@ async fn mixed_responses_routes_disable_automatic_lite_but_preserve_explicit_cli
         "parallel_tool_calls": true,
         "reasoning": {"effort": "high"}
     });
-    assert_eq!(
-        client
-            .post(format!("{}/v1/responses", gateway.base_url))
-            .bearer_auth(LOCAL_KEY)
-            .json(&request_body)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::OK
-    );
+    let first_response = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&request_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first_response.status(), StatusCode::OK);
+    let first_response = first_response.json::<Value>().await.unwrap();
+    let mut explicit_lite_body = request_body.clone();
+    explicit_lite_body["previous_response_id"] = first_response["id"].clone();
+    explicit_lite_body["parallel_tool_calls"] = json!(false);
     assert_eq!(
         client
             .post(format!("{}/v1/responses", gateway.base_url))
             .bearer_auth(LOCAL_KEY)
             .header("x-openai-internal-codex-responses-lite", "true")
-            .json(&request_body)
+            .json(&explicit_lite_body)
             .send()
             .await
             .unwrap()
@@ -107,14 +108,8 @@ async fn mixed_responses_routes_disable_automatic_lite_but_preserve_explicit_cli
 async fn account_only_compaction_requires_unanimous_automatic_lite_support() {
     let mut lite_catalog = default_upstream_model_catalog();
     lite_catalog["models"][0]["slug"] = Value::String(OFFICIAL_CODEX_MODEL.to_string());
-    let (lite_upstream, lite_state) = spawn_upstream_with_catalog(
-        vec![success_reply_for_model(
-            "full-compact",
-            OFFICIAL_CODEX_MODEL,
-        )],
-        lite_catalog,
-    )
-    .await;
+    let (lite_upstream, lite_state) =
+        spawn_upstream_with_catalog(vec![compaction_reply("full-compact")], lite_catalog).await;
     let mut full_catalog = default_upstream_model_catalog();
     full_catalog["models"][0]["slug"] = Value::String(OFFICIAL_CODEX_MODEL.to_string());
     full_catalog["models"][0]["use_responses_lite"] = Value::Bool(false);
@@ -310,8 +305,10 @@ async fn mixed_websocket_routes_disable_automatic_lite_but_preserve_explicit_cli
         .unwrap();
     assert_eq!(upgraded.status(), StatusCode::SWITCHING_PROTOCOLS);
     let mut socket = upgraded.into_websocket().await.unwrap();
+    let mut explicit_lite_request = request.clone();
+    explicit_lite_request["parallel_tool_calls"] = json!(false);
     socket
-        .send(ClientWsMessage::Text(request.to_string()))
+        .send(ClientWsMessage::Text(explicit_lite_request.to_string()))
         .await
         .unwrap();
     assert_eq!(
@@ -362,22 +359,40 @@ async fn account_requests_preserve_responses_lite_compatibility() {
     )
     .await;
 
-    let response = reqwest::Client::new()
+    let mut request_body = json!({
+        "model": MODEL,
+        "input": "hello",
+        "service_tier": "flex",
+        "parallel_tool_calls": true,
+        "reasoning": {"effort": "high"},
+        "tools": [
+            {"type": "function", "name": "local_tool"},
+            {"type": "web_search"},
+            {"type": "image_generation"}
+        ]
+    });
+    let client = reqwest::Client::new();
+    let rejected = client
         .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
         .header("x-openai-internal-codex-responses-lite", "true")
-        .json(&json!({
-            "model": MODEL,
-            "input": "hello",
-            "service_tier": "flex",
-            "parallel_tool_calls": true,
-            "reasoning": {"effort": "high"},
-            "tools": [
-                {"type": "function", "name": "local_tool"},
-                {"type": "web_search"},
-                {"type": "image_generation"}
-            ]
-        }))
+        .json(&request_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        rejected.json::<Value>().await.unwrap()["error"]["code"],
+        "invalid_request"
+    );
+    assert!(state.requests.lock().unwrap().is_empty());
+
+    request_body["parallel_tool_calls"] = json!(false);
+    let response = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .header("x-openai-internal-codex-responses-lite", "true")
+        .json(&request_body)
         .send()
         .await
         .unwrap();
@@ -402,8 +417,8 @@ async fn compact_and_alpha_search_use_the_oauth_account_runtime() {
         Reply::Json(
             StatusCode::OK,
             json!({
-                "type": "compaction",
-                "items": [],
+                "object": "response.compaction",
+                "output": [{"type": "compaction", "encrypted_content": "synthetic-checkpoint"}],
                 "usage": {
                     "input_tokens": 1200,
                     "input_tokens_details": {"cached_tokens": 800},
@@ -441,7 +456,10 @@ async fn compact_and_alpha_search_use_the_oauth_account_runtime() {
         .await
         .unwrap();
     assert_eq!(compact.status(), StatusCode::OK);
-    assert_eq!(compact.json::<Value>().await.unwrap()["type"], "compaction");
+    assert_eq!(
+        compact.json::<Value>().await.unwrap()["object"],
+        "response.compaction"
+    );
 
     let search = client
         .post(format!("{}/v1/alpha/search", gateway.base_url))

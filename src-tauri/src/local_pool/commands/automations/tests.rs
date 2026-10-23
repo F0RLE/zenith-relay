@@ -149,7 +149,7 @@ fn account(id: &str, models: &[&str]) -> LocalAccountRecord {
         },
         provider_family: Some("openai".into()),
         purchase_cost_micro_usd: None,
-        remote_location: None,
+        recovery: None,
         wire_api: WireApi::Responses,
         models: models.iter().map(|model| (*model).to_string()).collect(),
         discovered_models: None,

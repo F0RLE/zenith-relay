@@ -1,16 +1,4 @@
-export { formatDetailedRemainingTime, formatRemainingTime, quotaWindowLabel } from "../quotaFormatting";
-
-export { accountPlanOption, compareAccountPlans, formatAccountPlan } from "../accountPlans";
-// Compatibility exports keep existing feature and test imports stable while
-// the status policy itself lives in its domain module.
-export {
-  currentAccountErrorCode,
-  isCodexOauthAccountEligible,
-  operationalStatusTone,
-  transientCandidateTone,
-} from "../accountStatus";
-
-export { AccountPlanBadge, PageHeader, Tabs, accountErrorLabel } from "./ui/chrome";
+export { AccountBadges, AccountPlanBadge, PageHeader, Tabs, accountErrorLabel } from "./ui/chrome";
 export { ConfirmProvider, useConfirm } from "./ui/confirm";
 export { mergeDescribedBy, useTooltip } from "./ui/tooltip";
 export { Button, IconButton } from "./ui/buttons";

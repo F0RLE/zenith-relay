@@ -13,17 +13,19 @@ use terminal::finish_incomplete;
 use upstream_item::handle_upstream_item;
 
 pub(in crate::gateway::websocket) use connection::send_request;
-pub(in crate::gateway::websocket) use events::semantic_output_payload;
+pub(in crate::gateway::websocket) use events::{semantic_output_payload, semantic_output_value};
 
 pub(super) struct InFlight {
     request: ClientRequest,
     route: ExecutorRoute,
     event: UsageEvent,
+    usage_snapshot: Option<Value>,
     started: Instant,
     response_id: Option<String>,
     prompt_affinity_key: Option<String>,
     client_visible_output: bool,
     legacy_call_id_repair_attempted: bool,
+    tool_call_capture: crate::gateway::request::ToolCallCapture,
     native_replay_capture: NativeReplayCapture,
 }
 
@@ -35,6 +37,7 @@ pub(super) struct BridgeState {
     in_flight: Option<InFlight>,
     stream_id: Option<String>,
     upstream_candidate_id: String,
+    upstream_route: ExecutorRoute,
     upstream_origin: ErrorOrigin,
     last_response_id: Option<String>,
     transient_response_affinity_key: Option<String>,
@@ -82,7 +85,7 @@ struct LiveBridge<'a> {
     runtime: &'a GatewayRuntime,
     key: &'a AuthenticatedKey,
     headers: &'a HeaderMap,
-    state: &'a mut BridgeState,
+    bridge_state: &'a mut BridgeState,
 }
 
 impl<'a> LiveBridge<'a> {
@@ -92,7 +95,7 @@ impl<'a> LiveBridge<'a> {
         runtime: &'a GatewayRuntime,
         key: &'a AuthenticatedKey,
         headers: &'a HeaderMap,
-        state: &'a mut BridgeState,
+        bridge_state: &'a mut BridgeState,
     ) -> Self {
         Self {
             downstream,
@@ -100,16 +103,16 @@ impl<'a> LiveBridge<'a> {
             runtime,
             key,
             headers,
-            state,
+            bridge_state,
         }
     }
 }
 
 impl RetryHandoff {
-    async fn retry(self, bridge: &mut LiveBridge<'_>, request: ClientRequest) -> bool {
+    async fn retry(self, bridge: &mut LiveBridge<'_>, client_request: ClientRequest) -> bool {
         retry_upstream_connection(
             bridge,
-            request,
+            client_request,
             self.attempt_offset,
             self.request_id.as_deref(),
         )
@@ -131,9 +134,9 @@ pub(super) async fn bridge(
             attempt: connected.attempt,
             local_key_id: &key.id,
             route: &connected.route,
-            reasoning_effort: Some(&connected.request.reasoning_effort_for(&connected.route)),
+            reasoning_effort: Some(&connected.reasoning_effort),
             requested_model: &connected.request.requested_model,
-            tool_use: connected.request.tool_use_for(&connected.route),
+            tool_use: connected.tool_use,
         },
         true,
         StatusCode::OK.as_u16(),
@@ -143,30 +146,34 @@ pub(super) async fn bridge(
     let upstream_candidate_id = connected.route.candidate_id.clone();
     let upstream_origin = route_error_origin(&connected.route);
     let prompt_affinity_key = connected.request.prompt_affinity_key.clone();
-    let mut state = BridgeState {
+    let mut bridge_state = BridgeState {
         credential_fingerprint: connected.credential_fingerprint,
         authorization_incarnation: connected.authorization_incarnation,
         local_key_id: key.id.clone(),
         lease: Some(connected.lease),
         in_flight: Some(InFlight {
             request: connected.request.clone(),
-            route: connected.route,
+            route: connected.route.clone(),
             event: initial_event,
+            usage_snapshot: None,
             started: connected.started,
             response_id: None,
             prompt_affinity_key,
             client_visible_output: false,
             legacy_call_id_repair_attempted: false,
+            tool_call_capture: Default::default(),
             native_replay_capture: NativeReplayCapture::default(),
         }),
         stream_id: connected.request.stream_id.clone(),
         upstream_candidate_id,
+        upstream_route: connected.route.clone(),
         upstream_origin,
         last_response_id: None,
         transient_response_affinity_key: None,
     };
     for message in connected.initial_messages {
-        if !handle_upstream_message(&mut downstream, &runtime, &mut state, message).await {
+        if !handle_upstream_message(&mut downstream, &runtime, &mut bridge_state, message).await {
+            finish_incomplete(&runtime, &mut bridge_state, error_codes::CLIENT_CANCELLED);
             return;
         }
     }
@@ -181,27 +188,32 @@ pub(super) async fn bridge(
         let idle_deadline = last_activity + WEBSOCKET_IDLE_TIMEOUT;
         tokio::select! {
             // Reap an unused connection, never a provider's active generation.
-            _ = sleep_until(idle_deadline), if state.in_flight.is_none() => {
-                let _ = downstream.send(Message::Close(Some(CloseFrame {
+            _ = sleep_until(idle_deadline), if bridge_state.in_flight.is_none() => {
+                let _ = send_message(&mut downstream, Message::Close(Some(CloseFrame {
                     code: close_code::AWAY,
                     reason: "idle timeout".into(),
                 }))).await;
                 break;
             }
             _ = heartbeat.tick() => {
-                if downstream.send(Message::Ping(Default::default())).await.is_err() {
-                    finish_incomplete(&runtime, &mut state, error_codes::CLIENT_CANCELLED);
+                if send_message(&mut downstream, Message::Ping(Default::default())).await.is_err() {
+                    finish_incomplete(&runtime, &mut bridge_state, error_codes::CLIENT_CANCELLED);
                     break;
                 }
-                if upstream.send(UpstreamMessage::Ping(Default::default())).await.is_err() {
-                    let active_request = state.in_flight.is_some() && state.can_send_gateway_error();
-                    let request_id = state.request_id().map(str::to_owned);
-                    let stream_id = state.request_stream_id().map(str::to_owned);
-                    finish_incomplete(&runtime, &mut state, error_codes::UPSTREAM_WEBSOCKET);
+                if send_message(&mut upstream, UpstreamMessage::Ping(Default::default())).await.is_err() {
+                    let active_request = bridge_state.in_flight.is_some()
+                        && bridge_state.can_send_gateway_error();
+                    let request_id = bridge_state.request_id().map(str::to_owned);
+                    let stream_id = bridge_state.request_stream_id().map(str::to_owned);
+                    finish_incomplete(
+                        &runtime,
+                        &mut bridge_state,
+                        error_codes::UPSTREAM_WEBSOCKET,
+                    );
                     if active_request {
                         send_gateway_error(
                             &mut downstream,
-                            &GatewayFailure::transport(state.upstream_origin),
+                            &GatewayFailure::transport(bridge_state.upstream_origin),
                             request_id.as_deref(),
                             stream_id.as_deref(),
                         )
@@ -213,11 +225,11 @@ pub(super) async fn bridge(
             message = downstream.recv() => {
                 last_activity = TokioInstant::now();
                 let Some(message) = message else {
-                    finish_incomplete(&runtime, &mut state, error_codes::CLIENT_CANCELLED);
+                    finish_incomplete(&runtime, &mut bridge_state, error_codes::CLIENT_CANCELLED);
                     break;
                 };
                 let Ok(message) = message else {
-                    finish_incomplete(&runtime, &mut state, "client_websocket");
+                    finish_incomplete(&runtime, &mut bridge_state, "client_websocket");
                     break;
                 };
                 match handle_downstream_message(
@@ -226,16 +238,16 @@ pub(super) async fn bridge(
                     &runtime,
                     &key,
                     &headers,
-                    &mut state,
+                    &mut bridge_state,
                     message,
                 ).await {
                     Ok(true) => {}
                     Ok(false) => break,
                     Err(failure) => {
-                        let request_id = state.request_id().map(str::to_owned);
-                        let stream_id = state.request_stream_id().map(str::to_owned);
-                        let can_send_error = state.can_send_gateway_error();
-                        finish_incomplete(&runtime, &mut state, failure.category);
+                        let request_id = bridge_state.request_id().map(str::to_owned);
+                        let stream_id = bridge_state.request_stream_id().map(str::to_owned);
+                        let can_send_error = bridge_state.can_send_gateway_error();
+                        finish_incomplete(&runtime, &mut bridge_state, failure.category);
                         if can_send_error {
                             send_gateway_error(
                                 &mut downstream,
@@ -257,7 +269,7 @@ pub(super) async fn bridge(
                     &runtime,
                     &key,
                     &headers,
-                    &mut state,
+                    &mut bridge_state,
                     message,
                 )
                 .await
@@ -267,4 +279,5 @@ pub(super) async fn bridge(
             }
         }
     }
+    finish_incomplete(&runtime, &mut bridge_state, error_codes::CLIENT_CANCELLED);
 }

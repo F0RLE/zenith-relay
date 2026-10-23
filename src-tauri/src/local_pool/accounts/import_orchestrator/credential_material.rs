@@ -2,12 +2,14 @@ use crate::local_pool::accounts::credentials::{bearer_authorization, StoredCodex
 use crate::local_pool::accounts::import_orchestrator::{
     credential_item_error, ImportItemError, ItemResult,
 };
-use crate::local_pool::accounts::oauth::CodexOAuthClient;
+use crate::local_pool::accounts::oauth::{CodexOAuthClient, OAuthClientKind};
 use reqwest::header::HeaderValue;
 use url::Url;
 use zenith_relay_core::accounts::{ImportSecretMaterial, ParsedImportItem};
 use zenith_relay_core::error_codes;
-use zenith_relay_core::providers::chatgpt::{push_account_id_hint, AgentIdentityCredential};
+use zenith_relay_core::providers::chatgpt::{
+    push_account_id_hint, AgentIdentityCredential, BasisPointsCapturedHeaders,
+};
 use zenith_relay_core::ProxyConfig;
 use zenith_relay_core::{is_http_endpoint, url_has_userinfo};
 
@@ -28,11 +30,15 @@ struct ImportDocumentIdentity<'a> {
     plan_hint: Option<&'a str>,
     subscription_active_until_hint: Option<u64>,
     item_account_is_fedramp: bool,
+    basis_points_headers: Option<BasisPointsCapturedHeaders>,
+    oauth_client_kind: OAuthClientKind,
     imported_identity: super::claims::ImportedIdentity,
     account_id_hints: Vec<String>,
 }
 
 pub(in crate::local_pool::accounts) struct ImportedCredentialMaterial {
+    pub(in crate::local_pool::accounts) siwc_registration:
+        Option<zenith_relay_core::providers::chatgpt::SiwcRegistration>,
     pub(in crate::local_pool::accounts) access_token: String,
     pub(in crate::local_pool::accounts) agent_identity: Option<AgentIdentityCredential>,
     pub(in crate::local_pool::accounts) refresh_token: Option<String>,
@@ -51,6 +57,8 @@ pub(in crate::local_pool::accounts) struct ImportedCredentialMaterial {
     pub(in crate::local_pool::accounts) plan_type: Option<String>,
     pub(in crate::local_pool::accounts) subscription_active_until_ms: Option<u64>,
     pub(in crate::local_pool::accounts) account_is_fedramp: bool,
+    pub(in crate::local_pool::accounts) basis_points_headers: Option<BasisPointsCapturedHeaders>,
+    pub(in crate::local_pool::accounts) oauth_client_kind: OAuthClientKind,
 }
 
 impl ImportedCredentialMaterial {
@@ -58,6 +66,16 @@ impl ImportedCredentialMaterial {
         &self,
         now_ms: u64,
     ) -> ItemResult<HeaderValue> {
+        if self
+            .siwc_registration
+            .as_ref()
+            .is_some_and(|r| r.requires_reauthentication)
+        {
+            return Err(ImportItemError::new(
+                error_codes::ACCESS_TOKEN_REJECTED,
+                "Imported SIWC registrations require sign-in before use",
+            ));
+        }
         if let Some(agent) = self.agent_identity.as_ref() {
             return agent.authorization(now_ms).map_err(|_| {
                 ImportItemError::new(
@@ -96,9 +114,28 @@ impl ImportedCredentialMaterial {
         issued_at_ms: u64,
         generation: u64,
     ) -> ItemResult<StoredCodexCredentials> {
+        self.oauth_client_kind
+            .validate_plan(
+                self.plan_type.as_deref(),
+                self.id_token.as_deref(),
+                Some(&self.access_token),
+            )
+            .map_err(|message| {
+                ImportItemError::new(error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED, message)
+            })?;
+        if self.oauth_client_kind == OAuthClientKind::ExcelBps
+            && (self.agent_identity.is_some() || self.access_token.is_empty())
+        {
+            return Err(ImportItemError::new(
+                error_codes::ACCESS_TOKEN_REJECTED,
+                "Excel OAuth requires its own access token and cannot use Agent Identity",
+            ));
+        }
         let phone = self.phone.clone();
         let password = self.password.clone();
         let totp_secret = self.totp_secret.clone();
+        let basis_points_headers = self.basis_points_headers.clone();
+        let oauth_client_kind = self.oauth_client_kind;
         if self.access_token.is_empty() {
             let agent_identity = self.agent_identity.ok_or_else(|| {
                 ImportItemError::new(
@@ -118,7 +155,11 @@ impl ImportedCredentialMaterial {
                 self.plan_type,
                 self.account_is_fedramp,
             )
-            .map(|stored| stored.apply_stored_login_material(phone, password, totp_secret))
+            .map(|stored| {
+                stored
+                    .with_oauth_client_kind(oauth_client_kind)
+                    .apply_stored_login_material(phone, password, totp_secret)
+            })
             .map_err(credential_item_error);
         }
         let agent_identity = self.agent_identity;
@@ -138,9 +179,18 @@ impl ImportedCredentialMaterial {
             self.account_is_fedramp,
         )
         .map_err(credential_item_error)?;
+        stored = stored.with_oauth_client_kind(oauth_client_kind);
         if let Some(agent_identity) = agent_identity {
             stored = stored.with_agent_identity(agent_identity);
         }
+        if let Some(headers) = basis_points_headers {
+            stored = stored
+                .with_basis_points_headers(Some(headers))
+                .map_err(credential_item_error)?;
+        }
+        stored = stored
+            .with_siwc_registration(self.siwc_registration)
+            .map_err(credential_item_error)?;
         Ok(stored.apply_stored_login_material(phone, password, totp_secret))
     }
 
@@ -155,6 +205,7 @@ impl ImportedCredentialMaterial {
         document: ImportDocumentIdentity<'_>,
     ) -> Self {
         Self {
+            siwc_registration: None,
             access_token,
             agent_identity,
             refresh_token,
@@ -164,6 +215,8 @@ impl ImportedCredentialMaterial {
             phone: document.phone,
             password: document.password,
             totp_secret: document.totp_secret,
+            basis_points_headers: document.basis_points_headers,
+            oauth_client_kind: document.oauth_client_kind,
             provider_account_id: document.account_id_hints.first().cloned(),
             account_id_hints: document.account_id_hints,
             provider_user_id: document
@@ -186,7 +239,7 @@ impl ImportedCredentialMaterial {
 }
 
 pub(in crate::local_pool::accounts) async fn build_import_credential_material(
-    item: ParsedImportItem,
+    import_item: ParsedImportItem,
     issued_at_ms: u64,
     plan_hint: Option<&str>,
     subscription_active_until_hint: Option<u64>,
@@ -204,22 +257,62 @@ pub(in crate::local_pool::accounts) async fn build_import_credential_material(
             "ChatGPT account lookup endpoint is invalid",
         ));
     }
-    let email = item.email().map(str::to_string);
-    let phone = item.phone().map(str::to_string);
-    let password = item.password().map(str::to_string);
-    let totp_secret = item.totp_secret().map(str::to_string);
-    let item_account_id = item.account_id.clone();
-    let item_user_id = item.chatgpt_user_id.clone();
-    let organization_id = item.organization_id.clone();
-    let item_account_is_fedramp = item.account_is_fedramp;
-    let secrets = item.into_secrets();
+    let email = import_item.email().map(str::to_string);
+    let phone = import_item.phone().map(str::to_string);
+    let password = import_item.password().map(str::to_string);
+    let totp_secret = import_item.totp_secret().map(str::to_string);
+    let item_account_id = import_item.account_id.clone();
+    let item_user_id = import_item.chatgpt_user_id.clone();
+    let organization_id = import_item.organization_id.clone();
+    let item_account_is_fedramp = import_item.account_is_fedramp;
+    let access_expires_at_hint = import_item.expires_at_ms;
+    let secrets = import_item.into_secrets();
+    let basis_points_headers = secrets.basis_points_headers().cloned();
+    let oauth_client_kind = secrets
+        .oauth_client_kind()
+        .unwrap_or(OAuthClientKind::Codex);
     let original_refresh = secrets.refresh_token().map(str::to_string);
+    if let Some(registration) = secrets.siwc_registration() {
+        let mut registration = registration.clone();
+        registration.requires_reauthentication = true;
+        return Ok(ImportedCredentialMaterial {
+            provider_account_id: Some(registration.identity_key()),
+            provider_user_id: Some(registration.subject.clone()),
+            siwc_registration: Some(registration),
+            access_token: secrets
+                .access_token()
+                .ok_or_else(|| {
+                    ImportItemError::new(
+                        error_codes::ACCESS_TOKEN_MISSING,
+                        "SIWC import requires an access token",
+                    )
+                })?
+                .to_string(),
+            refresh_token: original_refresh,
+            id_token: secrets.id_token().map(str::to_string),
+            expires_at_ms: None,
+            email,
+            phone,
+            password,
+            totp_secret,
+            agent_identity: None,
+            account_id_hints: Vec::new(),
+            organization_id: None,
+            plan_type: plan_hint.map(str::to_string),
+            subscription_active_until_ms: subscription_active_until_hint,
+            account_is_fedramp: false,
+            basis_points_headers: None,
+            oauth_client_kind: OAuthClientKind::Siwc,
+        });
+    }
     let imported_identity = super::imported_identity(secrets.id_token(), secrets.access_token());
     let account_id_hints = account_id_hints(item_account_id, &imported_identity)?;
     let agent_identity = imported_agent_identity(&secrets)?;
     let access_token = secrets.access_token().map(str::to_string);
     let id_token = secrets.id_token().map(str::to_string);
-    let expires_at_ms = imported_identity.access_expires_at_ms;
+    let expires_at_ms = imported_identity
+        .access_expires_at_ms
+        .or(access_expires_at_hint);
     let document = ImportDocumentIdentity {
         email,
         phone,
@@ -230,6 +323,8 @@ pub(in crate::local_pool::accounts) async fn build_import_credential_material(
         plan_hint,
         subscription_active_until_hint,
         item_account_is_fedramp,
+        basis_points_headers,
+        oauth_client_kind,
         imported_identity,
         account_id_hints,
     };
@@ -308,12 +403,13 @@ async fn material_from_refresh_token(
     proxy: Option<&ProxyConfig>,
     document: ImportDocumentIdentity<'_>,
 ) -> ItemResult<ImportedCredentialMaterial> {
-    let oauth = CodexOAuthClient::new_with_proxy(proxy).map_err(|_| {
-        ImportItemError::new(
-            error_codes::REFRESH_EXCHANGE_UNAVAILABLE,
-            "refresh-token exchange is unavailable",
-        )
-    })?;
+    let oauth = CodexOAuthClient::new_with_proxy_for_kind(document.oauth_client_kind, proxy)
+        .map_err(|_| {
+            ImportItemError::new(
+                error_codes::REFRESH_EXCHANGE_UNAVAILABLE,
+                "refresh-token exchange is unavailable",
+            )
+        })?;
     let tokens = oauth
         .exchange_refresh_token(&refresh_token, issued_at_ms)
         .await
@@ -353,6 +449,8 @@ async fn material_from_refresh_token(
         plan_hint,
         subscription_active_until_hint,
         item_account_is_fedramp,
+        basis_points_headers,
+        oauth_client_kind,
         imported_identity,
         mut account_id_hints,
     } = document;
@@ -361,6 +459,7 @@ async fn material_from_refresh_token(
     }
     ensure_account_id_hints_are_consistent(&account_id_hints)?;
     Ok(ImportedCredentialMaterial {
+        siwc_registration: None,
         access_token,
         agent_identity,
         refresh_token: rotated_refresh.or(Some(refresh_token)),
@@ -386,5 +485,7 @@ async fn material_from_refresh_token(
         account_is_fedramp: item_account_is_fedramp
             || account_is_fedramp
             || imported_identity.account_is_fedramp,
+        basis_points_headers,
+        oauth_client_kind,
     })
 }

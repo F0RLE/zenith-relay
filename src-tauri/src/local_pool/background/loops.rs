@@ -13,18 +13,11 @@ use zenith_relay_core::{
 /// Keeps Relay's own OAuth identity aligned with the newest published Rust
 /// Codex release. This is intentionally independent of pool activity: a
 /// paused or empty pool must still pick up a newer identity for its next use.
-pub(super) async fn codex_release_loop(_app: AppHandle) {
+pub(super) async fn codex_release_loop() {
     loop {
         match refresh_codex_client_release().await {
             Ok(release) => {
-                if !configure_codex_client_version(release.version()) {
-                    crate::diagnostics::record_error(
-                        "background-codex-release",
-                        Some("configure_failed"),
-                        "published Codex release could not be applied",
-                        &[],
-                    );
-                }
+                let _ = configure_codex_client_version(release.version());
             }
             Err(error) => crate::diagnostics::record_error(
                 "background-codex-release",

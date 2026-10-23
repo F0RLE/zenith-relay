@@ -1,4 +1,6 @@
-use super::super::compatibility::{incompatible_routes, RouteCompatibility};
+use super::super::compatibility::{
+    incompatible_routes, record_adapter_rejection, AdapterRejection, RouteCompatibility,
+};
 use super::drive::{drive_selected_attempt, AttemptCarry, DriveAttemptInput, DrivenAttempt};
 use super::prelude::*;
 use super::recovery::{adapter_error_response, request_has_previous_response_id};
@@ -8,6 +10,7 @@ use super::RequestExecution;
 pub(in crate::gateway::execution) async fn execute_request(
     context: RequestExecution,
 ) -> Response<Body> {
+    let started = Instant::now();
     let RequestExecution {
         mut tool_policy,
         runtime,
@@ -20,20 +23,25 @@ pub(in crate::gateway::execution) async fn execute_request(
         mut request_id,
         forwarded_headers,
         client_context_id,
+        client_affinity_id,
         mut response_affinity_key,
         mut requires_affinity_owner,
-        wire_api,
+        client_wire_api,
         responses_lite,
         allow_previous_response_reset,
         attempt_offset,
         budget,
+        transport,
+        transport_fallback,
     } = context;
     let mut tried: HashSet<String> = Default::default();
+    // Local preparation failures belong to this request, not provider health.
+    // Recovery may revisit dispatched members after their cooldown, but it
+    // must never recycle a route that cannot prepare the unchanged request.
+    let mut preparation_exclusions = HashSet::new();
     let mut attempt = attempt_offset;
     let mut confirmed_response_missing = false;
     let mut repairs = AttemptRepairs::default();
-    let mut basis_points_relay_retry_attempted = false;
-    let mut basis_points_relay_retry_parameter: Option<&'static str> = None;
     let mut last_failure: Option<AttemptFailure> = None;
     let mut last_adapter_error: Option<AdapterError> = None;
     let mut last_preserved_upstream_error: Option<PreservedUpstreamError> = None;
@@ -44,24 +52,15 @@ pub(in crate::gateway::execution) async fn execute_request(
     // client Lite headers remain authoritative, but a mixed or partly unknown
     // pool must use full Responses so fallback preserves its tool/context
     // contract.
-    let automatic_responses_lite = wire_api == WireApi::Responses
+    let automatic_responses_lite = client_wire_api == WireApi::Responses
         && runtime.codex_model_responses_routes_all_support_lite(&key, &resolved_model);
     let mut has_unpaired_tool_output = !unpaired_tool_output_ids(&request).is_empty();
     let mut prompt_affinity_key = runtime.prompt_affinity_key(
         &key.id,
         &resolved_model,
         request.get("prompt_cache_key").and_then(Value::as_str),
-        client_context_id.as_deref(),
+        client_affinity_id.as_deref(),
     );
-    let retry_context = CandidateRetryContext {
-        runtime: &runtime,
-        key: &key,
-        resolved_model: &resolved_model,
-        protocols: candidate_protocols(wire_api),
-        operation: crate::scheduler::rotation::RotationOperation::Text,
-        exclusions: &HashSet::new(),
-    };
-
     loop {
         budget.retain_input_bytes(crate::gateway::request_body::retained_request_bytes(
             &request,
@@ -76,18 +75,19 @@ pub(in crate::gateway::execution) async fn execute_request(
         if !repairs.quota_yield {
             repairs.quota_yield = true;
             if let Some(affinity_key) = response_affinity_key.clone() {
-                if runtime.automatic_response_owner_should_yield_for_quota(
+                if runtime.automatic_response_owner_should_yield(
                     &key,
                     &affinity_key,
                     &resolved_model,
-                    candidate_protocols(wire_api),
+                    candidate_protocols(client_wire_api),
                     &tried,
                     now_ms(),
-                ) && drop_materialized_previous_response_id(
+                ) && prepare_response_owner_change(
                     &runtime,
                     &key.id,
                     &mut request,
                     &resolved_model,
+                    requires_affinity_owner,
                     now_ms(),
                 ) {
                     clear_materialized_continuation(
@@ -101,7 +101,7 @@ pub(in crate::gateway::execution) async fn execute_request(
         // Recovery can deliberately remove an unusable opaque response id.
         // Derive continuation semantics from the request that will actually be
         // sent on this attempt, rather than from its original payload.
-        let has_previous_response_id = request_has_previous_response_id(wire_api, &request);
+        let has_previous_response_id = request_has_previous_response_id(client_wire_api, &request);
         // The gateway setting is live for every text protocol. Turning it off
         // wakes an already-waiting request on its next availability event.
         let retry_until_available = runtime.route_recovery_enabled();
@@ -116,16 +116,26 @@ pub(in crate::gateway::execution) async fn execute_request(
         {
             response_affinity_key = None;
         }
-        let (incompatible, admission_error) = incompatible_routes(RouteCompatibility {
+        let (mut incompatible, mut admitted, admission_error) =
+            incompatible_routes(RouteCompatibility {
+                runtime: &runtime,
+                key: &key,
+                model: &resolved_model,
+                client: client_wire_api,
+                request: &request,
+                stream,
+                tier_policy: &service_tier_policy,
+                now_ms: now_ms(),
+            });
+        incompatible.extend(preparation_exclusions.iter().cloned());
+        let retry_context = CandidateRetryContext {
             runtime: &runtime,
             key: &key,
-            model: &resolved_model,
-            client: wire_api,
-            request: &request,
-            stream,
-            tier_policy: &service_tier_policy,
-            now_ms: now_ms(),
-        });
+            resolved_model: &resolved_model,
+            protocols: candidate_protocols(client_wire_api),
+            operation: crate::scheduler::rotation::RotationOperation::Text,
+            exclusions: &incompatible,
+        };
         let mut selection_exclusions = tried.clone();
         selection_exclusions.extend(incompatible.iter().cloned());
         if admission_error.is_some() {
@@ -135,7 +145,7 @@ pub(in crate::gateway::execution) async fn execute_request(
             .select_and_reserve_with_budget(
                 &key,
                 &resolved_model,
-                candidate_protocols(wire_api),
+                candidate_protocols(client_wire_api),
                 &selection_exclusions,
                 (
                     response_affinity_key.as_deref(),
@@ -146,14 +156,20 @@ pub(in crate::gateway::execution) async fn execute_request(
             )
             .await;
         let Some((selected, lease)) = selected else {
+            release_encrypted_context_repair_owner(
+                &mut repairs,
+                &mut response_affinity_key,
+                &mut requires_affinity_owner,
+                &runtime,
+            );
             match handle_selection_miss(SelectionMissInput {
                 budget: &budget,
                 runtime: &runtime,
                 key: &key,
                 resolved_model: &resolved_model,
-                wire_api,
+                client_wire_api,
                 stream,
-                request: &mut request,
+                request_json: &mut request,
                 response_affinity_key: &mut response_affinity_key,
                 requires_affinity_owner: &mut requires_affinity_owner,
                 allow_previous_response_reset,
@@ -161,9 +177,9 @@ pub(in crate::gateway::execution) async fn execute_request(
                 has_unpaired_tool_output: &mut has_unpaired_tool_output,
                 repairs: &mut repairs,
                 tried: &mut tried,
-                incompatible: &incompatible,
                 retry_context: &retry_context,
                 last_failure: &last_failure,
+                has_preparation_error: !preparation_exclusions.is_empty(),
                 last_adapter_error: &mut last_adapter_error,
                 retry_until_available,
                 attempt,
@@ -178,10 +194,41 @@ pub(in crate::gateway::execution) async fn execute_request(
                     retry_window_expired = expired;
                     break;
                 }
+                SelectionMiss::AdapterError(error) => {
+                    record_adapter_rejection(
+                        &runtime,
+                        AdapterRejection {
+                            request_id: &request_id,
+                            attempt,
+                            local_key_id: &key.id,
+                            requested_model: &requested_model,
+                            resolved_model: &resolved_model,
+                            client_context_id: client_context_id.as_deref(),
+                            wire_api: client_wire_api,
+                            transport,
+                            service_tier: service_tier_policy.selected_tier(),
+                        },
+                        &error,
+                        started.elapsed().as_millis() as u64,
+                    );
+                    return adapter_error_response(error, Some(&request_id));
+                }
                 SelectionMiss::Respond(response) => return response,
             }
         };
+        detach_encrypted_context_repair_owner(
+            &repairs,
+            &mut response_affinity_key,
+            &mut requires_affinity_owner,
+        );
+        let Some(route) = admitted.remove(&selected.candidate_id) else {
+            preparation_exclusions.insert(selected.candidate_id.clone());
+            tried.insert(selected.candidate_id.clone());
+            drop(lease);
+            continue;
+        };
         let driven = drive_selected_attempt(DriveAttemptInput {
+            route,
             selected,
             lease,
             request,
@@ -191,21 +238,23 @@ pub(in crate::gateway::execution) async fn execute_request(
             runtime: &runtime,
             key: &key,
             budget: &budget,
+            transport,
+            transport_fallback,
             resolved_model: &resolved_model,
-            wire_api,
+            client_wire_api,
             stream,
             responses_lite: &responses_lite,
             automatic_responses_lite,
             service_tier_policy: &service_tier_policy,
             tool_policy: &mut tool_policy,
             client_context_id: &client_context_id,
-            basis_points_relay_retry_parameter: &mut basis_points_relay_retry_parameter,
             last_adapter_error: &mut last_adapter_error,
             forwarded_headers: &forwarded_headers,
             attempt: &mut attempt,
             last_failure: &mut last_failure,
             last_failure_origin: &mut last_failure_origin,
             tried: &mut tried,
+            preparation_exclusions: &mut preparation_exclusions,
             has_previous_response_id,
             has_unpaired_tool_output: &mut has_unpaired_tool_output,
             requires_affinity_owner: &mut requires_affinity_owner,
@@ -214,11 +263,18 @@ pub(in crate::gateway::execution) async fn execute_request(
             response_affinity_key: &mut response_affinity_key,
             allow_previous_response_reset,
             confirmed_response_missing: &mut confirmed_response_missing,
-            basis_points_relay_retry_attempted: &mut basis_points_relay_retry_attempted,
         })
         .await;
         let kept = match driven {
-            DrivenAttempt::Respond(response) => return response,
+            DrivenAttempt::Respond(response) => {
+                release_encrypted_context_repair_owner(
+                    &mut repairs,
+                    &mut response_affinity_key,
+                    &mut requires_affinity_owner,
+                    &runtime,
+                );
+                return response;
+            }
             DrivenAttempt::Continue(kept) => kept,
             DrivenAttempt::Break(AttemptCarry {
                 request: next_request,
@@ -226,6 +282,12 @@ pub(in crate::gateway::execution) async fn execute_request(
                 requested_model: next_requested_model,
                 prompt_affinity_key: _,
             }) => {
+                release_encrypted_context_repair_owner(
+                    &mut repairs,
+                    &mut response_affinity_key,
+                    &mut requires_affinity_owner,
+                    &runtime,
+                );
                 request = next_request;
                 request_id = next_request_id;
                 requested_model = next_requested_model;
@@ -238,8 +300,15 @@ pub(in crate::gateway::execution) async fn execute_request(
         prompt_affinity_key = kept.prompt_affinity_key;
     }
 
+    release_encrypted_context_repair_owner(
+        &mut repairs,
+        &mut response_affinity_key,
+        &mut requires_affinity_owner,
+        &runtime,
+    );
+
     if allow_previous_response_reset
-        && request_has_previous_response_id(wire_api, &request)
+        && request_has_previous_response_id(client_wire_api, &request)
         && confirmed_response_missing
     {
         let mut reset_request = request;
@@ -262,13 +331,16 @@ pub(in crate::gateway::execution) async fn execute_request(
                 request_id,
                 forwarded_headers,
                 client_context_id,
+                client_affinity_id,
                 response_affinity_key: None,
                 requires_affinity_owner: false,
-                wire_api,
+                client_wire_api,
                 responses_lite,
                 allow_previous_response_reset: false,
                 attempt_offset: attempt,
                 budget,
+                transport,
+                transport_fallback,
             }))
             .await;
         }
@@ -281,7 +353,23 @@ pub(in crate::gateway::execution) async fn execute_request(
 
     if last_failure.is_none() {
         if let Some(error) = last_adapter_error {
-            return adapter_error_response(error);
+            record_adapter_rejection(
+                &runtime,
+                AdapterRejection {
+                    request_id: &request_id,
+                    attempt,
+                    local_key_id: &key.id,
+                    requested_model: &requested_model,
+                    resolved_model: &resolved_model,
+                    client_context_id: client_context_id.as_deref(),
+                    wire_api: client_wire_api,
+                    transport,
+                    service_tier: service_tier_policy.selected_tier(),
+                },
+                &error,
+                started.elapsed().as_millis() as u64,
+            );
+            return adapter_error_response(error, Some(&request_id));
         }
     }
     if let Some(error) = crate::gateway::errors::admission_error(&budget) {
@@ -292,7 +380,7 @@ pub(in crate::gateway::execution) async fn execute_request(
         runtime: &runtime,
         key: &key,
         resolved_model: &resolved_model,
-        protocols: candidate_protocols(wire_api),
+        protocols: candidate_protocols(client_wire_api),
         operation: crate::scheduler::rotation::RotationOperation::Text,
         exclusions: &HashSet::new(),
         response_affinity_key: response_affinity_key.as_deref(),

@@ -107,6 +107,63 @@ async fn reimporting_identical_credentials_retires_preexisting_refresh_reads() {
 }
 
 #[tokio::test]
+async fn account_trash_prevents_reimport_from_replacing_retained_credentials() {
+    let root = std::env::temp_dir().join(format!(
+        "zenith-relay-import-trash-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let state = DesktopState::open(root.clone()).unwrap();
+    let credential_store = CredentialStore::from_backend(NativeSecretBackend);
+    let account_id = format!("account_{}", uuid::Uuid::new_v4().simple());
+    let retained = credentials(&account_id, "retained", 10, 1);
+    let record = account(&retained);
+    credential_store.save(&retained).unwrap();
+    state
+        .store()
+        .unwrap()
+        .upsert_account(record.clone())
+        .unwrap();
+    state
+        .store()
+        .unwrap()
+        .trash_accounts(
+            std::slice::from_ref(&account_id),
+            crate::local_pool::models::AutomationRecords::default(),
+            20,
+        )
+        .unwrap();
+    let replacement = credentials(&account_id, "replacement", 30, 2);
+    assert!(persist_imported_account(
+        &state,
+        &credential_store,
+        &replacement,
+        Some(&retained),
+        record,
+    )
+    .await
+    .is_err());
+    assert!(StoredCodexCredentials::snapshots_match(
+        credential_store.load(&account_id).unwrap().as_ref(),
+        Some(&retained),
+    ));
+    assert!(state.store().unwrap().accounts().is_empty());
+    assert_eq!(state.store().unwrap().account_trash().len(), 1);
+    let duplicate_id = format!("account_{}", uuid::Uuid::new_v4().simple());
+    let duplicate_credentials = credentials(&duplicate_id, "duplicate", 40, 1);
+    assert!(persist_imported_account(
+        &state,
+        &credential_store,
+        &duplicate_credentials,
+        None,
+        account(&duplicate_credentials),
+    )
+    .await
+    .is_err());
+    assert!(credential_store.load(&duplicate_id).unwrap().is_none());
+    cleanup_import_test_state(state, credential_store, &account_id, root).await;
+}
+
+#[tokio::test]
 async fn importing_an_account_outside_the_pool_keeps_the_running_gateway() {
     let root = std::env::temp_dir().join(format!(
         "zenith-relay-import-no-pool-runtime-{}",

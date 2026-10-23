@@ -1,6 +1,6 @@
 use super::{is_agent_identity_task_invalid_response, CodexIdentityEnvelope};
-use crate::scheduler::refresh::http::{HttpClass, ManagementHttpScope};
-use crate::{transport::collect_limited, Error, ProxyConfig};
+use crate::scheduler::refresh::http::ManagementHttpScope;
+use crate::ProxyConfig;
 use reqwest::{
     header::{HeaderValue, AUTHORIZATION},
     redirect::Policy,
@@ -8,8 +8,15 @@ use reqwest::{
 use std::time::Duration;
 use url::Url;
 
+mod basis_points;
 mod failure;
 mod parse;
+mod request;
+pub(crate) use basis_points::normalize_basis_points_reasoning_effort;
+pub use basis_points::{
+    basis_points_access_url, parse_basis_points_model_access, BasisPointsModelAccess,
+    BASIS_POINTS_ACCESS_ENDPOINT, MAX_BASIS_POINTS_ACCESS_BYTES,
+};
 pub use failure::{ModelDiscoveryFailure, ModelDiscoveryFailureCode};
 
 pub const CODEX_MODELS_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/models";
@@ -17,20 +24,23 @@ pub const CODEX_MODELS_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/m
 const MAX_ACCOUNT_ID_BYTES: usize = 512;
 const MAX_MODEL_SLUG_BYTES: usize = 256;
 const MAX_MODELS: usize = 4_096;
-const MAX_MODELS_RESPONSE_BYTES: usize = 512 * 1024;
+const MAX_MODELS_RESPONSE_BYTES: usize = crate::transport::MAX_MODEL_CATALOG_BODY_BYTES;
 
 #[derive(Clone)]
-pub struct CodexModelsClient {
+pub struct AccountModelsClient {
     http: reqwest::Client,
     endpoint: Url,
+    endpoint_is_custom: bool,
     scope: ManagementHttpScope,
+    client_kind: super::OAuthClientKind,
+    subscription_plan_type: Option<String>,
 }
 
-impl CodexModelsClient {
+impl AccountModelsClient {
     pub fn new_with_proxy(proxy: Option<&ProxyConfig>) -> Result<Self, ModelDiscoveryFailure> {
         Self::new_with_proxy_and_timeout_and_user_agent(
             proxy,
-            Duration::from_secs(10),
+            Duration::from_secs(20),
             "Zenith Relay",
         )
     }
@@ -52,12 +62,14 @@ impl CodexModelsClient {
 
     #[cfg(test)]
     pub fn with_endpoint(endpoint: Url) -> Result<Self, ModelDiscoveryFailure> {
-        Self::with_endpoint_proxy_timeout_and_user_agent(
+        let mut client = Self::with_endpoint_proxy_timeout_and_user_agent(
             endpoint,
             None,
             Duration::from_secs(10),
             "Zenith Relay",
-        )
+        )?;
+        client.endpoint_is_custom = true;
+        Ok(client)
     }
 
     fn with_endpoint_proxy_timeout_and_user_agent(
@@ -80,12 +92,33 @@ impl CodexModelsClient {
         Ok(Self {
             http,
             endpoint,
+            endpoint_is_custom: false,
             scope: ManagementHttpScope::default(),
+            client_kind: super::OAuthClientKind::Codex,
+            subscription_plan_type: None,
         })
+    }
+
+    pub fn with_oauth_client_kind(mut self, kind: super::OAuthClientKind) -> Self {
+        if self.client_kind != kind && !self.endpoint_is_custom {
+            self.endpoint = Url::parse(match kind {
+                super::OAuthClientKind::ExcelBps => BASIS_POINTS_ACCESS_ENDPOINT,
+                super::OAuthClientKind::Codex => CODEX_MODELS_ENDPOINT,
+                super::OAuthClientKind::Siwc => "https://api.openai.com/v1/models",
+            })
+            .expect("constant HTTPS endpoint");
+        }
+        self.client_kind = kind;
+        self
     }
 
     pub fn with_http_scope(mut self, scope: ManagementHttpScope) -> Self {
         self.scope = scope;
+        self
+    }
+
+    pub fn with_subscription_plan_type(mut self, plan_type: Option<&str>) -> Self {
+        self.subscription_plan_type = plan_type.map(str::to_owned);
         self
     }
 
@@ -111,58 +144,68 @@ impl CodexModelsClient {
         chatgpt_account_id: &str,
         client_version: &str,
     ) -> Result<Vec<String>, ModelDiscoveryFailure> {
-        parse::validate_account_id(chatgpt_account_id)?;
-        parse::validate_client_version(client_version)?;
-        let identity = CodexIdentityEnvelope::new(chatgpt_account_id, client_version)
-            .map_err(|_| ModelDiscoveryFailure::new(ModelDiscoveryFailureCode::InvalidAccountId))?;
-        let mut request_url = self.endpoint.clone();
-        request_url
-            .query_pairs_mut()
-            .append_pair("client_version", client_version);
-        let (response, permit) = self
-            .scope
-            .send(
-                &self.http,
-                identity.apply(
-                    self.http
-                        .get(request_url)
-                        .header(AUTHORIZATION, authorization),
-                ),
-                HttpClass::Ordinary,
+        self.client_kind
+            .validate_plan(
+                self.subscription_plan_type.as_deref(),
+                None,
+                authorization
+                    .to_str()
+                    .ok()
+                    .and_then(|header| header.strip_prefix("Bearer ")),
             )
-            .await
-            .map_err(|_| ModelDiscoveryFailure::retryable(ModelDiscoveryFailureCode::Transport))?;
-        let status = response.status();
-        let retry_after_ms =
-            crate::transport::retry_after_ms(response.headers(), std::time::SystemTime::now());
-        let body = collect_limited(response, MAX_MODELS_RESPONSE_BYTES)
-            .await
-            .map_err(|error| match error {
-                Error::UpstreamBodyTooLarge => {
-                    ModelDiscoveryFailure::new(ModelDiscoveryFailureCode::ResponseTooLarge)
-                }
-                _ => ModelDiscoveryFailure::retryable(ModelDiscoveryFailureCode::Transport),
-            })
-            .map_err(|mut failure| {
-                failure.retry_after_ms = retry_after_ms;
-                failure
+            .map_err(|_| {
+                ModelDiscoveryFailure::new(
+                    ModelDiscoveryFailureCode::BasisPointsFreeAccountUnsupported,
+                )
             })?;
-        drop(permit);
+        parse::validate_account_id(chatgpt_account_id)?;
+        let basis_points = self.client_kind == super::OAuthClientKind::ExcelBps;
+        let siwc = self.client_kind == super::OAuthClientKind::Siwc;
+        let mut request_url = self.endpoint.clone();
+        if basis_points {
+            request_url
+                .query_pairs_mut()
+                .append_pair("include_models", "true");
+        } else if !siwc {
+            parse::validate_client_version(client_version)?;
+            request_url
+                .query_pairs_mut()
+                .append_pair("client_version", client_version);
+        }
+        let request = self
+            .http
+            .get(request_url)
+            .header(AUTHORIZATION, authorization);
+        let request = if basis_points {
+            request
+                .headers(super::basis_points_headers(chatgpt_account_id, None, None))
+                .timeout(Duration::from_secs(5))
+        } else if siwc {
+            request
+        } else {
+            CodexIdentityEnvelope::new(chatgpt_account_id, client_version)
+                .map_err(|_| {
+                    ModelDiscoveryFailure::new(ModelDiscoveryFailureCode::InvalidAccountId)
+                })?
+                .apply(request)
+        };
+        let (status, retry_after_ms, models_response_body) =
+            self.read_response(request, basis_points).await?;
         if !status.is_success() {
-            let (code, retryable) =
-                if is_agent_identity_task_invalid_response(status.as_u16(), &body) {
-                    (ModelDiscoveryFailureCode::AgentTaskInvalid, false)
-                } else {
-                    match status.as_u16() {
-                        401 => (ModelDiscoveryFailureCode::Unauthorized, false),
-                        403 => (ModelDiscoveryFailureCode::Forbidden, false),
-                        429 => (ModelDiscoveryFailureCode::RateLimited, true),
-                        _ if status.is_server_error() => {
-                            (ModelDiscoveryFailureCode::Upstream, true)
-                        }
-                        _ => (ModelDiscoveryFailureCode::HttpStatus, false),
-                    }
-                };
+            let (code, retryable) = if is_agent_identity_task_invalid_response(
+                status.as_u16(),
+                &models_response_body,
+            ) {
+                (ModelDiscoveryFailureCode::AgentTaskInvalid, false)
+            } else {
+                match status.as_u16() {
+                    401 => (ModelDiscoveryFailureCode::Unauthorized, false),
+                    403 => (ModelDiscoveryFailureCode::Forbidden, false),
+                    429 => (ModelDiscoveryFailureCode::RateLimited, true),
+                    _ if status.is_server_error() => (ModelDiscoveryFailureCode::Upstream, true),
+                    _ => (ModelDiscoveryFailureCode::HttpStatus, false),
+                }
+            };
             return Err(ModelDiscoveryFailure {
                 code,
                 retryable,
@@ -171,7 +214,13 @@ impl CodexModelsClient {
             });
         }
 
-        parse::parse_models(&body)
+        if basis_points {
+            parse_basis_points_model_access(&models_response_body).map(|access| access.model_ids())
+        } else if siwc {
+            parse::parse_siwc_models(&models_response_body)
+        } else {
+            parse::parse_models(&models_response_body)
+        }
     }
 }
 

@@ -90,7 +90,7 @@ impl AgentIdentityCredential {
     ) -> Result<Self, AgentIdentityError> {
         let private_key = private_key.trim().to_string();
         let runtime_id = runtime_id.trim().to_string();
-        let task_id = task_id.map(|value| value.trim().to_string());
+        let task_id = task_id.map(|task_id_text| task_id_text.trim().to_string());
         validate_identifier(&runtime_id).map_err(|_| AgentIdentityError::InvalidRuntimeId)?;
         if let Some(task_id) = task_id.as_deref() {
             validate_identifier(task_id).map_err(|_| AgentIdentityError::InvalidTaskId)?;
@@ -141,12 +141,12 @@ impl AgentIdentityCredential {
         };
         let encoded =
             serde_json::to_vec(&envelope).map_err(|_| AgentIdentityError::InvalidAuthorization)?;
-        let value = format!(
+        let authorization_header_value = format!(
             "AgentAssertion {}",
             general_purpose::URL_SAFE_NO_PAD.encode(encoded)
         );
-        let mut header =
-            HeaderValue::from_str(&value).map_err(|_| AgentIdentityError::InvalidAuthorization)?;
+        let mut header = HeaderValue::from_str(&authorization_header_value)
+            .map_err(|_| AgentIdentityError::InvalidAuthorization)?;
         header.set_sensitive(true);
         Ok(header)
     }
@@ -178,17 +178,17 @@ fn encode_ssh_public_key(public_key: &[u8; 32]) -> String {
     format!("ssh-ed25519 {}", general_purpose::STANDARD.encode(blob))
 }
 
-fn append_ssh_string(output: &mut Vec<u8>, value: &[u8]) {
-    output.extend_from_slice(&(value.len() as u32).to_be_bytes());
-    output.extend_from_slice(value);
+fn append_ssh_string(encoded_key: &mut Vec<u8>, key_bytes: &[u8]) {
+    encoded_key.extend_from_slice(&(key_bytes.len() as u32).to_be_bytes());
+    encoded_key.extend_from_slice(key_bytes);
 }
 
-fn parse_key(value: &str) -> Result<SigningKey, AgentIdentityError> {
-    if value.is_empty() || value.len() > MAX_PRIVATE_KEY_BYTES {
+fn parse_key(encoded_private_key: &str) -> Result<SigningKey, AgentIdentityError> {
+    if encoded_private_key.is_empty() || encoded_private_key.len() > MAX_PRIVATE_KEY_BYTES {
         return Err(AgentIdentityError::InvalidPrivateKey);
     }
     let bytes = general_purpose::STANDARD
-        .decode(value)
+        .decode(encoded_private_key)
         .map_err(|_| AgentIdentityError::InvalidPrivateKey)?;
     SigningKey::from_pkcs8_der(&bytes).map_err(|_| AgentIdentityError::InvalidPrivateKey)
 }
@@ -207,10 +207,10 @@ fn curve_secret_key(signing_key: &SigningKey) -> Curve25519SecretKey {
     Curve25519SecretKey::from(secret)
 }
 
-fn validate_identifier(value: &str) -> Result<(), ()> {
-    if value.is_empty()
-        || value.len() > MAX_IDENTIFIER_BYTES
-        || value.bytes().any(|byte| byte.is_ascii_control())
+fn validate_identifier(identifier: &str) -> Result<(), ()> {
+    if identifier.is_empty()
+        || identifier.len() > MAX_IDENTIFIER_BYTES
+        || identifier.bytes().any(|byte| byte.is_ascii_control())
     {
         Err(())
     } else {
@@ -218,11 +218,11 @@ fn validate_identifier(value: &str) -> Result<(), ()> {
     }
 }
 
-pub fn is_agent_identity_task_invalid_response(status: u16, body: &[u8]) -> bool {
+pub fn is_agent_identity_task_invalid_response(status: u16, response_body: &[u8]) -> bool {
     if status != 401 {
         return false;
     }
-    let lower = String::from_utf8_lossy(body).to_ascii_lowercase();
+    let lower = String::from_utf8_lossy(response_body).to_ascii_lowercase();
     let compact: String = lower
         .chars()
         .filter(|character| !character.is_whitespace())

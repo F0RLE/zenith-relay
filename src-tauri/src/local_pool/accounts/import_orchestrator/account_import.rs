@@ -4,7 +4,7 @@ use super::{
     proxy_item_error, validate_label, ImportItemError, ImportRowContext, ItemResult,
 };
 use crate::local_pool::accounts::credentials::CredentialStore;
-use crate::local_pool::accounts::proxy::{common_proxy_config, ensure_account_proxy};
+use crate::local_pool::accounts::proxy::ensure_account_proxy;
 use crate::local_pool::accounts::quota_refresh::AccountQuotaOutcome;
 use crate::local_pool::accounts::{records, NativeSecretBackend};
 use crate::local_pool::commands::current_time_ms;
@@ -12,16 +12,14 @@ use crate::local_pool::models::LocalAccountRecord;
 use crate::local_pool::state::DesktopState;
 use zenith_relay_core::accounts::ParsedImportItem;
 use zenith_relay_core::error_codes;
-use zenith_relay_core::providers::chatgpt::CodexModelsClient;
+use zenith_relay_core::providers::chatgpt::AccountModelsClient;
 
 mod quota_probe;
 mod reconcile;
-mod stage;
 
-pub(super) use quota_probe::hinted_import_proxy;
 use quota_probe::probe_import_quota;
+pub(super) use quota_probe::{account_import_proxy, import_proxy};
 use reconcile::reconcile_imported_credentials;
-pub(crate) use stage::stage_returned_remote_account;
 
 pub(super) struct AccountImportOptions<'a> {
     pub(super) add_to_pool: bool,
@@ -33,7 +31,7 @@ pub(super) struct AccountImportOptions<'a> {
 pub(super) async fn import_account_item(
     state: &DesktopState,
     credential_store: &CredentialStore<NativeSecretBackend>,
-    item: ParsedImportItem,
+    import_item: ParsedImportItem,
     context: &ImportRowContext,
     options: AccountImportOptions<'_>,
     account_check_endpoint: &url::Url,
@@ -44,17 +42,17 @@ pub(super) async fn import_account_item(
         probe_quota,
         configured_models,
     } = options;
-    ensure_account_import_item(&item)?;
-    let item_hash = crate::diagnostics::hash_identifier(&item.item_id);
+    ensure_account_import_item(&import_item)?;
+    let item_hash = crate::diagnostics::hash_identifier(&import_item.item_id);
     crate::diagnostics::breadcrumb(
         "account-import",
         "item_processing_started",
         &[("item", item_hash.clone())],
     );
     let issued_at_ms = current_time_ms();
-    let item_label = item.label.clone();
-    let imported_tags = item.tags.clone();
-    let item_priority = item.priority;
+    let item_label = import_item.label.clone();
+    let imported_tags = import_item.tags.clone();
+    let item_priority = import_item.priority;
     let settings = state
         .store()
         .map_err(|_| {
@@ -65,12 +63,11 @@ pub(super) async fn import_account_item(
         })?
         .gateway()
         .clone();
-    let common_proxy = common_proxy_config(&settings).map_err(proxy_item_error)?;
-    let hinted_proxy = hinted_import_proxy(state, credential_store, &settings, &item)?;
-    let import_proxy = hinted_proxy.as_ref().or(common_proxy.as_ref());
+    let proxy = import_proxy(state, credential_store, &settings, &import_item)?;
+    let import_proxy = proxy.as_ref();
     ensure_account_proxy(&settings, import_proxy).map_err(proxy_item_error)?;
     let material = build_import_credential_material(
-        item,
+        import_item,
         issued_at_ms,
         context.plan.as_deref(),
         context.subscription_active_until_ms,
@@ -96,8 +93,27 @@ pub(super) async fn import_account_item(
         provider_account_id,
         identity_is_registered,
     } = reconciled;
-    let discovered_models = if discover_models && identity_is_registered {
-        let client = CodexModelsClient::new_with_proxy(proxy.as_ref()).map_err(model_item_error)?;
+    records::validate_account_plan(&credentials, context.plan.as_deref())
+        .and_then(|_| {
+            records::validate_account_plan(
+                &credentials,
+                existing_account
+                    .as_ref()
+                    .and_then(|account| account.account.subscription.plan_type.as_deref()),
+            )
+        })
+        .map_err(|error| {
+            ImportItemError::new(
+                error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED,
+                &error.message,
+            )
+        })?;
+    let is_siwc = credentials.siwc_registration().is_some();
+    let discovered_models = if discover_models && identity_is_registered && !is_siwc {
+        let client = AccountModelsClient::new_with_proxy(proxy.as_ref())
+            .map_err(model_item_error)?
+            .with_oauth_client_kind(credentials.oauth_client_kind())
+            .with_subscription_plan_type(credentials.plan_type());
         let client_version =
             zenith_relay_core::providers::chatgpt::configured_codex_client_version();
         let models = client
@@ -133,7 +149,7 @@ pub(super) async fn import_account_item(
     };
     let priority = existing_account
         .as_ref()
-        .map(|value| value.priority)
+        .map(|existing_account| existing_account.priority)
         .or(item_priority);
     let mut account = records::new_account_record(
         &credentials,
@@ -151,10 +167,12 @@ pub(super) async fn import_account_item(
     account.discovered_models = discovered_models.or_else(|| {
         existing_account
             .as_ref()
-            .and_then(|value| value.discovered_models.clone())
+            .and_then(|existing_account| existing_account.discovered_models.clone())
     });
     merge_existing_account(&mut account, existing_account.as_ref());
-    account.account.in_pool |= add_to_pool;
+    account.account.in_pool = credentials.oauth_client_kind()
+        != zenith_relay_core::providers::chatgpt::OAuthClientKind::Codex
+        && (account.account.in_pool || (add_to_pool && !is_siwc));
     if let Some(active_until_ms) = subscription_active_until_ms {
         account.account.subscription = zenith_relay_core::quota::Subscription::normalize(
             zenith_relay_core::quota::SubscriptionInput {
@@ -181,7 +199,7 @@ pub(super) async fn import_account_item(
         )
     })?;
     account.normalize();
-    let quota = if probe_quota && identity_is_registered {
+    let quota = if probe_quota && identity_is_registered && !is_siwc {
         probe_import_quota(
             &mut account,
             &credentials,
@@ -192,6 +210,16 @@ pub(super) async fn import_account_item(
     } else {
         AccountQuotaOutcome::Skipped
     };
+    records::validate_account_plan(
+        &credentials,
+        account.account.subscription.plan_type.as_deref(),
+    )
+    .map_err(|error| {
+        ImportItemError::new(
+            error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED,
+            &error.message,
+        )
+    })?;
     crate::diagnostics::breadcrumb(
         "account-import",
         "persist_ready",

@@ -65,15 +65,15 @@ pub(in crate::local_pool::accounts) fn imported_identity(
         .and_then(|claims| claims.auth.as_ref());
     let mut account_id_hints = Vec::new();
     for auth in [access_auth, id_auth].into_iter().flatten() {
-        for value in [&auth.chatgpt_account_id, &auth.account_id]
+        for account_id_hint in [&auth.chatgpt_account_id, &auth.account_id]
             .into_iter()
-            .filter_map(|value| omit_blank(value.clone()))
+            .filter_map(|account_id_hint| omit_blank(account_id_hint.clone()))
         {
             if !account_id_hints
                 .iter()
-                .any(|existing: &String| existing.eq_ignore_ascii_case(&value))
+                .any(|existing: &String| existing.eq_ignore_ascii_case(&account_id_hint))
             {
-                account_id_hints.push(value);
+                account_id_hints.push(account_id_hint);
             }
         }
     }
@@ -104,12 +104,16 @@ pub(in crate::local_pool::accounts) fn imported_identity(
     }
 }
 
-pub(super) fn parse_subscription_timestamp_value_ms(value: &serde_json::Value) -> Option<u64> {
-    zenith_relay_core::providers::chatgpt::parse_subscription_timestamp_ms(value)
+pub(super) fn parse_subscription_timestamp_value_ms(
+    timestamp_value: &serde_json::Value,
+) -> Option<u64> {
+    zenith_relay_core::providers::chatgpt::parse_subscription_timestamp_ms(timestamp_value)
 }
 
-pub(in crate::local_pool::accounts) fn parse_subscription_timestamp_ms(value: &str) -> Option<u64> {
-    zenith_relay_core::providers::chatgpt::parse_subscription_timestamp_text(value)
+pub(in crate::local_pool::accounts) fn parse_subscription_timestamp_ms(
+    timestamp_text: &str,
+) -> Option<u64> {
+    zenith_relay_core::providers::chatgpt::parse_subscription_timestamp_text(timestamp_text)
 }
 
 pub(super) fn decode_imported_jwt(token: &str) -> Option<ImportedJwtClaims> {

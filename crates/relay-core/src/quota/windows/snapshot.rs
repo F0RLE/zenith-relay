@@ -37,6 +37,10 @@ pub struct QuotaSnapshot {
     pub provider_credits_available: bool,
     #[serde(default)]
     pub provider_credits_unlimited: bool,
+    /// Only a complete provider ledger observation advances this clock.
+    /// Window headers and reported exhaustion must not refresh old credits.
+    #[serde(default)]
+    pub provider_credits_observed_at_ms: Option<u64>,
     #[serde(default)]
     pub direct_balance_micro_usd: Option<u64>,
     pub updated_at_ms: Option<u64>,
@@ -46,6 +50,57 @@ pub struct QuotaSnapshot {
 impl QuotaSnapshot {
     pub fn has_usable_provider_credits(&self) -> bool {
         self.provider_credits_available
+    }
+
+    pub fn has_fresh_provider_credits(&self, now_ms: u64, stale_after_ms: u64) -> bool {
+        self.has_usable_provider_credits()
+            && crate::quota::observation_is_fresh(
+                self.provider_credits_observed_at_ms,
+                now_ms,
+                stale_after_ms,
+            )
+    }
+
+    /// The oldest known remainder bounds the freshness of the combined quota.
+    /// A reset-only header is not a new observation of that remainder.
+    pub fn quota_observed_at_ms(&self) -> Option<u64> {
+        self.primary
+            .iter()
+            .chain(self.secondary.iter())
+            .filter(|window| window.available_basis_points.is_some())
+            .map(|window| window.observed_at_ms)
+            .min()
+            .or(self.updated_at_ms)
+    }
+
+    /// Reconcile the ledger independently of newer passive window headers.
+    /// Unknown/older ledgers cannot overwrite a later complete observation.
+    pub fn merge_provider_credits(&mut self, incoming: &Self) -> bool {
+        let Some(incoming_at_ms) = incoming.provider_credits_observed_at_ms else {
+            return false;
+        };
+        if self
+            .provider_credits_observed_at_ms
+            .is_some_and(|current_at_ms| current_at_ms >= incoming_at_ms)
+        {
+            return false;
+        }
+        self.available_credits_micro_units = incoming.available_credits_micro_units;
+        self.provider_credits_available = incoming.provider_credits_available;
+        self.provider_credits_unlimited = incoming.provider_credits_unlimited;
+        self.provider_credits_observed_at_ms = Some(incoming_at_ms);
+        true
+    }
+
+    /// Queued usage may carry newer windows with an older ledger. Reconcile
+    /// each resource by its own clock instead of rolling the ledger back.
+    pub fn merge_observation(&mut self, incoming: &Self) {
+        if incoming.updated_at_ms.unwrap_or_default() >= self.updated_at_ms.unwrap_or_default() {
+            let previous = std::mem::replace(self, incoming.clone());
+            self.merge_provider_credits(&previous);
+        } else {
+            self.merge_provider_credits(incoming);
+        }
     }
 
     pub fn window(&self, kind: QuotaWindowKind) -> Option<&QuotaWindow> {
@@ -104,6 +159,72 @@ mod tests {
             full_transition_fingerprint: None,
             exhaustion_transition_fingerprint: None,
         }
+    }
+
+    #[test]
+    fn ledger_reconciliation_preserves_windows_and_rejects_old_or_unknown_credits() {
+        let mut quota = QuotaSnapshot {
+            primary: Some(open_window(QuotaWindowKind::Primary, 900)),
+            available_credits_micro_units: Some(100),
+            provider_credits_available: true,
+            provider_credits_observed_at_ms: Some(1_000),
+            updated_at_ms: Some(3_000),
+            ..Default::default()
+        };
+        let incoming = QuotaSnapshot {
+            available_credits_micro_units: Some(0),
+            provider_credits_observed_at_ms: Some(2_000),
+            ..Default::default()
+        };
+        assert!(quota.merge_provider_credits(&incoming));
+        assert_eq!(quota.available_credits_micro_units, Some(0));
+        assert!(!quota.provider_credits_available);
+        assert_eq!(quota.updated_at_ms, Some(3_000));
+        assert_eq!(
+            quota.primary.as_ref().unwrap().available_basis_points,
+            Some(900)
+        );
+        assert!(!quota.merge_provider_credits(&incoming));
+        assert!(!quota.merge_provider_credits(&QuotaSnapshot {
+            provider_credits_available: true,
+            available_credits_micro_units: Some(1_000_000),
+            provider_credits_observed_at_ms: Some(1_000),
+            ..Default::default()
+        }));
+        assert!(!quota.merge_provider_credits(&QuotaSnapshot::default()));
+        assert_eq!(quota.available_credits_micro_units, Some(0));
+        quota.merge_observation(&QuotaSnapshot {
+            updated_at_ms: Some(4_000),
+            provider_credits_available: true,
+            available_credits_micro_units: Some(1_000_000),
+            provider_credits_observed_at_ms: Some(1_000),
+            ..Default::default()
+        });
+        assert_eq!(quota.updated_at_ms, Some(4_000));
+        assert_eq!(quota.provider_credits_observed_at_ms, Some(2_000));
+        assert_eq!(quota.available_credits_micro_units, Some(0));
+        quota.merge_observation(&QuotaSnapshot {
+            updated_at_ms: Some(3_500),
+            provider_credits_available: true,
+            available_credits_micro_units: Some(700),
+            provider_credits_observed_at_ms: Some(3_000),
+            ..Default::default()
+        });
+        assert_eq!(quota.updated_at_ms, Some(4_000));
+        assert_eq!(quota.provider_credits_observed_at_ms, Some(3_000));
+        assert_eq!(quota.available_credits_micro_units, Some(700));
+    }
+
+    #[test]
+    fn legacy_snapshots_keep_their_balance_without_inventing_ledger_freshness() {
+        let quota: QuotaSnapshot = serde_json::from_value(serde_json::json!({
+            "availableCreditsMicroUnits": 100,
+            "providerCreditsAvailable": true,
+            "updatedAtMs": 1_000
+        }))
+        .unwrap();
+        assert_eq!(quota.available_credits_micro_units, Some(100));
+        assert!(!quota.has_fresh_provider_credits(1_001, 60_000));
     }
 
     #[test]

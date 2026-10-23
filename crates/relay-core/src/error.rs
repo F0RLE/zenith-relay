@@ -51,24 +51,24 @@ impl From<reqwest::Error> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub(crate) fn safe_error_code(value: &str) -> String {
-    let value = value.trim();
-    if valid_error_code(value) {
-        value.to_string()
+pub(crate) fn safe_error_code(error_code: &str) -> String {
+    let trimmed_code = error_code.trim();
+    if valid_error_code(trimmed_code) {
+        trimmed_code.to_string()
     } else {
         "redacted".to_string()
     }
 }
 
-pub fn normalize_error_code(value: &str) -> Option<String> {
-    let value = value.trim();
-    valid_error_code(value).then(|| value.to_ascii_lowercase())
+pub fn normalize_error_code(error_code: &str) -> Option<String> {
+    let trimmed_code = error_code.trim();
+    valid_error_code(trimmed_code).then(|| trimmed_code.to_ascii_lowercase())
 }
 
-fn valid_error_code(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value
+fn valid_error_code(error_code: &str) -> bool {
+    !error_code.is_empty()
+        && error_code.len() <= 64
+        && error_code
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }

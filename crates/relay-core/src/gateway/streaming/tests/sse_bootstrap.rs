@@ -36,8 +36,50 @@ fn streaming_terminal_errors_keep_the_canonical_category() {
     assert!(terminal.cooldown_hint.global);
 }
 
+#[tokio::test]
+async fn bootstrap_bounds_unfinished_events_and_setup_only_prefixes_without_retry() {
+    let limit = 1024;
+    for data in [
+        "data: ".to_string() + &"x".repeat(limit),
+        ": ping\n\n".repeat(limit),
+    ] {
+        let (upstream, server) = response_from_sse_event(data).await;
+        let failure = super::super::bootstrap::bootstrap_stream_impl(upstream, None, false, limit)
+            .await
+            .err()
+            .expect("setup buffer must be bounded");
+        server.await.unwrap();
+        assert_eq!(
+            failure.failure.category,
+            error_codes::STREAM_EVENT_TOO_LARGE
+        );
+        assert_eq!(failure.partial_body.len(), limit);
+        assert_eq!(
+            failure.execution.certainty,
+            crate::scheduler::rotation::ExecutionCertainty::Unknown
+        );
+    }
+}
+
+#[tokio::test]
+async fn bootstrap_preserves_coalesced_bytes_beyond_the_prefix_budget() {
+    let first = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"synthetic\"}\n\n";
+    let input = first.repeat(10);
+    let (upstream, server) = response_from_sse_event(input.clone()).await;
+    let result =
+        super::super::bootstrap::bootstrap_stream_impl(upstream, None, false, first.len() + 5)
+            .await;
+    server.await.unwrap();
+    let (_, prefix, mut rest) = result.ok().expect("output within budget must stream");
+    let mut forwarded = prefix.to_vec();
+    while let Some(bytes) = rest.next().await {
+        forwarded.extend_from_slice(&bytes.unwrap());
+    }
+    assert_eq!(forwarded, input.as_bytes());
+}
+
 #[test]
-fn generic_gateway_rejection_sse_keeps_candidate_category_and_provider_details() {
+fn generic_gateway_rejection_sse_keeps_request_category_and_provider_details() {
     let terminal = parse_sse_event(
         br#"event: error
 data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_request","message":"Zenith AI request is invalid. Check the model, messages, tools, and parameters."}}
@@ -45,8 +87,8 @@ data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_re
 "#,
     );
 
-    assert_eq!(terminal.error_category, Some("upstream_candidate_rejected"));
-    assert_eq!(terminal.error_status, Some(StatusCode::SERVICE_UNAVAILABLE));
+    assert_eq!(terminal.error_category, Some("upstream_invalid_request"));
+    assert_eq!(terminal.error_status, Some(StatusCode::BAD_REQUEST));
     let upstream = terminal.upstream_error.unwrap();
     assert_eq!(upstream.code.as_deref(), Some("invalid_request"));
     assert_eq!(
@@ -57,10 +99,44 @@ data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_re
 }
 
 #[tokio::test]
-async fn bootstrap_retries_empty_zero_token_incomplete_without_committing_output() {
+async fn bootstrap_failure_with_generated_usage_is_not_replayable() {
+    for usage in [
+        serde_json::json!({"output_tokens": 7}),
+        serde_json::json!({"output_tokens": 0, "output_tokens_details": {"reasoning_tokens": 7}}),
+        serde_json::json!({"completion_tokens": 7}),
+        serde_json::json!({"completion_tokens_details": {"reasoning_tokens": 7}}),
+    ] {
+        for terminal_usage in [false, true] {
+            let mut terminal = serde_json::json!({"type":"response.failed","response":{
+                "status":"failed","output":[],
+                "error":{"code":"model_capacity_exhausted","message":"Synthetic capacity refusal"}
+            }});
+            let mut events = String::new();
+            if terminal_usage {
+                terminal["response"]["usage"] = usage.clone();
+            } else {
+                let progress =
+                    serde_json::json!({"type":"response.in_progress","response":{"usage":usage}});
+                events.push_str(&format!("data: {progress}\n\n"));
+            }
+            events.push_str(&format!("data: {terminal}\n\n"));
+            let (upstream, server) = response_from_sse_event(events).await;
+            let failure = bootstrap_stream(upstream, None).await.err().unwrap();
+            server.await.unwrap();
+            assert_eq!(failure.failure.category, "upstream_model_capacity");
+            assert_eq!(
+                failure.execution.certainty,
+                crate::scheduler::rotation::ExecutionCertainty::Accepted
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn bootstrap_rejects_empty_incomplete_without_authorizing_replay() {
     let event = concat!(
         "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\"}}\n\n",
-        "data: {\"type\":\"response.incomplete\",\"response\":{\"output\":[],\"usage\":{\"output_tokens\":0}}}\n\n"
+        "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"output\":[],\"usage\":{\"output_tokens\":0}}}\n\n"
     );
     let (upstream, server) = response_from_sse_event(event.into()).await;
     let failure = bootstrap_stream(upstream, None)
@@ -69,8 +145,12 @@ async fn bootstrap_retries_empty_zero_token_incomplete_without_committing_output
         .expect("empty incomplete stream must not commit client output");
     server.await.unwrap();
 
-    assert_eq!(failure.failure.category, "stream_incomplete");
+    assert_eq!(failure.failure.category, "response_incomplete");
     assert_eq!(failure.failure.status, StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        failure.execution.certainty,
+        crate::scheduler::rotation::ExecutionCertainty::Unknown
+    );
 }
 
 #[tokio::test]
@@ -89,6 +169,38 @@ async fn bootstrap_does_not_commit_an_opaque_compaction_before_disconnect() {
 
     assert_eq!(failure.failure.category, "stream_incomplete");
     assert_eq!(failure.failure.status, StatusCode::BAD_GATEWAY);
+}
+
+#[tokio::test]
+async fn bootstrap_preserves_empty_known_incomplete_terminal_and_usage() {
+    for reason in ["max_output_tokens", "content_filter"] {
+        let payload = serde_json::json!({"type":"response.incomplete","response":{
+            "status":"incomplete","output":[],"incomplete_details":{"reason":reason},
+            "usage":{"input_tokens":23,"output_tokens":0,"total_tokens":23}
+        }});
+        let (upstream, server) = response_from_sse_event(format!("data: {payload}\n\n")).await;
+        let (headers, buffered, _) = bootstrap_stream(upstream, None)
+            .await
+            .unwrap_or_else(|_| panic!("a valid incomplete terminal is not a transport failure"));
+        server.await.unwrap();
+        assert!(headers.get("content-type").is_some());
+        let event = parse_sse_event(&buffered);
+        assert_eq!(event.outcome, Some(TerminalOutcome::Incomplete));
+        assert_eq!(event.error_category, Some("response_incomplete"));
+        let preserved: serde_json::Value = serde_json::from_slice(
+            buffered
+                .strip_prefix(b"data: ")
+                .unwrap()
+                .strip_suffix(b"\n\n")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(preserved["response"]["usage"]["input_tokens"], 23);
+        assert_eq!(
+            preserved["response"]["incomplete_details"]["reason"],
+            reason
+        );
+    }
 }
 
 #[tokio::test]
@@ -113,94 +225,17 @@ async fn large_valid_bootstrap_event_is_not_rejected_at_the_old_limit() {
 }
 
 #[tokio::test]
-async fn oversized_sse_event_is_recorded_as_failure() {
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let captured = events.clone();
-    let mut stream = UsageStream::new(
-        futures_util::stream::empty::<std::result::Result<Bytes, Infallible>>(),
-        Arc::new(move |event| captured.lock().unwrap().push(event)),
-        UsageEvent {
-            request_id: "request".into(),
-            attempt: 1,
-            local_key_id: "key".into(),
-            source_id: "source".into(),
-            candidate_id: Some("source".into()),
-            account_id: None,
-            account_token_generation: None,
-            client_context_id: None,
-            routing: None,
-            requested_model: Some("model".into()),
-            resolved_model: Some("model".into()),
-            requested_reasoning_effort: None,
-            effective_reasoning_effort: None,
-            wire_api: crate::WireApi::Responses,
-            service_tier: crate::DefaultServiceTier::Standard,
-            applied_service_tier: None,
-            success: true,
-            http_status: 200,
-            error_category: None,
-            tool_use: crate::ToolUseDiagnostics::default(),
-            cooldown_scope: None,
-            retry_at_ms: None,
-            consecutive_failures: Some(0),
-            latency_ms: 0,
-            ttft_ms: None,
-            generation_ms: None,
-            input_tokens: None,
-            cached_input_tokens: None,
-            cache_write_input_tokens: None,
-            cache_write_ttl: None,
-            reasoning_tokens: None,
-            output_tokens: None,
-            total_tokens: None,
-            upstream_error: None,
-            quota_snapshot: None,
-        },
-        Instant::now(),
-        Arc::new(|_, _, _| {}),
-    );
-    stream.ingest_sse(&vec![b'x'; MAX_SSE_EVENT_BYTES + 1]);
-    assert!(stream.terminated);
-    assert!(stream.sse_pending.is_empty());
-    let failure = String::from_utf8(stream.output_pending.pop_front().unwrap().to_vec()).unwrap();
-    assert!(failure.starts_with("event: response.failed\ndata: "));
-    let payload = failure
-        .strip_prefix("event: response.failed\ndata: ")
-        .and_then(|value| value.strip_suffix("\n\n"))
-        .and_then(|value| serde_json::from_str::<Value>(value).ok())
-        .unwrap();
-    assert_eq!(
-        payload["response"]["error"]["code"],
-        "stream_event_too_large"
-    );
-    assert_eq!(
-        payload["response"]["error"]["zenith_relay"]["origin"],
-        "provider"
-    );
-    assert_eq!(
-        payload["response"]["error"]["zenith_relay"]["category"],
-        "stream_event_too_large"
-    );
-    assert_eq!(
-        payload["response"]["error"]["zenith_relay"]["request_id"],
-        "request"
-    );
-    assert!(stream.output_pending.is_empty());
-    drop(stream);
-
-    let events = events.lock().unwrap();
-    assert_eq!(events.len(), 1);
-    assert!(!events[0].success);
-    assert_eq!(
-        events[0].error_category.as_deref(),
-        Some("stream_event_too_large")
-    );
-}
-
-#[tokio::test]
 async fn heartbeat_never_splits_an_unfinished_sse_frame() {
-    let frame = b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"synthetic\"}\r\n\r\n";
-    for native_gemini in [false, true] {
+    for (native_gemini, frame) in [
+        (
+            false,
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"synthetic\"}\r\n\r\n".as_slice(),
+        ),
+        (
+            true,
+            b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"synthetic\"}]}}]}\r\n\r\n".as_slice(),
+        ),
+    ] {
         for split in 1..frame.len() {
             let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
             let input = stream::unfold(receiver, |mut receiver| async move {
@@ -267,7 +302,7 @@ async fn quiet_stream_keeps_sending_heartbeats_until_provider_completion() {
     }
 
     let completed = Bytes::from_static(
-        b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"slow-response\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+        b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"slow-response\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"synthetic\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
     );
     sender.send(Ok(completed.clone())).unwrap();
     assert_eq!(stream.next().await.unwrap().unwrap(), completed);

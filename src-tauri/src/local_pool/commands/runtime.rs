@@ -6,11 +6,10 @@ use super::super::{
 };
 use super::super::{
     error::{LocalPoolError, Result},
-    models::{LocalAccountRecord, OwnershipOperationKind, ProviderSourceRecord},
+    models::{LocalAccountRecord, ProviderSourceRecord},
     state::DesktopState,
 };
 use super::{pool, profiles};
-use std::collections::HashSet;
 use zenith_relay_core::{
     accounts::AccountRecord,
     changed_runtime_source_policy_updates,
@@ -26,24 +25,29 @@ use zenith_relay_core::{protocol::AccountRoutingBlockReason, WireApi};
 pub(in crate::local_pool) use zenith_relay_core::unix_time_ms as current_time_ms;
 
 mod assemble;
+mod quota_references;
 mod sync;
 
 #[cfg(test)]
 use assemble::{managed_chatgpt_account_id_for_reserve, timestamp_ms};
 
 pub(in crate::local_pool) use assemble::runtime_from_store;
+pub(in crate::local_pool) use quota_references::sync_account_quota_references;
 pub(in crate::local_pool) use sync::{
-    core_error, fail_closed, refresh_active_codex_catalog_in_background,
-    restart_after_secret_change, restart_or_rollback, sync_account_or_rollback,
-    sync_gateway_or_rollback, sync_records_or_rollback, sync_refreshed_account_or_rollback,
-    sync_running_account_states, sync_runtime_account_state,
+    core_error, fail_closed, queue_active_client_catalog_refresh,
+    refresh_active_codex_catalog_in_background, restart_after_secret_change, restart_or_rollback,
+    sync_account_or_rollback, sync_gateway_or_rollback, sync_records_or_rollback,
+    sync_refreshed_account_or_rollback, sync_running_account_states, sync_runtime_account_state,
 };
 
 pub(in crate::local_pool) fn record_catalog_refresh_result(
     state: &DesktopState,
-    result: &std::result::Result<profiles::CodexCatalogRefreshStatus, LocalPoolError>,
+    refresh_status_result: &std::result::Result<
+        profiles::CodexCatalogRefreshStatus,
+        LocalPoolError,
+    >,
 ) {
-    match result {
+    match refresh_status_result {
         Ok(profiles::CodexCatalogRefreshStatus::Deferred) => {
             state.record_catalog_refresh_deferred()
         }
@@ -67,21 +71,21 @@ pub(in crate::local_pool) fn runtime_account_operational_state(
 
 pub(in crate::local_pool) async fn apply_source_policy_if_running(
     state: &DesktopState,
-    previous: &[ProviderSourceRecord],
+    previous_sources: &[ProviderSourceRecord],
     source: &ProviderSourceRecord,
 ) -> bool {
-    apply_source_policies_if_running(state, previous, std::slice::from_ref(source)).await
+    apply_source_policies_if_running(state, previous_sources, std::slice::from_ref(source)).await
 }
 
 pub(in crate::local_pool) async fn apply_source_policies_if_running(
     state: &DesktopState,
-    previous: &[ProviderSourceRecord],
+    previous_sources: &[ProviderSourceRecord],
     sources: &[ProviderSourceRecord],
 ) -> bool {
     let Some(runtime) = state.gateway.runtime().await else {
         return true;
     };
-    let updates = changed_runtime_source_policy_updates(previous, sources);
+    let updates = changed_runtime_source_policy_updates(previous_sources, sources);
     updates.is_empty() || runtime.update_source_policies(&updates)
 }
 
@@ -93,27 +97,15 @@ pub(in crate::local_pool) fn apply_local_gateway_key_scope(
     runtime: &GatewayRuntime,
 ) -> Result<bool> {
     let system_key = pool::ensure_system_gateway_key(state)?;
-    let (sources, accounts, settings, pending_move_ids) = {
+    let (sources, accounts, settings) = {
         let store = state.store()?;
         (
             store.sources().to_vec(),
             store.accounts().to_vec(),
             store.gateway().clone(),
-            store
-                .ownership_operation()
-                .filter(|operation| operation.kind == OwnershipOperationKind::MoveToRemote)
-                .map(|operation| {
-                    operation
-                        .local_account_ids
-                        .iter()
-                        .cloned()
-                        .collect::<HashSet<_>>()
-                })
-                .unwrap_or_default(),
         )
     };
-    let (source_ids, mut account_ids) = pool::local_pool_member_ids(&sources, &accounts)?;
-    account_ids.retain(|id| !pending_move_ids.contains(id));
+    let (source_ids, account_ids) = pool::local_pool_member_ids(&sources, &accounts)?;
     // Authorization follows configured membership. Temporary auth failures,
     // cooldowns and disables are enforced by the scheduler and must recover
     // without a second membership edit.
@@ -131,15 +123,6 @@ pub(in crate::local_pool) fn apply_local_gateway_key_scope(
         .map_err(core_error)
 }
 
-fn pending_move_account_ids(state: &DesktopState) -> Result<HashSet<String>> {
-    Ok(state
-        .store()?
-        .ownership_operation()
-        .filter(|operation| operation.kind == OwnershipOperationKind::MoveToRemote)
-        .map(|operation| operation.local_account_ids.iter().cloned().collect())
-        .unwrap_or_default())
-}
-
 /// Keep pending final dispatches on the old physical routes closed while a
 /// desktop command persists and publishes changed permissions or transport.
 /// The returned guards must outlive the save, hot apply and any rollback.
@@ -153,10 +136,10 @@ pub(in crate::local_pool) fn fence_runtime_candidates(
     };
     let mut fences = account_ids
         .iter()
-        .filter_map(|id| runtime.fence_candidate_dispatch(id))
+        .filter_map(|account_id| runtime.fence_candidate_dispatch(account_id))
         .collect::<Vec<_>>();
-    for id in source_ids {
-        fences.extend(runtime.fence_source_dispatch(id));
+    for source_id in source_ids {
+        fences.extend(runtime.fence_source_dispatch(source_id));
     }
     fences
 }
@@ -200,9 +183,13 @@ pub(in crate::local_pool) async fn sync_account_state_if_running(
     let Ok(store) = state.store() else {
         return false;
     };
-    store
-        .account(account_id)
-        .is_some_and(|account| sync_runtime_account_state(&runtime, account, current_time_ms()))
+    if quota_references::sync_account_quota_references(state, &runtime, &store).is_err() {
+        return false;
+    }
+    store.account(account_id).is_some_and(|account| {
+        !store.gateway().account_route_is_selected(account_id)
+            || sync_runtime_account_state(&runtime, account, current_time_ms())
+    })
 }
 
 /// Maps the persisted account state into the part of a live candidate that can
@@ -217,7 +204,7 @@ pub(in crate::local_pool) fn runtime_account_policy(
     let operational = runtime_account_operational_state(&account.account, now_ms);
     RuntimeCandidatePolicy {
         enabled: account_candidate_enabled(
-            account.account.enabled && account.remote_location.is_none(),
+            account.account.enabled && account.recovery.is_none(),
             operational.routing_block_reason,
         ),
         draining: account.account.draining,

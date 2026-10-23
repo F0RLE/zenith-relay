@@ -12,6 +12,7 @@ fn runtime(recovery_delay_seconds: u64) -> GatewayRuntime {
         api_key: "test-source-key".into(),
         wire_api: WireApi::Responses,
         models: vec!["model-a".into(), "model-b".into()],
+        proxy_url: None,
     });
     source.recovery_delay_seconds = recovery_delay_seconds;
     GatewayRuntime::from_pool(
@@ -75,6 +76,7 @@ async fn model_failure_preserves_provider_retry_after_over_shorter_source_delay(
                 RateLimitBodyHint {
                     retry_after_ms: body,
                     global: false,
+                    ..Default::default()
                 },
             );
             let retry_at = failure.retry_at_ms.unwrap();
@@ -91,6 +93,104 @@ async fn model_failure_preserves_provider_retry_after_over_shorter_source_delay(
             assert!(snapshot[0].available, "the other model must remain usable");
             assert_eq!(snapshot[0].model_retries[0].retry_at_ms, retry_at);
         }
+    }
+}
+
+#[test]
+fn relayed_subscription_reset_does_not_cool_the_entire_api_key() {
+    let runtime = runtime(5);
+    let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let empty_headers = reqwest::header::HeaderMap::new();
+    for (code, explicit, header, expected_ms) in [
+        ("usage_limit_reached", None, None, 5_000),
+        (
+            "subscription_sharing_usage_limit_exceeded",
+            Some(7),
+            None,
+            7_000,
+        ),
+        ("usage_limit_reached", Some(7), Some("120"), 120_000),
+    ] {
+        let body = serde_json::to_vec(&serde_json::json!({"error": {
+            "type":code, "plan_type":"plus", "resets_at":1_700_518_400_u64,
+            "retry_after":explicit
+        }}))
+        .unwrap();
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(value) = header {
+            headers.insert(RETRY_AFTER, HeaderValue::from_static(value));
+        }
+        let failure = AttemptFailure::classified_with_hint(
+            StatusCode::TOO_MANY_REQUESTS,
+            error_codes::UPSTREAM_QUOTA_EXHAUSTED,
+            cooldown::rate_limit_body_hint_at(&body, now),
+        )
+        .with_retry_headers(&headers);
+        assert_eq!(
+            failure.cooldown_hint.retry_after_for_account(true),
+            Some(518_400_000)
+        );
+        // Streaming paths may retain retry headers only in the failure hint.
+        let result = failure_cooldown(CooldownInput {
+            runtime: &runtime,
+            candidate_id: "source",
+            model: "model-a",
+            status: failure.status,
+            category: failure.category,
+            headers: &empty_headers,
+            hint: failure.cooldown_hint,
+            now,
+        })
+        .unwrap();
+        assert_eq!(result.scope, "model-a");
+        assert_eq!(result.retry_at_ms, 1_700_000_000_000 + expected_ms);
+    }
+    let hint = cooldown::rate_limit_body_hint_at(
+        br#"{"error":{"code":"insufficient_quota","resets_at":1700518400}}"#,
+        now,
+    );
+    let result = failure_cooldown(CooldownInput {
+        runtime: &runtime,
+        candidate_id: "source",
+        model: "model-a",
+        status: StatusCode::TOO_MANY_REQUESTS,
+        category: error_codes::UPSTREAM_QUOTA_EXHAUSTED,
+        headers: &empty_headers,
+        hint,
+        now,
+    })
+    .unwrap();
+    assert_eq!(result.scope, "*");
+    assert_eq!(result.retry_at_ms, 1_700_518_400_000);
+}
+
+#[test]
+fn relayed_subscription_reset_does_not_become_an_http_retry_after_header() {
+    let body = br#"{"error":{"type":"usage_limit_reached","resets_at":1700518400}}"#;
+    let hint =
+        cooldown::rate_limit_body_hint_at(body, UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+    for (origin, expected) in [
+        (crate::ErrorOrigin::Provider, None),
+        (crate::ErrorOrigin::Account, Some("518400")),
+    ] {
+        let failure = AttemptFailure::classified_with_hint(
+            StatusCode::TOO_MANY_REQUESTS,
+            error_codes::UPSTREAM_QUOTA_EXHAUSTED,
+            hint,
+        );
+        let response = crate::gateway::execution::attempt_error_response(
+            failure,
+            None,
+            origin,
+            "synthetic-request",
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(RETRY_AFTER)
+                .map(|value| value.to_str().unwrap()),
+            expected
+        );
     }
 }
 

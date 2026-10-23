@@ -11,7 +11,7 @@ use lines::{normalize_token_value, parse_json_lines};
 
 pub(super) struct InputEntry {
     pub(super) ordinal: usize,
-    pub(super) value: Option<Value>,
+    pub(super) import_value: Option<Value>,
     pub(super) issue: Option<ImportIssue>,
 }
 
@@ -22,21 +22,21 @@ pub(super) type ParsedEntries = (
     Option<String>,
 );
 
-pub(super) fn parse_entries(input: &str) -> Result<ParsedEntries, ImportError> {
-    match serde_json::from_str::<Value>(input) {
-        Ok(value) => parse_json_value(value),
-        Err(_) => parse_json_lines(input),
+pub(super) fn parse_entries(import_document: &str) -> Result<ParsedEntries, ImportError> {
+    match serde_json::from_str::<Value>(import_document) {
+        Ok(json_document) => parse_json_document(json_document),
+        Err(_) => parse_json_lines(import_document),
     }
 }
 
-fn parse_json_value(value: Value) -> Result<ParsedEntries, ImportError> {
-    ensure_depth(&value)?;
-    if let Some(object) = value.as_object() {
+fn parse_json_document(json_document: Value) -> Result<ParsedEntries, ImportError> {
+    ensure_depth(&json_document)?;
+    if let Some(object) = json_document.as_object() {
         if is_zenith_bundle(object) {
             return parse_zenith_bundle(object);
         }
-        if let Some(payload) = wrapped_sub2api_payload(object) {
-            return parse_portable_bundle(payload);
+        if let Some(wrapped_payload) = wrapped_sub2api_payload(object) {
+            return parse_portable_bundle(wrapped_payload);
         }
         if is_portable_bundle(object) {
             return parse_portable_bundle(object);
@@ -44,31 +44,31 @@ fn parse_json_value(value: Value) -> Result<ParsedEntries, ImportError> {
         if object.get("accounts").is_some_and(Value::is_array) {
             return parse_account_container(object);
         }
-        return Ok(single_entry(value));
+        return Ok(single_import_entry(json_document));
     }
-    if let Some(values) = value.as_array() {
-        check_item_count(values.len())?;
-        let entries = values
+    if let Some(array_items) = json_document.as_array() {
+        check_item_count(array_items.len())?;
+        let parsed_entries = array_items
             .iter()
             .cloned()
             .enumerate()
-            .map(|(ordinal, value)| InputEntry {
+            .map(|(ordinal, item_value)| InputEntry {
                 ordinal,
-                value: Some(normalize_token_value(value)),
+                import_value: Some(normalize_token_value(item_value)),
                 issue: None,
             })
             .collect();
-        return Ok((ImportFormat::JsonArray, entries, Vec::new(), None));
+        return Ok((ImportFormat::JsonArray, parsed_entries, Vec::new(), None));
     }
-    Ok(single_entry(normalize_token_value(value)))
+    Ok(single_import_entry(normalize_token_value(json_document)))
 }
 
-fn single_entry(value: Value) -> ParsedEntries {
+fn single_import_entry(import_value: Value) -> ParsedEntries {
     (
         ImportFormat::JsonObject,
         vec![InputEntry {
             ordinal: 0,
-            value: Some(value),
+            import_value: Some(import_value),
             issue: None,
         }],
         Vec::new(),

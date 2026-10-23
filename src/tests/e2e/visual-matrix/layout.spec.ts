@@ -4,7 +4,7 @@ import { themes, viewports } from "./fixtures";
 
 for (const viewport of viewports) {
   test(`empty pool and quota policy ${viewport.width}x${viewport.height}`, async ({ page }) => {
-    await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, accountCount: 4, poolMembers: false, gatewayRunning: false });
+    await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, accountCount: 4, accountOAuthClientKind: "excel_bps", poolMembers: false, gatewayRunning: false });
     await page.setViewportSize(viewport);
     await page.goto("/");
     await page.getByRole("button", { name: "Пул", exact: true }).click();
@@ -19,12 +19,13 @@ for (const viewport of viewports) {
     await accountSearch.fill("pro");
     await expect(dialog.locator(".pool-member-options > label").first()).toContainText("Pro account");
     const planBadge = dialog.locator(".pool-member-options .account-plan-badge");
-    await expect(planBadge).toHaveText("Pro");
+    await expect(planBadge).toHaveText("Pro 200");
     expect(await planBadge.evaluate((badge) => badge.scrollWidth <= badge.clientWidth && badge.scrollHeight <= badge.clientHeight)).toBe(true);
     await page.screenshot({ path: `output/playwright/pool-add-pro-ru-dark-${viewport.width}x${viewport.height}.png` });
     await accountSearch.fill("");
     await dialog.getByText("Business Workspace", { exact: true }).click();
     await dialog.getByRole("button", { name: "Добавить выбранные (1)" }).click();
+    await expect(page.getByRole("dialog", { name: "Добавить обычный аккаунт в пул?", exact: true })).toHaveCount(0);
 
     const memberActions = page.locator(".pool-member-card .pool-member-actions");
     await expect(memberActions.getByRole("button")).toHaveCount(3);
@@ -62,7 +63,7 @@ for (const viewport of viewports) {
     await page.screenshot({ path: `output/playwright/pool-header-actions-ru-dark-${viewport.width}x${viewport.height}.png` });
 
     await expect(page.locator(".pool-sort-menu")).toHaveCount(0);
-    await expect(page.locator(".pool-priority-label")).toContainText("Порядок использования");
+    await expect(page.locator(".pool-priority-label")).toContainText("Распределение запросов");
     await expect(page.getByRole("button", { name: "Настройки ротации пула", exact: true })).toBeVisible();
     const poolToolbarGroups = page.locator(".pool-quota-actions > .pool-control-group");
     await expect(poolToolbarGroups).toHaveCount(2);
@@ -98,7 +99,7 @@ for (const viewport of viewports) {
     await page.getByRole("button", { name: "Настройки ротации пула", exact: true }).click();
     const distribution = page.getByRole("dialog", { name: "Ротация пула" });
     await expect(distribution).not.toContainText("Скорость запроса");
-    await distribution.getByRole("radio", { name: "По порядку", exact: true }).click();
+    await distribution.getByRole("radio", { name: "По кругу", exact: true }).click();
     await expect(distribution.getByRole("listitem")).toHaveCount(6);
     expect(await distribution.evaluate((element) => element.scrollWidth <= element.clientWidth && element.getBoundingClientRect().bottom <= innerHeight)).toBe(true);
     await page.screenshot({ path: `output/playwright/pool-member-order-${viewport.width}x${viewport.height}.png` });
@@ -109,19 +110,22 @@ for (const viewport of viewports) {
     await expect(members.locator(".pool-member-card")).toHaveCount(6);
     await expect(members.locator('.pool-member-card[data-current="true"]')).toHaveCount(1);
     expect(await members.locator('.pool-member-card[data-current="true"]').evaluate((element) => {
-      const indicator = getComputedStyle(element, "::before");
-      return indicator.content !== "none" && Math.abs(Number.parseFloat(indicator.width) - element.clientWidth) <= 2;
+      const style = getComputedStyle(element);
+      const other = element.parentElement?.querySelector('.pool-member-card[data-current="false"]');
+      return getComputedStyle(element, "::before").content === "none"
+        && other != null && style.borderTopColor !== getComputedStyle(other).borderTopColor
+        && style.backgroundColor === getComputedStyle(other).backgroundColor;
     })).toBe(true);
     await expect(page.locator(".pool-summary > div")).toHaveCount(4);
     await expect(members.getByText("Pro account", { exact: true })).toBeVisible();
-    await expect(members.locator('.account-plan-badge[data-plan="pro"]')).toHaveText("Pro");
+    await expect(members.locator('.account-plan-badge[data-plan="pro-200"]')).toHaveText("Pro 200");
     const apiCard = members.locator('.pool-member-card[data-member-kind="source"]');
     await expect(apiCard).toContainText("42,50");
     await expect(apiCard).toContainText("7,50");
     await expect(apiCard).toContainText("128");
     await expect(apiCard.getByRole("button", { name: "Обновить баланс" })).toBeVisible();
     await expect(apiCard.locator(".pool-member-runtime-meta")).toContainText("Режим работы");
-    await expect(apiCard.locator(".pool-member-runtime-meta")).toContainText("Параллельность");
+    await expect(apiCard.locator(".pool-member-runtime-meta")).toContainText("Активных запросов");
     await expect(apiCard.locator(".pool-member-active-runtime")).toHaveCount(0);
     expect(await apiCard.locator(".pool-member-runtime-meta > div").evaluateAll((items) => items.every((item) => getComputedStyle(item).textAlign === "center"))).toBe(true);
     await expect(members.getByRole("button", { name: "Обновить", exact: true })).toHaveCount(5);
@@ -153,7 +157,7 @@ for (const viewport of viewports) {
     const members = page.locator(".pool-member-list");
 
     await expect(members.getByText("Pro account", { exact: true })).toBeVisible();
-    await expect(members.locator('.account-plan-badge[data-plan="pro"]')).toHaveText("Pro");
+    await expect(members.locator('.account-plan-badge[data-plan="pro-200"]')).toHaveText("Pro 200");
     const apiCard = members.locator('.pool-member-card[data-member-kind="source"]');
     await expect(apiCard).toContainText("$42.50");
     await expect(apiCard).toContainText("$7.50");
@@ -181,7 +185,7 @@ for (const viewport of viewports) {
     await accountProxy.getByRole("button", { name: "Cancel" }).click();
 
     await page.getByRole("tab", { name: "Proxies" }).click();
-    await expect(page.locator(".proxy-storage-counts")).toContainText("Total3");
+    await expect(page.locator(".proxy-storage-counts strong").first()).toHaveText("3");
     await page.screenshot({ path: `output/playwright/proxy-storage-${viewport.width}x${viewport.height}.png` });
     await page.getByRole("button", { name: "Import", exact: true }).click();
     const proxyImport = page.getByRole("dialog", { name: "Import proxies" });
@@ -233,7 +237,7 @@ for (const viewport of viewports) {
     await page.locator(".account-card .account-row-menu summary").click();
     const menu = page.locator(".account-card .account-row-menu [role=menu]");
     await expect(menu).toBeVisible();
-    await expect(menu.getByRole("menuitem")).toHaveText(["Notes", "Proxy: Common", "Export", "Disable", "Delete"]);
+    await expect(menu.getByRole("menuitem")).toHaveText(["Notes", "Account timezone", "Proxy: Common", "Export", "Disable", "Delete"]);
     await page.screenshot({ path: `output/playwright/account-actions-${viewport.width}x${viewport.height}.png` });
     expect(await menu.evaluate((element) => {
       const rect = element.getBoundingClientRect();
@@ -369,9 +373,9 @@ for (const viewport of viewports) {
     expect(await page.locator(".account-filter-stack").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     expect(await page.locator(".account-subscription-line").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
     await expect(cards.locator(".account-card-actions")).toHaveCount(3);
-    await expect(cards.locator(".account-card-actions > .relay-icon-button")).toHaveCount(9);
-    // The pool button is a call to action, not a state label.
-    await expect(cards.locator('.account-card-actions > .relay-icon-button:first-child[aria-label="Убрать из пула"]')).toHaveCount(3);
+    await expect(cards.locator(".account-card-actions > .relay-icon-button")).toHaveCount(6);
+    // Codex switches app accounts; it never exposes pool membership actions.
+    await expect(cards.getByRole('button', { name: /^(Убрать из пула|Добавить в пул)$/ })).toHaveCount(0);
 
     await expect(page.getByRole("button", { name: "Список" })).toHaveCount(0);
     expect(await cards.locator(".account-card-main").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
@@ -451,8 +455,8 @@ for (const viewport of viewports) {
     const modeButton = page.getByRole("button", { name: "Mode: Computer" });
     await modeButton.click();
     const modeMenu = page.getByRole("menu");
-    await expect(modeMenu.getByRole("menuitemradio")).toHaveCount(3);
-    await expect(modeMenu.getByRole("menuitemradio")).toHaveText(["Computer", "Choose API", "On your server"]);
+    await expect(modeMenu.getByRole("menuitemradio")).toHaveCount(2);
+    await expect(modeMenu.getByRole("menuitemradio")).toHaveText(["Computer", "Relay Hosted"]);
     await expect(modeMenu.getByRole("menuitemradio", { name: "Computer" })).toHaveAttribute("aria-checked", "true");
     expect(await modeMenu.evaluate((element) => {
       const rect = element.getBoundingClientRect();
@@ -472,7 +476,7 @@ for (const viewport of viewports) {
     }
     await expect(shell).not.toHaveClass(/sidebar-collapsed/);
     await expect(page.locator(".relay-sidebar nav button span").first()).toBeVisible();
-    await expect(page.locator(".sidebar-help-copy small")).toHaveText(/^v\d+\.\d+\.\d+$/);
+    await expect(page.locator(".sidebar-version")).toHaveText(/^v\d+\.\d+\.\d+$/);
     expect(await page.locator(".sidebar-footer").evaluate((footer) => {
       const bounds = footer.getBoundingClientRect();
       return [...footer.children].every((child) => {
@@ -485,14 +489,14 @@ for (const viewport of viewports) {
   });
 
   test(`secondary actions and dialogs ${viewport.width}x${viewport.height}`, async ({ page }) => {
-    await installTauriMock(page, { locale: "en", mode: "local", theme: "light", populated: true });
+    await installTauriMock(page, { locale: "en", mode: "local", theme: "light", populated: true, diagnosticDebug: true });
     await page.setViewportSize(viewport);
     await page.goto("/");
 
     await page.getByRole("button", { name: "Connections", exact: true }).click();
     await page.getByRole("button", { name: "Sign in", exact: true }).first().click();
     let dialog = page.getByRole("dialog", { name: "Sign in" });
-    await expect(dialog.getByText("Waiting for sign-in", { exact: true })).toBeVisible();
+    await expect(dialog.getByRole("timer")).toBeVisible();
     await expect(dialog.getByText("Time remaining", { exact: true })).toBeVisible();
     await expect(dialog.getByRole("button", { name: "Copy sign-in link" })).toBeVisible();
     await page.screenshot({ path: `output/playwright/oauth-dialog-${viewport.width}x${viewport.height}.png` });
@@ -500,11 +504,11 @@ for (const viewport of viewports) {
     await expect(dialog).toHaveCount(0);
 
     await page.getByRole("tab", { name: "Sources" }).click();
-    const sourceActions = page.locator(".relay-table .row-actions");
-    expect(await sourceActions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.tagName === "DETAILS" ? item.querySelector("summary")?.getAttribute("aria-label") : item.getAttribute("aria-label")))).toEqual(["Actions", "Edit", "Launch"]);
-    await sourceActions.locator("summary").click();
+    const sourceActions = page.locator(".source-card .account-card-actions");
+    expect(await sourceActions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.getAttribute("aria-label")))).toEqual(["Remove from pool", "Refresh API data", "Edit", "Launch"]);
+    await page.locator(".source-card .account-row-menu summary").click();
     const sourceMenu = page.getByRole("menu");
-    await expect(sourceMenu.getByRole("menuitem")).toHaveCount(4);
+    await expect(sourceMenu.getByRole("menuitem")).toHaveText(["Disable", "Delete"]);
     await expect(sourceMenu.getByRole("menuitem", { name: "Delete" })).toBeVisible();
     // The popover is placed after it is inserted, so poll the settled rect
     // instead of reading one frame that may still be unplaced.
@@ -527,8 +531,8 @@ for (const viewport of viewports) {
     await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
     dialog = page.getByRole("dialog", { name: "Request details" });
     await expect(dialog).toContainText("req_synthetic_local");
-    await dialog.getByRole("tab", { name: "Route", exact: true }).click();
-    await expect(dialog).toContainText("Selection reasonGreatest quota remaining");
+    await dialog.locator(".request-technical-details > summary").click();
+    await expect(dialog).toContainText("Selection reasonFresh quota headroom band");
     await expect(dialog).toContainText("Eligible participants4");
     await expect(dialog).toContainText("Quota at selection63.00%");
     expect(await dialog.locator(".request-details-list > div").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);

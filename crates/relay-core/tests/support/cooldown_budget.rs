@@ -406,7 +406,7 @@ async fn exhausted_retry_preserves_a_safe_gateway_error_message() {
     assert_eq!(body["error"]["code"], "service_unavailable");
     assert_eq!(
         body["error"]["message"],
-        "no eligible source is available for this model"
+        "Provider: no eligible source is available for this model"
     );
     assert!(!body.to_string().contains(&upstream.base_url));
     assert_eq!(state.requests.lock().unwrap().len(), 1);

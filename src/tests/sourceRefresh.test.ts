@@ -18,7 +18,6 @@ describe("source catalog refresh", () => {
           events.push(`end:${id}`);
           if (id === "second") throw new Error("source unavailable");
         },
-        testRemote: async () => { throw new Error("remote executor should not run"); },
       },
     });
 
@@ -26,26 +25,24 @@ describe("source catalog refresh", () => {
     expect(report).toEqual({ refreshed: 1, failed: 1, skipped: 1 });
   });
 
-  test("uses the remote executor only for a remote runtime", async () => {
+  test("Hosted cannot contact local source credentials", async () => {
     const calls: string[] = [];
     const report = await refreshSourceCatalogs({
-      mode: "remote",
-      sources: [{ id: "remote-source", secretAvailable: true }],
+      mode: "hosted",
+      sources: [{ id: "local-source", secretAvailable: true }],
       executor: {
         testLocal: async (id) => { calls.push(`local:${id}`); },
-        testRemote: async (id) => { calls.push(`remote:${id}`); },
       },
     });
 
-    expect(calls).toEqual(["remote:remote-source"]);
-    expect(report).toEqual({ refreshed: 1, failed: 0, skipped: 0 });
+    expect(calls).toEqual([]);
+    expect(report).toEqual({ refreshed: 0, failed: 1, skipped: 0 });
   });
 
   test("delegates a single source through the same mode policy as bulk refresh", async () => {
     const calls: string[] = [];
     await refreshSourceCatalog("local", "source-1", {
       testLocal: async (id) => { calls.push(`local:${id}`); },
-      testRemote: async (id) => { calls.push(`remote:${id}`); },
     });
     expect(calls).toEqual(["local:source-1"]);
   });

@@ -1,11 +1,11 @@
 import { useTranslation } from "react-i18next";
 import { EmptyState } from "../../components/Ui";
 
-export function matchesQuery(query: string, ...values: Array<string | string[] | null | undefined>) {
+export function matchesQuery(query: string, ...searchValues: Array<string | string[] | null | undefined>) {
   const normalized = query.trim().toLocaleLowerCase();
-  return !normalized || values
-    .flatMap((value) => Array.isArray(value) ? value : value ?? [])
-    .some((value) => value.toLocaleLowerCase().includes(normalized));
+  return !normalized || searchValues
+    .flatMap((searchValue) => Array.isArray(searchValue) ? searchValue : searchValue ?? [])
+    .some((searchValue) => searchValue.toLocaleLowerCase().includes(normalized));
 }
 
 export function NoResults() {

@@ -1,5 +1,7 @@
 use super::super::{
-    authority::CodexRefreshClient, credentials::CredentialRefresh, oauth::CodexOAuthClient,
+    authority::CodexRefreshClient,
+    credentials::CredentialRefresh,
+    oauth::{CodexOAuthClient, OAuthClientKind},
 };
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
 use std::{
@@ -50,13 +52,29 @@ impl ProxyRefreshClient {
             clients,
         })
     }
+
+    fn client_for_account(
+        &self,
+        account_id: &str,
+    ) -> std::result::Result<&CodexOAuthClient, TokenRefreshFailure> {
+        self.clients
+            .get(account_id)
+            .or_else(|| {
+                self.direct_accounts
+                    .contains(account_id)
+                    .then_some(&self.direct)
+            })
+            .ok_or_else(|| {
+                TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "proxy_client_missing")
+            })
+    }
 }
 
 impl CodexRefreshClient for ProxyRefreshClient {
-    fn refresh<'a>(
+    fn refresh_siwc<'a>(
         &'a self,
         local_account_id: &'a str,
-        _provider_account_id: Option<&'a str>,
+        registration: &'a super::super::oauth::siwc::SiwcRegistration,
         refresh_token: &'a str,
         now_ms: u64,
     ) -> Pin<
@@ -67,17 +85,10 @@ impl CodexRefreshClient for ProxyRefreshClient {
         >,
     > {
         Box::pin(async move {
-            let client = match self.clients.get(local_account_id) {
-                Some(client) => client,
-                None if self.direct_accounts.contains(local_account_id) => &self.direct,
-                None => {
-                    return Err(TokenRefreshFailure::new(
-                        TokenRefreshFailureKind::Transient,
-                        "proxy_client_missing",
-                    ))
-                }
-            };
-            let tokens = client.exchange_refresh_token(refresh_token, now_ms).await?;
+            let client = self.client_for_account(local_account_id)?;
+            let tokens = client
+                .exchange_siwc_refresh(registration, refresh_token, now_ms)
+                .await?;
             CredentialRefresh::from_oauth(tokens).map_err(|_| {
                 TokenRefreshFailure::new(
                     TokenRefreshFailureKind::Transient,
@@ -85,5 +96,48 @@ impl CodexRefreshClient for ProxyRefreshClient {
                 )
             })
         })
+    }
+    fn refresh<'a>(
+        &'a self,
+        local_account_id: &'a str,
+        _provider_account_id: Option<&'a str>,
+        refresh_token: &'a str,
+        now_ms: u64,
+        kind: OAuthClientKind,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = std::result::Result<CredentialRefresh, TokenRefreshFailure>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let client = self.client_for_account(local_account_id)?;
+            let tokens = client
+                .for_kind(kind)
+                .exchange_refresh_token(refresh_token, now_ms)
+                .await?;
+            CredentialRefresh::from_oauth(tokens).map_err(|_| {
+                TokenRefreshFailure::new(
+                    TokenRefreshFailureKind::Transient,
+                    "invalid_refresh_response",
+                )
+            })
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refresh_only_uses_explicitly_configured_account_routes() {
+        let client = ProxyRefreshClient::new([("synthetic-direct".to_string(), None)]).unwrap();
+        assert!(std::ptr::eq(
+            client.client_for_account("synthetic-direct").unwrap(),
+            &client.direct
+        ));
+        assert!(client.client_for_account("synthetic-missing").is_err());
     }
 }

@@ -4,6 +4,16 @@ use super::*;
 fn usage_survives_database_reopen() {
     let root = std::env::temp_dir().join(format!("zenith-relay-usage-{}", uuid::Uuid::new_v4()));
     let path = root.join("usage.sqlite");
+    let catalog = PricingCatalog::from_litellm_json(
+        r#"{"storage-test":{
+            "litellm_provider":"openai",
+            "input_cost_per_token":0.000001,"output_cost_per_token":0.000002,
+            "input_cost_per_token_flex":0.000001,"output_cost_per_token_flex":0.000002,
+            "cache_read_input_token_cost_flex":0.0000001
+        }}"#,
+    )
+    .unwrap();
+    let pricing = PricingContext::default();
     let event = UsageEvent {
         request_id: "req_1".into(),
         attempt: 1,
@@ -20,12 +30,45 @@ fn usage_survives_database_reopen() {
             in_flight_before: 0,
             dispatches_before: 3,
             endpoint_kind: None,
+            upstream_response_model: Some("synthetic-upstream-snapshot".into()),
+            transport: Some(
+                serde_json::from_value(serde_json::json!({
+                    "upstream":"http","mode":"native","responseFormat":"json",
+                    "requestPreparationMs":0,"upstreamResponseMs":12,
+                    "requestPreparation":{"bodyMs":0,"schemaValidationMs":0,"catalogMs":0,"attachmentsMs":0},
+                    "clientFirstOutputMs":4,"clientResponseReadyMs":15
+                }))
+                .unwrap(),
+            ),
+            attempt_outcome: Some(zenith_relay_core::AttemptOutcome::Completed),
+            cache_context: Some(
+                serde_json::from_value(serde_json::json!({
+                    "baseline": "completed_request", "scope": "client_session",
+                    "clientChanges": ["tools"], "upstreamChanges": ["tools", "reasoning"],
+                    "relayChanges": ["reasoning"], "candidateChanged": false,
+                    "previousCompletedAgeMs": 12_000,
+                    "clientHistory": {
+                        "comparison": "appended", "inputItems": 3, "inputBytes": 100,
+                        "sharedPrefixItems": 2, "firstChangedItemKind": null
+                    },
+                    "upstreamHistory": {
+                        "comparison": "appended", "inputItems": 3, "inputBytes": 100,
+                        "sharedPrefixItems": 2, "firstChangedItemKind": null
+                    },
+                    "relayHistory": {
+                        "comparison": "unchanged", "inputItems": 3, "inputBytes": 100,
+                        "sharedPrefixItems": 3, "firstChangedItemKind": null
+                    }
+                }))
+                .unwrap(),
+            ),
         }),
-        requested_model: Some("gpt-5.4".into()),
-        resolved_model: Some("gpt-5.4".into()),
+        requested_model: Some("storage-test".into()),
+        resolved_model: Some("storage-test".into()),
         requested_reasoning_effort: Some("max".into()),
         effective_reasoning_effort: Some("low".into()),
         wire_api: WireApi::Responses,
+        transport: zenith_relay_core::UsageTransport::Http,
         service_tier: DefaultServiceTier::Fast,
         applied_service_tier: Some("flex".into()),
         success: true,
@@ -35,6 +78,9 @@ fn usage_survives_database_reopen() {
             client_tool_count: 73,
             forwarded_tool_count: 73,
             tool_choice: ToolChoiceMode::Auto,
+            requested_parallel_tool_calls: Some(true),
+            upstream_tool_call_count: Some(2),
+            tool_calls_ready_ms: Some(6),
             tool_call_count: 1,
             text_output: false,
             terminal_output: TerminalOutputKind::ToolCall,
@@ -45,6 +91,9 @@ fn usage_survives_database_reopen() {
             policy_outcome: Some(zenith_relay_core::ToolPolicyOutcome::Deferred),
             policy_fallback: false,
             deferred_tool_search: true,
+            basis_points_catalog: None,
+            client_context: None,
+            upstream_context: None,
         },
         cooldown_scope: None,
         retry_at_ms: None,
@@ -67,6 +116,7 @@ fn usage_survives_database_reopen() {
     let logs = database.list(10).unwrap();
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].tool_use.as_ref(), Some(&event.tool_use));
+    assert_eq!(logs[0].routing, event.routing);
     assert!(logs[0].created_at.ends_with('Z'));
     assert_eq!(logs[0].candidate_id.as_deref(), Some("account_1"));
     assert_eq!(
@@ -92,24 +142,35 @@ fn usage_survives_database_reopen() {
         logs[0].routing.as_ref().map(|routing| routing.reason),
         Some(SelectionReason::QuotaHeadroom)
     );
-    let page = database.usage_page(&UsageQuery::default()).unwrap();
-    // The event carries a measured value and the totals are that same value
-    // merged once, so the relation holds regardless of catalog prices.
+    let page = database
+        .usage_page_with_pricing(&UsageQuery::default(), &catalog, &pricing)
+        .unwrap();
+    assert_eq!(page.events[0].routing, event.routing);
+    // The explicit Flex quote prices both the request and its aggregate.
     assert!(page.events[0].api_equivalent.micro_usd > 0);
     assert_eq!(page.totals.api_equivalent, page.events[0].api_equivalent);
     let default_page = database
-        .usage_page(&UsageQuery {
-            page: 0,
-            page_size: 0,
-            ..UsageQuery::default()
-        })
+        .usage_page_with_pricing(
+            &UsageQuery {
+                page: 0,
+                page_size: 0,
+                ..UsageQuery::default()
+            },
+            &catalog,
+            &pricing,
+        )
         .unwrap();
     assert_eq!(default_page.page, 1);
     assert_eq!(default_page.page_size, 50);
     assert_eq!(default_page.total_pages, 1);
-    let cached = database.api_equivalents().unwrap();
+    let cached = database
+        .api_equivalents_with_pricing(&catalog, &pricing)
+        .unwrap();
     assert_eq!(
-        database.api_equivalents().unwrap().accounts,
+        database
+            .api_equivalents_with_pricing(&catalog, &pricing)
+            .unwrap()
+            .accounts,
         cached.accounts
     );
     let mut second = event;
@@ -118,7 +179,11 @@ fn usage_survives_database_reopen() {
     second.total_tokens = Some(23);
     database.record(&second).unwrap();
     assert!(
-        database.api_equivalents().unwrap().accounts["account_1"].micro_usd
+        database
+            .api_equivalents_with_pricing(&catalog, &pricing)
+            .unwrap()
+            .accounts["account_1"]
+            .micro_usd
             > cached.accounts["account_1"].micro_usd
     );
     database
@@ -143,7 +208,7 @@ fn usage_survives_database_reopen() {
     std::fs::remove_dir_all(root).unwrap();
 }
 #[test]
-fn usage_aggregate_replaces_only_the_accepted_attempt() {
+fn usage_aggregate_replaces_each_send_without_losing_earlier_usage() {
     let root = std::env::temp_dir().join(format!(
         "zenith-relay-usage-aggregate-{}",
         uuid::Uuid::new_v4()
@@ -209,7 +274,7 @@ fn usage_aggregate_replaces_only_the_accepted_attempt() {
             },
         )
         .unwrap();
-    assert_eq!(row, (20, 1, 7, 1, 0, 7, 0, 8, 1, 28, 1));
+    assert_eq!(row, (110, 2, 18, 2, 0, 7, 11, 17, 2, 127, 2));
 
     database
         .record(&aggregate_test_event(
@@ -250,7 +315,7 @@ fn usage_aggregate_replaces_only_the_accepted_attempt() {
             },
         )
         .unwrap();
-    assert_eq!(row, (30, 1, 9, 1, 0, 0, 9, 12, 1, 42, 1));
+    assert_eq!(row, (120, 2, 20, 2, 0, 0, 20, 21, 2, 141, 2));
     assert_eq!(database.list(10).unwrap().len(), 1);
     database.clear().unwrap();
     assert!(
@@ -332,19 +397,42 @@ fn usage_totals_cache_tracks_new_and_replaced_events() {
     assert_eq!(replaced.totals.generation_ms, 60);
     assert_eq!(replaced.totals.generation_samples, 1);
     assert_eq!(replaced.totals.generation_output_tokens, 2);
-    assert_eq!(replaced.totals.input_tokens, 50);
-    assert_eq!(replaced.totals.reasoning_tokens, 4);
-    assert_eq!(replaced.totals.output_tokens, 16);
-    assert_eq!(replaced.totals.total_tokens, 66);
+    assert_eq!(replaced.totals.input_tokens, 70);
+    assert_eq!(replaced.totals.reasoning_tokens, 6);
+    assert_eq!(replaced.totals.output_tokens, 24);
+    assert_eq!(replaced.totals.total_tokens, 94);
     assert_eq!(replaced.totals.speed_output_tokens, 4);
     assert_eq!(replaced.totals.speed_duration_ms, 100);
 
     second.attempt = 1;
     second.input_tokens = Some(1_000);
     database.record(&second).unwrap();
+    let corrected = database.usage_page(&UsageQuery::default()).unwrap().totals;
     assert_eq!(
-        database.usage_page(&UsageQuery::default()).unwrap().totals,
-        replaced.totals
+        (
+            corrected.requests,
+            corrected.successful_requests,
+            corrected.latency_ms
+        ),
+        (2, 1, 500)
+    );
+    assert_eq!(
+        (
+            corrected.input_tokens,
+            corrected.output_tokens,
+            corrected.total_tokens
+        ),
+        (1050, 28, 118)
+    );
+    assert_eq!(
+        corrected,
+        database
+            .usage_page(&UsageQuery {
+                from_ms: Some(0),
+                ..UsageQuery::default()
+            })
+            .unwrap()
+            .totals
     );
 
     drop(database);
@@ -454,10 +542,12 @@ fn usage_keeps_only_the_terminal_fallback_attempt() {
     let path = root.join("usage.sqlite");
     let database = TelemetryDb::open(&path).unwrap();
     let mut event = failed_fallback_test_event("req_fallback");
-    event.upstream_error = Some(zenith_relay_core::usage::UpstreamErrorDetails::from_body(
-        Some(503),
-        br#"{"error":{"code":"future_capacity","message":"Capacity temporarily exhausted"}}"#,
-    ));
+    event.upstream_error = Some(
+        zenith_relay_core::usage::UpstreamErrorDetails::from_response_body(
+            Some(503),
+            br#"{"error":{"code":"future_capacity","message":"Capacity temporarily exhausted"}}"#,
+        ),
+    );
     event.requested_reasoning_effort = Some("max".into());
     event.effective_reasoning_effort = Some("max".into());
     database.record(&event).unwrap();
@@ -503,10 +593,12 @@ fn usage_keeps_only_the_last_failure_when_all_attempts_fail() {
     ));
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let mut event = failed_fallback_test_event("req_failed");
-    event.upstream_error = Some(zenith_relay_core::usage::UpstreamErrorDetails::from_body(
-        Some(503),
-        br#"{"error":{"code":"future_capacity","message":"Capacity temporarily exhausted"}}"#,
-    ));
+    event.upstream_error = Some(
+        zenith_relay_core::usage::UpstreamErrorDetails::from_response_body(
+            Some(503),
+            br#"{"error":{"code":"future_capacity","message":"Capacity temporarily exhausted"}}"#,
+        ),
+    );
     event.upstream_error.as_mut().unwrap().message =
         Some("Capacity exhausted; Bearer synthetic-private".into());
     database.record(&event).unwrap();

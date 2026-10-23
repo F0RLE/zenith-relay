@@ -5,42 +5,51 @@ import type { ProxyCheckResult } from "../../api/types";
 export type ProxyCheckState = { pending: boolean; result?: ProxyCheckResult };
 export type ProxyChecks = ReturnType<typeof useProxyChecks>;
 
-/** Session-only diagnostics, separate from proxy assignments and routing health. */
+/** Tracks pending checks; saved diagnostics come from the proxy pool. */
 export function useProxyChecks(resetKey: string) {
   const [checks, setChecks] = useState<Record<string, ProxyCheckState>>({});
   const generation = useRef(0);
   const inFlight = useRef(new Set<string>());
+  const scheduled = useRef(new Set<string>());
   useEffect(() => {
     generation.current += 1;
     inFlight.current.clear();
+    scheduled.current.clear();
     setChecks({});
     return () => { generation.current += 1; };
   }, [resetKey]);
 
   const check = useCallback(async (proxyId: string) => {
-    if (inFlight.current.has(proxyId)) return;
-    const run = generation.current;
+    if (inFlight.current.has(proxyId) || scheduled.current.has(proxyId)) return;
+    const generationAtStart = generation.current;
     inFlight.current.add(proxyId);
-    setChecks((current) => ({ ...current, [proxyId]: { pending: true } }));
-    let result: ProxyCheckResult;
+    setChecks((previousChecks) => ({ ...previousChecks, [proxyId]: { ...previousChecks[proxyId], pending: true } }));
+    let proxyCheckResult: ProxyCheckResult;
     try {
-      result = await relayCommands.checkStoredProxy(proxyId);
+      proxyCheckResult = await relayCommands.checkStoredProxy(proxyId);
     } catch {
-      result = { proxyId, checkedAtMs: Date.now(), elapsedMs: 0, ip: null, countryCode: null, errorCode: "proxy_check_unavailable" };
+      proxyCheckResult = { proxyId, checkedAtMs: Date.now(), elapsedMs: 0, ip: null, countryCode: null, errorCode: "proxy_check_unavailable" };
     }
-    if (run !== generation.current) return;
+    if (generationAtStart !== generation.current) return;
     inFlight.current.delete(proxyId);
-    setChecks((current) => ({ ...current, [proxyId]: { pending: false, result } }));
+    setChecks((previousChecks) => ({ ...previousChecks, [proxyId]: { pending: false, result: proxyCheckResult } }));
   }, []);
 
   const checkMany = useCallback(async (proxyIds: string[]) => {
-    const run = generation.current;
-    const queue = [...new Set(proxyIds)];
+    const generationAtStart = generation.current;
+    const queue = [...new Set(proxyIds)].filter((id) => !inFlight.current.has(id) && !scheduled.current.has(id));
+    for (const id of queue) scheduled.current.add(id);
+    setChecks((previous) => {
+      const next = { ...previous };
+      for (const id of queue) next[id] = { ...next[id], pending: true };
+      return next;
+    });
     await Promise.all(Array.from({ length: Math.min(3, queue.length) }, async () => {
-      while (run === generation.current) {
-        const id = queue.shift();
-        if (!id) break;
-        await check(id);
+      while (generationAtStart === generation.current) {
+        const queuedProxyId = queue.shift();
+        if (!queuedProxyId) break;
+        scheduled.current.delete(queuedProxyId);
+        await check(queuedProxyId);
       }
     }));
   }, [check]);

@@ -216,21 +216,6 @@ impl PricingCatalogLoader {
         self.schedule_changed.notified().await;
     }
 
-    pub fn spawn_refresh_if_due(
-        self: &Arc<Self>,
-        now_ms: u64,
-    ) -> Option<tokio::task::JoinHandle<()>> {
-        if !self.refresh_due(now_ms) {
-            return None;
-        }
-        let loader = Arc::clone(self);
-        tokio::runtime::Handle::try_current().ok().map(|runtime| {
-            runtime.spawn(async move {
-                let _ = loader.refresh(false).await;
-            })
-        })
-    }
-
     fn set_status(&self, status: CatalogStatus, error: Option<PricingError>) {
         *self.status.write().expect("pricing status lock poisoned") = status;
         *self

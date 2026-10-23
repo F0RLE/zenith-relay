@@ -34,10 +34,10 @@ export function OpenCodeRecoveryTab() {
   useEffect(refreshStatus, [refreshStatus]);
 
   const hasSnapshot = Boolean(status?.hasBackup);
-  const snapshotDate = (value: number | null | undefined) => value ? new Intl.DateTimeFormat(i18n.language, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "-";
+  const snapshotDate = (createdAtMs: number | null | undefined) => createdAtMs ? new Intl.DateTimeFormat(i18n.language, { dateStyle: "medium", timeStyle: "short" }).format(new Date(createdAtMs)) : "-";
   const createSnapshot = async () => {
-    const name = snapshotName.trim();
-    if (name && !hasSnapshot && await perform("opencode-snapshot-create", () => relayCommands.createOpenCodeSnapshot(name), "feedback.openCodeSnapshotCreated", { backgroundRefresh: true })) {
+    const normalizedSnapshotName = snapshotName.trim();
+    if (normalizedSnapshotName && !hasSnapshot && await perform("opencode-snapshot-create", () => relayCommands.createOpenCodeSnapshot(normalizedSnapshotName), "feedback.openCodeSnapshotCreated", { backgroundRefresh: true })) {
       setSnapshotName("");
       refreshStatus();
     }

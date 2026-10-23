@@ -7,9 +7,55 @@ fn provider_image_metadata_does_not_change_unknown_model_capabilities() {
         {"slug":"gpt-test", "input_modalities":["text"], "supported_reasoning_levels":[{"effort":"high","description":"high"}]}
     ]}), current_time_ms());
     let capabilities = runtime.model_capabilities("gpt-test");
-    assert_eq!(capabilities.input_modalities, ["text", "image"]);
+    assert_eq!(capabilities.input_modalities, ["text"]);
     assert!(capabilities.reasoning_effort_levels.is_empty());
-    assert_eq!(capabilities.tool_call, Some(true));
+    assert_eq!(capabilities.tool_call, None);
+}
+
+#[test]
+fn cached_native_context_windows_belong_to_the_exact_model_and_account() {
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    runtime.remember_codex_model_manifest(
+        "account-1",
+        serde_json::json!({
+            "models": [
+                {
+                    "slug": "gpt-test",
+                    "context_window": 272_000,
+                    "max_context_window": 872_000
+                },
+                {
+                    "slug": "gpt-medium",
+                    "context_window": 128_000,
+                    "max_context_window": 256_000
+                },
+                {
+                    "slug": "gpt-short",
+                    "context_window": 272_000
+                }
+            ]
+        }),
+        current_time_ms(),
+    );
+
+    for (model, default_tokens, maximum_tokens) in [
+        ("GPT-TEST", Some(272_000), Some(872_000)),
+        ("gpt-medium", Some(128_000), Some(256_000)),
+        ("gpt-short", Some(272_000), None),
+        ("missing", None, None),
+    ] {
+        assert_eq!(
+            runtime.model_context_windows(model, ["account-1"]),
+            crate::catalog::context_policy::ModelContextWindows {
+                default_tokens,
+                maximum_tokens,
+            }
+        );
+    }
+    assert_eq!(
+        runtime.model_context_windows("gpt-test", ["missing-account"]),
+        Default::default()
+    );
 }
 #[test]
 fn client_reasoning_projection_respects_source_scope_and_adapter_limits() {
@@ -27,6 +73,7 @@ fn client_reasoning_projection_respects_source_scope_and_adapter_limits() {
             checked_at_ms: 1,
             features: BTreeMap::new(),
             reasoning_efforts: vec!["low".into(), "xhigh".into()],
+            service_tiers: None,
         }];
         configured
     });
@@ -53,7 +100,7 @@ fn client_reasoning_projection_respects_source_scope_and_adapter_limits() {
         .unwrap();
     assert_eq!(
         runtime.client_reasoning_levels(&key, "test", WireApi::Responses),
-        ["low"]
+        ["low", "xhigh"]
     );
     assert_eq!(
         runtime.client_reasoning_levels(&key, "test", WireApi::Messages),
@@ -88,16 +135,18 @@ fn websocket_transport_capability_is_model_scoped_and_expires() {
         Arc::new(|_| {}),
     )
     .unwrap();
-    runtime.mark_websocket_http_only("source", "model-a", 1_000);
-    assert!(runtime.websocket_is_http_only("source", "model-a", 1_001));
-    assert!(!runtime.websocket_is_http_only("source", "model-b", 1_001));
+    let authorization = AuthorizationIncarnation::Source;
+    runtime.mark_websocket_http_only("source", "model-a", &authorization, 1_000);
+    assert!(runtime.websocket_is_http_only("source", "model-a", &authorization, 1_001));
+    assert!(!runtime.websocket_is_http_only("source", "model-b", &authorization, 1_001));
     assert!(!runtime.websocket_is_http_only(
         "source",
         "model-a",
+        &authorization,
         1_000 + WEBSOCKET_CAPABILITY_TTL_MS
     ));
-    runtime.mark_websocket_supported("source", "model-a");
-    assert!(!runtime.websocket_is_http_only("source", "model-a", 1_001));
+    runtime.mark_websocket_supported("source", "model-a", &authorization);
+    assert!(!runtime.websocket_is_http_only("source", "model-a", &authorization, 1_001));
 }
 #[test]
 fn messages_source_models_are_automatically_available_to_responses_clients() {
@@ -126,10 +175,20 @@ fn messages_source_models_are_automatically_available_to_responses_clients() {
         .into_iter()
         .map(|route| route.candidate_id)
         .collect::<Vec<_>>();
-    assert!(route_ids.iter().any(|id| id == "anthropic-source"));
-    assert!(route_ids
-        .iter()
-        .any(|id| id == "anthropic-source::responses_to_messages"));
+    assert_eq!(route_ids, vec!["anthropic-source"]);
+    let scheduler = runtime.lock_scheduler();
+    let candidate = scheduler
+        .candidate("anthropic-source")
+        .expect("source candidate");
+    assert_eq!(
+        candidate.model_protocols["claude-test"],
+        BTreeSet::from([
+            WireApi::Responses,
+            WireApi::ChatCompletions,
+            WireApi::Messages,
+            WireApi::Gemini,
+        ])
+    );
 }
 #[test]
 fn automatic_responses_lite_requires_every_configured_route_to_confirm_support() {
@@ -255,6 +314,7 @@ async fn source_capability_failure_does_not_permanently_hide_a_declared_model() 
             requested_reasoning_effort: None,
             effective_reasoning_effort: None,
             wire_api: WireApi::Responses,
+            transport: crate::UsageTransport::Http,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,
             success: false,
@@ -341,18 +401,32 @@ fn source_connector_preserves_normalized_binding_and_model_order() {
         .any(|binding| binding.wire_api == WireApi::ChatCompletions));
 }
 #[test]
-fn speed_choices_and_preferences_are_independent_of_source_metadata_and_health() {
+fn reference_speed_choices_survive_temporary_route_health_changes() {
     let model = "gpt-future-synthetic";
     let runtime = GatewayRuntime::from_pool(
         vec![
             RuntimeSource::unrestricted(source("source-1", "synthetic-one", &[model])),
             RuntimeSource::unrestricted(source("source-2", "synthetic-two", &[model])),
-        ],
+        ]
+        .into_iter()
+        .map(|mut source| {
+            source.protocol_config.endpoint_hint = Some(WireApi::Responses);
+            source
+        })
+        .collect(),
         vec![RuntimeLocalKey::unrestricted(key(
             "key-1",
             "synthetic-pool",
         ))],
-        GatewayRuntimeOptions::default(),
+        GatewayRuntimeOptions {
+            model_metadata_catalog: Some(crate::model_metadata::ModelMetadataCatalogHandle::new(
+                crate::model_metadata::ModelMetadataCatalog::from_models_dev_json(
+                    r#"{"gpt-future-synthetic":{"service_tiers":["priority","ultrafast"]}}"#,
+                )
+                .unwrap(),
+            )),
+            ..GatewayRuntimeOptions::default()
+        },
         Arc::new(|_| {}),
     )
     .unwrap();

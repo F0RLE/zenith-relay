@@ -16,7 +16,9 @@ pub(super) fn expire_account_access<B: SecretBackend>(
     let Ok(Some(mut stored)) = credentials.load(account_id) else {
         return Some(AccountAccessState::Failed);
     };
-    if stored.generation() != expected_generation {
+    if stored.oauth_client_kind() == zenith_relay_core::providers::chatgpt::OAuthClientKind::Siwc
+        || stored.generation() != expected_generation
+    {
         return None;
     };
     let refreshable = stored.refresh_token().is_some();
@@ -54,13 +56,9 @@ pub(in crate::local_pool) fn apply_account_usage_state(
     if ignore_account_observation {
         return false;
     }
-    if let Some(snapshot) = event.quota_snapshot.as_ref().filter(|snapshot| {
-        snapshot.updated_at_ms.unwrap_or_default()
-            >= account.account.quota.updated_at_ms.unwrap_or_default()
-    }) {
-        account.account.quota = snapshot.clone();
-    } else if event.quota_snapshot.is_none()
-        && event.affects_account_state()
+    if let Some(snapshot) = event.quota_snapshot.as_ref() {
+        account.account.quota.merge_observation(snapshot);
+    } else if event.affects_account_state()
         && event.error_category.as_deref() == Some(error_codes::UPSTREAM_QUOTA_EXHAUSTED)
     {
         account

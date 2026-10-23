@@ -1,7 +1,12 @@
 use super::*;
 use serde_json::{json, Value};
 
+mod history_messages;
+mod performance;
 mod preparation;
+mod reasoning_stream;
+mod structured_output;
+mod tool_identity;
 mod tool_responses;
 
 fn request_with_tool() -> Value {

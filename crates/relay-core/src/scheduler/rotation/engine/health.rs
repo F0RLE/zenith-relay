@@ -3,6 +3,91 @@
 use super::*;
 
 impl RotationEngine {
+    pub(super) fn decayed_failure_score(&self, health: &HealthRuntime, now_ms: u64) -> u32 {
+        let elapsed = health
+            .observed_at_ms
+            .map(|observed_at_ms| now_ms.saturating_sub(observed_at_ms))
+            .unwrap_or_default();
+        let mut score = health.failure_score_milli;
+        for _ in 0..(elapsed / HEALTH_HALF_LIFE_MS).min(16) {
+            score /= 2;
+        }
+        score
+    }
+
+    pub(super) fn observe_health(
+        &mut self,
+        candidate_id: &str,
+        route_key: &str,
+        observation: HealthObservation,
+        now_ms: u64,
+    ) {
+        if !matches!(
+            observation,
+            HealthObservation::Success | HealthObservation::CountableTransient { .. }
+        ) {
+            return;
+        }
+        let health = self
+            .health
+            .entry((candidate_id.to_owned(), route_key.to_owned()))
+            .or_default();
+        let elapsed = health
+            .observed_at_ms
+            .map(|observed_at_ms| now_ms.saturating_sub(observed_at_ms))
+            .unwrap_or_default();
+        for _ in 0..(elapsed / HEALTH_HALF_LIFE_MS).min(16) {
+            health.failure_score_milli /= 2;
+        }
+        match observation {
+            HealthObservation::CountableTransient { .. } => {
+                let alpha = HEALTH_EWMA_ALPHA_MILLI;
+                health.failure_score_milli = health
+                    .failure_score_milli
+                    .saturating_mul(1_000 - alpha)
+                    .saturating_add(1_000_u32.saturating_mul(alpha))
+                    / 1_000;
+            }
+            HealthObservation::Success => {
+                health.failure_score_milli = health
+                    .failure_score_milli
+                    .saturating_mul(1_000 - HEALTH_EWMA_ALPHA_MILLI)
+                    / 1_000;
+            }
+            HealthObservation::Busy
+            | HealthObservation::Cancelled
+            | HealthObservation::ClientError
+            | HealthObservation::LocalError
+            | HealthObservation::MonitoringFailure
+            | HealthObservation::Unknown => return,
+        }
+        health.observed_at_ms = Some(now_ms);
+    }
+
+    pub(super) fn observe_first_output_latency(
+        &mut self,
+        candidate_id: &str,
+        route_key: &str,
+        first_output_latency_ms: u64,
+        now_ms: u64,
+    ) {
+        let health = self
+            .health
+            .entry((candidate_id.to_owned(), route_key.to_owned()))
+            .or_default();
+        health.first_output_latency_ms = Some(match health.first_output_latency_ms {
+            Some(previous) => {
+                let alpha = u64::from(HEALTH_EWMA_ALPHA_MILLI);
+                previous
+                    .saturating_mul(1_000 - alpha)
+                    .saturating_add(first_output_latency_ms.saturating_mul(alpha))
+                    / 1_000
+            }
+            None => first_output_latency_ms,
+        });
+        health.latency_observed_at_ms = Some(now_ms);
+    }
+
     pub fn circuit(&self, candidate_id: &str, route_key: &str) -> CircuitSnapshot {
         self.circuits
             .get(&(candidate_id.to_owned(), route_key.to_owned()))
@@ -17,15 +102,16 @@ impl RotationEngine {
         lease: &LeaseRuntime,
         health: HealthObservation,
         now_ms: u64,
-    ) -> CircuitSnapshot {
+    ) -> (CircuitSnapshot, bool) {
         let key = (lease.candidate_id.clone(), lease.route_key.clone());
         let circuit = self.circuits.entry(key).or_default();
         if circuit.incident != lease.circuit_incident {
-            return circuit.snapshot();
+            return (circuit.snapshot(), false);
         }
         if circuit.half_open_lease == Some(lease.lease_id) {
             circuit.half_open_lease = None;
         }
+        let mut counted = false;
         match health {
             HealthObservation::Success => {
                 if circuit.epoch != lease.circuit_epoch {
@@ -35,8 +121,9 @@ impl RotationEngine {
                     if lease.recovery {
                         circuit.state = CircuitState::Open;
                     }
-                    return circuit.snapshot();
+                    return (circuit.snapshot(), false);
                 }
+                counted = true;
                 circuit.state = CircuitState::Closed;
                 circuit.failure_streak = 0;
                 circuit.counted_requests.clear();
@@ -66,8 +153,9 @@ impl RotationEngine {
                                 .max(circuit.not_before_ms.unwrap_or_default()),
                         );
                     }
-                    return circuit.snapshot();
+                    return (circuit.snapshot(), false);
                 }
+                counted = true;
                 // Only recent independent requests matter after the
                 // threshold. Do not retain every failed RequestId forever.
                 if circuit.counted_requests.len() > 64 {
@@ -111,7 +199,7 @@ impl RotationEngine {
                 }
             }
         }
-        circuit.snapshot()
+        (circuit.snapshot(), counted)
     }
 }
 

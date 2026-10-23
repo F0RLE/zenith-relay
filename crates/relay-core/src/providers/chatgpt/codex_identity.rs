@@ -8,7 +8,7 @@ use std::{
 // and may advance only to a newer stable release fetched from the official
 // release feed. API-key routes preserve the downstream client's identity
 // headers instead.
-pub const CODEX_STABLE_FALLBACK_VERSION: &str = "0.154.0";
+pub const CODEX_STABLE_FALLBACK_VERSION: &str = "0.160.0";
 pub const CODEX_CLIENT_VERSION: &str = CODEX_STABLE_FALLBACK_VERSION;
 pub const CODEX_ORIGINATOR: &str = "codex_cli_rs";
 
@@ -25,12 +25,12 @@ pub fn configured_codex_client_version() -> String {
 /// Replaces the process-wide Codex release after the host verifies it from the
 /// official release feed. Pre-release tags, delayed results, and equal versions
 /// are ignored, so the process can never downgrade or move onto an alpha/beta.
-pub fn configure_codex_client_version(value: &str) -> bool {
+pub fn configure_codex_client_version(candidate_version: &str) -> bool {
     let mut configured = crate::poison::write(&CONFIGURED_CODEX_CLIENT_VERSION);
-    if !is_newer_official_release(value, &configured) {
+    if !is_newer_official_release(candidate_version, &configured) {
         return false;
     }
-    *configured = value.to_string();
+    *configured = candidate_version.to_string();
     true
 }
 
@@ -103,33 +103,48 @@ impl CodexIdentityEnvelope {
         self.with_client_version(&client_version)
     }
 
-    /// Applies Relay's owned account binding and fallback identity to a
-    /// request created outside the gateway forwarding path.
-    ///
-    /// This keeps discovery and quota probes on the same header contract as
-    /// forwarded account traffic without overwriting an identity which the
-    /// request builder has already supplied.
+    /// Applies Relay's account binding and client profile to discovery and
+    /// quota probes. Gateway forwarding uses `insert` on the existing headers.
     pub fn apply(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         let mut headers = HeaderMap::new();
         self.insert(&mut headers);
         request.headers(headers)
     }
 
-    /// Adds Relay's fallback identity only where the downstream request did
-    /// not already provide one. The selected account binding is the one
-    /// exception: it is always owned by Relay and cannot be supplied by the
-    /// client.
+    /// Preserve a complete client profile as one unit. An incomplete profile
+    /// uses the entire Relay envelope, never a mixture of the two clients.
     pub fn insert(&self, headers: &mut HeaderMap) {
-        if !headers.contains_key(USER_AGENT) {
+        let complete_profile = [USER_AGENT.as_str(), "version", "originator"]
+            .iter()
+            .all(|name| {
+                let mut values = headers.get_all(*name).iter();
+                values.next().is_some_and(|value| {
+                    value
+                        .to_str()
+                        .ok()
+                        .is_some_and(|value| !value.trim().is_empty() && value.len() <= 1024)
+                }) && values.next().is_none()
+            })
+            && headers["version"]
+                .to_str()
+                .ok()
+                .is_some_and(valid_codex_client_version);
+        if !complete_profile {
             headers.insert(USER_AGENT, self.user_agent.clone());
+            headers.insert(HeaderName::from_static("version"), self.version.clone());
+            headers.insert(
+                HeaderName::from_static("originator"),
+                self.originator.clone(),
+            );
         }
-        let version = HeaderName::from_static("version");
-        if !headers.contains_key(&version) {
-            headers.insert(version, self.version.clone());
-        }
-        let originator = HeaderName::from_static("originator");
-        if !headers.contains_key(&originator) {
-            headers.insert(originator, self.originator.clone());
+        for name in [
+            "x-oai-attestation",
+            "openai-project",
+            "openai-organization",
+            "x-openai-project",
+            "x-openai-organization",
+        ] {
+            headers.remove(name);
         }
         // This is an account-binding header, not a client identity header.
         // Never allow a forwarded value to bind a request to another account.
@@ -140,10 +155,10 @@ impl CodexIdentityEnvelope {
     }
 }
 
-pub fn valid_codex_client_version(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value
+pub fn valid_codex_client_version(client_version: &str) -> bool {
+    !client_version.is_empty()
+        && client_version.len() <= 64
+        && client_version
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+' | b'_'))
 }
@@ -180,21 +195,21 @@ fn codex_terminal_token() -> String {
             None => program,
         };
     }
-    if env::var_os("WT_SESSION").is_some_and(|value| !value.is_empty()) {
+    if env::var_os("WT_SESSION").is_some_and(|session_value| !session_value.is_empty()) {
         return "WindowsTerminal".to_string();
     }
     environment_user_agent_token("TERM").unwrap_or_else(|| "unknown".to_string())
 }
 
-fn environment_user_agent_token(name: &str) -> Option<String> {
-    env::var(name)
+fn environment_user_agent_token(environment_variable_name: &str) -> Option<String> {
+    env::var(environment_variable_name)
         .ok()
-        .map(|value| sanitize_user_agent_token(&value))
-        .filter(|value| !value.is_empty())
+        .map(|environment_value| sanitize_user_agent_token(&environment_value))
+        .filter(|sanitized_value| !sanitized_value.is_empty())
 }
 
-fn sanitize_user_agent_token(value: &str) -> String {
-    value
+fn sanitize_user_agent_token(user_agent_token: &str) -> String {
+    user_agent_token
         .trim()
         .chars()
         .take(128)
@@ -238,7 +253,7 @@ mod tests {
                 "x86_64",
                 "WindowsTerminal"
             ),
-            "codex_cli_rs/0.154.0 (Windows 10.0; x86_64) WindowsTerminal"
+            "codex_cli_rs/0.160.0 (Windows 10.0; x86_64) WindowsTerminal"
         );
     }
 
@@ -261,14 +276,14 @@ mod tests {
 
     #[test]
     fn newer_verified_release_never_downgrades_process_identity() {
-        assert!(is_newer_official_release("0.155.0", CODEX_CLIENT_VERSION));
-        assert!(!is_newer_official_release(CODEX_CLIENT_VERSION, "0.155.0"));
+        assert!(is_newer_official_release("0.161.0", CODEX_CLIENT_VERSION));
+        assert!(!is_newer_official_release(CODEX_CLIENT_VERSION, "0.161.0"));
         assert!(!is_newer_official_release(
             CODEX_CLIENT_VERSION,
             CODEX_CLIENT_VERSION
         ));
         assert!(!is_newer_official_release(
-            "0.155.0-alpha.3.7",
+            "0.161.0-alpha.1",
             CODEX_CLIENT_VERSION
         ));
         assert!(!is_newer_official_release(

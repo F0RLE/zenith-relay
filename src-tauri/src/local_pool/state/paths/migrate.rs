@@ -71,21 +71,21 @@ fn migrate_durable_files(paths: &StoragePaths) -> Result<()> {
 }
 
 fn migrate_keyring_marker(paths: &StoragePaths) -> Result<()> {
-    let source = paths.data_root().join(LEGACY_KEYRING_MIGRATION_MARKER);
-    let source_metadata = match fs::symlink_metadata(&source) {
+    let marker_path = paths.data_root().join(LEGACY_KEYRING_MIGRATION_MARKER);
+    let marker_metadata = match fs::symlink_metadata(&marker_path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(io_error(error)),
     };
-    if !source_metadata.is_file()
-        || source_metadata.file_type().is_symlink()
-        || source_metadata.len() != 0
+    if !marker_metadata.is_file()
+        || marker_metadata.file_type().is_symlink()
+        || marker_metadata.len() != 0
     {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
             format!(
                 "legacy keyring migration marker is unsafe: {}",
-                source.display()
+                marker_path.display()
             ),
         ));
     }
@@ -93,7 +93,7 @@ fn migrate_keyring_marker(paths: &StoragePaths) -> Result<()> {
     let destination = paths.keyring_migration_marker();
     match fs::symlink_metadata(&destination) {
         Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-            fs::remove_file(&source).map_err(io_error)
+            fs::remove_file(&marker_path).map_err(io_error)
         }
         Ok(_) => Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
@@ -104,7 +104,7 @@ fn migrate_keyring_marker(paths: &StoragePaths) -> Result<()> {
         )),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             ensure_destination_parent(&destination)?;
-            fs::rename(&source, &destination).map_err(io_error)
+            fs::rename(&marker_path, &destination).map_err(io_error)
         }
         Err(error) => Err(io_error(error)),
     }
@@ -132,10 +132,10 @@ fn migrate_directory(source: &Path, destination: &Path) -> Result<()> {
     }
     ensure_real_directory(source, "legacy storage path")?;
     ensure_real_directory(destination, "storage destination")?;
-    for entry in fs::read_dir(source).map_err(io_error)? {
-        let entry = entry.map_err(io_error)?;
-        let source_entry = entry.path();
-        let destination_entry = destination.join(entry.file_name());
+    for directory_entry in fs::read_dir(source).map_err(io_error)? {
+        let directory_entry = directory_entry.map_err(io_error)?;
+        let source_entry = directory_entry.path();
+        let destination_entry = destination.join(directory_entry.file_name());
         if destination_entry.exists() {
             continue;
         }
@@ -263,21 +263,21 @@ mod tests {
                 .as_nanos()
         ));
         let legacy = root.join("recovery").join("profiles");
-        let current = root.join("recovery").join("applications").join("chatgpt");
+        let current_layout = root.join("recovery").join("applications").join("chatgpt");
         fs::create_dir_all(&legacy).unwrap();
-        fs::create_dir_all(&current).unwrap();
+        fs::create_dir_all(&current_layout).unwrap();
         fs::write(legacy.join("moved.json"), "legacy").unwrap();
         fs::write(legacy.join("conflict.json"), "legacy-value").unwrap();
-        fs::write(current.join("conflict.json"), "current-value").unwrap();
+        fs::write(current_layout.join("conflict.json"), "current-value").unwrap();
 
         migrate_storage_layout(&root).unwrap();
 
         assert_eq!(
-            fs::read_to_string(current.join("moved.json")).unwrap(),
+            fs::read_to_string(current_layout.join("moved.json")).unwrap(),
             "legacy"
         );
         assert_eq!(
-            fs::read_to_string(current.join("conflict.json")).unwrap(),
+            fs::read_to_string(current_layout.join("conflict.json")).unwrap(),
             "current-value"
         );
         assert!(legacy.join("conflict.json").exists());
@@ -289,16 +289,16 @@ mod tests {
     #[test]
     fn migrates_relay_owned_files_into_separate_categories() {
         let root = temp_root("categorized");
-        let data = root.join("data");
+        let data_dir = root.join("data");
         let cache = root.join("cache");
-        fs::create_dir_all(&data).unwrap();
+        fs::create_dir_all(&data_dir).unwrap();
         fs::create_dir_all(cache.join("com.zenith.codex")).unwrap();
         fs::create_dir_all(cache.join("deployments").join("deployment-a")).unwrap();
-        fs::write(data.join("secrets.enc"), "synthetic-encrypted-data").unwrap();
-        fs::write(data.join("secrets.enc.bak"), "synthetic-backup").unwrap();
-        fs::write(data.join("litellm-prices.json"), "prices").unwrap();
-        fs::write(data.join("models-dev.json"), "metadata").unwrap();
-        fs::write(data.join(".legacy-keyring-migrated-v1"), "").unwrap();
+        fs::write(data_dir.join("secrets.enc"), "synthetic-encrypted-data").unwrap();
+        fs::write(data_dir.join("secrets.enc.bak"), "synthetic-backup").unwrap();
+        fs::write(data_dir.join("litellm-prices.json"), "prices").unwrap();
+        fs::write(data_dir.join("models-dev.json"), "metadata").unwrap();
+        fs::write(data_dir.join(".legacy-keyring-migrated-v1"), "").unwrap();
         fs::write(cache.join("com.zenith.codex").join("profile"), "webview").unwrap();
         fs::write(
             cache
@@ -334,18 +334,18 @@ mod tests {
     #[test]
     fn preserves_both_copies_when_a_durable_migration_conflicts() {
         let root = temp_root("conflict");
-        let data = root.join("data");
-        fs::create_dir_all(data.join("catalogs")).unwrap();
-        fs::write(data.join("litellm-prices.json"), "legacy").unwrap();
-        fs::write(data.join("catalogs/litellm-prices.json"), "current").unwrap();
+        let data_dir = root.join("data");
+        fs::create_dir_all(data_dir.join("catalogs")).unwrap();
+        fs::write(data_dir.join("litellm-prices.json"), "legacy").unwrap();
+        fs::write(data_dir.join("catalogs/litellm-prices.json"), "current").unwrap();
 
         assert!(migrate_storage_layout(&root).is_err());
         assert_eq!(
-            fs::read_to_string(data.join("litellm-prices.json")).unwrap(),
+            fs::read_to_string(data_dir.join("litellm-prices.json")).unwrap(),
             "legacy"
         );
         assert_eq!(
-            fs::read_to_string(data.join("catalogs/litellm-prices.json")).unwrap(),
+            fs::read_to_string(data_dir.join("catalogs/litellm-prices.json")).unwrap(),
             "current"
         );
         fs::remove_dir_all(root).unwrap();

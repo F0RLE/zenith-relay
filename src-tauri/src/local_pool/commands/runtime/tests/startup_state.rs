@@ -1,6 +1,74 @@
 use super::*;
 
 #[tokio::test]
+async fn startup_removes_codex_membership_without_deleting_login_or_quota() {
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let root = std::env::temp_dir().join(format!("zenith-relay-codex-outside-pool-{id}"));
+    let account_id = format!("account_codex_{id}");
+    let state = DesktopState::open(root.clone()).unwrap();
+    let now_ms = current_time_ms();
+    let credentials = StoredCodexCredentials::new(
+        &account_id,
+        "synthetic-access".into(),
+        Some("synthetic-refresh".into()),
+        None,
+        Some(now_ms + 60_000),
+        now_ms,
+        1,
+        None,
+        Some(format!("provider-{id}")),
+        None,
+        None,
+        Some("plus".into()),
+        false,
+    )
+    .unwrap();
+    let credentials_store = CredentialStore::from_backend(NativeSecretBackend);
+    credentials_store.save(&credentials).unwrap();
+    let mut account = records::new_account_record(
+        &credentials,
+        zenith_relay_core::accounts::AccountAuthMode::OAuth,
+        vec!["gpt-test".into()],
+        0,
+        now_ms,
+    )
+    .unwrap();
+    account.account.in_pool = true;
+    account.account.label = "Saved Codex account".into();
+    account.account.quota.updated_at_ms = Some(now_ms);
+    state
+        .store()
+        .unwrap()
+        .upsert_account(account.clone())
+        .unwrap();
+    drop(state);
+    let state = DesktopState::open(root.clone()).unwrap();
+    let saved = state.store().unwrap().accounts()[0].clone();
+    assert!(!saved.account.in_pool);
+    assert!(saved.account.enabled);
+    assert_eq!(saved.account.label, account.account.label);
+    assert_eq!(saved.account.quota, account.account.quota);
+    let saved_credentials = credentials_store.require(&account_id).unwrap();
+    assert_eq!(saved_credentials.access_token(), credentials.access_token());
+    assert_eq!(
+        saved_credentials.refresh_token(),
+        credentials.refresh_token()
+    );
+    let runtime = runtime_from_store(&state).await.unwrap();
+    assert!(runtime
+        .candidate_runtime_order()
+        .iter()
+        .all(|candidate| !candidate.available));
+    for key in state.store().unwrap().keys() {
+        secret_store::delete(&key.secret_ref).unwrap();
+    }
+    credentials_store.delete(&account_id).unwrap();
+    drop(runtime);
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn startup_reconciles_quota_persisted_before_listener_creation() {
     let id = uuid::Uuid::new_v4().simple().to_string();
     let root = std::env::temp_dir().join(format!("zenith-relay-startup-quota-{id}"));
@@ -22,7 +90,8 @@ async fn startup_reconciles_quota_persisted_before_listener_creation() {
         Some("plus".into()),
         false,
     )
-    .unwrap();
+    .unwrap()
+    .with_oauth_client_kind(zenith_relay_core::providers::chatgpt::OAuthClientKind::ExcelBps);
     let credentials_store = CredentialStore::from_backend(NativeSecretBackend);
     credentials_store.save(&credentials).unwrap();
     let mut account = records::new_account_record(
@@ -65,7 +134,8 @@ async fn startup_reconciles_quota_persisted_before_listener_creation() {
         limit_reached: true,
         available_credits_micro_units: Some(123),
         provider_credits_available: true,
-        updated_at_ms: Some(now_ms.saturating_add(1)),
+        provider_credits_observed_at_ms: Some(now_ms),
+        updated_at_ms: Some(now_ms),
         ..Default::default()
     };
     state.store().unwrap().upsert_account(account).unwrap();
@@ -126,6 +196,7 @@ async fn persisted_reauth_disables_only_its_running_pool_account() {
             false,
         )
         .unwrap()
+        .with_oauth_client_kind(zenith_relay_core::providers::chatgpt::OAuthClientKind::ExcelBps)
     };
     let broken_credentials = credentials(&broken_account_id, "provider-reauth");
     let healthy_credentials = credentials(&healthy_account_id, "provider-healthy");

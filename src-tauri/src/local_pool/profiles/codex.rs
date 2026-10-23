@@ -28,6 +28,10 @@ mod account;
 mod catalog;
 mod catalog_state;
 mod config;
+mod context;
+#[cfg(test)]
+pub(crate) use context::sync_context_overrides;
+pub(crate) use context::sync_context_policy;
 
 pub(super) use super::portable_path_value;
 mod local;
@@ -39,12 +43,14 @@ mod account_ops;
 
 pub(crate) fn official_codex_ultra_models() -> std::collections::HashMap<String, serde_json::Value>
 {
-    catalog::bundled_codex_ultra_models(&crate::platform::default_codex_home())
+    catalog::bundled_codex_ultra_models()
 }
 
 mod backup;
 mod bindings;
 mod gateway_attach;
+mod memory_model;
+pub(crate) use memory_model::{memory_model, set_memory_model, CodexMemoryStage};
 mod service_tier;
 mod switch_flow;
 
@@ -54,11 +60,11 @@ use backup::{
     account_auth_content, account_auth_matches_snapshot, account_auth_matches_tokens,
     account_backup_for_profile, account_backup_path, account_backup_secret_ref,
     account_managed_config_matches, attach_account_config, auth_credential_kind,
-    auth_snapshot_json, binding_from_backup, canonical_profile_dir,
-    cleanup_created_account_backup_secret, cleanup_created_backup_secret, credential_kind_locked,
-    delete_backup_secrets, discard_backup, discard_managed_binding_locked,
-    ensure_single_profile_backup, parse_account_backup, parse_account_backup_snapshot,
-    parse_backup_snapshot, previous_auth_snapshot, restore_account_config, restore_secret_snapshot,
+    auth_snapshot_json, binding_from_backup, canonical_profile_dir, cleanup_account_attach_secrets,
+    cleanup_created_backup_secret, credential_kind_locked, delete_backup_secrets, discard_backup,
+    discard_managed_binding_locked, ensure_single_profile_backup, fill_missing_account_config,
+    parse_account_backup, parse_account_backup_snapshot, parse_backup_snapshot,
+    previous_auth_snapshot, restore_account_config, restore_secret_snapshot,
     rollback_account_backup, rollback_backup, serialize_account_backup, serialize_backup,
 };
 use bindings::managed_token;
@@ -79,12 +85,11 @@ use config::*;
 #[cfg(test)]
 use gateway_attach::set_local_gateway_websockets_with_backend;
 pub use gateway_attach::{
-    attach, attach_with_catalog, attach_with_catalog_and_websockets, restore,
+    attach_with_catalog, attach_with_catalog_and_websockets, restore,
     set_local_gateway_websockets_with_previous,
 };
 pub(crate) use gateway_attach::{
-    attach_ready_api, attach_ready_api_explicit, attach_with_oauth_and_options,
-    direct_source_model_catalog_with_capabilities, restore_ready_api,
+    attach_with_oauth_and_options, direct_source_model_catalog_with_capabilities,
 };
 #[cfg(test)]
 pub(crate) use gateway_attach::{
@@ -104,7 +109,14 @@ use transaction::{
 };
 
 const PROVIDER_ID: &str = "zenith_relay_local";
+const NATIVE_PROVIDER_ID: &str = "openai";
 const READY_API_PROVIDER_ID: &str = "codex_local_access";
+const LEGACY_READY_API_PROVIDER_ID: &str = "zenith";
+const RELAY_PROVIDER_IDS: [&str; 3] = [
+    PROVIDER_ID,
+    READY_API_PROVIDER_ID,
+    LEGACY_READY_API_PROVIDER_ID,
+];
 const READY_API_PROVIDER_NAME: &str = "OpenAI";
 const LEGACY_READY_API_PROVIDER_NAME: &str = "Zenith";
 
@@ -140,8 +152,8 @@ const MAX_MANAGED_TOKEN_BYTES: usize = 64 * 1024;
 /// Keep paths written into Codex config/backup metadata compatible with
 /// consumers that do not understand Win32 extended-path prefixes.
 pub(super) fn portable_path_string(path: &Path) -> String {
-    let value = path.to_string_lossy();
-    super::portable_path_value(&value)
+    let path_text = path.to_string_lossy();
+    super::portable_path_value(&path_text)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -155,6 +167,14 @@ struct ProfileBackup {
     previous_model_provider: Option<String>,
     #[serde(default)]
     previous_model_catalog_json: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_review_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_chatgpt_base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_openai_base_url: Option<String>,
     #[serde(default)]
     previous_model_reasoning_effort: Option<String>,
     #[serde(default)]
@@ -205,8 +225,22 @@ struct AccountProfileBackup {
     projection_secret_ref: Option<String>,
     profile_dir: String,
     previous_model_provider: Option<String>,
+    /// The native Codex catalog must not be kept active while an OAuth
+    /// account profile is attached. Older backups did not record this leaf;
+    /// the projection secret remains the authoritative restore source for
+    /// newly-created backups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_model_catalog_json: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_review_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_chatgpt_base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     previous_openai_base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_model_reasoning_effort: Option<String>,
     previous_auth_secret_ref: Option<String>,
     managed_account_id: String,
     managed_access_hash: String,
@@ -287,7 +321,7 @@ pub(crate) struct OAuthAttachOptions<'a> {
 }
 
 trait SecretBackend {
-    fn save(&self, secret_ref: &str, value: &str) -> Result<()>;
+    fn save(&self, secret_ref: &str, secret_value: &str) -> Result<()>;
     fn load(&self, secret_ref: &str) -> Result<Option<String>>;
     fn delete(&self, secret_ref: &str) -> Result<()>;
 }
@@ -295,8 +329,8 @@ trait SecretBackend {
 struct OsSecretBackend;
 
 impl SecretBackend for OsSecretBackend {
-    fn save(&self, secret_ref: &str, value: &str) -> Result<()> {
-        secret_store::save(secret_ref, value)
+    fn save(&self, secret_ref: &str, secret_value: &str) -> Result<()> {
+        secret_store::save(secret_ref, secret_value)
     }
 
     fn load(&self, secret_ref: &str) -> Result<Option<String>> {

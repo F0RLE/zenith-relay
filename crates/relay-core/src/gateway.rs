@@ -13,7 +13,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 pub(crate) use crate::unix_time_ms as now_ms;
-pub(crate) use errors::failure_category_affects_account_state;
+pub(crate) use errors::{basis_points_transport_rejected, failure_category_affects_account_state};
 
 mod auth;
 mod catalog;
@@ -71,6 +71,10 @@ pub async fn execute_account_wake(
             error_codes::NO_ELIGIBLE_SOURCE,
         );
     };
+    // Scheduler-owned requests bypass the public Responses handler, which
+    // normally refreshes the short-lived Basis Points access catalog before
+    // model resolution and account selection.
+    runtime.refresh_basis_points_access(&key).await;
     let Some(resolved_model) = runtime.resolve_configured_account_model(&key, model_id) else {
         return errors::api_error(
             StatusCode::NOT_FOUND,
@@ -105,6 +109,106 @@ pub async fn execute_account_wake(
     .await
 }
 
+/// Publish inference with one explicitly selected request key, never a management key.
+/// The caller owns network admission; internal handlers retain their loopback Host policy.
+pub fn network_router(runtime: Arc<GatewayRuntime>, key_id: &'static str) -> Router {
+    router(runtime.clone()).layer(axum::middleware::from_fn(
+        move |mut request: axum::extract::Request, next: axum::middleware::Next| {
+            let runtime = runtime.clone();
+            async move {
+                let key = runtime
+                    .authenticate(request.headers().get(axum::http::header::AUTHORIZATION))
+                    .or_else(|| {
+                        ["x-api-key", "x-goog-api-key"]
+                            .into_iter()
+                            .find_map(|header| {
+                                request
+                                    .headers()
+                                    .get(header)
+                                    .and_then(|value| value.to_str().ok())
+                                    .and_then(|secret| runtime.authenticate_secret(secret))
+                            })
+                    });
+                if !key.is_some_and(|key| key.id == key_id) {
+                    return auth::unauthorized();
+                }
+                request.headers_mut().insert(
+                    axum::http::header::HOST,
+                    axum::http::HeaderValue::from_static("127.0.0.1"),
+                );
+                next.run(request).await
+            }
+        },
+    ))
+}
+
+#[cfg(test)]
+mod network_access_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn network_router_accepts_only_its_selected_key_and_never_exposes_management() {
+        for principal in ["lan", "local"] {
+            let runtime = Arc::new(
+                GatewayRuntime::new(
+                    crate::ProviderSource {
+                        id: "synthetic".into(),
+                        name: "Synthetic".into(),
+                        base_url: "http://127.0.0.1:9/v1".into(),
+                        api_key: "synthetic-provider".into(),
+                        wire_api: crate::WireApi::Responses,
+                        models: vec!["synthetic-model".into()],
+                        proxy_url: None,
+                    },
+                    crate::LocalGatewayKey {
+                        id: principal.into(),
+                        secret: "synthetic-key".into(),
+                    },
+                    Arc::new(|_| {}),
+                )
+                .unwrap(),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let router = network_router(runtime, "lan");
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap();
+            for (path, expected) in [
+                ("/v1/models", StatusCode::OK),
+                ("/management/state", StatusCode::NOT_FOUND),
+            ] {
+                let response = client
+                    .get(format!("http://{address}{path}"))
+                    .header("host", "192.168.1.10")
+                    .bearer_auth("synthetic-key")
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    if principal == "lan" {
+                        expected
+                    } else {
+                        StatusCode::UNAUTHORIZED
+                    }
+                );
+            }
+            let missing = client
+                .get(format!("http://{address}/v1/models"))
+                .header("host", "192.168.1.10")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+            server.abort();
+            let _ = server.await;
+        }
+    }
+}
+
 pub fn router(runtime: Arc<GatewayRuntime>) -> Router {
     Router::new()
         .route("/v1/models", get(models))
@@ -130,11 +234,32 @@ pub fn router(runtime: Arc<GatewayRuntime>) -> Router {
         )
         .route("/v1/images/generations", post(images::generations))
         .route("/v1/images/edits", post(images::edits))
+        .fallback(route_not_found)
+        .method_not_allowed_fallback(method_not_allowed)
         .with_state(runtime)
 }
 
+async fn route_not_found() -> Response<Body> {
+    errors::api_error(
+        StatusCode::NOT_FOUND,
+        "route not found",
+        error_codes::ROUTE_NOT_FOUND,
+    )
+}
+
+async fn method_not_allowed() -> Response<Body> {
+    errors::api_error(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "method is not allowed for this route",
+        error_codes::METHOD_NOT_ALLOWED,
+    )
+}
+
 #[cfg(test)]
-mod test_support {
+pub(crate) mod test_support {
+    pub(crate) fn basis_points_stream(body: &[u8]) -> Vec<u8> {
+        super::execution::basis_points::synthetic_stream(body).expect("synthetic test response")
+    }
     use crate::runtime::DefaultServiceTier;
     use crate::{ToolUseDiagnostics, UsageEvent};
 
@@ -154,6 +279,7 @@ mod test_support {
             requested_reasoning_effort: None,
             effective_reasoning_effort: None,
             wire_api: crate::WireApi::Responses,
+            transport: crate::UsageTransport::Http,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,
             success: true,
@@ -175,6 +301,35 @@ mod test_support {
             total_tokens: None,
             upstream_error: None,
             quota_snapshot: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod route_error_tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use serde_json::Value;
+
+    #[tokio::test]
+    async fn route_and_method_error_bodies_identify_relay() {
+        for (response, expected_code, expected_message) in [
+            (
+                route_not_found().await,
+                error_codes::ROUTE_NOT_FOUND,
+                "Relay: route not found",
+            ),
+            (
+                method_not_allowed().await,
+                error_codes::METHOD_NOT_ALLOWED,
+                "Relay: method is not allowed for this route",
+            ),
+        ] {
+            let response_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let response_json: Value = serde_json::from_slice(&response_bytes).unwrap();
+            assert_eq!(response_json["error"]["code"], expected_code);
+            assert_eq!(response_json["error"]["message"], expected_message);
+            assert_eq!(response_json["error"]["zenith_relay"]["origin"], "relay");
         }
     }
 }

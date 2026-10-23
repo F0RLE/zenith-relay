@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime::AuthorizationIdentityPolicy;
 
 impl PreparedAuthorization {
     pub(crate) fn incarnation(&self) -> AuthorizationIncarnation {
@@ -19,14 +20,24 @@ impl PreparedAuthorization {
         runtime: &'a GatewayRuntime,
         candidate_id: &str,
     ) -> Option<PreparedAuthorizationDispatchGuard<'a>> {
+        if !self.account_plan_supported {
+            return None;
+        }
         if let Some(revision) = &self.token_revision {
             let account = runtime.chatgpt_accounts.get(candidate_id)?;
+            let plan = crate::poison::read(&account.subscription_plan_type);
+            let access_token = self.authorization.to_str().ok()?.strip_prefix("Bearer ");
+            account
+                .oauth_client_kind
+                .validate_plan(plan.as_deref(), None, access_token)
+                .ok()?;
             if !account.active.load(Ordering::Acquire) {
                 return None;
             }
             return Some(PreparedAuthorizationDispatchGuard {
                 _token: Some(revision.guard()?),
                 _agent: None,
+                _plan: Some(plan),
             });
         }
         if let Some(expected) = self.agent_identity_revision {
@@ -42,12 +53,14 @@ impl PreparedAuthorization {
             return Some(PreparedAuthorizationDispatchGuard {
                 _token: None,
                 _agent: Some(identity),
+                _plan: None,
             });
         }
         runtime.source_candidate_bindings.get(candidate_id)?;
         Some(PreparedAuthorizationDispatchGuard {
             _token: None,
             _agent: None,
+            _plan: None,
         })
     }
 
@@ -72,23 +85,26 @@ pub(super) fn apply_prepared_authorization(
     request: reqwest::RequestBuilder,
     prepared: &PreparedAuthorization,
     client_version: Option<&str>,
+    identity_policy: AuthorizationIdentityPolicy,
 ) -> std::result::Result<(reqwest::Client, reqwest::Request), AuthorizedRequestError> {
     let (client, request) = request.build_split();
     let mut request = request.map_err(AuthorizedRequestError::Transport)?;
     request
         .headers_mut()
         .insert(prepared.header_name.clone(), prepared.authorization.clone());
-    if let Some(identity) = prepared.identity.as_ref() {
-        // A model-catalog request has no forwarded client headers, so its
-        // requested version is a useful fallback. For normal routed requests
-        // the explicit downstream identity remains authoritative.
-        let identity = match client_version {
-            Some(version) => identity
-                .with_client_version(version)
-                .map_err(|_| AuthorizedRequestError::NotReplayable)?,
-            None => identity.clone(),
-        };
-        identity.insert(request.headers_mut());
+    if identity_policy == AuthorizationIdentityPolicy::RelayCodex {
+        if let Some(identity) = prepared.identity.as_ref() {
+            // A model-catalog request has no forwarded client headers, so its
+            // requested version is a useful fallback. For normal routed requests
+            // the explicit downstream identity remains authoritative.
+            let identity = match client_version {
+                Some(version) => identity
+                    .with_client_version(version)
+                    .map_err(|_| AuthorizedRequestError::NotReplayable)?,
+                None => identity.clone(),
+            };
+            identity.insert(request.headers_mut());
+        }
     }
     Ok((client, request))
 }

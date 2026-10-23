@@ -62,52 +62,7 @@
   background: var(--relay-subtle);
 }
 
-.source-table th:not(:last-child),
-.source-table td:not(:last-child) {
-  text-align: center;
-}
-
-.source-sort-button {
-  width: 100%;
-  min-height: 28px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  padding: 2px 4px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  font: inherit;
-  line-height: 15px;
-  text-align: center;
-}
-
-.source-sort-button svg {
-  width: 13px;
-  height: 13px;
-  flex: 0 0 13px;
-  opacity: 0.62;
-}
-
-.source-sort-button:hover,
-.source-sort-button:focus-visible {
-  color: var(--relay-text);
-}
-
-.source-sort-button:hover svg,
-.source-sort-button:focus-visible svg {
-  opacity: 1;
-}
-
-.source-table td:not(:last-child) > .relay-status {
-  margin-inline: auto;
-}
-
-.relay-table td small,
-.remote-status small {
+.relay-table td small {
   display: block;
   color: var(--relay-muted);
   font-size: 11px;
@@ -120,15 +75,10 @@
   white-space: nowrap;
 }
 
-.row-actions-cell:has(.relay-action-menu[open]) {
-  z-index: 30;
-}
-
 .row-actions .relay-button.ghost {
   border-color: transparent;
 }
 
-.relay-table td.row-actions-cell,
 .relay-shell[data-page="profiles"] .relay-table th:last-child,
 .relay-shell[data-page="profiles"] .relay-table td:last-child {
   position: sticky;
@@ -136,11 +86,6 @@
   right: 0;
   background: var(--relay-surface);
   box-shadow: -10px 0 14px -12px rgb(20 31 36 / 55%);
-}
-
-.relay-table td.row-actions-cell {
-  width: 1%;
-  white-space: nowrap;
 }
 
 .relay-shell[data-page="profiles"] .relay-table {
@@ -173,8 +118,6 @@
   background: var(--relay-sidebar);
 }
 
-.relay-table tbody tr:hover td.row-actions-cell,
-.relay-table tbody tr:focus-within td.row-actions-cell,
 .relay-shell[data-page="profiles"] .relay-table tbody tr:hover td:last-child,
 .relay-shell[data-page="profiles"] .relay-table tbody tr:focus-within td:last-child {
   background: var(--relay-subtle);
@@ -234,7 +177,7 @@
   justify-content: center;
   margin-top: 8px;
   padding: 6px 8px;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   border-radius: 4px;
   background: transparent;
   color: var(--relay-text);
@@ -256,7 +199,7 @@
 
 .reset-credits-control:hover:not(:disabled),
 .reset-credits-control:focus-visible {
-  border-color: color-mix(in srgb, var(--relay-accent) 35%, var(--relay-border));
+  border-color: transparent;
   background: color-mix(in srgb, var(--relay-accent) 6%, var(--relay-surface));
 }
 
@@ -311,7 +254,7 @@
   display: block;
   margin-top: 10px;
   padding: 8px 9px;
-  border: 1px solid color-mix(in srgb, var(--relay-error) 42%, var(--relay-border));
+  border: 1px solid transparent;
   border-radius: 5px;
   background: color-mix(in srgb, var(--relay-error) 8%, var(--relay-surface));
   color: var(--relay-error);
@@ -361,7 +304,6 @@
 }
 
 .quota-meter small,
-.quota-unknown,
 .muted,
 .form-note {
   color: var(--relay-muted);

@@ -81,7 +81,10 @@ pub(super) async fn webview_proxy(
 }
 
 fn sign_in_proxy_plan(proxy_url: Option<&str>) -> Result<SignInProxyPlan, LocalPoolError> {
-    let Some(proxy_url) = proxy_url.map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(proxy_url) = proxy_url
+        .map(str::trim)
+        .filter(|proxy_url_text| !proxy_url_text.is_empty())
+    else {
         return Ok(SignInProxyPlan::Direct);
     };
     let normalized = normalize_proxy_url(proxy_url).map_err(|_| invalid_proxy())?;
@@ -97,7 +100,7 @@ fn sign_in_proxy_plan(proxy_url: Option<&str>) -> Result<SignInProxyPlan, LocalP
     }
     let host = url
         .host_str()
-        .filter(|value| !value.is_empty())
+        .filter(|host_text| !host_text.is_empty())
         .ok_or_else(invalid_proxy)?
         .to_string();
     let port = url.port().ok_or_else(invalid_proxy)?;
@@ -106,7 +109,7 @@ fn sign_in_proxy_plan(proxy_url: Option<&str>) -> Result<SignInProxyPlan, LocalP
     if username.is_empty() && password.is_none() {
         return Ok(SignInProxyPlan::Http(http_endpoint_url(&host, port)?));
     }
-    let Some(password) = password.filter(|value| !value.is_empty()) else {
+    let Some(password) = password.filter(|password_text| !password_text.is_empty()) else {
         return Err(invalid_proxy());
     };
     if username.is_empty() || username.contains(['\r', '\n']) || password.contains(['\r', '\n']) {
@@ -228,11 +231,11 @@ fn rewrite_proxy_request(head: &[u8], authorization: &str) -> io::Result<Vec<u8>
         .next()
         .filter(|line| !line.is_empty())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "proxy request is empty"))?;
-    let mut output = Vec::with_capacity(head.len() + authorization.len() + 32);
-    output.extend_from_slice(request.as_bytes());
-    output.extend_from_slice(b"\r\nProxy-Authorization: Basic ");
-    output.extend_from_slice(authorization.as_bytes());
-    output.extend_from_slice(b"\r\n");
+    let mut rewritten_request = Vec::with_capacity(head.len() + authorization.len() + 32);
+    rewritten_request.extend_from_slice(request.as_bytes());
+    rewritten_request.extend_from_slice(b"\r\nProxy-Authorization: Basic ");
+    rewritten_request.extend_from_slice(authorization.as_bytes());
+    rewritten_request.extend_from_slice(b"\r\n");
     for line in lines {
         if line.is_empty() {
             break;
@@ -241,12 +244,12 @@ fn rewrite_proxy_request(head: &[u8], authorization: &str) -> io::Result<Vec<u8>
             .to_ascii_lowercase()
             .starts_with("proxy-authorization:")
         {
-            output.extend_from_slice(line.as_bytes());
-            output.extend_from_slice(b"\r\n");
+            rewritten_request.extend_from_slice(line.as_bytes());
+            rewritten_request.extend_from_slice(b"\r\n");
         }
     }
-    output.extend_from_slice(b"\r\n");
-    Ok(output)
+    rewritten_request.extend_from_slice(b"\r\n");
+    Ok(rewritten_request)
 }
 
 fn is_connect_request(head: &[u8]) -> bool {

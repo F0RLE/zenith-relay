@@ -23,6 +23,43 @@ describe("overview analytics cache", () => {
     expect(getCachedOverviewAnalytics(scopes.at(-1)!)).toBe(analytics);
   });
 
+  test("a backwards clock adjustment does not make an old report fresh", () => {
+    const scope = `cache-clock-test:${Date.now()}`;
+    rememberOverviewAnalytics(scope, { totals: emptyUsageTotals(), buckets: [] });
+    expect(isOverviewAnalyticsFresh(scope, Date.now() - 60_000)).toBe(false);
+  });
+
+  test("usage arriving during a read schedules one fresh read after it", async () => {
+    const scope = `cache-trailing-test:${Date.now()}`;
+    const older = { totals: emptyUsageTotals(), buckets: [] };
+    const newer = { totals: { ...emptyUsageTotals(), requests: 2 }, buckets: [] };
+    let finish!: (value: typeof older) => void;
+    const first = loadOverviewAnalytics(scope, () => new Promise<typeof older>((resolve) => { finish = resolve; }));
+    let refreshes = 0;
+    const refresh = () => { refreshes += 1; return Promise.resolve(newer); };
+    const next = loadOverviewAnalytics(scope, refresh, true);
+    const deduplicated = loadOverviewAnalytics(scope, refresh, true);
+    finish(older);
+    await expect(first).resolves.toBe(older);
+    await expect(next).resolves.toBe(newer);
+    await expect(deduplicated).resolves.toBe(newer);
+    expect(refreshes).toBe(1);
+    expect(getCachedOverviewAnalytics(scope)).toBe(newer);
+  });
+
+  test("a trailing refresh still runs when the superseded read fails", async () => {
+    const scope = `cache-trailing-error-test:${Date.now()}`;
+    const analytics = { totals: emptyUsageTotals(), buckets: [] };
+    let fail!: (reason: Error) => void;
+    const first = loadOverviewAnalytics(scope, () => new Promise<never>((_, reject) => { fail = reject; }));
+    const caught = first.catch(() => null);
+    const next = loadOverviewAnalytics(scope, () => Promise.resolve(analytics), true);
+    fail(new Error("Synthetic superseded read failure"));
+    await caught;
+    await expect(next).resolves.toBe(analytics);
+    expect(getCachedOverviewAnalytics(scope)).toBe(analytics);
+  });
+
   test("deduplicates concurrent refreshes for one scope", async () => {
     const scope = `cache-inflight-test:${Date.now()}`;
     const analytics = { totals: emptyUsageTotals(), buckets: [] };

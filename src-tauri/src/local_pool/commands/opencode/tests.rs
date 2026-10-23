@@ -17,6 +17,7 @@ pub(super) fn source(bindings: Vec<SourceProtocolBinding>) -> ProviderSourceReco
         base_url: "https://provider.example/v1".into(),
         secret_ref: "source:test".into(),
         pricing_provider: None,
+        proxy_id: None,
         official_provider_family: None,
         wire_api: WireApi::Responses,
         protocol_config: Default::default(),
@@ -55,15 +56,21 @@ pub(super) fn model(id: &str, enabled: bool) -> ModelSummary {
         codex_visible: enabled,
         codex_display_name: id.into(),
         catalog_provider: None,
+        catalog_source_model_id: None,
+        catalog_canonical_model_id: None,
         catalog_family: None,
         catalog_name: None,
         catalog_release_date: None,
         catalog_last_updated: None,
         catalog_status: None,
+        catalog_capabilities: None,
         catalog_reasoning: None,
         catalog_reasoning_method: None,
         catalog_reasoning_effort_levels: Vec::new(),
         catalog_default_reasoning_effort: None,
+        catalog_reasoning_budget_min_tokens: None,
+        catalog_reasoning_budget_max_tokens: None,
+        catalog_reasoning_budget_default_tokens: None,
         catalog_tool_call: None,
         catalog_structured_output: None,
         catalog_attachment: None,
@@ -71,13 +78,18 @@ pub(super) fn model(id: &str, enabled: bool) -> ModelSummary {
         catalog_input_modalities: Vec::new(),
         catalog_output_modalities: Vec::new(),
         catalog_context_limit: None,
+        context_windows: None,
+        context_policy: zenith_relay_core::ModelContextPolicy::Short,
+        context_configurable: false,
         catalog_input_limit: None,
         catalog_output_limit: None,
         input_micro_usd_per_million: None,
         cached_input_micro_usd_per_million: None,
         cache_write_5m_micro_usd_per_million: None,
         cache_write_1h_micro_usd_per_million: None,
+        cache_write_micro_usd_per_million: None,
         output_micro_usd_per_million: None,
+        token_price: None,
         image_request_prices: Vec::new(),
         custom_price: false,
         reasoning_levels: Vec::new(),
@@ -124,17 +136,21 @@ fn keeps_prepared_catalog_order_and_excludes_disabled_models() {
 
 #[test]
 fn configures_opencode_for_responses_tool_calls() {
-    let provider = managed_provider(
-        "http://127.0.0.1:14998/v1",
-        "test-secret",
-        &[model("gpt-5.6-sol", true)],
-    );
+    let metadata = super::ModelMetadataCatalog::from_models_dev_json(
+        r#"{"test/tool-model":{"attachment":true,"tool_call":true,
+        "modalities":{"input":["text","image"],"output":["text"]}}}"#,
+    )
+    .unwrap();
+    let mut models = vec![model("tool-model", true)];
+    zenith_relay_core::protocol::apply_model_metadata(&mut models, &metadata);
+    let provider = managed_provider("http://127.0.0.1:14998/v1", "test-secret", &models);
 
     assert_eq!(provider["npm"], PROVIDER_NPM);
     assert_eq!(provider["options"]["baseURL"], "http://127.0.0.1:14998/v1");
-    assert_eq!(provider["models"]["gpt-5.6-sol"]["attachment"], true);
+    assert_eq!(provider["models"]["tool-model"]["attachment"], true);
+    assert_eq!(provider["models"]["tool-model"]["tool_call"], true);
     assert_eq!(
-        provider["models"]["gpt-5.6-sol"]["modalities"]["input"],
+        provider["models"]["tool-model"]["modalities"]["input"],
         json!(["text", "image"])
     );
 }
@@ -159,12 +175,62 @@ fn model_capabilities_are_shared_by_pool_and_direct_source_configs() {
     assert_eq!(pooled["text-only"]["modalities"]["input"], json!(["text"]));
     assert_eq!(pooled["text-only"]["tool_call"], true);
     assert_eq!(pooled["text-only"]["limit"]["context"], 32000);
+    models[0].context_configurable = true;
+    models[0].context_policy = zenith_relay_core::ModelContextPolicy::Custom { tokens: 16000 };
     assert_eq!(
-        pooled["unknown"]["modalities"]["input"],
-        json!(["text", "image"])
+        super::model_config(&models)["text-only"]["limit"]["context"],
+        16000
     );
+    assert_eq!(
+        super::model_config(&models)["text-only"]["limit"]["input"],
+        16000
+    );
+    models[0].context_policy = zenith_relay_core::ModelContextPolicy::Short;
+    assert_eq!(
+        super::model_config(&models)["text-only"]["limit"]["context"],
+        8000
+    );
+    assert_eq!(
+        super::model_config(&models)["text-only"]["limit"]["input"],
+        8000
+    );
+    models[0].context_policy = zenith_relay_core::ModelContextPolicy::Extended;
+    assert_eq!(
+        super::model_config(&models)["text-only"]["limit"]["context"],
+        32000
+    );
+    assert_eq!(
+        super::model_config(&models)["text-only"]["limit"]["input"],
+        24000
+    );
+    models[0].context_windows = Some(
+        zenith_relay_core::catalog::context_policy::ModelContextWindows {
+            default_tokens: Some(12000),
+            maximum_tokens: Some(32000),
+        },
+    );
+    models[0].context_policy = zenith_relay_core::ModelContextPolicy::Short;
+    assert_eq!(
+        super::model_config(&models)["text-only"]["limit"]["context"],
+        12000
+    );
+    assert_eq!(
+        super::model_config(&models)["text-only"]["limit"]["input"],
+        12000
+    );
+    models[0].context_policy = zenith_relay_core::ModelContextPolicy::Extended;
+    assert_eq!(
+        super::model_config(&models)["text-only"]["limit"]["context"],
+        32000
+    );
+    models[0].context_windows = Some(Default::default());
+    assert!(super::model_config(&models)["text-only"]["limit"]
+        .get("context")
+        .is_none());
+    assert_eq!(pooled["unknown"]["modalities"]["input"], json!(["text"]));
+    assert_eq!(pooled["unknown"]["attachment"], false);
     assert_eq!(pooled["unknown"]["reasoning"], false);
-    assert_eq!(pooled["unknown"]["tool_call"], true);
+    assert_eq!(pooled["unknown"]["tool_call"], false);
     assert!(pooled["unknown"].get("limit").is_none());
     models[0].reasoning_configurable = true;
     models[0].reasoning_allowed_levels = vec!["high".into(), "max".into()];

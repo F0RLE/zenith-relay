@@ -2,12 +2,12 @@ use super::{
     all_native_wire_apis, client_wire_apis_to_native, model_rules, normalize_client_wire_api,
     normalize_prefix, normalized_set, source_candidate_id, ChatGptAccountExecutor,
     GatewayRuntimeOptions, PassiveQuotaState, RuntimeHttpClients, RuntimeKey, RuntimeSource,
-    SourceCandidateBinding,
+    SourceCandidateBinding, SourceCandidateRoute,
 };
 use super::{
     normalize_image_base_model, runtime_now_ms, CodexTurnStateStore, GatewayRuntime,
-    LocalGatewayKey, NativeResponsesReplayStore, ProviderSource, RuntimeControl, RuntimeLocalKey,
-    SourceModelMetadataState, UsageCallback, NEXT_ACTIVITY_RUNTIME_ID,
+    LocalGatewayKey, ProviderSource, RuntimeControl, RuntimeLocalKey, SourceModelMetadataState,
+    UsageCallback, NEXT_ACTIVITY_RUNTIME_ID,
 };
 use crate::catalog::normalize_model_reasoning_allowed_levels;
 use crate::protocol::ClientWireApi;
@@ -39,6 +39,7 @@ pub(super) struct SourceRuntimeParts {
     pub(super) executors: BTreeMap<String, SourceConnector>,
     pub(super) candidate_bindings: BTreeMap<String, SourceCandidateBinding>,
     pub(super) recovery_delays_ms: BTreeMap<String, u64>,
+    pub(super) legacy_candidate_ids: BTreeMap<String, Option<String>>,
 }
 
 pub(super) struct AccountRuntimeParts {
@@ -60,6 +61,10 @@ pub(super) struct KeyRuntimeParts {
 }
 
 pub(super) fn validate_runtime_options(options: &GatewayRuntimeOptions) -> Result<()> {
+    options
+        .request_timezone
+        .validate()
+        .map_err(|message| Error::Validation(message.into()))?;
     if let Some(policy) = &options.pool_routing {
         policy
             .validate_activation()
@@ -213,15 +218,13 @@ impl GatewayRuntime {
         usage: UsageCallback,
     ) -> Result<Self> {
         validate_runtime_options(&options)?;
-        let tool_policy = options
-            .tool_policy
-            .clone()
-            .normalized()
-            .map_err(|message| Error::Validation(message.to_string()))?;
         let model_reasoning_allowed_levels = normalize_model_reasoning_allowed_levels(
             options.model_reasoning_allowed_levels.clone(),
         )
         .map_err(|message| Error::Validation(message.to_string()))?;
+        let model_context_policies =
+            crate::normalize_model_context_policies(options.model_context_policies.clone())
+                .map_err(|message| Error::Validation(message.to_string()))?;
 
         let clients = RuntimeHttpClients::new(None)?;
         let discovery_client = reqwest::Client::builder()
@@ -234,7 +237,16 @@ impl GatewayRuntime {
         let mut registry = ModelRegistry::default();
         let image_base_model = normalize_image_base_model(options.image_base_model.clone())?;
         let image_pricing_catalog = options.image_pricing_catalog.as_deref();
-        let source_parts = build_sources(sources, &mut registry, &mut scheduler)?;
+        let reference_catalog = options
+            .model_metadata_catalog
+            .as_ref()
+            .map(|handle| handle.snapshot());
+        let source_parts = build_sources(
+            sources,
+            &mut registry,
+            &mut scheduler,
+            reference_catalog.as_deref(),
+        )?;
         let account_parts = accounts::build_accounts(
             accounts,
             account_auth.as_ref(),
@@ -267,23 +279,65 @@ impl GatewayRuntime {
         )?;
 
         let affinity_store = options.response_affinity_store.clone();
+        let continuation_state = options.continuation_state.clone().unwrap_or_default();
+        let response_route_affinity = continuation_state.routes.clone();
         if let Some(store) = affinity_store.as_ref() {
             let now_ms = runtime_now_ms();
             if let Ok(bindings) = store.load(now_ms) {
                 for binding in bindings {
+                    if binding.key.starts_with("route:") {
+                        if binding.candidate_id.len() == 64
+                            && binding
+                                .candidate_id
+                                .bytes()
+                                .all(|byte| byte.is_ascii_hexdigit())
+                        {
+                            let mut routes = crate::poison::mutex(&response_route_affinity);
+                            if routes.get_with_expiry(&binding.key, now_ms).is_none() {
+                                routes.restore(
+                                    binding.key,
+                                    binding.candidate_id,
+                                    binding.expires_at_ms,
+                                    now_ms,
+                                );
+                            }
+                        } else {
+                            let _ = store.delete(&binding.key);
+                        }
+                        continue;
+                    }
+                    let soft =
+                        binding.key.starts_with("cache:") || binding.key.starts_with("session:");
+                    let owner = if scheduler.candidate(&binding.candidate_id).is_some() {
+                        Some(binding.candidate_id.clone())
+                    } else if soft {
+                        source_parts
+                            .legacy_candidate_ids
+                            .get(&binding.candidate_id)
+                            .cloned()
+                            .flatten()
+                    } else {
+                        // Old suffixed opaque owners lack endpoint/credential
+                        // identity. Never guess that they belong to a new route.
+                        None
+                    };
+                    let Some(owner) = owner else {
+                        let _ = store.delete(&binding.key);
+                        continue;
+                    };
                     let restored = if binding.key.starts_with("cache:")
                         || binding.key.starts_with("session:")
                     {
                         scheduler.restore_prompt_affinity(
                             binding.key.clone(),
-                            &binding.candidate_id,
+                            &owner,
                             binding.expires_at_ms,
                             now_ms,
                         )
                     } else {
                         scheduler.restore_response_affinity(
                             binding.key.clone(),
-                            &binding.candidate_id,
+                            &owner,
                             binding.expires_at_ms,
                             now_ms,
                         )
@@ -295,12 +349,40 @@ impl GatewayRuntime {
             }
         }
 
+        // Build per-source HTTP and WebSocket clients for sources that
+        // configure a proxy. Sources without a proxy use the shared global
+        // clients, so only proxied sources need dedicated clients here.
+        let mut source_http_clients = BTreeMap::<String, reqwest::Client>::new();
+        let mut source_websocket_clients = BTreeMap::<String, reqwest::Client>::new();
+        for (candidate_id, binding) in &source_parts.candidate_bindings {
+            let Some(connector) = source_parts.executors.get(&binding.source_id) else {
+                continue;
+            };
+            if connector.proxy.is_some() {
+                let proxy = connector.proxy.as_ref();
+                source_http_clients.insert(
+                    candidate_id.clone(),
+                    crate::runtime::support::runtime_client(proxy)?,
+                );
+                source_websocket_clients.insert(
+                    candidate_id.clone(),
+                    crate::runtime::support::runtime_websocket_client(proxy)?,
+                );
+            }
+        }
+
         Ok(Self {
-            tool_policy: RwLock::new(tool_policy),
+            diagnostics_enabled: options.diagnostics_enabled,
+            tool_policy: RwLock::new(options.tool_policy.clone()),
+            request_timezone: RwLock::new(options.request_timezone.clone()),
             clients,
             discovery_client,
             sources: source_parts.executors,
+            source_http_clients,
+            source_websocket_clients,
             source_candidate_bindings: source_parts.candidate_bindings,
+            legacy_source_candidate_ids: source_parts.legacy_candidate_ids,
+            response_route_affinity,
             source_recovery_delays_ms: Mutex::new(source_parts.recovery_delays_ms),
             chatgpt_accounts: account_parts.executors,
             chatgpt_team_members: account_parts.team_members,
@@ -319,13 +401,16 @@ impl GatewayRuntime {
             websocket_http_only: Mutex::new(BTreeMap::new()),
             model_metadata: SourceModelMetadataState::default(),
             model_reasoning_allowed_levels: Mutex::new(model_reasoning_allowed_levels),
+            model_context_policies: Mutex::new(model_context_policies),
             model_service_tier_overrides: Mutex::new(BTreeMap::new()),
             model_display_order: Mutex::new(Vec::new()),
             model_metadata_catalog: options.model_metadata_catalog.clone(),
             passive_quotas: Mutex::new(account_parts.passive_quotas),
-            messages_bridge_store: Mutex::new(crate::MessagesBridgeStore::default()),
-            native_responses_replay_store: Mutex::new(NativeResponsesReplayStore::default()),
+            adapter_continuation_store: continuation_state.adapters.clone(),
+            native_responses_replay_store: continuation_state.native_responses.clone(),
+            cache_context_store: super::cache_context::CacheContextStore::default(),
             codex_turn_state_store: CodexTurnStateStore::default(),
+            basis_points_catalog_store: super::tool_catalog::ToolCatalogStore::default(),
             control: RuntimeControl::default(),
             max_retry_candidates: std::sync::atomic::AtomicUsize::new(options.max_retry_candidates),
             quota_stale_after_ms: options.quota_stale_after_ms,

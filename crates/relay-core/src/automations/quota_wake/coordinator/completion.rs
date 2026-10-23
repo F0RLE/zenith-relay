@@ -34,8 +34,8 @@ impl WakeCoordinator {
             cycle.finish(used_at_ms);
         }
         let completed = history.len();
-        for entry in history {
-            self.push_history(entry);
+        for history_record in history {
+            self.push_history(history_record);
         }
         completed
     }
@@ -110,8 +110,8 @@ impl WakeCoordinator {
             cycle.finish(completed_at_ms);
         }
         let completed = history.len();
-        for entry in history {
-            self.push_history(entry);
+        for history_record in history {
+            self.push_history(history_record);
         }
         completed
     }

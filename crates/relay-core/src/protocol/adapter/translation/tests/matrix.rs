@@ -2,6 +2,76 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn all_protocol_paths_include_each_instruction_and_history_text_once() {
+    const POLICY_A: &str = "SYNTHETIC_INITIAL_POLICY_SENTINEL";
+    const POLICY_B: &str = "SYNTHETIC_ADDITIONAL_POLICY_SENTINEL";
+    const QUESTION: &str = "SYNTHETIC_QUESTION_SENTINEL";
+    const ANSWER: &str = "SYNTHETIC_ANSWER_SENTINEL";
+    const NEXT: &str = "SYNTHETIC_NEXT_SENTINEL";
+    for client in WireApi::ALL {
+        let request = match client {
+            WireApi::Responses => json!({"model":"test","instructions":POLICY_A,"input":[
+                {"role":"developer","content":POLICY_B},
+                {"role":"user","content":QUESTION},{"role":"assistant","content":ANSWER},{"role":"user","content":NEXT}
+            ]}),
+            WireApi::ChatCompletions => json!({"model":"test","messages":[
+                {"role":"system","content":POLICY_A},{"role":"developer","content":POLICY_B},
+                {"role":"user","content":QUESTION},{"role":"assistant","content":ANSWER},{"role":"user","content":NEXT}
+            ]}),
+            WireApi::Messages => json!({"model":"test","max_tokens":64,"system":[
+                {"type":"text","text":POLICY_A},{"type":"text","text":POLICY_B}
+            ],"messages":[{"role":"user","content":QUESTION},{"role":"assistant","content":ANSWER},{"role":"user","content":NEXT}]}),
+            WireApi::Gemini => {
+                json!({"systemInstruction":{"parts":[{"text":POLICY_A},{"text":POLICY_B}]},"contents":[
+                    {"role":"user","parts":[{"text":QUESTION}]},{"role":"model","parts":[{"text":ANSWER}]},{"role":"user","parts":[{"text":NEXT}]}
+                ]})
+            }
+        };
+        let original = request.clone();
+        for upstream in WireApi::ALL {
+            let prepared = prepare(client, upstream, &request, false);
+            let serialized = prepared.upstream_body().to_string();
+            for text in [POLICY_A, POLICY_B, QUESTION, ANSWER, NEXT] {
+                assert_eq!(
+                    serialized.matches(text).count(),
+                    1,
+                    "{client:?} -> {upstream:?}: {text}"
+                );
+            }
+        }
+        assert_eq!(request, original);
+    }
+}
+
+pub(super) fn prepare_portable_tool_history(
+    client: WireApi,
+    upstream: WireApi,
+    stream: bool,
+) -> crate::PreparedAdapterRequest {
+    let capabilities = crate::model_metadata::ModelCapabilities {
+        reasoning: Some(false),
+        ..Default::default()
+    };
+    SourceAdapter::between(client, upstream)
+        .unwrap()
+        .prepare_request_with_capabilities(
+            AdapterRequestContext {
+                client_wire_api: client,
+                request: &tool_history(client),
+                model: "test",
+                stream,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: CacheWriteTtl::Provider,
+                previous: None,
+                response_scope: "source-test",
+                response_id_seed: "request-test",
+            },
+            &capabilities,
+        )
+        .unwrap_or_else(|error| panic!("{client:?} -> {upstream:?}: {error}"))
+}
+
+#[test]
 fn all_sixteen_request_and_json_contracts() {
     for client in WireApi::ALL {
         for upstream in WireApi::ALL {
@@ -179,11 +249,43 @@ fn all_sixteen_stream_contracts_handle_fragmented_frames_and_completion() {
     }
 }
 #[test]
+fn every_stream_conversion_emits_text_before_completion() {
+    for client in WireApi::ALL {
+        for upstream in WireApi::ALL {
+            let prepared = prepare(client, upstream, &input(client), true);
+            let Some(mut bridge) = prepared.into_stream_bridge() else {
+                assert_eq!(client, upstream);
+                continue;
+            };
+            let mut pending = sse(upstream);
+            let mut output = Vec::new();
+            while let Some(frame) = crate::protocol::take_sse_event(&mut pending) {
+                for chunk in frame.chunks(7) {
+                    bridge.push(chunk);
+                }
+                while let Some(bytes) = bridge.pop_output() {
+                    output.extend(bytes);
+                }
+                if String::from_utf8_lossy(&output).contains("Hi") {
+                    break;
+                }
+            }
+            assert!(
+                String::from_utf8_lossy(&output).contains("Hi"),
+                "{client:?} -> {upstream:?}"
+            );
+            assert!(!bridge.is_terminal(), "{client:?} -> {upstream:?}");
+            assert!(bridge.completed().is_none(), "{client:?} -> {upstream:?}");
+        }
+    }
+}
+
+#[test]
 fn every_stream_conversion_keeps_tool_ids_order_arguments_and_actual_usage() {
     for client in WireApi::ALL {
         for upstream in WireApi::ALL {
             let Some(mut bridge) =
-                prepare(client, upstream, &tool_history(client), true).into_stream_bridge()
+                prepare_portable_tool_history(client, upstream, true).into_stream_bridge()
             else {
                 continue;
             };
@@ -260,6 +362,7 @@ fn unsupported_parameters_fail_before_transport_but_native_extensions_survive() 
                     response_id_seed: "request",
                 },
                 upstream,
+                None,
             )
             .unwrap_err();
             assert_eq!(
@@ -288,7 +391,7 @@ fn absent_usage_remains_unknown() {
 fn all_sixteen_paths_preserve_multi_turn_tool_history_and_instructions() {
     for client in WireApi::ALL {
         for upstream in WireApi::ALL {
-            let prepared = prepare(client, upstream, &tool_history(client), false);
+            let prepared = prepare_portable_tool_history(client, upstream, false);
             let mut request = decode::request(upstream, prepared.upstream_body())
                 .unwrap_or_else(|error| panic!("{client:?} -> {upstream:?}: {error}"));
             decode::resolve_tool_history(&mut request.messages).unwrap();

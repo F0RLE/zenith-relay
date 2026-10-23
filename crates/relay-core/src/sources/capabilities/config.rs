@@ -1,4 +1,5 @@
 use super::*;
+use crate::model_metadata::ModelMetadataCatalog;
 
 impl SourceProtocolConfig {
     pub fn effective_capabilities(
@@ -9,32 +10,34 @@ impl SourceProtocolConfig {
         let hint = self
             .endpoint_hint
             .or_else(|| endpoint_url_protocol(base_url));
-        let profile = service_protocol(base_url);
+        let profile = service_protocols(base_url);
         let mut indexed = BTreeMap::<_, Vec<_>>::new();
-        for entry in &self.capabilities {
+        for capability in &self.capabilities {
             // Legacy generation probes are diagnostic records, not routing or
             // model-capability evidence. Never let them override discovery.
-            if entry.origin == CapabilityOrigin::GenerationProbe {
+            if capability.origin == CapabilityOrigin::GenerationProbe {
                 continue;
             }
-            if entry.status == CapabilityStatus::Unknown
-                && (entry.origin != CapabilityOrigin::Catalog
-                    || (entry.features.is_empty() && entry.reasoning_efforts.is_empty()))
+            if capability.status == CapabilityStatus::Unknown
+                && (capability.origin != CapabilityOrigin::Catalog
+                    || (capability.features.is_empty()
+                        && capability.reasoning_efforts.is_empty()
+                        && capability.service_tiers.is_none()))
             {
                 continue;
             }
             indexed
                 .entry((
-                    crate::model_id_key(&entry.model_id),
-                    entry.upstream_wire_api,
+                    crate::model_id_key(&capability.model_id),
+                    capability.upstream_wire_api,
                 ))
                 .or_default()
-                .push(entry);
+                .push(capability);
         }
         for observations in indexed.values_mut() {
-            observations.sort_by_key(|entry| entry.checked_at_ms);
+            observations.sort_by_key(|capability| capability.checked_at_ms);
         }
-        let mut result = Vec::new();
+        let mut effective_capabilities = Vec::new();
         for model in models {
             let model_key = crate::model_id_key(model);
             for upstream in WireApi::ALL {
@@ -44,7 +47,7 @@ impl SourceProtocolConfig {
                     .unwrap_or_default();
                 let declaration = if hint == Some(upstream) {
                     Some(CapabilityOrigin::EndpointUrl)
-                } else if hint.is_none() && profile == Some(upstream) {
+                } else if hint.is_none() && profile.contains(&upstream) {
                     Some(CapabilityOrigin::ServiceProfile)
                 } else {
                     None
@@ -61,27 +64,34 @@ impl SourceProtocolConfig {
                             CapabilityStatus::Declared,
                         )]),
                         reasoning_efforts: vec![],
+                        service_tiers: None,
                     })
-                    .or_else(|| observations.first().map(|entry| (*entry).clone()));
-                if let Some(entry) = merged.as_mut() {
+                    .or_else(|| observations.first().map(|capability| (*capability).clone()));
+                if let Some(effective_capability) = merged.as_mut() {
                     for observation in observations {
                         // Feature-only catalog rows do not establish or erase
                         // the protocol selected by an endpoint declaration.
                         if observation.status != CapabilityStatus::Unknown {
-                            entry.status = observation.status;
-                            entry.origin = observation.origin;
-                            entry.checked_at_ms = observation.checked_at_ms;
+                            effective_capability.status = observation.status;
+                            effective_capability.origin = observation.origin;
+                            effective_capability.checked_at_ms = observation.checked_at_ms;
                         }
-                        entry.features.extend(observation.features.clone());
+                        effective_capability
+                            .features
+                            .extend(observation.features.clone());
                         if !observation.reasoning_efforts.is_empty() {
-                            entry.reasoning_efforts = observation.reasoning_efforts.clone();
+                            effective_capability.reasoning_efforts =
+                                observation.reasoning_efforts.clone();
+                        }
+                        if observation.service_tiers.is_some() {
+                            effective_capability.service_tiers = observation.service_tiers.clone();
                         }
                     }
                 }
-                result.extend(merged);
+                effective_capabilities.extend(merged);
             }
         }
-        result
+        effective_capabilities
     }
 
     pub fn with_effective_capabilities(&self, base_url: &str, models: &[String]) -> Self {
@@ -99,7 +109,20 @@ impl SourceProtocolConfig {
         fallback: WireApi,
         client: Option<WireApi>,
     ) -> Result<Vec<String>> {
-        let routes = self.resolve(base_url, models, bindings, fallback)?;
+        self.models_for_with_catalog(base_url, models, bindings, fallback, client, None)
+    }
+
+    pub fn models_for_with_catalog(
+        &self,
+        base_url: &str,
+        models: &[String],
+        bindings: &[SourceProtocolBinding],
+        fallback: WireApi,
+        client: Option<WireApi>,
+        reference_catalog: Option<&ModelMetadataCatalog>,
+    ) -> Result<Vec<String>> {
+        let routes =
+            self.resolve_with_catalog(base_url, models, bindings, fallback, reference_catalog)?;
         let routed_models = routes
             .into_iter()
             .filter(|route| client.is_none_or(|client| route.wire_api == client))
@@ -153,44 +176,63 @@ impl SourceProtocolConfig {
         self.capabilities.extend(observations);
     }
 
-    /// Resolve every catalog model. Catalog declarations and configured
-    /// endpoint identity select the upstream wire format. Legacy generation
-    /// probes are diagnostic only. Names, families and prices never
-    /// participate.
+    /// Resolve every catalog model without reference metadata. Without a
+    /// model group, configured endpoint identity and catalog declarations
+    /// select the upstream wire format.
     pub fn resolve(
         &self,
         base_url: &str,
         models: &[String],
         legacy_bindings: &[SourceProtocolBinding],
-        fallback: WireApi,
+        fallback_protocol: WireApi,
     ) -> Result<Vec<SourceProtocolBinding>> {
-        let mut capabilities = BTreeMap::<_, Vec<_>>::new();
+        self.resolve_with_catalog(base_url, models, legacy_bindings, fallback_protocol, None)
+    }
+
+    /// Preserve the source's supported upstream contracts before projecting
+    /// client APIs. A recommendation orders routes, never creates an endpoint.
+    /// Pins and explicit exclusions apply before legacy fallback.
+    pub fn resolve_with_catalog(
+        &self,
+        base_url: &str,
+        models: &[String],
+        legacy_bindings: &[SourceProtocolBinding],
+        fallback_protocol: WireApi,
+        reference_catalog: Option<&ModelMetadataCatalog>,
+    ) -> Result<Vec<SourceProtocolBinding>> {
+        let mut capabilities_by_model = BTreeMap::<_, Vec<_>>::new();
+        let mut unsupported_protocols = BTreeMap::<_, BTreeSet<_>>::new();
         for capability in self.effective_capabilities(base_url, models) {
             if capability.status.available() {
-                capabilities
+                capabilities_by_model
                     .entry(crate::model_id_key(&capability.model_id))
                     .or_default()
                     .push(capability);
+            } else if capability.status == CapabilityStatus::Unsupported {
+                unsupported_protocols
+                    .entry(crate::model_id_key(&capability.model_id))
+                    .or_default()
+                    .insert(capability.upstream_wire_api);
             }
         }
-        let endpoint_fallback = self
+        let pinned_protocol = self
             .endpoint_hint
-            .or_else(|| endpoint_url_protocol(base_url))
-            .or_else(|| service_protocol(base_url));
-        let mut legacy_by_model = BTreeMap::<_, Vec<_>>::new();
+            .or_else(|| endpoint_url_protocol(base_url));
+        let host_protocol = service_protocol(base_url);
+        let mut legacy_protocols_by_model = BTreeMap::<_, Vec<_>>::new();
         for binding in legacy_bindings {
-            let upstream = binding
+            let protocol = binding
                 .adapter
                 .upstream_protocol(binding.wire_api)
                 .wire_api();
             for model in &binding.model_ids {
-                legacy_by_model
+                legacy_protocols_by_model
                     .entry(crate::model_id_key(model))
                     .or_default()
-                    .push(upstream);
+                    .push(protocol);
             }
         }
-        let single_legacy = if legacy_bindings.len() == 1 {
+        let legacy_fallback_protocols = if legacy_bindings.len() == 1 {
             let binding = &legacy_bindings[0];
             vec![binding
                 .adapter
@@ -208,65 +250,133 @@ impl SourceProtocolConfig {
             }
             // Keep old physical endpoints as hints, without retaining their
             // client-protocol restrictions or requiring generation probes.
-            let legacy_upstreams = legacy_by_model
+            let legacy_protocols = legacy_protocols_by_model
                 .get(&key)
                 .map(Vec::as_slice)
-                .unwrap_or(&single_legacy);
-            let available = capabilities
+                .unwrap_or(&legacy_fallback_protocols);
+            let available_capabilities = capabilities_by_model
                 .get(&key)
                 .map(Vec::as_slice)
                 .unwrap_or_default();
-            for client in WireApi::ALL {
-                // Resolve each client protocol independently. If the model
-                // accepts that protocol upstream, keep it native. Otherwise
-                // use the strongest available catalog evidence and bridge to
-                // it. If protocol evidence is absent, the configured source
-                // protocol is the fallback; catalog membership remains
-                // routable regardless of legacy diagnostic probes.
-                let upstream = available
-                    .iter()
-                    .find(|capability| capability.upstream_wire_api == client)
-                    .or_else(|| {
-                        available.iter().max_by_key(|capability| {
-                            (
-                                capability.status == CapabilityStatus::Confirmed,
-                                capability.checked_at_ms,
-                                std::cmp::Reverse(capability.upstream_wire_api),
-                            )
-                        })
-                    })
-                    .map(|capability| capability.upstream_wire_api)
-                    .unwrap_or_else(|| {
-                        endpoint_fallback.unwrap_or_else(|| {
-                            legacy_upstreams
-                                .iter()
-                                .find(|upstream| **upstream == client)
-                                .or_else(|| legacy_upstreams.first())
-                                .copied()
-                                .unwrap_or(fallback)
-                        })
-                    });
-                if let Some(adapter) = SourceAdapter::between(client, upstream) {
-                    let model_ids = routes.entry((client, adapter)).or_insert_with(Vec::new);
-                    model_ids.push(model.clone());
+            let supported_protocols = supported_upstream_protocols(
+                UpstreamProtocolHints {
+                    pinned: pinned_protocol,
+                    model_preference: reference_catalog
+                        .and_then(|catalog| catalog.preferred_protocol_for(model)),
+                    native: reference_catalog
+                        .and_then(|catalog| catalog.native_protocol_for(model)),
+                    host: host_protocol,
+                },
+                available_capabilities,
+                unsupported_protocols.get(&key),
+                legacy_protocols,
+                fallback_protocol,
+            );
+            for upstream in supported_protocols {
+                for client_protocol in WireApi::ALL {
+                    if let Some(adapter) = SourceAdapter::between(client_protocol, upstream) {
+                        let model_ids = routes
+                            .entry((client_protocol, adapter))
+                            .or_insert_with(Vec::new);
+                        model_ids.push(model.clone());
+                    }
                 }
             }
         }
-        Ok(routes
+        let resolved = routes
             .into_iter()
-            .map(|((wire_api, adapter), model_ids)| SourceProtocolBinding {
-                wire_api,
-                adapter,
-                reasoning_mode: if adapter.is_passthrough() {
-                    MessagesReasoningMode::Disabled
-                } else {
-                    MessagesReasoningMode::Adaptive
-                },
-                cache_write_ttl: CacheWriteTtl::Provider,
-                model_ids,
+            .map(|((wire_api, adapter), model_ids)| {
+                let legacy = legacy_bindings
+                    .iter()
+                    .find(|binding| binding.wire_api == wire_api && binding.adapter == adapter);
+                SourceProtocolBinding {
+                    wire_api,
+                    adapter,
+                    reasoning_mode: legacy.map_or_else(
+                        || {
+                            if adapter.is_passthrough() {
+                                MessagesReasoningMode::Disabled
+                            } else {
+                                MessagesReasoningMode::Adaptive
+                            }
+                        },
+                        |binding| binding.reasoning_mode,
+                    ),
+                    cache_write_ttl: legacy
+                        .map_or(CacheWriteTtl::Provider, |binding| binding.cache_write_ttl),
+                    model_ids,
+                }
             })
-            .collect())
+            .collect::<Vec<_>>();
+        if resolved.is_empty() {
+            return Ok(resolved);
+        }
+        crate::normalize_source_protocol_bindings(resolved, fallback_protocol, models)
     }
+}
+
+/// Endpoint and preference inputs for one model's upstream protocol.
+struct UpstreamProtocolHints {
+    /// Endpoint the source owner chose through a hint or an endpoint URL.
+    pinned: Option<WireApi>,
+    /// Protocol preferred for the model's group in the reference catalog.
+    model_preference: Option<WireApi>,
+    /// A validated manufacturer contract, independent of the client's API.
+    native: Option<WireApi>,
+    /// Protocol implied by a known service host.
+    host: Option<WireApi>,
+}
+
+fn supported_upstream_protocols(
+    hints: UpstreamProtocolHints,
+    available_capabilities: &[ModelEndpointCapability],
+    unsupported_protocols: Option<&BTreeSet<WireApi>>,
+    legacy_protocols: &[WireApi],
+    fallback_protocol: WireApi,
+) -> Vec<WireApi> {
+    let is_unsupported =
+        |protocol: &WireApi| unsupported_protocols.is_some_and(|set| set.contains(protocol));
+    if let Some(protocol) = hints.pinned {
+        return (!is_unsupported(&protocol)
+            && hints.native.is_none_or(|native| native == protocol))
+        .then_some(protocol)
+        .into_iter()
+        .collect();
+    }
+    let mut declared = available_capabilities
+        .iter()
+        .filter(|capability| !is_unsupported(&capability.upstream_wire_api))
+        .map(|capability| capability.upstream_wire_api)
+        .collect::<BTreeSet<_>>();
+    if declared.is_empty() {
+        // Preserve configured legacy contracts on unknown services. Catalog
+        // identity, price rows and family preferences cannot supply support.
+        declared.extend(
+            legacy_protocols
+                .iter()
+                .copied()
+                .filter(|protocol| !is_unsupported(protocol)),
+        );
+        if declared.is_empty() {
+            declared.extend(
+                hints
+                    .host
+                    .or(Some(fallback_protocol))
+                    .filter(|protocol| !is_unsupported(protocol)),
+            );
+        }
+    }
+    let mut protocols = declared.into_iter().collect::<Vec<_>>();
+    protocols.retain(|protocol| hints.native.is_none_or(|native| native == *protocol));
+    protocols.sort_by_key(|protocol| {
+        (
+            Some(*protocol) != hints.model_preference,
+            Some(*protocol) != hints.host,
+            *protocol != fallback_protocol,
+            *protocol,
+        )
+    });
+    protocols
 }
 
 /// Field view shared by stored source records.
@@ -283,24 +393,41 @@ pub trait SourceProtocolResolution {
     fn resolved_protocol_bindings(
         &self,
     ) -> std::result::Result<Vec<SourceProtocolBinding>, String> {
+        self.resolved_protocol_bindings_with_catalog(None)
+    }
+
+    fn resolved_protocol_bindings_with_catalog(
+        &self,
+        reference_catalog: Option<&ModelMetadataCatalog>,
+    ) -> std::result::Result<Vec<SourceProtocolBinding>, String> {
         self.source_protocol_config()
-            .resolve(
+            .resolve_with_catalog(
                 self.protocol_base_url(),
                 self.protocol_models(),
                 self.stored_protocol_bindings(),
                 self.protocol_fallback(),
+                reference_catalog,
             )
             .map_err(|error| error.to_string())
     }
 
     fn resolved_models(&self, client: Option<WireApi>) -> std::result::Result<Vec<String>, String> {
+        self.resolved_models_with_catalog(client, None)
+    }
+
+    fn resolved_models_with_catalog(
+        &self,
+        client: Option<WireApi>,
+        reference_catalog: Option<&ModelMetadataCatalog>,
+    ) -> std::result::Result<Vec<String>, String> {
         self.source_protocol_config()
-            .models_for(
+            .models_for_with_catalog(
                 self.protocol_base_url(),
                 self.protocol_models(),
                 self.stored_protocol_bindings(),
                 self.protocol_fallback(),
                 client,
+                reference_catalog,
             )
             .map_err(|error| error.to_string())
     }

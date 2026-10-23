@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "../bun-playwright";
-import { installTauriMock } from "./tauri-mock";
+import { emitTauriEvent, installTauriMock } from "./tauri-mock";
 
 async function expectPanelFits(page: Page) {
   const panel = page.locator(".pool-controls");
@@ -10,7 +10,8 @@ async function expectPanelFits(page: Page) {
       const rect = item.getBoundingClientRect();
       return rect.left >= bounds.left - 1 && rect.right <= bounds.right + 1
         && rect.top >= bounds.top - 1 && rect.bottom <= bounds.bottom + 1
-        && item.scrollWidth <= item.clientWidth + 1;
+        && (item.scrollWidth <= item.clientWidth + 1
+          || (getComputedStyle(item).textOverflow === "ellipsis" && getComputedStyle(item).overflowX === "hidden"));
     }) && bounds.left >= 0 && bounds.right <= innerWidth;
   })).toBe(true);
   expect(await panel.locator(".pool-runtime-strip, .pool-summary").evaluateAll((rows) => rows.every((row) => {
@@ -28,8 +29,8 @@ for (const theme of ["light", "dark"] as const) {
       await installTauriMock(page, { mode: "local", locale: "ru", theme, populated: true, accountCount: 3, providerCredits: 125.5, basisPointsAvailable: true });
       await page.goto("/");
       await page.getByRole("button", { name: "Пул", exact: true }).click();
-      const panel = page.getByRole("group", { name: "Порядок использования" });
-      await expect(panel.getByRole("heading", { name: "Порядок использования" })).toBeVisible();
+      const panel = page.getByRole("group", { name: "Распределение запросов" });
+      await expect(panel.getByRole("heading", { name: "Распределение запросов" })).toBeVisible();
       await expect(panel.locator(".pool-current-route")).toContainText("Работает сейчас: Personal Plus");
       await expect(panel.locator(".pool-next-route")).toContainText("Следующий кандидат");
       await expect(panel.locator("[data-active-models]")).toHaveAttribute("data-active-request-count", "1");
@@ -51,8 +52,8 @@ for (const theme of ["light", "dark"] as const) {
   }
 }
 
-for (const mode of ["local", "remote"] as const) {
-  test(`pool controls wrap long active model names in ${mode} mode`, async ({ page }, testInfo) => {
+for (const mode of ["local"] as const) {
+  test(`pool controls truncate long active model names with full tooltips in ${mode} mode`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width: 390, height: 844 });
     const model = `synthetic-model-${"extended".repeat(12)}`;
     await installTauriMock(page, {
@@ -63,6 +64,8 @@ for (const mode of ["local", "remote"] as const) {
     await page.getByRole("button", { name: "Pool", exact: true }).click();
     await expect(page.locator(".pool-active-models")).toContainText(model);
     await expect(page.locator(".pool-active-models")).toHaveAttribute("data-active-request-count", "14");
+    await expect(page.locator(".pool-active-models")).toHaveAttribute("data-relay-tooltip", new RegExp(model));
+    await expect(page.locator(".pool-active-models > span")).toHaveCSS("white-space", "nowrap");
     await expectPanelFits(page);
     await page.locator(".pool-controls").screenshot({ path: testInfo.outputPath("long-model.png") });
   });
@@ -72,7 +75,7 @@ test("pool controls keep icon commands labelled and show quota refresh progress"
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  const panel = page.getByRole("group", { name: "Usage order" });
+  const panel = page.getByRole("group", { name: "Request distribution" });
   await panel.getByRole("button", { name: "Hide account calculation" }).click();
   await expect(panel.getByRole("button", { name: "Show account calculation" })).toHaveAttribute("aria-pressed", "false");
   await panel.getByRole("button", { name: "Pool rotation settings" }).click();
@@ -90,6 +93,7 @@ test("pool controls keep icon commands labelled and show quota refresh progress"
     };
   });
   const refresh = panel.getByRole("button", { name: "Refresh", exact: true });
+  const listTop = (await page.locator(".pool-member-list").boundingBox())!.y;
   await refresh.hover();
   await expect(page.getByRole("tooltip", { name: "Refresh", exact: true })).toBeVisible();
   await refresh.click();
@@ -99,14 +103,78 @@ test("pool controls keep icon commands labelled and show quota refresh progress"
   await page.evaluate(() => (window as unknown as { __COMPLETE_POOL_REFRESH__: () => void }).__COMPLETE_POOL_REFRESH__());
   await expect(refresh).toBeEnabled();
   await expect(refresh).toHaveAttribute("aria-busy", "false");
+  await expect(page.locator(".pool-routing-alert, .account-quota-report")).toHaveCount(0);
+  expect((await page.locator(".pool-member-list").boundingBox())!.y).toBeCloseTo(listTop, 0);
 });
 
 test("pool controls keep idle routes distinct from active requests", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, usageActive: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  const panel = page.getByRole("group", { name: "Usage order" });
+  const panel = page.getByRole("group", { name: "Request distribution" });
   await expect(panel.locator(".pool-current-route")).toHaveAttribute("data-active", "false");
   await expect(panel.locator(".pool-current-route")).toContainText("Next candidate");
-  await expect(panel.locator(".pool-active-models")).toHaveCount(0);
+  await expect(panel.locator(".pool-active-models")).toBeHidden();
 });
+
+for (const width of [1160, 840, 390]) {
+  test(`pool activity does not move the toolbar or cards at ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 844 });
+    await installTauriMock(page, { mode: "local", locale: "ru", theme: "dark", populated: true, accountCount: 3, usageActive: false });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Пул", exact: true }).click();
+    const panel = page.locator(".pool-controls");
+    const list = page.locator(".pool-member-list");
+    const baselinePanel = (await panel.boundingBox())!;
+    const baselineList = (await list.boundingBox())!;
+    const baselineActions = (await panel.locator(".pool-quota-actions").boundingBox())!;
+    let revision = 0;
+    const activity = (candidateId: string, count: number, model: string) => emitTauriEvent(page, "zenith-runtime-activity", {
+      revision: ++revision, candidateId, inFlight: count, activeRequestCount: count,
+      activeModels: count ? [{ model, requestCount: count }] : [],
+    });
+    const stableLayout = async () => {
+      expect((await panel.boundingBox())!.height).toBeCloseTo(baselinePanel.height, 0);
+      expect((await list.boundingBox())!.y).toBeCloseTo(baselineList.y, 0);
+      expect((await panel.locator(".pool-quota-actions").boundingBox())!.y).toBeCloseTo(baselineActions.y, 0);
+      await expectPanelFits(page);
+    };
+    await expect(panel.locator(".pool-active-models")).toBeHidden();
+    await activity("account_synthetic", 1, "gpt-6.1-sol");
+    await expect(panel.locator(".pool-active-models")).toHaveAttribute("data-active-request-count", "1");
+    await stableLayout();
+    await activity("account_synthetic_2", 2, `synthetic-${"long-model".repeat(20)}`);
+    await expect(panel.locator(".pool-active-models")).toHaveAttribute("data-active-request-count", "3");
+    await stableLayout();
+    await page.screenshot({ path: testInfo.outputPath("active-pool.png"), animations: "disabled" });
+    await activity("account_synthetic", 0, "gpt-6.1-sol");
+    await activity("account_synthetic_2", 0, "synthetic-model");
+    await expect(panel.locator(".pool-active-models")).toBeHidden();
+    await stableLayout();
+    await page.screenshot({ path: testInfo.outputPath("idle-pool.png"), animations: "disabled" });
+  });
+}
+
+for (const mode of ["local"] as const) {
+  test(`pool cards use scheduler resource evidence without inventing the next route (${mode})`, async ({ page }) => {
+    await installTauriMock(page, {
+      mode, locale: "en", populated: true, accountCount: 2, quotaAvailable: true, nextCandidateId: null, usageActive: false,
+      routingHeadroom: {
+        account_synthetic: { quotaRemainingBasisPoints: 1_000, providerCreditsMicroUnits: null, providerCreditsUnlimited: false },
+        account_synthetic_2: { quotaRemainingBasisPoints: 9_000, providerCreditsMicroUnits: null, providerCreditsUnlimited: false },
+      },
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Pool", exact: true }).click();
+    const cards = page.locator(".pool-member-card");
+    await expect(cards.first()).toHaveAttribute("data-member-label", "Business Workspace");
+    await expect(cards.nth(1)).toHaveAttribute("data-member-label", "Personal Plus");
+    await expect(page.locator('.pool-member-card[data-next="true"]')).toHaveCount(0);
+    await expect(page.locator(".pool-next-route")).toHaveCount(0);
+    await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Pool rotation", exact: true });
+    await dialog.getByRole("radio", { name: "Round robin", exact: true }).click();
+    await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
+    await expect(page.getByRole("group", { name: "Usage order", exact: true })).toBeVisible();
+  });
+}

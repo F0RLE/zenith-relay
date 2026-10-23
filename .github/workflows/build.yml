@@ -12,6 +12,12 @@ on:
 permissions:
   contents: read
 
+# Pull requests and main run checks only. Installers are built for a manual
+# run or a pushed v* tag. Only that tag push publishes.
+concurrency:
+  group: build-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   check:
     name: Check
@@ -24,13 +30,21 @@ jobs:
           fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.2
-      - name: Test proposed PR metadata policy
-        run: bun test ./.github/tools/pr-metadata.test.mjs
+          bun-version: 1.4.3
+      - run: bun install --frozen-lockfile
+        working-directory: src
+      - name: Test development scripts
+        run: bun test ./scripts/check ./scripts/lib ./scripts/maintenance ./scripts/build
+      - name: Check documentation links
+        run: bun ./scripts/check/check-docs.mjs
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+            crates/relay-core -> target
       - uses: taiki-e/install-action@cargo-audit
       - name: Prepare RustSec advisory database
         run: |
@@ -40,30 +54,28 @@ jobs:
           git -C "$RUSTSEC_ADVISORY_DB" remote add origin https://github.com/RustSec/advisory-db.git
           git -C "$RUSTSEC_ADVISORY_DB" fetch --depth=1 origin b4af64d3dab58bfac9d4ab23d474264ed0bb6537
           git -C "$RUSTSEC_ADVISORY_DB" checkout --detach --quiet FETCH_HEAD
-      - run: bun install --frozen-lockfile
-        working-directory: src
       - name: Install Linux Tauri dependencies
         run: |
           sudo find /etc/apt/sources.list.d -type f \( -name '*microsoft*' -o -name '*azure*' \) -delete
+          sudo sed -i -E 's|https?://azure[.]archive[.]ubuntu[.]com/ubuntu/?|https://archive.ubuntu.com/ubuntu/|g; s|mirror[+]file:/etc/apt/apt-mirrors[.]txt|https://archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources
           sudo apt-get update
           sudo apt-get install -y dbus-x11 gnome-keyring libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev xdg-utils
-      - run: bunx playwright install chromium
+      - run: bunx --no-install playwright install chromium
         timeout-minutes: 10
         working-directory: src
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --workspace --all-targets --locked -- -D warnings
       - name: Agent guardrails
-        shell: pwsh
-        run: ./scripts/check-agent-guardrails.ps1
+        run: bun ./scripts/check/check-agent-guardrails.mjs
       - name: No new duplicate code
-        shell: pwsh
-        run: ./scripts/check-duplicate-code.ps1
+        run: bun ./scripts/check/check-duplicate-code.mjs
       - run: cargo fmt --manifest-path crates/relay-core/Cargo.toml --all -- --check
       - run: cargo clippy --manifest-path crates/relay-core/Cargo.toml --all-targets --locked -- -D warnings
       - run: cargo test --manifest-path crates/relay-core/Cargo.toml --locked
+      - name: Bounded pool admission under contention
+        run: cargo test --manifest-path crates/relay-core/Cargo.toml --locked --lib large_mixed_queue_reaches_per_principal_limit_without_starvation -- --ignored
       - run: cargo audit --db "$RUSTSEC_ADVISORY_DB" --no-fetch --file crates/relay-core/Cargo.lock
       - run: cargo audit --db "$RUSTSEC_ADVISORY_DB" --no-fetch --file src-tauri/Cargo.lock
-      - run: cargo audit --db "$RUSTSEC_ADVISORY_DB" --no-fetch --file relay-server/Cargo.lock
       - run: bun audit
         working-directory: src
       - name: Run verification with Linux Secret Service
@@ -77,10 +89,46 @@ jobs:
       - run: bun run test:e2e
         working-directory: src
 
+  check-windows:
+    name: Check Windows
+    runs-on: windows-latest
+    env:
+      RUSTFLAGS: "-Dwarnings"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Run Windows Rust tests
+        # The test keyring is process-global, so its system key must not be mutated concurrently.
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1
+
+  check-web:
+    name: Check web preview
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+      - run: bun install --frozen-lockfile
+      - run: bun run test
+      - run: bun run build
+      - name: Use canonical Ubuntu archive
+        run: sudo sed -i -E 's|https?://azure[.]archive[.]ubuntu[.]com/ubuntu/?|https://archive.ubuntu.com/ubuntu/|g; s|mirror[+]file:/etc/apt/apt-mirrors[.]txt|https://archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources
+      - name: Install preview test browser
+        run: bunx --no-install playwright install --with-deps chromium
+        timeout-minutes: 10
+      - run: bun run test:e2e
+
   build:
     name: ${{ matrix.name }}
-    needs: check
-    if: github.event_name != 'pull_request'
+    needs: [check, check-windows, check-web]
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
     runs-on: ${{ matrix.os }}
     env:
       RUSTFLAGS: "-Dwarnings"
@@ -105,9 +153,11 @@ jobs:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.3
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
       - run: bun install --frozen-lockfile
         working-directory: src
       - name: Install Linux Tauri dependencies
@@ -175,7 +225,7 @@ jobs:
           mkdir -p "$mount_point"
           # The DMG license agreement cancels a non-interactive attach. The
           # helper answers it, and this watchdog covers a helper that itself hangs.
-          python3 -B .github/tools/attach-macos-dmg.py "$mount_point" "${dmgs[0]}" &
+          python3 -B scripts/release/attach-macos-dmg.py "$mount_point" "${dmgs[0]}" &
           attach_pid=$!
           (
             sleep 120
@@ -258,7 +308,7 @@ jobs:
   publish-release:
     name: Publish verified release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -351,7 +401,7 @@ jobs:
   publish-updater-manifest:
     name: Publish updater manifest
     needs: publish-release
-    if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -369,7 +419,7 @@ jobs:
           if (-not $releaseNotes) {
             throw "Release notes are empty"
           }
-          .github/tools/publish-updater-manifest.ps1 `
+          scripts/release/publish-updater-manifest.ps1 `
             -TagName "${{ github.ref_name }}" `
             -Repository "${{ github.repository }}" `
             -ArtifactsDir "release-artifacts" `

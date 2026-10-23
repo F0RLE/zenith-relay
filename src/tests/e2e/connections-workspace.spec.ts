@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "../bun-playwright";
-import { installTauriMock } from "./tauri-mock";
+import { installTauriMock, type MockOptions } from "./tauri-mock";
 
 async function openConnections(page: Page) {
   await page.goto("/");
@@ -9,6 +9,76 @@ async function openConnections(page: Page) {
 
 async function commands(page: Page) {
   return page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
+}
+
+for (const state of [
+  { label: "Ready for requests", options: {} },
+  { label: "Ready for requests", options: { poolMembers: false } },
+  { label: "Disabled", options: { sourceEnabled: false } },
+  { label: "Key not saved", options: { sourceSecretAvailable: false } },
+  { label: "Unavailable", options: { sourceOperationalStatus: "unavailable" } },
+  { label: "Finishing requests", options: { sourceDraining: true } },
+  { label: "Source error", options: { sourceErrorCode: "HTTP 401 synthetic failure" } },
+] satisfies Array<{ label: string; options: MockOptions }>) {
+  test(`API source shows ${state.label} with ${JSON.stringify(state.options)}`, async ({ page }) => {
+    await installTauriMock(page, { populated: true, ...state.options });
+    await openConnections(page);
+    await page.getByRole("tab", { name: "Sources", exact: true }).click();
+    const card = page.locator(".source-card").first();
+    await card.locator(".account-kind-icon").hover();
+    await expect(page.getByRole("tooltip")).toContainText(state.label);
+    await expect(page.getByRole("tooltip")).not.toContainText("In rotation");
+    if ("sourceEnabled" in state.options || "sourceSecretAvailable" in state.options) {
+      await expect(card.getByRole("button", { name: "Launch", exact: true })).toBeDisabled();
+    }
+    expect((await commands(page)).some((call) => call.command.startsWith("launch_"))).toBe(false);
+  });
+}
+
+for (const locale of ["ru", "en"] as const) {
+  for (const theme of ["light", "dark"] as const) {
+    test(`compact proxy cards retain actions and selection ${locale} ${theme}`, async ({ page }) => {
+      const russian = locale === "ru";
+      await installTauriMock(page, { locale, theme, populated: true, proxyCount: 3, accountCount: 3 });
+      await page.goto("/");
+      await page.getByRole("button", { name: russian ? "Подключения" : "Connections", exact: true }).click();
+      await page.getByRole("tab", { name: russian ? "Прокси" : "Proxies", exact: true }).click();
+      const cards = page.locator(".proxy-storage-row.account-card");
+      await expect(cards).toHaveCount(3);
+      const card = cards.first();
+      await expect(card.locator(".account-card-actions button")).toHaveCount(2);
+      const selection = card.locator(".account-select-button");
+      await selection.click();
+      await expect(selection).toHaveAttribute("aria-pressed", "true");
+      await expect(card).toHaveClass(/selected/);
+      await selection.click();
+      await expect(selection).toHaveAttribute("aria-pressed", "false");
+      await expect(card.getByRole("button", { name: russian ? "Часовой пояс прокси" : "Proxy timezone", exact: true })).toHaveCount(0);
+      await card.locator(".account-row-menu summary").click();
+      await expect(page.getByRole("menuitem")).toHaveText(russian ? "Удалить" : "Delete");
+      await page.keyboard.press("Escape");
+      await expect(card).toContainText("203.0.113.42");
+      await expect(card).not.toContainText("Europe/Amsterdam");
+      await expect(card.locator(".proxy-region")).toContainText(russian ? "Нидерланды" : "Netherlands");
+      await expect(card.locator(".account-kind-icon")).toHaveAttribute("data-status", "ready");
+      await expect(card.locator(".proxy-diagnostic-status")).toHaveCount(0);
+      await expect(cards.nth(1).locator(".account-kind-icon")).toHaveAttribute("data-status", "ready");
+      await expect(cards.nth(1)).not.toContainText("Europe/Amsterdam");
+      await expect(cards.locator(".proxy-storage-location, .proxy-storage-timezone.unset, .proxy-storage-bindings > small")).toHaveCount(0);
+      const boxes = await cards.evaluateAll((elements) => elements.map((element) => {
+        const box = element.getBoundingClientRect();
+        const footer = element.querySelector("footer")!.getBoundingClientRect();
+        const header = element.querySelector(".account-card-main")!.getBoundingClientRect();
+        return { top: box.top, headerBottom: header.bottom, bottom: footer.bottom, width: box.width };
+      }));
+      expect(boxes.every((box) => box.top === boxes[0]!.top && box.headerBottom === boxes[0]!.headerBottom && box.bottom === boxes[0]!.bottom && box.width < 400)).toBe(true);
+      await page.mouse.move(1, 1);
+      await page.screenshot({ path: `output/playwright/proxy-cards-${locale}-${theme}.png`, animations: "disabled" });
+      const calls = await commands(page);
+      expect(calls.filter((call) => call.command === "check_local_stored_proxy")).toHaveLength(3);
+      expect(calls.some((call) => ["set_local_stored_proxy_accounts", "set_local_account_proxy"].includes(call.command))).toBe(false);
+    });
+  }
 }
 
 test("proxy action cards disable unavailable choices without applying changes", async ({ page }) => {
@@ -27,7 +97,7 @@ test("proxy action cards disable unavailable choices without applying changes", 
   await custom.focus();
   await page.keyboard.press("Enter");
   await expect(custom).toBeChecked();
-  await expect(dialog.getByLabel("HTTP(S) proxy")).toBeVisible();
+  await expect(dialog.getByLabel("HTTP(S) proxy", { exact: true })).toBeVisible();
   await expect(dialog.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
   expect((await commands(page)).some((call) => call.command === "set_local_account_proxy")).toBe(false);
 });
@@ -54,28 +124,55 @@ test("proxy action cards retain a selected stored endpoint before saving", async
   expect((await commands(page)).findLast((call) => call.command === "assign_local_stored_proxy")?.args).toEqual({ input: { accountId: "account_synthetic", proxyId: "proxy_synthetic_2" } });
 });
 
-test("proxy checks are explicit, show observed egress, and keep account assignments", async ({ page }) => {
-  await installTauriMock(page, { populated: true, proxyCount: 2, proxyCheckDelayMs: 500 });
+test("proxy checks automatically detect timezone, show observed egress, and keep account assignments", async ({ page }) => {
+  await installTauriMock(page, { populated: true, proxyCount: 2, proxyCheckDelayMs: 1500 });
   await openConnections(page);
   await page.getByRole("tab", { name: "Proxies" }).click();
   const row = page.locator(".proxy-storage-row").first();
-  await expect(row).toContainText("Declared: United States");
-  await expect(row).toContainText("Not checked yet");
-  expect((await commands(page)).some((call) => call.command === "check_local_stored_proxy")).toBe(false);
-  await row.getByRole("button", { name: "Test proxy", exact: true }).hover();
-  await expect(page.getByRole("tooltip")).toHaveText("Test proxy");
-  await row.getByRole("button", { name: "Test proxy", exact: true }).click();
+  const status = row.locator(".account-kind-icon");
+  await expect(row).not.toContainText("Declared:");
+  await expect(row).not.toContainText("Not checked yet");
   await expect(row.getByRole("button", { name: "Test proxy", exact: true })).toBeDisabled();
-  await expect(row).toContainText("Checking connection");
+  await expect(status).toHaveAttribute("aria-label", "Checking connection…");
+  await expect(status).toHaveAttribute("data-status", "info");
   await expect(row).toContainText("203.0.113.42");
   await expect(row).toContainText("Netherlands");
+  await expect(row).not.toContainText("Europe/Amsterdam");
   await expect(row).toContainText("184 ms");
+  await expect(status).toHaveAttribute("data-status", "ready");
+  await expect(status).toHaveAttribute("aria-label", "Connection works");
+  await expect(row.locator(".proxy-diagnostic-status")).toHaveCount(0);
+  await status.hover();
+  await expect(page.getByRole("tooltip")).toHaveText("Connection works");
+  await row.locator(".proxy-diagnostic").hover();
+  await expect(page.getByRole("tooltip")).toContainText("Checked:");
+  await expect(page.getByRole("tooltip")).toContainText("Europe/Amsterdam");
   const calls = await commands(page);
-  expect(calls.filter((call) => call.command === "check_local_stored_proxy")).toEqual([{ command: "check_local_stored_proxy", args: { proxyId: "proxy_synthetic_1" } }]);
+  expect(calls.filter((call) => call.command === "check_local_stored_proxy")).toEqual([
+    { command: "check_local_stored_proxy", args: { proxyId: "proxy_synthetic_1" } },
+    { command: "check_local_stored_proxy", args: { proxyId: "proxy_synthetic_2" } },
+  ]);
   expect(calls.some((call) => ["set_local_account_proxy", "set_local_stored_proxy_accounts", "start_local_gateway"].includes(call.command))).toBe(false);
   await page.getByRole("tab", { name: "Sources" }).click();
   await page.getByRole("tab", { name: "Proxies" }).click();
   await expect(page.locator(".proxy-storage-row").first()).toContainText("203.0.113.42");
+});
+
+test("automatic proxy checks reserve queued entries and do not loop on tab changes", async ({ page }) => {
+  await installTauriMock(page, { populated: true, proxyCount: 5, proxyCheckDelayMs: 200 });
+  await openConnections(page);
+  await page.getByRole("tab", { name: "Proxies" }).click();
+  await page.getByRole("tab", { name: "Sources" }).click();
+  await page.getByRole("tab", { name: "Proxies" }).click();
+  await expect(page.locator('.proxy-diagnostic[data-state="success"]')).toHaveCount(5);
+  const checkedIds = async () => (await commands(page))
+    .filter((call) => call.command === "check_local_stored_proxy")
+    .map((call) => call.args["proxyId"]).sort();
+  expect(await checkedIds()).toEqual(Array.from({ length: 5 }, (_, index) => `proxy_synthetic_${index + 1}`));
+  await page.getByRole("tab", { name: "Sources" }).click();
+  await page.getByRole("tab", { name: "Proxies" }).click();
+  await expect(page.locator('.proxy-diagnostic[data-state="success"]')).toHaveCount(5);
+  expect(await checkedIds()).toHaveLength(5);
 });
 
 test("import checks only new proxies and retains them after a failed check", async ({ page }) => {
@@ -85,7 +182,7 @@ test("import checks only new proxies and retains them after a failed check", asy
   await page.getByRole("button", { name: "Import", exact: true }).first().click();
   const dialog = page.getByRole("dialog", { name: "Import proxies" });
   await dialog.getByLabel("Proxy list").fill("proxy-new.example.test:1234:user:synthetic-password\nproxy-new.example.test:1234:user:synthetic-password");
-  await expect(dialog.getByLabel("Check after adding")).toBeChecked();
+  await expect(dialog.getByLabel("Check after adding")).toHaveCount(0);
   await dialog.getByRole("button", { name: "Import 2", exact: true }).click();
   await expect(dialog).toContainText("Added 1; skipped 1 duplicate(s).");
   await expect(dialog).toContainText("Check failed");
@@ -93,22 +190,51 @@ test("import checks only new proxies and retains them after a failed check", asy
   await expect(dialog).not.toContainText("synthetic-password");
   await dialog.getByRole("button", { name: "Done", exact: true }).click();
   await expect(page.locator(".proxy-storage-row")).toHaveCount(1);
-  await expect(page.locator(".proxy-storage-row")).toContainText("Check failed");
+  await expect(page.locator(".proxy-storage-row .account-kind-icon")).toHaveAttribute("aria-label", "Check failed");
+  await expect(page.locator(".proxy-storage-row .account-kind-icon")).toHaveAttribute("data-status", "error");
+  await expect(page.locator(".proxy-storage-row")).toContainText("No response within 12 seconds");
   expect((await commands(page)).filter((call) => call.command === "check_local_stored_proxy")).toHaveLength(1);
 });
 
-test("proxy import can skip checks and complete without diagnostic requests", async ({ page }) => {
+test("proxy import determines timezone without extra controls or a manual save", async ({ page }) => {
   await installTauriMock(page, { populated: true, proxyCount: 0 });
   await openConnections(page);
   await page.getByRole("tab", { name: "Proxies" }).click();
   await page.getByRole("button", { name: "Import", exact: true }).first().click();
   const dialog = page.getByRole("dialog", { name: "Import proxies" });
   await dialog.getByLabel("Proxy list").fill("proxy-new.example.test:1234:user:synthetic-password");
-  await dialog.getByLabel("Check after adding").uncheck();
+  await expect(dialog.getByLabel("Check after adding")).toHaveCount(0);
   await dialog.getByRole("button", { name: "Import 1", exact: true }).click();
-  await expect(dialog).toContainText("Not checked yet");
-  expect((await commands(page)).some((call) => call.command === "check_local_stored_proxy")).toBe(false);
+  await expect(dialog).toContainText("Connection works");
+  await dialog.getByRole("button", { name: "Done", exact: true }).click();
+  await page.locator(".proxy-storage-row .proxy-diagnostic").first().hover();
+  await expect(page.getByRole("tooltip")).toContainText("Europe/Amsterdam");
+  expect((await commands(page)).filter((call) => call.command === "check_local_stored_proxy")).toHaveLength(1);
 });
+
+for (const mode of ["local"] as const) {
+  test(`sources retain hidden selections and change only selected pool members in ${mode}`, async ({ page }) => {
+    await installTauriMock(page, { mode, locale: "en", populated: true, sourceCount: 3 });
+    await openConnections(page);
+    await page.getByRole("tab", { name: "Sources", exact: true }).click();
+    const cards = page.locator(".source-card");
+    await expect(cards).toHaveCount(3);
+    await cards.nth(0).getByRole("button", { name: "Select Example compatible API" }).click();
+    await cards.nth(1).getByRole("button", { name: "Select Backup API 1" }).click();
+    await expect(page.locator(".sources-selection-toolbar")).toContainText("Selected: 2");
+    await page.getByRole("textbox", { name: "Search", exact: true }).fill("Backup API 2");
+    await expect(cards).toHaveCount(1);
+    await expect(page.locator(".sources-selection-toolbar")).toContainText("Selected: 2");
+    await page.locator(".sources-selection-toolbar").getByRole("button", { name: "Remove from pool", exact: true }).click();
+    await page.getByRole("textbox", { name: "Search", exact: true }).fill("");
+    await expect(cards).toHaveCount(3);
+    await expect(cards.filter({ hasText: "Example compatible API" })).toHaveAttribute("data-in-pool", "false");
+    await expect(cards.filter({ hasText: "Backup API 1" })).toHaveAttribute("data-in-pool", "false");
+    await expect(cards.filter({ hasText: "Backup API 2" })).toHaveAttribute("data-in-pool", "true");
+    await page.getByRole("button", { name: "Clear selection", exact: true }).click();
+    await expect(page.locator(".sources-selection-toolbar")).toHaveCount(0);
+  });
+}
 
 async function expectDialogFits(page: Page) {
   const dialog = page.getByRole("dialog");
@@ -140,17 +266,26 @@ for (const theme of ["light", "dark"] as const) {
       await capture("proxy-account");
       await page.getByRole("dialog").getByRole("button", { name: "Отмена", exact: true }).click();
       await page.getByRole("tab", { name: "Источники API", exact: true }).click();
-      expect(await page.locator(".connection-list-wrap").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      expect(await page.locator(".source-cards").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      if (viewport.width > 620) {
+        const alignment = await page.locator(".source-card").evaluateAll((elements) => elements.map((element) => ({
+          header: element.querySelector(".account-card-main")!.getBoundingClientRect().bottom,
+          footer: element.querySelector("footer")!.getBoundingClientRect().bottom,
+        })));
+        expect(alignment.every((card) => card.header === alignment[0]!.header && card.footer === alignment[0]!.footer)).toBe(true);
+      }
       await capture("sources");
-      await page.locator(".source-table tbody tr").first().getByRole("button", { name: "Изменить", exact: true }).click();
+      await page.locator(".source-card").first().getByRole("button", { name: "Изменить", exact: true }).click();
       await expectDialogFits(page);
       await capture("source-editor");
       await page.getByRole("dialog").getByRole("tab").nth(1).click();
       await page.locator(".source-price-group > summary").first().click();
       await expectDialogFits(page);
       await capture("source-prices");
-      await page.getByRole("dialog").getByRole("button", { name: "Отмена", exact: true }).click();
+      await page.getByRole("dialog").getByRole("button", { name: "Закрыть", exact: true }).click();
       await page.getByRole("tab", { name: "Прокси", exact: true }).click();
+      await expect(page.locator(".proxy-storage-row.account-card")).toHaveCount(3);
+      expect(await page.locator(".proxy-storage-list").evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(" ").length)).toBe(viewport.width <= 620 ? 1 : viewport.width <= 900 ? 2 : 3);
       await page.locator(".proxy-storage-row").first().getByRole("button", { name: "Проверить прокси", exact: true }).click();
       await expect(page.locator(".proxy-storage-row").first()).toContainText("203.0.113.42");
       expect(await page.locator(".proxy-storage-row").evaluateAll((rows) => rows.every((row) => row.scrollWidth <= row.clientWidth))).toBe(true);

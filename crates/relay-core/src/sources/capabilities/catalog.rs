@@ -2,12 +2,12 @@ use super::endpoint_type;
 use super::*;
 
 pub(crate) fn catalog_capabilities(
-    body: &Value,
+    catalog_response: &Value,
     checked_at_ms: u64,
 ) -> Vec<ModelEndpointCapability> {
-    let Some(models) = body
+    let Some(models) = catalog_response
         .get("data")
-        .or_else(|| body.get("models"))
+        .or_else(|| catalog_response.get("models"))
         .and_then(Value::as_array)
     else {
         return Vec::new();
@@ -48,6 +48,15 @@ pub(crate) fn catalog_capabilities(
         } else {
             &WireApi::ALL
         };
+        let declared_service_tiers = model
+            .get("service_tiers")
+            .and_then(Value::as_array)
+            .or_else(|| {
+                model
+                    .get("supported_service_tiers")
+                    .and_then(Value::as_array)
+            })
+            .map(|_| crate::catalog::reference_service_tiers(model));
         for &upstream_wire_api in advertised_protocols {
             let status = if endpoints.is_none() {
                 CapabilityStatus::Unknown
@@ -58,7 +67,7 @@ pub(crate) fn catalog_capabilities(
             };
             // Participant catalogs identify endpoints, not model capabilities.
             // Semantic fields come from the shared trusted model catalog.
-            if endpoints.is_none() {
+            if endpoints.is_none() && declared_service_tiers.is_none() {
                 continue;
             }
             capabilities.push(ModelEndpointCapability {
@@ -69,6 +78,7 @@ pub(crate) fn catalog_capabilities(
                 checked_at_ms,
                 features: BTreeMap::new(),
                 reasoning_efforts: Vec::new(),
+                service_tiers: declared_service_tiers.clone(),
             });
         }
     }

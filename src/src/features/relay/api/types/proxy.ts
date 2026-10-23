@@ -7,9 +7,12 @@ export type ProxyPoolEntry = {
   id: string;
   endpoint: string;
   assignedAccountIds: string[];
+  /** Declared in the proxy username; observed geography belongs to lastCheck. */
   countryCode: string | null;
   region: string | null;
   createdAtMs: number;
+  timezone?: string | null;
+  lastCheck?: ProxyCheckResult | null;
 };
 
 export type ProxyPoolSummary = {
@@ -27,6 +30,11 @@ export type ProxyPoolImportResult = {
 };
 
 export type ProxyCheckResult = {
+  timezone?: string | null;
+  region?: string | null;
+  city?: string | null;
+  locationSource?: "cloudflare" | "ipwhois" | null;
+  locationErrorCode?: string | null;
   proxyId: string;
   checkedAtMs: number;
   elapsedMs: number;

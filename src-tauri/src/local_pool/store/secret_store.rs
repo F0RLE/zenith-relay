@@ -68,9 +68,9 @@ pub fn initialize(vault_root: &Path, migration_root: &Path) -> Result<()> {
         .map_err(|_| LocalPoolError::new(ErrorCode::Io, "failed to initialize secret vault"))
 }
 
-pub fn save(secret_ref: &str, value: &str) -> Result<()> {
+pub fn save(secret_ref: &str, secret_value: &str) -> Result<()> {
     validate_secret_ref(secret_ref)?;
-    if value.trim().is_empty() {
+    if secret_value.trim().is_empty() {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
             "secret value must not be empty",
@@ -79,13 +79,13 @@ pub fn save(secret_ref: &str, value: &str) -> Result<()> {
     if let Some(configured) = VAULT.get() {
         configured
             .vault
-            .save(secret_ref, value)
+            .save(secret_ref, secret_value)
             .map_err(vault_error)?;
         let _ = delete_keyring_secret(secret_ref);
         bump_generation();
         return Ok(());
     }
-    save_keyring_secret(secret_ref, value)?;
+    save_keyring_secret(secret_ref, secret_value)?;
     bump_generation();
     Ok(())
 }
@@ -95,18 +95,18 @@ pub fn load(secret_ref: &str) -> Result<Option<String>> {
     let Some(configured) = VAULT.get() else {
         return load_keyring_secret(secret_ref);
     };
-    if let Some(value) = configured.vault.load(secret_ref).map_err(vault_error)? {
-        return Ok(Some(value));
+    if let Some(vault_secret) = configured.vault.load(secret_ref).map_err(vault_error)? {
+        return Ok(Some(vault_secret));
     }
-    let Some(value) = load_keyring_secret(secret_ref)? else {
+    let Some(keyring_secret) = load_keyring_secret(secret_ref)? else {
         return Ok(None);
     };
     configured
         .vault
-        .save(secret_ref, &value)
+        .save(secret_ref, &keyring_secret)
         .map_err(vault_error)?;
     let _ = delete_keyring_secret(secret_ref);
-    Ok(Some(value))
+    Ok(Some(keyring_secret))
 }
 
 /// Presence check for snapshots. A vault hit does not clone the secret.
@@ -221,8 +221,8 @@ fn load_or_create_vault_key(vault_root: &Path) -> Result<[u8; 32]> {
     Ok(key)
 }
 
-fn decode_vault_key(value: &str) -> Result<[u8; 32]> {
-    let bytes = URL_SAFE_NO_PAD.decode(value.trim()).map_err(|_| {
+fn decode_vault_key(encoded_key: &str) -> Result<[u8; 32]> {
+    let bytes = URL_SAFE_NO_PAD.decode(encoded_key.trim()).map_err(|_| {
         LocalPoolError::new(
             ErrorCode::RecoveryRequired,
             "encrypted secret vault master key is invalid",
@@ -236,33 +236,33 @@ fn decode_vault_key(value: &str) -> Result<[u8; 32]> {
     })
 }
 
-fn save_keyring_secret(secret_ref: &str, value: &str) -> Result<()> {
-    save_named_secret(&keyring_user(secret_ref)?, value)
+fn save_keyring_secret(secret_ref: &str, secret_value: &str) -> Result<()> {
+    save_named_secret(&keyring_user(secret_ref)?, secret_value)
         .map_err(|error| LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error))
 }
 
 fn load_keyring_secret(secret_ref: &str) -> Result<Option<String>> {
-    if let Some(value) = load_named_secret_result(&keyring_user(secret_ref)?)
+    if let Some(current_keyring_secret) = load_named_secret_result(&keyring_user(secret_ref)?)
         .map_err(|error| LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error))?
     {
-        return Ok(Some(value));
+        return Ok(Some(current_keyring_secret));
     }
     let legacy_user = legacy_keyring_user(secret_ref)?;
-    let Some(value) = load_named_secret_result(&legacy_user)
+    let Some(legacy_keyring_secret) = load_named_secret_result(&legacy_user)
         .map_err(|error| LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error))?
     else {
         return Ok(None);
     };
-    save_keyring_secret(secret_ref, &value)?;
+    save_keyring_secret(secret_ref, &legacy_keyring_secret)?;
     delete_named_secret_result(&legacy_user)
         .map_err(|error| LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error))?;
-    Ok(Some(value))
+    Ok(Some(legacy_keyring_secret))
 }
 
 fn delete_keyring_secret(secret_ref: &str) -> Result<()> {
-    let current = delete_named_secret_result(&keyring_user(secret_ref)?);
+    let primary_delete_result = delete_named_secret_result(&keyring_user(secret_ref)?);
     let legacy = delete_named_secret_result(&legacy_keyring_user(secret_ref)?);
-    current
+    primary_delete_result
         .and(legacy)
         .map_err(|error| LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error))
 }

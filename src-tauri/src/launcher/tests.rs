@@ -15,6 +15,64 @@ use super::process::{
 use super::process::{process_stop_is_stable, running_target_pids};
 
 #[test]
+fn launch_confirmation_requires_a_running_desktop() {
+    for product in ["OpenCode", "Claude Desktop"] {
+        assert!(
+            super::process::wait_for_application_start(|| true, Duration::ZERO, product).is_ok()
+        );
+        let error = super::process::wait_for_application_start(|| false, Duration::ZERO, product)
+            .unwrap_err();
+        assert!(error.contains(product));
+        assert!(error.contains("saved profile was kept"));
+    }
+    let mut probes = 0;
+    assert!(super::process::wait_for_application_start(
+        || {
+            probes += 1;
+            probes == 2
+        },
+        Duration::from_secs(2),
+        "OpenCode",
+    )
+    .is_ok());
+    assert_eq!(probes, 2);
+}
+
+#[test]
+fn claude_helpers_are_neither_running_clients_nor_stop_targets() {
+    let executable = Path::new("C:/Users/Test/Claude/app-1.0/Claude.exe");
+    assert!(super::process::is_claude_desktop_process_identity(
+        Some(executable),
+        &["Claude.exe"]
+    ));
+    for role in ["renderer", "gpu-process", "utility", "crashpad-handler"] {
+        assert!(!super::process::is_claude_desktop_process_identity(
+            Some(executable),
+            &[format!("--type={role}")]
+        ));
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn codex_name_alone_does_not_authorize_stopping_a_process() {
+    for executable in [None, Some(Path::new(r"C:\Other\OpenAI.Codex.exe"))] {
+        assert!(!is_codex_process_identity(
+            "OpenAI.Codex.exe",
+            executable,
+            &[""]
+        ));
+    }
+    assert!(is_codex_process_identity(
+        "OpenAI.Codex.exe",
+        Some(Path::new(
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_test\app\OpenAI.Codex.exe"
+        )),
+        &[""]
+    ));
+}
+
+#[test]
 fn unix_desktop_paths_do_not_include_terminal_clients_or_helpers() {
     assert!(is_macos_app_executable(
         Path::new("/Applications/Codex.app/Contents/MacOS/Codex"),
@@ -61,11 +119,26 @@ fn windows_opencode_desktop_path_excludes_cli_installation() {
     assert!(is_windows_opencode_desktop_path(Path::new(
         r"C:\Users\test\AppData\Local\Programs\@opencode-aidesktop\opencode.exe"
     )));
+    assert!(is_windows_opencode_desktop_path(Path::new(
+        r"D:\Apps\OpenCode\OpenCode.exe"
+    )));
+    assert!(is_windows_opencode_desktop_path(Path::new(
+        r"D:\Apps\OpenCode Beta\OpenCode Beta.exe"
+    )));
+    assert!(!is_windows_opencode_desktop_path(Path::new(
+        r"D:\Apps\OpenCode\resources\opencode.exe"
+    )));
+    assert!(!is_windows_opencode_desktop_path(Path::new(
+        r"D:\Apps\Other\opencode.exe"
+    )));
     assert!(!is_windows_opencode_desktop_path(Path::new(
         r"C:\Users\test\AppData\Local\Programs\OpenCode\bin\opencode.exe"
     )));
     assert!(!is_windows_opencode_desktop_path(Path::new(
         r"C:\Users\test\.opencode\bin\opencode.exe"
+    )));
+    assert!(!is_windows_opencode_desktop_path(Path::new(
+        r"C:\Users\test\scoop\apps\opencode\current\opencode.exe"
     )));
 }
 

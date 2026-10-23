@@ -4,11 +4,27 @@ import {
   accountQuotaRefreshState,
   accountErrorTranslationKey,
   accountSurfaceTone,
+  canLaunchCodexAccount,
   currentAccountErrorCode,
   isCodexOauthAccountEligible,
   operationalStatusTone,
   transientCandidateTone,
 } from "../src/features/relay/accountStatus";
+
+test("local recovery blocks direct launch even with apparently usable credentials", () => {
+  const pending = account({ recoveryRequired: true });
+  expect(canLaunchCodexAccount(pending)).toBe(false);
+  expect(isCodexOauthAccountEligible(pending)).toBe(false);
+  expect(accountSurfaceTone(pending)).toBe("info");
+});
+
+test("SIWC uses the pool rather than native credential injection and explains missing consent", () => {
+  const siwc = account({ oauthClientKind: "siwc", lastErrorCode: "siwc_plan_use_disabled" });
+  expect(canLaunchCodexAccount(siwc)).toBe(false);
+  expect(isCodexOauthAccountEligible(siwc)).toBe(false);
+  expect(currentAccountErrorCode(siwc)).toBe("siwc_plan_use_disabled");
+  expect(accountErrorTranslationKey("siwc_plan_use_disabled")).toBe("accounts.errors.siwcPlanUseDisabled");
+});
 
 function account(overrides: Partial<AccountSummary> = {}): AccountSummary {
   return {
@@ -18,8 +34,8 @@ function account(overrides: Partial<AccountSummary> = {}): AccountSummary {
     enabled: true,
     inPool: true,
     draining: false,
-    authState: { state: "ready" },
-    health: "ready",
+    authState: { state: "active" },
+    health: "healthy",
     operationalStatus: "rotation",
     models: [],
     allowedModels: [],
@@ -36,7 +52,32 @@ function account(overrides: Partial<AccountSummary> = {}): AccountSummary {
   };
 }
 
+test("SIWC without quota data is not left waiting and preserves real refresh and auth states", () => {
+  const siwc = account({ oauthClientKind: "siwc", quotaRefreshStatus: "pending" });
+  expect(accountQuotaRefreshState(siwc)).toBe("not_available");
+  expect(accountSurfaceTone(siwc)).toBe("ready");
+  expect(accountQuotaRefreshState({ ...siwc, quotaRefreshStatus: "updated" })).toBe("not_available");
+  expect(accountQuotaRefreshState({ ...siwc, quotaRefreshStatus: "refreshing" })).toBe("refreshing");
+  expect(accountQuotaRefreshState({ ...siwc, quotaRefreshStatus: "failed" })).toBe("failed");
+  expect(accountQuotaRefreshState({
+    ...siwc, quotaRefreshStatus: "updated", quota: {
+      ...siwc.quota,
+      primary: { kind: "primary", availableBasisPoints: 7500, explicitlyFull: false, resetAtMs: 5000, windowMinutes: 300, observedAtMs: 1 },
+    },
+  })).toBe("updated");
+  expect(accountQuotaRefreshState({ ...siwc, authState: { state: "requires_reauth", reason: "invalid_grant" } })).toBe("requires_reauth");
+  expect(accountQuotaRefreshState({ ...siwc, oauthClientKind: "codex" })).toBe("pending");
+});
+
 describe("account status policy", () => {
+  test("SIWC quota wait is a warning without inventing missing quota counters", () => {
+    const waiting = account({ oauthClientKind: "siwc", operationalStatus: "quotaWait", quotaRefreshStatus: "pending" });
+    expect(accountSurfaceTone(waiting)).toBe("warning");
+    expect(currentAccountErrorCode(waiting)).toBeNull();
+    expect(accountQuotaRefreshState(waiting)).toBe("not_available");
+    expect(waiting.quota.primary).toBeUndefined();
+  });
+
   test("maps operational and transient scheduler state without treating cooldown as failure", () => {
     expect(operationalStatusTone("rotation")).toBe("ready");
     expect(operationalStatusTone("quotaWait")).toBe("warning");
@@ -48,7 +89,10 @@ describe("account status policy", () => {
 
   test("keeps account eligibility and error precedence explicit", () => {
     expect(isCodexOauthAccountEligible(account({ operationalStatus: "quotaWait" }))).toBeTrue();
-    expect(isCodexOauthAccountEligible(account({ inPool: false }))).toBeFalse();
+    expect(isCodexOauthAccountEligible(account({ inPool: false }))).toBeTrue();
+    expect(isCodexOauthAccountEligible(account({ oauthClientKind: "excel_bps" }))).toBeFalse();
+    expect(isCodexOauthAccountEligible(account({ draining: true }))).toBeFalse();
+    expect(accountErrorTranslationKey("basis_points_free_account_unsupported")).toBe("accounts.errors.basisPointsFreeUnsupported");
     expect(currentAccountErrorCode(account({ operationalStatus: "quotaWait", routingBlockReason: "quota_exhausted" }))).toBeNull();
     expect(currentAccountErrorCode(account({ quotaRefreshStatus: "failed", quota: { error: { code: "quota_timeout" } } }))).toBe("quota_timeout");
     expect(currentAccountErrorCode(account({ authState: { state: "requires_reauth", reason: "expired" } }))).toBe("auth_expired");
@@ -66,6 +110,27 @@ describe("account status policy", () => {
       quotaRefreshStatus: "updated",
       authState: { state: "requires_reauth", reason: "reused_refresh_token" },
     }))).toBe("updated");
+  });
+
+  test("disables direct ChatGPT launch for terminal account states", () => {
+    expect(canLaunchCodexAccount(account())).toBeTrue();
+    expect(canLaunchCodexAccount(account({
+      authState: { state: "requires_reauth", reason: "invalid_grant" },
+      routingBlockReason: "reauth_required",
+    }))).toBeFalse();
+    expect(canLaunchCodexAccount(account({ enabled: false, routingBlockReason: "disabled" }))).toBeFalse();
+    expect(canLaunchCodexAccount(account({ proxyAvailable: false, routingBlockReason: "proxy_unavailable" }))).toBeFalse();
+    expect(canLaunchCodexAccount(account({ clientAuthStatus: "login_required" }))).toBeFalse();
+    expect(canLaunchCodexAccount(account({ health: "unhealthy", routingBlockReason: "account_unhealthy" }))).toBeFalse();
+    expect(canLaunchCodexAccount(account({ inPool: false, routingBlockReason: "not_in_pool" }))).toBeTrue();
+  });
+
+  test("does not surface an expired subscription as a generic account error", () => {
+    expect(currentAccountErrorCode(account({
+      operationalStatus: "unavailable",
+      routingBlockReason: "subscription_expired",
+      subscription: { planType: "plus", activeUntilMs: 1, status: "expired", updatedAtMs: 2 },
+    }))).toBeNull();
   });
 
   test("keeps the account failure visible when quota monitoring also fails", () => {
@@ -89,9 +154,11 @@ describe("account status policy", () => {
     expect(accountErrorTranslationKey("upstream_forbidden")).toBe("usage.errorCategories.upstream_forbidden");
     expect(accountErrorTranslationKey("models_forbidden")).toBe("accounts.importFailureReasons.modelsForbidden");
     expect(accountErrorTranslationKey("models_prepare")).toBe("accounts.errors.models");
-    expect(accountErrorTranslationKey("models_transport")).toBe("accounts.errors.models");
+    expect(accountErrorTranslationKey("models_transport")).toBe("accounts.errors.modelsConnection");
+    expect(accountErrorTranslationKey("proxy_unavailable")).toBe("accounts.errors.connection");
     expect(accountErrorTranslationKey("quota_forbidden")).toBe("accounts.errors.quota");
-    expect(accountErrorTranslationKey("subscription_forbidden")).toBe("accounts.errors.unknown");
+    expect(accountErrorTranslationKey("subscription_forbidden")).toBe("accounts.errors.blocked");
+    expect(accountErrorTranslationKey("checkpoint")).toBe("accounts.errors.verificationRequired");
     expect(accountErrorTranslationKey("deactivated_workspace")).toBe("accounts.errors.blocked");
     expect(accountErrorTranslationKey("account_blocked")).toBe("accounts.errors.blocked");
   });

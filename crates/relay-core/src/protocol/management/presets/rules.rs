@@ -18,7 +18,7 @@ where
 }
 
 pub(super) fn replace_preset_members<T, F>(
-    current: &mut [T],
+    existing_members: &mut [T],
     requested: &[T],
     id: F,
     kind: &str,
@@ -27,7 +27,7 @@ where
     T: Clone,
     F: Fn(&T) -> &String,
 {
-    let indexes = current
+    let indexes = existing_members
         .iter()
         .enumerate()
         .map(|(index, rule)| (id(rule).clone(), index))
@@ -38,7 +38,7 @@ where
             .get(member_id)
             .copied()
             .ok_or_else(|| format!("referenced {kind} {member_id} does not exist"))?;
-        current[index] = rule.clone();
+        existing_members[index] = rule.clone();
     }
     Ok(())
 }
@@ -49,14 +49,14 @@ pub(super) fn normalize_source_preset_rules(
     if rules.len() > super::MAX_PRESET_MEMBERS {
         return Err("configuration preset contains too many sources".into());
     }
-    let mut ids = BTreeSet::new();
+    let mut source_ids = BTreeSet::new();
     for rule in rules.iter_mut() {
         validate_preset_reference(&rule.id, "source")?;
         rule.name = rule.name.trim().to_string();
         rule.base_url = rule.base_url.trim().trim_end_matches('/').to_string();
         let valid_url =
             url::Url::parse(&rule.base_url).is_ok_and(|url| crate::is_http_endpoint(&url));
-        if !ids.insert(rule.id.clone())
+        if !source_ids.insert(rule.id.clone())
             || rule.weight == 0
             || rule.recovery_delay_seconds > crate::MAX_SOURCE_RECOVERY_DELAY_SECONDS
             || rule.name.is_empty()
@@ -98,10 +98,10 @@ pub(super) fn normalize_account_preset_rules(
     if rules.len() > super::MAX_PRESET_MEMBERS {
         return Err("configuration preset contains too many accounts".into());
     }
-    let mut ids = BTreeSet::new();
+    let mut account_ids = BTreeSet::new();
     for rule in rules.iter_mut() {
         validate_preset_reference(&rule.id, "account")?;
-        if !ids.insert(rule.id.clone())
+        if !account_ids.insert(rule.id.clone())
             || rule.weight == 0
             || invalid_preset_reference(&rule.identity_hint)
             || rule
@@ -120,17 +120,17 @@ pub(super) fn normalize_account_preset_rules(
     Ok(())
 }
 
-fn validate_preset_reference(value: &str, kind: &str) -> Result<(), String> {
-    if invalid_preset_reference(value) {
+fn validate_preset_reference(reference_value: &str, kind: &str) -> Result<(), String> {
+    if invalid_preset_reference(reference_value) {
         return Err(format!("configuration preset {kind} reference is invalid"));
     }
     Ok(())
 }
 
-fn invalid_preset_reference(value: &str) -> bool {
-    value.is_empty()
-        || value.len() > 128
-        || !value
+fn invalid_preset_reference(reference_value: &str) -> bool {
+    reference_value.is_empty()
+        || reference_value.len() > 128
+        || !reference_value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }

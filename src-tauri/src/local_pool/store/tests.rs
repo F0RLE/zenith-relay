@@ -3,11 +3,12 @@ use serde::Serialize;
 use std::fs;
 use std::path::Path;
 
+mod account_trash;
 mod refresh;
+mod retired_accounts;
 mod rotation_upgrade;
 mod source_refresh;
 use super::*;
-use crate::local_pool::models::{OwnershipOperationKind, OwnershipOperationPhase};
 use std::collections::{BTreeMap, BTreeSet};
 use std::{
     env,
@@ -38,7 +39,10 @@ fn fresh_store_is_versioned_and_restart_safe() {
     let root = temp_root();
     let store = LocalPoolStore::open(root.clone()).unwrap();
     assert_eq!(store.gateway().port, 14998);
-    assert_eq!(store.database().state_count().unwrap(), 9);
+    assert_eq!(store.database().state_count().unwrap(), 8);
+    for retired in ["remote_target", "ownership_operation"] {
+        assert!(store.database().state_json(retired).unwrap().is_none());
+    }
     assert!(root.join("data/database/relay.sqlite").exists());
     assert!(!root.join("data/metadata.json").exists());
     drop(store);
@@ -68,6 +72,7 @@ fn quota_and_routing_policy_survive_restart() {
             cache_write_5m_micro_usd_per_million: None,
             cache_write_1h_micro_usd_per_million: None,
             output_micro_usd_per_million: 7_500_000,
+            ..Default::default()
         },
     );
     store.replace_gateway(gateway).unwrap();
@@ -101,64 +106,9 @@ fn quota_and_routing_policy_survive_restart() {
             cache_write_5m_micro_usd_per_million: None,
             cache_write_1h_micro_usd_per_million: None,
             output_micro_usd_per_million: 7_500_000,
+            ..Default::default()
         })
     );
-    drop(reopened);
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn remote_target_survives_restart() {
-    let root = temp_root();
-    let target = RemoteTargetRecord {
-        origin: "https://relay.example.test".into(),
-        server_id: "server_1".into(),
-        identity_fingerprint: "sha256:test".into(),
-        server_version: "1.1.0".into(),
-        protocol_version: 1,
-        allow_insecure_http: false,
-        secret_ref: "remote:server_1".into(),
-        connected_at_ms: 123,
-    };
-    let mut store = LocalPoolStore::open(root.clone()).unwrap();
-    store.replace_remote_target(Some(target.clone())).unwrap();
-    drop(store);
-
-    let reopened = LocalPoolStore::open(root.clone()).unwrap();
-    assert_eq!(reopened.remote_target(), Some(&target));
-    drop(reopened);
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn ownership_operation_survives_restart_without_secret_material() {
-    let root = temp_root();
-    let operation = OwnershipOperationRecord {
-        id: "ownership_0123456789abcdef0123456789abcdef".into(),
-        kind: OwnershipOperationKind::MoveToRemote,
-        phase: OwnershipOperationPhase::MoveRemoteCommitted,
-        server_id: "server_1".into(),
-        local_account_ids: vec!["account_local".into()],
-        remote_account_ids: vec!["account_remote".into()],
-        created_remote_account_ids: vec!["account_remote".into()],
-        created_at_ms: 100,
-        updated_at_ms: 200,
-    };
-    let mut store = LocalPoolStore::open(root.clone()).unwrap();
-    store
-        .replace_ownership_operation(Some(operation.clone()))
-        .unwrap();
-    drop(store);
-
-    let reopened = LocalPoolStore::open(root.clone()).unwrap();
-    assert_eq!(reopened.ownership_operation(), Some(&operation));
-    let stored = reopened
-        .database()
-        .state_json(STATE_OWNERSHIP_OPERATION)
-        .unwrap()
-        .unwrap();
-    assert!(!stored.contains("access_token"));
-    assert!(!stored.contains("refresh_token"));
     drop(reopened);
     fs::remove_dir_all(root).unwrap();
 }
@@ -204,10 +154,26 @@ fn current_json_store_is_imported_once_and_removed() {
         &data.join("automations.json"),
         &AutomationRecords::default(),
     );
+    let target = serde_json::json!({
+        "origin": "https://retired.example.test", "secretRef": "synthetic-old-ref"
+    });
+    write_json(
+        &data.join("remote-target.json"),
+        &serde_json::json!({ "active": target }),
+    );
     rusqlite::Connection::open(data.join("usage.sqlite")).unwrap();
 
     let store = LocalPoolStore::open(root.clone()).unwrap();
     assert_eq!(store.accounts()[0].account.id, "imported");
+    let archived: serde_json::Value = serde_json::from_str(
+        &store
+            .database()
+            .state_json("retired_server_state")
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(archived["target"], target);
     assert!(data.join("database/relay.sqlite").exists());
     assert!(!data.join("usage.sqlite").exists());
     for name in LEGACY_STATE_FILES {
@@ -322,6 +288,7 @@ fn source_and_key_records_survive_restart_without_secret_values() {
             base_url: "https://example.test/v1".into(),
             secret_ref: "source:source_1".into(),
             pricing_provider: None,
+            proxy_id: None,
             official_provider_family: None,
             wire_api: WireApi::Responses,
             protocol_config: Default::default(),
@@ -341,6 +308,7 @@ fn source_and_key_records_survive_restart_without_secret_values() {
                     cache_write_5m_micro_usd_per_million: None,
                     cache_write_1h_micro_usd_per_million: None,
                     output_micro_usd_per_million: 2_000_000,
+                    ..Default::default()
                 },
             )]),
             last_used_at: None,
@@ -372,6 +340,7 @@ fn source_and_key_records_survive_restart_without_secret_values() {
             cache_write_5m_micro_usd_per_million: None,
             cache_write_1h_micro_usd_per_million: None,
             output_micro_usd_per_million: 2_000_000,
+            ..Default::default()
         })
     );
     assert_eq!(reopened.keys()[0].secret_ref, "key:key_1");
@@ -398,6 +367,7 @@ fn failed_transaction_preserves_all_state_and_memory() {
         base_url: "https://example.test/v1".into(),
         secret_ref: "source:source_1".into(),
         pricing_provider: None,
+        proxy_id: None,
         official_provider_family: None,
         wire_api: WireApi::Responses,
         protocol_config: Default::default(),
@@ -528,7 +498,7 @@ fn account_record(id: &str) -> LocalAccountRecord {
         },
         provider_family: Some("openai".into()),
         purchase_cost_micro_usd: None,
-        remote_location: None,
+        recovery: None,
         wire_api: WireApi::Responses,
         models: vec!["gpt-test".into()],
         discovered_models: None,

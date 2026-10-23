@@ -63,8 +63,57 @@ fn quota_reset_delay_uses_the_earliest_future_window_and_stable_jitter() {
 }
 
 #[test]
+fn quota_verification_accelerates_only_the_last_positive_percent() {
+    let mut quota = QuotaSnapshot {
+        primary: Some(QuotaWindow {
+            kind: QuotaWindowKind::Primary,
+            provider_cycle_id: None,
+            window_start_ms: None,
+            available_basis_points: Some(100),
+            explicitly_full: Some(false),
+            reset_at_ms: Some(7_200_000),
+            window_minutes: Some(300),
+            observed_at_ms: 100_000,
+            full_transition_fingerprint: None,
+            exhaustion_transition_fingerprint: None,
+        }),
+        ..QuotaSnapshot::default()
+    };
+    for remaining in [None, Some(0), Some(1), Some(100), Some(101), Some(5_000)] {
+        quota.primary.as_mut().unwrap().available_basis_points = remaining;
+        let expected = match remaining {
+            Some(1..=100) => Some(60_000),
+            _ => quota_reset_delay("synthetic", &quota, 100_000),
+        };
+        assert_eq!(
+            quota_verification_delay("synthetic", &quota, 100_000),
+            expected
+        );
+    }
+    quota.primary.as_mut().unwrap().available_basis_points = Some(100);
+    quota.secondary = quota.primary.clone();
+    quota.secondary.as_mut().unwrap().available_basis_points = Some(0);
+    assert_eq!(
+        quota_verification_delay("synthetic", &quota, 100_000),
+        quota_reset_delay("synthetic", &quota, 100_000)
+    );
+    quota.secondary = None;
+    quota.primary.as_mut().unwrap().reset_at_ms = Some(110_000);
+    assert_eq!(
+        quota_verification_delay("synthetic", &quota, 100_000),
+        quota_reset_delay("synthetic", &quota, 100_000)
+    );
+    quota.primary.as_mut().unwrap().reset_at_ms = None;
+    assert_eq!(
+        quota_verification_delay("synthetic", &quota, 100_000),
+        Some(60_000)
+    );
+}
+
+#[test]
 fn passive_quota_requires_a_recent_window_not_only_an_updated_timestamp() {
     let mut quota = QuotaSnapshot {
+        provider_credits_observed_at_ms: Some(99_000),
         updated_at_ms: Some(99_000),
         primary: Some(QuotaWindow {
             kind: QuotaWindowKind::Primary,
@@ -81,6 +130,13 @@ fn passive_quota_requires_a_recent_window_not_only_an_updated_timestamp() {
         ..QuotaSnapshot::default()
     };
     assert_eq!(passive_quota_age_ms(&quota, 100_000), Some(1_000));
+    quota.provider_credits_observed_at_ms = Some(5_000);
+    assert_eq!(passive_quota_age_ms(&quota, 100_000), Some(95_000));
+    quota.provider_credits_observed_at_ms = None;
+    assert_eq!(passive_quota_age_ms(&quota, 100_000), None);
+    quota.provider_credits_observed_at_ms = Some(100_001);
+    assert_eq!(passive_quota_age_ms(&quota, 100_000), None);
+    quota.provider_credits_observed_at_ms = Some(99_000);
     quota.secondary = Some(QuotaWindow {
         kind: QuotaWindowKind::Secondary,
         provider_cycle_id: None,
@@ -392,18 +448,36 @@ fn events_after_failed_completion_cannot_advance_provider_retry_after() {
 #[test]
 fn old_revision_completion_cannot_publish_into_a_new_identity() {
     let mut coordinator = coordinator();
-    let old = identity(1);
-    let new = identity(2);
-    coordinator.register(old.clone(), RefreshKind::Models, 0, true, true);
+    let previous_identity = identity(1);
+    let replacement_identity = identity(2);
+    coordinator.register(
+        previous_identity.clone(),
+        RefreshKind::Models,
+        0,
+        true,
+        true,
+    );
     let job = coordinator.claim_due(0).unwrap();
-    assert_eq!(coordinator.invalidate(&old), 1);
-    coordinator.register(new.clone(), RefreshKind::Models, 1, true, true);
+    assert_eq!(coordinator.invalidate(&previous_identity), 1);
+    coordinator.register(
+        replacement_identity.clone(),
+        RefreshKind::Models,
+        1,
+        true,
+        true,
+    );
     assert_eq!(
         coordinator.complete(&job, RefreshOutcome::Success, 2),
         RefreshCompletion::Stale
     );
-    assert_eq!(coordinator.next_due(&new, RefreshKind::Models), Some(1));
-    assert_eq!(coordinator.claim_due(1).unwrap().identity, new);
+    assert_eq!(
+        coordinator.next_due(&replacement_identity, RefreshKind::Models),
+        Some(1)
+    );
+    assert_eq!(
+        coordinator.claim_due(1).unwrap().identity,
+        replacement_identity
+    );
 }
 
 #[test]

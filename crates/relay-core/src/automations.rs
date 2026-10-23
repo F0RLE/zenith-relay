@@ -1,4 +1,7 @@
 mod quota_wake;
+mod routes;
+
+pub use routes::select_automation_route;
 
 pub use quota_wake::{
     model_lightness_rank, verify_wake_countdown, AccountSelector, WakeAdapterPolicy,

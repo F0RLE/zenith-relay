@@ -13,8 +13,8 @@ pub struct ProxyConfig {
 }
 
 impl ProxyConfig {
-    pub fn parse(value: &str) -> Result<Self, &'static str> {
-        let normalized = normalize_proxy_url(value)?;
+    pub fn parse(proxy_url: &str) -> Result<Self, &'static str> {
+        let normalized = normalize_proxy_url(proxy_url)?;
         let proxy = reqwest::Proxy::all(&normalized).map_err(|_| "proxy URL is invalid")?;
         Ok(Self { proxy })
     }
@@ -30,13 +30,15 @@ impl fmt::Debug for ProxyConfig {
     }
 }
 
-pub fn normalize_proxy_url(value: &str) -> Result<String, &'static str> {
-    let value = value.trim();
-    if value.is_empty() || value.len() > MAX_PROXY_URL_BYTES || value.chars().any(char::is_control)
+pub fn normalize_proxy_url(proxy_url: &str) -> Result<String, &'static str> {
+    let proxy_url = proxy_url.trim();
+    if proxy_url.is_empty()
+        || proxy_url.len() > MAX_PROXY_URL_BYTES
+        || proxy_url.chars().any(char::is_control)
     {
         return Err("proxy URL is invalid");
     }
-    let (scheme, authority) = value.split_once("://").unwrap_or(("http", value));
+    let (scheme, authority) = proxy_url.split_once("://").unwrap_or(("http", proxy_url));
     let candidate = format!("{scheme}://{}", normalize_proxy_authority(authority));
     let url = Url::parse(&candidate).map_err(|_| "proxy URL is invalid")?;
     if !matches!(url.scheme(), "http" | "https")
@@ -52,28 +54,28 @@ pub fn normalize_proxy_url(value: &str) -> Result<String, &'static str> {
     Ok(url.to_string())
 }
 
-pub fn proxy_reference_id(value: &str) -> Result<String, &'static str> {
-    let value = normalize_proxy_url(value)?;
+pub fn proxy_reference_id(proxy_url: &str) -> Result<String, &'static str> {
+    let normalized_proxy_url = normalize_proxy_url(proxy_url)?;
     Ok(format!(
         "proxy_{}",
-        hex::encode(Sha256::digest(value.as_bytes()))
+        hex::encode(Sha256::digest(normalized_proxy_url.as_bytes()))
     ))
 }
 
-fn normalize_proxy_authority(value: &str) -> String {
-    if value
+fn normalize_proxy_authority(authority: &str) -> String {
+    if authority
         .rsplit_once('@')
         .is_some_and(|(_, endpoint)| is_proxy_endpoint(endpoint))
     {
-        return value.to_string();
+        return authority.to_string();
     }
-    if let Some((endpoint, credentials)) = value.split_once('@') {
+    if let Some((endpoint, credentials)) = authority.split_once('@') {
         if is_proxy_endpoint(endpoint) && has_proxy_credentials(credentials) {
             return format!("{credentials}@{endpoint}");
         }
     }
 
-    let mut leading = value.splitn(3, ':');
+    let mut leading = authority.splitn(3, ':');
     if let (Some(host), Some(port), Some(credentials)) =
         (leading.next(), leading.next(), leading.next())
     {
@@ -82,7 +84,7 @@ fn normalize_proxy_authority(value: &str) -> String {
             return format!("{credentials}@{endpoint}");
         }
     }
-    let mut trailing = value.rsplitn(3, ':');
+    let mut trailing = authority.rsplitn(3, ':');
     if let (Some(port), Some(host), Some(credentials)) =
         (trailing.next(), trailing.next(), trailing.next())
     {
@@ -91,11 +93,11 @@ fn normalize_proxy_authority(value: &str) -> String {
             return format!("{credentials}@{endpoint}");
         }
     }
-    value.to_string()
+    authority.to_string()
 }
 
-fn is_proxy_endpoint(value: &str) -> bool {
-    Url::parse(&format!("http://{value}")).is_ok_and(|url| {
+fn is_proxy_endpoint(endpoint: &str) -> bool {
+    Url::parse(&format!("http://{endpoint}")).is_ok_and(|url| {
         !url_has_userinfo(&url)
             && url.host_str().is_some()
             && url.port().is_some()
@@ -105,8 +107,8 @@ fn is_proxy_endpoint(value: &str) -> bool {
     })
 }
 
-fn has_proxy_credentials(value: &str) -> bool {
-    value
+fn has_proxy_credentials(credentials: &str) -> bool {
+    credentials
         .split_once(':')
         .is_some_and(|(username, password)| !username.is_empty() && !password.is_empty())
 }
@@ -127,14 +129,14 @@ mod tests {
     #[test]
     fn proxy_url_accepts_popular_http_shape_and_redacts_debug() {
         let expected = "http://user:pass@proxy.example:8080/";
-        for value in [
+        for proxy_url in [
             "user:pass@proxy.example:8080",
             "proxy.example:8080:user:pass",
             "proxy.example:8080@user:pass",
             "user:pass:proxy.example:8080",
             "http://user:pass@proxy.example:8080",
         ] {
-            assert_eq!(normalize_proxy_url(value).unwrap(), expected);
+            assert_eq!(normalize_proxy_url(proxy_url).unwrap(), expected);
         }
         let provider_style = "proxy.example:8080:user__cr.us;anon.1;sessttl.5:pass";
         assert_eq!(
@@ -176,7 +178,9 @@ mod tests {
                     async move {
                         if headers
                             .get(PROXY_AUTHORIZATION)
-                            .is_some_and(|value| value == "Basic dXNlcjpwYXNz")
+                            .is_some_and(|proxy_authorization| {
+                                proxy_authorization == "Basic dXNlcjpwYXNz"
+                            })
                         {
                             marker.store(true, Ordering::SeqCst);
                             StatusCode::NO_CONTENT

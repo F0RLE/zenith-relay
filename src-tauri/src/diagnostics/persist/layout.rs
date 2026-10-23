@@ -123,12 +123,12 @@ pub(in crate::diagnostics::persist) fn prune_files(directory: &Path, prefix: &st
         .flatten()
         .filter_map(|entry| {
             let path = entry.path();
-            let name = path.file_name()?.to_str()?;
+            let file_name = path.file_name()?.to_str()?;
             let metadata = entry.file_type().ok()?;
-            if !metadata.is_file() || metadata.is_symlink() || !name.starts_with(prefix) {
+            if !metadata.is_file() || metadata.is_symlink() || !file_name.starts_with(prefix) {
                 return None;
             }
-            Some((name.to_string(), path))
+            Some((file_name.to_string(), path))
         })
         .collect::<Vec<_>>();
     files.sort_by(|left, right| left.0.cmp(&right.0));

@@ -4,16 +4,16 @@ mod jwt;
 mod login_notes;
 mod quota_state;
 mod record;
+mod routes;
 mod token_authority;
 
 /// Upper bound for a user-entered account purchase cost in micro-USD.
 /// This is presentation metadata used only for the payback ratio.
 pub const MAX_PURCHASE_COST_MICRO_USD: u64 = 1_000_000_000_000;
 
-/// Bounds for optional account tags carried by portable account exports.
+/// Bounds for optional account tags accepted by portable account imports.
 /// Tags are user metadata, not routing credentials; bounding them keeps a
-/// malformed import from expanding a prepared snapshot without importing
-/// Cockpit-specific folder/group semantics into Relay.
+/// malformed import from expanding a prepared snapshot.
 pub const MAX_ACCOUNT_TAGS: usize = 32;
 pub const MAX_ACCOUNT_TAG_CHARS: usize = 64;
 pub const MAX_ACCOUNT_TAG_BYTES: usize = 2_048;
@@ -42,6 +42,10 @@ pub use record::{
     reduce_account_usage, AccountAccessState, AccountAuthMode, AccountAuthState,
     AccountHealthState, AccountIdentity, AccountRecord, AccountUsageObservation, AccountUsageState,
     AccountUsageUpdate, ProviderAccountFailure, ReauthReason,
+};
+pub use routes::{
+    detach_account_route, select_account_route_group, validate_account_route_connection,
+    validate_account_route_groups, AccountRouteGroup, AccountRouteIdentity,
 };
 pub use token_authority::{
     access_token_is_usable, PrepareStatus, PreparedToken, TokenAuthority, TokenAuthorityError,

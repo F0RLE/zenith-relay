@@ -1,25 +1,5 @@
 use super::*;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CredentialRefreshStatus {
-    Refreshed,
-    RetryableFailure,
-    RequiresReauth,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CredentialRefreshResult {
-    pub account_id: String,
-    pub status: CredentialRefreshStatus,
-    pub code: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expires_at_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub generation: Option<u64>,
-}
-
 pub(in crate::local_pool::accounts) use zenith_relay_core::accounts::TOKEN_REFRESH_SKEW_MS;
 
 pub(in crate::local_pool::accounts) const QUOTA_COMMAND_TIMEOUT_OVERHEAD: Duration =
@@ -129,6 +109,8 @@ pub struct AccountQuotaRefreshResponse {
 }
 
 pub(crate) struct PreparedAccountCredentials {
+    pub(in crate::local_pool::accounts) oauth_client_kind:
+        zenith_relay_core::providers::chatgpt::OAuthClientKind,
     pub(in crate::local_pool::accounts) tokens: TokenSet,
     pub(in crate::local_pool::accounts) provider_account_id: String,
     pub(in crate::local_pool::accounts) proxy: Option<ProxyConfig>,
@@ -136,6 +118,8 @@ pub(crate) struct PreparedAccountCredentials {
 
 #[derive(Clone)]
 pub(in crate::local_pool) struct PreparedAccountAuthorization {
+    pub(in crate::local_pool::accounts) oauth_client_kind:
+        zenith_relay_core::providers::chatgpt::OAuthClientKind,
     pub(in crate::local_pool::accounts) authorization: HeaderValue,
     pub(in crate::local_pool::accounts) subscription_authorization: Option<HeaderValue>,
     pub(in crate::local_pool::accounts) tokens: Option<TokenSet>,
@@ -160,33 +144,35 @@ impl fmt::Debug for PreparedAccountAuthorization {
 
 impl PreparedAccountAuthorization {
     pub(in crate::local_pool::accounts) fn from_tokens(
-        value: PreparedAccountCredentials,
+        credentials: PreparedAccountCredentials,
     ) -> LocalResult<Self> {
-        let authorization = bearer_authorization(value.tokens.access_token()).map_err(|_| {
-            LocalPoolError::new(ErrorCode::InvalidState, "account token is invalid")
-        })?;
+        let authorization =
+            bearer_authorization(credentials.tokens.access_token()).map_err(|_| {
+                LocalPoolError::new(ErrorCode::InvalidState, "account token is invalid")
+            })?;
         Ok(Self {
+            oauth_client_kind: credentials.oauth_client_kind,
             subscription_authorization: Some(authorization.clone()),
             authorization,
-            tokens: Some(value.tokens),
+            tokens: Some(credentials.tokens),
             agent_task_id: None,
-            provider_account_id: value.provider_account_id,
-            proxy: value.proxy,
+            provider_account_id: credentials.provider_account_id,
+            proxy: credentials.proxy,
         })
     }
 }
 
 impl PreparedAccountCredentials {
+    pub(crate) fn supports_native_codex(&self) -> bool {
+        self.oauth_client_kind == zenith_relay_core::providers::chatgpt::OAuthClientKind::Codex
+    }
+
     pub(crate) fn tokens(&self) -> &TokenSet {
         &self.tokens
     }
 
     pub(crate) fn provider_account_id(&self) -> &str {
         &self.provider_account_id
-    }
-
-    pub(crate) fn proxy(&self) -> Option<&ProxyConfig> {
-        self.proxy.as_ref()
     }
 }
 

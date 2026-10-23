@@ -4,10 +4,8 @@ use std::collections::BTreeMap;
 use zenith_relay_core::{
     accounts::AccountRecord,
     automations::{WakeAutomationState, WakeTask},
-    normalize_model_price_overrides,
-    protocol::RemoteAccountLocation,
-    ApiModelPriceOverride, PoolAccess, PoolParticipant, SourceProtocolBinding,
-    SourceProtocolConfig, SourceProtocolResolution, WireApi,
+    normalize_model_price_overrides, ApiModelPriceOverride, PoolAccess, PoolParticipant,
+    SourceProtocolBinding, SourceProtocolConfig, SourceProtocolResolution, WireApi,
 };
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -35,6 +33,10 @@ pub struct ProviderSourceRecord {
     #[serde(default)]
     pub protocol_config: SourceProtocolConfig,
     pub models: Vec<String>,
+    /// Stored proxy used for every request to this source. The URL and its
+    /// credentials stay in the proxy pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_id: Option<String>,
     #[serde(default)]
     pub allowed_models: Vec<String>,
     #[serde(default)]
@@ -79,8 +81,13 @@ pub struct LocalAccountRecord {
     pub provider_family: Option<String>,
     #[serde(default)]
     pub purchase_cost_micro_usd: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote_location: Option<RemoteAccountLocation>,
+    /// Opaque recovery evidence is retained locally and never grants dispatch access.
+    #[serde(
+        default,
+        alias = "remoteLocation",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub recovery: Option<serde_json::Value>,
     pub wire_api: WireApi,
     pub models: Vec<String>,
     /// The last successful upstream discovery snapshot. `models` remains the
@@ -108,6 +115,13 @@ pub struct LocalAccountRecord {
     pub last_client_login_redirect_at_ms: Option<u64>,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashedLocalAccount {
+    pub record: LocalAccountRecord,
+    pub trashed_at_ms: u64,
+}
+
 impl LocalAccountRecord {
     /// Compares the operational record while ignoring Codex client-login
     /// observations. Those can change during a credential transaction and do
@@ -121,10 +135,6 @@ impl LocalAccountRecord {
 
     pub fn normalize(&mut self) {
         self.account.label = self.account.label.trim().to_string();
-        if let Some(location) = &mut self.remote_location {
-            location.server_id = location.server_id.trim().to_string();
-            location.remote_account_id = location.remote_account_id.trim().to_string();
-        }
         self.models = normalized_values(std::mem::take(&mut self.models));
         self.discovered_models = self.discovered_models.take().map(normalized_values);
         self.allowed_models = normalized_values(std::mem::take(&mut self.allowed_models));
@@ -133,8 +143,8 @@ impl LocalAccountRecord {
         self.provider_family = self
             .provider_family
             .take()
-            .map(|value| value.trim().to_ascii_lowercase())
-            .filter(|value| !value.is_empty());
+            .map(|provider_name| provider_name.trim().to_ascii_lowercase())
+            .filter(|provider_name| !provider_name.is_empty());
     }
 }
 zenith_relay_core::impl_effective_models!(LocalAccountRecord);
@@ -182,6 +192,7 @@ pub(crate) fn synthetic_responses_source() -> ProviderSourceRecord {
         base_url: "https://provider.test/v1".into(),
         secret_ref: "source:test".into(),
         pricing_provider: None,
+        proxy_id: None,
         official_provider_family: None,
         wire_api: WireApi::Responses,
         protocol_config: Default::default(),
@@ -208,13 +219,13 @@ impl ProviderSourceRecord {
         self.pricing_provider = self
             .pricing_provider
             .take()
-            .map(|value| value.trim().to_ascii_lowercase())
-            .filter(|value| !value.is_empty());
+            .map(|pricing_provider| pricing_provider.trim().to_ascii_lowercase())
+            .filter(|pricing_provider| !pricing_provider.is_empty());
         self.official_provider_family = self
             .official_provider_family
             .take()
-            .map(|value| value.trim().to_ascii_lowercase())
-            .filter(|value| !value.is_empty());
+            .map(|provider_family| provider_family.trim().to_ascii_lowercase())
+            .filter(|provider_family| !provider_family.is_empty());
         self.models = normalized_values(std::mem::take(&mut self.models));
         self.allowed_models = normalized_values(std::mem::take(&mut self.allowed_models));
         self.excluded_models = normalized_values(std::mem::take(&mut self.excluded_models));

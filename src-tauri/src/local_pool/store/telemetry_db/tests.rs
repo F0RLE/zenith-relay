@@ -2,10 +2,14 @@ use super::*;
 use zenith_relay_core::{
     ErrorOrigin, SelectionReason, TerminalOutputKind, ToolChoiceMode, WireApi,
 };
+mod filter_options;
 mod maintenance;
+mod performance;
 mod pricing;
 mod reporting;
 mod rollups;
+mod send_usage;
+mod unknown_tiers;
 
 fn aggregate_test_event(
     request_id: &str,
@@ -30,6 +34,7 @@ fn aggregate_test_event(
         requested_reasoning_effort: None,
         effective_reasoning_effort: None,
         wire_api: WireApi::Responses,
+        transport: zenith_relay_core::UsageTransport::Http,
         service_tier: DefaultServiceTier::Standard,
         applied_service_tier: None,
         success: true,
@@ -86,6 +91,7 @@ fn failed_fallback_test_event(request_id: &str) -> UsageEvent {
         requested_reasoning_effort: None,
         effective_reasoning_effort: None,
         wire_api: WireApi::Responses,
+        transport: zenith_relay_core::UsageTransport::Http,
         service_tier: DefaultServiceTier::Standard,
         applied_service_tier: None,
         success: false,

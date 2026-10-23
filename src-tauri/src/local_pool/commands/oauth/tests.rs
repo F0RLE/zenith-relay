@@ -14,6 +14,92 @@ use crate::local_pool::{
 
 use std::collections::BTreeSet;
 
+#[test]
+fn automatic_login_request_preserves_legacy_bool_and_rejects_extra_route_fields() {
+    use super::AutomaticLoginRequest;
+    use serde_json::{from_value, json};
+    assert!(matches!(
+        from_value::<AutomaticLoginRequest>(json!(true)).unwrap(),
+        AutomaticLoginRequest::Enabled(true)
+    ));
+    assert!(matches!(
+        from_value::<AutomaticLoginRequest>(json!(false)).unwrap(),
+        AutomaticLoginRequest::Enabled(false)
+    ));
+    let route = from_value::<AutomaticLoginRequest>(json!({"notesAccountId":"source"})).unwrap();
+    assert!(
+        matches!(route, AutomaticLoginRequest::Route { notes_account_id } if notes_account_id == "source")
+    );
+    for invalid in [
+        json!({}),
+        json!({"notesAccountId":true}),
+        json!({"notesAccountId":"source","accountId":"target"}),
+    ] {
+        assert!(from_value::<AutomaticLoginRequest>(invalid).is_err());
+    }
+}
+
+#[test]
+fn all_three_login_clients_can_start_without_converting_the_selected_kind() {
+    use crate::local_pool::accounts::oauth::OAuthClientKind;
+    for kind in [
+        OAuthClientKind::Codex,
+        OAuthClientKind::Siwc,
+        OAuthClientKind::ExcelBps,
+    ] {
+        assert_eq!(super::oauth_client_kind(None, Some(kind)).unwrap(), kind);
+    }
+    assert_eq!(
+        super::oauth_client_kind(None, None).unwrap(),
+        OAuthClientKind::Codex
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn route_automatic_login_without_saved_password_falls_back_to_manual() {
+    use super::window::automatic_login::LoginNotes;
+    use crate::local_pool::{accounts::oauth::OAuthClientKind, state::DesktopState};
+
+    let root = std::env::temp_dir().join(format!("relay-route-login-{}", Uuid::new_v4()));
+    let state = DesktopState::open(root.clone()).unwrap();
+    let account_id = format!("account_{}", Uuid::new_v4().simple());
+    let credentials = StoredCodexCredentials::new(
+        &account_id,
+        "synthetic-access".into(),
+        Some("synthetic-refresh".into()),
+        None,
+        Some(60_000),
+        1,
+        1,
+        Some("synthetic@example.test".into()),
+        Some("synthetic-workspace".into()),
+        None,
+        None,
+        Some("plus".into()),
+        false,
+    )
+    .unwrap();
+    let credential_store = CredentialStore::from_backend(NativeSecretBackend);
+    credential_store.save(&credentials).unwrap();
+    let record =
+        new_account_record(&credentials, AccountAuthMode::OAuth, Vec::new(), 0, 1).unwrap();
+    state.store().unwrap().upsert_account(record).unwrap();
+
+    let route_results = [OAuthClientKind::Codex, OAuthClientKind::ExcelBps]
+        .map(|kind| LoginNotes::load(Some(&account_id), kind, &state, true));
+    let reauthentication =
+        LoginNotes::load(Some(&account_id), OAuthClientKind::ExcelBps, &state, false);
+
+    credential_store.delete(&account_id).unwrap();
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+    for result in route_results {
+        assert!(result.unwrap().is_none());
+    }
+    assert!(reauthentication.is_err());
+}
+
 use url::Url;
 use uuid::Uuid;
 
@@ -38,6 +124,72 @@ use super::flow::validated_authorization_url;
 
 use zenith_relay_core::providers::chatgpt::ModelDiscoveryFailureCode;
 
+#[tokio::test]
+async fn targeted_completion_keeps_account_proxy_and_direct_overrides() {
+    use crate::local_pool::accounts::import_session::SecretBackend;
+    use crate::local_pool::accounts::proxy::COMMON_PROXY_SECRET_REF;
+    use crate::local_pool::state::DesktopState;
+
+    for (proxy_url, bypass_common) in [
+        (Some("http://127.0.0.1:9".to_string()), false),
+        (None, true),
+    ] {
+        let root = std::env::temp_dir().join(format!("relay-oauth-proxy-{}", Uuid::new_v4()));
+        let state = DesktopState::open(root.clone()).unwrap();
+        let mut settings = state.store().unwrap().gateway().clone();
+        settings.common_proxy_configured = true;
+        settings.account_proxy_required = false;
+        state.store().unwrap().replace_gateway(settings).unwrap();
+        let account_id = format!("account_{}", Uuid::new_v4().simple());
+        let credentials = StoredCodexCredentials::new(
+            &account_id,
+            "synthetic-access".into(),
+            Some("synthetic-refresh".into()),
+            Some("synthetic-id-token".into()),
+            Some(60_000),
+            1,
+            1,
+            Some("synthetic@example.test".into()),
+            Some("synthetic-workspace".into()),
+            None,
+            None,
+            Some("plus".into()),
+            false,
+        )
+        .unwrap()
+        .with_proxy_route(proxy_url, bypass_common)
+        .unwrap();
+        let credential_store = CredentialStore::from_backend(NativeSecretBackend);
+        credential_store.save(&credentials).unwrap();
+        let record =
+            new_account_record(&credentials, AccountAuthMode::OAuth, Vec::new(), 0, 1).unwrap();
+        state.store().unwrap().upsert_account(record).unwrap();
+        let flow = state.oauth_flow();
+        let start = flow
+            .start_for_account(&CodexOAuthClient::new().unwrap(), Some(&account_id), None)
+            .await
+            .unwrap();
+        let previous_common = NativeSecretBackend.load(COMMON_PROXY_SECRET_REF).unwrap();
+        NativeSecretBackend
+            .save(COMMON_PROXY_SECRET_REF, "synthetic-invalid-common-proxy")
+            .unwrap();
+        let result = super::complete_oauth(&start.login_id, &state).await;
+        match previous_common {
+            Some(previous) => NativeSecretBackend
+                .save(COMMON_PROXY_SECRET_REF, &previous)
+                .unwrap(),
+            None => NativeSecretBackend.delete(COMMON_PROXY_SECRET_REF).unwrap(),
+        }
+        flow.cancel(&start.login_id).await.unwrap();
+        credential_store.delete(&account_id).unwrap();
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+        let error = result.expect_err("a callback is still required");
+        assert_eq!(error.code, ErrorCode::InvalidState);
+        assert_eq!(error.message, "OAuth callback has not been received");
+    }
+}
+
 // Synthetic PKCS#8 bytes used only to exercise Agent Identity formatting.
 // This is not a credential and is never registered with a provider.
 const TEST_ED25519_PKCS8_FIXTURE: &str =
@@ -55,7 +207,10 @@ fn authorization_url_validation_allows_generated_url_only() {
         redirect_uri: oauth.pending().redirect_uri().to_string(),
         expires_at_ms: oauth.pending().expires_at_ms(),
         status: OAuthFlowStatus::Pending,
+        client_kind: crate::local_pool::accounts::oauth::OAuthClientKind::Codex,
         target_account_id: None,
+        notes_account_id: None,
+        automatic_login: None,
     };
     assert!(validated_authorization_url(&valid).is_ok());
 
@@ -95,8 +250,10 @@ fn authorization_url_validation_allows_generated_url_only() {
 fn exchanged_token_checkpoint_is_recoverable_and_fully_redacted() {
     let login_id = Uuid::new_v4().hyphenated().to_string();
     let checkpoint = OAuthCompletionCheckpoint {
+        siwc: None,
         version: COMPLETION_CHECKPOINT_VERSION,
         login_id: login_id.clone(),
+        client_kind: crate::local_pool::accounts::oauth::OAuthClientKind::Codex,
         access_token: "checkpoint-access-secret".into(),
         refresh_token: Some("checkpoint-refresh-secret".into()),
         id_token: Some("checkpoint-id-secret".into()),
@@ -229,50 +386,53 @@ fn duplicate_identity_preserves_local_id_and_user_settings() {
         find_existing_account(std::slice::from_ref(&current), &credentials, &identity_hash)
             .unwrap()
             .unwrap();
-    let mut next = account("account_existing", "provider-account", "new-refresh");
-    next.models = vec!["new-model".into()];
-    preserve_existing_settings(&mut next, existing);
+    let mut updated_account = account("account_existing", "provider-account", "new-refresh");
+    updated_account.models = vec!["new-model".into()];
+    preserve_existing_settings(&mut updated_account, existing);
 
-    assert_eq!(next.account.id, "account_existing");
-    assert_eq!(next.account.label, "My Codex");
+    assert_eq!(updated_account.account.id, "account_existing");
+    assert_eq!(updated_account.account.label, "My Codex");
     assert_eq!(
-        next.account.identity.identity_hash,
+        updated_account.account.identity.identity_hash,
         current.account.identity.identity_hash
     );
     assert_ne!(
-        next.account.identity.stable_index,
+        updated_account.account.identity.stable_index,
         current.account.identity.stable_index
     );
-    assert_eq!(next.account.tags, current.account.tags);
-    assert!(!next.account.enabled);
-    assert!(next.account.in_pool);
-    assert!(next.account.draining);
-    assert_eq!(next.account.created_at_ms, 7);
-    assert_eq!(next.account.last_used_at_ms, Some(8));
-    assert_eq!(next.allowed_models, vec!["allowed"]);
-    assert_eq!(next.excluded_models, vec!["excluded"]);
-    assert_eq!(next.priority, -10);
-    assert_eq!(next.weight, 4);
-    assert_eq!(next.purchase_cost_micro_usd, Some(42_000_000));
-    assert!(next.cooldowns.is_empty());
-    assert_eq!(next.consecutive_failures, 0);
-    assert_eq!(next.models, vec!["gpt-test"]);
-    assert_eq!(next.discovered_models, Some(vec!["new-model".into()]));
-    assert_eq!(next.effective_models(), ["new-model"]);
+    assert_eq!(updated_account.account.tags, current.account.tags);
+    assert!(!updated_account.account.enabled);
+    assert!(updated_account.account.in_pool);
+    assert!(updated_account.account.draining);
+    assert_eq!(updated_account.account.created_at_ms, 7);
+    assert_eq!(updated_account.account.last_used_at_ms, Some(8));
+    assert_eq!(updated_account.allowed_models, vec!["allowed"]);
+    assert_eq!(updated_account.excluded_models, vec!["excluded"]);
+    assert_eq!(updated_account.priority, -10);
+    assert_eq!(updated_account.weight, 4);
+    assert_eq!(updated_account.purchase_cost_micro_usd, Some(42_000_000));
+    assert!(updated_account.cooldowns.is_empty());
+    assert_eq!(updated_account.consecutive_failures, 0);
+    assert_eq!(updated_account.models, vec!["gpt-test"]);
+    assert_eq!(
+        updated_account.discovered_models,
+        Some(vec!["new-model".into()])
+    );
+    assert_eq!(updated_account.effective_models(), ["new-model"]);
 }
 
 #[test]
 fn duplicate_identity_keeps_models_when_the_new_snapshot_is_empty() {
     let current = account("account_empty_models", "provider-account", "old-refresh");
-    let mut next = account("account_empty_models", "provider-account", "new-refresh");
-    next.models.clear();
-    next.discovered_models = Some(Vec::new());
+    let mut updated_account = account("account_empty_models", "provider-account", "new-refresh");
+    updated_account.models.clear();
+    updated_account.discovered_models = Some(Vec::new());
 
-    preserve_existing_settings(&mut next, &current);
+    preserve_existing_settings(&mut updated_account, &current);
 
-    assert_eq!(next.models, current.models);
-    assert!(next.discovered_models.is_none());
-    assert_eq!(next.effective_models(), ["gpt-test"]);
+    assert_eq!(updated_account.models, current.models);
+    assert!(updated_account.discovered_models.is_none());
+    assert_eq!(updated_account.effective_models(), ["gpt-test"]);
 }
 
 #[test]
@@ -286,12 +446,12 @@ fn reauth_does_not_restore_an_expired_subscription_date_without_new_metadata() {
             observed_at_ms: 2_000,
         },
     );
-    let mut next = account("account_expired", "provider-account", "new-refresh");
-    preserve_existing_settings(&mut next, &current);
+    let mut updated_account = account("account_expired", "provider-account", "new-refresh");
+    preserve_existing_settings(&mut updated_account, &current);
 
-    assert_eq!(next.account.subscription.active_until_ms, None);
+    assert_eq!(updated_account.account.subscription.active_until_ms, None);
     assert_eq!(
-        next.account.subscription.status,
+        updated_account.account.subscription.status,
         zenith_relay_core::quota::SubscriptionStatus::Active
     );
 }

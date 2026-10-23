@@ -14,6 +14,7 @@ fn merges_generic_and_messages_prices_for_one_model() {
         cache_write_5m_micro_usd_per_million: None,
         cache_write_1h_micro_usd_per_million: None,
         output_micro_usd_per_million: 3,
+        ..Default::default()
     };
     let messages = ApiModelPriceOverride {
         cache_write_5m_micro_usd_per_million: Some(4),
@@ -32,6 +33,35 @@ fn merges_generic_and_messages_prices_for_one_model() {
 }
 
 #[test]
+fn discovered_context_prices_merge_only_when_compatible() {
+    for band in [
+        "above100k",
+        "above128k",
+        "above200k",
+        "above272k",
+        "above512k",
+    ] {
+        let mut model = serde_json::json!({
+            "id": "synthetic-model",
+            "inputMicroUsdPerMillion": 1_000_000,
+            "outputMicroUsdPerMillion": 2_000_000
+        });
+        model[band] = serde_json::json!({ "priority": { "input": 3_000_000, "cacheRead": 0 } });
+        let price = super::pricing::detected_model_price(&model).unwrap();
+        let plain = ApiModelPriceOverride {
+            input_micro_usd_per_million: 1_000_000,
+            output_micro_usd_per_million: 2_000_000,
+            ..Default::default()
+        };
+        assert_eq!(merge_route_model_price(plain, price), Some(price));
+        assert_eq!(merge_route_model_price(price, plain), Some(price));
+        model[band]["priority"]["input"] = serde_json::json!(4_000_000);
+        let conflicting = super::pricing::detected_model_price(&model).unwrap();
+        assert!(merge_route_model_price(price, conflicting).is_none());
+    }
+}
+
+#[test]
 fn generic_model_catalog_retains_explicit_cache_write_windows() {
     let models = parse_upstream_models(
         UpstreamProtocol::Responses,
@@ -46,6 +76,45 @@ fn generic_model_catalog_retains_explicit_cache_write_windows() {
     let price = models[0].1.unwrap();
     assert_eq!(price.cache_write_5m_micro_usd_per_million, Some(1_250_000));
     assert_eq!(price.cache_write_1h_micro_usd_per_million, Some(2_500_000));
+}
+
+#[test]
+fn compatible_catalog_protocols_do_not_invent_cache_write_windows() {
+    for protocol in [
+        UpstreamProtocol::Responses,
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Messages,
+        UpstreamProtocol::GeminiGenerateContent,
+    ] {
+        let model = serde_json::json!({
+            "id": "synthetic-model",
+            "name": "models/synthetic-model",
+            "supportedGenerationMethods": ["generateContent"],
+            "inputMicroUsdPerMillion": 1_000_000,
+            "outputMicroUsdPerMillion": 2_000_000,
+            "cacheCreationInputCostMicrousdPerMillion": 0
+        });
+        let catalog = if protocol == UpstreamProtocol::GeminiGenerateContent {
+            serde_json::json!({"models": [model]})
+        } else {
+            serde_json::json!({"data": [model]})
+        };
+        let models = parse_upstream_models(protocol, &catalog).unwrap();
+        let price = models[0].1.unwrap();
+        assert_eq!(
+            price.cache_write_micro_usd_per_million,
+            Some(0),
+            "{protocol:?}"
+        );
+        assert_eq!(
+            price.cache_write_5m_micro_usd_per_million, None,
+            "{protocol:?}"
+        );
+        assert_eq!(
+            price.cache_write_1h_micro_usd_per_million, None,
+            "{protocol:?}"
+        );
+    }
 }
 
 #[test]
@@ -80,6 +149,7 @@ async fn valid_empty_catalog_is_successful() {
         api_key: "secret".into(),
         wire_api: WireApi::Responses,
         models: Vec::new(),
+        proxy_url: None,
     };
 
     let discovery = discover_source_models_and_protocol_bindings(&source, &[])
@@ -99,6 +169,7 @@ fn apply_catalog_replaces_models_and_only_a_resolved_url() {
         cache_write_5m_micro_usd_per_million: None,
         cache_write_1h_micro_usd_per_million: None,
         output_micro_usd_per_million: 2,
+        ..Default::default()
     };
     let catalog = ModelEndpointCapability {
         model_id: "model-a".into(),
@@ -108,6 +179,7 @@ fn apply_catalog_replaces_models_and_only_a_resolved_url() {
         checked_at_ms: 10,
         features: BTreeMap::new(),
         reasoning_efforts: Vec::new(),
+        service_tiers: None,
     };
     let probe = ModelEndpointCapability {
         model_id: "old".into(),
@@ -117,6 +189,7 @@ fn apply_catalog_replaces_models_and_only_a_resolved_url() {
         checked_at_ms: 1,
         features: BTreeMap::new(),
         reasoning_efforts: Vec::new(),
+        service_tiers: None,
     };
     let mut base_url = "https://kept.example/v1".to_string();
     let mut models = vec!["old".into()];
@@ -196,6 +269,7 @@ fn source_catalog_changed_follows_apply_catalog() {
         cache_write_5m_micro_usd_per_million: None,
         cache_write_1h_micro_usd_per_million: None,
         output_micro_usd_per_million: 2,
+        ..Default::default()
     };
     let mut base_url = "https://kept.example/v1".to_string();
     let mut models = vec!["model-a".into()];

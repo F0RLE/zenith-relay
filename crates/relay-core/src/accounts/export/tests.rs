@@ -5,6 +5,126 @@ const ACCESS: &str = "synthetic-export-access-token";
 const REFRESH: &str = "synthetic-export-refresh-token";
 const ID_TOKEN: &str = "synthetic.export.id-token";
 
+fn siwc_fixture() -> AccountExportCredential {
+    let registration = crate::providers::chatgpt::SiwcRegistration {
+        client_id: "oaiapp_synthetic_export".into(),
+        host_id: "urn:uuid:synthetic-export-host".into(),
+        issuer: crate::providers::chatgpt::SIWC_ISSUER.into(),
+        subject: "synthetic-export-subject".into(),
+        scopes: vec!["resource.invoke".into(), "chatgpt.tokens.use.direct".into()],
+        earliest_refresh_at_ms: Some(1_788_000_100_000),
+        requires_reauthentication: false,
+    };
+    AccountExportCredential {
+        oauth_client_kind: crate::providers::chatgpt::OAuthClientKind::Siwc,
+        account_id: Some(registration.identity_key()),
+        user_id: Some(registration.subject.clone()),
+        siwc_registration: Some(registration),
+        ..fixture()
+    }
+}
+
+#[test]
+fn zenith_round_trip_preserves_all_three_issuing_clients() {
+    use crate::providers::chatgpt::OAuthClientKind;
+    let excel = AccountExportCredential {
+        oauth_client_kind: OAuthClientKind::ExcelBps,
+        ..fixture()
+    };
+    let document = build_account_export(
+        AccountExportFormat::Zenith,
+        &[fixture(), siwc_fixture(), excel],
+        1_788_000_000_000,
+        None,
+    )
+    .unwrap();
+    let parsed = crate::accounts::parse_import(&document.content, None, &[]).unwrap();
+    assert_eq!(parsed.items.len(), 3);
+    for (item, kind) in parsed.items.iter().zip([
+        OAuthClientKind::Codex,
+        OAuthClientKind::Siwc,
+        OAuthClientKind::ExcelBps,
+    ]) {
+        assert_eq!(item.secrets().oauth_client_kind(), Some(kind));
+        assert_eq!(item.secrets().access_token(), Some(ACCESS));
+        assert_eq!(item.secrets().refresh_token(), Some(REFRESH));
+    }
+    let registration = parsed.items[1].secrets().siwc_registration().unwrap();
+    assert_eq!(registration.client_id, "oaiapp_synthetic_export");
+    assert_eq!(registration.host_id, "urn:uuid:synthetic-export-host");
+    assert_eq!(registration.earliest_refresh_at_ms, Some(1_788_000_100_000));
+    assert_eq!(
+        parsed.items[1].account_id.as_deref(),
+        Some(registration.identity_key().as_str())
+    );
+    assert!(registration.requires_reauthentication);
+    assert!(!registration.plan_use_enabled());
+    assert!(!format!("{registration:?}").contains("synthetic"));
+    assert!(!format!("{parsed:?}").contains(ACCESS));
+}
+
+#[test]
+fn siwc_export_rejects_lossy_formats_and_incomplete_registrations() {
+    for format in AccountExportFormat::all()
+        .into_iter()
+        .filter(|format| *format != AccountExportFormat::Zenith)
+    {
+        assert!(build_account_export(format, &[siwc_fixture()], 1_788_000_000_000, None).is_err());
+    }
+    let mut incomplete = siwc_fixture();
+    incomplete.siwc_registration = None;
+    assert!(build_account_export(
+        AccountExportFormat::Zenith,
+        &[incomplete],
+        1_788_000_000_000,
+        None
+    )
+    .is_err());
+    let mut wrong_client = siwc_fixture();
+    wrong_client.oauth_client_kind = crate::providers::chatgpt::OAuthClientKind::Codex;
+    assert!(build_account_export(
+        AccountExportFormat::Zenith,
+        &[wrong_client],
+        1_788_000_000_000,
+        None
+    )
+    .is_err());
+}
+
+#[test]
+fn siwc_import_rejects_conflicting_client_and_registration_metadata() {
+    let document = build_account_export(
+        AccountExportFormat::Zenith,
+        &[siwc_fixture()],
+        1_788_000_000_000,
+        None,
+    )
+    .unwrap();
+    let source: Value = serde_json::from_str(&document.content).unwrap();
+    for (path, value) in [
+        (
+            "/accounts/0/client_id",
+            json!(crate::providers::chatgpt::CODEX_OAUTH_CLIENT_ID),
+        ),
+        ("/accounts/0/oauth_client_kind", json!("excel_bps")),
+        (
+            "/accounts/0/siwc/issuer",
+            json!("https://not-openai.example"),
+        ),
+        (
+            "/accounts/0/siwc/clientId",
+            json!(crate::providers::chatgpt::SIWC_BOOTSTRAP_CLIENT_ID),
+        ),
+        ("/accounts/0/siwc/subject", json!("")),
+        ("/accounts/0/siwc", Value::Null),
+    ] {
+        let mut input = source.clone();
+        *input.pointer_mut(path).unwrap() = value;
+        let parsed = crate::accounts::parse_import(&input.to_string(), None, &[]).unwrap();
+        assert!(parsed.items.is_empty(), "{path}");
+    }
+}
+
 #[test]
 fn all_supported_formats_are_valid_json_and_never_include_proxy_fields() {
     for format in AccountExportFormat::all() {
@@ -18,6 +138,10 @@ fn all_supported_formats_are_valid_json_and_never_include_proxy_fields() {
         }
         assert!(!document.content.contains("proxy.example"), "{format:?}");
         assert!(!document.content.contains("proxy_url"), "{format:?}");
+        assert_eq!(
+            document.content.contains("\"oauth_client_kind\""),
+            format == AccountExportFormat::Zenith
+        );
         assert!(value.is_object());
     }
 }
@@ -57,7 +181,7 @@ fn cockpit_export_carries_safe_name_and_tags() {
     let parsed = crate::accounts::parse_import(&document.content, None, &[]).unwrap();
     assert_eq!(
         parsed.items[0].tags,
-        BTreeSet::from(["team".to_string(), "work".to_string()])
+        std::collections::BTreeSet::from(["team".to_string(), "work".to_string()])
     );
 }
 
@@ -230,6 +354,9 @@ fn request_rejects_duplicates_and_unsafe_account_ids() {
 
 fn fixture() -> AccountExportCredential {
     AccountExportCredential {
+        oauth_client_kind: Default::default(),
+        siwc_registration: None,
+        basis_points_headers: None,
         label: "Synthetic Plus".into(),
         email: Some("person@example.test".into()),
         phone: None,

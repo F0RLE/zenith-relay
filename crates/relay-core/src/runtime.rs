@@ -4,7 +4,9 @@ use crate::accounts::{
 use crate::model_metadata::ModelMetadataCatalogHandle;
 use crate::pricing::PricingCatalog;
 use crate::protocol::ClientWireApi;
-use crate::providers::chatgpt::{AgentIdentityCredential, CodexIdentityEnvelope};
+use crate::providers::chatgpt::{
+    basis_points_headers, AgentIdentityCredential, CodexIdentityEnvelope,
+};
 #[cfg(test)]
 use crate::providers::chatgpt::{RuntimeChatGptAccount, RuntimeChatGptAuth};
 use crate::quota::QuotaSnapshot;
@@ -39,7 +41,10 @@ mod admission;
 mod attempt;
 mod authentication;
 mod authorization;
+mod basis_points_access;
+pub(crate) use authorization::AuthorizationDispatch;
 mod build;
+pub(crate) mod cache_context;
 mod candidates;
 mod clients;
 mod codex_metadata;
@@ -53,23 +58,25 @@ mod session_state;
 mod settings;
 mod source_metadata;
 mod support;
+mod tool_catalog;
 
 pub(in crate::runtime) use support::{
-    all_native_wire_apis, apply_candidate_policy, basis_points_headers, client_wire_apis_to_native,
-    model_rules, normalize_client_wire_api, normalize_prefix, normalized_responses_url,
-    normalized_set, parse_bearer, require_runtime_value, runtime_client, runtime_now_ms,
-    runtime_websocket_client, strip_prefix_ignore_ascii_case,
+    all_native_wire_apis, apply_candidate_policy, client_wire_apis_to_native, model_rules,
+    normalize_client_wire_api, normalize_prefix, normalized_responses_url, normalized_set,
+    parse_bearer, require_runtime_value, runtime_client, runtime_now_ms, runtime_websocket_client,
+    strip_prefix_ignore_ascii_case,
 };
 
 use config::source_candidate_id;
 pub use config::{
     changed_runtime_source_policy_updates, normalize_model_service_tier_overrides,
     pool_catalog_visibility_changed, pool_dispatch_permission_changed, DefaultServiceTier,
-    GatewayRuntimeOptions, PoolAccess, PoolParticipant, ResponseAffinityBinding,
-    ResponseAffinityStore, RuntimeActivitySnapshot, RuntimeCandidatePolicy, RuntimeLocalKey,
-    RuntimeMixedLocalKey, RuntimeSource, RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate,
-    RESPONSE_AFFINITY_DELETE_CANDIDATE_SQL, RESPONSE_AFFINITY_DELETE_EXPIRED_SQL,
-    RESPONSE_AFFINITY_DELETE_SQL, RESPONSE_AFFINITY_FIND_SQL, RESPONSE_AFFINITY_UPSERT_SQL,
+    GatewayRuntimeOptions, ModelContextPolicy, PoolAccess, PoolParticipant,
+    ResponseAffinityBinding, ResponseAffinityStore, RuntimeActivitySnapshot,
+    RuntimeCandidatePolicy, RuntimeLocalKey, RuntimeMixedLocalKey, RuntimeSource,
+    RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate, RESPONSE_AFFINITY_DELETE_CANDIDATE_SQL,
+    RESPONSE_AFFINITY_DELETE_EXPIRED_SQL, RESPONSE_AFFINITY_DELETE_SQL, RESPONSE_AFFINITY_FIND_SQL,
+    RESPONSE_AFFINITY_UPSERT_SQL,
 };
 
 pub(crate) use attempt::CandidateLease;
@@ -78,6 +85,7 @@ pub use attempt::ExecutionFence;
 use control::RuntimeControl;
 pub(crate) use session_state::CodexTurnStateScope;
 use session_state::CodexTurnStateStore;
+pub use session_state::RuntimeContinuationStores;
 
 #[cfg(test)]
 use crate::{
@@ -88,19 +96,33 @@ pub use images::normalize_image_base_model;
 #[cfg(test)]
 use images::{cheapest_image_main_model, select_image_main_model};
 
-pub(crate) const MAX_NON_STREAM_BODY_BYTES: usize = 16 * 1024 * 1024;
-pub(crate) const IMAGE_API_MODEL: &str = "gpt-image-2";
+/// Relay's virtual Image API model for OAuth account routes.
+///
+/// The account bridge sends this model in the Responses `image_generation`
+/// tool while the top-level Responses model remains the account's selected
+/// text model. Keep the public virtual id aligned with the current stable
+/// GPT Image model; provider routes still use the model selected by their own
+/// source catalog.
+pub(crate) const IMAGE_API_MODEL: &str = "gpt-image-2.5-sunburst";
 const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 256;
 pub(crate) const WEBSOCKET_CAPABILITY_TTL_MS: u64 = 5 * 60 * 1_000;
 const CHATGPT_TEAM_BREAKER_DEDUP_MS: u64 = 60 * 1_000;
 static NEXT_ACTIVITY_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct GatewayRuntime {
+    diagnostics_enabled: fn() -> bool,
     tool_policy: RwLock<crate::ToolPolicy>,
+    request_timezone: RwLock<crate::RequestTimezonePolicy>,
     clients: RuntimeHttpClients,
     discovery_client: reqwest::Client,
     sources: BTreeMap<String, SourceConnector>,
+    /// Per-source HTTP clients for sources that configure a proxy. Sources
+    /// without a proxy use the shared `clients.http` client instead.
+    source_http_clients: BTreeMap<String, reqwest::Client>,
+    /// Per-source WebSocket clients for sources that configure a proxy.
+    source_websocket_clients: BTreeMap<String, reqwest::Client>,
     source_candidate_bindings: BTreeMap<String, SourceCandidateBinding>,
+    legacy_source_candidate_ids: BTreeMap<String, Option<String>>,
     source_recovery_delays_ms: Mutex<BTreeMap<String, u64>>,
     chatgpt_accounts: BTreeMap<String, ChatGptAccountExecutor>,
     chatgpt_team_members: BTreeMap<String, BTreeSet<String>>,
@@ -116,21 +138,25 @@ pub struct GatewayRuntime {
     image_pricing_catalog: Option<Arc<PricingCatalog>>,
     codex_responses_lite_models: Mutex<BTreeSet<(String, String)>>,
     official_codex_ultra: Mutex<BTreeMap<String, Value>>,
-    websocket_http_only: Mutex<BTreeMap<(String, String), u64>>,
+    websocket_http_only: Mutex<BTreeMap<(String, String), clients::WebsocketCapabilityObservation>>,
     model_metadata: SourceModelMetadataState,
     model_reasoning_allowed_levels: Mutex<BTreeMap<String, Vec<String>>>,
+    model_context_policies: Mutex<BTreeMap<String, ModelContextPolicy>>,
     model_service_tier_overrides: Mutex<BTreeMap<String, DefaultServiceTier>>,
     model_display_order: Mutex<Vec<String>>,
     model_metadata_catalog: Option<ModelMetadataCatalogHandle>,
     passive_quotas: Mutex<BTreeMap<String, PassiveQuotaState>>,
-    messages_bridge_store: Mutex<crate::MessagesBridgeStore>,
-    native_responses_replay_store: Mutex<NativeResponsesReplayStore>,
+    adapter_continuation_store: Arc<Mutex<crate::AdapterContinuationStore>>,
+    native_responses_replay_store: Arc<Mutex<NativeResponsesReplayStore>>,
+    cache_context_store: cache_context::CacheContextStore,
     codex_turn_state_store: CodexTurnStateStore,
+    pub(crate) basis_points_catalog_store: tool_catalog::ToolCatalogStore,
     control: RuntimeControl,
     max_retry_candidates: std::sync::atomic::AtomicUsize,
     quota_stale_after_ms: u64,
     default_service_tier_value: AtomicU8,
     response_affinity_store: Option<Arc<dyn ResponseAffinityStore>>,
+    response_route_affinity: Arc<Mutex<crate::scheduler::AffinityCache>>,
     activity_callback: Arc<Mutex<RuntimeActivityCallback>>,
     activity_runtime_id: u64,
     activity_revision: Arc<AtomicU64>,
@@ -151,7 +177,7 @@ struct PassiveQuotaState {
 
 #[derive(Clone, Debug)]
 struct CachedModelManifest {
-    value: Value,
+    manifest_payload: Value,
 }
 
 #[derive(Default)]
@@ -181,13 +207,17 @@ impl AuthenticatedKey {
 }
 
 struct ChatGptAccountExecutor {
+    oauth_client_kind: crate::providers::chatgpt::OAuthClientKind,
+    subscription_plan_type: RwLock<Option<String>>,
     id: String,
     source_id: String,
     chatgpt_account_id: String,
+    chatgpt_user_id: Option<String>,
+    basis_points_headers: Option<crate::providers::chatgpt::BasisPointsCapturedHeaders>,
+    proxy_timezone: RwLock<Option<String>>,
     identity: CodexIdentityEnvelope,
     responses_url: Url,
     basis_points_url: Url,
-    basis_points_enabled: AtomicBool,
     model_inventory: RwLock<AccountModelInventory>,
     image_bridge_revision: Arc<AtomicU64>,
     token_authority: Arc<TokenAuthority>,
@@ -199,6 +229,8 @@ struct ChatGptAccountExecutor {
     agent_identity: RwLock<Option<AgentIdentityCredential>>,
     agent_identity_revision: AtomicU64,
     agent_task_lock: tokio::sync::Mutex<()>,
+    basis_points_access: RwLock<Option<basis_points_access::CachedBasisPointsAccess>>,
+    basis_points_access_refresh: tokio::sync::Mutex<()>,
     routing_cookies: routing_cookies::RoutingCookies,
 }
 
@@ -216,27 +248,56 @@ pub(crate) struct ExecutorRoute {
     /// request. This is request-local provenance, not route configuration.
     pub(crate) account_token_generation: Option<u64>,
     pub(crate) client_context_id: Option<String>,
-    pub(crate) wire_api: WireApi,
+    /// Client contract. The adapter maps it to the upstream protocol.
+    pub(crate) client_wire_api: WireApi,
     pub(crate) adapter: SourceAdapter,
     pub(crate) reasoning_mode: MessagesReasoningMode,
+    /// Explicit client compatibility choice; the original request stays intact for usage.
+    pub(crate) reasoning_effort_override: Option<String>,
     pub(crate) cache_write_ttl: CacheWriteTtl,
     pub(crate) service_tier: DefaultServiceTier,
     pub(crate) upstream_url: Url,
     pub(crate) upstream_headers: HeaderMap,
     pub(crate) account_transport: AccountTransport,
+    pub(crate) client_transport: crate::UsageTransport,
     pub(crate) source_model: String,
+    /// Source-local capability evidence for the selected route. OAuth account
+    /// routes currently rely on the shared reference catalog and keep this
+    /// unset until the account endpoint reports model capabilities.
+    pub(crate) route_capability: Option<crate::ModelEndpointCapability>,
     pub(crate) half_open_probe: bool,
+    pub(crate) diagnostics_enabled: bool,
+    pub(crate) basis_points_discovery: bool,
     pub(crate) routing: Option<RoutingDiagnostics>,
+    pub(crate) cache_context_observation: Option<cache_context::CacheContextObservation>,
+}
+
+impl ExecutorRoute {
+    pub(crate) fn binding_key(&self) -> SourceProtocolBindingKey {
+        SourceProtocolBindingKey {
+            wire_api: self.client_wire_api,
+            adapter: self.adapter,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 struct SourceCandidateBinding {
     source_id: String,
+    routes: Vec<SourceCandidateRoute>,
+}
+
+#[derive(Clone, Debug)]
+struct SourceCandidateRoute {
     binding_key: SourceProtocolBindingKey,
     wire_api: WireApi,
     adapter: SourceAdapter,
     reasoning_mode: MessagesReasoningMode,
     cache_write_ttl: CacheWriteTtl,
+    models: BTreeSet<String>,
+    /// Capability evidence for this exact upstream model route. Reference
+    /// metadata remains separate and is merged only during request admission.
+    capabilities: BTreeMap<String, crate::ModelEndpointCapability>,
 }
 
 pub(crate) struct PreparedAuthorization {
@@ -245,6 +306,7 @@ pub(crate) struct PreparedAuthorization {
     pub(crate) identity: Option<CodexIdentityEnvelope>,
     pub(crate) token_generation: Option<u64>,
     pub(crate) token_revision: Option<TokenDispatchRevision>,
+    pub(crate) account_plan_supported: bool,
     pub(crate) agent_task_id: Option<String>,
     pub(crate) agent_credential_fingerprint: Option<[u8; 32]>,
     pub(crate) agent_identity_revision: Option<u64>,
@@ -263,6 +325,7 @@ pub(crate) enum AuthorizationIncarnation {
 pub(crate) struct AuthorizedResponse {
     pub(crate) response: reqwest::Response,
     pub(crate) account_token_generation: Option<u64>,
+    pub(crate) authorization_incarnation: AuthorizationIncarnation,
 }
 
 #[derive(Debug)]
@@ -271,6 +334,11 @@ pub(crate) enum AuthorizedRequestError {
     Transport(reqwest::Error),
     NotReplayable,
     DispatchBudgetExhausted,
+    ModelAccess(crate::providers::chatgpt::ModelDiscoveryFailure),
+    ModelUnavailable,
+    ReasoningUnavailable,
+    ProgressTimeout,
+    HeadersTimeout,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -308,28 +376,31 @@ impl RuntimeHttpClients {
 
 impl GatewayRuntime {
     pub async fn discover_models(&self) -> Result<Vec<String>> {
-        let source = self.sources.values().next().ok_or_else(|| {
+        let provider_source = self.sources.values().next().ok_or_else(|| {
             Error::Validation("at least one provider source is required".to_string())
         })?;
-        discover_models_with_client(&self.discovery_client, source, source.protocol_bindings())
-            .await
+        discover_models_with_client(
+            &self.discovery_client,
+            provider_source,
+            provider_source.protocol_bindings(),
+        )
+        .await
     }
 
-    pub(crate) fn record_success_with_metrics(
+    /// Returns a non-secret fingerprint for the OAuth credential currently
+    /// installed in an account slot. Basis Points attachment IDs belong to a
+    /// credential session, so they must not survive an access-token rotation.
+    pub(crate) async fn basis_points_credential_fingerprint(
         &self,
         candidate_id: &str,
-        model: &str,
-        now_ms: u64,
-        output_tokens: Option<u64>,
-        latency_ms: u64,
-    ) -> bool {
-        self.lock_scheduler().record_success_with_metrics(
-            candidate_id,
-            model,
-            now_ms,
-            output_tokens,
-            latency_ms,
-        )
+    ) -> Option<[u8; 32]> {
+        let account = self.chatgpt_accounts.get(candidate_id)?;
+        let tokens = account.token_authority.tokens(candidate_id).await?;
+        let mut digest = Sha256::new();
+        digest.update(b"zenith-relay-basis-points-attachment-v1");
+        digest.update(tokens.generation().to_be_bytes());
+        digest.update(tokens.access_token().as_bytes());
+        Some(digest.finalize().into())
     }
 
     fn lock_scheduler(&self) -> MutexGuard<'_, PoolScheduler> {
@@ -340,7 +411,14 @@ impl GatewayRuntime {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AccountTransport {
     NativeResponses,
+    Siwc,
     ExcelBasisPoints,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AuthorizationIdentityPolicy {
+    RelayCodex,
+    PreserveUpstream,
 }
 
 impl ChatGptAccountExecutor {

@@ -7,15 +7,37 @@ use super::super::super::{
 use super::super::profiles;
 use super::assemble::runtime_from_store;
 use super::{current_time_ms, record_catalog_refresh_result, runtime_account_operational_state};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use zenith_relay_core::{protocol::account_candidate_enabled, GatewayRuntime};
 
 pub(in crate::local_pool) fn refresh_active_codex_catalog_in_background(app: AppHandle) {
+    queue_active_client_catalog_refresh(&app.state::<DesktopState>());
+}
+
+/// Client catalogs are projections, not part of the durable gateway mutation.
+/// Do not keep a save/delete command (or its setup lock) waiting on client
+/// process detection, catalog HTTP reads, or profile file updates.
+pub(in crate::local_pool) fn queue_active_client_catalog_refresh(state: &DesktopState) {
+    // Only the attached desktop session owns client-profile projections.
+    // Standalone states (including synthetic runtime tests) must not touch
+    // the current user's application profiles.
+    if !state.oauth_events.is_attached() {
+        return;
+    }
+    if !state.client_catalog_refresh.request() {
+        return;
+    }
+    let state = state.clone();
     tauri::async_runtime::spawn(async move {
-        let state = app.state::<DesktopState>();
-        let result = profiles::refresh_active_client_catalogs(&state).await;
-        record_catalog_refresh_result(&state, &result);
-        let _ = app.emit("zenith-state-changed", ());
+        loop {
+            state.client_catalog_refresh.begin_pass();
+            let catalog_refresh_result = profiles::refresh_active_client_catalogs(&state).await;
+            record_catalog_refresh_result(&state, &catalog_refresh_result);
+            state.oauth_events.emit_state_changed();
+            if !state.client_catalog_refresh.finish_pass() {
+                break;
+            }
+        }
     });
 }
 
@@ -52,7 +74,20 @@ pub(in crate::local_pool) async fn sync_running_account_states(state: &DesktopSt
     let Some(runtime) = state.gateway.runtime().await else {
         return Ok(());
     };
-    let accounts = state.store()?.accounts().to_vec();
+    let accounts = {
+        let store = state.store()?;
+        super::quota_references::sync_account_quota_references(state, &runtime, &store)?;
+        store
+            .accounts()
+            .iter()
+            .filter(|account| {
+                store
+                    .gateway()
+                    .account_route_is_selected(&account.account.id)
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
     let observed_at_ms = current_time_ms();
     for account in accounts {
         sync_runtime_account_state(&runtime, &account, observed_at_ms);
@@ -70,11 +105,17 @@ pub(in crate::local_pool) async fn sync_refreshed_account_or_rollback(
     let Some(runtime) = state.gateway.runtime().await else {
         return Ok(());
     };
-    let account = state
-        .store()?
-        .account(&account_id)
-        .cloned()
-        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
+    let account = {
+        let store = state.store()?;
+        super::quota_references::sync_account_quota_references(state, &runtime, &store)?;
+        if !store.gateway().account_route_is_selected(&account_id) {
+            return Ok(());
+        }
+        store
+            .account(&account_id)
+            .cloned()
+            .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?
+    };
     let observed_at_ms = current_time_ms();
     let health_changed =
         runtime_account_operational_state(&previous_account.account, observed_at_ms).health
@@ -107,8 +148,19 @@ fn sync_runtime_account_state_with_live_block(
     preserve_live_block: bool,
 ) -> bool {
     let operational = runtime_account_operational_state(&account.account, observed_at_ms);
+    if !operational.health.is_eligible() || !account.account.enabled || account.recovery.is_some() {
+        runtime.invalidate_account_quota_reference_source(&account.account.id);
+    }
+    if !runtime.update_account_subscription_plan(
+        &account.account.id,
+        account.account.subscription.plan_type.as_deref(),
+    ) {
+        return false;
+    }
     let enabled =
-        account_candidate_enabled(account.account.enabled, operational.routing_block_reason);
+        account_candidate_enabled(account.account.enabled, operational.routing_block_reason)
+            && crate::local_pool::accounts::records::can_account_join_pool(account)
+                .unwrap_or(false);
     if preserve_live_block {
         runtime.sync_account_refresh_availability_with_quota(
             &account.account.id,
@@ -153,6 +205,7 @@ pub(in crate::local_pool) async fn restart_or_rollback(
         return Ok(());
     };
     let next_port = state.store()?.gateway().port;
+    let next_scope = state.store()?.gateway().bind_scope;
     let mut rollback = Some(rollback);
     let runtime = match runtime_from_store(state).await {
         Ok(runtime) => runtime,
@@ -185,11 +238,24 @@ pub(in crate::local_pool) async fn restart_or_rollback(
                     .await)
                 }
             };
-            if let Some(previous) = state.gateway.runtime().await {
-                previous.retire_for_replacement();
+            let restored_scope = state.store()?.gateway().bind_scope;
+            if state
+                .gateway
+                .replace_runtime_with_scope(restored.clone(), address.port(), restored_scope)
+                .await
+            {
+                return Err(error);
+            }
+            if let Some(previous_runtime) = state.gateway.runtime().await {
+                previous_runtime.retire_for_replacement();
             }
             state.gateway.stop().await;
-            if let Err(restart) = state.gateway.start(restored, address.port()).await {
+            let scope = state.store()?.gateway().bind_scope;
+            if let Err(restart) = state
+                .gateway
+                .start_with_scope(restored, address.port(), scope)
+                .await
+            {
                 return Err(fail_closed(
                     state,
                     format!("{error}; failed to restart restored gateway: {restart}"),
@@ -200,6 +266,16 @@ pub(in crate::local_pool) async fn restart_or_rollback(
         }
     };
 
+    if state
+        .gateway
+        .replace_runtime_with_scope(runtime.clone(), next_port, next_scope)
+        .await
+    {
+        queue_active_client_catalog_refresh(state);
+        crate::diagnostics::record_operation("gateway-runtime", "runtime_replaced", &[]);
+        return Ok(());
+    }
+
     crate::diagnostics::breadcrumb(
         "gateway-runtime",
         "gateway_stop_started",
@@ -207,8 +283,8 @@ pub(in crate::local_pool) async fn restart_or_rollback(
     );
     // A delayed request may still hold the old Arc after the listener stops.
     // Failed activation rebuilds a fresh runtime from restored storage.
-    if let Some(previous) = state.gateway.runtime().await {
-        previous.retire_for_replacement();
+    if let Some(previous_runtime) = state.gateway.runtime().await {
+        previous_runtime.retire_for_replacement();
     }
     state.gateway.stop().await;
     crate::diagnostics::breadcrumb(
@@ -216,7 +292,11 @@ pub(in crate::local_pool) async fn restart_or_rollback(
         "gateway_start_started",
         &[("port", next_port.to_string())],
     );
-    let restart_error = state.gateway.start(runtime, next_port).await.err();
+    let restart_error = state
+        .gateway
+        .start_with_scope(runtime, next_port, next_scope)
+        .await
+        .err();
     if let Some(error) = restart_error {
         crate::diagnostics::record_error(
             "gateway-runtime",
@@ -243,7 +323,12 @@ pub(in crate::local_pool) async fn restart_or_rollback(
                 .await)
             }
         };
-        if let Err(restart) = state.gateway.start(old_runtime, address.port()).await {
+        let scope = state.store()?.gateway().bind_scope;
+        if let Err(restart) = state
+            .gateway
+            .start_with_scope(old_runtime, address.port(), scope)
+            .await
+        {
             return Err(fail_closed(
                 state,
                 format!("{error}; failed to restart previous gateway: {restart}"),
@@ -257,9 +342,7 @@ pub(in crate::local_pool) async fn restart_or_rollback(
         "gateway_started",
         &[("port", next_port.to_string())],
     );
-    crate::diagnostics::breadcrumb("gateway-runtime", "catalog_refresh_started", &[]);
-    let result = profiles::refresh_active_client_catalogs(state).await;
-    record_catalog_refresh_result(state, &result);
+    queue_active_client_catalog_refresh(state);
     crate::diagnostics::record_operation("gateway-runtime", "restart_completed", &[]);
     Ok(())
 }

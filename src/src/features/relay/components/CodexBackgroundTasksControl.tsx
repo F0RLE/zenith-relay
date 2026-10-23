@@ -9,7 +9,7 @@ export function CodexBackgroundTasksControl({ className = "" }: { className?: st
   const { t } = useTranslation();
   const { mode, runtime, codexBackgroundTasksEnabled, setCodexBackgroundTasksEnabled } = useRelayState();
   const { checked, select } = usePendingFlag(codexBackgroundTasksEnabled);
-  const supported = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("codex_background_tasks"));
+  const supported = mode === "local";
   if (!supported) return null;
   return <CodexFeatureToggleControl
     className={className}

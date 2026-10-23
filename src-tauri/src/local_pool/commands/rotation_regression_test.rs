@@ -183,11 +183,10 @@ async fn desktop_membership_batch_keeps_the_live_runtime_and_rejects_missing_mem
 }
 
 #[tokio::test]
-async fn desktop_proxy_fence_targets_inherited_and_bypassed_accounts() {
+async fn desktop_common_proxy_fence_targets_only_inheriting_accounts() {
     let pool = ReviewPool::new().await;
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
-    let affected =
-        super::gateway::settings::accounts_without_explicit_proxy(&pool.state, false).unwrap();
+    let affected = super::gateway::settings::accounts_inheriting_common_proxy(&pool.state).unwrap();
     assert_eq!(affected, pool.ids);
 
     let second = credentials.require(&pool.ids[1]).unwrap();
@@ -197,23 +196,14 @@ async fn desktop_proxy_fence_targets_inherited_and_bypassed_accounts() {
         .unwrap();
     credentials.save(&explicit).unwrap();
     assert_eq!(
-        super::gateway::settings::accounts_without_explicit_proxy(&pool.state, false).unwrap(),
+        super::gateway::settings::accounts_inheriting_common_proxy(&pool.state).unwrap(),
         [pool.ids[0].clone()]
     );
-    assert_eq!(
-        super::gateway::settings::accounts_without_explicit_proxy(&pool.state, true).unwrap(),
-        [pool.ids[0].clone()]
-    );
-
     let bypassed = second.with_proxy_route(None, true).unwrap();
     credentials.save(&bypassed).unwrap();
     assert_eq!(
-        super::gateway::settings::accounts_without_explicit_proxy(&pool.state, false).unwrap(),
+        super::gateway::settings::accounts_inheriting_common_proxy(&pool.state).unwrap(),
         [pool.ids[0].clone()]
-    );
-    assert_eq!(
-        super::gateway::settings::accounts_without_explicit_proxy(&pool.state, true).unwrap(),
-        pool.ids
     );
     pool.close().await;
 }
@@ -227,6 +217,15 @@ impl ReviewPool {
         let now = current_time_ms();
         let credentials = CredentialStore::from_backend(NativeSecretBackend);
         for id in &ids {
+            let registration = crate::local_pool::accounts::oauth::siwc::SiwcRegistration {
+                client_id: "oaiapp_synthetic_rotation".into(),
+                host_id: "urn:uuid:synthetic-rotation".into(),
+                issuer: "https://auth.openai.com".into(),
+                subject: id.clone(),
+                scopes: vec!["resource.invoke".into(), "chatgpt.tokens.use.direct".into()],
+                earliest_refresh_at_ms: None,
+                requires_reauthentication: false,
+            };
             let secret = StoredCodexCredentials::new(
                 id,
                 "synthetic-access".into(),
@@ -236,12 +235,15 @@ impl ReviewPool {
                 now,
                 1,
                 None,
-                Some(id.clone()),
-                None,
+                Some(registration.identity_key()),
+                Some(registration.subject.clone()),
                 None,
                 Some("plus".into()),
                 false,
             )
+            .unwrap()
+            .with_oauth_client_kind(zenith_relay_core::providers::chatgpt::OAuthClientKind::Siwc)
+            .with_siwc_registration(Some(registration))
             .unwrap();
             credentials.save(&secret).unwrap();
             let mut record = records::new_account_record(

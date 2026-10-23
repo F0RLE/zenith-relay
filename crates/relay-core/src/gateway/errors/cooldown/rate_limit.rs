@@ -1,26 +1,56 @@
 use super::super::{upstream_error_text, MAX_RATE_LIMIT_RETRY_HINT_MS};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct RateLimitBodyHint {
     pub(crate) retry_after_ms: Option<u64>,
+    pub(crate) explicit_retry_after_ms: Option<u64>,
+    pub(crate) chatgpt_subscription: bool,
     pub(crate) global: bool,
+    pub(crate) shared_bucket: Option<[u8; 32]>,
 }
 
-pub(crate) fn rate_limit_body_hint(body: &[u8]) -> RateLimitBodyHint {
-    rate_limit_body_hint_at(body, SystemTime::now())
+impl RateLimitBodyHint {
+    pub(crate) fn retry_after_for_account(self, account_route: bool) -> Option<u64> {
+        if self.chatgpt_subscription && !account_route {
+            self.explicit_retry_after_ms
+        } else {
+            self.retry_after_ms
+        }
+    }
 }
 
-pub(crate) fn rate_limit_body_hint_at(body: &[u8], now: SystemTime) -> RateLimitBodyHint {
-    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+pub(crate) fn rate_limit_body_hint(response_body: &[u8]) -> RateLimitBodyHint {
+    rate_limit_body_hint_at(response_body, SystemTime::now())
+}
+
+pub(crate) fn rate_limit_body_hint_at(response_body: &[u8], now: SystemTime) -> RateLimitBodyHint {
+    let Ok(rate_limit_payload) = serde_json::from_slice::<Value>(response_body) else {
         return RateLimitBodyHint::default();
     };
-    rate_limit_body_hint_value(&value, now)
+    rate_limit_body_hint_value(&rate_limit_payload, now)
 }
 
-pub(crate) fn rate_limit_body_hint_value(value: &Value, now: SystemTime) -> RateLimitBodyHint {
-    let retry_after_ms = rate_limit_reset_delay_ms(value, now)
+pub(crate) fn rate_limit_body_hint_value(
+    rate_limit_payload: &Value,
+    now: SystemTime,
+) -> RateLimitBodyHint {
+    let explicit_retry_after_ms = [
+        "/retry_after",
+        "/error/retry_after",
+        "/body/error/retry_after",
+        "/response/error/retry_after",
+    ]
+    .into_iter()
+    .find_map(|path| {
+        rate_limit_payload
+            .pointer(path)
+            .and_then(json_seconds_to_ms)
+    })
+    .or_else(|| retry_delay_from_text(&upstream_error_text(rate_limit_payload)));
+    let retry_after_ms = rate_limit_reset_delay_ms(rate_limit_payload, now)
         .or_else(|| {
             [
                 "/resets_in_seconds",
@@ -29,19 +59,24 @@ pub(crate) fn rate_limit_body_hint_value(value: &Value, now: SystemTime) -> Rate
                 "/response/error/resets_in_seconds",
             ]
             .into_iter()
-            .find_map(|path| value.pointer(path).and_then(json_seconds_to_ms))
+            .find_map(|path| {
+                rate_limit_payload
+                    .pointer(path)
+                    .and_then(json_seconds_to_ms)
+            })
         })
-        .or_else(|| {
-            [
-                "/retry_after",
-                "/error/retry_after",
-                "/body/error/retry_after",
-                "/response/error/retry_after",
-            ]
-            .into_iter()
-            .find_map(|path| value.pointer(path).and_then(json_seconds_to_ms))
-        })
-        .or_else(|| retry_delay_from_text(&upstream_error_text(value)));
+        .or(explicit_retry_after_ms);
+    let chatgpt_subscription = ["", "/error", "/body/error", "/response/error"]
+        .into_iter()
+        .filter_map(|path| rate_limit_payload.pointer(path))
+        .any(|error| {
+            ["code", "type"].into_iter().any(|field| {
+                matches!(
+                    error.get(field).and_then(Value::as_str),
+                    Some("usage_limit_reached" | "subscription_sharing_usage_limit_exceeded")
+                )
+            })
+        });
     let global = [
         "/type",
         "/code",
@@ -53,7 +88,7 @@ pub(crate) fn rate_limit_body_hint_value(value: &Value, now: SystemTime) -> Rate
         "/response/error/code",
     ]
     .into_iter()
-    .filter_map(|path| value.pointer(path).and_then(Value::as_str))
+    .filter_map(|path| rate_limit_payload.pointer(path).and_then(Value::as_str))
     .map(str::to_ascii_lowercase)
     .any(|kind| {
         kind.contains("usage_limit")
@@ -67,11 +102,49 @@ pub(crate) fn rate_limit_body_hint_value(value: &Value, now: SystemTime) -> Rate
     });
     RateLimitBodyHint {
         retry_after_ms,
+        explicit_retry_after_ms,
+        chatgpt_subscription,
         global,
+        shared_bucket: organization_rate_limit_bucket(rate_limit_payload),
     }
 }
 
-fn rate_limit_reset_delay_ms(value: &Value, now: SystemTime) -> Option<u64> {
+fn organization_rate_limit_bucket(payload: &Value) -> Option<[u8; 32]> {
+    let error = ["/error", "/body/error", "/response/error", ""]
+        .into_iter()
+        .filter_map(|path| payload.pointer(path))
+        .find(|error| error["code"].as_str() == Some("rate_limit_exceeded"))?;
+    let dimension = error["type"].as_str()?;
+    let unit = match dimension {
+        "tokens" => "tokens per min",
+        "requests" => "requests per min",
+        _ => return None,
+    };
+    let message = error["message"].as_str()?;
+    let (model, remainder) = message
+        .strip_prefix("Rate limit reached for ")?
+        .split_once(" in organization ")?;
+    let (organization, limit) = remainder.split_once(" on ")?;
+    if !crate::catalog::is_valid_model_token(model)
+        || organization.is_empty()
+        || organization.len() > 128
+        || !organization
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        || !limit.starts_with(unit)
+    {
+        return None;
+    }
+    // Keep quota identity opaque; account names and provider messages are not stored here.
+    let mut digest = Sha256::new();
+    for value in [organization, model, dimension] {
+        digest.update(value.as_bytes());
+        digest.update([0]);
+    }
+    Some(digest.finalize().into())
+}
+
+fn rate_limit_reset_delay_ms(rate_limit_payload: &Value, now: SystemTime) -> Option<u64> {
     let reset_at = [
         "/resets_at",
         "/error/resets_at",
@@ -79,7 +152,7 @@ fn rate_limit_reset_delay_ms(value: &Value, now: SystemTime) -> Option<u64> {
         "/response/error/resets_at",
     ]
     .into_iter()
-    .find_map(|path| value.pointer(path).and_then(json_u64))?;
+    .find_map(|path| rate_limit_payload.pointer(path).and_then(json_u64))?;
     let reset_seconds = if reset_at > 10_000_000_000 {
         reset_at / 1_000
     } else {
@@ -93,16 +166,20 @@ fn rate_limit_reset_delay_ms(value: &Value, now: SystemTime) -> Option<u64> {
         .map(|duration_ms| duration_ms.min(MAX_RATE_LIMIT_RETRY_HINT_MS))
 }
 
-fn json_u64(value: &Value) -> Option<u64> {
-    value
-        .as_u64()
-        .or_else(|| value.as_str().and_then(|value| value.trim().parse().ok()))
+fn json_u64(json_value: &Value) -> Option<u64> {
+    json_value.as_u64().or_else(|| {
+        json_value
+            .as_str()
+            .and_then(|text| text.trim().parse().ok())
+    })
 }
 
-fn json_seconds_to_ms(value: &Value) -> Option<u64> {
-    let seconds = value
-        .as_f64()
-        .or_else(|| value.as_str().and_then(|value| value.trim().parse().ok()))?;
+fn json_seconds_to_ms(duration_value: &Value) -> Option<u64> {
+    let seconds = duration_value.as_f64().or_else(|| {
+        duration_value
+            .as_str()
+            .and_then(|text| text.trim().parse().ok())
+    })?;
     if !seconds.is_finite() || seconds <= 0.0 {
         return None;
     }
@@ -137,8 +214,16 @@ fn retry_delay_from_text(text: &str) -> Option<u64> {
     )
 }
 
-pub(crate) fn retry_delay_ms(header: Option<u64>, body: Option<u64>, fallback: u64) -> u64 {
-    header.into_iter().chain(body).max().unwrap_or(fallback)
+pub(crate) fn retry_delay_ms(
+    header_retry_after_ms: Option<u64>,
+    body_retry_after_ms: Option<u64>,
+    fallback_ms: u64,
+) -> u64 {
+    header_retry_after_ms
+        .into_iter()
+        .chain(body_retry_after_ms)
+        .max()
+        .unwrap_or(fallback_ms)
 }
 
 pub(crate) fn retry_after_ms(headers: &reqwest::header::HeaderMap, now: SystemTime) -> Option<u64> {

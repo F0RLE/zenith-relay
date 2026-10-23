@@ -19,10 +19,759 @@ fn request(id: u64) -> RotationRequest {
     RotationRequest::new(RequestId(id), "responses:gpt", "gpt-6")
 }
 
+fn preferred_request(id: u64, candidate_id: &str) -> RotationRequest {
+    let mut request = request(id);
+    request.preferred = Some(candidate_id.to_owned());
+    request
+}
+
+#[test]
+fn warm_fallbacks_only_break_automatic_ties_and_never_bypass_capacity() {
+    for mode in [
+        RotationMode::Automatic,
+        RotationMode::RoundRobin,
+        RotationMode::Failover,
+    ] {
+        let cold = candidate("a-cold", 10, 100);
+        let mut warm = candidate("z-warm", 0, 1);
+        warm.max_concurrency = 1;
+        let mut engine = engine_with([cold, warm]);
+        engine.mode = mode;
+        let mut request = request(1);
+        request.warm_fallbacks = vec!["z-warm".to_string()];
+        assert_eq!(
+            engine.select(&request, 100).unwrap().candidate_id,
+            if mode == RotationMode::Automatic {
+                "z-warm"
+            } else {
+                "a-cold"
+            }
+        );
+        let busy = engine
+            .reserve(&request.clone().with_owner("z-warm"), 100)
+            .unwrap();
+        assert_eq!(engine.select(&request, 100).unwrap().candidate_id, "a-cold");
+        assert!(engine.release_unstarted(busy.lease_id));
+    }
+}
+
+#[test]
+fn cache_affinity_keeps_a_ready_member_with_one_extra_in_flight_request() {
+    let mut warm = candidate("warm", 0, 1);
+    warm.max_concurrency = 4;
+    let mut idle = candidate("idle", 0, 1);
+    idle.max_concurrency = 4;
+    let mut engine = engine_with([warm, idle]);
+    let busy = engine.reserve(&request(1).with_owner("warm"), 100).unwrap();
+
+    let selected = engine.select(&preferred_request(2, "warm"), 100).unwrap();
+    assert_eq!(selected.candidate_id, "warm");
+    assert_eq!(selected.reason, RotationSelectionReason::WeightedRotation);
+    assert!(engine.release_unstarted(busy.lease_id));
+}
+
+#[test]
+fn cache_affinity_load_margin_never_overrides_capacity_or_a_larger_load_gap() {
+    for (capacity, in_flight) in [(1, 1), (4, 2), (4, 3)] {
+        let mut warm = candidate("warm", 0, 1);
+        warm.max_concurrency = capacity;
+        let mut engine = engine_with([warm, candidate("idle", 0, 1)]);
+        let leases = (1..=in_flight)
+            .map(|id| {
+                engine
+                    .reserve(&request(id).with_owner("warm"), 100)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        let selected = engine.select(&preferred_request(20, "warm"), 100).unwrap();
+        assert_eq!(selected.candidate_id, "idle");
+        for lease in leases {
+            assert!(engine.release_unstarted(lease.lease_id));
+        }
+    }
+}
+
+#[test]
+fn cache_affinity_load_margin_preserves_quota_and_independent_load_balancing() {
+    let mut warm = candidate("warm", 0, 1);
+    warm.max_concurrency = 4;
+    let mut idle = candidate("idle", 0, 1);
+    idle.max_concurrency = 4;
+    let mut engine = engine_with([warm, idle]);
+    for (id, remaining) in [("warm", 8_000), ("idle", 8_100)] {
+        assert!(engine.sync_candidate_state(
+            id,
+            true,
+            false,
+            AuthState::Ready,
+            QuotaState::Available,
+            RateState::Ready,
+        ));
+        assert!(engine.set_quota_remaining(id, Some(remaining), Some(100)));
+    }
+    let busy = engine.reserve(&request(1).with_owner("warm"), 100).unwrap();
+    assert_eq!(
+        engine.select(&request(2), 100).unwrap().candidate_id,
+        "idle"
+    );
+    assert_eq!(
+        engine
+            .select(&preferred_request(3, "warm"), 100)
+            .unwrap()
+            .candidate_id,
+        "warm"
+    );
+
+    assert!(engine.set_quota_remaining("idle", Some(9_000), Some(100)));
+    let selected = engine.select(&preferred_request(4, "warm"), 100).unwrap();
+    assert_eq!(selected.candidate_id, "idle");
+    assert_eq!(selected.reason, RotationSelectionReason::QuotaHeadroom);
+    assert!(engine.release_unstarted(busy.lease_id));
+}
+
+#[test]
+fn cache_affinity_load_margin_compares_normalized_physical_capacity() {
+    for (warm_capacity, other_capacity, warm_load, other_load, expected) in
+        [(4, 8, 2, 1, "other"), (8, 4, 3, 1, "warm")]
+    {
+        let mut warm = candidate("warm", 0, 1);
+        warm.max_concurrency = warm_capacity;
+        let mut other = candidate("other", 0, 1);
+        other.max_concurrency = other_capacity;
+        let mut engine = engine_with([warm, other]);
+        let mut leases = Vec::new();
+        for id in 1..=warm_load {
+            leases.push(
+                engine
+                    .reserve(&request(id).with_owner("warm"), 100)
+                    .unwrap(),
+            );
+        }
+        for id in 100..100 + other_load {
+            leases.push(
+                engine
+                    .reserve(&request(id).with_owner("other"), 100)
+                    .unwrap(),
+            );
+        }
+        assert_eq!(
+            engine
+                .select(&preferred_request(200, "warm"), 100)
+                .unwrap()
+                .candidate_id,
+            expected
+        );
+        for lease in leases {
+            assert!(engine.release_unstarted(lease.lease_id));
+        }
+    }
+}
+
+#[test]
+fn cache_affinity_load_margin_does_not_override_health_or_latency() {
+    for warm_health in [
+        HealthRuntime {
+            failure_score_milli: HEALTH_FAILURE_SWITCH_MARGIN_MILLI,
+            observed_at_ms: Some(100),
+            ..HealthRuntime::default()
+        },
+        HealthRuntime {
+            first_output_latency_ms: Some(1_000),
+            latency_observed_at_ms: Some(100),
+            ..HealthRuntime::default()
+        },
+    ] {
+        let mut warm = candidate("warm", 0, 1);
+        warm.max_concurrency = 4;
+        let mut engine = engine_with([warm, candidate("idle", 0, 1)]);
+        engine
+            .health
+            .insert(("warm".into(), "responses:gpt".into()), warm_health);
+        engine.health.insert(
+            ("idle".into(), "responses:gpt".into()),
+            HealthRuntime {
+                first_output_latency_ms: Some(100),
+                latency_observed_at_ms: Some(100),
+                ..HealthRuntime::default()
+            },
+        );
+        let busy = engine.reserve(&request(1).with_owner("warm"), 100).unwrap();
+        assert_eq!(
+            engine
+                .select(&preferred_request(2, "warm"), 100)
+                .unwrap()
+                .candidate_id,
+            "idle"
+        );
+        assert!(engine.release_unstarted(busy.lease_id));
+    }
+}
+
+#[test]
+fn cache_affinity_load_margin_preserves_material_provider_credit_leads() {
+    let mut warm = candidate("warm", 0, 1);
+    warm.max_concurrency = 4;
+    let mut engine = engine_with([warm, candidate("idle", 0, 1)]);
+    assert!(engine.set_provider_credits("warm", Some(500_000_000), false, Some(100)));
+    assert!(engine.set_provider_credits("idle", Some(501_000_000), false, Some(100)));
+    let busy = engine.reserve(&request(1).with_owner("warm"), 100).unwrap();
+    assert_eq!(
+        engine
+            .select(&preferred_request(2, "warm"), 100)
+            .unwrap()
+            .candidate_id,
+        "warm"
+    );
+
+    assert!(engine.set_provider_credits("idle", Some(515_000_000), false, Some(100)));
+    let selected = engine.select(&preferred_request(3, "warm"), 100).unwrap();
+    assert_eq!(selected.candidate_id, "idle");
+    assert_eq!(selected.reason, RotationSelectionReason::ProviderCredits);
+    assert!(engine.release_unstarted(busy.lease_id));
+}
+
+#[test]
+#[ignore = "Synthetic admission probe; no provider calls or billed cache measurements."]
+fn measure_cache_affinity_under_parallel_load() {
+    use std::time::Instant;
+
+    const WARMUPS: u64 = 20;
+    const TRIALS: usize = 9;
+    const ITERATIONS: u64 = 1_000;
+    let mut warm = candidate("warm", 0, 1);
+    warm.max_concurrency = 4;
+    let mut idle = candidate("idle", 0, 1);
+    idle.max_concurrency = 4;
+    let mut engine = engine_with([warm, idle]);
+    let busy = engine.reserve(&request(1).with_owner("warm"), 100).unwrap();
+    for id in 2..WARMUPS + 2 {
+        let lease = engine.reserve(&preferred_request(id, "warm"), 100).unwrap();
+        assert!(engine.release_unstarted(lease.lease_id));
+    }
+
+    let mut durations = Vec::with_capacity(TRIALS);
+    let mut warm_selections = 0_u64;
+    for trial in 0..TRIALS {
+        let start = Instant::now();
+        for iteration in 0..ITERATIONS {
+            let id = WARMUPS + 2 + trial as u64 * ITERATIONS + iteration;
+            let lease = engine.reserve(&preferred_request(id, "warm"), 100).unwrap();
+            warm_selections += u64::from(lease.candidate_id == "warm");
+            assert!(engine.release_unstarted(lease.lease_id));
+        }
+        durations.push(start.elapsed().as_nanos() / u128::from(ITERATIONS));
+    }
+    durations.sort_unstable();
+    println!(
+        "cache-affinity admission: warm selections {warm_selections}/{}, ns/reserve+release median={} min={} max={}",
+        TRIALS as u64 * ITERATIONS,
+        durations[TRIALS / 2],
+        durations[0],
+        durations[TRIALS - 1],
+    );
+    assert!(engine.release_unstarted(busy.lease_id));
+}
+
+#[test]
+fn balanced_quota_margin_preserves_affinity_without_hiding_a_material_lead() {
+    let mut engine = engine_with([candidate("a", 0, 1), candidate("b", 0, 1)]);
+    for (id, remaining) in [("a", 8_100), ("b", 8_000)] {
+        assert!(engine.sync_candidate_state(
+            id,
+            true,
+            false,
+            AuthState::Ready,
+            QuotaState::Available,
+            RateState::Ready
+        ));
+        assert!(engine.set_quota_remaining(id, Some(remaining), Some(100)));
+    }
+    let selected = engine.select(&preferred_request(1, "b"), 100).unwrap();
+    assert_eq!(selected.candidate_id, "b");
+    assert_eq!(selected.reason, RotationSelectionReason::WeightedRotation);
+    assert!(engine.set_quota_remaining("a", Some(9_000), Some(100)));
+    assert_eq!(
+        engine
+            .select(&preferred_request(2, "b"), 100)
+            .unwrap()
+            .candidate_id,
+        "a"
+    );
+}
+
+#[test]
+fn cache_owner_rebalance_uses_fresh_quota_margins_not_completion_order() {
+    for (remaining, owner_remaining, expected) in [
+        (Some(8_000), Some(8_100), false),
+        (Some(8_100), Some(8_000), false),
+        (Some(8_499), Some(8_000), false),
+        (Some(8_500), Some(8_000), true),
+        (Some(9_000), Some(8_000), true),
+        (Some(9_000), None, true),
+        (None, Some(8_000), false),
+        (None, None, false),
+    ] {
+        let mut engine = engine_with([candidate("owner", 0, 1), candidate("next", 0, 1)]);
+        for (id, quota) in [("owner", owner_remaining), ("next", remaining)] {
+            assert!(engine.sync_candidate_state(
+                id,
+                true,
+                false,
+                AuthState::Ready,
+                if quota.is_some() {
+                    QuotaState::Available
+                } else {
+                    QuotaState::Unknown
+                },
+                RateState::Ready,
+            ));
+            assert!(engine.set_quota_remaining(id, quota, Some(100)));
+        }
+        assert_eq!(
+            engine.has_material_resource_lead("next", "owner", 100),
+            expected
+        );
+        assert!(!engine.has_material_resource_lead("next", "owner", 99));
+        assert!(!engine.has_material_resource_lead(
+            "next",
+            "owner",
+            101 + engine.quota_stale_after_ms
+        ));
+        engine.set_mode(RotationMode::RoundRobin);
+        assert!(!engine.has_material_resource_lead("next", "owner", 100));
+    }
+}
+
+#[test]
+fn cache_owner_rebalance_uses_credit_margin_without_overriding_known_quota() {
+    for (next_credits, owner_credits, expected) in [
+        (Some(500_000_000), Some(499_000_000), false),
+        (Some(500_000_000), Some(485_000_001), false),
+        (Some(500_000_000), Some(485_000_000), true),
+        (Some(500_000_000), None, true),
+        (None, Some(500_000_000), false),
+        (None, None, false),
+    ] {
+        let mut engine = engine_with([candidate("owner", 0, 1), candidate("next", 0, 1)]);
+        for (id, credits) in [("owner", owner_credits), ("next", next_credits)] {
+            assert!(engine.set_provider_credits(id, credits, false, Some(100)));
+        }
+        assert_eq!(
+            engine.has_material_resource_lead("next", "owner", 100),
+            expected
+        );
+        assert!(!engine.has_material_resource_lead("next", "owner", 99));
+        assert!(!engine.has_material_resource_lead(
+            "next",
+            "owner",
+            101 + engine.quota_stale_after_ms
+        ));
+        assert!(engine.sync_candidate_state(
+            "owner",
+            true,
+            false,
+            AuthState::Ready,
+            QuotaState::Available,
+            RateState::Ready,
+        ));
+        assert!(engine.set_quota_remaining("owner", Some(8_000), Some(100)));
+        assert!(!engine.has_material_resource_lead("next", "owner", 100));
+    }
+}
+
+#[test]
+fn balanced_small_quota_differences_do_not_starve_equal_request_shares() {
+    let mut engine = engine_with([candidate("a", 0, 1), candidate("b", 0, 1)]);
+    for (id, remaining) in [("a", 8_100), ("b", 8_000)] {
+        assert!(engine.sync_candidate_state(
+            id,
+            true,
+            false,
+            AuthState::Ready,
+            QuotaState::Available,
+            RateState::Ready
+        ));
+        assert!(engine.set_quota_remaining(id, Some(remaining), Some(100)));
+    }
+    let mut counts = BTreeMap::new();
+    for id in 1..=20 {
+        let lease = engine.reserve(&request(id), 100).unwrap();
+        *counts.entry(lease.candidate_id.clone()).or_insert(0) += 1;
+        assert!(engine.release_unstarted(lease.lease_id));
+    }
+    assert_eq!(counts.get("a"), Some(&10));
+    assert_eq!(counts.get("b"), Some(&10));
+}
+
 fn dispatch(engine: &mut RotationEngine, lease: &RotationLease) -> RequestBudget {
     let mut budget = RequestBudget::default_for(lease.request_id);
     engine.begin_dispatch(lease.lease_id, &mut budget).unwrap();
     budget
+}
+
+fn settle_owner(
+    engine: &mut RotationEngine,
+    candidate_id: &str,
+    request_id: u64,
+    now_ms: u64,
+    health: HealthObservation,
+) {
+    let request = request(request_id).with_owner(candidate_id);
+    let lease = engine.reserve(&request, now_ms).unwrap();
+    let budget = dispatch(engine, &lease);
+    engine
+        .settle(
+            lease.lease_id,
+            AttemptObservation {
+                execution: if matches!(health, HealthObservation::Success) {
+                    ExecutionObservation::accepted()
+                } else {
+                    ExecutionObservation::not_sent()
+                },
+                health,
+            },
+            &budget,
+            now_ms,
+        )
+        .unwrap();
+}
+
+#[test]
+fn automatic_selection_softly_prefers_the_candidate_with_fewer_recent_failures() {
+    let mut engine = engine_with([candidate("a", 0, 1), candidate("b", 0, 1)]);
+    settle_owner(
+        &mut engine,
+        "a",
+        1,
+        0,
+        HealthObservation::CountableTransient {
+            provider_not_before_ms: None,
+        },
+    );
+
+    assert_eq!(engine.select(&request(2), 0).unwrap().candidate_id, "b");
+    // Due recovery trials retain their existing permit and priority.
+    assert_eq!(
+        engine
+            .select(&request(3), FIRST_TRANSIENT_PACING_MS)
+            .unwrap()
+            .candidate_id,
+        "a"
+    );
+}
+
+#[test]
+fn successful_traffic_reduces_the_soft_failure_score() {
+    let mut engine = engine_with([candidate("a", 0, 1)]);
+    settle_owner(
+        &mut engine,
+        "a",
+        1,
+        0,
+        HealthObservation::CountableTransient {
+            provider_not_before_ms: None,
+        },
+    );
+    let failed_score = engine
+        .health
+        .get(&("a".to_owned(), "responses:gpt".to_owned()))
+        .unwrap()
+        .failure_score_milli;
+
+    settle_owner(
+        &mut engine,
+        "a",
+        2,
+        FIRST_TRANSIENT_PACING_MS,
+        HealthObservation::Success,
+    );
+    let recovered_score = engine
+        .health
+        .get(&("a".to_owned(), "responses:gpt".to_owned()))
+        .unwrap()
+        .failure_score_milli;
+
+    assert_eq!(failed_score, 250);
+    assert_eq!(recovered_score, 187);
+}
+
+#[test]
+fn soft_failure_score_decays_after_its_half_life() {
+    let mut engine = engine_with([candidate("a", 0, 1)]);
+    engine.observe_health(
+        "a",
+        "responses:gpt",
+        HealthObservation::CountableTransient {
+            provider_not_before_ms: None,
+        },
+        0,
+    );
+    let health = engine
+        .health
+        .get(&("a".to_owned(), "responses:gpt".to_owned()))
+        .copied()
+        .unwrap();
+
+    assert_eq!(health.failure_score_milli, 250);
+    assert_eq!(
+        engine.decayed_failure_score(&health, HEALTH_HALF_LIFE_MS),
+        125
+    );
+}
+
+#[test]
+fn latency_is_only_used_as_a_soft_tie_breaker_in_automatic_mode() {
+    let mut engine = engine_with([candidate("a", 0, 1), candidate("b", 0, 1)]);
+    for (request_id, candidate_id, latency_ms) in [(1, "a", 100), (2, "b", 1_000)] {
+        let lease = engine
+            .reserve(&request(request_id).with_owner(candidate_id), 0)
+            .unwrap();
+        let budget = dispatch(&mut engine, &lease);
+        engine
+            .settle_with_latency(
+                lease.lease_id,
+                AttemptObservation {
+                    execution: ExecutionObservation::committed(),
+                    health: HealthObservation::Success,
+                },
+                &budget,
+                0,
+                Some(latency_ms),
+            )
+            .unwrap();
+    }
+
+    assert_eq!(engine.select(&request(3), 0).unwrap().candidate_id, "a");
+}
+
+#[test]
+fn soft_health_uses_a_common_baseline_before_affinity_and_weights() {
+    let mut engine = engine_with([
+        candidate("a", 0, 1),
+        candidate("b", 0, 1),
+        candidate("c", 0, 100),
+    ]);
+    for (id, failure_score) in [("a", 0), ("b", 180), ("c", 360)] {
+        engine.health.insert(
+            (id.to_owned(), "responses:gpt".to_owned()),
+            HealthRuntime {
+                failure_score_milli: failure_score,
+                observed_at_ms: Some(0),
+                ..Default::default()
+            },
+        );
+    }
+    assert_eq!(
+        engine
+            .select(&preferred_request(1, "c"), 0)
+            .unwrap()
+            .candidate_id,
+        "a"
+    );
+    // Near-equivalent feedback preserves the session's existing member.
+    assert_eq!(
+        engine
+            .select(&preferred_request(2, "b"), 0)
+            .unwrap()
+            .candidate_id,
+        "b"
+    );
+    let ready = engine.ready_candidates(&request(3), 0);
+    let expected = engine.selection_group(&ready, &request(3), 0);
+    let reversed = ready.into_iter().rev().collect::<Vec<_>>();
+    let actual = engine.selection_group(&reversed, &request(3), 0);
+    assert_eq!(
+        expected
+            .iter()
+            .map(|candidate| &candidate.id)
+            .collect::<BTreeSet<_>>(),
+        actual
+            .iter()
+            .map(|candidate| &candidate.id)
+            .collect::<BTreeSet<_>>()
+    );
+}
+
+#[test]
+fn missing_and_stale_latency_do_not_block_ordinary_rotation() {
+    let mut engine = engine_with([candidate("a", 0, 1), candidate("b", 0, 1)]);
+    engine.observe_first_output_latency("a", "responses:gpt", 100, 0);
+    assert_eq!(
+        engine
+            .select(&preferred_request(1, "b"), 0)
+            .unwrap()
+            .candidate_id,
+        "b"
+    );
+    engine.observe_first_output_latency("b", "responses:gpt", 1_000, 0);
+    assert_eq!(
+        engine
+            .select(&preferred_request(2, "b"), 0)
+            .unwrap()
+            .candidate_id,
+        "a"
+    );
+    assert_eq!(
+        engine
+            .select(&preferred_request(3, "b"), HEALTH_HALF_LIFE_MS + 1)
+            .unwrap()
+            .candidate_id,
+        "b"
+    );
+}
+
+#[test]
+fn future_latency_observations_do_not_override_fresh_owner_preference() {
+    let mut engine = engine_with([candidate("a", 0, 1), candidate("b", 0, 1)]);
+    engine.observe_first_output_latency("a", "responses:gpt", 1, 101);
+    engine.observe_first_output_latency("b", "responses:gpt", 1_000, 100);
+    assert_eq!(
+        engine
+            .select(&preferred_request(1, "b"), 100)
+            .unwrap()
+            .candidate_id,
+        "b"
+    );
+    assert_eq!(
+        engine
+            .select(&preferred_request(2, "b"), 101)
+            .unwrap()
+            .candidate_id,
+        "a"
+    );
+}
+
+#[test]
+fn ignored_health_observations_do_not_mutate_the_failure_score() {
+    let mut engine = engine_with([candidate("a", 0, 1)]);
+    engine.observe_health(
+        "a",
+        "responses:gpt",
+        HealthObservation::CountableTransient {
+            provider_not_before_ms: None,
+        },
+        0,
+    );
+    let before = engine.health[&("a".to_owned(), "responses:gpt".to_owned())];
+    for observation in [
+        HealthObservation::Cancelled,
+        HealthObservation::Unknown,
+        HealthObservation::LocalError,
+        HealthObservation::MonitoringFailure,
+    ] {
+        engine.observe_health("a", "responses:gpt", observation, HEALTH_HALF_LIFE_MS * 2);
+    }
+    let after = engine.health[&("a".to_owned(), "responses:gpt".to_owned())];
+    assert_eq!(after.failure_score_milli, before.failure_score_milli);
+    assert_eq!(after.observed_at_ms, before.observed_at_ms);
+}
+
+#[test]
+fn success_latency_uses_the_lease_route_and_does_not_update_sibling_operations() {
+    let mut member = candidate("a", 0, 1);
+    member.add_route("image:gpt", "gpt-6", RotationOperation::Image);
+    let mut engine = engine_with([member]);
+    let lease = engine
+        .reserve(
+            &RotationRequest::new(RequestId(1), "image:gpt", "gpt-6")
+                .with_operation(RotationOperation::Image),
+            0,
+        )
+        .unwrap();
+    let budget = dispatch(&mut engine, &lease);
+    let observation = AttemptObservation {
+        execution: ExecutionObservation::committed(),
+        health: HealthObservation::Success,
+    };
+    engine
+        .settle_with_latency(lease.lease_id, observation, &budget, 10, Some(100))
+        .unwrap();
+
+    assert_eq!(
+        engine.health[&("a".to_owned(), "image:gpt".to_owned())].first_output_latency_ms,
+        Some(100)
+    );
+    assert!(!engine
+        .health
+        .contains_key(&("a".to_owned(), "responses:gpt".to_owned())));
+    assert_eq!(
+        engine.settle_with_latency(lease.lease_id, observation, &budget, 20, Some(500)),
+        Err(SettlementError::UnknownLease)
+    );
+    assert_eq!(
+        engine.health[&("a".to_owned(), "image:gpt".to_owned())].first_output_latency_ms,
+        Some(100)
+    );
+}
+
+#[test]
+fn late_success_latency_cannot_update_a_readded_candidate() {
+    let mut engine = engine_with([candidate("a", 0, 1)]);
+    let lease = engine.reserve(&request(1), 0).unwrap();
+    let budget = dispatch(&mut engine, &lease);
+    engine.remove("a").unwrap();
+    engine.upsert(candidate("a", 0, 1)).unwrap();
+    let settlement = engine
+        .settle_with_latency(
+            lease.lease_id,
+            AttemptObservation {
+                execution: ExecutionObservation::committed(),
+                health: HealthObservation::Success,
+            },
+            &budget,
+            10,
+            Some(100),
+        )
+        .unwrap();
+
+    assert!(!settlement.observation_current);
+    assert!(engine.health.is_empty());
+}
+
+#[test]
+fn round_robin_and_failover_ignore_soft_health_signals() {
+    for mode in [RotationMode::RoundRobin, RotationMode::Failover] {
+        let mut engine = engine_with([candidate("a", 0, 1), candidate("b", 0, 1)]);
+        engine.set_mode(mode);
+        let before = engine.select(&request(1), 0).unwrap().candidate_id;
+        settle_owner(
+            &mut engine,
+            &before,
+            2,
+            0,
+            HealthObservation::CountableTransient {
+                provider_not_before_ms: None,
+            },
+        );
+
+        assert_eq!(
+            engine
+                .select(&request(3), FIRST_TRANSIENT_PACING_MS)
+                .unwrap()
+                .candidate_id,
+            before
+        );
+    }
+}
+
+#[test]
+fn removed_candidates_do_not_transfer_soft_health_to_readded_ids() {
+    let mut engine = engine_with([candidate("a", 0, 1)]);
+    engine.observe_health(
+        "a",
+        "responses:gpt",
+        HealthObservation::CountableTransient {
+            provider_not_before_ms: None,
+        },
+        0,
+    );
+    assert!(engine.remove("a").is_some());
+    engine.upsert(candidate("a", 0, 1)).unwrap();
+
+    assert!(!engine
+        .health
+        .contains_key(&("a".to_owned(), "responses:gpt".to_owned())));
 }
 
 #[test]
@@ -31,7 +780,7 @@ fn allowed_healthy_reserve_is_not_blocked_by_primary_priority() {
     primary.auth = AuthState::Ready;
     let reserve = candidate("reserve", 0, 1);
     let mut engine = engine_with([primary, reserve]);
-    engine.set_mode(RotationMode::InOrder);
+    engine.set_mode(RotationMode::Failover);
     let first_request = request(1);
     let lease = engine.reserve(&first_request, 0).unwrap();
     let budget = dispatch(&mut engine, &lease);
@@ -69,17 +818,37 @@ fn allowed_healthy_reserve_is_not_blocked_by_primary_priority() {
 }
 
 #[test]
+fn failover_does_not_send_healthy_primary_traffic_to_a_recovering_reserve() {
+    let mut engine = engine_with([candidate("primary", 100, 1), candidate("reserve", 0, 1)]);
+    engine.set_mode(RotationMode::Failover);
+    settle_owner(
+        &mut engine,
+        "reserve",
+        1,
+        0,
+        HealthObservation::CountableTransient {
+            provider_not_before_ms: None,
+        },
+    );
+    let selected = engine
+        .select(&request(2), FIRST_TRANSIENT_PACING_MS)
+        .unwrap();
+    assert_eq!(selected.candidate_id, "primary");
+    assert!(!selected.recovery);
+}
+
+#[test]
 fn weighted_preview_is_side_effect_free_and_reservation_advances_state() {
     let mut engine = engine_with([candidate("a", 0, 1), candidate("b", 0, 3)]);
-    engine.set_mode(RotationMode::RoundRobin);
+    engine.set_mode(RotationMode::WeightedRoundRobin);
     let first_request = request(1);
     let preview = engine.select(&first_request, 0).unwrap();
     let second_preview = engine.select(&request(2), 0).unwrap();
     assert_eq!(preview.candidate_id, second_preview.candidate_id);
     let lease = engine.reserve(&first_request, 0).unwrap();
     assert_eq!(lease.candidate_id, preview.candidate_id);
-    let next = engine.select(&request(3), 0).unwrap();
-    assert_ne!(next.candidate_id, lease.candidate_id);
+    let different_candidate = engine.select(&request(3), 0).unwrap();
+    assert_ne!(different_candidate.candidate_id, lease.candidate_id);
 }
 
 #[test]
@@ -182,6 +951,10 @@ fn same_request_does_not_vote_twice_and_success_breaks_the_streak() {
             .unwrap();
     }
     assert_eq!(engine.circuit("a", "responses:gpt").failure_streak, 1);
+    assert_eq!(
+        engine.health[&("a".to_owned(), "responses:gpt".to_owned())].failure_score_milli,
+        250
+    );
     let request = request(2).with_owner("a");
     let lease = engine.reserve(&request, 10_000).unwrap();
     let budget = dispatch(&mut engine, &lease);
@@ -322,36 +1095,45 @@ fn late_success_does_not_clear_a_newer_failure() {
     let mut engine = engine_with([candidate("a", 0, 1)]);
     let first = request(1).with_owner("a");
     let second = request(2).with_owner("a");
-    let old = engine.reserve(&first, 0).unwrap();
-    let new = engine.reserve(&second, 0).unwrap();
-    let old_budget = dispatch(&mut engine, &old);
-    let new_budget = dispatch(&mut engine, &new);
+    let previous_lease = engine.reserve(&first, 0).unwrap();
+    let newer_lease = engine.reserve(&second, 0).unwrap();
+    let previous_budget = dispatch(&mut engine, &previous_lease);
+    let newer_budget = dispatch(&mut engine, &newer_lease);
     engine
         .settle(
-            new.lease_id,
+            newer_lease.lease_id,
             AttemptObservation {
                 execution: ExecutionObservation::not_sent(),
                 health: HealthObservation::CountableTransient {
                     provider_not_before_ms: None,
                 },
             },
-            &new_budget,
+            &newer_budget,
             1,
         )
         .unwrap();
     let before = engine.circuit("a", "responses:gpt");
+    let health_before = engine.health[&("a".to_owned(), "responses:gpt".to_owned())];
     engine
-        .settle(
-            old.lease_id,
+        .settle_with_latency(
+            previous_lease.lease_id,
             AttemptObservation {
                 execution: ExecutionObservation::accepted(),
                 health: HealthObservation::Success,
             },
-            &old_budget,
+            &previous_budget,
             2,
+            Some(100),
         )
         .unwrap();
     assert_eq!(engine.circuit("a", "responses:gpt"), before);
+    let health_after = engine.health[&("a".to_owned(), "responses:gpt".to_owned())];
+    assert_eq!(
+        health_after.failure_score_milli,
+        health_before.failure_score_milli
+    );
+    assert_eq!(health_after.observed_at_ms, health_before.observed_at_ms);
+    assert_eq!(health_after.first_output_latency_ms, None);
     assert_eq!(engine.in_flight("a"), 0);
 }
 
@@ -483,7 +1265,7 @@ fn remove_and_readd_fences_old_capacity_release() {
     let mut original = candidate("source", 0, 1).with_capacity("physical", 1);
     original.max_concurrency = 1;
     let mut engine = engine_with([original]);
-    let old = engine.reserve(&request(1), 0).unwrap();
+    let previous_lease = engine.reserve(&request(1), 0).unwrap();
     let removed = engine.remove("source").unwrap();
     assert_eq!(removed.id, "source");
     let replacement = candidate("source", 0, 1).with_capacity("physical", 1);
@@ -494,7 +1276,11 @@ fn remove_and_readd_fences_old_capacity_release() {
         CandidateAvailability::Busy(CandidateBlockReason::CapacityBusy)
     ));
     engine
-        .cancel(old.lease_id, &RequestBudget::default_for(RequestId(1)), 0)
+        .cancel(
+            previous_lease.lease_id,
+            &RequestBudget::default_for(RequestId(1)),
+            0,
+        )
         .unwrap();
     assert_eq!(engine.capacity_in_flight("physical"), 0);
     assert!(engine.reserve(&request(2), 0).is_ok());

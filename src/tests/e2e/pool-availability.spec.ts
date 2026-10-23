@@ -7,18 +7,17 @@ const mixedStatuses: OperationalStatus[] = ["unavailable", "quotaWait", "disable
 
 async function setPoolState(
   page: Page,
-  mode: "local" | "remote",
   statuses: OperationalStatus[],
   preview: Preview = "complete",
   hasModels = true,
 ) {
-  await page.evaluate(async ({ mode, statuses, preview, hasModels }) => {
+  await page.evaluate(async ({ statuses, preview, hasModels }) => {
     const scope = window as unknown as {
       __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> };
     };
     const invoke = scope.__TAURI_INTERNALS__.invoke.bind(scope.__TAURI_INTERNALS__);
-    const snapshotCommand = mode === "local" ? "get_local_runtime_state" : "get_remote_server_state";
-    const orderCommand = mode === "local" ? "get_local_runtime_order" : "get_remote_runtime_order";
+    const snapshotCommand = "get_local_runtime_state";
+    const orderCommand = "get_local_runtime_order";
     const runtime = await invoke(snapshotCommand) as RuntimeSnapshot;
     runtime.sources = [];
     runtime.accounts = runtime.accounts.slice(0, statuses.length).map((account, index) => ({
@@ -68,22 +67,22 @@ async function setPoolState(
       if (command === orderCommand) return structuredClone(runtime.gateway.routingOrder);
       return invoke(command, args, options);
     };
-  }, { mode, statuses, preview, hasModels });
+  }, { statuses, preview, hasModels });
   await emitTauriEvent(page, "zenith-state-changed", null);
   await expect(page.locator('.pool-member-card[data-member-label="Fixture 1"]')).toBeVisible();
 }
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   for (const preview of ["empty", "partial", "stale"] as const) {
     test(`${mode} mixed pool stays usable with ${preview} route telemetry`, async ({ page }) => {
       await installTauriMock(page, { mode, locale: "en", accountCount: 6, usagePresent: false });
       await page.goto("/");
       await page.getByRole("button", { name: "Pool", exact: true }).click();
-      await setPoolState(page, mode, mixedStatuses, preview);
+      await setPoolState(page, mixedStatuses, preview);
 
       await expect(page.locator(".pool-routing-alert")).toHaveCount(0);
       await expect(page.locator(".pool-current-route")).toHaveText("Waiting for the first request");
-      if (mode === "local") await expect(page.getByRole("button", { name: "Connect", exact: true })).toBeEnabled();
+      await expect(page.getByRole("button", { name: "Connect", exact: true })).toBeEnabled();
       const poolOrder = ["Fixture 6", "Fixture 4", "Fixture 2", "Fixture 1", "Fixture 5", "Fixture 3"];
       const connectionOrder = ["Fixture 4", "Fixture 6", "Fixture 2", "Fixture 1", "Fixture 5", "Fixture 3"];
       await expect(page.locator(".pool-member-name")).toHaveText(poolOrder);
@@ -94,34 +93,65 @@ for (const mode of ["local", "remote"] as const) {
   }
 }
 
-test("unavailable pool explains counts and deduplicates localized sign-in errors", async ({ page }, testInfo) => {
+test("unavailable pool shows counts without a duplicate status banner", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await installTauriMock(page, { mode: "local", locale: "ru", accountCount: 6, usagePresent: false, theme: "dark" });
   await page.goto("/");
   await page.getByRole("button", { name: "Пул", exact: true }).click();
-  await setPoolState(page, "local", ["unavailable", "quotaWait", "disabled", "unavailable"]);
-  const alert = page.locator(".pool-routing-alert");
-  await expect(alert).toContainText("Ожидают квоту: 1; недоступны: 2; отключены: 1");
-  await expect(alert).not.toContainText("auth_invalid_grant");
-  await expect(alert).not.toContainText("no_eligible_source");
-  expect((await alert.innerText()).match(/Выполнен выход или сменена учётная запись/g)).toHaveLength(1);
-  expect(await alert.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await setPoolState(page, ["unavailable", "quotaWait", "disabled", "unavailable"]);
+  await expect(page.locator(".pool-routing-alert")).toHaveCount(0);
+  const summary = page.locator(".pool-summary");
+  await expect(summary.locator('[data-tone="error"] strong')).toHaveText("2");
+  await expect(summary.locator("div").nth(1).locator("strong")).toHaveText("1");
+  await expect(summary.locator("div").nth(3).locator("strong")).toHaveText("1");
+  await expect(page.locator(".pool-controls + .pool-member-list")).toHaveCount(1);
   await page.screenshot({ path: testInfo.outputPath("unavailable-mobile.png"), animations: "disabled" });
 });
 
-test("quota waits and disabled models have distinct pool warnings", async ({ page }) => {
+test("quota waits and disabled models stay visible without extra pool banners", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", accountCount: 6, usagePresent: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await setPoolState(page, "local", ["quotaWait", "quotaWait"]);
-  const alert = page.locator(".pool-routing-alert");
-  await expect(alert).toContainText("Waiting for quota: 2; unavailable: 0; disabled: 0");
-  await expect(alert).not.toContainText("Sign-in");
-  await expect(alert).not.toContainText("no_eligible_source");
+  await setPoolState(page, ["quotaWait", "quotaWait"]);
+  await expect(page.locator(".pool-routing-alert")).toHaveCount(0);
+  await expect(page.locator(".pool-summary > div").nth(1).locator("strong")).toHaveText("2");
 
-  await setPoolState(page, "local", ["rotation", "unavailable"], "complete", false);
-  await expect(alert.locator("strong")).toHaveText("No available models");
-  await expect(alert).not.toContainText("Sign-in");
+  await setPoolState(page, ["rotation", "unavailable"], "complete", false);
+  await expect(page.locator(".pool-routing-alert")).toHaveCount(0);
+  await expect(page.locator(".pool-current-route")).toHaveText("No available models");
+});
+
+test("SIWC quota wait without counters stays a waiting warning on both account surfaces", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", accountCount: 2, usagePresent: false });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await setPoolState(page, ["quotaWait"]);
+  await page.evaluate(async () => {
+    const scope = window as unknown as {
+      __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> };
+    };
+    const invoke = scope.__TAURI_INTERNALS__.invoke.bind(scope.__TAURI_INTERNALS__);
+    const runtime = await invoke("get_local_runtime_state") as RuntimeSnapshot;
+    const account = runtime.accounts[0];
+    account.oauthClientKind = "siwc";
+    account.quotaRefreshStatus = "pending";
+    account.quota = { primary: null, secondary: null, supplemental: [], limitReached: false, updatedAtMs: null, error: null };
+    runtime.gateway.routingOrder = runtime.gateway.routingOrder?.map((candidate) => ({ ...candidate, quotaWait: true }));
+    scope.__TAURI_INTERNALS__.invoke = async (command, args, options) => {
+      if (command === "get_local_runtime_state") return structuredClone(runtime);
+      if (command === "get_local_runtime_order") return structuredClone(runtime.gateway.routingOrder);
+      return invoke(command, args, options);
+    };
+  });
+  await emitTauriEvent(page, "zenith-state-changed", null);
+  const poolIndicator = page.locator(".pool-member-card .pool-member-kind-icon");
+  await expect(poolIndicator).toHaveAttribute("data-status", "warning");
+  await expect(poolIndicator).toHaveAttribute("aria-label", "Waiting for quota");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  const accountIndicator = page.locator(".account-card .account-kind-icon");
+  await expect(accountIndicator).toHaveAttribute("data-status", "warning");
+  await expect(accountIndicator).toHaveAttribute("aria-label", /^Waiting for quota(?: ·|$)/);
+  await expect(accountIndicator).not.toHaveAttribute("aria-label", /Quota not provided|Unavailable/);
 });
 
 test("mixed pool groups remain readable on a narrow screen", async ({ page }, testInfo) => {
@@ -129,7 +159,7 @@ test("mixed pool groups remain readable on a narrow screen", async ({ page }, te
   await installTauriMock(page, { mode: "local", locale: "ru", accountCount: 6, usagePresent: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Пул", exact: true }).click();
-  await setPoolState(page, "local", mixedStatuses);
+  await setPoolState(page, mixedStatuses);
   await expect(page.locator(".pool-routing-alert")).toHaveCount(0);
   await expect(page.locator(".pool-current-route")).toHaveText("Следующий кандидат: Fixture 4");
   expect(await page.locator(".pool-member-card").evaluateAll((cards) => cards.every((card) => {
@@ -191,4 +221,30 @@ test("pool uses explicit preview and rejects activity from a replaced runtime", 
   await emitTauriEvent(page, "zenith-state-changed", null);
   await expect(summary).toContainText("Next candidate: Example compatible API");
   await expect(summary).toContainText("Active now: Personal Plus");
+});
+
+test("pool accepts out-of-order activity for different candidates without reviving completed requests", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", accountCount: 1, quotaAvailable: true, usagePresent: false });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  const summary = page.locator(".pool-controls");
+  const activeRequests = summary.locator("[data-active-request-count]");
+  const activity = (candidateId: string, revision: number, count: number) => emitTauriEvent(page, "zenith-runtime-activity", {
+    runtimeId: 1, revision, candidateId, inFlight: count, activeRequestCount: count,
+    activeModels: count ? [{ model: "gpt-5.4", requestCount: count }] : [],
+  });
+
+  await activity("account_synthetic", 1, 1);
+  await expect(activeRequests).toHaveAttribute("data-active-request-count", "1");
+  await activity("source_synthetic", 4, 1);
+  await expect(activeRequests).toHaveAttribute("data-active-request-count", "2");
+
+  // This release is new for the account even though the source event arrived first.
+  await activity("account_synthetic", 3, 0);
+  await expect(activeRequests).toHaveAttribute("data-active-request-count", "1");
+  await expect(summary).toContainText("Active now: Example compatible API");
+  await activity("source_synthetic", 2, 0);
+  await expect(activeRequests).toHaveAttribute("data-active-request-count", "1");
+  await activity("source_synthetic", 5, 0);
+  await expect(activeRequests).toBeHidden();
 });

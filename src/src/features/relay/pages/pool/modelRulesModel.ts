@@ -5,7 +5,7 @@ import { normalizeReasoningEffort } from "../../poolFormatting";
 export type ModelRuleGroup = {
   id: string;
   label: string;
-  items: ModelSummary[];
+  models: ModelSummary[];
 };
 
 /** Build the render-affecting identity used to reset an optimistic order. */
@@ -28,10 +28,19 @@ export function modelSignature(models: ModelSummary[]) {
     model.catalogReasoningMethod,
     model.catalogReasoning,
     model.catalogReasoningEffortLevels?.join(","),
+    model.contextPolicy?.mode,
+    model.contextPolicy?.mode === "custom" ? model.contextPolicy.tokens : undefined,
+    model.catalogContextLimit,
+    model.contextWindows != null,
+    model.contextWindows?.defaultTokens,
+    model.contextWindows?.maximumTokens,
+    model.catalogOutputModalities?.join(","),
+    model.contextConfigurable,
     model.inputMicroUsdPerMillion,
     model.cachedInputMicroUsdPerMillion,
     model.cacheWrite5mMicroUsdPerMillion,
     model.cacheWrite1hMicroUsdPerMillion,
+    model.cacheWriteMicroUsdPerMillion,
     model.outputMicroUsdPerMillion,
     model.customPrice,
     model.reasoningLevels?.join(","),
@@ -43,26 +52,26 @@ export function modelSignature(models: ModelSummary[]) {
 }
 
 /** Reorder two rows without mutating the catalog delivered by the runtime. */
-export function reorderById<T extends { id: string }>(items: readonly T[], sourceId: string, targetId: string) {
+export function reorderById<T extends { id: string }>(rows: readonly T[], sourceId: string, targetId: string) {
   if (sourceId === targetId) return null;
-  const source = items.findIndex((item) => item.id === sourceId);
-  const target = items.findIndex((item) => item.id === targetId);
-  if (source < 0 || target < 0) return null;
-  const next = [...items];
-  const [moved] = next.splice(source, 1);
-  next.splice(target, 0, moved!);
-  return next;
+  const sourceIndex = rows.findIndex((modelRow) => modelRow.id === sourceId);
+  const targetIndex = rows.findIndex((modelRow) => modelRow.id === targetId);
+  if (sourceIndex < 0 || targetIndex < 0) return null;
+  const reorderedRows = [...rows];
+  const [moved] = reorderedRows.splice(sourceIndex, 1);
+  reorderedRows.splice(targetIndex, 0, moved!);
+  return reorderedRows;
 }
 
 /** Flatten groups after moving a complete provider block to another block. */
 export function reorderModelGroups(groups: readonly ModelRuleGroup[], sourceId: string, targetId: string) {
   if (sourceId === targetId) return null;
-  const source = groups.findIndex((group) => group.id === sourceId);
-  const target = groups.findIndex((group) => group.id === targetId);
-  if (source < 0 || target < 0) return null;
-  const blocks = groups.map((group) => [...group.items]);
-  const [moved] = blocks.splice(source, 1);
-  blocks.splice(target, 0, moved!);
+  const sourceIndex = groups.findIndex((group) => group.id === sourceId);
+  const targetIndex = groups.findIndex((group) => group.id === targetId);
+  if (sourceIndex < 0 || targetIndex < 0) return null;
+  const blocks = groups.map((group) => [...group.models]);
+  const [moved] = blocks.splice(sourceIndex, 1);
+  blocks.splice(targetIndex, 0, moved!);
   return blocks.flat();
 }
 
@@ -74,11 +83,11 @@ export function completeModelDisplayOrder(
   const included = new Set<string>();
   const order: string[] = [];
   const add = (model: ModelSummary) => {
-    const id = model.id.trim();
-    const key = modelIdKey(id);
-    if (!id || included.has(key)) return;
+    const modelId = model.id.trim();
+    const key = modelIdKey(modelId);
+    if (!modelId || included.has(key)) return;
     included.add(key);
-    order.push(id);
+    order.push(modelId);
   };
   reordered.forEach(add);
   catalog.forEach(add);
@@ -104,14 +113,36 @@ export function modelShowsReasoningControl(model: Pick<ModelSummary, "id" | "cat
     || model.reasoningManualFallback === true;
 }
 
-function isImageGenerationModel(model: Pick<ModelSummary, "id" | "catalogFamily" | "catalogOutputModalities">) {
-  const outputs = (model.catalogOutputModalities ?? []).map((item) => item.toLowerCase());
+/** Context windows apply only to models that produce text output. */
+export function modelShowsContextControl(model: Pick<ModelSummary, "id" | "catalogFamily" | "catalogOutputModalities" | "contextConfigurable">) {
+  if (model.contextConfigurable === false) return false;
+  const family = model.catalogFamily?.toLowerCase() ?? "";
+  const familyTokens = family.split(/[^a-z0-9]+/).filter(Boolean);
+  if (familyTokens.some((token) => ["audio", "dalle", "embed", "embedding", "image", "moderation", "speech", "tts", "video"].includes(token))) {
+    return false;
+  }
+  const modelId = model.id.toLowerCase();
+  if (["audio", "dall-e", "dalle", "embed", "embedding", "gpt-image", "moderation", "tts", "video", "whisper"]
+    .some((token) => modelId.startsWith(token) || modelId.includes(`-${token}`))) {
+    return false;
+  }
+  const outputs = (model.catalogOutputModalities ?? [])
+    .map((modality) => modality.trim().toLowerCase())
+    .filter(Boolean);
+  if (outputs.length > 0) {
+    return outputs.some((modality) => modality === "text" || modality.includes("text"));
+  }
+  return true;
+}
+
+export function isImageGenerationModel(model: Pick<ModelSummary, "id" | "catalogFamily" | "catalogOutputModalities">) {
+  const outputs = (model.catalogOutputModalities ?? []).map((modality) => modality.toLowerCase());
   if (outputs.includes("image") && !outputs.includes("text")) return true;
   const family = model.catalogFamily?.toLowerCase() ?? "";
   const familyTokens = family.split(/[^a-z0-9]+/).filter(Boolean);
   if (familyTokens.includes("image") || familyTokens.includes("dalle")) return true;
-  const id = model.id.toLowerCase();
-  return id.startsWith("gpt-image") || id.startsWith("dall-e") || id.startsWith("dalle");
+  const modelId = model.id.toLowerCase();
+  return modelId.startsWith("gpt-image") || modelId.startsWith("dall-e") || modelId.startsWith("dalle");
 }
 
 /** Keep selected values in provider order and remove stale policy values. */
@@ -122,11 +153,10 @@ export function normalizeReasoningSelection(supported: readonly string[], select
 
 const MODEL_SPEED_ORDER = ["standard", "fast", "ultrafast"] as const satisfies readonly DefaultServiceTier[];
 
-/** Speed choices for one model. A configurable family always keeps all three modes. */
+/** Show only the speed modes supplied by the runtime. */
 export function modelSpeedTiers(model: Pick<ModelSummary, "speedSupported" | "speedTiers">): DefaultServiceTier[] {
   const declared = new Set(model.speedTiers ?? []);
   const ordered = MODEL_SPEED_ORDER.filter((tier) => declared.has(tier));
-  if (model.speedSupported && ordered.length <= 1) return [...MODEL_SPEED_ORDER];
   return ordered.length ? [...ordered] : ["standard"];
 }
 
@@ -145,15 +175,15 @@ export function reconcilePendingModelEnabled(
 ) {
   const confirmed = new Map(models.map((model) => [model.id, model.enabled]));
   let changed = false;
-  const next: Record<string, boolean> = {};
+  const remainingPending: Record<string, boolean> = {};
   for (const [id, enabled] of Object.entries(pending)) {
     if (confirmed.get(id) === enabled) {
       changed = true;
       continue;
     }
-    next[id] = enabled;
+    remainingPending[id] = enabled;
   }
-  return changed ? next : pending;
+  return changed ? remainingPending : pending;
 }
 
 /** Remove one pending value only when it is still the failed attempt. */
@@ -163,7 +193,7 @@ export function clearPendingModelEnabled(
   enabled: boolean,
 ) {
   if (pending[id] !== enabled) return pending;
-  const next = { ...pending };
-  delete next[id];
-  return next;
+  const remainingPending = { ...pending };
+  delete remainingPending[id];
+  return remainingPending;
 }

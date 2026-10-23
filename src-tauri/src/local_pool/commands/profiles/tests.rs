@@ -4,6 +4,38 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use zenith_relay_core::{MessagesReasoningMode, SourceAdapter, SourceProtocolBinding, WireApi};
 
+#[tokio::test]
+async fn local_gateway_catalog_bypasses_system_proxy() {
+    if crate::tests::run_isolated_proxy_test(concat!(
+        module_path!(),
+        "::local_gateway_catalog_bypasses_system_proxy"
+    ))
+    .await
+    {
+        return;
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = axum::Router::new().route(
+        "/v1/models",
+        axum::routing::get(|headers: axum::http::HeaderMap| async move {
+            assert_eq!(
+                headers.get("authorization").unwrap(),
+                "Bearer synthetic-gateway-key"
+            );
+            axum::Json(serde_json::json!({"models":[{"slug":"synthetic-model"}]}))
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let result =
+        fetch_local_codex_model_catalog(&format!("http://{address}/v1"), "synthetic-gateway-key")
+            .await;
+    server.abort();
+    let _ = server.await;
+    let catalog: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+    assert_eq!(catalog["models"][0]["slug"], "synthetic-model");
+}
+
 fn source_record(id: &str) -> ProviderSourceRecord {
     ProviderSourceRecord {
         id: id.into(),
@@ -14,6 +46,7 @@ fn source_record(id: &str) -> ProviderSourceRecord {
         base_url: "https://provider.test/v1".into(),
         secret_ref: "source:test".into(),
         pricing_provider: None,
+        proxy_id: None,
         official_provider_family: None,
         wire_api: WireApi::Responses,
         protocol_config: Default::default(),
@@ -89,49 +122,6 @@ fn active_catalog_refresh_ignores_sources_without_an_enabled_native_responses_bi
     }];
     source.models = vec!["bridge-only".to_string()];
     assert!(catalog::active_catalog_refresh_target(&binding, &[], &[source]).is_none());
-}
-
-#[test]
-fn lost_profile_rotation_commit_response_is_reconciled_without_a_blind_rollback() {
-    let system_credential_id = "key_system";
-    let current = RemoteProfileCredential {
-        key_id: system_credential_id.into(),
-        base_url: "https://relay.example/v1".into(),
-        secret: "zrs_current_secret_value_000000".into(),
-    };
-    let rotation = ProfileKeyRotation {
-        schema_version: 1,
-        rotation_id: "key_profile_rotation_test".into(),
-        key_id: system_credential_id.into(),
-        base_url: current.base_url.clone(),
-        secret: "zrs_rotated_secret_value_000000".into(),
-    };
-    let committed = RemoteProfileCredential {
-        key_id: rotation.key_id.clone(),
-        base_url: rotation.base_url.clone(),
-        secret: rotation.secret.clone(),
-    };
-    let unrelated = RemoteProfileCredential {
-        secret: "zrs_unrelated_secret_value_0000".into(),
-        ..current.clone()
-    };
-
-    assert_eq!(
-        profile_rotation_commit_state(Some(&committed), &current, &rotation),
-        ProfileRotationCommitState::Committed
-    );
-    assert_eq!(
-        profile_rotation_commit_state(Some(&current), &current, &rotation),
-        ProfileRotationCommitState::NotCommitted
-    );
-    assert_eq!(
-        profile_rotation_commit_state(Some(&unrelated), &current, &rotation),
-        ProfileRotationCommitState::Unknown
-    );
-    assert_eq!(
-        profile_rotation_commit_state(None, &current, &rotation),
-        ProfileRotationCommitState::Unknown
-    );
 }
 
 #[test]

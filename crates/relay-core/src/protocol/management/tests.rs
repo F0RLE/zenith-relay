@@ -27,7 +27,11 @@ fn runtime_candidate(
         candidate_id: candidate_id.into(),
         kind,
         available,
+        quota_wait: false,
+        capacity_wait: false,
         next_for_new_request: false,
+        selection_rank: None,
+        resource_headroom: None,
         activity_revision: 0,
         runtime_id: 0,
         in_flight: 0,
@@ -41,14 +45,34 @@ fn runtime_candidate(
     }
 }
 
+#[test]
+fn account_route_metadata_is_backward_compatible_and_round_trips() {
+    let mut legacy = serde_json::to_value(account_summary(true, &["model-fixture"])).unwrap();
+    legacy.as_object_mut().unwrap().remove("routeGroupId");
+    legacy.as_object_mut().unwrap().remove("routeInactive");
+    let mut restored: AccountSummary = serde_json::from_value(legacy).unwrap();
+    assert!(restored.route_group_id.is_none());
+    assert!(!restored.route_inactive);
+    restored.route_group_id = Some("account_fixture".into());
+    restored.route_inactive = true;
+    let decoded: AccountSummary =
+        serde_json::from_value(serde_json::to_value(&restored).unwrap()).unwrap();
+    assert_eq!(decoded, restored);
+}
+
 fn account_summary(in_pool: bool, models: &[&str]) -> AccountSummary {
     AccountSummary {
+        route_group_id: None,
+        route_inactive: false,
+        credit_balance_key: None,
+        oauth_client_kind: Default::default(),
         id: "account".into(),
         label: "Account".into(),
         identity_hint: "account".into(),
         provider_family: None,
         basis_points_available: false,
         basis_points_enabled: false,
+        credential_diagnostics: None,
         enabled: true,
         in_pool,
         draining: false,
@@ -68,7 +92,7 @@ fn account_summary(in_pool: bool, models: &[&str]) -> AccountSummary {
         quota_refresh_status: QuotaRefreshStatus::default(),
         refresh_state: AccountRefreshState::default(),
         secret_available: true,
-        remote_location: None,
+        recovery_required: false,
         proxy_mode: ProxyMode::Direct,
         proxy_available: true,
         proxy_id: None,
@@ -91,6 +115,7 @@ fn source_summary(id: &str, models: &[&str]) -> SourceSummary {
         base_url: "https://example.test/v1".into(),
         pricing_provider: None,
         official_provider_family: None,
+        proxy_id: None,
         wire_api: WireApi::Responses,
         protocol_bindings: Vec::new(),
         protocol_config: crate::SourceProtocolConfig::default(),
@@ -102,6 +127,7 @@ fn source_summary(id: &str, models: &[&str]) -> SourceSummary {
         recovery_delay_seconds: 0,
         model_price_overrides: BTreeMap::new(),
         detected_model_prices: BTreeMap::new(),
+        resolved_model_prices: BTreeMap::new(),
         api_equivalent: ApiEquivalentSummary::default(),
         secret_available: true,
         last_error_code: None,
@@ -118,6 +144,11 @@ fn test_token_price(input: u64, output: u64) -> TokenPrice {
         cache_write_5m: None,
         cache_write_1h: None,
         output,
+        flex: crate::pricing::TokenRateSet::EMPTY,
+        priority: crate::pricing::TokenRateSet::EMPTY,
+        above_200k: crate::pricing::LongContextRates::EMPTY,
+        above_272k: crate::pricing::LongContextRates::EMPTY,
+        ..Default::default()
     }
 }
 

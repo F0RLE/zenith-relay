@@ -9,8 +9,16 @@ pub(super) fn function(tool: &Function, protocol: WireApi) -> AdapterResult<Valu
         WireApi::Messages => "input_schema",
         WireApi::Gemini => "parametersJsonSchema",
         _ => "parameters",
-    }] = tool.parameters.clone();
-    if let Some(strict) = tool.strict {
+    }] = if protocol == WireApi::Gemini {
+        super::super::schema::to_gemini(&tool.parameters)?
+    } else {
+        tool.parameters.clone()
+    };
+    // Responses auto-normalizes omitted strict; foreign best-effort tools must opt out.
+    if let Some(strict) = tool
+        .strict
+        .or((protocol == WireApi::Responses).then_some(false))
+    {
         if protocol == WireApi::Gemini && strict {
             return Err(AdapterError::parameter_unsupported());
         }
@@ -53,41 +61,53 @@ pub(super) fn tool_choice(choice: &ToolChoice, protocol: WireApi) -> Value {
 }
 
 pub(super) fn output_format(
-    body: &mut Map<String, Value>,
+    request_fields: &mut Map<String, Value>,
     generation: &mut Map<String, Value>,
     format: &OutputFormat,
     protocol: WireApi,
 ) -> AdapterResult<()> {
-    let mut value = match format {
-        OutputFormat::JsonObject => json!({"type":"json_object"}),
-        OutputFormat::JsonSchema {
-            name,
-            schema,
-            strict,
-        } => {
-            let mut value = json!({"type":"json_schema","name":name,"schema":schema});
-            if let Some(strict) = strict {
-                value["strict"] = (*strict).into();
-            }
-            value
-        }
-    };
     match protocol {
-        WireApi::Responses => {
-            body.insert("text".into(), json!({"format":value}));
-        }
-        WireApi::ChatCompletions => {
-            if matches!(format, OutputFormat::JsonSchema { .. }) {
-                value.as_object_mut().unwrap().remove("type");
-                value = json!({"type":"json_schema","json_schema":value});
+        WireApi::Responses | WireApi::ChatCompletions => {
+            let mut format_value = match format {
+                OutputFormat::JsonObject => json!({"type":"json_object"}),
+                OutputFormat::JsonSchema {
+                    name,
+                    description,
+                    schema,
+                    strict,
+                } => {
+                    let mut schema_value =
+                        json!({"type":"json_schema","name":name,"schema":schema});
+                    if let Some(description) = description {
+                        schema_value["description"] = description.clone().into();
+                    }
+                    if let Some(strict) = strict {
+                        schema_value["strict"] = (*strict).into();
+                    }
+                    schema_value
+                }
+            };
+            if protocol == WireApi::Responses {
+                request_fields.insert("text".into(), json!({"format":format_value}));
+            } else {
+                if matches!(format, OutputFormat::JsonSchema { .. }) {
+                    format_value.as_object_mut().unwrap().remove("type");
+                    format_value = json!({"type":"json_schema","json_schema":format_value});
+                }
+                request_fields.insert("response_format".into(), format_value);
             }
-            body.insert("response_format".into(), value);
         }
         WireApi::Messages => {
-            let OutputFormat::JsonSchema { schema, .. } = format else {
+            let OutputFormat::JsonSchema {
+                schema,
+                description,
+                ..
+            } = format
+            else {
                 return Err(AdapterError::parameter_unsupported());
             };
-            body.insert(
+            let schema = described_schema(schema, description.as_deref());
+            request_fields.insert(
                 "output_config".into(),
                 json!({"format":{"type":"json_schema","schema":schema}}),
             );
@@ -103,54 +123,62 @@ pub(super) fn output_format(
                 return Err(AdapterError::parameter_unsupported());
             }
             generation.insert("responseMimeType".into(), "application/json".into());
-            if let OutputFormat::JsonSchema { schema, .. } = format {
-                generation.insert("responseJsonSchema".into(), schema.clone());
+            if let OutputFormat::JsonSchema {
+                schema,
+                description,
+                ..
+            } = format
+            {
+                generation.insert(
+                    "responseJsonSchema".into(),
+                    super::super::schema::to_gemini(&described_schema(
+                        schema,
+                        description.as_deref(),
+                    ))?,
+                );
             }
         }
     }
     Ok(())
 }
 
+fn described_schema(schema: &Value, description: Option<&str>) -> Value {
+    let mut schema = schema.clone();
+    if let Some(description) = description {
+        // Preserve both envelope and schema descriptions without changing validation.
+        let text = schema
+            .get("description")
+            .and_then(Value::as_str)
+            .map_or_else(
+                || description.to_owned(),
+                |existing| format!("{description}\n{existing}"),
+            );
+        schema["description"] = text.into();
+    }
+    schema
+}
+
 pub(super) fn thinking(
-    body: &mut Map<String, Value>,
+    request_fields: &mut Map<String, Value>,
     generation: &mut Map<String, Value>,
     reasoning: &Reasoning,
     protocol: WireApi,
+    mode: MessagesReasoningMode,
+    explicit_max_tokens: bool,
+    capabilities: Option<&crate::model_metadata::ModelCapabilities>,
 ) -> AdapterResult<()> {
-    match (protocol, reasoning) {
-        (WireApi::Responses, Reasoning::Effort(effort)) => {
-            body.insert("reasoning".into(), json!({"effort":effort}));
-        }
-        (WireApi::ChatCompletions, Reasoning::Effort(effort)) => {
-            body.insert("reasoning_effort".into(), effort.clone().into());
-        }
-        (WireApi::Gemini, Reasoning::Effort(effort))
-            if matches!(effort.as_str(), "minimal" | "low" | "medium" | "high") =>
-        {
-            generation.insert("thinkingConfig".into(), json!({"thinkingLevel":effort}));
-        }
-        (WireApi::Gemini, Reasoning::Budget(budget)) => {
-            generation.insert("thinkingConfig".into(), json!({"thinkingBudget":budget}));
-        }
-        (WireApi::Messages, Reasoning::Budget(budget)) if *budget >= 1024 => {
-            body.insert(
-                "thinking".into(),
-                json!({"type":"enabled","budget_tokens":budget}),
-            );
-        }
-        (WireApi::Messages, Reasoning::Effort(effort)) if effort == "none" => {
-            body.insert("thinking".into(), json!({"type":"disabled"}));
-        }
-        (WireApi::Messages, Reasoning::Effort(effort))
-            if matches!(effort.as_str(), "low" | "medium" | "high" | "max") =>
-        {
-            body.insert("thinking".into(), json!({"type":"adaptive"}));
-            body.entry("output_config").or_insert_with(|| json!({}))["effort"] =
-                effort.clone().into();
-        }
-        _ => return Err(AdapterError::reasoning_unsupported()),
+    let fields = if protocol == WireApi::Gemini {
+        generation
+    } else {
+        request_fields
+    };
+    let policy = super::super::super::contracts::ReasoningPolicy::new(protocol, mode, capabilities);
+    match reasoning {
+        Reasoning::Effort(effort) => policy.apply_effort(fields, effort, explicit_max_tokens),
+        Reasoning::Budget(budget) => policy.apply_budget(fields, *budget, explicit_max_tokens),
+        Reasoning::DynamicBudget => policy.apply_dynamic_budget(fields),
+        Reasoning::Adaptive => Err(AdapterError::reasoning_unsupported()),
     }
-    Ok(())
 }
 
 pub(super) fn message_value(message: &Message, protocol: WireApi) -> AdapterResult<Vec<Value>> {
@@ -159,7 +187,7 @@ pub(super) fn message_value(message: &Message, protocol: WireApi) -> AdapterResu
         Role::Assistant => "assistant",
         Role::System => "system",
     };
-    let mut values = Vec::new();
+    let mut encoded_items = Vec::new();
     let mut content = Vec::new();
     let mut calls = Vec::new();
     let mut reasoning = String::new();
@@ -174,8 +202,8 @@ pub(super) fn message_value(message: &Message, protocol: WireApi) -> AdapterResu
                     arguments,
                 },
             ) => {
-                flush_responses_content(&mut values, &mut content, role);
-                values.push(
+                flush_responses_content(&mut encoded_items, &mut content, role);
+                encoded_items.push(
                     json!({"type":"function_call","call_id":id,"name":name,"arguments":arguments}),
                 );
             }
@@ -188,8 +216,8 @@ pub(super) fn message_value(message: &Message, protocol: WireApi) -> AdapterResu
                     ..
                 },
             ) => {
-                flush_responses_content(&mut values, &mut content, role);
-                values.push(json!({"type":"function_call_output","call_id":id,"output":tool_output(output, *is_error)}));
+                flush_responses_content(&mut encoded_items, &mut content, role);
+                encoded_items.push(json!({"type":"function_call_output","call_id":id,"output":tool_output(output, *is_error, protocol)?}));
             }
             (
                 WireApi::ChatCompletions,
@@ -213,47 +241,83 @@ pub(super) fn message_value(message: &Message, protocol: WireApi) -> AdapterResu
                 if !content.is_empty() || !calls.is_empty() {
                     return Err(AdapterError::parameter_unsupported());
                 }
-                values.push(json!({"role":"tool","tool_call_id":id,"content":tool_output(output, *is_error)}));
+                encoded_items.push(json!({"role":"tool","tool_call_id":id,"content":tool_output(output, *is_error, protocol)?}));
             }
             _ => content.push(content_block(block, protocol, message.role)?),
         }
     }
     match protocol {
-        WireApi::Responses => flush_responses_content(&mut values, &mut content, role),
+        WireApi::Responses => flush_responses_content(&mut encoded_items, &mut content, role),
         WireApi::ChatCompletions if !content.is_empty() || !calls.is_empty() || !reasoning.is_empty() => {
-            let mut value = json!({"role":role,"content":if content.is_empty() { Value::Null } else { content.into() }});
-            if !calls.is_empty() { value["tool_calls"] = calls.into(); }
-            if !reasoning.is_empty() { value["reasoning_content"] = reasoning.into(); }
-            values.push(value);
+            let mut message_value = json!({"role":role,"content":if content.is_empty() { Value::Null } else { content.into() }});
+            if !calls.is_empty() { message_value["tool_calls"] = calls.into(); }
+            if !reasoning.is_empty() { message_value["reasoning_content"] = reasoning.into(); }
+            encoded_items.push(message_value);
         }
-        WireApi::Messages => values.push(json!({"role":role,"content":content})),
-        WireApi::Gemini => values.push(json!({"role":if message.role == Role::Assistant { "model" } else { "user" },"parts":content})),
+        WireApi::Messages => encoded_items.push(json!({"role":role,"content":content})),
+        WireApi::Gemini => encoded_items.push(json!({"role":if message.role == Role::Assistant { "model" } else { "user" },"parts":content})),
         _ => {}
     }
-    Ok(values)
+    Ok(encoded_items)
 }
 
-pub(super) fn tool_output(content: &str, is_error: bool) -> String {
-    if is_error {
-        json!({"error":content}).to_string()
-    } else {
-        content.into()
+fn tool_output(content: &[Block], is_error: bool, protocol: WireApi) -> AdapterResult<Value> {
+    if let Some(text) = tool_output_text(content) {
+        return Ok(Value::String(if is_error {
+            json!({"error":text}).to_string()
+        } else {
+            text
+        }));
     }
+    if protocol == WireApi::ChatCompletions {
+        return Err(AdapterError::parameter_unsupported_for("input.output"));
+    }
+    let mut parts = Vec::new();
+    if is_error {
+        parts.push(content_block(
+            &Block::Text("Tool execution failed.".into()),
+            protocol,
+            Role::User,
+        )?);
+    }
+    parts.extend(
+        content
+            .iter()
+            .map(|block| content_block(block, protocol, Role::User))
+            .collect::<AdapterResult<Vec<_>>>()?,
+    );
+    Ok(Value::Array(parts))
+}
+
+fn tool_output_text(content: &[Block]) -> Option<String> {
+    let mut text = String::new();
+    for block in content {
+        let Block::Text(part) = block else {
+            return None;
+        };
+        text.push_str(part);
+    }
+    Some(text)
 }
 
 pub(super) fn flush_responses_content(
-    values: &mut Vec<Value>,
+    response_items: &mut Vec<Value>,
     content: &mut Vec<Value>,
     role: &str,
 ) {
     if !content.is_empty() {
-        values.push(json!({"role":role,"content":std::mem::take(content)}));
+        response_items.push(json!({"role":role,"content":std::mem::take(content)}));
     }
 }
 
 pub(super) fn content_block(block: &Block, protocol: WireApi, role: Role) -> AdapterResult<Value> {
     Ok(match block {
-        Block::Text(text) => match protocol {
+        Block::Refusal(text)
+            if matches!(protocol, WireApi::Responses | WireApi::ChatCompletions) =>
+        {
+            json!({"type":"refusal","refusal":text})
+        }
+        Block::Text(text) | Block::Refusal(text) => match protocol {
             WireApi::Responses => {
                 json!({"type":if role == Role::Assistant { "output_text" } else { "input_text" },"text":text})
             }
@@ -262,31 +326,31 @@ pub(super) fn content_block(block: &Block, protocol: WireApi, role: Role) -> Ada
         },
         Block::Image { url, detail } => match protocol {
             WireApi::Responses => {
-                let mut value = json!({"type":"input_image","image_url":url});
+                let mut responses_image = json!({"type":"input_image","image_url":url});
                 if let Some(detail) = detail {
-                    value["detail"] = detail.clone().into();
+                    responses_image["detail"] = detail.clone().into();
                 }
-                value
+                responses_image
             }
             WireApi::ChatCompletions => {
-                let mut value = json!({"type":"image_url","image_url":{"url":url}});
+                let mut chat_image = json!({"type":"image_url","image_url":{"url":url}});
                 if let Some(detail) = detail {
-                    value["image_url"]["detail"] = detail.clone().into();
+                    chat_image["image_url"]["detail"] = detail.clone().into();
                 }
-                value
+                chat_image
             }
             WireApi::Messages | WireApi::Gemini => {
                 if detail.as_deref().is_some_and(|detail| detail != "auto") {
                     return Err(AdapterError::parameter_unsupported());
                 }
-                if let Some((mime, data)) = url
+                if let Some((mime, encoded_image)) = url
                     .strip_prefix("data:")
-                    .and_then(|data| data.split_once(";base64,"))
+                    .and_then(|data_url| data_url.split_once(";base64,"))
                 {
                     if protocol == WireApi::Messages {
-                        json!({"type":"image","source":{"type":"base64","media_type":mime,"data":data}})
+                        json!({"type":"image","source":{"type":"base64","media_type":mime,"data":encoded_image}})
                     } else {
-                        json!({"inlineData":{"mimeType":mime,"data":data}})
+                        json!({"inlineData":{"mimeType":mime,"data":encoded_image}})
                     }
                 } else if protocol == WireApi::Messages {
                     json!({"type":"image","source":{"type":"url","url":url}})
@@ -295,19 +359,83 @@ pub(super) fn content_block(block: &Block, protocol: WireApi, role: Role) -> Ada
                 }
             }
         },
+        Block::Document {
+            url,
+            filename,
+            detail,
+        } => {
+            if protocol != WireApi::Responses
+                && detail.as_deref().is_some_and(|detail| detail != "auto")
+            {
+                return Err(AdapterError::parameter_unsupported_for("document.detail"));
+            }
+            let data = url.strip_prefix("data:application/pdf;base64,");
+            match protocol {
+                WireApi::Responses => {
+                    let mut file = json!({"type":"input_file"});
+                    file[if data.is_some() {
+                        "file_data"
+                    } else {
+                        "file_url"
+                    }] = url.clone().into();
+                    if let Some(filename) = filename {
+                        file["filename"] = filename.clone().into();
+                    }
+                    if let Some(detail) = detail {
+                        file["detail"] = detail.clone().into();
+                    }
+                    file
+                }
+                WireApi::ChatCompletions => {
+                    if data.is_none() {
+                        return Err(AdapterError::parameter_unsupported_for("document.file_url"));
+                    }
+                    let mut file = json!({"file_data":url});
+                    if let Some(filename) = filename {
+                        file["filename"] = filename.clone().into();
+                    }
+                    json!({"type":"file","file":file})
+                }
+                WireApi::Messages => {
+                    let source = match data {
+                        Some(data) => {
+                            json!({"type":"base64","media_type":"application/pdf","data":data})
+                        }
+                        None => json!({"type":"url","url":url}),
+                    };
+                    let mut file = json!({"type":"document","source":source});
+                    if let Some(filename) = filename {
+                        file["title"] = filename.clone().into();
+                    }
+                    file
+                }
+                WireApi::Gemini => {
+                    let data = data.ok_or_else(|| {
+                        AdapterError::parameter_unsupported_for("document.file_url")
+                    })?;
+                    let mut blob = json!({"mimeType":"application/pdf","data":data});
+                    if let Some(filename) = filename {
+                        blob["displayName"] = filename.clone().into();
+                    }
+                    json!({"inlineData":blob})
+                }
+            }
+        }
         Block::ToolCall {
             id,
             name,
             arguments,
         } => {
-            let input: Value =
+            let tool_input: Value =
                 serde_json::from_str(arguments).map_err(|_| AdapterError::invalid_request())?;
-            if !input.is_object() {
+            if !tool_input.is_object() {
                 return Err(AdapterError::invalid_request());
             }
             match protocol {
-                WireApi::Messages => json!({"type":"tool_use","id":id,"name":name,"input":input}),
-                WireApi::Gemini => json!({"functionCall":{"id":id,"name":name,"args":input}}),
+                WireApi::Messages => {
+                    json!({"type":"tool_use","id":id,"name":name,"input":tool_input})
+                }
+                WireApi::Gemini => json!({"functionCall":{"id":id,"name":name,"args":tool_input}}),
                 _ => return Err(AdapterError::unsupported_binding()),
             }
         }
@@ -316,31 +444,63 @@ pub(super) fn content_block(block: &Block, protocol: WireApi, role: Role) -> Ada
             name,
             content,
             is_error,
+            raw_text,
         } => match protocol {
             WireApi::Messages => {
-                json!({"type":"tool_result","tool_use_id":id,"content":content,"is_error":is_error})
+                let mut result = json!({"type":"tool_result","tool_use_id":id,"content":tool_output(content, false, protocol)?});
+                if *is_error {
+                    result["is_error"] = true.into();
+                }
+                result
             }
             WireApi::Gemini => {
-                let response = serde_json::from_str::<Value>(content)
-                    .ok()
-                    .filter(Value::is_object)
-                    .unwrap_or_else(|| {
-                        if *is_error {
-                            json!({"error":content})
+                let text = content
+                    .iter()
+                    .filter_map(|block| {
+                        if let Block::Text(text) = block {
+                            Some(text.as_str())
                         } else {
-                            json!({"result":content})
+                            None
                         }
-                    });
-                json!({"functionResponse":{"id":id,"name":name,"response":response}})
+                    })
+                    .collect::<String>();
+                let parsed = (!raw_text)
+                    .then(|| serde_json::from_str::<Value>(&text).ok())
+                    .flatten()
+                    .filter(Value::is_object);
+                let response = if *is_error {
+                    match parsed {
+                        Some(value) if value.get("error").is_some() => value,
+                        Some(value) => json!({"error":value}),
+                        None => json!({"error":text}),
+                    }
+                } else {
+                    parsed.unwrap_or_else(|| json!({"output":text}))
+                };
+                let mut result = json!({"id":id,"name":name,"response":response});
+                let mut media = Vec::new();
+                for block in content
+                    .iter()
+                    .filter(|block| !matches!(block, Block::Text(_)))
+                {
+                    let part = content_block(block, protocol, Role::User)?;
+                    if !matches!(
+                        part.pointer("/inlineData/mimeType").and_then(Value::as_str),
+                        Some("image/png" | "image/jpeg" | "image/webp")
+                    ) {
+                        return Err(AdapterError::parameter_unsupported_for("input.output"));
+                    }
+                    media.push(part);
+                }
+                if !media.is_empty() {
+                    result["parts"] = Value::Array(media);
+                }
+                json!({"functionResponse":result})
             }
             _ => return Err(AdapterError::unsupported_binding()),
         },
-        Block::Reasoning(text) if protocol == WireApi::Messages => {
-            json!({"type":"thinking","thinking":text})
-        }
-        Block::Reasoning(text) if protocol == WireApi::Gemini => {
-            json!({"text":text,"thought":true})
-        }
+        // Provider-owned thinking can only be replayed through native_turns,
+        // with its real signature and source/model owner intact.
         Block::Reasoning(_) => return Err(AdapterError::reasoning_unsupported()),
     })
 }

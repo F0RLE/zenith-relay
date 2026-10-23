@@ -73,7 +73,7 @@ export function ActionMenu({ children, className = "", label }: { children: Reac
         <MoreHorizontal aria-hidden />
       </summary>
       {tooltip.tooltip}
-      <div ref={panelRef} className="relay-popover-panel" role="menu">{children}</div>
+      {open ? <div ref={panelRef} className="relay-popover-panel" role="menu">{children}</div> : null}
     </details>
   );
 }
@@ -101,7 +101,7 @@ export function ActionMenuItem({ children, icon, danger = false, className = "",
   </>;
 }
 
-export function OptionMenu({ label, value, options, icon, onChange, className = "", disabled = false }: {
+export function OptionMenu({ label, value, options, icon, onChange, className = "", disabled = false, align = "end", fitContent = false, listClassName = "", showSelectionIndicator = true }: {
   label: string;
   value: string;
   options: Array<{ value: string; label: string; shortLabel?: string }>;
@@ -109,12 +109,17 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
   onChange: (value: string) => void;
   className?: string;
   disabled?: boolean;
+  align?: "start" | "center" | "end";
+  fitContent?: boolean;
+  listClassName?: string;
+  showSelectionIndicator?: boolean;
 }) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
-  const [position, setPosition] = useState<{ left: number; top: number; width: number } | null>(null);
-  const selected = options.find((option) => option.value === value) ?? options[0];
+  const [position, setPosition] = useState<{ left: number; top: number; width: number; maxHeight: number } | null>(null);
+  const selected: (typeof options)[number] | undefined = options.find((option) => option.value === value)
+    ?? (value ? { value, label: value } : options[0]);
 
   const close = (restoreFocus = false) => {
     setOpen(false);
@@ -129,19 +134,61 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
     if (!trigger || !list) return;
     const margin = 8;
     const gap = 6;
-    const width = Math.min(Math.max(trigger.width, 220), window.innerWidth - margin * 2);
-    const left = Math.max(margin, Math.min(trigger.right - width, window.innerWidth - width - margin));
+    const contentTop = 36 + margin;
+    list.style.maxHeight = "";
+    const measuredWidth = () => {
+      const labels = [...list.querySelectorAll<HTMLElement>("button > span")];
+      const labelWidth = Math.max(0, ...labels.map((label) => {
+        const range = document.createRange();
+        range.selectNodeContents(label);
+        return range.getBoundingClientRect().width;
+      }));
+      const firstOptionButton = list.querySelector<HTMLElement>("button");
+      if (!firstOptionButton) return list.getBoundingClientRect().width;
+      const pixels = (cssLength: string) => Number.parseFloat(cssLength) || 0;
+      const itemStyle = window.getComputedStyle(firstOptionButton);
+      const listStyle = window.getComputedStyle(list);
+      const indicatorWidth = showSelectionIndicator ? 16 + pixels(itemStyle.columnGap) : 0;
+      return Math.ceil(
+        labelWidth
+        + pixels(itemStyle.paddingLeft)
+        + pixels(itemStyle.paddingRight)
+        + indicatorWidth
+        + pixels(listStyle.paddingLeft)
+        + pixels(listStyle.paddingRight)
+        + pixels(listStyle.borderLeftWidth)
+        + pixels(listStyle.borderRightWidth),
+      );
+    };
+    const preferredWidth = fitContent ? measuredWidth() : trigger.width;
+    const width = Math.min(preferredWidth, window.innerWidth - margin * 2);
+    // Measure wrapping at the final field width before choosing above/below.
+    list.style.width = `${width}px`;
+    const preferredLeft = align === "start"
+      ? trigger.left
+      : align === "center"
+        ? trigger.left + (trigger.width - width) / 2
+        : trigger.right - width;
+    const left = Math.max(margin, Math.min(preferredLeft, window.innerWidth - width - margin));
     const below = trigger.bottom + gap;
-    const top = below + list.offsetHeight <= window.innerHeight - margin
-      ? below
-      : Math.max(margin, trigger.top - list.offsetHeight - gap);
-    setPosition({ left, top, width });
-  }, [open, options.length]);
+    const spaceBelow = Math.max(0, window.innerHeight - margin - below);
+    const spaceAbove = Math.max(0, trigger.top - gap - contentTop);
+    const opensBelow = list.offsetHeight <= spaceBelow || spaceBelow >= spaceAbove;
+    const maxHeight = opensBelow ? spaceBelow : spaceAbove;
+    const height = Math.min(list.offsetHeight, maxHeight);
+    const top = opensBelow ? below : trigger.top - height - gap;
+    setPosition({ left, top: Math.max(contentTop, top), width, maxHeight });
+  }, [align, fitContent, open, options.length, showSelectionIndicator]);
 
   useEffect(() => {
     if (!open) return;
-    const selectedOption = listRef.current?.querySelector<HTMLElement>('[role="option"][aria-selected="true"]');
-    selectedOption?.focus({ preventScroll: true });
+    let opening = true;
+    const openingFrame = window.requestAnimationFrame(() => {
+      // The portal stays hidden until its measured position is committed.
+      const selectedOption = listRef.current?.querySelector<HTMLElement>('[role="option"][aria-selected="true"]');
+      selectedOption?.focus({ preventScroll: true });
+      opening = false;
+    });
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target as Node;
       if (!triggerRef.current?.contains(target) && !listRef.current?.contains(target)) close();
@@ -158,8 +205,9 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
       if (event.key === "Tab") close();
     };
     const dismiss = () => close();
-    const dismissOnWheel = (event: WheelEvent) => {
+    const dismissOnScroll = (event: Event) => {
       const target = event.target;
+      if (opening) return;
       if (target instanceof Node && listRef.current?.contains(target)) return;
       close();
     };
@@ -169,12 +217,15 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
     // listbox closes.
     document.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("resize", dismiss);
-    window.addEventListener("wheel", dismissOnWheel, true);
+    window.addEventListener("wheel", dismissOnScroll, true);
+    window.addEventListener("scroll", dismissOnScroll, true);
     return () => {
       document.removeEventListener("pointerdown", onPointerDown);
       document.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("resize", dismiss);
-      window.removeEventListener("wheel", dismissOnWheel, true);
+      window.removeEventListener("wheel", dismissOnScroll, true);
+      window.removeEventListener("scroll", dismissOnScroll, true);
+      window.cancelAnimationFrame(openingFrame);
     };
   }, [open]);
 
@@ -201,7 +252,7 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
       aria-expanded={open}
       data-value={value}
       disabled={disabled}
-      onClick={() => setOpen((current) => !current)}
+      onClick={() => setOpen((previousOpen) => !previousOpen)}
       onKeyDown={(event) => {
         if (event.key === "Escape" && open) {
           event.preventDefault();
@@ -220,11 +271,12 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
     {open && typeof document !== "undefined" ? createPortal(
       <div
         ref={listRef}
-        className="relay-option-list relay-popover-panel"
+        className={`relay-option-list relay-popover-panel ${listClassName}`.trim()}
         role="listbox"
         aria-label={label}
         data-positioned={Boolean(position)}
-        style={position ? { left: position.left, top: position.top, width: position.width } : undefined}
+        data-selection-indicator={showSelectionIndicator}
+        style={position ? { left: position.left, top: position.top, width: position.width, maxHeight: `min(280px, ${position.maxHeight}px)` } : undefined}
       >
         {options.map((option, index) => <button
           key={option.value}
@@ -240,7 +292,7 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
           onKeyDown={(event) => moveFocus(event, index)}
         >
           <span>{option.label}</span>
-          {option.value === value ? <Check aria-hidden /> : null}
+          {showSelectionIndicator && option.value === value ? <Check aria-hidden /> : null}
         </button>)}
       </div>,
       document.body,

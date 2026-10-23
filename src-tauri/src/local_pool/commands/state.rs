@@ -1,61 +1,19 @@
-use crate::local_pool::{
-    error::{CommandError, ErrorCode, LocalPoolError},
-    models::LocalPoolSnapshot,
-    state::DesktopState,
-};
+use crate::local_pool::{error::CommandError, state::DesktopState};
 #[cfg(test)]
 use std::collections::BTreeMap;
-use tauri::{AppHandle, Emitter, State};
+use tauri::State;
 use zenith_relay_core::protocol::RuntimeStateSnapshot;
 #[cfg(test)]
-use zenith_relay_core::protocol::{Capabilities, GatewaySummary, RuntimeTargetSummary};
+use zenith_relay_core::protocol::{DesktopCapabilities, GatewaySummary};
 mod snapshot;
 
 pub(crate) use snapshot::build_local_runtime_state;
 #[cfg(test)]
 use snapshot::oauth_account_runtime_available;
 
-use zenith_relay_core::{
-    pricing::{CatalogRefreshOutcome, PricingError},
-    CandidateRuntimeSnapshot,
-};
+use zenith_relay_core::CandidateRuntimeSnapshot;
 #[cfg(test)]
 use zenith_relay_core::{CandidateKind, PricingMetadata};
-
-#[tauri::command]
-pub async fn get_local_pool_state(
-    state: State<'_, DesktopState>,
-) -> Result<LocalPoolSnapshot, CommandError> {
-    state.snapshot().await.map_err(Into::into)
-}
-
-/// Force a LiteLLM catalog refresh without returning the catalog payload.
-///
-/// The loader keeps the previous valid snapshot when the network or cache
-/// fails, while the state event makes the resulting freshness state visible to
-/// all renderer consumers.
-#[tauri::command]
-pub async fn refresh_local_pricing_catalog(
-    app: AppHandle,
-    state: State<'_, DesktopState>,
-) -> Result<CatalogRefreshOutcome, CommandError> {
-    let result = state.pricing_loader().refresh(true).await;
-    let _ = app.emit("zenith-state-changed", ());
-    result.map_err(pricing_error).map_err(Into::into)
-}
-
-fn pricing_error(error: PricingError) -> LocalPoolError {
-    let code = match error {
-        PricingError::Network | PricingError::HttpStatus(_) => ErrorCode::GatewayUnavailable,
-        PricingError::InvalidCatalog | PricingError::InvalidCache => ErrorCode::InvalidState,
-        PricingError::InvalidAmount
-        | PricingError::Overflow
-        | PricingError::InvalidRecord
-        | PricingError::CacheTooLarge
-        | PricingError::Io => ErrorCode::Io,
-    };
-    LocalPoolError::new(code, error.to_string())
-}
 
 #[tauri::command]
 pub async fn get_local_runtime_state(
@@ -93,20 +51,12 @@ mod parity_tests {
     use super::*;
 
     #[test]
-    fn local_and_remote_snapshots_share_the_same_top_level_contract() {
+    fn local_snapshot_omits_retired_fields_and_accepts_legacy_transport_flag() {
         let local = serde_json::to_value(RuntimeStateSnapshot {
             schema_version: 1,
-            configuration_revision: None,
-            runtime_target: RuntimeTargetSummary {
-                kind: "local".into(),
-                connected: false,
-                origin: None,
-                server_id: None,
-                version: None,
-            },
             gateway: GatewaySummary {
                 tool_policy: Default::default(),
-                basis_points_enabled: false,
+                request_timezone: Default::default(),
                 pool_routing: None,
                 running: false,
                 base_url: "http://127.0.0.1:14998/v1".into(),
@@ -124,13 +74,15 @@ mod parity_tests {
                 quota_request_timeout_seconds: 20,
                 chatgpt_interface_quota_reserve_basis_points: Some(100),
                 codex_background_tasks_enabled: true,
+                codex_memory_extraction_enabled: true,
+                codex_memory_consolidation_enabled: true,
                 codex_websockets_enabled: true,
                 chatgpt_retry_until_available: false,
                 block_degraded_routes_enabled: true,
                 routing_order: Vec::new(),
             },
             platform: "test".into(),
-            capabilities: Capabilities::desktop_local(),
+            capabilities: DesktopCapabilities::current(),
             sources: Vec::new(),
             accounts: Vec::new(),
             automations: Vec::new(),
@@ -139,10 +91,22 @@ mod parity_tests {
             pricing: PricingMetadata::default(),
         })
         .unwrap();
-        let remote = local.clone();
+        assert!(local.get("runtimeTarget").is_none());
+        assert!(local.get("configurationRevision").is_none());
+        assert!(local["gateway"].get("basisPointsEnabled").is_none());
+        for legacy_enabled in [false, true] {
+            let mut legacy_gateway = local["gateway"].clone();
+            legacy_gateway["basisPointsEnabled"] = legacy_enabled.into();
+            let gateway: GatewaySummary = serde_json::from_value(legacy_gateway).unwrap();
+            assert_eq!(serde_json::to_value(gateway).unwrap(), local["gateway"]);
+        }
         assert_eq!(
-            local.as_object().unwrap().keys().collect::<Vec<_>>(),
-            remote.as_object().unwrap().keys().collect::<Vec<_>>()
+            local["capabilities"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            ["features"]
         );
     }
 
@@ -152,7 +116,11 @@ mod parity_tests {
             candidate_id: "account_plus".into(),
             kind: CandidateKind::OAuthAccount,
             available: true,
+            quota_wait: false,
+            capacity_wait: false,
             next_for_new_request: false,
+            selection_rank: None,
+            resource_headroom: None,
             activity_revision: 0,
             runtime_id: 0,
             in_flight: 0,
@@ -172,7 +140,11 @@ mod parity_tests {
             candidate_id: "account_unavailable".into(),
             kind: CandidateKind::OAuthAccount,
             available: false,
+            quota_wait: false,
+            capacity_wait: false,
             next_for_new_request: false,
+            selection_rank: None,
+            resource_headroom: None,
             activity_revision: 0,
             runtime_id: 0,
             in_flight: 0,

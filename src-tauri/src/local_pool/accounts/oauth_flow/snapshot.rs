@@ -1,7 +1,7 @@
-use super::super::oauth::OAuthPendingSession;
+use super::super::oauth::{OAuthClientKind, OAuthPendingSession};
 use super::{
-    OAuthFlowError, OAuthFlowErrorCode, OAuthFlowStatus, PendingSnapshot, AUTHORIZATION_ENDPOINT,
-    CALLBACK_PATH, SNAPSHOT_VERSION,
+    OAuthFlowError, OAuthFlowErrorCode, OAuthFlowStatus, PendingSnapshot, CALLBACK_PATH,
+    SNAPSHOT_VERSION,
 };
 use std::fs;
 use std::io;
@@ -16,19 +16,19 @@ pub(super) fn load_snapshots(root: &Path) -> Result<Vec<PendingSnapshot>, OAuthF
     let directory = pending_directory(root);
     ensure_pending_directory(&directory)?;
     let mut snapshots = Vec::new();
-    for entry in fs::read_dir(&directory).map_err(|_| snapshot_io())? {
-        let entry = entry.map_err(|_| snapshot_io())?;
-        let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) == Some("tmp") {
+    for directory_entry in fs::read_dir(&directory).map_err(|_| snapshot_io())? {
+        let directory_entry = directory_entry.map_err(|_| snapshot_io())?;
+        let path = directory_entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) == Some("tmp") {
             remove_snapshot(&path).map_err(|_| recovery_required())?;
             continue;
         }
-        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
             return Err(recovery_required());
         }
         let login_id = path
             .file_stem()
-            .and_then(|value| value.to_str())
+            .and_then(|file_stem| file_stem.to_str())
             .ok_or_else(recovery_required)?;
         let login_id = validate_login_id(login_id).map_err(|_| recovery_required())?;
         snapshots.push(read_snapshot(root, &login_id)?);
@@ -79,57 +79,25 @@ pub(super) fn validate_snapshot(
         .for_login(expected_login_id));
     }
     if snapshot.login_id != expected_login_id
+        || (snapshot.target_account_id.is_some() && snapshot.notes_account_id.is_some())
+        || snapshot.notes_account_id.as_deref().is_some_and(|id| {
+            id.trim().is_empty() || id.len() > 256 || id.chars().any(char::is_control)
+        })
         || snapshot.callback_secret_ref != callback_secret_ref(expected_login_id)
         || !matches!(
             snapshot.status,
             OAuthFlowStatus::Pending | OAuthFlowStatus::CallbackReceived
         )
         || snapshot.pending.created_at_ms() == 0
-        || callback_port(&snapshot.pending).is_err()
+        || (snapshot.pending.client_kind().is_local_callback()
+            && callback_port(&snapshot.pending).is_err())
     {
         return Err(recovery_required().for_login(expected_login_id));
     }
-    let authorization_url = Url::parse(&snapshot.authorization_url)
+    snapshot
+        .pending
+        .validate_authorization_url(&snapshot.authorization_url)
         .map_err(|_| recovery_required().for_login(expected_login_id))?;
-    let authorization_endpoint = Url::parse(AUTHORIZATION_ENDPOINT)
-        .map_err(|_| recovery_required().for_login(expected_login_id))?;
-    if authorization_url.scheme() != authorization_endpoint.scheme()
-        || authorization_url.host_str() != authorization_endpoint.host_str()
-        || authorization_url.port().is_some()
-        || authorization_url.path() != authorization_endpoint.path()
-        || url_has_userinfo(&authorization_url)
-        || authorization_url.fragment().is_some()
-    {
-        return Err(recovery_required().for_login(expected_login_id));
-    }
-    let mut redirect_uri_count = 0;
-    for (key, value) in authorization_url.query_pairs() {
-        if [
-            "code",
-            "access_token",
-            "refresh_token",
-            "id_token",
-            "token",
-            "client_secret",
-            "authorization",
-            "password",
-            "api_key",
-        ]
-        .iter()
-        .any(|sensitive| key.eq_ignore_ascii_case(sensitive))
-        {
-            return Err(recovery_required().for_login(expected_login_id));
-        }
-        if key == "redirect_uri" {
-            redirect_uri_count += 1;
-            if value != snapshot.pending.redirect_uri() {
-                return Err(recovery_required().for_login(expected_login_id));
-            }
-        }
-    }
-    if redirect_uri_count != 1 {
-        return Err(recovery_required().for_login(expected_login_id));
-    }
     if snapshot
         .sign_in_proxy_id
         .as_deref()
@@ -217,11 +185,17 @@ pub(super) fn validate_login_id(login_id: &str) -> Result<String, OAuthFlowError
 
 pub(super) fn callback_port(pending: &OAuthPendingSession) -> Result<u16, OAuthFlowError> {
     let redirect = Url::parse(pending.redirect_uri()).map_err(|_| recovery_required())?;
+    let expected_host = match pending.client_kind() {
+        OAuthClientKind::Codex => "localhost",
+        OAuthClientKind::Siwc => "127.0.0.1",
+        OAuthClientKind::ExcelBps => return Err(recovery_required()),
+    };
     if redirect.scheme() != "http"
-        || redirect.host_str() != Some("localhost")
+        || redirect.host_str() != Some(expected_host)
         || redirect.path() != CALLBACK_PATH
         || redirect.query().is_some()
         || redirect.fragment().is_some()
+        || url_has_userinfo(&redirect)
     {
         return Err(recovery_required());
     }

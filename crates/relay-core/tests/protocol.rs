@@ -1,44 +1,30 @@
-use zenith_relay_core::protocol::{
-    negotiate, Capabilities, ClientProtocolRange, Feature, ProtocolError, RevealedAccountIdentity,
-    CURRENT_PROTOCOL_VERSION,
-};
+use zenith_relay_core::protocol::{DesktopCapabilities, RevealedAccountIdentity};
 
 #[test]
-fn protocol_negotiation_accepts_current_server_and_features_are_explicit() {
-    let capabilities = Capabilities::personal_server("server-1", "fingerprint-1");
-    let negotiated = negotiate(ClientProtocolRange::default(), &capabilities).unwrap();
-
-    assert_eq!(negotiated.version, CURRENT_PROTOCOL_VERSION);
-    assert!(capabilities.supports(Feature::Accounts));
-    assert!(capabilities.supports(Feature::AccountImportToPool));
-    assert!(capabilities.supports(Feature::AccountIdentityReveal));
-    assert!(capabilities.supports(Feature::Sources));
-    assert!(capabilities.supports(Feature::ModelPricing));
-    assert!(capabilities.supports(Feature::ProfileAttach));
-    // Keep the negotiated token stable for already installed clients/servers.
-    assert!(capabilities.supports(Feature::Rotation));
-    assert!(capabilities.features.contains("rotation_v2"));
-}
-
-#[test]
-fn protocol_overlap_and_missing_optional_capabilities_remain_compatible() {
-    let mut current = Capabilities::personal_server("server-1", "fingerprint-1");
-    current.compatibility_min_client = CURRENT_PROTOCOL_VERSION - 1;
-    let negotiated = negotiate(
-        ClientProtocolRange {
-            min: CURRENT_PROTOCOL_VERSION - 1,
-            max: CURRENT_PROTOCOL_VERSION,
-        },
-        &current,
-    )
-    .unwrap();
-    assert_eq!(negotiated.version, CURRENT_PROTOCOL_VERSION);
-
-    current
-        .features
-        .remove(Feature::ProfileKeyRotation.as_str());
-    assert!(negotiate(ClientProtocolRange::default(), &current).is_ok());
-    assert!(!current.supports(Feature::ProfileKeyRotation));
+fn desktop_capabilities_expose_local_features_without_server_negotiation() {
+    let capabilities = DesktopCapabilities::current();
+    for feature in [
+        "accounts",
+        "account_import_to_pool",
+        "account_identity_reveal",
+        "sources",
+        "model_pricing",
+        "profile_attach",
+        "rotation_v3",
+        "route_recovery_v1",
+        "chatgpt_retry_until_available",
+    ] {
+        assert!(capabilities.features.contains(feature));
+    }
+    assert!(capabilities.features.contains("rotation_v3"));
+    assert!(!capabilities.features.contains("rotation_v2"));
+    assert!(!capabilities.features.contains("profile_key_rotation"));
+    assert!(!capabilities.features.contains("backups"));
+    let value = serde_json::to_value(capabilities).unwrap();
+    assert_eq!(
+        value.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["features"]
+    );
 }
 
 #[test]
@@ -50,25 +36,4 @@ fn revealed_account_identity_debug_output_is_redacted() {
     let debug = format!("{identity:?}");
     assert!(debug.contains("[redacted]"));
     assert!(!debug.contains("private@example.test"));
-}
-
-#[test]
-fn protocol_negotiation_rejects_non_overlapping_versions_and_empty_identity() {
-    let capabilities = Capabilities::personal_server("server-1", "fingerprint-1");
-    assert!(matches!(
-        negotiate(
-            ClientProtocolRange {
-                min: CURRENT_PROTOCOL_VERSION + 1,
-                max: CURRENT_PROTOCOL_VERSION + 2,
-            },
-            &capabilities,
-        ),
-        Err(ProtocolError::Incompatible { .. })
-    ));
-
-    let invalid = Capabilities::personal_server("", "fingerprint-1");
-    assert_eq!(
-        negotiate(ClientProtocolRange::default(), &invalid),
-        Err(ProtocolError::InvalidServerIdentity)
-    );
 }

@@ -65,7 +65,7 @@ pub(crate) fn local_pool_member_ids(
     }
     let account_ids = accounts
         .iter()
-        .filter(|account| account.account.in_pool && account.remote_location.is_none())
+        .filter(|account| account.account.in_pool && account.recovery.is_none())
         .map(|account| account.account.id.clone())
         .collect();
     Ok((source_ids, account_ids))

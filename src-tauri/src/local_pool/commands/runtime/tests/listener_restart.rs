@@ -16,6 +16,7 @@ async fn runtime_restarts_after_pool_eviction_and_source_deletion() {
         base_url: "http://127.0.0.1:9/v1".into(),
         secret_ref: source_secret_ref.clone(),
         pricing_provider: None,
+        proxy_id: None,
         official_provider_family: None,
         wire_api: WireApi::Responses,
         protocol_config: Default::default(),
@@ -163,6 +164,7 @@ async fn runtime_repairs_missing_enabled_gateway_key_secret() {
             base_url: "http://127.0.0.1:9/v1".into(),
             secret_ref: source_secret_ref.clone(),
             pricing_provider: None,
+            proxy_id: None,
             official_provider_family: None,
             wire_api: zenith_relay_core::WireApi::Responses,
             protocol_config: Default::default(),
@@ -199,13 +201,17 @@ async fn runtime_repairs_missing_enabled_gateway_key_secret() {
     let generated = secret_store::load(&key_secret_ref).unwrap().unwrap();
     assert!(generated.starts_with("zlr_"));
     let address = state.gateway.start(runtime, 0).await.unwrap();
-    let response = reqwest::Client::new()
+    let client = reqwest::Client::new();
+    let response = client
         .get(format!("http://{address}/v1/models"))
         .bearer_auth(&generated)
         .send()
         .await
         .unwrap();
     assert!(response.status().is_success());
+    let models: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(models["data"][0]["id"], "gpt-test");
+    drop(client);
 
     state.gateway.stop().await;
     secret_store::delete(&source_secret_ref).unwrap();
@@ -234,6 +240,7 @@ async fn invalid_source_start_keeps_the_remaining_pool_route_available() {
         base_url: "http://127.0.0.1:9/v1".into(),
         secret_ref: source_secret_ref.clone(),
         pricing_provider: None,
+        proxy_id: None,
         official_provider_family: None,
         wire_api: WireApi::Responses,
         protocol_config: Default::default(),
@@ -321,6 +328,7 @@ async fn occupied_new_port_restores_settings_and_previous_listener() {
             base_url: "http://127.0.0.1:9/v1".into(),
             secret_ref: source_secret_ref.clone(),
             pricing_provider: None,
+            proxy_id: None,
             official_provider_family: None,
             wire_api: zenith_relay_core::WireApi::Responses,
             protocol_config: Default::default(),

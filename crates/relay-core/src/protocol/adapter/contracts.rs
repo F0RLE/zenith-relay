@@ -1,5 +1,6 @@
 mod bridge;
 mod error;
+mod history;
 mod prepared;
 mod reasoning;
 mod replay;
@@ -7,15 +8,15 @@ mod source;
 mod tools;
 mod validation;
 
-pub(in crate::protocol::adapter) use bridge::prepare_bridge_state;
-pub use bridge::{MessagesBridgeRequest, MessagesBridgeResponse, MessagesBridgeState};
+pub use bridge::{AdapterContinuationState, TranslatedResponse};
 pub use error::{AdapterError, AdapterResult};
 pub use prepared::{AdapterResponse, PreparedAdapterRequest};
 pub use reasoning::MessagesReasoningMode;
+pub(in crate::protocol::adapter) use reasoning::{reasoning_effort_budget, ReasoningPolicy};
 pub use source::{AdapterRequestContext, SourceAdapter, UpstreamProtocol};
 pub(in crate::protocol::adapter) use tools::{
-    bridged_namespace_tool_name, request_tool_catalog, ClientToolTarget, ResponsesToolKind,
-    TranslatedTools,
+    bridged_namespace_tool_name, bridged_tool_description, request_tool_catalog,
+    resolve_responses_tool_choice, ClientToolTarget, ResponsesToolKind, ToolChoice,
 };
 
 pub(in crate::protocol::adapter) use replay::custom_tool_item_id;

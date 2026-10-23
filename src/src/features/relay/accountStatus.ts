@@ -20,8 +20,8 @@ export function operationalStatusTone(status: OperationalStatus): "ready" | "war
 }
 
 /** Same icon color as the account card, without live pool-runtime hints. */
-export function accountSurfaceTone(account: AccountSummary, onServer = false): "ready" | "warning" | "error" | "info" | "disabled" {
-  if (onServer) return "info";
+export function accountSurfaceTone(account: AccountSummary, recoveryRequired = Boolean(account.recoveryRequired)): "ready" | "warning" | "error" | "info" | "disabled" {
+  if (recoveryRequired) return "info";
   const quotaStatus = accountQuotaRefreshState(account);
   const displayedError = quotaStatus === "refreshing" ? null : currentAccountErrorCode(account);
   if (displayedError) return "error";
@@ -47,10 +47,11 @@ export function transientCandidateTone(
 }
 
 export function isCodexOauthAccountEligible(account: AccountSummary) {
-  return account.inPool && (account.operationalStatus === "rotation" || account.operationalStatus === "quotaWait");
+  return account.oauthClientKind !== "excel_bps" && !account.recoveryRequired && !account.draining
+    && canLaunchCodexAccount(account) && account.authState.state === "active";
 }
 
-export function requiresAccountReauthentication(account: Pick<AccountSummary, "authState" | "routingBlockReason">) {
+function requiresAccountReauthentication(account: Pick<AccountSummary, "authState" | "routingBlockReason">) {
   return account.routingBlockReason === "reauth_required" || (
     account.authState.state === "requires_reauth"
     && account.authState.reason !== "reused_refresh_token"
@@ -58,18 +59,45 @@ export function requiresAccountReauthentication(account: Pick<AccountSummary, "a
 }
 
 /**
+ * Launching ChatGPT directly needs a usable local credential and a healthy
+ * account state. Pool membership and a temporary quota wait do not prevent a
+ * direct launch, but terminal account failures do.
+ */
+export function canLaunchCodexAccount(account: Pick<AccountSummary, "oauthClientKind" | "enabled" | "secretAvailable" | "proxyAvailable" | "authState" | "routingBlockReason" | "clientAuthStatus" | "health" | "recoveryRequired">) {
+  if (account.recoveryRequired) return false;
+  if (account.oauthClientKind === "excel_bps" || account.oauthClientKind === "siwc") return false;
+  if (!account.enabled || !account.secretAvailable || account.proxyAvailable === false || requiresAccountReauthentication(account)) return false;
+  if (account.clientAuthStatus === "login_required") return false;
+  if (account.authState.state === "error" || account.health === "unhealthy" || account.health === "blocked") return false;
+  const terminalBlockReasons = new Set([
+    "disabled",
+    "secret_unavailable",
+    "proxy_unavailable",
+    "auth_error",
+    "checkpoint",
+    "captcha",
+    "subscription_forbidden",
+    "account_unhealthy",
+  ]);
+  return !terminalBlockReasons.has(account.routingBlockReason ?? "");
+}
+
+/**
  * A real sign-in requirement takes precedence over a stale quota refresh
  * result, so every account surface exposes the same available action.
  */
-export function accountQuotaRefreshState(account: Pick<AccountSummary, "authState" | "routingBlockReason" | "quota" | "quotaRefreshStatus">): AccountSummary["quotaRefreshStatus"] {
+export function accountQuotaRefreshState(account: Pick<AccountSummary, "oauthClientKind" | "authState" | "routingBlockReason" | "quota" | "quotaRefreshStatus">): AccountSummary["quotaRefreshStatus"] | "not_available" {
   if (requiresAccountReauthentication(account)) return "requires_reauth";
-  return account.quotaRefreshStatus ?? (
+  const status = account.quotaRefreshStatus ?? (
     account.quota.error
       ? "failed"
       : account.quota.updatedAtMs != null
         ? "updated"
         : "pending"
   );
+  if (account.oauthClientKind === "siwc" && (status === "pending" || status === "updated")
+    && !account.quota.primary && !account.quota.secondary && !account.quota.supplemental?.length) return "not_available";
+  return status;
 }
 
 export function currentAccountErrorCode(account: AccountSummary) {
@@ -77,34 +105,40 @@ export function currentAccountErrorCode(account: AccountSummary) {
     return account.authState.reason ? `auth_${account.authState.reason}` : "auth_requires_reauth";
   }
   const accountError = account.lastErrorCode?.trim();
-  if (accountError && (account.operationalStatus === "unavailable" || accountError.startsWith("models_"))) return accountError;
+  if (accountError && (account.operationalStatus === "unavailable" || accountError.startsWith("models_") || accountError === "siwc_plan_use_disabled")) return accountError;
   const quotaError = account.quota.error?.code.trim();
   if (account.quotaRefreshStatus === "failed" && quotaError) return quotaError;
   if (account.operationalStatus !== "unavailable") return null;
   // Runtime availability can be false for a route, capacity or a protected
   // quota reserve even when the account itself is healthy. Do not invent an
   // account failure when no account-owned error has been observed.
-  return accountError || quotaError || account.routingBlockReason || null;
+  return accountError || quotaError || (account.routingBlockReason === "subscription_expired" ? null : account.routingBlockReason) || null;
 }
 
 export function accountErrorTranslationKey(code: string) {
   const normalized = code.toLowerCase();
-  if (normalized === "remote_missing") return "accounts.errors.remoteMissing";
+  if (normalized === "siwc_plan_use_disabled") return "accounts.errors.siwcPlanUseDisabled";
+  if (normalized === "basis_points_free_account_unsupported") return "accounts.errors.basisPointsFreeUnsupported";
   if (/reused_refresh_token|refresh_token_reused/.test(normalized)) return "accounts.errors.reusedRefreshToken";
   if (/expired_refresh_token|refresh_token_expired/.test(normalized)) return "accounts.errors.expiredRefreshToken";
   if (/invalidated_refresh_token|refresh_token_invalidated|token_invalidated/.test(normalized)) return "accounts.errors.invalidatedRefreshToken";
   if (/invalid_grant/.test(normalized)) return "accounts.errors.invalidGrant";
-  if (/invalid_grant|requires_reauth|refresh_token/.test(normalized)) return "accounts.errors.requiresReauth";
+  if (/requires_reauth|refresh_token/.test(normalized)) return "accounts.errors.requiresReauth";
   if (/verification|verify.*account|phone/.test(normalized)) return "accounts.errors.verificationRequired";
+  if (normalized === "checkpoint" || normalized === "captcha") return "accounts.errors.verificationRequired";
   if (/credential|secret/.test(normalized)) return "accounts.errors.credentialsMissing";
   if (/deactivated|disabled.*workspace|workspace.*(?:disabled|expired|terminated)/.test(normalized)) return "accounts.errors.blocked";
   if (normalized === "upstream_forbidden") return "usage.errorCategories.upstream_forbidden";
   if (normalized === "models_forbidden") return "accounts.importFailureReasons.modelsForbidden";
   const endpointPermission = normalized === "quota_forbidden" || normalized === "subscription_forbidden";
+  if (normalized === "subscription_forbidden") return "accounts.errors.blocked";
   if (!endpointPermission && /forbidden|blocked/.test(normalized)) return "accounts.errors.blocked";
   if (/rate.?limit|too_many/.test(normalized)) return "accounts.errors.rateLimited";
+  if (normalized === "models_timeout") return "accounts.errors.modelsTimeout";
+  if (normalized === "models_transport") return "accounts.errors.modelsConnection";
+  if (/timeout/.test(normalized)) return "accounts.errors.connectionTimeout";
+  if (/transport|network|connect|proxy/.test(normalized)) return "accounts.errors.connection";
   if (normalized.startsWith("models_")) return "accounts.errors.models";
-  if (/transport|timeout|network|connect/.test(normalized)) return "accounts.errors.connection";
   if (normalized === "quota_exhausted" || normalized === "upstream_quota_exhausted") return "accounts.errors.quotaExhausted";
   if (/quota/.test(normalized)) return "accounts.errors.quota";
   if (/auth_error|unauthorized|authentication/.test(normalized)) return "accounts.errors.authorization";
