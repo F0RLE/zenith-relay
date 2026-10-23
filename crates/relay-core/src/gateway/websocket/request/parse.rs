@@ -4,7 +4,7 @@ use super::super::{
 use crate::gateway::continuation;
 use crate::gateway::request::{
     client_request_identity, codex_background_request_kind, is_managed_codex_client,
-    RequestToolPolicy, ServiceTierPolicy,
+    normalize_codex_reasoning_placeholder, RequestToolPolicy, ServiceTierPolicy,
 };
 use crate::scheduler::rotation::SharedRequestBudget;
 use crate::GatewayRuntime;
@@ -96,6 +96,7 @@ impl super::ClientRequest {
             .filter(|model| !model.is_empty())
             .ok_or_else(|| GatewayFailure::invalid_request("model must be a non-empty string"))?
             .to_string();
+        normalize_codex_reasoning_placeholder(runtime, key, headers, &mut request_body);
         let mut service_tier_policy = if is_managed_codex_client(headers) {
             ServiceTierPolicy::pool_owned(&request_body)
         } else {

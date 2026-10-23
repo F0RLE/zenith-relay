@@ -1,6 +1,29 @@
 use super::*;
 
 #[test]
+fn stateless_responses_rejection_is_shared_by_classification_and_recovery() {
+    let error = json!({"type":"invalid_request_error", "message":
+        "previous_response_id is not supported: this service does not retain past responses"});
+    for envelope in [
+        json!({"error":error}),
+        json!({"type":"response.failed", "response":{"error":error}}),
+    ] {
+        let body = serde_json::to_vec(&envelope).unwrap();
+        assert!(previous_response_not_found(&body));
+        assert_eq!(
+            classify_upstream_error(StatusCode::BAD_REQUEST, Some(&body)).category,
+            crate::error_codes::UPSTREAM_PREVIOUS_RESPONSE_NOT_FOUND,
+        );
+        assert!(!recoverable_response_affinity_miss(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            true,
+            true,
+            true
+        ));
+    }
+}
+
+#[test]
 fn websocket_only_previous_response_errors_are_detected_without_matching_other_errors() {
     assert!(previous_response_requires_websocket(
             br#"{"error":{"message":"previous_response_id is only supported on Responses WebSocket v2"}}"#,

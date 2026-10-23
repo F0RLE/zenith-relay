@@ -27,7 +27,10 @@ fn two_function_tools() -> Value {
     })
 }
 
-fn capability_test_runtime(models: &[&str], options: GatewayRuntimeOptions) -> GatewayRuntime {
+pub(super) fn capability_test_runtime(
+    models: &[&str],
+    options: GatewayRuntimeOptions,
+) -> GatewayRuntime {
     GatewayRuntime::from_pool(
         vec![RuntimeSource::unrestricted(ProviderSource {
             id: "source".into(),

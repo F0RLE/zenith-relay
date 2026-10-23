@@ -16,6 +16,9 @@ mod cooldown;
 mod failure;
 mod response;
 
+const UNSTORED_PREVIOUS_RESPONSE_MESSAGE: &str =
+    "previous_response_id is not supported: this service does not retain past responses";
+
 pub(super) use classify::{classify_upstream_error, classify_upstream_error_value};
 pub(crate) use classify::{is_deactivated_workspace, is_deactivated_workspace_value};
 use classify::{normalized_error_text, text_has_any, upstream_error_text};
