@@ -37,6 +37,13 @@ recoverable account deletion. Changes below are grouped by area.
   stay intact. A reordered-input replay regression fails before the fix and
   passes afterward; the loopback file-create/result/final-answer cycle succeeds,
   while changed history still fails before dispatch.
+- BPS accepts explicitly non-strict JSON-schema output without private client
+  flags. It validates the unchanged schema before releasing JSON or streaming
+  replies; invalid or incomplete output fails without repeating generation.
+  Native strict output still requires a compatible route.
+- Managed Codex picker aliases omit the placeholder `none` effort for catalogued
+  thinking models without published effort controls. Native Responses can replay
+  owned tool history after an explicit rejection by a stateless service.
 - Request details separate the model declared by the upstream response from
   requested and routed models without treating it as verified identity.
   BPS tool failures identify the validation stage and why executable calls are
@@ -466,6 +473,13 @@ recoverable account deletion. Changes below are grouped by area.
   Тест переставленных аргументов падает до правки и проходит после неё; локальная
   цепочка создания файла, результата и финального ответа работает, а реально
   изменённая история по-прежнему отклоняется до отправки.
+- BPS принимает JSON-схему с явно нестрогим режимом без специальных флагов клиента.
+  Исходная схема проверяется до выдачи JSON или потока; неверный или незавершённый
+  ответ завершается ошибкой без повторной генерации. Для нативного строгого
+  режима по-прежнему нужен совместимый маршрут.
+- Управляемые алиасы Codex убирают подставленное `none` у thinking-моделей без
+  опубликованных режимов усилия. Native Responses восстанавливает продолжение
+  по сохранённой истории после явного отказа сервиса без хранения ответов.
 - В деталях запроса отдельно показана модель из ответа источника — без выдачи
   её за подтверждённую личность модели. Ошибки BPS-инструментов поясняют этап
   проверки и запрет перегенерации исполняемых вызовов. При неоднозначном отказе

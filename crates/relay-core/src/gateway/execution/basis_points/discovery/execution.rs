@@ -1,3 +1,4 @@
+use super::super::structured_output::requires_buffering;
 use super::{capture, DiscoverySession};
 use crate::gateway::errors::{apply_failure_state, settle_route_failure, AttemptFailure};
 use crate::gateway::execution::{
@@ -144,10 +145,7 @@ pub(in crate::gateway::execution) async fn resolve(
     if context.allow_streaming
         && streamed
         && original.get("stream").and_then(Value::as_bool) == Some(true)
-        && original
-            .get("relay_bps_output_validation")
-            .and_then(Value::as_bool)
-            != Some(true)
+        && !requires_buffering(original)
     {
         return Ok(DiscoveryResponse {
             response: first.response,
