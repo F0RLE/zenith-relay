@@ -92,8 +92,13 @@ They are references, not dependencies or copied converters.
 - [Responses nullable output fields](https://github.com/openai/openai-node/blob/17e0f08e83e2381efa075b1bbe9ed5eb7b63a6e1/src/resources/responses/responses.ts):
   message `phase`, reasoning `encrypted_content`, and function/custom tool
   `caller` are optional and nullable. Completed-item comparisons treat omission
-  and `null` alike only for these fields; actual values and execution state
-  remain immutable between done events and terminal snapshots.
+  and `null` alike only for these fields. Other values and execution state
+  remain immutable after applying completed-reasoning precedence below.
+- [Completed Responses reasoning](https://github.com/openai/openai-node/blob/4c11b87c3e5e4fcddeeffc85b55502b2296f49fd/src/resources/responses/responses.ts):
+  streaming replay uses the reasoning item's `encrypted_content` from
+  `response.output_item.done`, not the potentially incomplete added item.
+  Relay retains that exact completed ciphertext if the terminal has another
+  copy, before comparing its other fields; it does not decode or regenerate it.
 - [Responses additional-tools input type](https://github.com/openai/openai-node/blob/e35205033764ec2a2adc7fc71f3d2df9b0ea8679/src/resources/responses/responses.ts):
   input `additional_tools` requires `role: "developer"`; the wider output-item
   role union is not the request contract. SIWC-generated tool items must retain

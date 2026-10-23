@@ -2,6 +2,82 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn completed_reasoning_keeps_done_ciphertext_without_rewriting_other_fields() {
+    let previous = json!({"type":"reasoning","id":"rs_synthetic","summary":[],
+        "status":"completed","encrypted_content":"synthetic-done-cipher"});
+    for replacement in [
+        None,
+        Some(Value::Null),
+        Some(json!("synthetic-terminal-cipher")),
+    ] {
+        let mut terminal = previous.clone();
+        terminal
+            .as_object_mut()
+            .unwrap()
+            .remove("encrypted_content");
+        if let Some(replacement) = replacement {
+            terminal["encrypted_content"] = replacement;
+        }
+        retain_completed_reasoning(&previous, &mut terminal).unwrap();
+        assert_eq!(terminal, previous);
+        validate_unchanged(&previous, &terminal).unwrap();
+    }
+    for (field, value) in [
+        (
+            "summary",
+            json!([{"type":"summary_text","text":"synthetic-private"}]),
+        ),
+        ("status", json!("incomplete")),
+        ("id", json!("rs_other")),
+    ] {
+        let mut terminal = previous.clone();
+        terminal["encrypted_content"] = json!("synthetic-terminal-cipher");
+        terminal[field] = value.clone();
+        retain_completed_reasoning(&previous, &mut terminal).unwrap();
+        assert_eq!(terminal[field], value);
+        let error = validate_unchanged(&previous, &terminal).unwrap_err();
+        assert!(!error.to_string().contains("synthetic-private"));
+    }
+}
+
+#[test]
+fn reasoning_reconciliation_rejects_invalid_cipher_types_and_never_invents_done_state() {
+    let previous = json!({"type":"reasoning","id":"rs_synthetic","summary":[],
+        "encrypted_content":"synthetic-done-cipher"});
+    for invalid in [
+        json!(false),
+        json!(42),
+        json!([]),
+        json!({"synthetic-private":true}),
+    ] {
+        let mut terminal = previous.clone();
+        terminal["encrypted_content"] = invalid;
+        let error = retain_completed_reasoning(&previous, &mut terminal).unwrap_err();
+        assert_eq!(
+            error.parameter(),
+            Some("response.output_item.encrypted_content")
+        );
+        assert!(!error.to_string().contains("synthetic-private"));
+    }
+    for absent in [None, Some(Value::Null)] {
+        let mut previous = previous.clone();
+        previous
+            .as_object_mut()
+            .unwrap()
+            .remove("encrypted_content");
+        if let Some(absent) = absent {
+            previous["encrypted_content"] = absent;
+        }
+        let mut terminal = previous.clone();
+        terminal["encrypted_content"] = json!("synthetic-terminal-cipher");
+        let unchanged = terminal.clone();
+        retain_completed_reasoning(&previous, &mut terminal).unwrap();
+        assert_eq!(terminal, unchanged);
+        assert!(validate_unchanged(&previous, &terminal).is_err());
+    }
+}
+
+#[test]
 fn only_documented_nullable_item_fields_allow_absent_and_null() {
     for (kind, field) in [
         ("message", "phase"),

@@ -1,6 +1,34 @@
 use crate::protocol::{AdapterError, AdapterResult};
 use serde_json::Value;
 
+pub(super) fn retain_completed_reasoning(
+    previous: &Value,
+    terminal: &mut Value,
+) -> AdapterResult<()> {
+    if previous.get("type").and_then(Value::as_str) != Some("reasoning")
+        || terminal.get("type").and_then(Value::as_str) != Some("reasoning")
+    {
+        return Ok(());
+    }
+    let Some(completed @ Value::String(_)) = previous.get("encrypted_content") else {
+        return Ok(());
+    };
+    if terminal
+        .get("encrypted_content")
+        .is_some_and(|value| !value.is_null() && !value.is_string())
+    {
+        return Err(AdapterError::upstream_stream_invalid()
+            .with_parameter("response.output_item.encrypted_content"));
+    }
+    // The official Responses SDK directs streaming clients to replay the
+    // completed reasoning item's ciphertext from output_item.done. A terminal
+    // snapshot is not a replacement for that opaque continuation state.
+    if terminal.get("encrypted_content") != Some(completed) {
+        terminal["encrypted_content"] = completed.clone();
+    }
+    Ok(())
+}
+
 pub(super) fn validate_unchanged(previous: &Value, terminal: &Value) -> AdapterResult<()> {
     let invalid = || AdapterError::upstream_stream_invalid();
     let (Some(previous), Some(terminal)) = (previous.as_object(), terminal.as_object()) else {

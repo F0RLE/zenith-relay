@@ -350,6 +350,38 @@ fn stream_response(response: &Value) -> (crate::AdapterStreamBridge, Vec<Value>)
 }
 
 #[test]
+fn messages_tool_roundtrip_replays_done_reasoning_not_terminal_ciphertext() {
+    for include_summary in [true, false] {
+        let mut native = reply();
+        if !include_summary {
+            native["output"][0]["summary"] = json!([]);
+        }
+        let mut events = response_events(&native);
+        events.last_mut().unwrap()["response"]["output"][0]["encrypted_content"] =
+            json!("synthetic-terminal-cipher");
+        let wire = events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect::<String>();
+        for chunk_size in [1, 7, wire.len()] {
+            let mut bridge = prepare(WireApi::Messages, WireApi::Responses, &request(), true)
+                .into_stream_bridge()
+                .unwrap();
+            for chunk in wire.as_bytes().chunks(chunk_size) {
+                bridge.push(chunk);
+            }
+            bridge.finish();
+            assert_reasoning_tool_roundtrip(
+                bridge
+                    .completed()
+                    .expect("completed reasoning must retain native replay"),
+                &native,
+            );
+        }
+    }
+}
+
+#[test]
 fn messages_stream_keeps_public_reasoning_and_edit_tool_with_native_replay() {
     let (stream, events) = stream_response(&reply());
     let kinds = events

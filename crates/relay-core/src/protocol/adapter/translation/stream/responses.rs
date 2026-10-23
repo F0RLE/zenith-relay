@@ -713,6 +713,13 @@ impl TranslationStream {
             .ok_or_else(|| invalid().with_parameter("response.terminal.output"))?;
         for (index, item) in output.iter_mut().enumerate() {
             self.merge_item_annotations(index as u64, item)?;
+            if let Some(state) = self
+                .response_items
+                .get(&(index as u64))
+                .filter(|state| state.closed)
+            {
+                snapshots::retain_completed_reasoning(&state.item, item)?;
+            }
         }
         let output = terminal_response
             .get("output")
@@ -726,8 +733,8 @@ impl TranslationStream {
                 let item = output
                     .get(usize::try_from(index).map_err(|_| invalid())?)
                     .ok_or_else(|| invalid().with_parameter("response.terminal.output_index"))?;
-                // An output item is immutable after its done event. Its final
-                // content must also retain every delta already sent to the client.
+                // Completed reasoning keeps its authoritative done ciphertext;
+                // other fields still retain the completed item and every delta.
                 self.validate_final_item(index, item)?;
             }
         }
