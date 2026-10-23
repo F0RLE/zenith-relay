@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { tauriDevOptions } from "./tauri-dev-args.mjs";
@@ -53,5 +53,22 @@ test("root and frontend packages expose the explicit watch command", () => {
     const pkg = JSON.parse(readFileSync(new URL(path, import.meta.url), "utf8"));
     expect(pkg.scripts["app:dev"]).toEndWith("tauri-dev.mjs");
     expect(pkg.scripts["app:dev:watch"]).toEndWith("tauri-dev.mjs --watch");
+    expect(pkg.scripts["app:dev:isolated"]).toBeUndefined();
+  }
+});
+
+test("Codex actions use normal development without setup or extra actions", () => {
+  const files = [
+    [new URL("../../.codex/environments/environment.toml", import.meta.url), "bun run app:dev"],
+  ];
+  const workspaceFile = new URL("../../../.codex/environments/environment.toml", import.meta.url);
+  if (existsSync(workspaceFile)) files.push([workspaceFile, "bun scripts/dev.mjs dev relay"]);
+  for (const [path, command] of files) {
+    const env = Bun.TOML.parse(readFileSync(path, "utf8"));
+    expect(env.actions.map((action) => action.name)).toEqual([
+      "Relay · Dev", "Relay · TypeScript", "Relay · UI tests", "Relay · Rust check",
+    ]);
+    expect(env.actions[0].command).toBe(command);
+    expect(env.setup.script).toBe("");
   }
 });

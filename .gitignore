@@ -1,4 +1,6 @@
 target/
+# Persistent private development profiles are not build caches or source files.
+/.dev-data/
 gen/
 .build/
 src/.build/

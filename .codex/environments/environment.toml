@@ -1,7 +1,7 @@
 version = 1
 name = "Zenith Relay development"
 
-# Dependencies and the app are started only by an explicit action.
+# Opening a chat/worktree must not install dependencies or start the app.
 [setup]
 script = ""
 
@@ -24,13 +24,3 @@ command = "bun run --cwd src test:unit"
 name = "Relay · Rust check"
 icon = "debug"
 command = "bun scripts/build/cargo.mjs check --manifest-path src-tauri/Cargo.toml --locked"
-
-[[actions]]
-name = "Relay · Docs check"
-icon = "tool"
-command = "bun run --cwd src check:docs"
-
-[[actions]]
-name = "Relay · Setup dependencies"
-icon = "tool"
-command = "bun run setup"
