@@ -125,9 +125,9 @@ test("usage request columns reorder, resize, and open details only from the deta
   await page.locator(".relay-modal-backdrop").click({ position: { x: 2, y: 2 } });
   await expect(details).toHaveCount(0);
 
-  for (const [column, alignment] of [["model", "left"], ["connection", "left"], ["timing", "right"], ["equivalent", "right"], ["status", "center"]]) {
-    await expect(table.locator(`th[data-column="${column}"]`)).toHaveCSS("text-align", alignment);
-    await expect(row.locator(`td[data-column="${column}"]`)).toHaveCSS("text-align", alignment);
+  for (const column of ["model", "connection", "timing", "equivalent", "status"]) {
+    await expect(table.locator(`th[data-column="${column}"]`)).toHaveCSS("text-align", "center");
+    await expect(row.locator(`td[data-column="${column}"]`)).toHaveCSS("text-align", "center");
   }
   const statusHeading = table.getByLabel(/^Move the Status column/);
   const timeHeading = table.getByLabel(/^Move the Time column/);

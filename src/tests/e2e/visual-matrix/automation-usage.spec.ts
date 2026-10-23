@@ -179,10 +179,10 @@ for (const scenario of [
     const primarySize = await page.locator(".usage-metrics strong").first().evaluate((value) => parseFloat(getComputedStyle(value).fontSize));
     const secondarySize = await page.locator(".usage-secondary-metrics strong").first().evaluate((value) => parseFloat(getComputedStyle(value).fontSize));
     expect(secondarySize).toBeLessThan(primarySize);
-    expect(await page.locator(".usage-metrics > div").evaluateAll((items) => items.every((item) => getComputedStyle(item).textAlign === "left"))).toBe(true);
-    for (const [column, alignment] of [["model", "left"], ["connection", "left"], ["timing", "right"], ["equivalent", "right"], ["status", "center"]]) {
+    expect(await page.locator(".usage-metrics > div").evaluateAll((items) => items.every((item) => getComputedStyle(item).textAlign === "center"))).toBe(true);
+    for (const column of ["model", "connection", "timing", "equivalent", "status"]) {
       expect(await page.locator(`.usage-request-table th[data-column="${column}"], .usage-request-table td[data-column="${column}"]`)
-        .evaluateAll((items, expected) => items.every((item) => getComputedStyle(item).textAlign === expected), alignment)).toBe(true);
+        .evaluateAll((items) => items.every((item) => getComputedStyle(item).textAlign === "center"))).toBe(true);
     }
     const timing = page.locator('.usage-request-table tbody td[data-column="timing"]');
     await expect(timing).toHaveText(scenario.locale === "ru" ? "128 мс / 428 мс" : "128 ms / 428 ms");

@@ -16,6 +16,7 @@ async function dragColumn(page: Page, table: Locator, column: string, target: st
 }
 
 async function expectColumnAlignment(table: Locator) {
+  const centered = await table.evaluate((element) => element.classList.contains("usage-request-table"));
   const alignmentByColumn: Record<string, string> = {
     time: "left", model: "left", name: "left", connection: "left",
     timing: "right", speed: "right", tokens: "right", equivalent: "right",
@@ -27,7 +28,7 @@ async function expectColumnAlignment(table: Locator) {
   })));
   expect(cells.length).toBeGreaterThan(0);
   for (const { column, alignment } of cells) {
-    expect(alignment, `Alignment of ${column}`).toBe(alignmentByColumn[column] ?? "center");
+    expect(alignment, `Alignment of ${column}`).toBe(centered ? "center" : alignmentByColumn[column] ?? "center");
   }
 }
 
