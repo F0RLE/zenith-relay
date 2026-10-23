@@ -232,6 +232,87 @@ fn framed_headers_share_lossless_json_parsing_without_modifying_the_raw_body() {
 }
 
 #[test]
+fn framed_multiline_headers_keep_json_and_raw_body_boundaries() {
+    use super::super::codec::function_arguments;
+
+    let raw = "\n\r\n\tWrite-Output \"synthetic } ]\"\nrelay-function-string-v1 {}\n";
+    let arguments = json!({
+        "cmd":raw,
+        "metadata":{"label":"synthetic } ] \"quote\"","lines":["first\nsecond", "third"]}
+    });
+    let header = json!({"field":"cmd","args":{"metadata":arguments["metadata"]}});
+    for newline in ["\n", "\r\n"] {
+        let pretty = serde_json::to_string_pretty(&header)
+            .unwrap()
+            .replace('\n', newline);
+        // Literal newlines in header strings already belong to BPS's lossless
+        // compatibility grammar, just like those in ordinary function JSON.
+        let literal = header
+            .to_string()
+            .replace("first\\nsecond", "first\nsecond");
+        for encoded in [pretty, literal] {
+            let payload = json!(format!(
+                "{}{encoded}{newline}{raw}",
+                super::super::FUNCTION_STRING_PREFIX
+            ));
+            assert_eq!(function_arguments(&payload).unwrap(), arguments);
+
+            let mut request = request_with_tool();
+            request["tools"][0]["parameters"] = json!({
+                "type":"object","properties":{"cmd":{"type":"string"},"metadata":{"type":"object"}},
+                "required":["cmd","metadata"],"additionalProperties":false
+            });
+            let response = json!({"status":"completed","output":[{
+                "type":"function_call","call_id":"call_multiline_frame","name":TRANSPORT_TOOL,
+                "arguments":json!({"references":["exec_command"],"code":payload}).to_string()
+            }]});
+            let translated = translate_response_value(response.clone(), &request).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(
+                    translated["output"][0]["arguments"].as_str().unwrap()
+                )
+                .unwrap(),
+                arguments
+            );
+            request["tools"][0]["parameters"]["properties"]["metadata"]["type"] = json!("string");
+            assert_eq!(
+                translate_response_value(response, &request)
+                    .unwrap_err()
+                    .parameter(),
+                Some("output.run_officejs.args.schema")
+            );
+        }
+    }
+}
+
+#[test]
+fn framed_header_separator_errors_never_rewrite_executable_arguments() {
+    use super::super::codec::function_arguments;
+
+    for header in [
+        r#"{"field":"cmd","args":{"label":"synthetic-private" "extra":1}}"#,
+        r#"{"field":"cmd","args":{"label":"synthetic-private "quoted""}}"#,
+        "{\n\"field\":\"cmd\",\n\"args\":{\"label\":\"synthetic-private\" \"extra\":1}\n}",
+    ] {
+        let payload = json!(format!(
+            "{}{header}\nsynthetic-private executable body\n{{}}\n",
+            super::super::FUNCTION_STRING_PREFIX
+        ));
+        let error = function_arguments(&payload).unwrap_err();
+        assert_eq!(
+            error.parameter(),
+            Some("output.run_officejs.args.frame.header")
+        );
+        let diagnostic = error.to_string();
+        assert!(
+            diagnostic.contains("json_reason=expected_separator"),
+            "{diagnostic}"
+        );
+        assert!(!diagnostic.contains("synthetic-private"));
+    }
+}
+
+#[test]
 fn framed_function_strings_preserve_commands_and_validate_the_original_schema() {
     let mut request = request_with_tool();
     request["tools"][0]["parameters"] = json!({"type":"object","properties":{"cmd":{"type":"string"},"max_output_tokens":{"type":"integer"}},"required":["cmd"],"additionalProperties":false});

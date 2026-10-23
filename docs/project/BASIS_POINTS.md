@@ -56,7 +56,13 @@ is observed and regression-tested, not guaranteed by public OpenAI documentation
 - Complex function string arguments may use Relay's explicit private frame:
   `relay-function-string-v1 {"field":"cmd","args":{}}`, one newline, then
   the unchanged string value. Other arguments live in the JSON header. The
-  reconstructed object still passes the original schema and tool-choice checks;
+  generated header stays compact on one line; its remaining string values still
+  need JSON escaping. Only the selected body is raw. The decoder also accepts
+  pretty-printed headers and the supported literal newlines inside header
+  strings: the body starts at the first newline outside JSON containers and
+  strings, without trimming or decoding its bytes. Malformed quotes and missing
+  separators remain failures; Relay never guesses or regenerates executable code.
+  The reconstructed object still passes the original schema and tool-choice checks;
   duplicate fields and malformed headers fail. Ordinary JSON calls remain
   supported and custom tools stay opaque, even if their text resembles a frame.
   Replayed client function calls and generated examples share this encoder:

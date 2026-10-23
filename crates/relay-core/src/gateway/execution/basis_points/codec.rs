@@ -186,13 +186,43 @@ pub(super) fn json_argument_error(text: &str, error: &serde_json::Error) -> Adap
     )
 }
 
+fn split_function_string_frame(frame: &str) -> Option<(&str, &str)> {
+    let mut depth = 0_usize;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (offset, byte) in frame.bytes().enumerate() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => quoted = true,
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            b'\n' if depth == 0 => return Some((&frame[..offset], &frame[offset + 1..])),
+            _ => {}
+        }
+    }
+    // Keep the original failure path for malformed or incomplete headers. This
+    // scan only finds a delimiter outside JSON containers/strings; the existing
+    // decoder and original tool schema still validate the whole header. Never
+    // normalize, trim, or parse the executable body after that delimiter.
+    frame.split_once('\n')
+}
+
 pub(super) fn function_arguments(payload: &Value) -> Result<Value, AdapterError> {
     let arguments = match payload {
         Value::Object(_) => payload.clone(),
         Value::String(text) => {
             if let Some(frame) = text.strip_prefix(super::FUNCTION_STRING_PREFIX) {
                 let invalid = AdapterError::upstream_tool_arguments_frame_invalid();
-                let (header, raw) = frame.split_once('\n').ok_or_else(|| {
+                let (header, raw) = split_function_string_frame(frame).ok_or_else(|| {
                     invalid.with_parameter("output.run_officejs.args.frame.separator")
                 })?;
                 let header = parse_payload_json(header).map_err(|error| {

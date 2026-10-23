@@ -503,7 +503,10 @@ fn fragmented_stream_preserves_function_json_and_custom_raw_input() {
     let arguments = json!({"path":"C:\\synthetic\\quoted\"folder\\file-😀.txt\nline\t\""});
     let patch = "*** Begin Patch\n*** Add File: synthetic.txt\n+\"quoted\" \\ 😀\n*** End Patch\n";
     let mut function = call("inspect");
-    function["arguments"] = json!({"references":["inspect"],"code":format!("relay-function-string-v1 {}\n{}", json!({"field":"path","args":{}}), arguments["path"].as_str().unwrap())})
+    let header = serde_json::to_string_pretty(&json!({"field":"path","args":{}}))
+        .unwrap()
+        .replace('\n', "\r\n");
+    function["arguments"] = json!({"references":["inspect"],"code":format!("relay-function-string-v1 {header}\r\n{}", arguments["path"].as_str().unwrap())})
         .to_string()
         .into();
     let custom = json!({

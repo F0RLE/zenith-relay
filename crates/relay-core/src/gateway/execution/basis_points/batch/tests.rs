@@ -124,8 +124,9 @@ fn repeated_tools_namespaces_and_raw_payloads_roundtrip_without_losing_reasoning
     let path = "C:\\synthetic\\a\n\"quoted\"\tline";
     let raw = "*** Begin Patch\n+literal \\n and \"quotes\"\n*** End Patch";
     let framed = format!(
-        "{}{{\"field\":\"path\",\"args\":{{}}}}\n{path}",
-        super::super::FUNCTION_STRING_PREFIX
+        "{}{}\n{path}",
+        super::super::FUNCTION_STRING_PREFIX,
+        serde_json::to_string_pretty(&json!({"field":"path","args":{}})).unwrap()
     );
     let native = native(
         json!(["inspect", "inspect", "files.patch"]),
