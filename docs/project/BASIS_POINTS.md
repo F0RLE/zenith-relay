@@ -7,6 +7,17 @@ remains in the Desktop roadmap.
 BPS is a separate account executor, not the public Responses API. Its behavior
 is observed and regression-tested, not guaranteed by public OpenAI documentation.
 
+## HTTP request encoding
+
+Relay leaves BPS Responses JSON uncompressed, including when client
+ingress uses WebSocket. Native Codex compression and response-compression
+negotiation (`Accept-Encoding`) do not establish BPS request support.
+Neither an HTTP 401/422 status nor telemetry compression proves inference
+request-decoder support. Do not enable it without endpoint-specific evidence
+or resend a generation after an encoding failure. The local
+[compression probe](../../CONTRIBUTING.md#request-compression-probe) measures
+transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
+
 ## Access and request context
 
 - Permission discovery is token-incarnation-scoped, coalesced, bounded, and
@@ -19,6 +30,13 @@ is observed and regression-tested, not guaranteed by public OpenAI documentation
 - Compact messages, attribution, tool history, and inline attachments are
   normalized at this boundary. Collaboration context is lower-authority user
   context; encrypted agent messages and remote image fetching are unsupported.
+- The observed Codex `codex_app.create_thread` handoff is lowered to labelled
+  user context only when `call_id` is absent and its nonempty string output has
+  complete `<codex_delegation>` delimiters. Original text and source ID remain
+  visible; extra fields are rejected rather than hiding media or ciphertext.
+  Ordinary results, including present/null/empty call IDs, keep their existing
+  identity/pairing rules. Metadata is computed before this generated user message,
+  so the handoff does not create a new logical turn or reset iteration.
 - Metadata sent upstream contains only Relay's task/turn/iteration fields.
   Client metadata stays local and is restored in the translated response.
   Turn fingerprints borrow the relevant history prefix; JSON hashing streams
@@ -150,6 +168,9 @@ is observed and regression-tested, not guaranteed by public OpenAI documentation
   catalog time. Rounding and remaining dispatch setup can leave a gap to the
   total. The recorder retains only counters and does not change validation,
   caching, wire bodies, or upload/retry policy.
+  Schema-3 support exports expose this gap as
+  `transport.preparationAccounting.unattributedMs`, computed from observed
+  non-overlapping phases only. Initial schema validation is never added twice.
 
 ## Parallel tool calls and batch replay
 
@@ -159,6 +180,10 @@ is observed and regression-tested, not guaranteed by public OpenAI documentation
   respect task/tool permissions, approval boundaries, dependencies, and shared
   state. This is guidance, not automatic command rewriting. Actual scheduling
   and approvals belong to the client; concurrent execution is not guaranteed.
+- For independent generated scripts, patches and function-string frames, guidance
+  prefers separate native calls in one response, preserving raw bodies without
+  another nested batch-JSON layer. This does not disable parallel calls or remove
+  existing batch formats; simple payloads may still use a compact batch.
 - BPS also accepts an explicit Relay-local batch: ordered `references` names
   and `code` containing `relay-tool-batch-v1`, a newline, and a JSON payload
   array. There must be 2–8 calls and one payload per reference, with at most
@@ -166,8 +191,10 @@ is observed and regression-tested, not guaranteed by public OpenAI documentation
   namespaces are preserved. Function payloads are argument objects or encoded
   function strings; custom payloads must be strings and stay opaque.
   Batch headers accept LF or CRLF without modifying payload strings. Their JSON
-  array and function-string frame headers use the same strict-first, lossless
-  escape/control handling as single function payloads; invalid Unicode,
+  array must be one complete JSON value: trailing text, extra closing delimiters
+  and concatenated values reject the whole batch without releasing a valid
+  prefix. The array and function-string frame headers use the same strict-first,
+  lossless escape/control handling as single function payloads; invalid Unicode,
   incomplete JSON and schema violations still
   fail the entire batch. Safe `.batch.*` and `.args.frame.*` parameters identify
   framing, size, count or shape failures; JSON diagnostics never include values.
@@ -206,9 +233,17 @@ is observed and regression-tested, not guaranteed by public OpenAI documentation
 
 ## Catalogs, discovery and cache boundaries
 
-- The complete current catalog determines the stable prologue and discovery
-  mode. `tool_choice: none`, named function/custom choices, and `allowed_tools`
-  restrict the current turn after history instead of filtering that prologue.
+- With explicit `additional_tools`/`tool_search_output` history, the transport
+  prologue is catalog-independent and each declared batch renders at its original
+  position. Later batches cannot rewrite earlier declarations; compact/full
+  schemas or discovery indexes follow the requested presentation policy.
+  Root declarations overriding that history are supplied after history, with
+  current schemas/permissions authoritative for execution. Root-only catalogs
+  retain their original prefix placement so an unchanged catalog does not move
+  on every turn. A changed root-only catalog or presentation mode can still
+  invalidate that prefix: Relay does not invent a hidden historical snapshot.
+  `tool_choice: none`, named function/custom choices, and `allowed_tools`
+  restrict the current turn after history instead of filtering the prologue.
   A visible contract is not permission to call it: schema lookup, preload and
   completed-call validation remain scoped to the permitted tools. With no
   permitted tools, a final text-only guard forbids transport and catalog calls.
@@ -217,7 +252,20 @@ is observed and regression-tested, not guaranteed by public OpenAI documentation
   under the existing eight-tool/16 KiB eager budget, respecting explicit
   deferral, so stable discovery presentation does not require a lookup just
   to recover a small selected schema. Checkpoints borrow the exact prepared
-  prologue instead of rendering a different filtered catalog a second time.
+  exact prologue instead of rendering a different filtered catalog a second time.
+- Parsed tool definitions, serialized declarations, and lazily rendered full/
+  compact descriptions share immutable allocations in a content-addressed cache.
+  Namespace, declared name, kind and exact definition bytes determine identity;
+  selection and executable-call validation still use the current request.
+  Limits: 1,024 entries, 512 KiB charged per entry, 16 MiB total charged retained
+  allocation, ten minutes idle reuse. Charges include parsed objects, serialized
+  declarations and reserved lazy rendering space; they are not process RSS.
+  Oversized definitions work without retention. No arguments, history, provider
+  state, credentials or per-request permissions enter this cache.
+  Current-catalog collection borrows declarations until historical/root overrides
+  are resolved, then prepares only the surviving definitions. First-position
+  ordering, current root precedence and malformed-declaration rejection remain
+  unchanged; historical catalog messages keep their original timeline.
 - Catalogs use compact schema presentation without changing the original
   validator. Complex/unknown JSON Schema constructs remain complete JSON.
   Compact property names and annotation keywords have deterministic ordering,
@@ -234,6 +282,11 @@ is observed and regression-tested, not guaranteed by public OpenAI documentation
   validate normally without retention; changed schemas compile independently.
   Compilation stays outside the cache lock. No tool arguments or provider
   continuation state enter this cache, and no remote references are retrieved.
+  Immutable prepared declarations also remember successful schema preparation,
+  avoiding repeated schema serialization and digest lookup during preflight.
+  This retains only a success marker, not another compiled validator. Changed
+  definitions compile independently, failures are never marked successful, and
+  every actual call still validates arguments and current-turn permissions.
   Automatic Relay-local discovery applies from 24 tools and 24 KiB of complete
   declarations (including descriptions, schemas, and custom formats):
   the initial JSON index groups names by their declared kind and namespace;
@@ -267,7 +320,7 @@ is observed and regression-tested, not guaranteed by public OpenAI documentation
   returns each original full definition once per discovery session; repeated
   selections refer to its earlier lookup result. Client instructions, history,
   reasoning effort, and original validators are not pruned or reduced.
-- Those checkpoints may also retain the Relay-generated catalog prologue, at
+- Those checkpoints may also retain the Relay-generated transport prologue, at
   most 32 KiB per entry, shared across a response's call IDs under the same
   volatile count/expiry limits. Reuse requires the same local key, model,
   historical call ID, identified client context, and digest of top-level and
@@ -343,6 +396,13 @@ is observed and regression-tested, not guaranteed by public OpenAI documentation
 
 ## Attachments, capability limits and authorization failures
 
+- Both request and account dispatch keep the prepared JSON value through catalog
+  preparation and image resolution, then encode it once for HTTP. Discovery
+  retains that same resolved value, without reparsing the wire body or retaining
+  a redundant encoded copy of inline images. Text-only requests skip attachment
+  credential lookup. Final encoding remains part of `catalogMs`, not upload time;
+  image validation, account/credential cache boundaries and cancellation are
+  unchanged. Tools still wait for complete response validation before release.
 - Inline-image uploads share in-flight success or failure for the same endpoint,
   account, credential fingerprint, media type and image bytes. Only file IDs
   enter the existing 512-entry cache; upload failures are not retained there.
@@ -351,16 +411,28 @@ is observed and regression-tested, not guaranteed by public OpenAI documentation
   data. Cancellation drops the active upload, without detached work; an existing
   independent waiter may perform its own upload. Credential and account scopes
   remain separate, and discovery continuations reuse uploaded file references.
+  A second, versioned digest of the exact inline representation reuses a validated
+  successful file ID before base64 decoding. It shares the same account/credential
+  scope and 512-entry budget with byte-content keys; neither raw inputs nor image
+  bytes are retained. Invalid images and failed uploads never seed this shortcut.
   Within one request, at most four image jobs resolve concurrently after all
   images pass validation. Bytes, input order, and input-ordered failures stay
   unchanged. Each completion frees a slot without waiting for earlier images;
   only completed IDs/errors wait for their input position. An observed failure
   stops admitting new jobs while earlier uploads resolve the input-ordered error.
   Cancellation/failure drops pending work before generation.
-- Opaque `previous_response_id`, non-Standard tiers, native strict output,
-  native web search/image generation, and Agent Identity are unsupported.
-  Full supplied history reconstructs the tool catalog; the preload hint cache
-  is not a BPS provider session store and cannot restore opaque continuation.
+- BPS does not accept provider-side `previous_response_id`. Responses clients
+  may continue through Relay's bounded, volatile native replay store: validate
+  the exact predecessor owner, materialize its complete history before route
+  preparation, and send BPS a self-contained request without the predecessor ID.
+  Missing replay state fails locally; over WebSocket, `previous_response_not_found`
+  lets a compatible client resend full history on a new connection. Relay never
+  drops context or rotates merely because BPS cannot resolve an opaque ID.
+  Native replay uses the existing 16 MiB total budget without a separate 2 MiB
+  conversation cutoff. Full supplied history also reconstructs
+  the tool catalog. The catalog preload hint cache is separate and cannot restore
+  a conversation. Non-Standard tiers, native strict output, native web search/image
+  generation and Agent Identity remain unsupported.
 - A JSON schema with explicit `strict: false` buffers output and validates the
   unchanged self-contained schema locally without a Relay-private request flag.
   `relay_bps_output_validation: false` opts out; the explicit `true` option also
@@ -375,4 +447,14 @@ is observed and regression-tested, not guaranteed by public OpenAI documentation
 - Generation 401 invalidates only its rejected token incarnation and returns
   without another generation. The next request prepares fresh authorization.
   Account-wide 429 and model-access blocks retain separate scopes/deadlines.
+  Without explicit route-recovery waiting, the first proven not-sent BPS
+  rate-limit rejection starts a maximum 30-second recovery window, or the
+  shorter configured window. Account changes and transport handoffs do not
+  restart it. With route-recovery waiting enabled, this time cap is suspended;
+  provider cooldowns, client cancellation, dispatch/wire limits and the ban on
+  replaying accepted or uncertain generations still apply. Turning waiting off
+  restores the original deadline, not a new window. An already accepted
+  generation is not interrupted by deadline expiry. Expiry during preparation
+  preserves the last provider rejection and retry evidence rather than
+  replacing a 429 with a synthetic 503 or recording an unsent generation.
   A BPS 422 invalid-body rejection is not a retryable server failure.

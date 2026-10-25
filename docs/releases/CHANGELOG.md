@@ -13,6 +13,32 @@ recoverable account deletion. Changes below are grouped by area.
 
 ### Changed
 
+- Pool and Connections reuse an inventory index for linked account lookups,
+  instead of rescanning every account per card; quota and routing are unchanged.
+- Request timezone now follows the assigned proxy automatically, without account
+  pickers, global switches, manual bindings or a default New York fallback.
+  Shared background jobs discover exits independently of the UI, refresh before
+  the 15-minute expiry and pace failed lookups. Requests never wait for location;
+  unknown/stale evidence leaves client fields intact. Legacy controls are removed
+  on startup; newer observations update proxy cards through coalesced events.
+
+- ChatGPT account settings briefly explain Codex sign-in for phone control and
+  clarify that requests still use the pool.
+
+- The Images only badge stays in Pool and its member picker, not on Connection
+  account cards. Image-only admission and actions remain unchanged.
+
+- Connection account cards now match Pool card typography, header spacing, and
+  quota-bar thickness, without changing account data or actions.
+
+- API-source and proxy bulk actions now replace search and sorting inline, like
+  account selection, instead of adding a row that pushes cards down. Clearing
+  selection restores the previous search and sorting controls.
+
+- Proxy speed tests now queue in click order instead of rejecting concurrent
+  requests. Cards distinguish waiting from measuring; waiting does not consume
+  the measurement timeout or compete for download bandwidth.
+
 - Local account cards can explicitly group Codex, SIWC and Excel/BPS authorizations
   and select one route from Accounts or Rotation. Credentials and quota remain
   independent; switching preserves pool weight/concurrency and waits for idle routes.
@@ -30,12 +56,43 @@ recoverable account deletion. Changes below are grouped by area.
 
 #### Protocol adapters and Excel / Basis Points
 
+- BPS prepares images in the existing request object and serializes once before
+  sending, removing repeated full-history JSON copies in both dispatch paths.
+  Wire output, discovery continuation, cache isolation and tool validation stay
+  unchanged; a synthetic before/after probe measures the removed CPU overhead.
+- BPS discovery avoids duplicate ordinary text/reasoning SSE capture while keeping
+  terminal items, usage, errors, model/tier evidence and the total-response limit.
+  Replay preparation moves the original request instead of cloning its history.
+- Codex request compression shares the input buffer instead of copying it onto
+  the async thread. Debug diagnostics distinguish encoding wall time from HTTP
+  execute-to-headers; first output remains a separate milestone. Reproducible
+  local compression/transfer probes and their limits are documented in
+  [Contributing](../../CONTRIBUTING.md#request-compression-probe). Provider support,
+  payload contents and retry policy are unchanged.
+- Protocol regressions cover interleaved calls, reversed completion order,
+  fragmented UTF-8 and escaped arguments. Gemini schema conversion can consume
+  an owned schema without cloning it again; canonical type names stay unchanged.
+- API-key sources can explicitly use native Gemini Interactions JSON/SSE.
+  Opaque interaction IDs remain caller/model/route-owned; interrupted streams
+  retain known usage and report native errors. Generate Content does not imply
+  Interactions support. Agents, background execution, retrieval and conversion
+  are not included, and unsupported OpenCode SDKs do not advertise these models.
+- Soft affinity can keep anonymous conversation branches on the opening
+  instruction/user prefix and observed Claude child sessions with their parent.
+  Explicit keys stay stronger; hints never authorize opaque continuation.
+- Desktop capabilities expose stable connector-family/sign-in descriptors for
+  existing OpenAI connections only. Other provider logins and their UI remain
+  paused. Policy reloads match unique source IDs independently of order, and
+  publishing the same runtime no longer retires its own listener/candidates.
+- BPS preserves the observed Codex new-chat handoff as labelled context without
+  inventing a tool call or changing turn metadata; extra hidden content is rejected.
 - Full-history tool continuations no longer lose their native state when a
   client serializes function-argument object fields in another order, including
-  nested file-tool options. Fingerprints normalize object order only in a
-  comparison copy; arrays, exact values, original native arguments and reasoning
-  stay intact. A reordered-input replay regression fails before the fix and
-  passes afterward; the loopback file-create/result/final-answer cycle succeeds,
+  nested file-tool options, writes an exact integral exponent as an integer,
+  or splits adjacent same-role text into messages. Only comparison copies are
+  normalized; arrays, exact values, negative zero, native arguments and reasoning
+  stay intact. Regressions fail before the fixes and pass afterward; JSON/SSE
+  file-tool chains recover their scoped state after client reserialization,
   while changed history still fails before dispatch.
 - BPS accepts explicitly non-strict JSON-schema output without private client
   flags. It validates the unchanged schema before releasing JSON or streaming
@@ -219,9 +276,42 @@ recoverable account deletion. Changes below are grouped by area.
 
 #### Desktop UI and Access
 
+- Slow runtime snapshots save their stage timings in one durable SQLite
+  transaction instead of committing each stage separately. Validation, retention
+  and the single-metric path remain unchanged; failed batches leave no partial data.
+- Pool and Connections index runtime candidates once per snapshot rather than
+  scanning every route for each card. Saved model ordering resolves IDs/groups
+  once, compares numeric positions, and moves the original strings into the
+  result; manual anchors, provider grouping and routing semantics are unchanged.
 - Usage first entry sorts only send keys and decodes the selected page instead
   of buffering full-history diagnostics. Narrow totals/filter reads and indexes
   reduce database work; report loading no longer occupies the window event loop.
+- Usage loads only the selected page and reuses unchanged visited pages. Period
+  totals appear without a separate button; historical filter choices load on demand.
+  Hidden or inactive views invalidate cached history without background report reads.
+- Native Usage pagination reuses a bounded summary without retaining diagnostic
+  pages. History and pricing changes invalidate it; catalog freshness still updates.
+- Unchanged metadata refreshes share immutable model/index trees instead of
+  rebuilding them. Source caches omit the derived merged JSON; compact internal
+  field provenance preserves the same public evidence and conflicts.
+- Restoring Usage reads only the selected saved preview instead of loading all
+  eight reports into renderer memory. BPS resolves catalog overrides before
+  preparing definitions and reuses successful immutable schema preparation;
+  actual arguments and current tool permissions remain fully validated.
+- Request details close without reconciling the Usage workspace. An active
+  tooltip no longer consumes the dialog's first Escape, and backdrop dismissal
+  preserves focus on the opener without a click-through focus change. This dialog
+  keeps its dim backdrop without full-window blur and yields a paint opportunity
+  before restoring focus, without measuring passive hints or overriding newer focus.
+  Opening reads only the selected chat/candidate/model cache history on a worker,
+  not the desktop event loop; closed technical details render only on expansion.
+- Entering Usage no longer blocks the window while its page-open timing waits
+  for the history database. Renderer timing writes run on a worker with the same
+  validation and persistence rules.
+- Local network enumeration, configuration and backup/trash reads, history
+  clearing, and diagnostic writes no longer run on the window thread. Switching
+  between Pool and Connections keeps the existing routing read and fallback
+  timer instead of starting duplicate work.
 - Overview displays completed analytics before saving its derived cache, coalesces
   writes and flushes pending data when hidden or leaving the page. Pool activity
   no longer repeatedly serializes unchanged source-statistics inventory; actual
@@ -252,7 +342,7 @@ recoverable account deletion. Changes below are grouped by area.
 - Access combines Local API, Applications, and Accounts settings. Application
   setup saves an executable path without launching or changing the pool; protected
   Claude restore lives in Recovery. Shared account settings retain per-account
-  overrides, optional IANA timezone binding, and existing launch opt-outs.
+  overrides and existing launch opt-outs; timezone follows the proxy automatically.
 - Pages, pickers, dialogs, source cards, and saved proxies use compact layouts.
   Source cards show readiness and balances, not account rotation; Launch sits
   beside Edit. Proxy checks retain exit IP, country, latency, and check time,
@@ -280,6 +370,59 @@ recoverable account deletion. Changes below are grouped by area.
 
 ### Fixed
 
+- BPS guidance uses separate native calls for scripts, patches and framed
+  arguments instead of encouraging nested batch JSON. Parallel calls and simple
+  batches remain supported; malformed executable payloads still fail closed.
+
+- Responses continuations no longer reject a valid tool result when another
+  conversation reuses its call ID. The exact predecessor and retained history
+  disambiguate the call; key, model and route isolation remain enforced.
+
+- Quota countdown automations verify current quota when saved or enabled and
+  recover already-full windows without repeating a completed cycle. A new reset
+  is recognized even when quota stays rounded to 100%; canceling an unstarted
+  reservation no longer blocks an edited or re-enabled rule.
+
+- Quota reset checks no longer disappear when the countdown reaches zero during
+  a read. Overdue checks use the shared refresh job; verified windows do not
+  trigger a refresh loop, and provider retry limits remain in force.
+
+- Account indicators now distinguish quota/model refresh failures from blocked
+  execution. Connections and Pool show temporary connection waits consistently,
+  retain terminal errors, and identify quota timeouts in their tooltips.
+
+- Usage no longer reloads its report for unrelated account/quota state events.
+  History and pricing updates refresh in place without a recurring spinner or
+  pagination lock; retention and hidden-view invalidation remain event-driven.
+- Usage waits for the pending native report and runs only the latest filter or
+  history intent; Usage and Overview discard queued work on navigation, and
+  Usage re-entry shares pending reads.
+  Unchanged request/error rows skip rendering; normal manual refresh is removed,
+  with retry retained for errors. Late filter replies cannot replace newer choices.
+- Folder, export, preset-preview and key-copy actions no longer reload the full
+  runtime. Routing fallback no longer duplicates pending or just-completed reads;
+  hidden windows defer queued refreshes. Settings reuse known storage paths, and
+  network observation no longer restarts for unrelated interface actions.
+- Long native/BPS conversations can use the existing 16 MiB replay budget
+  instead of losing continuation above 2 MiB. If replay is unavailable,
+  WebSocket clients receive the standard full-history recovery code; the
+  internal HTTP bridge preserves the original Relay error category.
+- Switching from the Relay pool to a native Codex account also updates chat
+  metadata in differently named root-level history databases and Desktop
+  catalogs. Old chats no longer retain a removed Relay provider solely because
+  the database filename changed; unrelated rows and databases remain untouched.
+- BPS tool-result continuations restore owned history before preparing the route,
+  avoiding false model/source mismatches and unnecessary account changes. Native
+  replay no longer retains unused prior tool catalogs or request options that
+  could crowd valid history out of its existing memory budget.
+- WebSocket continuation ownership failures immediately before sending a turn
+  now persist in Desktop SQLite as local Relay errors, without recording a
+  provider attempt or tokens. Zero-send support exports no longer mark their
+  empty attempt history as missing. Ownership checks remain unchanged.
+- Cloudflare 1010 no longer changes credential health; explicit internal WS 403
+  refusals are distinct terminal transport errors. Valid JSON-before-SSE errors
+  retain their first classification. New tests cover partial usage, peer cancellation
+  and route-health isolation without changing rotation policy.
 - Explicit unknown provider tiers remain unpriced instead of borrowing Standard
   rates. Raw tier names survive aggregation; retained history is reclassified
   once without rewriting archived evidence or older migrations. Context-price
@@ -449,6 +592,32 @@ recoverable account deletion. Changes below are grouped by area.
 
 ### Изменения
 
+- Пул и Подключения используют индекс связанных аккаунтов вместо полного поиска
+  для каждой карточки; квоты и маршрутизация не меняются.
+- Часовой пояс автоматически следует назначенному прокси: удалены выбор города,
+  глобальные переключатели, ручные привязки и запасной Нью-Йорк. Общие фоновые
+  задачи определяют выход без открытия UI, обновляют пояс до истечения 15 минут
+  и повторяют сбои с паузой. Запросы не ждут геолокацию; без актуальных данных
+  поля клиента сохраняются. Старые настройки очищаются при запуске, карточки
+  получают новые результаты по объединяемым событиям.
+
+- В настройке аккаунта ChatGPT кратко поясняются вход в Codex для управления
+  с телефона и выполнение запросов через пул.
+
+- Бейдж «Только изображения» остаётся в Пуле и выборе его участников, но не на
+  карточках Подключений. Условия добавления и действия аккаунтов не меняются.
+
+- Карточки аккаунтов в Подключениях используют те же шрифты, отступы шапки и
+  толщину полос квоты, что и в Пуле; данные и действия аккаунтов не меняются.
+
+- Массовые действия API-источников и прокси заменяют поиск и сортировку в той же
+  строке, как в аккаунтах, а не сдвигают карточки вниз. После сброса выделения
+  возвращаются прежние поиск и сортировка.
+
+- Тесты скорости прокси выполняются по очереди вместо ошибки занятости.
+  Карточки различают ожидание и измерение; очередь не расходует таймаут
+  измерения и не создаёт конкуренцию за полосу скачивания.
+
 - На одной локальной карточке можно явно объединить авторизации Codex, SIWC и
   Excel/BPS и выбрать маршрут в Аккаунтах или Ротации. Токены и квоты не смешиваются;
   переключение сохраняет вес/параллельность и доступно после завершения запросов.
@@ -466,13 +635,46 @@ recoverable account deletion. Changes below are grouped by area.
 
 #### Адаптеры протоколов и Excel / Basis Points
 
+- BPS обрабатывает изображения в уже подготовленном запросе и сериализует его
+  один раз перед отправкой, без повторных JSON-копий всей истории в обоих путях
+  исполнения. Содержимое запроса, продолжение диалога, изоляция кеша и проверки
+  инструментов сохранены; добавлен синтетический замер накладных расходов.
+- BPS discovery не хранит вторую копию обычных текстовых/reasoning-дельт SSE,
+  сохраняя завершённые элементы, usage, ошибки, модель/тариф и общий лимит ответа.
+  Подготовка продолжения переносит исходный запрос вместо копирования истории.
+- Сжатие запросов Codex использует общий буфер без полного копирования в
+  асинхронном потоке. Диагностика разделяет подготовку сжатия и ожидание
+  HTTP-заголовков; первый вывод остаётся отдельной отметкой. Воспроизводимые
+  локальные замеры сжатия/передачи и их ограничения описаны в
+  [Contributing](../../CONTRIBUTING.md#request-compression-probe). Поддержка
+  провайдеров, содержимое запросов и правила повторов не меняются.
+- Регрессионные тесты покрывают перемежающиеся вызовы, обратный порядок
+  завершения, фрагменты UTF-8 и экранированные аргументы. Конвертация схем Gemini
+  принимает уже принадлежащую ей схему без повторного клонирования; канонические
+  названия типов остаются неизменными.
+- API-источники с ключом могут явно использовать нативный Gemini Interactions
+  через JSON/SSE. ID продолжений привязаны к клиентскому ключу, модели и маршруту;
+  обрыв сохраняет известный usage и выдаёт нативную ошибку. Generate Content не
+  означает поддержку Interactions. Агенты, фоновые задачи, получение сохранённых
+  ресурсов и конвертация не входят; неподдерживаемые SDK OpenCode не получают
+  такие модели в конфигурации.
+- Мягкая привязка объединяет ветки по начальным инструкциям и сообщению, а
+  наблюдаемые дочерние сессии Claude — по родителю. Явные ключи важнее; подсказка
+  не даёт права использовать чужое непрозрачное продолжение.
+- Desktop capabilities возвращает стабильные описания семейства и способа
+  входа только для существующих OpenAI-подключений. Новые входы и их интерфейс
+  на паузе. Обновление политик сравнивает уникальные ID источников независимо от
+  порядка; повторная публикация runtime не отключает его listener и кандидатов.
+- BPS сохраняет наблюдаемый контекст нового чата Codex без выдуманного вызова
+  инструмента или смены метаданных хода; лишнее скрытое содержимое отклоняется.
 - Продолжения после инструментов больше не теряют исходное состояние, если
   клиент переставил поля JSON-аргументов, в том числе вложенные параметры
-  файлового инструмента. Порядок нормализуется только в копии для сравнения;
-  массивы, точные значения, исходные аргументы и reasoning не меняются.
-  Тест переставленных аргументов падает до правки и проходит после неё; локальная
-  цепочка создания файла, результата и финального ответа работает, а реально
-  изменённая история по-прежнему отклоняется до отправки.
+  файлового инструмента, заменил экспоненциальную запись целого числа обычной или
+  разбил соседний текст одной роли на сообщения. Меняются только копии для
+  сравнения; массивы, точные значения, отрицательный ноль, нативные аргументы
+  и reasoning сохраняются. Регрессионные тесты падают до правок и проходят после;
+  цепочки файловых инструментов JSON/SSE восстанавливают состояние после
+  пересериализации клиентом, а изменённая история отклоняется до отправки.
 - BPS принимает JSON-схему с явно нестрогим режимом без специальных флагов клиента.
   Исходная схема проверяется до выдачи JSON или потока; неверный или незавершённый
   ответ завершается ошибкой без повторной генерации. Для нативного строгого
@@ -663,9 +865,44 @@ recoverable account deletion. Changes below are grouped by area.
 
 #### Интерфейс и Доступ
 
+- Этапы медленных снимков состояния записываются одной надёжной транзакцией SQLite
+  вместо отдельного сохранения каждого этапа. Проверки, срок хранения и одиночные
+  метрики сохранены; при ошибке пакет откатывается целиком.
+- Пул и подключения индексируют кандидатов один раз на снимок вместо полного
+  обхода маршрутов для каждой карточки. Сортировка моделей определяет ID/группы
+  один раз, сравнивает числовые позиции и переносит исходные строки в результат;
+  ручной порядок, группы провайдеров и правила маршрутизации сохранены.
 - Первый вход в «Использование» сортирует ключи отправок и загружает подробности
   только выбранной страницы вместо всей истории. Облегчённые запросы итогов/фильтров
   и индексы сокращают работу базы; чтение отчёта вынесено с потока окна.
+- «Использование» загружает только выбранную страницу и повторно использует
+  просмотренные, пока данные не изменились. Итоги за период появляются без отдельной
+  кнопки, а списки фильтров из истории — по действию пользователя. Скрытые
+  и неактивные страницы сбрасывают устаревший кэш без фонового чтения отчёта.
+- Нативная пагинация «Использования» повторно использует ограниченный кэш итогов
+  без подробностей соседних страниц. История и цены сбрасывают кэш; свежесть каталога
+  обновляется и без изменения цен.
+- Неизменившийся каталог повторно использует общие деревья моделей и индексы.
+  Производный объединённый JSON больше не сохраняется; компактные внутренние
+  сведения об источниках полей сохраняют публичные доказательства и конфликты.
+- При восстановлении «Использование» читает только выбранный сохранённый отчёт,
+  а не все восемь в память интерфейса. BPS сначала разрешает замены объявлений
+  каталога и повторно использует успешную подготовку неизменных схем;
+  аргументы вызовов и текущие разрешения по-прежнему проверяются полностью.
+- Закрытие сведений о запросе не перерисовывает журнал использования. Подсказка
+  больше не перехватывает первое Escape окна, а закрытие по фону сохраняет фокус
+  на открывшей его кнопке без смены фокуса сквозь исчезнувшее окно. Только это окно
+  сохраняет затемнение без размытия всего фона; фокус возвращается после возможности
+  отрисовать закрытие, без измерения пассивной подсказки и перехвата нового фокуса.
+  При открытии история кэша читается только для выбранных чата, участника и модели
+  в рабочем потоке, без блокировки окна; технические детали строятся при раскрытии.
+- Вход в «Использование» больше не блокирует окно, когда запись замера открытия
+  ждёт базу истории. Замеры интерфейса записываются в рабочем потоке с прежними
+  правилами проверки и сохранения.
+- Чтение сетевых интерфейсов, настроек, резервных копий и корзины, очистка истории
+  и запись диагностики больше не выполняются в потоке окна. Переход между пулом
+  и подключениями сохраняет текущее чтение ротации и резервный таймер вместо
+  запуска повторной работы.
 - Обзор показывает готовую аналитику до сохранения её кеша, объединяет записи
   и сохраняет ожидающие данные при скрытии или закрытии страницы. Активность пула
   больше не сериализует повторно неизменный список статистики API; новые снимки
@@ -724,6 +961,60 @@ recoverable account deletion. Changes below are grouped by area.
 
 ### Исправления
 
+- BPS рекомендует отдельные нативные вызовы для скриптов, патчей и аргументов
+  с raw-frame вместо вложенного batch JSON. Параллельность и простые пакеты
+  сохранены; повреждённые исполняемые аргументы по-прежнему отклоняются целиком.
+
+- Продолжение Responses больше не отклоняет корректный результат инструмента,
+  если другой чат использовал такой же ID вызова. Вызов проверяется по владельцу
+  предыдущего ответа и сохранённой истории; изоляция ключа, модели и маршрута сохранена.
+
+- Запуск отсчёта в автоматизациях проверяет текущую квоту после сохранения или
+  включения и подхватывает уже полное окно без повтора завершённого цикла.
+  Новый сброс распознаётся и при округлённых 100%; отмена ещё не начатой задачи
+  больше не блокирует изменённое или повторно включённое правило.
+
+- Проверка сброса квоты больше не теряется, если таймер дошёл до нуля во время
+  чтения. Просроченную проверку выполняет общая задача обновления; уже проверенные
+  окна не вызывают цикл запросов, ограничения повторов провайдера сохраняются.
+
+- Индикаторы аккаунтов различают сбой обновления квоты или моделей и блокировку
+  запросов. «Подключения» и «Пул» одинаково показывают временное ожидание связи,
+  сохраняют реальные ошибки и уточняют таймаут проверки квоты в подсказке.
+
+- «Использование» больше не перечитывает отчёт при посторонних изменениях
+  аккаунтов и квот. История и цены обновляются без постоянного индикатора загрузки
+  и блокировки страниц; очистка старых записей и скрытые вкладки учитываются событиями.
+- «Использование» дожидается текущего нативного чтения и выполняет только последний
+  выбранный фильтр или обновление истории. Уход из «Использования» и «Обзора» отменяет
+  отложенную работу; возврат в «Использование» использует незавершённое чтение.
+  Неизменившиеся строки запросов и ошибок
+  не перерисовываются. Обычное ручное обновление убрано; повтор остаётся при ошибке.
+  Поздние ответы фильтров не заменяют свежие варианты.
+- Открытие папок, экспорт, просмотр пресета и копирование ключа больше не
+  перечитывают весь runtime. Таймер порядка пула не дублирует текущее или только
+  завершённое чтение; скрытое окно откладывает обновления. Настройки сразу показывают
+  известные пути, а посторонние действия не перезапускают наблюдение за сетью.
+- Длинные нативные/BPS-диалоги используют существующий лимит истории 16 МиБ,
+  без потери продолжения после 2 МиБ. Если история недоступна, WebSocket-клиент
+  получает стандартный код для повторной отправки полного контекста;
+  внутренний HTTP-мост сохраняет исходную категорию ошибки Relay.
+- При переходе с пула Relay на нативный аккаунт Codex обновляются и метаданные
+  чатов в базах истории с другими именами и каталогах Desktop в корне профиля.
+  Смена имени базы больше не оставляет старые чаты с удалённым провайдером Relay;
+  посторонние записи и базы не меняются.
+- Продолжения BPS с результатом инструмента восстанавливают историю владельца
+  до подготовки маршрута, без ложной ошибки модели/источника и лишней смены
+  аккаунта. В памяти больше не хранятся неиспользуемые каталоги инструментов
+  и параметры предыдущего запроса, вытеснявшие историю из существующего лимита.
+- Ошибки владельца контекста WebSocket непосредственно перед отправкой запроса
+  теперь сохраняются в SQLite Desktop как локальные ошибки Relay, без попытки
+  провайдера и токенов. Диагностика не считает пустую историю отправок таких
+  запросов потерянными данными. Проверки владельца не меняются.
+- Cloudflare 1010 больше не меняет состояние авторизации; явный внутренний WS 403
+  выделен в терминальную ошибку транспорта. JSON-ошибка перед SSE сохраняет исходную
+  классификацию. Добавлены проверки частичного usage, отмены соседнего потока и
+  изоляции здоровья маршрутов без смены политики ротации.
 - Неизвестный тариф провайдера больше не считается по Standard. Названия новых
   тарифов сохраняются в агрегатах; доступная история переклассифицируется один
   раз без подмены архивных данных и старых миграций. Пороги цен одинаково

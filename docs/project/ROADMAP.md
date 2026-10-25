@@ -9,7 +9,8 @@ Future Hosted work has its own [delivery plan](../hosted/HOSTED_RELAY_ROADMAP.md
 
 ### Model, provider, and harness compatibility
 
-The shared typed pipeline, four native paths, multiple source/model bindings,
+The shared typed pipeline, four interoperable native paths plus native-only
+Gemini Interactions, multiple source/model bindings,
 and native-upstream selection are already implementation contracts. Remaining
 work is qualification and specific missing semantics, not another adapter engine.
 
@@ -22,6 +23,7 @@ work is qualification and specific missing semantics, not another adapter engine
 | Native fidelity | Ordered schemas, precise numbers, repeated permitted headers, opaque state, and native extensions survive without lossy conversion. |
 | Accounting and errors | One logical outcome plus retained attempts; partial/unknown usage remains explicit; the failing stage and origin are safe and understandable. |
 | Client profiles | ChatGPT, Claude Desktop, and OpenCode expose only usable models/efforts/context for that route; attachment and recovery preserve user settings. |
+| Claude Desktop effort menus | Qualify picker → embedded Code capability lookup → wire effort, including Max/XHigh on opaque Relay IDs. Find a supported metadata path for exact per-model lists. `maxEffort` is only a cap; `modelCatalogUrl` requires Anthropic-signed content. Do not hide higher choices, infer Max from received High, or patch client signature checks. |
 
 Use the [official contracts](../../.agents/skills/relay-protocol-adapters/references/contracts.md)
 and [conversation matrix](../../.agents/skills/relay-protocol-adapters/references/acceptance.md).
@@ -29,6 +31,13 @@ Synthetic coverage, a working endpoint, and live client acceptance are different
 evidence. Discovery must not generate paid probes across a catalog.
 
 ### Client and provider acceptance
+
+Gemini Interactions needs permitted live qualification of the exact source,
+model and key scope for JSON/SSE text → calls → results → next answer, terminal
+usage and interruption. Synthetic native tests do not qualify account OAuth,
+agents/background execution, remote retrieval or cross-protocol conversion.
+Other account connectors remain paused: the current capability metadata is a
+frontend/credential-family foundation, not an implementation of new logins.
 
 BPS multi-tool batching has a bounded [Relay-local contract](BASIS_POINTS.md) and
 synthetic roundtrip coverage for JSON/SSE, discovery, tool restrictions,
@@ -90,7 +99,7 @@ token reuse alone does not establish the cause of TTFT or safe history reduction
   schemas/output, and no automatic regeneration of a completed answer.
 - Next-request 401 recovery, model-scoped access blocks, shared aliases,
   two-account rotation, quota refresh, removal, and operator disable/drain.
-- Native Free versus Free BPS behavior after import, downgrade, restart, and
+- Free native/BPS provider access after import, plan changes, restart, and
   transfer; timezone rewriting leaves ordinary text/API-source bodies intact.
 - Quality comparisons only with authorized isolated routes and matched tasks,
   models, and effort. Keep inconclusive observations separate. Local solvers

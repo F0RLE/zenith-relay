@@ -18,11 +18,9 @@ Navigation: [design gates](#specification-before-implementation) ·
 
 ## Specification before implementation
 
-This is intentionally a detailed implementation specification, not a short product
-pitch. Keep the detail needed to implement and review a behavior without inventing
-its data ownership, failure policy or customer meaning during coding. Length is not
-a reason to remove constraints. Use navigation, stable identifiers and one canonical
-definition per subject instead of parallel architecture documents or copied rules.
+Keep one definition per contract, with enough detail to establish ownership,
+failure policy and customer meaning. Link to that definition instead of copying
+rules into parallel plans or adding a report for each task.
 
 This document owns the target contracts; [the detailed delivery plan](HOSTED_RELAY_ROADMAP.md#hosted-implementation-work-packages)
 owns ordered work packages, dependencies and acceptance. `PLANNING.md` continues to
@@ -79,14 +77,10 @@ state transition, transaction, external effect, visible result and recovery chec
 | SC-07 | [Maintenance and recovery](#maintenance-and-recovery-walkthrough) | H03, H05, H08, H10, H15, H16 |
 | SC-08 | [Service closure and migration](#service-closure-and-migration-walkthrough) | H03, H04, H08, H12, H15, H16, H17 |
 
-Before coding any step, its owning package records: preconditions and actor; exact
-input/output types and limits; state/version checked; records written in one commit;
-external calls outside that commit; operation identity and timeout; customer/owner
-text; failure/restart behavior; and named acceptance cases. A happy-path screenshot
-or endpoint name alone does not finish the step. Reuse the existing field/API/state
-inventories; add missing definitions there instead of creating competing copies.
-Separate an approved product default, a measured deployment value and an externally
-verified commercial fact. An unresolved fact blocks only the dependent step.
+Apply the [specification gate](#specification-before-implementation) to the affected
+step using the existing field/API/state inventories, not a second scenario dossier.
+Separate approved defaults, measured deployment values and verified commercial
+facts; an unresolved fact blocks only the dependent step.
 
 ## Decision
 
@@ -590,19 +584,9 @@ authorities. H05/H07/H08/H09/H15 still specify every allowed action and permissi
 
 ### Overview and chart layout
 
-1. **Current account strip:** available balance, reserved funds, current active/
-   queued work and applicable concurrency/spending limits. Mark this as current
-   state: changing the historical period does not backdate the wallet or live count.
-2. **Period summary:** logical requests, completed/incomplete/failed/cancelled outcomes,
-   normalized token usage and settled customer charges. Show unsettled requests
-   and incomplete usage alongside totals rather than silently excluding them.
-3. **Time series:** requests by outcome, input/cache/output token usage, customer
-   charges, and observed successful-request latency. Give each its own units and
-   legend; do not hide different scales behind an unlabeled combined graph.
-4. **Breakdowns:** model and API-key tables with request counts, supported token
-   components and charges. A chart/table selection opens Usage with matching filters.
-5. **Recent activity and notices:** recent own logical requests, pending payment/
-   settlement, low balance, service degradation and actionable access restrictions.
+The [Overview design](HOSTED_RELAY_WEB_DESIGN.md#ws-03--overview) owns composition.
+Current wallet/activity is separate from historical filters. Reports retain
+unsettled requests and incomplete usage; chart/table navigation preserves filters.
 
 Default to the last seven UTC calendar days including the current partial day;
 offer Today, 7 days, 30 days and a bounded custom period within retained coverage.
@@ -691,23 +675,11 @@ just-issued secret; never put keys in links, analytics, browser storage or logs.
 
 ### Customer journeys and exceptional states
 
-- **New customer:** configured login -> atomic personal workspace -> empty Overview
-  with connection guidance -> view models/prices -> top up/create a scoped key ->
-  first permitted request -> visible usage and charge. Do not auto-generate paid
-  test requests or fake sample usage in a real account.
-- **Top-up:** server-issued payment intent -> hosted payment flow -> pending return
-  screen -> server-confirmed journal credit -> refreshed balance/receipt. A browser
-  redirect, provider UI screenshot or repeated refresh never proves credit. Handle
-  expired/cancelled/failed payments and delayed/duplicate notifications explicitly.
-- **Troubleshooting:** select a request -> distinguish access, balance, capacity,
-  execution and settlement problems -> copy safe request ID/context for support.
-  No automatic resend of a paid or uncertain generation from the dashboard.
-- **Security:** link another verified login, inspect/revoke sessions, rotate keys
-  and sign out. Expired sessions clear sensitive UI state and return to login;
-  a sanitized return path cannot become an external redirect or bypass authorization.
-- **Restricted account:** explain suspension/read-only state, outstanding settlement
-  and support options from server policy; never silently erase history or imply
-  that deleting a key/account deletes financial obligations.
+Use the canonical [first-request](#first-customer-request-walkthrough),
+[money](#money-scenarios-and-worked-checks), [identity](#identity-and-account-channels)
+and [diagnostic](#errors-and-production-diagnostics) flows. The dashboard cannot
+auto-run paid tests, resend uncertain generations or infer credit from redirects.
+Deleting a key/account does not erase financial obligations.
 
 Every page has loading, empty, partial, stale, unavailable and forbidden states.
 Never substitute demo data or zero balances after a fetch failure. Keep last-known

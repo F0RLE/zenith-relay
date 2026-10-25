@@ -1,18 +1,10 @@
 # Hosted Relay Web Design
 
 **Design specification for future implementation, not an implemented website.**
-This document defines Relay's original visual system, screen composition,
-interaction states and design acceptance. It introduces no runtime code, mock
-application, dependency, deployment or claim that a working screen exists.
-
-[Hosted architecture](HOSTED_RELAY_ARCHITECTURE.md) owns permissions, routes, data meanings,
-money, security and service behavior. [Hosted roadmap](HOSTED_RELAY_ROADMAP.md#hosted-implementation-work-packages)
-owns implementation order and evidence. This document owns how those contracts
-are presented; it must not invent a second wallet, API or authorization model.
-The customer cabinet follows Relay's own launcher palette and usage/detail
-composition, with customer API keys replacing account/pool identity. Other screen
-details below remain design proposals, not shipped behavior. Change presentation here;
-change a business contract in architecture and its affected roadmap package too.
+This document owns visuals, screen composition and interaction states.
+[Architecture](HOSTED_RELAY_ARCHITECTURE.md) owns routes, permissions and data/money
+semantics; [roadmap](HOSTED_RELAY_ROADMAP.md#hosted-implementation-work-packages)
+owns delivery and acceptance. Link to those contracts rather than redefining them.
 
 Navigation: [principles](#design-principles) · [visual system](#visual-system) ·
 [layout](#layout-and-responsive-behavior) · [components](#shared-components) ·
@@ -1155,28 +1147,11 @@ generic Retry labels for actions with different financial consequences.
 
 ### Sequence before implementation
 
-1. **Agree information architecture:** confirm WS-01–WS-24, navigation grouping,
-   public/customer/owner boundaries and the canonical route tables. Check each
-   task has an entry, permitted action, result, recovery and return path.
-2. **Review visual baseline:** agree original mark/art direction, token palette,
-   typography, density and responsive geometry. The values in this document are
-   a concrete starting proposal, not an already approved rendered design.
-3. **Specify shared components:** document every relevant state, keyboard/focus
-   behavior, content length and mobile adaptation. Reuse those decisions across
-   screens rather than redesigning a form or money badge each time.
-4. **Review customer storyboards:** WS-01–WS-10 for fresh/returning customer,
-   registration closed, lost key result, funding pending, first paid request,
-   uncertain outcome, refund request and account restrictions. Use synthetic data.
-5. **Review owner storyboards:** WS-11–WS-23 for setup, source admission/parking,
-   price changes, customer suspension, request investigation, maintenance and
-   closure. Include stale revision/proof, lost response and partial bulk outcomes.
-6. **Review cross-cutting behavior:** WS-24, both themes/locales, responsive and
-   keyboard paths, safe deep links, expired detail, offline/incompatible API and
-   forbidden content. Review warning copy together with actual domain semantics.
-7. **Hand off versioned decisions:** record accepted visual baseline, any unresolved
-   screen/asset choice and corresponding H-package. Only then implement under a
-   separately authorized code task. Written descriptions do not satisfy runtime
-   or production acceptance and do not mark H13/H14/H15 complete.
+1. Confirm canonical routes, public/customer/owner boundaries and WS-01–WS-24 scope.
+2. Review tokens, shared components and customer/owner flows with synthetic data.
+3. Check the states and viewports below; resolve affected H/HD blockers before coding.
+4. Update accepted choices here, not in separate screen passports or handoff reports.
+   Written approval does not complete runtime or production acceptance.
 
 ### Screen-to-package and evidence matrix
 
@@ -1199,29 +1174,12 @@ case when needed, not a parallel frontend testing framework.
 
 ### Required design review set
 
-- Screen record for every WS ID: route/role, entry/exit, top-to-bottom placement,
-  visible fields/units, primary/secondary actions, dialogs, mobile order, data owner
-  and specific failure/recovery states. No action exists only as an unexplained icon.
-- At least one complete public/customer and one owner flow, plus money uncertainty,
-  secret display and service closure, reviewed end to end rather than as isolated
-  attractive screenshots. Role-specific data boundaries must be evident in the design.
-- Review widths 1440, 1024, 768, 390 and 320 CSS pixels, plus zoom/text enlargement,
-  keyboard and software-keyboard layouts. These are test viewports, not device promises.
-- RU/EN, light/dark, dense/long labels, supported fractional charges, zero/large
-  amounts, pending/partial/stale/unavailable/denied states and long safe identifiers.
-  Use synthetic amounts only as clearly labelled review fixtures, never prices/defaults.
-- Complete text matrix for actions, field hints/errors, status badges, confirmations,
-  support messages and destructive consequences. Give unknown backend detail a named
-  H/HD dependency, not a fake interaction that pretends the missing contract exists.
-- Asset/provenance register for the original brand/illustrations and reused licensed
-  primitives; no foreign page/theme import. Do not assume a new stylesheet changes
-  ownership of another project's assets or code.
-- Final handoff identifies which tokens/layout/copy are accepted and which remain
-  proposals. API/version, money/security and accessibility/runtime evidence stay
-  separate; no visual approval is permission to weaken those release gates.
-
-This specification deliberately does not include implemented React/CSS, generated
-HTML, a clickable prototype or final visual screenshots. Those are separate tasks.
-The remaining visual acceptance is a review of actual proposed compositions/assets
-and subsequently the rendered interface; textual and token checks alone cannot
-prove real-world layout, focus order, mobile behavior or accessibility.
+- End-to-end customer and owner flows, including uncertain money, one-time secrets,
+  service closure, stale revisions and partial actions; preserve role boundaries.
+- Widths 1440, 1024, 768, 390 and 320 CSS pixels, zoom and keyboard/software keyboard.
+- RU/EN, light/dark, long labels/IDs, fractional/large amounts and every shared state.
+- Clear actions, units, errors, confirmations and recovery; no unexplained icons or
+  invented backend behavior. Use labelled synthetic fixtures, not assumed prices.
+- Retain asset/license provenance with the assets and distinguish proposals from
+  accepted choices. Review rendered layout/focus/accessibility; prose and contrast
+  checks alone do not satisfy the implementation gates.
