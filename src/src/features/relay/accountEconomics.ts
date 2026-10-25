@@ -5,6 +5,7 @@ const MIN_OBSERVED_USAGE_BASIS_POINTS = 500;
 const MIN_PRICING_COVERAGE_BASIS_POINTS = 8_000;
 const MIN_WEEKLY_WINDOW_MINUTES = 6 * 24 * 60;
 const MAX_WEEKLY_WINDOW_MINUTES = 8 * 24 * 60;
+const MAX_ESTIMATE_AGE_MS = 3 * 24 * 60 * 60 * 1_000;
 
 export type RemainingApiEquivalentEstimate = {
   microUsd: number;
@@ -55,6 +56,7 @@ export function buildAccountValueProjection(
 export function estimateRemainingApiEquivalent(
   quota?: Pick<QuotaSnapshot, "primary" | "secondary" | "directBalanceMicroUsd">,
   evidence?: QuotaWindowUsage | null,
+  nowMs = Date.now(),
 ): RemainingApiEquivalentEstimate | null {
   if (!quota) return null;
   const directBalance = quota.directBalanceMicroUsd;
@@ -76,6 +78,12 @@ export function estimateRemainingApiEquivalent(
   const totalTokens = equivalent.pricedTokens + equivalent.unpricedTokens;
   if (
     window?.windowStartMs !== evidence.windowStartMs
+    || !Number.isSafeInteger(nowMs)
+    || !Number.isSafeInteger(evidence.observedAtMs)
+    || evidence.observedAtMs > nowMs
+    || nowMs - evidence.observedAtMs >= MAX_ESTIMATE_AGE_MS
+    || window?.resetAtMs == null || !Number.isSafeInteger(window.resetAtMs)
+    || window.resetAtMs <= nowMs
     || window?.observedAtMs !== evidence.observedAtMs
     || window?.windowMinutes !== evidence.windowMinutes
     || available == null
@@ -96,7 +104,7 @@ export function estimateRemainingApiEquivalent(
   if (consumed == null || !Number.isSafeInteger(consumed) || consumed < MIN_OBSERVED_USAGE_BASIS_POINTS
     || consumed > 10_000 - available) return null;
   const microUsd = Math.round(equivalent.microUsd * available / consumed);
-  if (!Number.isFinite(microUsd) || microUsd < 0) return null;
+  if (!Number.isSafeInteger(microUsd) || microUsd < 0) return null;
   return {
     microUsd,
     approximate: true,

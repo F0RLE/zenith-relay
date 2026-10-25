@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, CircleAlert, CircleCheck, CirclePause, Clock3, Coins, Cpu, DollarSign, Loader2, RefreshCw, SlidersHorizontal } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
@@ -15,9 +15,13 @@ import { updatePoolMembership } from "../../poolMembership";
 import { useSourceStats } from "../../hooks/useSourceStats";
 import { persistRoutingPolicy } from "../../routingPolicy";
 import { useRelayActivity, useRelayState } from "../../state/relayStateContext";
+import { setVisibleIdsSelected, toggleSelectedId } from "../../state/selectionModel";
 import { AccountErrorDialog } from "../connections/AccountErrorDialog";
 import { PoolSpeedControl } from "./PoolSpeedControl";
 import { PoolMemberCard } from "./PoolMemberCard";
+import { PoolEconomicsStrip } from "./PoolEconomicsStrip";
+import { PoolSelectionActions } from "./PoolSelectionActions";
+import { poolMemberKey } from "./poolSelectionModel";
 import {
   orderedPoolMembers,
   poolActivityState,
@@ -48,6 +52,8 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     }
   }, [pendingServiceTier, runtime?.gateway.defaultServiceTier]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const selectAllRef = useRef<HTMLInputElement>(null);
   const [errorDetails, setErrorDetails] = useState<AccountSummary | null>(null);
   const poolMembers: Member[] = useMemo(
     () => runtime ? poolMembersFromRuntime(runtime) : EMPTY_POOL_MEMBERS,
@@ -65,6 +71,19 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     () => orderedPoolMembers(poolMembers, runtimeOrder, savedRoutingMembers, rotationMode, runtimeByMember),
     [poolMembers, rotationMode, runtimeOrder, savedRoutingMembers, runtimeByMember],
   );
+  const selectedMembers = members.filter((member) => selectedIds.includes(poolMemberKey(member)));
+  const allSelected = members.length > 0 && selectedMembers.length === members.length;
+  useEffect(() => {
+    const keys = new Set(poolMembers.map(poolMemberKey));
+    setSelectedIds((previous) => previous.filter((id) => keys.has(id)));
+  }, [poolMembers]);
+  useEffect(() => {
+    setSelectedIds([]);
+    setSelectedId(null);
+  }, [mode]);
+  useEffect(() => {
+    if (selectAllRef.current) selectAllRef.current.indeterminate = selectedMembers.length > 0 && !allSelected;
+  }, [selectedMembers.length, allSelected]);
   const providerCredits = useMemo(() => poolProviderCreditsSummary(members), [members]);
   const providerCreditsValue = providerCredits == null
     ? null
@@ -204,21 +223,32 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
   }
   return <>
     <div className="pool-controls workspace-controls" role="group" aria-label={routingTitle}>
-      <div className="pool-summary relay-status-summary" data-has-provider-credits={providerCreditsValue != null ? "true" : "false"}>
-        <div data-tone={counts.rotation ? "ready" : "muted"}><CircleCheck aria-hidden /><strong>{counts.rotation}</strong><span>{t("pool.memberStatus.rotation")}</span></div>
-        <div data-tone={counts.waiting ? "warning" : "muted"}><Clock3 aria-hidden /><strong>{counts.waiting}</strong><span>{t("pool.waiting")}</span></div>
-        <div data-tone={counts.errors ? "error" : "muted"}><CircleAlert aria-hidden /><strong>{counts.errors}</strong><span>{t("accounts.summary.errors")}</span></div>
-        <div data-tone="muted"><CirclePause aria-hidden /><strong>{counts.disabled}</strong><span>{t("pool.memberStatus.disabled")}</span></div>
-        {providerCreditsValue != null ? (
-          <div data-summary="provider-credits" data-relay-tooltip={t("pool.totalProviderCreditsHint")}>
-            <Coins aria-hidden />
-            <strong>{providerCreditsValue}</strong>
-            <span>{t("pool.totalProviderCredits")}</span>
-          </div>
-        ) : null}
+      <div className="pool-summary-band">
+        <div className="pool-summary relay-status-summary" data-has-provider-credits={providerCreditsValue != null ? "true" : "false"}>
+          <div role="group" tabIndex={0} aria-label={t("pool.memberStatus.rotation")} data-relay-tooltip={t("pool.memberStatus.rotation")} data-tone={counts.rotation ? "ready" : "muted"}><CircleCheck aria-hidden /><strong>{counts.rotation}</strong></div>
+          <div role="group" tabIndex={0} aria-label={t("pool.waiting")} data-relay-tooltip={t("pool.waiting")} data-tone={counts.waiting ? "warning" : "muted"}><Clock3 aria-hidden /><strong>{counts.waiting}</strong></div>
+          <div role="group" tabIndex={0} aria-label={t("accounts.summary.errors")} data-relay-tooltip={t("accounts.summary.errors")} data-tone={counts.errors ? "error" : "muted"}><CircleAlert aria-hidden /><strong>{counts.errors}</strong></div>
+          <div role="group" tabIndex={0} aria-label={t("pool.memberStatus.disabled")} data-relay-tooltip={t("pool.memberStatus.disabled")} data-tone="muted"><CirclePause aria-hidden /><strong>{counts.disabled}</strong></div>
+          {providerCreditsValue != null ? (
+            <div role="group" tabIndex={0} aria-label={t("pool.totalProviderCredits")} data-summary="provider-credits" data-relay-tooltip={t("pool.totalProviderCreditsHint")}>
+              <Coins aria-hidden />
+              <strong>{providerCreditsValue}</strong>
+            </div>
+          ) : null}
+        </div>
+        <PoolEconomicsStrip members={poolMembers} />
       </div>
-      <div className="pool-member-toolbar">
-        <div className="pool-priority-context">
+      <div className="pool-member-toolbar" data-selection={selectedMembers.length > 0}>
+        <div className="pool-selection-context">
+          <input ref={selectAllRef} type="checkbox" checked={allSelected} disabled={Boolean(busy)}
+            aria-label={t("pool.selectAll")}
+            onChange={(event) => setSelectedIds((ids) => setVisibleIdsSelected(ids, members.map(poolMemberKey), event.target.checked))} />
+          {selectedMembers.length ? <span className="pool-selected-count" role="status"
+            aria-label={t("pool.selectionCount", { count: selectedMembers.length })}
+            data-relay-tooltip={t("pool.selectionCount", { count: selectedMembers.length })}>
+            <span className="pool-selected-count-full">{t("pool.selectionCount", { count: selectedMembers.length })}</span>
+            <span className="pool-selected-count-short" aria-hidden>{selectedMembers.length}</span>
+          </span> : <div className="pool-priority-context">
           <div className="pool-priority-label" data-relay-tooltip={t(rotationMode === "automatic" ? "pool.priorityHintAutomatic" : rotationMode === "failover" ? "pool.priorityHintFailover" : "pool.priorityHint")}><h2>{routingTitle}</h2></div>
           <div className="pool-runtime-strip">
             <div className="pool-route-summary">
@@ -236,8 +266,18 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
               <span>{activeRequestSummary}</span>
             </span>
           </div>
+        </div>}
         </div>
-        <div className="pool-quota-actions">
+        {selectedMembers.length ? <PoolSelectionActions
+          members={selectedMembers}
+          onClear={() => setSelectedIds([])}
+          onRemoved={(removed) => {
+            const keys = new Set(removed.map(poolMemberKey));
+            setSelectedIds((ids) => ids.filter((id) => !keys.has(id)));
+            setSelectedId((id) => id && keys.has(id) ? null : id);
+          }}
+          onRefreshSource={(id) => refreshSourceStats(id, true, true)}
+        /> : <div className="pool-quota-actions">
           <div className="pool-control-group" data-toolbar-group="routing">
             <PoolSpeedControl
               key={mode}
@@ -277,7 +317,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
               onClick={() => void refreshQuotas()}
             />
           </div>
-        </div>
+        </div>}
       </div>
     </div>
     <div className="pool-member-list" role="list" aria-label={t("pool.members")}>
@@ -293,6 +333,8 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
           nowMs={nowMs}
           runtimeState={runtimeState}
           selected={selectedId === memberId}
+          checked={selectedIds.includes(memberId)}
+          onToggleSelected={() => setSelectedIds((ids) => toggleSelectedId(ids, memberId))}
           isNext={isNext}
           isLastUsed={isLastUsed}
           sourceState={member.kind === "source" ? sourceStats[member.id] : undefined}

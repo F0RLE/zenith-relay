@@ -1,4 +1,4 @@
-import { Cloud, ListMinus, Loader2, Pencil, RefreshCw, UserRound } from "lucide-react";
+import { Check, Cloud, ListMinus, Loader2, Pencil, RefreshCw, Square, UserRound } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { AccountSummary, CandidateRuntimeSnapshot, PoolRoutingMode } from "../../api/types";
 import { rotationModeName } from "./rotationModes";
@@ -26,6 +26,8 @@ type PoolMemberCardProps = {
   nowMs: number;
   runtimeState: CandidateRuntimeSnapshot | undefined;
   selected: boolean;
+  checked: boolean;
+  onToggleSelected: () => void;
   isNext: boolean;
   isLastUsed: boolean;
   sourceState: SourceStatsState | undefined;
@@ -44,6 +46,8 @@ export function PoolMemberCard({
   nowMs,
   runtimeState,
   selected,
+  checked,
+  onToggleSelected,
   isNext,
   isLastUsed,
   sourceState,
@@ -111,20 +115,21 @@ export function PoolMemberCard({
     : null;
   const indicatorLabel = errorLabel
     ? statusKey === "rotation" || statusKey === "unavailable" ? errorLabel : `${statusLabel} · ${errorLabel}`
-    : quotaStatus === "updated" || (statusKey === "quotaWait" && quotaStatus === "not_available") ? statusLabel : `${t(`accounts.quotaRefreshStatus.${quotaStatus}`)} · ${statusLabel}`;
+    : quotaStatus === "updated" || quotaStatus === "not_available" ? statusLabel : `${t(`accounts.quotaRefreshStatus.${quotaStatus}`)} · ${statusLabel}`;
   const indicatorHint = member.kind === "source"
     ? [indicatorLabel, runtimeHint].filter(Boolean).join(" · ")
     : [runtimeHint, indicatorLabel].filter(Boolean).join(" · ");
 
   return (
     <article
-      className={`pool-member-card${selected ? " selected" : ""}${isCurrent ? " current" : ""}${isNext ? " next" : ""}${isLastUsed ? " last-used" : ""}`}
+      className={`pool-member-card${selected || checked ? " selected" : ""}${isCurrent ? " current" : ""}${isNext ? " next" : ""}${isLastUsed ? " last-used" : ""}`}
       role="listitem"
       data-member-label={memberName}
       data-current={isCurrent ? "true" : "false"}
       data-next={isNext ? "true" : "false"}
       data-last-used={isLastUsed ? "true" : "false"}
       data-member-kind={member.kind}
+      data-selected={checked}
     >
       <header className="pool-member-card-header">
         {member.kind === "account" && displayedErrorCode
@@ -162,6 +167,12 @@ export function PoolMemberCard({
                 routeControl={<AccountRouteSelector account={member} />} />
               : <small data-relay-tooltip={detail}>{detail}</small>}
           </div>
+        </div>
+        <div className="account-card-header-actions">
+          <IconButton className="account-select-button"
+            label={t(checked ? "accounts.deselect" : "accounts.select", { name: memberName })}
+            icon={checked ? <Check aria-hidden /> : <Square aria-hidden />}
+            aria-pressed={checked} disabled={Boolean(busy)} onClick={onToggleSelected} />
         </div>
       </header>
       <div className={`pool-member-card-quota${member.kind === "account" ? " compact-quota-layout" : ""}`}>

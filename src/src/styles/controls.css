@@ -286,27 +286,36 @@ textarea {
 }
 
 .relay-status-summary {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px 24px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
   margin-bottom: 14px;
-  padding-bottom: 14px;
-  border-bottom: 1px solid var(--relay-border);
+  overflow: hidden;
+  border: 1px solid var(--relay-border);
+  border-radius: 7px;
+  background: var(--relay-border);
+}
+
+.relay-status-summary[data-has-provider-credits="true"] {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.relay-status-summary.proxy-storage-counts {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .relay-status-summary > div {
   min-width: 0;
+  min-height: 38px;
   display: flex;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
+  gap: 4px;
+  padding: 6px;
+  background: var(--relay-surface);
   color: var(--relay-muted);
   font-size: 12px;
   line-height: 20px;
-}
-
-.relay-status-summary > [data-summary="provider-credits"] {
-  margin-left: auto;
 }
 
 .relay-status-summary strong {
@@ -334,15 +343,13 @@ textarea {
 .relay-status-summary [data-tone="error"] > svg { color: var(--relay-error); }
 .relay-status-summary [data-tone="muted"] > strong { color: var(--relay-muted); }
 
-@container (max-width: 480px) {
-  .relay-status-summary {
-    display: grid;
+@container (max-width: 620px) {
+  .relay-status-summary,
+  .relay-status-summary[data-has-provider-credits="true"] {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    column-gap: 16px;
   }
 
   .relay-status-summary > [data-summary="provider-credits"] {
     grid-column: 1 / -1;
-    margin-left: 0;
   }
 }

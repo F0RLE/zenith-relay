@@ -108,12 +108,17 @@ export function canLaunchCodexAccount(account: Pick<AccountSummary, "oauthClient
   return !terminalBlockReasons.has(account.routingBlockReason ?? "");
 }
 
-/**
- * A real sign-in requirement takes precedence over a stale quota refresh
- * result, so every account surface exposes the same available action.
- */
+function hasOwnQuotaMonitoring(account: Pick<AccountSummary, "oauthClientKind" | "quota">) {
+  return account.oauthClientKind !== "siwc" || Boolean(account.quota.primary || account.quota.secondary
+    || account.quota.supplemental?.length || account.quota.limitReached);
+}
+
+/** A selected route's sign-in requirement always takes precedence over monitoring. */
 export function accountQuotaRefreshState(account: Pick<AccountSummary, "oauthClientKind" | "authState" | "routingBlockReason" | "quota" | "quotaRefreshStatus">): AccountSummary["quotaRefreshStatus"] | "not_available" {
   if (requiresAccountReauthentication(account)) return "requires_reauth";
+  // SIWC executes requests but does not expose a quota-polling endpoint.
+  // Linked counters retain their own reader/freshness in AccountQuotaPanel.
+  if (!hasOwnQuotaMonitoring(account)) return "not_available";
   const status = account.quotaRefreshStatus ?? (
     account.quota.error
       ? "failed"
@@ -121,8 +126,6 @@ export function accountQuotaRefreshState(account: Pick<AccountSummary, "oauthCli
         ? "updated"
         : "pending"
   );
-  if (account.oauthClientKind === "siwc" && (status === "pending" || status === "updated")
-    && !account.quota.primary && !account.quota.secondary && !account.quota.supplemental?.length) return "not_available";
   return status;
 }
 
@@ -130,9 +133,12 @@ export function currentAccountErrorCode(account: AccountSummary) {
   if (requiresAccountReauthentication(account)) {
     return account.authState.reason ? `auth_${account.authState.reason}` : "auth_requires_reauth";
   }
-  const accountError = account.lastErrorCode?.trim();
+  const savedQuotaError = account.quota.error?.code.trim();
+  const unsupportedQuotaError = !hasOwnQuotaMonitoring(account) && savedQuotaError?.startsWith("quota_");
+  const quotaError = unsupportedQuotaError ? undefined : savedQuotaError;
+  const savedAccountError = account.lastErrorCode?.trim();
+  const accountError = unsupportedQuotaError && savedAccountError === savedQuotaError ? undefined : savedAccountError;
   if (accountError && (account.operationalStatus === "unavailable" || accountError.startsWith("models_") || accountError === "siwc_plan_use_disabled")) return accountError;
-  const quotaError = account.quota.error?.code.trim();
   if (account.quotaRefreshStatus === "failed" && quotaError) return quotaError;
   if (account.operationalStatus !== "unavailable") return null;
   // Runtime availability can be false for a route, capacity or a protected

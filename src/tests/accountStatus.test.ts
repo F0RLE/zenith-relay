@@ -79,13 +79,13 @@ test("quota errors keep only their matching timestamp and no invented route evid
   expect(accountErrorContext(value, "quota_timeout").observed_at).toBeNull();
 });
 
-test("SIWC without quota data is not left waiting and preserves real refresh and auth states", () => {
+test("SIWC without its own counters does not expose a quota-polling state", () => {
   const siwc = account({ oauthClientKind: "siwc", quotaRefreshStatus: "pending" });
   expect(accountQuotaRefreshState(siwc)).toBe("not_available");
   expect(accountSurfaceTone(siwc)).toBe("ready");
   expect(accountQuotaRefreshState({ ...siwc, quotaRefreshStatus: "updated" })).toBe("not_available");
-  expect(accountQuotaRefreshState({ ...siwc, quotaRefreshStatus: "refreshing" })).toBe("refreshing");
-  expect(accountQuotaRefreshState({ ...siwc, quotaRefreshStatus: "failed" })).toBe("failed");
+  expect(accountQuotaRefreshState({ ...siwc, quotaRefreshStatus: "refreshing" })).toBe("not_available");
+  expect(accountQuotaRefreshState({ ...siwc, quotaRefreshStatus: "failed" })).toBe("not_available");
   expect(accountQuotaRefreshState({
     ...siwc, quotaRefreshStatus: "updated", quota: {
       ...siwc.quota,
@@ -94,6 +94,23 @@ test("SIWC without quota data is not left waiting and preserves real refresh and
   })).toBe("updated");
   expect(accountQuotaRefreshState({ ...siwc, authState: { state: "requires_reauth", reason: "invalid_grant" } })).toBe("requires_reauth");
   expect(accountQuotaRefreshState({ ...siwc, oauthClientKind: "codex" })).toBe("pending");
+});
+
+test("SIWC ignores obsolete quota polling errors without hiding route failures", () => {
+  const siwc = account({
+    oauthClientKind: "siwc", health: "degraded", quotaRefreshStatus: "failed",
+    quota: { error: { code: "quota_prepare", occurredAtMs: 123 } }, lastErrorCode: "quota_prepare",
+  });
+  expect(accountQuotaRefreshState(siwc)).toBe("not_available");
+  expect(currentAccountErrorCode(siwc)).toBeNull();
+  expect(accountSurfaceTone(siwc)).toBe("ready");
+  expect(currentAccountErrorCode({ ...siwc, lastErrorCode: "models_transport" })).toBe("models_transport");
+  expect(accountSurfaceTone({ ...siwc, lastErrorCode: "models_transport" })).toBe("warning");
+  expect(currentAccountErrorCode({ ...siwc, operationalStatus: "unavailable", lastErrorCode: "upstream_transport_connect" })).toBe("upstream_transport_connect");
+  expect(accountSurfaceTone({ ...siwc, secretAvailable: false })).toBe("error");
+  expect(currentAccountErrorCode({ ...siwc, authState: { state: "requires_reauth", reason: "invalid_grant" } })).toBe("auth_invalid_grant");
+  expect(accountQuotaRefreshState({ ...siwc, quota: { ...siwc.quota, limitReached: true } })).toBe("failed");
+  expect(currentAccountErrorCode({ ...siwc, oauthClientKind: "codex" })).toBe("quota_prepare");
 });
 
 describe("account status policy", () => {

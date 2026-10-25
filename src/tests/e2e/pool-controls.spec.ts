@@ -6,14 +6,15 @@ async function expectPanelFits(page: Page) {
   expect(await panel.evaluate((element) => {
     const bounds = element.getBoundingClientRect();
     const selectors = ".pool-priority-label, .pool-speed-control, .pool-control-group, .pool-current-route, .pool-next-route, .pool-active-models, .pool-summary > div";
-    return Array.from(element.querySelectorAll<HTMLElement>(selectors)).every((item) => {
+    return Array.from(element.querySelectorAll<HTMLElement>(selectors)).flatMap((item) => {
       const rect = item.getBoundingClientRect();
-      return rect.left >= bounds.left - 1 && rect.right <= bounds.right + 1
+      const fits = rect.left >= bounds.left - 1 && rect.right <= bounds.right + 1
         && rect.top >= bounds.top - 1 && rect.bottom <= bounds.bottom + 1
         && (item.scrollWidth <= item.clientWidth + 1
           || (getComputedStyle(item).textOverflow === "ellipsis" && getComputedStyle(item).overflowX === "hidden"));
-    }) && bounds.left >= 0 && bounds.right <= innerWidth;
-  })).toBe(true);
+      return fits ? [] : [{ selector: item.className, text: item.textContent, width: item.clientWidth, scrollWidth: item.scrollWidth, left: rect.left, right: rect.right }];
+    }).concat(bounds.left >= 0 && bounds.right <= innerWidth ? [] : [{ selector: "panel", text: null, width: element.clientWidth, scrollWidth: element.scrollWidth, left: bounds.left, right: bounds.right }]);
+  })).toEqual([]);
   expect(await panel.locator(".pool-runtime-strip, .pool-summary").evaluateAll((rows) => rows.every((row) => {
     const children = Array.from(row.children).map((child) => child.getBoundingClientRect());
     return children.every((a, index) => children.slice(index + 1).every((b) =>
@@ -36,7 +37,7 @@ for (const theme of ["light", "dark"] as const) {
       await expect(panel.locator("[data-active-models]")).toHaveAttribute("data-active-request-count", "1");
       await expect(panel.locator(".pool-summary > div")).toHaveCount(5);
       await expect(panel.locator('[data-tone="error"] strong')).toHaveText("1");
-      await expect(panel.getByRole("checkbox")).toHaveCount(0);
+      await expect(panel.getByRole("checkbox", { name: "Выбрать всех участников пула", exact: true })).toHaveCount(1);
       await expect(panel).not.toContainText("Excel");
       await expectPanelFits(page);
       if (width === 1160) {

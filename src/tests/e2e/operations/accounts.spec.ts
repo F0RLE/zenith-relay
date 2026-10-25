@@ -906,5 +906,33 @@ test("pool summary shows routing states and current errors", async ({ page }) =>
   const summary = page.locator(".pool-summary");
   await expect(summary.locator("div")).toHaveCount(4);
   await expect(summary.locator("strong")).toHaveText(["3", "1", "1", "0"]);
-  await expect(summary.locator("span")).toHaveText(["In rotation", "Waiting", "With errors", "Disabled"]);
+  await expect(summary.locator("span")).toHaveCount(0);
+  expect(await summary.locator("div").evaluateAll((cells) => cells.map((cell) => cell.getAttribute("aria-label"))))
+    .toEqual(["In rotation", "Waiting", "With errors", "Disabled"]);
+  await summary.locator("div").first().focus();
+  await page.keyboard.press("Shift+Tab");
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("tooltip")).toHaveText("In rotation");
+  for (let index = 0; index < 4; index += 1) await page.keyboard.press("Tab");
+  await expect(page.locator('.pool-economics [data-metric="api-used"]')).toBeFocused();
+  await expect(page.getByRole("tooltip")).toContainText("API equiv. used");
+});
+
+test("pool economics follows membership and leaves Overview unchanged", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, quotaAvailable: true });
+  await page.goto("/");
+  await expect(page.locator(".overview-metrics > div")).toHaveCount(4);
+  await expect(page.locator(".pool-economics")).toHaveCount(0);
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  const economics = page.locator(".pool-economics");
+  await expect(economics.locator("strong")).toHaveText(["≈$14.11", "≈$8.89", "78%"]);
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  const account = page.locator(".account-card").first();
+  await account.getByRole("button", { name: "Remove from pool", exact: true }).click();
+  await expect(account.getByRole("button", { name: "Add to pool for images", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await expect(page.locator(".pool-member-card")).toHaveCount(1);
+  await expect(economics.locator("strong")).toHaveText(["≈$0.01", "—", "—"]);
+  await page.getByRole("button", { name: "Overview", exact: true }).click();
+  await expect(page.locator(".overview-metrics > div")).toHaveCount(4);
 });

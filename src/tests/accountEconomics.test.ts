@@ -36,22 +36,23 @@ describe("account value projection", () => {
     expect(buildAccountValueProjection(usage, undefined, undefined, 0)).toMatchObject({ purchaseCostMicroUsd: 0, remainingApiEquivalent: null, payback: null });
   });
 
+  const now = Date.now();
   const quota = {
     primary: null,
     secondary: {
       kind: "secondary" as const,
       availableBasisPoints: 5_800,
       explicitlyFull: false,
-      resetAtMs: 20_000,
-      windowStartMs: 1_000,
+      resetAtMs: now + 6 * 86_400_000,
+      windowStartMs: now - 86_400_000,
       windowMinutes: 10_080,
-      observedAtMs: 10_000,
+      observedAtMs: now,
     },
   };
   const evidence = {
     kind: "secondary" as const,
-    windowStartMs: 1_000,
-    observedAtMs: 10_000,
+    windowStartMs: quota.secondary.windowStartMs,
+    observedAtMs: now,
     windowMinutes: 10_080,
     apiEquivalent: { microUsd: 5_210_000, pricedTokens: 90, unpricedTokens: 10 },
   };
@@ -90,6 +91,14 @@ describe("account value projection", () => {
   test("withholds evidence from a different observation or quota cycle", () => {
     expect(estimateRemainingApiEquivalent(quota, { ...evidence, observedAtMs: 9_999 })).toBeNull();
     expect(estimateRemainingApiEquivalent(quota, { ...evidence, windowStartMs: 999 })).toBeNull();
+  });
+
+  test("expires forecasts at reset or after 72 hours and rejects future evidence", () => {
+    expect(estimateRemainingApiEquivalent(quota, evidence, now + 3 * 86_400_000)).toBeNull();
+    expect(estimateRemainingApiEquivalent(quota, evidence, now - 1)).toBeNull();
+    expect(estimateRemainingApiEquivalent({ ...quota, secondary: { ...quota.secondary, resetAtMs: now } }, evidence, now)).toBeNull();
+    expect(estimateRemainingApiEquivalent({ ...quota, secondary: { ...quota.secondary, resetAtMs: null } }, evidence, now)).toBeNull();
+    expect(estimateRemainingApiEquivalent(quota, evidence, now + 2 * 86_400_000)).not.toBeNull();
   });
 
   test("uses a provider-reported direct balance without extrapolation", () => {

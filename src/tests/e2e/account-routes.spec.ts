@@ -173,7 +173,7 @@ test("switching grouped routes keeps the same-plan subscription date and each ro
   }
 });
 
-for (const scenario of ["stale", "unknown-time", "different-plan", "own-limit"] as const) {
+for (const scenario of ["stale", "unknown-time", "different-plan", "own-limit", "quota-poll-error", "route-model-error"] as const) {
   test(`linked SIWC reference preserves ${scenario} without promoting donor evidence`, async ({ page }) => {
     await installTauriMock(page, { populated: true, usageActive: false, accountRouteKinds: ["codex", "siwc"], accountRoutesGrouped: true });
     await openAccounts(page);
@@ -200,6 +200,12 @@ for (const scenario of ["stale", "unknown-time", "different-plan", "own-limit"] 
             siwc.subscription.planType = "free";
           }
           if (scenario === "own-limit") siwc.quota.limitReached = true;
+          if (scenario === "quota-poll-error" || scenario === "route-model-error") {
+            siwc.quota.error = { code: "quota_prepare", occurredAtMs: Date.now() };
+            siwc.quotaRefreshStatus = "failed";
+            siwc.health = "degraded";
+            siwc.lastErrorCode = scenario === "route-model-error" ? "models_transport" : "quota_prepare";
+          }
         }
         return result;
       };
@@ -221,6 +227,16 @@ for (const scenario of ["stale", "unknown-time", "different-plan", "own-limit"] 
         await expect(item.locator(".account-plan-badge")).toHaveText("Free");
         await expect(item.locator('.account-plan-badge [data-stale]')).toHaveCount(0);
         await expect(item.locator('.account-plan-badge[data-relay-tooltip]')).toHaveCount(0);
+      } else if (scenario === "quota-poll-error" || scenario === "route-model-error") {
+        await expect(item.locator(".quota-stack")).toHaveCount(1);
+        await expect(item.locator('.quota-stack[data-stale="true"]')).toHaveCount(0);
+        await expect(item.locator(".account-quota-refresh-state")).toHaveCount(0);
+        await expect(item.locator('[data-status="error"]')).toHaveCount(0);
+        await expect(item.locator('[data-status="warning"]')).toHaveCount(scenario === "route-model-error" ? 1 : 0);
+        if (scenario === "quota-poll-error") {
+          await page.mouse.move(0, 0);
+          await item.screenshot({ path: `output/playwright/siwc-quota-owner-${surface.toLowerCase()}.png`, animations: "disabled" });
+        }
       } else {
         await expect(item.locator(".quota-stack")).toHaveCount(0);
         await expect(item.locator(".account-quota-refresh-state")).toBeVisible();

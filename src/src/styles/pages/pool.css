@@ -12,6 +12,62 @@
   margin-right: auto;
 }
 
+.pool-summary-band {
+  display: grid;
+  grid-template-columns: minmax(180px, 4fr) minmax(300px, 5fr);
+  gap: 1px;
+  margin: -14px -16px 8px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--relay-border);
+  border-radius: 9px 9px 0 0;
+  background: var(--relay-border);
+}
+
+.pool-summary-band:has([data-has-provider-credits="true"]) {
+  grid-template-columns: minmax(240px, 4fr) minmax(300px, 5fr);
+}
+
+.pool-controls .pool-summary-band > .relay-status-summary {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+}
+
+.pool-summary-band > .pool-summary.relay-status-summary {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.pool-summary-band > .pool-summary.relay-status-summary[data-has-provider-credits="true"] {
+  grid-template-columns: repeat(4, minmax(0, 1fr)) minmax(max-content, 1fr);
+}
+
+.pool-summary-band > .pool-economics.relay-status-summary {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.pool-summary-band .relay-status-summary > [data-summary="provider-credits"] {
+  grid-column: auto;
+}
+
+.pool-summary-band [tabindex="0"]:focus-visible {
+  outline: 2px solid var(--relay-accent-hover);
+  outline-offset: -2px;
+}
+
+@container relay-page (max-width: 560px) {
+  .pool-summary-band {
+    margin: -12px -12px 8px;
+  }
+}
+
+.pool-economics > div > svg {
+  color: var(--relay-info);
+}
+
+.pool-economics > [data-paid="true"] > strong {
+  color: var(--relay-accent-hover);
+}
+
 .pool-member-toolbar {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -23,6 +79,39 @@
   min-width: 0;
   display: grid;
   gap: 5px;
+}
+
+.pool-selection-context {
+  min-width: 0;
+  min-height: 41px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.pool-selection-context > input {
+  flex-shrink: 0;
+  margin: 0;
+}
+
+.pool-selected-count {
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.pool-selected-count-short {
+  display: none;
+}
+
+.pool-member-toolbar[data-selection="true"] {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.pool-member-toolbar .pool-selection-actions {
+  width: auto;
+  flex-wrap: nowrap;
+  gap: 4px;
 }
 
 .pool-priority-label {
@@ -337,6 +426,19 @@
 }
 
 @container (max-width: 380px) {
+  .pool-selected-count-full {
+    display: none;
+  }
+
+  .pool-selected-count-short {
+    display: inline;
+  }
+
+  .pool-selection-actions .relay-icon-button {
+    width: 32px;
+    min-width: 32px;
+  }
+
   .pool-control-group[data-toolbar-group="routing"] {
     flex: 1 1 100%;
     flex-wrap: nowrap;
@@ -450,7 +552,7 @@
   min-width: 0;
   min-height: 54px;
   display: grid;
-  grid-template-columns: 46px minmax(0, 1fr);
+  grid-template-columns: 46px minmax(0, 1fr) auto;
   align-items: stretch;
   gap: 0;
   padding: 0;

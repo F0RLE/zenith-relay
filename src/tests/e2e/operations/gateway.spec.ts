@@ -287,7 +287,7 @@ test("pool summary shows the total provider credits across pooled accounts", asy
   const summary = page.locator(".pool-summary");
   const credits = summary.locator('[data-summary="provider-credits"]');
   await expect(summary).toHaveAttribute("data-has-provider-credits", "true");
-  await expect(credits).toContainText("Total credits");
+  await expect(credits).toHaveAttribute("aria-label", "Total credits");
   await expect(credits.locator("strong")).toHaveText("5");
 });
 

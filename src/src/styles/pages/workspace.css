@@ -101,8 +101,9 @@
 }
 
 .workspace-controls .relay-status-summary {
-  margin-bottom: 12px;
-  padding-bottom: 12px;
+  margin: -14px -16px 8px;
+  border-width: 0 0 1px;
+  border-radius: 9px 9px 0 0;
 }
 
 .workspace-controls .relay-status-summary strong {
@@ -204,5 +205,9 @@
 
   .workspace-controls {
     padding: 12px;
+  }
+
+  .workspace-controls .relay-status-summary {
+    margin: -12px -12px 8px;
   }
 }

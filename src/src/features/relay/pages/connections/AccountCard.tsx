@@ -112,7 +112,7 @@ export function AccountCard({
   const canLaunch = canLaunchCodexAccount(account) && !recoveryRequired;
   const surfaceTone = accountSurfaceTone(account, recoveryRequired, runtimeState);
   const indicatorTone = surfaceTone === "ready" ? runtimeTone ?? surfaceTone : surfaceTone;
-  const statusIndicatorLabel = quotaStatus === "updated" || (operationalStatus === "quotaWait" && quotaStatus === "not_available") ? operationalLabel : `${t(`accounts.quotaRefreshStatus.${quotaStatus}`)} · ${operationalLabel}`;
+  const statusIndicatorLabel = quotaStatus === "updated" || quotaStatus === "not_available" ? operationalLabel : `${t(`accounts.quotaRefreshStatus.${quotaStatus}`)} · ${operationalLabel}`;
   const indicatorLabel = `${clientAuthWarning ? `${t("accounts.clientAuthWarning")} · ` : ""}${runtimeHint ? `${statusIndicatorLabel} · ${runtimeHint}` : statusIndicatorLabel}`;
 
   const updateParticipation = async (participate: boolean) => {

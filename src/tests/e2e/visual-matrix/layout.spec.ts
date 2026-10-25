@@ -2,6 +2,61 @@ import { expect, test } from "../../bun-playwright";
 import { installTauriMock } from "../tauri-mock";
 import { themes, viewports } from "./fixtures";
 
+for (const locale of ["ru", "en"] as const) for (const theme of themes) for (const viewport of viewports) {
+  test(`segmented summaries ${locale} ${theme} ${viewport.width}`, async ({ page }) => {
+    await installTauriMock(page, { locale, mode: "local", theme, populated: true, accountCount: 3, quotaAvailable: true, providerCredits: 2.5 });
+    await page.setViewportSize(viewport);
+    await page.goto("/");
+    const assertBand = async (selector: string, count: number) => {
+      const band = page.locator(selector);
+      await expect(band.locator(":scope > div")).toHaveCount(count);
+      const layout = await band.evaluate((element) => {
+        const bounds = element.getBoundingClientRect();
+        return { display: getComputedStyle(element).display, gap: getComputedStyle(element).gap,
+          cells: Array.from(element.children).map((child) => {
+            const cell = child.getBoundingClientRect();
+            return { text: child.textContent, height: cell.height,
+              fits: cell.left >= bounds.left - 1 && cell.right <= bounds.right + 1
+                && child.scrollWidth <= child.clientWidth && child.scrollHeight <= child.clientHeight
+                && Array.from(child.querySelectorAll("span, strong")).every((text) => text.scrollWidth <= text.clientWidth) };
+          }) };
+      });
+      expect(layout.display).toBe("grid");
+      expect(layout.gap).toBe("1px");
+      for (const cell of layout.cells) {
+        expect(cell.height, `${selector}: ${JSON.stringify(cell)}`).toBeLessThanOrEqual(40);
+        expect(cell.fits, `${selector}: ${JSON.stringify(cell)}`).toBe(true);
+      }
+    };
+    const overviewCells = page.locator(".overview-metrics > div");
+    await expect(overviewCells).toHaveCount(4);
+    await expect(overviewCells.locator("span")).toHaveText(locale === "ru"
+      ? ["Запросы", "Подключения", "Модели", "Ошибки"]
+      : ["Requests", "Connections", "Models", "Errors"]);
+    expect(await overviewCells.evaluateAll((cells) => cells.every((cell) => cell.getBoundingClientRect().height === 58))).toBe(true);
+    await page.screenshot({ path: `output/playwright/summary-overview-${locale}-${theme}-${viewport.width}.png` });
+    await page.getByRole("button", { name: locale === "ru" ? "Пул" : "Pool", exact: true }).click();
+    await page.screenshot({ path: `output/playwright/summary-pool-${locale}-${theme}-${viewport.width}.png` });
+    await assertBand(".pool-summary", 5);
+    await assertBand(".pool-economics", 3);
+    const poolCells = page.locator(".pool-summary-band .relay-status-summary > div");
+    await expect(poolCells.locator("span")).toHaveCount(0);
+    expect(await poolCells.evaluateAll((cells) => {
+      const top = cells[0].getBoundingClientRect().top;
+      return cells.every((cell) => Math.abs(cell.getBoundingClientRect().top - top) <= 1);
+    })).toBe(true);
+    await page.getByRole("button", { name: locale === "ru" ? "Подключения" : "Connections", exact: true }).click();
+    await assertBand(".connections-account-summary", 5);
+    await page.screenshot({ path: `output/playwright/summary-accounts-${locale}-${theme}-${viewport.width}.png` });
+    await page.getByRole("tab", { name: locale === "ru" ? "Источники API" : "Sources", exact: true }).click();
+    await assertBand(".sources-controls .relay-status-summary", 4);
+    await page.screenshot({ path: `output/playwright/summary-sources-${locale}-${theme}-${viewport.width}.png` });
+    await page.getByRole("tab", { name: locale === "ru" ? "Прокси" : "Proxies", exact: true }).click();
+    await assertBand(".proxy-storage-counts", 3);
+    await page.screenshot({ path: `output/playwright/summary-proxies-${locale}-${theme}-${viewport.width}.png` });
+  });
+}
+
 for (const viewport of viewports) {
   test(`empty pool and quota policy ${viewport.width}x${viewport.height}`, async ({ page }) => {
     await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, accountCount: 4, accountOAuthClientKind: "excel_bps", poolMembers: false, gatewayRunning: false });
@@ -75,8 +130,8 @@ for (const viewport of viewports) {
     await page.screenshot({ path: `output/playwright/pool-priority-ru-dark-${viewport.width}x${viewport.height}.png` });
     expect(await page.locator(".pool-summary > div").evaluateAll((cells) => cells.every((cell) => {
       const value = cell.querySelector("strong")!.getBoundingClientRect();
-      const label = cell.querySelector("span")!.getBoundingClientRect();
-      return value.right <= label.left && cell.scrollWidth <= cell.clientWidth;
+      const bounds = cell.getBoundingClientRect();
+      return Boolean(cell.getAttribute("aria-label")) && value.left >= bounds.left && value.right <= bounds.right && cell.scrollWidth <= cell.clientWidth;
     }))).toBe(true);
     await page.screenshot({ path: `output/playwright/pool-members-ru-dark-${viewport.width}x${viewport.height}.png` });
 
