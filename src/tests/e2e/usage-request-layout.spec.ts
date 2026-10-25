@@ -21,6 +21,11 @@ for (const scenario of [
     await page.getByRole("button", { name: scenario.locale === "ru" ? "Использование" : "Usage", exact: true }).click();
     const table = page.locator(".usage-request-table");
     const row = table.locator("tbody tr").first();
+    const speed = row.locator('[data-column="speed"]');
+    await expect(speed).toBeVisible();
+    await expect(speed).toHaveText(scenario.locale === "ru" ? "6,7 ток/с" : "6.7 tok/s");
+    await expect(table.locator('thead th[data-column="timing"] + th')).toHaveAttribute("data-column", "speed");
+    await expect(table.locator('thead th[data-column="speed"] + th')).toHaveAttribute("data-column", "tokens");
     const connection = row.locator(".usage-request-connection");
     await expect(connection).toHaveText(accountLabel);
     await expect(row.locator('[data-column="connection"]')).toHaveAttribute("data-relay-tooltip", accountLabel);
@@ -50,7 +55,7 @@ for (const scenario of [
       for (const column of ["model", "connection"]) {
         expect(await table.locator(`th[data-column="${column}"]`).evaluate((element) => element.getBoundingClientRect().width)).toBeGreaterThan(statusWidth * 2);
       }
-      for (const column of ["tokens", "request"]) {
+      for (const column of ["speed", "tokens", "request"]) {
         const heading = table.locator(`th[data-column="${column}"] .usage-column-heading > span`);
         const bounds = await heading.evaluate((element) => ({
           width: element.getBoundingClientRect().width,
@@ -66,5 +71,21 @@ for (const scenario of [
     await (scenario.width < 840 ? row : table).screenshot({ path: `output/playwright/usage-requests-centered-${scenario.locale}-${scenario.width}.png` });
     await row.getByRole("button", { name: /req|relay-synthetic/ }).click();
     await expect(page.getByRole("dialog")).toBeVisible();
+  });
+}
+
+for (const scenario of [
+  { name: "failed request", generationMs: 300, failure: true },
+  { name: "missing generation time", generationMs: null, failure: false },
+  { name: "buffered response", generationMs: 1, failure: false },
+] as const) {
+  test(`request speed stays unknown for ${scenario.name}`, async ({ page }) => {
+    await installTauriMock(page, {
+      locale: "en", mode: "local", populated: true, usageFailure: scenario.failure,
+      usageTiming: { latencyMs: 428, ttftMs: 128, generationMs: scenario.generationMs },
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Usage", exact: true }).click();
+    await expect(page.locator('.usage-request-table tbody [data-column="speed"]')).toHaveText("-");
   });
 }

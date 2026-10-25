@@ -21,6 +21,7 @@ for (const scenario of [
     });
     const ru = scenario.locale === "ru";
     await page.getByRole("button", { name: ru ? "Использование" : "Usage", exact: true }).click();
+    await expect(page.locator('.usage-request-table tbody [data-column="speed"]')).toHaveText("-");
     await page.getByRole("button", { name: `${ru ? "Сведения о запросе" : "Request details"}: req_synthetic_local`, exact: true }).click();
     const dialog = page.getByRole("dialog");
     await expect(dialog.getByText(ru ? "Готовых изображений" : "Images completed", { exact: true })).toBeVisible();

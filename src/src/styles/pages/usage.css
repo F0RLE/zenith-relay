@@ -533,11 +533,12 @@
 }
 
 /* Flexible columns share the remainder without expanding fixed icon/ID columns. */
-.usage-request-table col[data-column="time"] { width: 20%; }
+.usage-request-table col[data-column="time"] { width: 18%; }
 .usage-request-table col[data-column="status"] { width: 64px; }
-.usage-request-table col[data-column="model"] { width: 25%; }
-.usage-request-table col[data-column="connection"] { width: 24%; }
-.usage-request-table col[data-column="timing"] { width: 19%; }
+.usage-request-table col[data-column="model"] { width: 26%; }
+.usage-request-table col[data-column="connection"] { width: 26%; }
+.usage-request-table col[data-column="timing"] { width: 18%; }
+.usage-request-table col[data-column="speed"] { width: 92px; }
 .usage-request-table col[data-column="tokens"] { width: 76px; }
 .usage-request-table col[data-column="equivalent"] { width: 12%; }
 .usage-request-table col[data-column="request"] { width: 110px; }
@@ -1244,33 +1245,39 @@
 }
 
 .request-technical-details > .request-disclosure-body {
-  padding: 0 20px;
+  padding: 16px;
 }
 
 .request-technical-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 0;
-  align-items: start;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  align-items: stretch;
 }
 
 .request-technical-grid > .request-detail-section {
   min-width: 0;
-  padding: 20px 0;
+  padding: 16px;
+  border: 1px solid var(--relay-border);
+  border-radius: 12px;
+  background: var(--relay-subtle);
+}
+
+.request-technical-grid > :is(.request-technical-wide, .request-response-section, .request-timings-section, .request-identifiers-section) {
+  grid-column: 1 / -1;
+}
+
+.request-technical-grid .request-section-heading,
+.request-context-details > .request-section-heading {
+  margin-bottom: 10px;
+  padding-bottom: 10px;
   border-bottom: 1px solid var(--relay-border);
 }
 
-.request-technical-grid > .request-detail-section:last-child {
-  border-bottom: 0;
-}
-
-.request-technical-grid .request-section-heading {
-  margin-bottom: 14px;
-}
-
-.request-technical-grid .request-section-heading > h3 {
+.request-technical-grid .request-section-heading > h3,
+.request-context-details > .request-section-heading > h3 {
   color: var(--relay-text);
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .request-technical-grid .request-details-list > div {
@@ -1278,8 +1285,8 @@
 }
 
 .request-technical-grid .request-details-list dt {
-  color: var(--relay-secondary);
-  font-size: 12px;
+  color: var(--relay-muted);
+  font-size: 11px;
 }
 
 .request-details-list {
@@ -1347,27 +1354,25 @@
 }
 
 .request-technical-fields {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  column-gap: 24px;
+  display: block;
 }
 
 .request-technical-fields > div {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
   align-items: baseline;
-  padding-block: 4px;
+  gap: 12px;
+  padding-block: 3px;
   border: 0;
 }
 
 .request-technical-fields dd {
-  padding-block: 3px;
+  padding-block: 2px;
   text-align: right;
+  font-weight: 500;
 }
 
 .request-technical-fields > .request-route-reason {
-  grid-column: 1 / -1;
-  margin-bottom: 8px;
-  border-bottom: 1px solid var(--relay-border);
+  margin-bottom: 6px;
 }
 
 .request-route-reason dd {
@@ -1376,32 +1381,43 @@
 
 .request-context-columns {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 24px;
-  align-items: start;
-}
-
-.request-context-columns > dl:only-child {
-  grid-column: 1 / -1;
+  gap: 10px;
 }
 
 .request-context-columns .request-details-list > div {
   grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+  border: 0;
+  min-height: 30px;
+}
+
+.request-context-columns > dl + dl {
+  border-top: 1px solid var(--relay-border);
+  padding-top: 10px;
 }
 
 .request-context-columns dd {
+  padding-block: 4px;
   text-align: right;
+  font-weight: 500;
+}
+
+.request-preparation-details {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 3fr);
+  align-items: center;
+  gap: 20px;
 }
 
 .request-preparation-total > div {
   display: flex;
-  justify-content: space-between;
-  gap: 12px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
   border: 0;
 }
 
 .request-preparation-total dt {
-  font-weight: 600;
+  font-weight: 400;
 }
 
 .request-preparation-total dd {
@@ -1412,20 +1428,24 @@
 }
 
 .request-preparation-details > .request-technical-fields {
-  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 20px;
+  padding-inline-start: 20px;
+  border-inline-start: 1px solid var(--relay-border);
 }
 
 .request-preparation-details + .request-response-timings {
-  margin-top: 16px;
-  padding-top: 16px;
+  margin-top: 14px;
+  padding-top: 14px;
   border-top: 1px solid var(--relay-border);
 }
 
 .request-response-timings > h4 {
   margin: 0 0 10px;
   color: var(--relay-secondary);
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 400;
 }
 
 .request-details-list > .request-route-reason {
@@ -1439,6 +1459,49 @@
 
 .request-route-reason > dd {
   font-weight: 500;
+}
+
+.request-route-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--relay-border);
+}
+
+.request-route-stats > div {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 6px;
+  border: 0;
+}
+
+.request-route-stats dd {
+  padding: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.request-response-section .request-technical-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 28px;
+}
+
+.request-identifiers-section .request-id-list > div {
+  min-height: 36px;
+  padding-block: 4px;
+}
+
+.request-identifiers-section .request-id-list dd {
+  text-align: right;
+}
+
+.request-identifiers-section .request-details-copy-value {
+  align-items: center;
 }
 
 .request-details-content > .request-token-details {
@@ -1578,46 +1641,69 @@
 
 .request-tools-list,
 .request-timing-metrics {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 20px;
 }
 
 .request-tools-list > div,
 .request-timing-metrics > div {
-  flex: 1 1 200px;
   min-width: 0;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 10px;
-  padding: 12px;
+  gap: 4px;
+  padding: 4px 0;
   border: 0;
-  border-radius: 7px;
-  background: var(--relay-subtle);
 }
 
 .request-tools-list dt,
 .request-timing-metrics dt {
-  flex: 1;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .request-tools-list dd,
 .request-timing-metrics dd {
   padding-block: 0;
   font-size: 16px;
-  font-weight: 500;
+  font-weight: 600;
+}
+
+.request-timing-metrics {
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 14px 0;
 }
 
 .request-timing-metrics > div {
-  flex-basis: 140px;
+  padding-inline: 16px;
+  border-inline-start: 1px solid var(--relay-border);
+}
+
+.request-timing-metrics > div:first-child {
+  padding-inline-start: 0;
+  border-inline-start: 0;
 }
 
 .request-timing-metrics dd {
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 600;
   letter-spacing: -0.02em;
+}
+
+.request-tools-list > div:last-child {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: baseline;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--relay-border);
+}
+
+.request-tools-list > div:last-child dd {
+  text-align: right;
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .request-details-cost-value {
@@ -1721,11 +1807,24 @@
 }
 
 .request-context-details {
-  margin-top: 0;
+  margin-top: 12px;
+  padding: 16px;
+  border: 1px solid var(--relay-border);
+  border-radius: 12px;
+  background: var(--relay-subtle);
 }
 
-.request-context-details > summary {
-  padding-inline: 2px;
+.request-cache-context > .request-details-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 24px;
+}
+
+.request-cache-context > .request-details-list > div {
+  align-items: baseline;
+  padding-block: 4px;
+  font-size: 11px;
+  border: 0;
 }
 
 @media (max-width: 820px) {
@@ -1769,14 +1868,22 @@
   .request-details-parameters > div { padding-inline: 12px; }
   .request-technical-details { margin-top: 18px; }
   .request-technical-details > summary { min-height: 50px; padding: 8px 12px; }
-  .request-technical-details > .request-disclosure-body { padding: 0 14px; }
-  .request-technical-fields,
-  .request-context-columns { grid-template-columns: minmax(0, 1fr); gap: 0; }
-  .request-context-columns > dl + dl { margin-top: 16px; }
-  .request-technical-grid > .request-detail-section { padding: 16px 0; }
+  .request-technical-details > .request-disclosure-body { padding: 14px; }
+  .request-technical-grid { grid-template-columns: minmax(0, 1fr); }
+  .request-technical-grid > .request-detail-section,
+  .request-context-details { padding: 14px; }
+  .request-response-section .request-technical-fields,
+  .request-cache-context > .request-details-list { grid-template-columns: minmax(0, 1fr); }
+  .request-preparation-details { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .request-preparation-total > div { flex-direction: row; justify-content: space-between; align-items: baseline; }
+  .request-preparation-details > .request-technical-fields { padding-inline-start: 0; border-inline-start: 0; column-gap: 14px; }
+  .request-timing-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .request-timing-metrics > div { padding-inline: 0; border-inline-start: 0; }
+  .request-timing-metrics > div:last-child:nth-child(odd) { grid-column: 1 / -1; }
+  .request-timing-metrics dd { font-size: 16px; }
+  .request-route-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .request-id-list > div { grid-template-columns: minmax(0, 1fr); gap: 4px; }
-  .request-tools-list > div,
-  .request-timing-metrics > div { flex-basis: 120px; }
+  .request-identifiers-section .request-id-list dd { text-align: left; }
   .request-details-error { padding: 12px; margin-bottom: 18px; }
   .request-outcome-heading { grid-template-columns: 28px minmax(0, 1fr); gap: 8px; }
   .request-outcome-heading > code { grid-column: 2; font-size: 10px; }
@@ -1892,9 +1999,10 @@
   .usage-request-table td[data-column="model"] { order: 2; }
   .usage-request-table td[data-column="connection"] { order: 3; display: grid; grid-column: 1 / -1; }
   .usage-request-table td[data-column="timing"] { order: 5; }
-  .usage-request-table td[data-column="tokens"] { order: 6; display: grid; }
-  .usage-request-table td[data-column="equivalent"] { order: 7; }
-  .usage-request-table td[data-column="request"] { order: 8; }
+  .usage-request-table td[data-column="speed"] { order: 6; }
+  .usage-request-table td[data-column="tokens"] { order: 7; display: grid; }
+  .usage-request-table td[data-column="equivalent"] { order: 8; }
+  .usage-request-table td[data-column="request"] { order: 9; }
 
   .usage-sortable-table .usage-model-value { align-items: flex-start; }
   .usage-sortable-table .request-link { margin: 0; justify-content: flex-start; white-space: normal; }

@@ -28,14 +28,15 @@ for (const continuation of [false, true]) {
     const dialog = page.getByRole("dialog");
     await dialog.locator(".request-technical-details > summary").click();
     const route = dialog.locator(".request-route-section");
-    await expect(route.getByText(continuation ? "Response ID continuation" : "Full request", { exact: true })).toBeVisible();
-    await expect(route.getByText("Why a full request", { exact: true })).toHaveCount(continuation ? 0 : 1);
-    await expect(route.getByText(continuation ? "Reused" : "Zstd", { exact: true })).toBeVisible();
-    if (!continuation) await expect(route.getByText("0 ms", { exact: true })).toBeVisible();
-    await expect(route.getByText("HTTP send → headers", { exact: true })).toHaveCount(continuation ? 0 : 1);
-    if (!continuation) await expect(route.getByText("12 ms", { exact: true })).toBeVisible();
-    expect(await route.locator("dd").evaluateAll((fields) => fields.every((field) => field.scrollWidth <= field.clientWidth + 1))).toBe(true);
-    await route.scrollIntoViewIfNeeded();
+    const payload = dialog.locator(".request-payload-section");
+    await expect(payload.getByText(continuation ? "Response ID continuation" : "Full request", { exact: true })).toBeVisible();
+    await expect(payload.getByText("Why a full request", { exact: true })).toHaveCount(continuation ? 0 : 1);
+    await expect((continuation ? route : payload).getByText(continuation ? "Reused" : "Zstd", { exact: true })).toBeVisible();
+    if (!continuation) await expect(payload.getByText("0 ms", { exact: true })).toBeVisible();
+    await expect(payload.getByText("HTTP send → headers", { exact: true })).toHaveCount(continuation ? 0 : 1);
+    if (!continuation) await expect(payload.getByText("12 ms", { exact: true })).toBeVisible();
+    expect(await dialog.locator(".request-route-section dd, .request-payload-section dd").evaluateAll((fields) => fields.every((field) => field.scrollWidth <= field.clientWidth + 1))).toBe(true);
+    await payload.scrollIntoViewIfNeeded();
     await page.screenshot({ path: `output/playwright/technical-payload-${continuation ? "continuation" : "compressed"}.png` });
     await page.keyboard.press("Escape");
   });
@@ -118,9 +119,19 @@ for (const locale of ["ru", "en"] as const) {
         await expect(technical.locator(".request-technical-grid > section:last-child")).toHaveClass(/request-identifiers-section/);
         expect(await technical.locator("section, dl, dd").evaluateAll((elements) =>
           elements.every((element) => element.scrollWidth <= element.clientWidth + 1))).toBe(true);
-        const cards = await technical.locator(".request-technical-grid > section").evaluateAll((elements) =>
-          elements.map((element) => ({ left: element.getBoundingClientRect().left, width: element.getBoundingClientRect().width })));
-        expect(cards.every((card) => Math.abs(card.left - cards[0].left) < 1 && Math.abs(card.width - cards[0].width) < 1)).toBe(true);
+        const route = await technical.locator(".request-route-section").boundingBox();
+        const payload = await technical.locator(".request-payload-section").boundingBox();
+        const identifiers = await technical.locator(".request-identifiers-section").boundingBox();
+        expect(identifiers!.width).toBeCloseTo((await timings.boundingBox())!.width, 0);
+        if (width < 620) {
+          expect(payload!.x).toBeCloseTo(route!.x, 0);
+          expect(payload!.width).toBeCloseTo(route!.width, 0);
+          expect(payload!.y).toBeGreaterThan(route!.y + route!.height);
+        } else {
+          expect(payload!.y).toBeCloseTo(route!.y, 0);
+          expect(payload!.x).toBeGreaterThan(route!.x + route!.width);
+          expect(identifiers!.width).toBeGreaterThan(route!.width * 2);
+        }
 
         await timings.scrollIntoViewIfNeeded();
         await page.screenshot({ path: `output/playwright/technical-details-${locale}-${theme}-${width}.png` });

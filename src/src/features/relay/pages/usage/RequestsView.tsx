@@ -5,10 +5,11 @@ import { useTranslation } from "react-i18next";
 import { EmptyState, StatusIcon } from "../../components/Ui";
 import { loadRequestTableLayout, reorderColumns, REQUEST_COLUMN_IDS, REQUEST_COLUMN_MAX_WIDTH, REQUEST_COLUMN_MIN_WIDTH, REQUEST_TABLE_LAYOUT_KEY, shiftColumn, useColumnDrag } from "./useColumnLayout";
 import type { RequestColumnId, RequestTableLayout } from "./useColumnLayout";
-import type { UsageRow } from "./usageData";
+import { tokenSpeed } from "../../usageSpeed";
+import { usageSpeedSample, type UsageRow } from "./usageData";
 import { formatUsageApiEquivalent } from "./usageFormatting";
 import { formatErrorCategory, formatRequestOrigin, formatTiming, requestStatusKind, requestStatusLabel } from "./usageReportFormat";
-import { UsageModel, CompactNumber } from "./usageReportParts";
+import { UsageModel, CompactNumber, SpeedValue } from "./usageReportParts";
 import { UsageTableRow, type UsageColumns } from "./UsageTableRow";
 
 type RequestsViewProps = {
@@ -57,6 +58,7 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
     model: { label: t("common.model"), cell: (row) => <UsageModel row={row} /> },
     connection: { label: t("usage.poolMember"), cell: (row) => <span className="usage-request-connection">{row.connection}</span> },
     timing: { label: t("usage.timing"), cell: (row) => <span data-relay-tooltip={t("usage.elapsedTiming")}>{formatTiming(row.ttft, row.duration, i18n.resolvedLanguage ?? i18n.language, t)}</span> },
+    speed: { label: t("usage.generationSpeedShort"), cell: (row) => <SpeedValue value={row.imageUsage ? null : tokenSpeed(usageSpeedSample(row))} locale={i18n.resolvedLanguage ?? i18n.language} unit={t("usage.tokensPerSecondUnit")} /> },
     tokens: { label: t("usage.tokens"), cell: (row) => row.tokens == null ? "-" : <CompactNumber value={row.tokens} locale={i18n.language} /> },
     equivalent: { label: t("usage.value"), cell: (row) => row.apiEquivalent ? formatUsageApiEquivalent(row.apiEquivalent, i18n.language) : "—" },
     request: {

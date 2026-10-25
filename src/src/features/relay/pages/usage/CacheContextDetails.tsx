@@ -11,7 +11,7 @@ export function CacheContextDetails({ diagnostics }: { diagnostics: CacheContext
   const sections = (changes: CacheContextSection[]) => changes.length
     ? changes.map((section) => t(`usage.cacheContext.sections.${section}`)).join(", ")
     : t("usage.cacheContext.noChanges");
-  return <section className="request-cache-context" aria-label={t("usage.cacheContext.title")}>
+  return <div className="request-cache-context">
     <dl className="request-details-list">
       {diagnostics.provider ? <div>
         <dt>{t("usage.cacheContext.provider")}</dt>
@@ -40,7 +40,7 @@ export function CacheContextDetails({ diagnostics }: { diagnostics: CacheContext
       <div><dt>{t("usage.cacheContext.upstreamHistory")}</dt><dd><History diagnostics={diagnostics.upstreamHistory} /></dd></div>
       <div><dt>{t("usage.cacheContext.relayHistory")}</dt><dd><History diagnostics={diagnostics.relayHistory} /></dd></div>
     </dl>
-  </section>;
+  </div>;
 }
 
 function History({ diagnostics }: { diagnostics: CacheHistoryDiagnostics }) {

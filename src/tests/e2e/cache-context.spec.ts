@@ -37,18 +37,14 @@ for (const locale of ["ru", "en"] as const) {
       await page.locator(".usage-request-table tbody tr button").first().click();
       const dialog = page.getByRole("dialog");
       const close = dialog.getByRole("button", { name: locale === "ru" ? "Закрыть" : "Close", exact: true });
-      const contextSummary = dialog.locator(".request-context-details > summary");
-      await expect(contextSummary).toHaveCount(0);
+      await expect(dialog.locator(".request-context-details")).toHaveCount(0);
       await close.focus();
       await page.keyboard.press("Shift+Tab");
       await expect(dialog.locator(".request-technical-details > summary")).toBeFocused();
       await page.keyboard.press("Enter");
-      await expect(contextSummary).toBeAttached();
-      await close.focus();
-      await page.keyboard.press("Shift+Tab");
-      await expect(contextSummary).toBeFocused();
-      await page.keyboard.press("Enter");
+      await expect(dialog.locator(".request-context-details summary, .request-context-details details")).toHaveCount(0);
       const section = dialog.getByRole("region", { name: locale === "ru" ? "Сравнение контекста" : "Context comparison" });
+      await expect(section).toHaveCount(1);
       await expect(section).toBeVisible();
       await expect(section.getByText(locale === "ru" ? "Предыдущий завершённый" : "Previous completed", { exact: true })).toBeVisible();
       await expect(section.getByText(locale === "ru" ? "Диагностика кэша провайдера" : "Provider cache diagnostics", { exact: true })).toBeVisible();
@@ -79,7 +75,6 @@ for (const baseline of ["first_observation", "overlapping_requests", "unavailabl
     await page.getByRole("button", { name: "Usage", exact: true }).click();
     await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
     await page.locator(".request-technical-details > summary").click();
-    await page.locator(".request-context-details > summary").click();
     const section = page.getByRole("region", { name: "Context comparison" });
     await expect(section).toBeVisible();
     await expect(section.getByText("Client parameter changes", { exact: true })).toHaveCount(0);
@@ -107,7 +102,6 @@ for (const type of ["cache_hit", "unavailable", "comparison_response_not_found"]
     await page.getByRole("button", { name: "Usage", exact: true }).click();
     await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
     await page.locator(".request-technical-details > summary").click();
-    await page.locator(".request-context-details > summary").click();
     const section = page.getByRole("region", { name: "Context comparison" });
     const result = { cache_hit: "No miss detected", unavailable: "Provider comparison unavailable", comparison_response_not_found: "Comparison baseline not found" }[type];
     await expect(section).toContainText(result);

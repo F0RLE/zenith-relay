@@ -38,14 +38,14 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
     || toolUse.requestedParallelToolCalls != null || toolUse.upstreamToolCallCount != null);
   const toolWarning = row.success && missingRequiredToolCall(toolUse);
   const clientContext = toolUse?.clientContext;
-  // BPS embeds tool schemas in upstream instructions instead of a native tools field.
+  // BPS embeds tool schemas in upstream instructions.
   const upstreamContext = toolUse?.upstreamContext;
   const hasContext = Boolean(clientContext || upstreamContext);
   const catalog = toolUse?.basisPointsCatalog;
   const contextBytes = (client: number | undefined, upstream: number | undefined) =>
     `${formatContextBytes(client, i18n.language)} → ${formatContextBytes(upstream, i18n.language)}`;
   const observedTier = formatObservedServiceTier(row);
-  // This is the provider-reported model, not an independently verified identity.
+  // Observed model name reported by the provider.
   const upstreamModel = routing?.upstreamResponseModel;
   const modelAlias = row.requestedModel && formatModelId(row.requestedModel, row.routedModel) !== row.requestedModel
     ? row.requestedModel : null;
@@ -76,10 +76,9 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
           {observedTier ? <div><dt>{t("usage.upstreamTier")}</dt><dd>{observedTier}</dd></div> : null}
         </dl>
       </RequestSection> : null}
-      {debugEnabled && routing ? <RequestSection title={t("usage.requestSections.route")} className="request-route-section">
+      {debugEnabled && routing ? <RequestSection title={t("usage.requestSections.route")} className={`request-route-section${!payload ? " request-technical-wide" : ""}`}>
         <dl className="request-details-list request-technical-fields">
           <div className="request-route-reason"><dt>{t("usage.routingReason")}</dt><dd>{t(`usage.routingReasons.${routing.reason}`)}</dd></div>
-          <div><dt>{t("usage.eligibleCandidates")}</dt><dd>{routing.eligibleCandidates}</dd></div>
           {transport ? <>
             <div><dt>{t("usage.transportPath")}</dt><dd>{formatTransport(row.transport, t)} → {formatTransport(transport.upstream, t)}</dd></div>
             <div><dt>{t("usage.transportMode")}</dt><dd>{t(`usage.transportModes.${transport.mode}`)}</dd></div>
@@ -87,19 +86,24 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
             {transport.responseFormat ? <div><dt>{t("usage.upstreamResponseFormat")}</dt><dd>{t(`usage.transportResponseFormats.${transport.responseFormat}`)}</dd></div> : null}
             {transport.handshakeMs != null ? <div><dt>{t("usage.handshakeMs")}</dt><dd>{formatDurationMs(transport.handshakeMs, i18n.language, t)}</dd></div> : null}
             {transport.connectionReused != null ? <div><dt>{t("usage.connectionReuse")}</dt><dd>{t(transport.connectionReused ? "usage.connectionReused" : "usage.connectionOpened")}</dd></div> : null}
-            {payload ? <>
-              <div><dt>{t("usage.requestPayloadMode")}</dt><dd>{t(`usage.requestPayloadModes.${payload.mode}`)}</dd></div>
-              {payload.fullRequestReason ? <div><dt>{t("usage.fullRequestReason")}</dt><dd>{t(`usage.fullRequestReasons.${payload.fullRequestReason}`)}</dd></div> : null}
-              <div><dt>{t("usage.requestPayloadBytes")}</dt><dd>{contextBytes(payload.jsonBytes, payload.bodyBytes)}</dd></div>
-              <div><dt>{t("usage.requestEncoding")}</dt><dd>{payload.contentEncoding === "zstd" ? "Zstd" : t("usage.requestUncompressed")}</dd></div>
-              {payload.compressionMs != null ? <div><dt>{t("usage.requestCompressionTime")}</dt><dd>{formatDurationMs(payload.compressionMs, i18n.language, t)}</dd></div> : null}
-              {payload.httpSendToHeadersMs != null ? <div><dt>{t("usage.requestHttpSendTime")}</dt><dd>{formatDurationMs(payload.httpSendToHeadersMs, i18n.language, t)}</dd></div> : null}
-            </> : null}
           </> : null}
+        </dl>
+        <dl className="request-details-list request-route-stats">
+          <div><dt>{t("usage.eligibleCandidates")}</dt><dd>{routing.eligibleCandidates}</dd></div>
           {row.candidateKind === "account" && routing.quotaRemainingBasisPoints != null
             ? <div><dt>{t("usage.quotaAtSelection")}</dt><dd>{(routing.quotaRemainingBasisPoints / 100).toFixed(2)}%</dd></div> : null}
           <div><dt>{t("usage.inFlightAtSelection")}</dt><dd>{routing.inFlightBefore}</dd></div>
           <div><dt>{t("usage.dispatchesBefore")}</dt><dd>{routing.dispatchesBefore}</dd></div>
+        </dl>
+      </RequestSection> : null}
+      {debugEnabled && payload ? <RequestSection title={t("usage.requestSections.payload")} className="request-payload-section">
+        <dl className="request-details-list request-technical-fields">
+          <div><dt>{t("usage.requestPayloadMode")}</dt><dd>{t(`usage.requestPayloadModes.${payload.mode}`)}</dd></div>
+          {payload.fullRequestReason ? <div><dt>{t("usage.fullRequestReason")}</dt><dd>{t(`usage.fullRequestReasons.${payload.fullRequestReason}`)}</dd></div> : null}
+          <div><dt>{t("usage.requestPayloadBytes")}</dt><dd>{contextBytes(payload.jsonBytes, payload.bodyBytes)}</dd></div>
+          <div><dt>{t("usage.requestEncoding")}</dt><dd>{payload.contentEncoding === "zstd" ? "Zstd" : t("usage.requestUncompressed")}</dd></div>
+          {payload.compressionMs != null ? <div><dt>{t("usage.requestCompressionTime")}</dt><dd>{formatDurationMs(payload.compressionMs, i18n.language, t)}</dd></div> : null}
+          {payload.httpSendToHeadersMs != null ? <div><dt>{t("usage.requestHttpSendTime")}</dt><dd>{formatDurationMs(payload.httpSendToHeadersMs, i18n.language, t)}</dd></div> : null}
         </dl>
       </RequestSection> : null}
       {debugEnabled && hasTimings ? <RequestSection title={t("usage.requestSections.timings")} className="request-timings-section">
@@ -122,7 +126,7 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
           </dl>
         </div> : null}
       </RequestSection> : null}
-      {debugEnabled && hasContext ? <RequestSection title={t("usage.contextSize.title")} className="request-context-section">
+      {debugEnabled && hasContext ? <RequestSection title={t("usage.contextSize.title")} className={`request-context-section${!hasTools ? " request-technical-wide" : ""}`}>
         <div className="request-context-columns">
           <dl className="request-details-list">
             {(["bodyBytes", "instructionBytes", "conversationBytes", "toolCatalogBytes"] as const).map((field, index) => <div key={field}>
@@ -141,7 +145,7 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
           </dl> : null}
         </div>
       </RequestSection> : null}
-      {((debugEnabled && hasTools) || toolWarning) && toolUse ? <RequestSection title={t("usage.requestSections.tools")} className="request-tool-details">
+      {((debugEnabled && hasTools) || toolWarning) && toolUse ? <RequestSection title={t("usage.requestSections.tools")} className={`request-tool-details${!debugEnabled || !hasContext ? " request-technical-wide" : ""}`}>
         <dl className={`request-details-list${debugEnabled ? " request-tools-list" : ""}`}>
           {debugEnabled ? <>
             <div><dt>{t("usage.clientTools")}</dt><dd>{toolUse.clientToolCount}{!hasContext && toolUse.clientSchemaBytes != null ? ` · ${formatContextBytes(toolUse.clientSchemaBytes, i18n.language)}` : null}</dd></div>
@@ -185,9 +189,9 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
       </RequestSection> : null}
     </div>
     {debugEnabled && routing?.cacheContext
-      ? <RequestDisclosure title={t("usage.cacheContext.title")} className="request-context-details">
-        {() => <CacheContextDetails diagnostics={routing.cacheContext!} />}
-      </RequestDisclosure> : null}
+      ? <RequestSection title={t("usage.cacheContext.title")} className="request-context-details">
+        <CacheContextDetails diagnostics={routing.cacheContext} />
+      </RequestSection> : null}
     </>}
   </RequestDisclosure>;
 }

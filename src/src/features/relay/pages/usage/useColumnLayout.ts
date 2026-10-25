@@ -1,6 +1,6 @@
 import { type KeyboardEvent, type PointerEvent, useEffect, useRef, useState } from "react";
 
-export const REQUEST_COLUMN_IDS = ["time", "status", "model", "connection", "timing", "tokens", "equivalent", "request"] as const;
+export const REQUEST_COLUMN_IDS = ["time", "status", "model", "connection", "timing", "speed", "tokens", "equivalent", "request"] as const;
 export type RequestColumnId = typeof REQUEST_COLUMN_IDS[number];
 export type RequestTableLayout = { order: RequestColumnId[]; widths: Partial<Record<RequestColumnId, number>> };
 export const MODEL_COLUMN_IDS = ["name", "requests", "input", "output", "cache", "equivalent"] as const;
@@ -11,7 +11,7 @@ export type ErrorColumnId = typeof ERROR_COLUMN_IDS[number];
 type ColumnDrag<ColumnId extends string> = { column: ColumnId; pointerId: number; target: ColumnId; after: boolean };
 export const REQUEST_TABLE_LAYOUT_KEY = "relay.usageRequestTableLayout";
 export const REQUEST_COLUMN_MAX_WIDTH = 480;
-export const REQUEST_COLUMN_MIN_WIDTH: Record<RequestColumnId, number> = { time: 130, status: 64, model: 82, connection: 100, timing: 96, tokens: 72, equivalent: 92, request: 96 };
+export const REQUEST_COLUMN_MIN_WIDTH: Record<RequestColumnId, number> = { time: 130, status: 64, model: 82, connection: 100, timing: 96, speed: 88, tokens: 72, equivalent: 92, request: 96 };
 
 export function loadRequestTableLayout(): RequestTableLayout {
   const fallback = { order: [...REQUEST_COLUMN_IDS], widths: {} } satisfies RequestTableLayout;
@@ -20,12 +20,17 @@ export function loadRequestTableLayout(): RequestTableLayout {
     const storedOrder = parsed?.order;
     if (!Array.isArray(storedOrder) || !storedOrder.every((columnId) => typeof columnId === "string") || new Set(storedOrder).size !== storedOrder.length) return fallback;
     const order = storedOrder.filter((columnId): columnId is RequestColumnId => REQUEST_COLUMN_IDS.includes(columnId as RequestColumnId));
+    const addSpeed = !order.includes("speed");
     for (const columnId of REQUEST_COLUMN_IDS) {
-      if (!order.includes(columnId)) order.push(columnId);
+      if (!order.includes(columnId)) {
+        // Add speed next to timing without resetting the user's column order.
+        const index = columnId === "speed" ? order.indexOf("timing") + 1 : order.length;
+        order.splice(index, 0, columnId);
+      }
     }
     const widths: Partial<Record<RequestColumnId, number>> = {};
     for (const columnId of REQUEST_COLUMN_IDS) {
-      const width = parsed?.widths?.[columnId];
+      const width = parsed?.widths?.[columnId] ?? (columnId === "speed" && addSpeed ? REQUEST_COLUMN_MIN_WIDTH.speed : undefined);
       if (typeof width === "number" && Number.isFinite(width)) widths[columnId] = Math.min(REQUEST_COLUMN_MAX_WIDTH, Math.max(REQUEST_COLUMN_MIN_WIDTH[columnId], Math.round(width)));
     }
     return { order, widths: Object.keys(widths).length === REQUEST_COLUMN_IDS.length ? widths : {} };
