@@ -38,6 +38,9 @@ const LOCAL_KEY: &str = "p3-local-key";
 const MODEL: &str = "gpt-p3";
 const OFFICIAL_CODEX_MODEL: &str = "gpt-5.6-terra";
 
+// Socket load scenarios share CI resources; their internal requests stay parallel.
+static LOCAL_SOCKET_LOAD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[path = "support/usage_observations.rs"]
 mod usage_observations;
 

@@ -180,6 +180,7 @@ async fn extended_mixed_transport_soak() {
 async fn run_mixed_waves(waves: usize) {
     use zenith_relay_core::{PoolMemberKind, PoolRoutingMember, PoolRoutingPolicy};
 
+    let _guard = LOCAL_SOCKET_LOAD_LOCK.lock().await;
     let (first, first_http, first_ws) = mixed_upstream().await;
     let (second, second_http, second_ws) = mixed_upstream().await;
     let authority = Arc::new(TokenAuthority::new(4).unwrap());
@@ -218,6 +219,7 @@ async fn run_mixed_waves(waves: usize) {
         .unwrap();
     let client = reqwest::Client::new();
     let base_url = &gateway.base_url;
+    let wave_timeout = Duration::from_secs(15);
     for wave in 0..waves {
         // Healthy waves alternate with a temporarily unavailable member.
         assert!(runtime.set_candidate_health(
@@ -228,19 +230,25 @@ async fn run_mixed_waves(waves: usize) {
                 CandidateHealth::Unhealthy
             }
         ));
+        let progress = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
         let responses = (0..24).map(|index| {
             let client = client.clone();
+            let progress = progress.clone();
             async move {
+                progress.lock().unwrap().insert(index, "started");
                 if index % 4 == 2 {
                     let response = client.get(format!("{base_url}/v1/responses"))
                         .bearer_auth(LOCAL_KEY).upgrade().send().await.unwrap();
                     assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+                    progress.lock().unwrap().insert(index, "upgrade accepted");
                     let mut socket = response.into_websocket().await.unwrap();
+                    progress.lock().unwrap().insert(index, "upgraded");
                     socket.send(ClientWsMessage::Text(json!({
                         "type": "response.create", "model": MODEL,
                         "input": format!("mixed websocket {wave}-{index}"),
                     }).to_string())).await.unwrap();
-                    assert_eq!(receive_websocket_completion(&mut socket).await["type"], "response.completed");
+                    progress.lock().unwrap().insert(index, "sent");
+                    assert_eq!(receive_websocket_completion_with_timeout(&mut socket, wave_timeout).await["type"], "response.completed");
                 } else {
                     let image = index % 4 == 3;
                     let path = if image { "images/generations" } else { "responses" };
@@ -253,7 +261,9 @@ async fn run_mixed_waves(waves: usize) {
                         .bearer_auth(LOCAL_KEY).json(&body).send().await.unwrap();
                     let status = response.status();
                     let body = response.text().await.unwrap();
-                    assert_eq!(status, StatusCode::OK, "wave={wave} index={index}: {body}");
+                    assert_eq!(status, StatusCode::OK,
+                        "wave={wave} index={index}: {body}; candidates={:?}",
+                        runtime.candidate_runtime_order());
                     if image {
                         assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["data"][0]["b64_json"], "aW1hZ2U=");
                     } else if index % 4 == 1 {
@@ -262,11 +272,18 @@ async fn run_mixed_waves(waves: usize) {
                         assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["status"], "completed");
                     }
                 }
+                progress.lock().unwrap().insert(index, "completed");
             }
         });
-        tokio::time::timeout(Duration::from_secs(15), join_all(responses))
+        tokio::time::timeout(wave_timeout, join_all(responses))
             .await
-            .expect("mixed transport wave stalled");
+            .unwrap_or_else(|error| panic!(
+                "mixed transport wave {wave} stalled: {error}; progress={:?}; candidates={:?}; upstream HTTP={}/{} WS={}/{}; events={}",
+                progress.lock().unwrap(), runtime.candidate_runtime_order(),
+                first_http.requests.lock().unwrap().len(), second_http.requests.lock().unwrap().len(),
+                first_ws.requests.lock().unwrap().len(), second_ws.requests.lock().unwrap().len(),
+                events.lock().unwrap().len(),
+            ));
         tokio::time::timeout(Duration::from_secs(2), async {
             while events.lock().unwrap().len() != (wave + 1) * 24
                 || runtime
