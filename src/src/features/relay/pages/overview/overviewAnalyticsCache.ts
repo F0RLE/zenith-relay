@@ -53,8 +53,7 @@ function hydrateCache() {
       const analytics = storedEntryRecord.value as Partial<Analytics>;
       if (!validTotals(analytics.totals) || !Array.isArray(analytics.buckets)
         || !analytics.buckets.every((bucket) => bucket != null && Number.isFinite(bucket.startMs) && validTotals(bucket.totals))) return;
-      // Persisted snapshots are for immediate display only. Always revalidate
-      // them after a process restart instead of treating them as fresh.
+      // Display persisted snapshots immediately and revalidate after each restart.
       analyticsCache.set(storedEntryRecord.scope, { analytics: analytics as Analytics, updatedAt: 0 });
     });
   } catch {

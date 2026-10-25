@@ -63,11 +63,8 @@ export function routingOrderPositions(order: CandidateRuntimeSnapshot[]) {
     const separator = candidate.candidateId.indexOf("::");
     if (separator > 0) {
       const sourceId = candidate.candidateId.slice(0, separator);
-      // A source card represents all of its protocol candidates. Prefer the
-      // protocol route that is actually carrying traffic, then fall back to
-      // the first route supplied by the scheduler. This keeps a multi-
-      // protocol source card aligned with the active route instead of pinning
-      // it to whichever binding happened to be serialized first.
+      // A source card combines protocol candidates: prefer its active route,
+      // then the first route supplied by the scheduler.
       const active = activeRequestCount(candidate) > 0;
       const previousSourcePosition = sourcePositions.get(sourceId);
       if (!previousSourcePosition

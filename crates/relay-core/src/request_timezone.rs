@@ -2,7 +2,7 @@ use serde_json::Value;
 
 pub const PROXY_TIMEZONE_MAX_AGE_MS: u64 = 15 * 60_000;
 
-/// Observed egress metadata, not a user preference or country-based guess.
+/// Validated timezone observed at the proxy's egress IP.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProxyTimezone {
     pub timezone: String,

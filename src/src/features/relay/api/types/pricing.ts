@@ -134,7 +134,7 @@ export type TokenPrice = TokenRateSet & PriceSchedules & {
   output: number;
 };
 
-/** Source-scoped query-time evidence, not a pool-wide price or an invoice. */
+/** Query-time price evidence scoped to one source. */
 export type ResolvedModelPrice = {
   quote: TokenPrice | null;
   source: Exclude<PricingSourceSummary, "mixed">;

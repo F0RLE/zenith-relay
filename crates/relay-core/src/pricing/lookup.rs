@@ -1,8 +1,7 @@
 use super::{CatalogEntry, ImageModelPrice};
 use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
 
-/// Immutable indexes built with the catalog, not a query cache. Keep only
-/// canonical entry keys and image quotes instead of cloning full records.
+/// Immutable catalog indexes retaining canonical entry keys and image quotes.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct CatalogLookup {
     canonical: BTreeMap<String, BTreeMap<String, Option<String>>>,

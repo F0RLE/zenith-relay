@@ -9,7 +9,7 @@ export type SourceSortColumn = "status" | "name" | "server" | "models";
 export type SourceSortKey = "runtime" | SourceSortColumn;
 export type SourceSortDirection = "asc" | "desc";
 
-/** Source readiness is independent of pool membership, and is not a live API probe. */
+/** Saved source readiness, evaluated independently of pool membership. */
 export function sourceStatus(
   source: SourceSummary,
   candidate: CandidateRuntimeSnapshot | undefined,

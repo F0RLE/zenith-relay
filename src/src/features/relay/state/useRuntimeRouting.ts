@@ -24,8 +24,7 @@ export function useRuntimeRouting({
 }) {
   const scheduleRefreshRef = useRef<() => void>(() => {});
   const requestRoutingRefresh = useCallback(() => scheduleRefreshRef.current(), []);
-  // Both pages consume the same scheduler state. Keep its pending read and
-  // fallback deadline when moving between them instead of starting a duplicate.
+  // Share the pending scheduler read and fallback deadline across both pages.
   const observing = mode === "local" && (page === "pool" || page === "connections") && Boolean(gatewayRunning);
   useEffect(() => {
     if (!observing) return;
@@ -43,7 +42,7 @@ export function useRuntimeRouting({
     const scheduleRefresh = () => {
       if (!active || document.visibilityState !== "visible") return;
       if (pending) {
-        // Only a real event, not an elapsed polling interval, dirties a read.
+        // Queue a follow-up read when a new runtime event arrives.
         refreshQueued = true;
         return;
       }

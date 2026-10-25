@@ -272,9 +272,7 @@ export function ImportDialog({
   }, [relayMode]);
   const importRows = session?.preview.rows ?? [];
   const toggle = (itemId: string) => setSelected((selectedIds) => toggleSelectedId(selectedIds, itemId));
-  // Keep invalid rows selectable so the user can explicitly submit them and
-  // receive a per-item failure result instead of losing the row silently.
-  // Rust still validates the item and never imports unusable credentials.
+  // Selectable invalid rows receive per-item errors from Rust validation.
   const importRowIds = importRows.map((row) => row.itemId);
   const selectedImportRowCount = importRowIds.filter((itemId) => selected.includes(itemId)).length;
   const allImportRowsSelected = importRowIds.length > 0 && selectedImportRowCount === importRowIds.length;

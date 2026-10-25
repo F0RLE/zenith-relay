@@ -160,8 +160,8 @@ export function UsagePage() {
       sourceLabels,
     }));
   }, [usagePage?.events, accountLabels, sourceLabels, t]);
-  // A missing report is not an empty report. Keep the last complete report
-  // during refresh; only show zero/empty results after a successful read.
+  // Keep the last complete report during refresh; display empty results only
+  // after a successful read.
   const awaitingReport = usageSupported && !usagePage && !usageError;
   const reportBusy = usageLoading || requestSearchPending || awaitingReport;
   const totals = usagePage?.totals ?? totalsFromRows(rows);

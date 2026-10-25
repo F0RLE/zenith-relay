@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-// Use the frontend's locked Markdown parser, not a second regex Markdown grammar.
+// Resolve the Markdown parser from the frontend's locked dependencies.
 const requireFrontend = createRequire(new URL("../../src/package.json", import.meta.url));
 const { unified } = await import(pathToFileURL(requireFrontend.resolve("unified")).href);
 const { default: remarkParse } = await import(pathToFileURL(requireFrontend.resolve("remark-parse")).href);

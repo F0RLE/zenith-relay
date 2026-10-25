@@ -78,7 +78,7 @@ export type RoutingDiagnostics = {
     } | null;
     requestPreparation?: {
       bodyMs?: number | null;
-      /** Subset of bodyMs, not an additional duration. */
+      /** Included in bodyMs. */
       schemaValidationMs?: number | null;
       catalogMs?: number | null;
       attachmentsMs?: number | null;
@@ -265,7 +265,7 @@ export type UsageFilterOptions = {
 
 export type LocalUsagePage = {
   events: LocalUsage[];
-  /** Present for a bounded sends-only read; totals/counts are not a full report. */
+  /** Pagination for bounded sends-only reads with partial totals/counts. */
   hasMore?: boolean;
   /** Echoed by hosts that actually applied the requested workload filter. */
   workload?: UsageWorkload;

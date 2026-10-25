@@ -4,7 +4,7 @@ export function isTooltipFocusSuppressed() {
   return suppressedTooltipFocus > 0;
 }
 
-/** Restoring keyboard position is not a request to show/measure another hint. */
+/** Restore keyboard focus while suppressing tooltip activation. */
 export function focusWithoutTooltip(element: HTMLElement) {
   suppressedTooltipFocus += 1;
   try {

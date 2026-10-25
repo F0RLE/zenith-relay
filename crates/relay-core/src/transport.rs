@@ -4,7 +4,7 @@ use std::time::Duration;
 
 pub(crate) const MAX_MODEL_CATALOG_BODY_BYTES: usize = 4 * 1024 * 1024;
 
-/// Opt-in native HTTP connect/upload/headers bound, not a generation or body timeout.
+/// Optional native HTTP deadline from connect through response headers.
 pub(crate) fn http_headers_timeout() -> Option<Duration> {
     parse_http_headers_timeout(
         std::env::var("ZENITH_RELAY_HTTP_HEADERS_TIMEOUT_SECONDS")

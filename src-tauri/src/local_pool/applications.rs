@@ -1,7 +1,6 @@
 //! Application integration registry.
 //!
-//! Runtime integrations are deliberately described here instead of being
-//! selected through application-name branches throughout the pool.  A new
+//! This registry owns runtime integration descriptors. A new
 //! client can be added by registering its descriptor first, then implementing
 //! only the capabilities it supports.
 

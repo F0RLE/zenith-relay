@@ -55,8 +55,7 @@ export function PoolContextControl({
   useEffect(() => {
     const requestedTokens = submittedTokens.current;
     submittedTokens.current = savedTokens;
-    // An acknowledgement must not erase newer typing, but a rejected optimistic
-    // save must restore the confirmed value instead of retrying every debounce.
+    // Preserve newer typing on acknowledgement; restore the confirmed value on rejection.
     if (document.activeElement !== inputRef.current || requestedTokens !== savedTokens) setCustomTokens(String(savedTokens));
   }, [selectedKey, savedTokens, resetRevision]);
   useEffect(() => {

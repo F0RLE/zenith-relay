@@ -164,8 +164,7 @@ export function useRelayRuntime({
 
   const refresh = useCallback(async (force = true) => {
     if (modeRef.current !== mode) return;
-    // Explicit refreshes, including those following a mutation, replace any
-    // older background work instead of keeping its pending marker alive.
+    // Explicit refreshes invalidate older background work, including after mutations.
     invalidateRefreshes();
     await loadSnapshot(force);
   }, [invalidateRefreshes, loadSnapshot, mode]);
@@ -187,9 +186,8 @@ export function useRelayRuntime({
         // A previous visit to this mode must not schedule retries or release
         // the pending marker belonging to the current visit.
         if (backgroundRefreshPending.current !== refreshRequestToken) return;
-        // A state event may arrive while the snapshot is in flight. Keep one
-        // trailing retry, but let a short settling window coalesce a burst of
-        // writes instead of spinning through full snapshots back-to-back.
+        // Coalesce state events arriving during the snapshot into one trailing
+        // retry after a short settling window.
         if (
           modeRef.current === refreshMode
           && isRuntimeRefreshPage(pageRef.current)

@@ -38,9 +38,7 @@ export function Dialog({
   const { t } = useTranslation();
   const dialogRef = useRef<HTMLElement>(null);
   const onCloseRef = useRef(onClose);
-  // Capture the opener during render, before a descendant with autoFocus can
-  // move focus during the commit phase. The cleanup must restore the control
-  // that actually opened this dialog, not an input that disappears with it.
+  // Capture the opener before descendant autoFocus runs; restore it on cleanup.
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const titleId = useId();
   onCloseRef.current = onClose;

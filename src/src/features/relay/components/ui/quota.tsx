@@ -25,9 +25,7 @@ export function QuotaMeter({ window, kind, label, nowMs, concise = false }: { wi
 
 export function QuotaStack({ snapshot, nowMs, concise = false, hint, stale = false }: { snapshot: QuotaSnapshot; nowMs?: number; concise?: boolean; hint?: string | undefined; stale?: boolean }) {
   const { t } = useTranslation();
-  // Fast/priority is a request-speed mode, not a second user-facing quota.
-  // Keep the provider signal in the snapshot for diagnostics, but do not show
-  // it beside the primary and feature-specific quota windows.
+  // Keep request-speed signals in diagnostics; show primary and feature quotas here.
   const supplemental = (snapshot.supplemental ?? []).filter((supplementalQuota) => !isFastSupplementalQuota(supplementalQuota));
   const reported = [
     ...(["primary", "secondary"] as const).flatMap((kind) => {

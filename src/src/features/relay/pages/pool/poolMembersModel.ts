@@ -180,7 +180,7 @@ export function poolMemberDisplayStatus(member: PoolMember, candidate?: Candidat
 /**
  * Positive known window remainder used only to place automatic cards.
  * Provider credits are a separate display key when no positive window exists.
- * A source balance is not a routing remainder or provider credit balance.
+ * Source balances are excluded from both display keys.
  */
 export function memberRoutingRemainder(member: PoolMember, headroom?: ResourceHeadroom): number | null {
   if (headroom) {
@@ -334,7 +334,7 @@ export function memberCanRoute(member: PoolMember, visibleModelIds?: readonly st
   return member.models.some((model) => visible.has(modelIdKey(model)));
 }
 
-/** Missing route telemetry is not a failure of the configured members.
+/** Missing route telemetry preserves configured-member availability.
  * The exact next candidate remains a separate scheduler-owned preview. */
 export function poolRoutingAvailability(
   members: readonly PoolMember[],

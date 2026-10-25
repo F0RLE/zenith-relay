@@ -94,8 +94,7 @@ export function useRuntimeEvents({
         runtimeActivityFlushQueued = false;
         return;
       }
-      // Events still update the latest per-candidate overlay while hidden.
-      // Publish it once on return instead of cloning/rendering every 16 ms.
+      // Publish the latest per-candidate overlay once the window becomes visible.
       if (pendingRuntimeActivity) scheduleRuntimeActivityFlush();
       if (usageDirty) scheduleUsageRefresh();
     };

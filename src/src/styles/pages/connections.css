@@ -778,8 +778,7 @@
   color: var(--relay-error);
 }
 
-/* An upstream credit ledger is not a reset token or a Relay value estimate.
- * Keep it with the provider quota it describes, on its own compact row. */
+/* Provider credits share a compact row with their provider quota. */
 .account-provider-quota-strip {
   min-width: 0;
   display: flex;

@@ -5,7 +5,7 @@ const CLAUDE_DESKTOP_REASONING_ALIAS_PREFIX: &str = "claude-fable-5-relay-";
 const LEGACY_ALIAS_PREFIX: &str = "claude-zenith-";
 const LEGACY_REASONING_ALIAS_PREFIX: &str = "claude-fable-5-zenith-";
 
-/// A client-facing route identifier, not a claim that the upstream is Claude.
+/// A client-facing alias for the canonical upstream model.
 /// Desktop rejects other vendors' names even inside a `claude-*` route. Hash
 /// canonical model identity into a compact 64-bit suffix. Four-character hex
 /// groups avoid vendor words and terminal snapshot dates without exposing the
@@ -16,11 +16,11 @@ pub fn claude_desktop_model_alias(model: &str) -> String {
 
 /// A client-only route that opts into Desktop's built-in effort picker.
 /// The alias does not establish support for every value in that picker;
-/// unsupported requests are rejected rather than remapped.
+/// unsupported requests are rejected.
 /// Never infer upstream capabilities, context, prices or effort from this name.
 /// Desktop's Fable effort metadata matches a prefix; suffixed Sonnet/Opus
-/// names do not inherit their exact-ID controls. Keep the opaque suffix here
-/// rather than collapsing the pool into a few fixed Claude role slots.
+/// names do not inherit their exact-ID controls. The opaque suffix preserves
+/// each model's distinct route.
 pub fn claude_desktop_reasoning_model_alias(model: &str) -> String {
     model_alias(CLAUDE_DESKTOP_REASONING_ALIAS_PREFIX, model)
 }

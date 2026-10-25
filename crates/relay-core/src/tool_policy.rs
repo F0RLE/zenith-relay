@@ -85,7 +85,7 @@ pub enum ToolPolicyOutcome {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct CatalogStats {
     pub count: u16,
-    /// Compact JSON bytes for catalog arrays, not a token/billing estimate.
+    /// Compact JSON size of catalog arrays, in bytes.
     pub bytes: u64,
     pub deferred_search: bool,
 }

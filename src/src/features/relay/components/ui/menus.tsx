@@ -199,9 +199,7 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
         close(true);
         return;
       }
-      // A listbox is rendered in a portal. Closing it before a surrounding
-      // Dialog handles Tab lets the dialog keep focus inside its own subtree
-      // instead of leaving focus on a detached portal option.
+      // Close the portal listbox before Dialog handles Tab to preserve its focus trap.
       if (event.key === "Tab") close();
     };
     const dismiss = () => close();
