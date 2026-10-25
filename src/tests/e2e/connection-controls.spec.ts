@@ -123,13 +123,17 @@ for (const width of [1160, 390]) {
       await page.goto("/");
       for (const tab of ["Connections", "Pool"]) {
         await page.getByRole("button", { name: tab, exact: true }).click();
-        const summary = page.locator(".relay-status-summary");
+        const summary = page.locator(tab === "Pool"
+          ? ".pool-summary-band > .pool-summary"
+          : ".connections-account-summary");
+        await expect(summary).toBeVisible();
         const hasCredits = credits === "finite" || credits === "unlimited";
         await expect(summary).toHaveAttribute("data-has-provider-credits", String(hasCredits));
         await expect(summary.locator(":scope > div")).toHaveCount(hasCredits ? 5 : 4);
         const total = summary.locator('[data-summary="provider-credits"]');
         if (hasCredits) {
-          await expect(total).toHaveAccessibleName("Total credits");
+          if (tab === "Pool") await expect(total).toHaveAccessibleName("Total credits");
+          else await expect(total.locator("span")).toHaveText("Total credits");
           await expect(total.locator("strong")).toHaveText(credits === "finite" ? "5" : "\u221e");
         } else {
           await expect(total).toHaveCount(0);
@@ -142,8 +146,13 @@ for (const width of [1160, 390]) {
           return name.trim().length > 0 && value.left >= bounds.left && value.right <= bounds.right
             && style.justifyContent === "center" && style.borderLeftWidth === "0px";
         }))).toBe(true);
-        if (tab === "Pool") await expect(summary.locator(":scope > div span")).toHaveCount(0);
-        await expect(summary).toHaveCSS("border-bottom-width", "1px");
+        if (tab === "Pool") {
+          await expect(summary.locator(":scope > div span")).toHaveCount(0);
+          await expect(summary).toHaveCSS("border-bottom-width", "0px");
+          await expect(page.locator(".pool-summary-band")).toHaveCSS("border-bottom-width", "1px");
+        } else {
+          await expect(summary).toHaveCSS("border-bottom-width", "1px");
+        }
         if (hasCredits && width < 640 && tab === "Connections") {
           const [innerWidth, creditsBox] = await Promise.all([summary.evaluate(element => element.clientWidth), total.boundingBox()]);
           expect(Math.abs(creditsBox!.width - innerWidth)).toBeLessThanOrEqual(1);

@@ -195,7 +195,7 @@ test("separate token cards and parameters fit a short desktop window", async ({ 
   await expect(dialog.locator(".request-details-token-group-heading .request-token-count")).toHaveText(["264 820", "1 268"]);
   await expect(dialog.locator(".request-details-token-group-heading .request-token-cost")).toHaveText(["≈0,32564 $", "≈0,0634 $"]);
   await expect(dialog.locator(".request-token-footer, .request-token-price-note, .request-cache-retention")).toHaveCount(0);
-  await expect(dialog.locator(".request-details-token-group-heading .request-token-cost").first()).toHaveAttribute("data-relay-tooltip", /Неоценённых токенов: 560/);
+  await expect(dialog.locator(".request-details-token-group-heading .request-token-cost").first()).toHaveAttribute("data-relay-tooltip", /Токенов без цены: 560/);
   await expect(dialog.locator(".request-parameters-section")).toContainText("Максимальное→Очень высокое");
   const bodySize = await dialog.locator(".relay-dialog-body").evaluate((element) => ({ content: element.scrollHeight, viewport: element.clientHeight }));
   expect(bodySize.content).toBeLessThanOrEqual(bodySize.viewport + 1);

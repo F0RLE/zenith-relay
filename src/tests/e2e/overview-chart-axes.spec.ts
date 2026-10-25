@@ -9,11 +9,12 @@ for (const locale of ["en", "ru"] as const) {
       await expect(page.locator(".overview-analytics")).toHaveClass(/has-data/);
       await expect(page.locator(".overview-analytics")).toHaveAttribute("aria-busy", "false");
 
+      const tones = ["cost", "requests", "speed", "e2e-speed", "weekly-capacity"];
       for (const viewport of [{ width: 1160, height: 900 }, { width: 390, height: 844 }]) {
         await page.setViewportSize(viewport);
         const charts = page.locator(".overview-chart-stack > .overview-chart:not(.tokens)");
-        await expect(charts).toHaveCount(4);
-        for (const tone of ["cost", "requests", "speed", "e2e-speed"]) {
+        await expect(charts).toHaveCount(tones.length);
+        for (const tone of tones) {
           const chart = page.locator(`.overview-chart.${tone}`);
           const left = chart.locator(".overview-chart-y-axis:not(.overview-chart-y-axis-right)");
           const right = chart.locator(".overview-chart-y-axis-right");
