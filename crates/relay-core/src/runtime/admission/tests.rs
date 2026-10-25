@@ -69,6 +69,52 @@ fn queued(runtime: &GatewayRuntime) -> (usize, usize) {
 }
 
 #[tokio::test(start_paused = true)]
+async fn settled_attempt_waits_for_physical_reservation_release() {
+    use crate::scheduler::rotation::{AttemptObservation, ExecutionObservation, HealthObservation};
+
+    for (model, operation) in [
+        ("model-a", RotationOperation::Text),
+        ("gpt-image-2", RotationOperation::Image),
+    ] {
+        let runtime = runtime();
+        let now = crate::unix_time_ms();
+        let mut initial = request(&runtime, 0, model);
+        initial.operation = operation;
+        let (_, held) = runtime.admit(initial, now).await.unwrap();
+        held.begin_rotation_dispatch().unwrap();
+        // Pause between engine settlement and the physical reservation release.
+        held.rotation_budget
+            .with_budget(|budget| {
+                runtime.lock_scheduler().settle_rotation_with_latency(
+                    held.reservation_id,
+                    AttemptObservation {
+                        execution: ExecutionObservation::committed(),
+                        health: HealthObservation::Success,
+                    },
+                    budget,
+                    now,
+                    None,
+                )
+            })
+            .unwrap();
+        held.rotation_settled.store(true, Ordering::Release);
+
+        let mut pending = request(&runtime, 1, model);
+        pending.operation = operation;
+        let mut waiting = Box::pin(runtime.admit(pending.clone(), now));
+        assert!(
+            poll!(&mut waiting).is_pending(),
+            "{operation:?} must wait for the retained reservation"
+        );
+        assert_eq!(queued(&runtime).0, 1);
+        assert_eq!(pending.budget.dispatches(), 0);
+        drop(held);
+        drop(waiting.await.expect("the released member remains eligible"));
+        assert_eq!(queued(&runtime), (0, 0));
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn retiring_a_runtime_wakes_queued_admissions_without_spending_dispatch() {
     let runtime = runtime();
     let now = crate::unix_time_ms();

@@ -58,6 +58,11 @@ impl PoolScheduler {
         let Some(projected) = self.prepare_rotation_request(&selection_request, operation) else {
             return false;
         };
+        let lane = if operation == RotationOperation::Image {
+            InFlightLane::Image
+        } else {
+            InFlightLane::Text
+        };
         self.candidates.values().any(|candidate| {
             match self.rotation.candidate_availability(
                 &projected,
@@ -66,8 +71,9 @@ impl PoolScheduler {
             ) {
                 CandidateAvailability::Busy(_) => true,
                 CandidateAvailability::Ready { .. } => {
-                    operation == RotationOperation::Image
-                        && !self.lane_allows(candidate, InFlightLane::Image)
+                    // Engine settlement may precede physical reservation release.
+                    // Both lanes wait through that gap instead of rejecting work.
+                    !self.lane_allows(candidate, lane)
                 }
                 _ => false,
             }
