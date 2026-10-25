@@ -1,5 +1,5 @@
 use super::super::{MAX_PROXY_POOL_ENTRIES, PROXY_POOL_VERSION};
-use super::{PersistedProxyPool, ProxyPool, StoredProxy, PROXY_POOL_SECRET_REF};
+use super::{valid_label, PersistedProxyPool, ProxyPool, StoredProxy, PROXY_POOL_SECRET_REF};
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError, Result},
     store::secret_store,
@@ -34,19 +34,37 @@ impl ProxyPool {
                     if let Some(account_id) = stored_proxy.assigned_account_id {
                         assigned_account_ids.push(account_id);
                     }
-                    let timezone = zenith_relay_core::normalize_timezone(stored_proxy.timezone)
+                    let mut timezone = zenith_relay_core::normalize_timezone(stored_proxy.timezone)
                         .map_err(|_| {
                             LocalPoolError::new(
                                 ErrorCode::RecoveryRequired,
                                 "stored proxy timezone is invalid",
                             )
                         })?;
+                    let timezone_observed_at_ms =
+                        stored_proxy.timezone_observed_at_ms.or_else(|| {
+                            stored_proxy
+                                .last_check
+                                .as_ref()
+                                .filter(|check| {
+                                    check.error_code.is_none()
+                                        && check.ip.is_some()
+                                        && check.timezone.as_deref() == timezone.as_deref()
+                                        && timezone.is_some()
+                                })
+                                .map(|check| check.checked_at_ms)
+                        });
+                    if timezone_observed_at_ms.is_none() {
+                        timezone = None;
+                    }
                     Ok(StoredProxy {
                         id: stored_proxy.id,
+                        label: stored_proxy.label,
                         url: stored_proxy.url,
                         assigned_account_ids,
                         created_at_ms: stored_proxy.created_at_ms,
                         timezone,
+                        timezone_observed_at_ms,
                         last_check: stored_proxy.last_check,
                     })
                 })
@@ -79,6 +97,7 @@ impl ProxyPool {
         let mut accounts = HashSet::new();
         for stored_proxy in &self.entries {
             let valid = !stored_proxy.id.is_empty()
+                && stored_proxy.label.as_deref().is_none_or(valid_label)
                 && proxy_ids.insert(stored_proxy.id.as_str())
                 && zenith_relay_core::normalize_proxy_url(&stored_proxy.url)
                     .is_ok_and(|url| url == stored_proxy.url)

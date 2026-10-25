@@ -2,7 +2,7 @@ use super::{current_time_ms, fence_runtime_candidates, restart_or_rollback};
 use crate::local_pool::{
     accounts::{
         credentials::CredentialStore,
-        proxy::{account_proxy_pool_id, common_proxy_pool_id, ProxyPool, ProxyPoolSummary},
+        proxy::{ProxyPool, ProxyPoolSummary},
         NativeSecretBackend,
     },
     error::CommandError,
@@ -12,15 +12,28 @@ use std::collections::HashSet;
 use tauri::State;
 
 mod apply;
-mod timezone;
 mod types;
 
+use crate::local_pool::accounts::proxy::observations::load_reconciled_pool;
 pub(crate) use apply::set_account_proxy_inner;
-use apply::{apply_choices, load_reconciled_pool, normalize_ids};
+use apply::{apply_choices, normalize_ids};
 use types::{
     AssignFreeProxiesInput, AssignStoredProxyInput, DeleteStoredProxiesInput, ImportProxyPoolInput,
     ProxyChoice, ProxyPoolImportResult, SetStoredProxyAccountsInput, StoredProxyAssignmentResult,
 };
+
+#[tauri::command]
+pub async fn rename_local_stored_proxy(
+    proxy_id: String,
+    label: String,
+    state: State<'_, DesktopState>,
+) -> std::result::Result<ProxyPoolSummary, CommandError> {
+    let _mutation = state.setup_guard().await;
+    let mut pool = ProxyPool::load()?;
+    pool.rename(proxy_id.trim(), &label)?;
+    pool.save()?;
+    Ok(pool.summary())
+}
 
 #[tauri::command]
 pub async fn get_local_proxy_pool(
@@ -47,6 +60,8 @@ pub async fn import_local_proxy_pool(
         .collect();
     let (added, duplicates) = pool.import(&input.proxy_urls, current_time_ms())?;
     pool.save()?;
+    state.store()?.notify_refresh_changed();
+    state.oauth_events.emit_proxy_pool_changed();
     let summary = pool.summary();
     Ok(ProxyPoolImportResult {
         added,
@@ -67,26 +82,9 @@ pub async fn check_local_stored_proxy(
     state: State<'_, DesktopState>,
 ) -> std::result::Result<crate::local_pool::accounts::proxy::check::ProxyCheckResult, CommandError>
 {
-    let proxy_id = proxy_id.trim().to_owned();
-    let (proxy, expected_url) = {
-        let _mutation = state.setup_guard().await;
-        let pool = ProxyPool::load()?;
-        (pool.config(&proxy_id)?, pool.stored_url(&proxy_id)?)
-    };
-    let mut result =
-        crate::local_pool::accounts::proxy::check::check(proxy_id, &proxy, current_time_ms()).await;
-    let _mutation = state.setup_guard().await;
-    let mut pool = ProxyPool::load()?;
-    let previous_timezone = pool.timezone(&result.proxy_id).ok().flatten();
-    if pool.record_check(&expected_url, result.clone()) {
-        if pool.timezone(&result.proxy_id)? != previous_timezone {
-            timezone::save_pool(&state, &pool, &result.proxy_id).await?;
-        } else {
-            pool.save()?;
-        }
-        result.timezone = pool.timezone(&result.proxy_id)?;
-    }
-    Ok(result)
+    crate::local_pool::refresh::proxies::request(&state, proxy_id.trim())
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -99,6 +97,28 @@ pub async fn delete_local_stored_proxy(
     apply::delete_proxies(&state, &proxy_ids)
         .await
         .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn test_local_stored_proxy_speed(
+    proxy_id: String,
+    on_started: tauri::ipc::Channel<()>,
+    state: State<'_, DesktopState>,
+) -> std::result::Result<
+    crate::local_pool::accounts::proxy::speed::ProxySpeedTestResult,
+    CommandError,
+> {
+    let proxy_id = proxy_id.trim().to_owned();
+    let proxy = {
+        let _mutation = state.setup_guard().await;
+        ProxyPool::load()?.config(&proxy_id)?
+    };
+    Ok(
+        crate::local_pool::accounts::proxy::speed::test(proxy_id, &proxy, || {
+            on_started.send(()).is_ok()
+        })
+        .await,
+    )
 }
 
 #[tauri::command]

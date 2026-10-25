@@ -2,6 +2,7 @@ use super::{
     current_time_ms, fence_runtime_candidates, restart_or_rollback, ProxyChoice,
     StoredProxyAssignmentResult,
 };
+use crate::local_pool::accounts::proxy::observations::load_reconciled_pool;
 use crate::local_pool::{
     accounts::{
         credentials::{
@@ -184,6 +185,8 @@ async fn apply_changes(
     if updates.is_empty() {
         if pool != old_pool {
             pool.save()?;
+            state.store()?.notify_refresh_changed();
+            state.oauth_events.emit_proxy_pool_changed();
         }
         return Ok(StoredProxyAssignmentResult {
             assigned: 0,
@@ -216,6 +219,8 @@ async fn apply_changes(
         old_pool.save()
     })
     .await?;
+    state.store()?.notify_refresh_changed();
+    state.oauth_events.emit_proxy_pool_changed();
     let now_ms = current_time_ms();
     for (_, updated_credentials) in &updates {
         state.sync_account_quota_refresh(updated_credentials.local_account_id(), now_ms)?;
@@ -226,26 +231,6 @@ async fn apply_changes(
         unavailable,
         pool: pool.summary(),
     })
-}
-
-pub(super) fn load_reconciled_pool(
-    state: &DesktopState,
-    credentials: &CredentialStore<NativeSecretBackend>,
-) -> Result<ProxyPool> {
-    let mut account_proxies = Vec::new();
-    for account in state.store()?.accounts() {
-        let proxy = credentials
-            .load(&account.account.id)
-            .map_err(credential_error)?
-            .and_then(|stored| stored.proxy_url().map(str::to_string));
-        account_proxies.push((account.account.id.clone(), proxy));
-    }
-    account_proxies.sort_by(|left, right| left.0.cmp(&right.0));
-    let mut pool = ProxyPool::load()?;
-    if pool.reconcile(&account_proxies, current_time_ms()) {
-        pool.save()?;
-    }
-    Ok(pool)
 }
 
 fn save_credential_updates(

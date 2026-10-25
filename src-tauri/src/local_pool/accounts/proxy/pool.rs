@@ -8,6 +8,20 @@ use zenith_relay_core::ProxyConfig;
 mod assign;
 mod persist;
 
+fn valid_label(label: &str) -> bool {
+    !label.is_empty()
+        && label.trim() == label
+        && label.chars().count() <= 80
+        && !label.chars().any(char::is_control)
+}
+
+pub(crate) struct ProxyRefreshScope<'a> {
+    pub id: &'a str,
+    pub created_at_ms: u64,
+    pub url: &'a str,
+    pub last_check: Option<&'a ProxyCheckResult>,
+}
+
 #[derive(Clone, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ProxyPool {
@@ -19,11 +33,15 @@ pub(crate) struct ProxyPool {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StoredProxy {
     id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
     url: String,
     assigned_account_ids: Vec<String>,
     created_at_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     timezone: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timezone_observed_at_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_check: Option<ProxyCheckResult>,
 }
@@ -39,6 +57,8 @@ struct PersistedProxyPool {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PersistedStoredProxy {
     id: String,
+    #[serde(default)]
+    label: Option<String>,
     url: String,
     #[serde(default)]
     assigned_account_ids: Vec<String>,
@@ -48,6 +68,8 @@ struct PersistedStoredProxy {
     #[serde(default)]
     timezone: Option<String>,
     #[serde(default)]
+    timezone_observed_at_ms: Option<u64>,
+    #[serde(default)]
     last_check: Option<ProxyCheckResult>,
 }
 
@@ -55,6 +77,7 @@ struct PersistedStoredProxy {
 #[serde(rename_all = "camelCase")]
 pub struct ProxyPoolEntrySummary {
     pub id: String,
+    pub label: Option<String>,
     pub endpoint: String,
     pub assigned_account_ids: Vec<String>,
     pub country_code: Option<String>,
@@ -83,6 +106,32 @@ impl Default for ProxyPool {
 }
 
 impl ProxyPool {
+    pub(crate) fn refresh_scopes(&self) -> impl Iterator<Item = ProxyRefreshScope<'_>> {
+        self.entries.iter().map(|entry| ProxyRefreshScope {
+            id: &entry.id,
+            created_at_ms: entry.created_at_ms,
+            url: &entry.url,
+            last_check: entry.last_check.as_ref(),
+        })
+    }
+
+    pub(crate) fn rename(&mut self, proxy_id: &str, label: &str) -> Result<()> {
+        let label = label.trim();
+        if !label.is_empty() && !valid_label(label) {
+            return Err(LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "proxy name must contain at most 80 characters without control characters",
+            ));
+        }
+        let proxy = self
+            .entries
+            .iter_mut()
+            .find(|proxy| proxy.id == proxy_id)
+            .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "stored proxy not found"))?;
+        proxy.label = (!label.is_empty()).then(|| label.to_owned());
+        Ok(())
+    }
+
     /// A deleted/replaced proxy or an older completion cannot overwrite a newer check.
     pub(crate) fn record_check(&mut self, expected_url: &str, result: ProxyCheckResult) -> bool {
         let Some(stored_proxy) = self.entries.iter_mut().find(|stored_proxy| {
@@ -109,10 +158,16 @@ impl ProxyPool {
         if result.error_code.is_none() && result.ip.is_some() {
             if let Some(timezone) = &result.timezone {
                 stored_proxy.timezone = Some(timezone.clone());
-            } else if stored_proxy.last_check.as_ref().and_then(|check| check.ip) != result.ip {
+                stored_proxy.timezone_observed_at_ms = Some(result.checked_at_ms);
+            } else if matches!(
+                result.location_error_code.as_deref(),
+                Some("proxy_location_conflict" | "proxy_location_mismatch")
+            ) || stored_proxy.last_check.as_ref().and_then(|check| check.ip) != result.ip
+            {
                 // An observed exit change invalidates its old zone. A failed
                 // geolocation must not assign a guessed or stale timezone.
                 stored_proxy.timezone = None;
+                stored_proxy.timezone_observed_at_ms = None;
             }
         }
         stored_proxy.last_check = Some(result);
@@ -185,15 +240,30 @@ impl ProxyPool {
             .map_err(|_| LocalPoolError::new(ErrorCode::InvalidState, "source proxy is invalid"))
     }
 
-    pub(crate) fn timezone(&self, proxy_id: &str) -> Result<Option<String>> {
+    pub(crate) fn timezone_observation(
+        &self,
+        proxy_id: &str,
+    ) -> Result<Option<zenith_relay_core::request_timezone::ProxyTimezone>> {
         self.entries
             .iter()
             .find(|stored_proxy| stored_proxy.id == proxy_id)
-            .map(|stored_proxy| stored_proxy.timezone.clone())
+            .map(|stored_proxy| {
+                stored_proxy
+                    .timezone
+                    .clone()
+                    .zip(stored_proxy.timezone_observed_at_ms)
+                    .map(|(timezone, observed_at_ms)| {
+                        zenith_relay_core::request_timezone::ProxyTimezone {
+                            timezone,
+                            observed_at_ms,
+                        }
+                    })
+            })
             .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "stored proxy not found"))
     }
 
     pub(crate) fn summary(&self) -> ProxyPoolSummary {
+        let now_ms = zenith_relay_core::unix_time_ms();
         let proxy_summaries = self
             .entries
             .iter()
@@ -201,12 +271,22 @@ impl ProxyPool {
                 let (country_code, region) = declared_proxy_location(&stored_proxy.url);
                 ProxyPoolEntrySummary {
                     id: stored_proxy.id.clone(),
+                    label: stored_proxy.label.clone(),
                     endpoint: proxy_endpoint(&stored_proxy.url),
                     assigned_account_ids: stored_proxy.assigned_account_ids.clone(),
                     country_code,
                     region,
                     created_at_ms: stored_proxy.created_at_ms,
-                    timezone: stored_proxy.timezone.clone(),
+                    timezone: stored_proxy
+                        .timezone
+                        .as_ref()
+                        .zip(stored_proxy.timezone_observed_at_ms)
+                        .filter(|(_, at)| {
+                            now_ms.checked_sub(*at).is_some_and(|age| {
+                                age < zenith_relay_core::request_timezone::PROXY_TIMEZONE_MAX_AGE_MS
+                            })
+                        })
+                        .map(|(timezone, _)| timezone.clone()),
                     last_check: stored_proxy.last_check.clone(),
                 }
             })

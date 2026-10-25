@@ -36,7 +36,9 @@ impl ProxyPool {
                 url,
                 assigned_account_ids: Vec::new(),
                 created_at_ms: now_ms,
+                label: None,
                 timezone: None,
+                timezone_observed_at_ms: None,
                 last_check: None,
             });
             added += 1;
@@ -85,7 +87,9 @@ impl ProxyPool {
                     url: proxy_url.clone(),
                     assigned_account_ids: vec![account_id.clone()],
                     created_at_ms: now_ms,
+                    label: None,
                     timezone: None,
+                    timezone_observed_at_ms: None,
                     last_check: None,
                 });
             }
@@ -141,7 +145,9 @@ impl ProxyPool {
                     url,
                     assigned_account_ids: Vec::new(),
                     created_at_ms: now_ms,
+                    label: None,
                     timezone: None,
+                    timezone_observed_at_ms: None,
                     last_check: None,
                 });
                 self.entries.len() - 1

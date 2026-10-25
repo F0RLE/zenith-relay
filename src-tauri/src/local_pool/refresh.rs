@@ -3,6 +3,7 @@
 //! observations. No queue snapshots, per-caller settlement or polling scans.
 
 mod automations;
+pub(crate) mod proxies;
 pub(crate) mod sources;
 
 mod account;
@@ -36,6 +37,7 @@ pub(crate) enum RefreshRead {
     Authorization(Box<PreparedAccountAuthorization>),
     SourceModels(Box<super::models::ProviderSourceRecord>),
     SourceStats(zenith_relay_core::scheduler::refresh::SourceStatsObservation),
+    Proxy(Box<super::accounts::proxy::check::ProxyCheckResult>),
 }
 
 impl zenith_relay_core::scheduler::refresh::SourceStatsRead for RefreshRead {
@@ -52,7 +54,7 @@ impl zenith_relay_core::scheduler::refresh::SourceStatsRead for RefreshRead {
 pub(crate) type RefreshReadResult = Result<RefreshRead>;
 
 pub(crate) fn cache_observation(refresh_result: &RefreshReadResult) -> bool {
-    matches!(refresh_result, Ok(read) if !matches!(read, RefreshRead::Authorization(_)))
+    matches!(refresh_result, Ok(read) if !matches!(read, RefreshRead::Authorization(_) | RefreshRead::Proxy(_)))
 }
 
 impl DesktopState {
@@ -84,6 +86,14 @@ impl DesktopState {
                 if let Err(error) = account::reconcile(&state).await {
                     crate::diagnostics::record_error(
                         "refresh",
+                        Some("reconcile_failed"),
+                        &error.message,
+                        &[],
+                    );
+                }
+                if let Err(error) = proxies::reconcile(&state).await {
+                    crate::diagnostics::record_error(
+                        "proxy-refresh",
                         Some("reconcile_failed"),
                         &error.message,
                         &[],

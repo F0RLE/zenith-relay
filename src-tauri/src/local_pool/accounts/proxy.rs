@@ -6,6 +6,7 @@ use crate::local_pool::{error::ErrorCode, models::GatewaySettings};
 use zenith_relay_core::protocol::ProxyMode;
 
 pub(crate) mod check;
+pub(crate) mod speed;
 
 pub const COMMON_PROXY_SECRET_REF: &str = "proxy:common";
 pub const PROXY_POOL_SECRET_REF: &str = "proxy:pool";
@@ -20,12 +21,13 @@ pub(crate) fn is_proxy_id(proxy_id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'-'))
 }
 
+pub(crate) mod observations;
 mod pool;
 mod refresh;
 mod selection;
 
-pub(crate) use pool::ProxyPool;
 pub use pool::ProxyPoolSummary;
+pub(crate) use pool::{ProxyPool, ProxyRefreshScope};
 pub use refresh::ProxyRefreshClient;
 #[cfg(test)]
 use selection::choose_proxy_url;
@@ -41,6 +43,43 @@ pub use selection::{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_names_round_trip_without_changing_routes_and_can_be_cleared() {
+        let mut pool = ProxyPool::default();
+        pool.import(&["http://proxy.example.test:8080".into()], 1)
+            .unwrap();
+        let id = pool.summary().entries[0].id.clone();
+        pool.assign_id(&id, "synthetic-account").unwrap();
+        let before = pool.summary();
+        pool.rename(&id, "  Рабочий прокси  ").unwrap();
+        let named = pool.summary();
+        assert_eq!(named.entries[0].label.as_deref(), Some("Рабочий прокси"));
+        assert_eq!(named.entries[0].endpoint, before.entries[0].endpoint);
+        assert_eq!(
+            named.entries[0].assigned_account_ids,
+            before.entries[0].assigned_account_ids
+        );
+        assert_eq!(named.entries[0].id, id);
+        assert_eq!(named.entries[0].created_at_ms, 1);
+        let restored = ProxyPool::from_json(&serde_json::to_string(&pool).unwrap()).unwrap();
+        assert_eq!(restored.summary(), named);
+        for invalid in ["x".repeat(81), "line\nbreak".into(), "control\0name".into()] {
+            assert!(pool.rename(&id, &invalid).is_err());
+            assert_eq!(pool.summary(), named);
+        }
+        assert!(pool.rename("missing", "name").is_err());
+        pool.rename(&id, " ").unwrap();
+        assert_eq!(pool.summary(), before);
+        let document = serde_json::to_value(&pool).unwrap();
+        assert!(document["entries"][0].get("label").is_none());
+        assert_eq!(
+            ProxyPool::from_json(&document.to_string())
+                .unwrap()
+                .summary(),
+            before
+        );
+    }
 
     #[test]
     fn source_proxy_resolves_only_a_stored_valid_proxy() {
@@ -196,11 +235,15 @@ mod tests {
                 "assignedAccountIds": [],
                 "createdAtMs": 1,
                 "timezone": " Etc/UTC "
+                ,"timezoneObservedAtMs": 100
             }]
         });
         let pool = ProxyPool::from_json(&document.to_string()).unwrap();
         assert_eq!(
-            pool.timezone("proxy_test").unwrap().as_deref(),
+            pool.timezone_observation("proxy_test")
+                .unwrap()
+                .as_ref()
+                .map(|evidence| evidence.timezone.as_str()),
             Some("Etc/UTC")
         );
         let restored = ProxyPool::from_json(&serde_json::to_string(&pool).unwrap()).unwrap();
@@ -210,7 +253,7 @@ mod tests {
         document["entries"][0]["timezone"] = serde_json::json!(" ");
         assert!(ProxyPool::from_json(&document.to_string())
             .unwrap()
-            .timezone("proxy_test")
+            .timezone_observation("proxy_test")
             .unwrap()
             .is_none());
         document["entries"][0]["timezone"] = serde_json::json!("Invalid/Timezone");

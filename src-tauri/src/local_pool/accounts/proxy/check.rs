@@ -11,6 +11,7 @@ const MAX_RESPONSE_BYTES: usize = 4_096;
 static CHECK_LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
 mod lookup;
+mod secondary;
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -19,6 +20,12 @@ pub struct ProxyCheckResult {
     pub checked_at_ms: u64,
     pub elapsed_ms: u64,
     pub ip: Option<IpAddr>,
+    #[serde(default)]
+    pub ipv4: Option<std::net::Ipv4Addr>,
+    #[serde(default)]
+    pub ipv6: Option<std::net::Ipv6Addr>,
+    #[serde(default)]
+    pub secondary_check_error: Option<String>,
     pub country_code: Option<String>,
     #[serde(default)]
     pub timezone: Option<String>,
@@ -34,7 +41,15 @@ pub struct ProxyCheckResult {
 }
 
 pub async fn check(proxy_id: String, proxy: &ProxyConfig, checked_at_ms: u64) -> ProxyCheckResult {
-    check_at(proxy_id, proxy, checked_at_ms, CHECK_URL, lookup::BASE_URL).await
+    check_at(
+        proxy_id,
+        proxy,
+        checked_at_ms,
+        CHECK_URL,
+        lookup::BASE_URL,
+        Some(("https://api.ipify.org/", "https://api6.ipify.org/")),
+    )
+    .await
 }
 
 async fn check_at(
@@ -43,6 +58,7 @@ async fn check_at(
     checked_at_ms: u64,
     check_url: &str,
     location_base: &str,
+    family_endpoints: Option<(&str, &str)>,
 ) -> ProxyCheckResult {
     let _permit = CHECK_LIMIT
         .acquire()
@@ -64,17 +80,30 @@ async fn check_at(
     match probe {
         Ok((ip, country_code)) => {
             result.ip = Some(ip);
+            secondary::set_address(&mut result, ip);
             result.country_code = country_code;
             result.location_source = result.country_code.as_ref().map(|_| "cloudflare".into());
-            match lookup::lookup(
+            let primary_location = lookup::lookup(
                 proxy,
                 ip,
                 result.country_code.as_deref(),
                 location_base,
                 Duration::from_secs(3),
-            )
-            .await
-            {
+            );
+            let additional = async {
+                let (v4, v6) = family_endpoints?;
+                Some(
+                    secondary::probe(
+                        proxy,
+                        ip.is_ipv6(),
+                        if ip.is_ipv4() { v6 } else { v4 },
+                        location_base,
+                    )
+                    .await,
+                )
+            };
+            let (primary_location, additional) = tokio::join!(primary_location, additional);
+            match primary_location {
                 Ok(location) => {
                     result.country_code = Some(location.country_code);
                     result.region = location.region;
@@ -83,6 +112,17 @@ async fn check_at(
                     result.location_source = Some("ipwhois".into());
                 }
                 Err(code) => result.location_error_code = Some(code.into()),
+            }
+            match additional {
+                Some(Ok((address, location))) => {
+                    secondary::set_address(&mut result, address);
+                    match location {
+                        Ok(location) => secondary::check_location(&mut result, &location),
+                        Err(error) => result.secondary_check_error = Some(error.into()),
+                    }
+                }
+                Some(Err(error)) => result.secondary_check_error = Some(error.into()),
+                None => {}
             }
         }
         Err(code) => result.error_code = Some(code.to_owned()),
@@ -219,6 +259,7 @@ mod tests {
             1,
             "http://unreachable.invalid/trace",
             "http://unreachable.invalid/unavailable/",
+            None,
         )
         .await;
         assert_eq!(result.ip.unwrap().to_string(), "203.0.113.9");
@@ -253,6 +294,7 @@ mod tests {
             1,
             "http://unreachable.invalid/trace",
             "http://unreachable.invalid/",
+            None,
         )
         .await;
         assert!(result.error_code.is_none());
@@ -264,8 +306,24 @@ mod tests {
         server.abort();
     }
 
-    async fn mock_proxy() -> (ProxyConfig, tokio::task::JoinHandle<()>) {
+    pub(super) async fn mock_proxy() -> (ProxyConfig, tokio::task::JoinHandle<()>) {
         let app = Router::new()
+            .route(
+                "/ipv6",
+                get(|headers: HeaderMap| async move {
+                    assert!(headers.contains_key("proxy-authorization"));
+                    assert!(!headers.contains_key("authorization"));
+                    "2001:db8::1"
+                }),
+            )
+            .route(
+                "/2001:db8::1",
+                get(|| async {
+                    axum::Json(serde_json::json!({"success": true, "ip": "2001:db8::1",
+                    "country_code": "US", "region": "New York", "city": "New York",
+                    "timezone": {"id": "America/New_York"}}))
+                }),
+            )
             .route(
                 "/203.0.113.9",
                 get(|| async {
