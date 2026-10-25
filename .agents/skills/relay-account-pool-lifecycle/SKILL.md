@@ -1,6 +1,6 @@
 ---
 name: relay-account-pool-lifecycle
-description: Integrate or repair Relay account pool admission, token renewal, quota and availability, request ownership, and account removal. Excludes API-source protocol adapters, production Zenith pools, and adding a sign-in UI alone.
+description: Review or change Relay pool membership, renewal, quota, dispatch ownership, or account removal. Excludes API-source conversion, login-only work, and production Zenith pools.
 ---
 
 # Relay account pool lifecycle

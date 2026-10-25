@@ -1,6 +1,6 @@
 ---
 name: relay-account-connectors
-description: Add or repair Relay account sign-in, including OAuth, device authorization, reauthentication, and credential imports. Excludes generic API-key sources, UI-only changes, and production Zenith user authentication.
+description: Add, review, or repair Relay provider sign-in, reauthentication, or credential import. Excludes API-key-only setup, UI copy, and Zenith product-user login.
 ---
 
 # Relay account connectors
@@ -17,16 +17,18 @@ workflow.
 
 ## Establish the provider contract
 
-- Identify the provider, issuing OAuth client, principal/workspace identity,
-  supported grant or credential type, scopes, endpoints, redirect rules, expiry,
-  and renewal method. Distinguish documented support from observed private
+- For a new flow or contract change, establish the provider, issuing OAuth
+  client, principal/workspace identity, grant, scopes, endpoints, redirect,
+  expiry, and renewal method. For a local fix, inspect the affected validation
+  and state invariants. Distinguish documented support from observed private
   behavior; a client ID found in another app does not establish permission.
-- Read the matching provider implementation in
+- For a targeted implementation comparison, use the matching provider in
   [implementations.md](references/implementations.md#login-and-import).
-  Compare it with the provider's official contract and record the inspected
-  commit and paths. New API's product-user OAuth is unrelated to provider
-  account credentials.
-- Trace `src-tauri/src/local_pool/accounts/oauth/` and
+  Record its inspected commit and paths and compare against the official
+  contract. An existing local callback/state fix does not by itself require
+  reading another application's code. New API's product-user OAuth is unrelated
+  to provider account credentials.
+- Trace the affected owner under `src-tauri/src/local_pool/accounts/oauth/` or
   `src-tauri/src/local_pool/accounts/oauth_flow/`, then
   `src-tauri/src/local_pool/commands/oauth/{flow,checkpoint,completion,account}.rs`.
   Imports belong to `src-tauri/src/local_pool/accounts/import_orchestrator/`

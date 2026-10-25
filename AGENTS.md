@@ -21,7 +21,7 @@ Load guidance for the affected task only:
 - Pool admission/renewal/quota/removal: [lifecycle](.agents/skills/relay-account-pool-lifecycle/SKILL.md).
 - Frontend-to-Rust commands: [Tauri commands](.agents/skills/tauri-calling-rust/SKILL.md).
 - Rust-to-frontend events/progress: [Tauri events](.agents/skills/tauri-calling-frontend/SKILL.md).
-- Agent instructions or GPT-6 prompting: [agent guidance](CONTRIBUTING.md#agent-guidance).
+- Agent instructions and skills: [agent guidance](CONTRIBUTING.md#agent-guidance).
 
 Read only the skills relevant to the affected boundary. Reuse the workspace's
 shared provider-contract, browser, build, and CLI guidance when present; do not
@@ -50,13 +50,12 @@ History does not make uncertain execution safe to repeat. Database migrations ar
 append-only. Profile recovery uses inspect/snapshot/attach/verify/restore and
 preserves newer user logins.
 
-Check branch/status and preserve unrelated work. Implementation requests authorize
-scoped local edits and non-destructive checks; review requests authorize inspection.
-Continue through the requested result and fix regressions caused by the change.
-Ask only when missing information changes correctness, scope, or safety.
+Use the affected [checks](CONTRIBUTING.md#verification); broaden only for a
+changed contract or unresolved failure. Documentation edits need content/link
+and diff checks, not runtime suites. Release gates remain separate.
 
-Use the affected [checks](CONTRIBUTING.md#verification); broaden or repeat them
-only for new changes, failures, or unresolved concerns. Docs need content/link
-and diff checks, not full runtime suites. Release gates remain separate. Commit,
-push, PR, merge, deploy, publish, external messages, and subagents require explicit
-current authorization.
+Workspace task/authorization rules apply when that file is present. For a
+standalone checkout, preserve unrelated work, complete authorized local edits
+and checks, and keep review-only requests read-only. Commit, push, PR, merge,
+deploy, publish, external messages, and subagents require explicit current
+authorization in either checkout layout.

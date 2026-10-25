@@ -5,10 +5,10 @@ description: Implement Relay Tauri Rust-to-frontend events or progress with type
 
 # Rust to Tauri frontend
 
-Read the installed Tauri version, existing event names/DTOs, subscriptions, and
-the receiving component before editing. Use the version-matching official
+Inspect the affected event/DTO, subscription, and receiving component. For an
+unresolved Tauri API question, check the installed version and the official
 [communication guide](https://v2.tauri.app/develop/calling-frontend/) or available
-Context7 for API details; do not copy an unrelated tutorial implementation.
+Context7; do not replace established local behavior with an unrelated tutorial.
 
 For the current subscriptions and the late-registration cleanup pattern,
 use the focused [Relay event example](references/relay-events.md). Reuse the
@@ -27,8 +27,6 @@ existing hook and event owners instead of adding another subscription manager.
 - Do not interpolate untrusted text into `eval`. If evaluation is genuinely
   necessary, use a fixed script and safe serialization, not string concatenation.
 
-Select checks from [CONTRIBUTING.md](../../../CONTRIBUTING.md#verification)
-for the changed serialization or listener lifecycle, within task and harness
-permissions. Reuse existing coverage;
-delivery, remount, or cancellation changes need a regression case only when
-existing coverage leaves a meaningful gap.
+Use [the affected checks](../../../CONTRIBUTING.md#verification) for changed
+serialization, delivery, remount, or cancellation behavior. Add regression
+coverage only where existing checks leave a meaningful gap.

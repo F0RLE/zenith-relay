@@ -5,10 +5,10 @@ description: Implement Relay Tauri frontend-to-Rust commands with typed wrappers
 
 # Tauri frontend to Rust
 
-Inspect the existing command registration, DTOs, wrappers, and installed Tauri
-version. Use the version-matching official
+Inspect the affected command registration, DTOs, and wrappers. For an unresolved
+signature or API question, check the installed Tauri version and the official
 [command guide](https://v2.tauri.app/develop/calling-rust/) or available Context7
-for exact signatures; do not expand permissions to bypass a command error.
+documentation. Do not expand permissions to bypass a command error.
 
 For the repository's actual registration, wrapper and argument conventions,
 use the focused [Relay IPC example](references/relay-ipc.md). Reuse its owners
@@ -27,9 +27,7 @@ rather than introducing a parallel invocation or diagnostics layer.
   mutations. Route destructive actions through their existing confirmation
   boundary, not a newly unrestricted generic command.
 
-Select validation from [CONTRIBUTING.md](../../../CONTRIBUTING.md#verification)
-for the changed IPC contract, within task and harness permissions. When
-serialization, errors, or registration
-change, verify the real IPC or existing mock boundary; internal calculations
-alone do not cover it. Reuse existing coverage unless a meaningful gap needs
-a regression case.
+Use [the affected checks](../../../CONTRIBUTING.md#verification) for changed
+serialization, errors, or registration. Verify the real IPC or existing mock
+boundary; internal calculations alone do not cover it. Add regression coverage
+only where existing checks leave a meaningful gap.

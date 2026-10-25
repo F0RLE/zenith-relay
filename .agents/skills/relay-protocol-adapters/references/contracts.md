@@ -10,10 +10,14 @@ and corresponding official SDK types before changing behavior.
 | OpenAI Chat Completions | [API reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create), [streaming events](https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events), [reasoning](https://developers.openai.com/api/docs/guides/reasoning) | Message/tool grouping, supported options, streamed argument fragments, requested usage chunks and finish reason |
 | Anthropic Messages | [Messages](https://platform.claude.com/docs/en/api/messages/create), [streaming](https://platform.claude.com/docs/en/build-with-claude/streaming), [thinking](https://platform.claude.com/docs/en/build-with-claude/thinking), [tool use](https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview) | Ordered content blocks, tool use/result IDs, signatures, stop reasons, input/output/cache usage |
 | Gemini Generate Content | [API reference](https://ai.google.dev/api/generate-content), [Schema SDK type](https://googleapis.github.io/js-genai/release_docs/interfaces/types.Schema.html), [function calling](https://ai.google.dev/gemini-api/docs/function-calling), [thought signatures](https://ai.google.dev/gemini-api/docs/thought-signatures) | Candidate/part order, function call IDs, native signatures, schema dialect, finish reason and usage metadata |
+| Gemini Interactions, native only | [API reference](https://ai.google.dev/api/interactions), [official Python SDK contract](https://github.com/googleapis/python-genai/tree/c0e9c54915970948258226e565bde6ef6d5c0b94/google/genai/_gaos/types/interactions) | Separate model-create contract; `event_type`, partial lifecycle resources, `previous_interaction_id`, native calls/results and usage. Inspected 2026-10-24. No Generate Content inference or foreign conversion. |
 
 Provider-compatible APIs need their own official capability and endpoint
 documentation. OpenAI wire compatibility alone does not establish stateful
 Responses support, tool search, structured outputs, or a reasoning level.
+Cloudflare's [1010 reference](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-1xxx-errors/error-1010/)
+identifies a site/browser security block, not provider credential invalidity.
+Recognize bounded error-envelope evidence only, never echoed client content.
 For native Responses sockets, also check the official
 [WebSocket mode guide](https://developers.openai.com/api/docs/guides/websocket-mode).
 Connection reuse is not evidence of multiplexing or safe replay after output.
@@ -169,19 +173,27 @@ downgrading such a request.
 
 Claude Desktop's official [third-party configuration](https://claude.com/docs/third-party/claude-desktop/configuration#models)
 defines per-model `maxEffort` as an upper bound, not an enum of allowed efforts.
-Cap at the highest executable pool-allowed Messages effort: a missing `medium`
-or `xhigh` must not suppress a supported `high` or `max`. Desktop cannot express
-holes in that menu through this field. As an explicit client compatibility
-policy, reserved Desktop reasoning aliases on Messages map Low/Medium/High/
-XHigh/Max to the nearest executable, pool-allowed lower level, or the lowest
-allowed level if none is lower. This resembles the documented
-`defaultModelEffort` fallback, but applying it to incoming picker selections
-is Relay policy, not a provider guarantee. Resolve across configured routes
-before selection, preserving exact choices even when another member lacks
-them. Admission and preparation share the effective choice; usage preserves
-the requested value. Off, budgets, unknown levels, Ultra, ordinary API model
-IDs and other client protocols stay strict. Never infer a reasoning budget
-or enable a capability from the picker alias.
+Its `modelCatalogUrl` setting is a mirror for Anthropic's signed catalog, not
+an unsigned gateway metadata endpoint: Desktop verifies the adjacent
+`.raw-sig.json` against a built-in key. The installed Desktop 3.1623.3.0 parser
+in `.vite/build/index.chunk-BMtEZi-I.js` inside `app.asar` accepts schema version 1
+and arbitrary `thinking.effort_options`; the reader in
+`.vite/build/index.chunk-TcAEd5wW.js` requires the signature even for custom
+loopback URLs. Parser support alone does not establish an integration path.
+Keep supported higher picker choices available while exact sparse menus remain
+unresolved; never silently substitute another incoming effort. Admission uses
+the selected model's executable, pool-allowed route choices and key scope.
+An alias grants no reasoning capability, budget, price, or context window.
+The embedded Code engine also resolves effort independently of Desktop's menu.
+Static inspection of Desktop 3.1623.3.0's Code 2.1.308 shows its effort resolver
+replacing `max`/`xhigh` with `high` when that ID fails the corresponding capability
+lookup, even if the session retains the higher selection. This is observed client
+behavior, not an Anthropic wire guarantee. The official
+[model configuration](https://code.claude.com/docs/en/model-config#customize-pinned-model-display-and-capabilities)
+defines capability declarations for specifically pinned model IDs; it does not
+make a Desktop `maxEffort` cap a capability declaration for every opaque route.
+Never repair this by upgrading all incoming `high` requests or claiming an
+unrelated model's native capabilities. Client-to-wire qualification remains open.
 OpenCode's built-in `Default` choice means no variant override, not a model
 effort named `default`; disabling a named variant does not remove that client UI.
 

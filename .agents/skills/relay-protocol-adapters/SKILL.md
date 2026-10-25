@@ -1,6 +1,6 @@
 ---
 name: relay-protocol-adapters
-description: Review or repair Relay conversions between Responses, Chat Completions, Anthropic Messages, and Gemini Generate Content, including tool roundtrips and opaque reasoning replay. Excludes UI and production Zenith routing.
+description: Review or repair Relay native forwarding, API conversion, or conversation continuation. Excludes UI-only changes and production Zenith routing.
 ---
 
 # Relay protocol adapters
@@ -11,8 +11,9 @@ assistant response. A successful first answer does not establish compatibility.
 
 Follow the official provider contract workflow in
 [CONTRIBUTING.md](../../../CONTRIBUTING.md#api-and-protocol-references).
-Use [PLANNING.md](../../../docs/project/PLANNING.md) for implemented contracts
-and [ROADMAP.md](../../../docs/project/ROADMAP.md) for unfinished acceptance.
+Use the affected [PLANNING.md](../../../docs/project/PLANNING.md) contract;
+consult [ROADMAP.md](../../../docs/project/ROADMAP.md) when the task concerns
+unfinished capability or acceptance, not as a prerequisite for every fix.
 
 ## Trace the failing contract
 
@@ -22,8 +23,9 @@ and [ROADMAP.md](../../../docs/project/ROADMAP.md) for unfinished acceptance.
 - Follow source resolution, request preparation, response conversion, and the
   next request containing tool results. Inspect both `contracts/source.rs`
   dispatch and the owning converter under `crates/relay-core/src/protocol/adapter`.
-  All twelve cross-protocol routes use the shared typed translation pipeline;
-  four matching-protocol routes bypass it and preserve native wire extensions.
+  Determine native versus converted support from current dispatch and tests,
+  not a fixed protocol count. Preserve native wire extensions on native routes;
+  reuse the shared typed translation pipeline where conversion is supported.
   Portable types live in `translation/model.rs`; `AdapterContinuationState`
   and `AdapterContinuationStore` are shared state owners, not Messages-only
   implementations. Do not restore protocol-named compatibility aliases.

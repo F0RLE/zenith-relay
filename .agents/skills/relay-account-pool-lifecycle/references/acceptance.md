@@ -10,7 +10,7 @@ define acceptance; they do not claim that live compatibility was established.
 | Case | Required observation |
 | --- | --- |
 | New login | Saved outside the pool; explicit membership follows the connector's policy. |
-| Native ChatGPT versus Excel/BPS | Separate issuing-client refresh and generation paths. Known Free is rejected only for BPS under current policy. |
+| Native ChatGPT versus Excel/BPS | Separate issuing-client refresh and generation paths. Plan names do not block admission; actual provider access and quota checks still apply. |
 | Unknown/missing plan, balance, quota, or reset | Retain unknown state; do not fabricate paid access, zero usage, or a reset window. |
 | Discovery without access evidence | Inventory remains visible without making unsupported account/model routes executable. |
 | Same ledger through two login clients | One credit total, separate auth connections and routing ownership. |

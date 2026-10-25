@@ -52,24 +52,16 @@ Never copy production Zenith credentials, customer data, inventory, or internal
 business logic into Relay. User secrets use the existing credential store or
 protected local storage; transfer is explicit and confirmed. Future Hosted vault
 requirements belong in the [Hosted design](docs/hosted/HOSTED_RELAY_ARCHITECTURE.md).
-Diagnostics, screenshots, snapshots, and fixtures contain no secrets or raw
-prompt/response bodies. Explicit credential exports are not support bundles.
+Keep credentials, cookies, authorization headers, sessions, account identities and
+raw prompt/response bodies out of source, fixtures, diagnostics, logs, telemetry,
+screenshots and support bundles. Credential exports require explicit user action.
 
 ## Safety rules
 
 - Use stable dependencies only.
-- Never put credentials, cookies, authorization headers, session exports, or
-  account identities in source, fixtures, screenshots, logs, snapshots,
-  telemetry, or support exports. Credential-bearing account exports require
-  an explicit user action and must stay out of support output.
-- Keep Desktop secrets in the existing credential store or protected local
-  storage. The retired personal-server runtime and management client are not
-  current integration targets; future Hosted vault and administration contracts
-  belong to the [Hosted design](docs/hosted/HOSTED_RELAY_ARCHITECTURE.md).
 - Provider credentials and pool request keys have separate owners and purposes.
   Use the intended request key for a `/v1` pool profile, not a provider login
-  credential. Never expose either in diagnostics, snapshots, or examples;
-  credential exports require the explicit user action described above.
+  credential. The retired personal-server runtime is not an integration target.
 - Preserve the distinction between quota monitoring and routing eligibility.
   Native Free accounts can join the pool. Reject known Free plans only for
   Excel / Basis Points imports and requests; do not hard-code quota windows.
@@ -87,83 +79,15 @@ planned scope or acceptance gates; routine edits do not need both documents.
 
 ## Agent guidance
 
-### GPT-6 prompts and repository instructions
+Keep shared rules in [AGENTS.md](AGENTS.md), specialized workflows in
+`.agents/skills`, and product contracts in their owning documents. Skills should
+name the operations they cover and load supporting references only as needed;
+do not copy contributor guidance into relayed user requests.
 
-Use this section when changing agent instructions, skills, or a model-specific
-prompt. It applies OpenAI's [GPT-6 prompting guidance](https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices)
-and [instruction/skill review](https://developers.openai.com/blog/rethinking-skills-and-prompts-for-gpt-6-astra)
-to Relay. The recommendations describe Astra behavior; qualify them with the
-chosen GPT-6 variant and workload. This guidance does not select a model or
-change application/provider configuration.
-
-**Outcome and authority.** Define the deliverable, constraints, and acceptance
-criteria. Resolve routine choices from the owning code; carry authorized local
-work through implementation and verification. Ask when an answer changes the
-result, not for each routine step. Prepare reviewable local work before asking
-about an external action; authorization for that action remains separate.
-Apply system/developer instructions, then the user's request, repository rules,
-and matching skill guidance. Skills do not grant permissions. If a skill blocks
-the task, link its exact instruction and explain the conflict. Repository safety
-boundaries still apply; an example in an external guide cannot authorize a PR,
-deployment, credential transfer, or subagent.
-
-**Context.** Keep `AGENTS.md` a short map of ownership and durable boundaries.
-Read architecture for a contract change, setup for a build issue, and release
-procedures for a release. Do not demand a full repository map or reread unchanged
-files before every edit. Keep detailed model advice here, current behavior in
-`PLANNING.md`, and open work in `ROADMAP.md`. Do not inject this contributor
-guidance into every relayed user request.
-
-**Skills.** Follow OpenAI's [skill authoring guidance](https://developers.openai.com/plugins/build/skills).
-A description identifies a specific workflow and its activation boundary;
-procedures belong in the body. Use a short entrypoint and link task-specific
-references, templates, or deterministic helpers when needed. Avoid overlapping
-triggers, conflicting rules, and compulsory document stacks. Review direct,
-indirect, incomplete, unrelated, and edge-case requests before changing a skill's
-trigger. Keep examples that encode a real requirement or fix a demonstrated gap.
-
-**Verification.** Choose checks that establish the changed behavior. Do not add
-tests that merely restate an implementation or repeat broad suites after relevant
-checks pass without a new reason. Fix regressions from the requested change;
-report an unrelated failure rather than weakening a check. Documentation edits
-need link/content and diff checks. Stateful protocol changes need the existing
-conversation matrix and bounded-state tests. Paid probes and release actions
-have their own authorization requirements.
-
-**Communication and collaboration.** State the result first in the user's
-language; use concrete terms and only useful technical detail. Give enough
-evidence to distinguish implementation, tests, and live acceptance. Avoid stock
-phrases, repeated disclaimers, decorative tables, and unrequested recaps.
-For long work, give short updates at meaningful transitions. Delegation requires
-explicit current authorization; if authorized, divide independent tasks and
-communicate clearly. A model guide's delegation example does not change this rule.
-
-**Evaluating a prompt change.** Follow OpenAI's
-[evaluation-led optimization](https://developers.openai.com/api/docs/guides/model-optimization).
-Begin with a working prompt. Change one group of instructions at a time and
-compare representative tasks for correctness,
-completion, tool roundtrips, latency, total usage, and cost. Check both cold
-starts and growing conversations. A smaller JSON body, fewer turns, or a faster
-answer alone does not prove better quality or lower total cost. Keep required
-tool schemas, reasoning state, and user constraints intact.
-
-**Model and transport compatibility.** Use the exact model and endpoint requested.
-Check the current [model guide](https://developers.openai.com/api/docs/guides/latest-model#limitations)
-before changing reasoning effort, verbosity, sampling, caching, or tool controls;
-sibling models need not share support. OpenAI's public capabilities do not prove
-BPS/account-transport or third-party API support. Protocol and BPS behavior stays
-in its existing owner. Adopting a public feature requires a scoped implementation
-and protocol acceptance, not just a link to its documentation.
-
-A task request can state the contract without prescribing every tool call:
-
-~~~text
-Goal: <observable result>.
-Scope: <Relay component; preserve unrelated local work>.
-Acceptance: <required behavior and relevant checks>.
-Constraints: <compatibility, data, and side-effect boundaries>.
-Delivery: implement locally, fix caused regressions, report results/checks/gaps.
-~~~
+In a workspace checkout, the parent `CONTRIBUTING.md#agent-guidance` and
+`.agents/skill-selection.cases.json` cover authoring and selection checks.
+These are optional for a standalone checkout. Structural checks do not establish
+model-selection quality or authorize live probes, releases, or subagents.
 
 ## API and protocol references
 
@@ -282,6 +206,8 @@ Desktop Help; the Help document size gate remains unchanged.
 Do not add parallel architecture/handoff documents, transcripts, completed TODOs,
 or per-model tables copied from generated data. Publishing an export is separate
 from generating it. Mark proposals as proposals, not available features.
+Give routine check results in chat; do not add audit, benchmark or status reports
+unless explicitly requested. Update an existing guide only for a maintained change.
 
 ### Changelog and release notes
 
@@ -348,13 +274,9 @@ bun ./scripts/check/check-docs.mjs
 git diff --check -- '*.md' '*.markdown'
 ~~~
 
-The same link check is `bun run check:docs` from `src`. It checks required entry
-documents, tracked and non-ignored new Markdown files, local links/images, filename
-case and GitHub-style heading/HTML anchors. Code examples and HTML comments are not
-links. External URLs are not fetched; the optional parent workspace `AGENTS.md`
-link is not required in a standalone checkout. Review content accuracy separately;
-a passing link check does not establish implemented behavior or live acceptance.
-The existing bundled Help size gate still applies to user-guide changes.
+The equivalent is `bun run check:docs` from `src`. It checks local links, anchors,
+filename case and required documents, not external URLs or content accuracy.
+The bundled Help size gate also applies to user-guide changes.
 
 For behavior changes, reuse existing coverage or add regression cases that
 exercise the affected contract when tests are in scope. Avoid tests that
@@ -407,62 +329,39 @@ bun run test:e2e
 
 #### Renderer responsiveness checks
 
-From `src`, the focused renderer checks are:
+Use the existing suite for the changed surface; do not add a new test file or
+benchmark diary for each fix.
+
+| Surface | Suites under `src/tests/e2e` |
+| --- | --- |
+| Startup and navigation | `operations/startup.spec.ts`, `seamless-navigation.spec.ts` |
+| Events and background work | `frontend-activity.spec.ts`, `runtime-refresh.spec.ts`, `interface-workload.spec.ts` |
+| Usage | `usage-event-refresh.spec.ts`, `usage-loading.spec.ts`, `usage-performance.spec.ts` |
+| Saved views | `previous-snapshots.spec.ts`, `overview-persistence.spec.ts` |
+| Network settings | `operations/network-refresh.spec.ts`, `operations/hosted-network.spec.ts` |
+
+Run a selected suite from `src`, for example:
 
 ~~~powershell
-bun test tests/runtimeDisplay.test.ts tests/usagePageSharing.test.ts tests/analyticsPersistence.test.ts
-bunx --no-install playwright test tests/e2e/operations/startup.spec.ts tests/e2e/frontend-activity.spec.ts tests/e2e/runtime-refresh.spec.ts tests/e2e/usage-performance.spec.ts tests/e2e/overview-persistence.spec.ts
+bunx --no-install playwright test tests/e2e/usage-event-refresh.spec.ts
 ~~~
 
-The account projection fixture uses 500 synthetic accounts and 100 gateway-only
-updates: direct projection resolves 50,000 labels; the bounded current projection
-resolves 500, preserving account-array identity across those updates. New account
-facts, a changed privacy resolver and runtime clearing must invalidate it.
-The visibility fixture retains the final activity from a hidden burst without
-rendering intermediate states or reviving an older completed request. Startup
-checks hold the runtime for 20 seconds while navigation, Settings and Help work,
-then verify data readiness separately. Snapshot failure remains retryable, and
-the unused all-time Usage preload must not return. These checks establish avoided
-work and responsiveness, not a measured WebView2 working-set or RSS reduction.
+Cover pending-read navigation, latest-filter wins, failures, cache invalidation and
+saved-view clearing. Use the [Desktop contract](docs/project/PLANNING.md#desktop-workspace)
+for behavior; check affected locales, compact layouts and dialog focus.
 
-The Usage fixture types the 19-character `req_synthetic_local` ID and observes one
-settled report read; clearing input or leaving the request tab cancels unfinished
-searches. A separate fixture retains eight reports with 1,000 identical model
-choices: sharing keeps one model-choice array instead of eight, while each
-report's totals and event arrays remain independent. New, reordered and missing
-choices must not be replaced by cached values. This measures avoided reads and
-retained array identities, not native-process memory in bytes.
-
-Analytics persistence is checked independently of provider reads. A burst of
-20 updates makes no synchronous writes and produces one deferred write of the
-latest state. Lifecycle flush cancels its timer; even a stale scheduled callback
-cannot write a newer generation. The browser case checks page-exit flush, absence
-of a duplicate delayed write and a subsequent reload. Pool statistics are checked
-across five rendered activity updates: the source-inventory signature is not
-serialized again until a full inventory snapshot arrives. Existing source-refresh
-cases still verify updated observations and one-shot explicit refresh intent.
-The storage operation remains synchronous when flushed; this removes it from
-the report-completion path, not into a worker thread. The 250 ms derived-cache
-window is not a durability guarantee during a process crash.
-
-Native Usage first-entry checks run separately from browser mocks:
+For native telemetry or snapshot changes, run the owning Rust tests from the root:
 
 ~~~powershell
 bun scripts/build/cargo.mjs test --manifest-path src-tauri/Cargo.toml --locked local_pool::store::telemetry_db::tests -- --test-threads=1
-bun scripts/build/cargo.mjs test --manifest-path src-tauri/Cargo.toml --locked measure_usage_first_entry -- --ignored --nocapture --test-threads=1
+bun scripts/build/cargo.mjs test --manifest-path src-tauri/Cargo.toml --locked local_pool::commands::state:: -- --test-threads=1
 ~~~
 
-Run these from the repository root. The timing fixture creates 10,000 synthetic
-logical results and matching sends, requests 50 rows plus full-period filter
-choices, and checks exact total tokens. A local debug run measured cold/warm
-reads of 79.93/60.65 ms before the narrow-query/index change and 44.84/26.66 ms
-after it. This covers SQLite, pricing and row decoding, not IPC, WebView rendering
-or an installed application's first-entry latency. The ordinary tests compare
-five pages across filters against the original send view, including legacy-only
-final sends with retained earlier attempts, and verify the covering/partial-index
-plans without timing thresholds. Index migration is append-only; SQL/report
-work stays on a blocking worker and startup must not prefetch unused Usage data.
-
+Serialize Cargo runs. Opt-in `measure_*` tests live next to their implementation;
+run them with `--ignored --nocapture` on the same fixture and build profile for a
+before/after comparison. Keep measured results in review evidence, not this guide.
+Mocked IPC counts and local CPU probes do not establish installed-app latency,
+memory consumption or provider speed. Builds do not replace or restart Desktop.
 For a release UI or layout change, run the focused Playwright suites as well:
 
 ~~~powershell
@@ -542,6 +441,10 @@ These synthetic checks do not delete build artifacts; CI runs them too.
 
 ### Shared runtime
 
+Run the affected core contracts, including stream/terminal handling, usage,
+continuations and lease isolation. Contract details stay in
+[PLANNING.md](docs/project/PLANNING.md) and [BPS](docs/project/BASIS_POINTS.md).
+
 ~~~powershell
 bun scripts/build/cargo.mjs fmt --manifest-path crates/relay-core/Cargo.toml --all -- --check
 bun scripts/build/cargo.mjs check --manifest-path crates/relay-core/Cargo.toml --all-targets --locked
@@ -551,95 +454,64 @@ bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --
 
 ### Protocol optimization probes
 
-Before changing preparation or cache-affinity behavior, run the relevant
-synthetic probe against the current working tree, then repeat it after the
-change with the same machine, build profile, payloads, warmup and trial counts.
-Keep unrelated local changes in both baselines; do not reset to `HEAD`.
+These opt-in probes use synthetic inputs and loopback, not provider quota. Compare
+the same machine, build profile and fixtures before/after; preserve unrelated
+dirty work. Report results in chat or review, not this guide. Local CPU, bytes and
+mock timings do not establish installed-app memory, provider TTFT, cache hits or
+billing savings. Keep ordinary correctness/continuation tests passing.
+
+#### Request compression probe
+
+Compare identity/Zstd transfer and copied/shared request bodies:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --target-dir src-tauri/target --locked --release --lib payload:: -- --include-ignored --nocapture --test-threads=1
+~~~
+
+Fixtures and sampling live with the tests. Windows timer-floor differences are
+inconclusive. Do not change the 64 KiB–8 MiB gate, two-job limit or native-Codex
+allowlist based only on a mock link; BPS compression needs separate evidence.
+
+#### Schema and cache probes
+
+Schema conversion, with exact-output equivalence:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --target-dir src-tauri/target --locked --release --lib measure_canonical_gemini_schema_conversion -- --ignored --nocapture --test-threads=1
+~~~
+
+Historical catalog preparation:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --lib measure_catalog_history_preparation -- --ignored --nocapture --test-threads=1
+~~~
+
+Prepared BPS prefix reuse and opt-in debug fingerprinting:
 
 ~~~powershell
 bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --target-dir src-tauri/target --locked --release --lib measure_bps_turn_prefix_reuse -- --ignored --nocapture --test-threads=1
 bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --target-dir src-tauri/target --locked --release --lib measure_cache_context_fingerprinting -- --ignored --nocapture --test-threads=1
 ~~~
 
-The BPS probe reports preparation time and equal leading prepared input items
-when only tool choice changes. It uses 48 synthetic tools and three historical
-messages, five warmups, seven trials and 25 preparations per trial. These are
-JSON bytes and local CPU durations, not tokens, billed cache hits or TTFT.
-The fingerprint probe uses 48 synthetic tools and 16/256 escaped-text messages,
-20 warmups, nine trials and 100 captures per trial. It measures the opt-in
-debug comparison path, not ordinary debug-off request processing.
+Preserve tool order, original schemas, malformed-declaration rejection and
+current-call permissions. Debug fingerprint timings do not describe debug-off work.
 
-Report regressions and tradeoffs as well as improvements. Native forwarding,
-original tool schemas, current-call restrictions and complete continuation
-must still pass their ordinary tests. Live provider cache reuse needs observed
-cached/input token counts in a controlled installed-app run; a stable prefix
-or faster local hashing does not establish that result.
+### BPS attachment preparation probe
 
-#### Recorded comparison: 2026-10-23
+Compare in-place image resolution with the reference JSON-roundtrip path:
 
-Windows, AMD Ryzen 5 5600X, optimized release profile, one test thread, no
-provider I/O. The baseline includes the pre-existing dirty worktree, with only
-the synthetic probes added before the runtime changes. Times below are medians
-of per-trial averages, not individual-request latency percentiles.
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --lib measure_bps_attachment_json_roundtrips -- --ignored --nocapture --test-threads=1
+~~~
 
-For the same declarations/history with `none`, named or `allowed_tools` choices:
-
-| BPS presentation | Equal leading input items before | After | Serialized equal-prefix bytes after |
-| --- | ---: | ---: | ---: |
-| Compact | 0/4 | 4/4 | 38,407 |
-| Discovery | 0/4 | 4/4 | 34,177 |
-
-Unrestricted `auto` retains 4/4 items in both versions. These byte counts
-serialize the equal leading input-item array; they are neither token counts
-nor a measurement of the provider's rendered/cacheable prefix. The constant
-catalog-permission clarification adds 180 bytes to this synthetic prologue.
-Call restrictions remain after history; lookup/preload and returned calls
-still use only the current permitted tools. Selected small schemas are ready
-without a discovery-only generation, within the unchanged eager limits and
-explicit deferral rules. Checkpoints reuse that exact prepared prologue.
-
-| BPS presentation / choice | Preparation before, microseconds | After, microseconds |
-| --- | ---: | ---: |
-| Compact / auto | 336.424 | 339.932 |
-| Compact / none | 112.740 | 206.872 |
-| Compact / named | 123.552 | 212.040 |
-| Compact / allowed | 122.864 | 213.464 |
-| Discovery / auto | 221.072 | 220.044 |
-| Discovery / none | 111.764 | 132.604 |
-| Discovery / named | 124.340 | 144.160 |
-| Discovery / allowed | 122.336 | 145.432 |
-
-Retaining the catalog intentionally costs about 0.088-0.094 ms of extra local
-preparation in restricted compact turns, and 0.020-0.023 ms in discovery.
-It removes the measured prefix rewrite; it is not a claim that every local
-preparation became faster or that total input tokens decreased. The unrestricted
-timing ranges overlap before/after, so no general `auto` speedup is claimed.
-
-| Debug fingerprint fixture | Before, microseconds | After, microseconds | Reduction |
-| --- | ---: | ---: | ---: |
-| 16 items / 42,925 request bytes | 76.882 | 48.818 | 36.5% |
-| 256 items / 549,445 request bytes | 781.145 | 588.304 | 24.7% |
-
-Each capture includes the same reference-equality checks in both versions.
-The trial ranges were 76.579-79.947 -> 48.587-51.100 microseconds and
-778.672-807.915 -> 587.533-590.578 microseconds respectively. One reusable
-8 KiB buffer replaces repeated tiny hash updates; reference tests retain the
-original salted JSON digests, exact byte budget, item cap and failure behavior.
-Debug-off requests already skip this work and do not gain this reduction.
-
-The design follows the stable-prefix/tool-definition guidance in the official
-[prompt caching guide](https://developers.openai.com/api/docs/guides/prompt-caching)
-and [cache diagnostics](https://developers.openai.com/api/docs/guides/prompt-caching/diagnostics),
-read on 2026-10-23. BPS remains an undocumented account transport; public API
-retention/breakpoint fields were not added. Live provider cache-hit ratio,
-TTFT, billing and installed-application acceptance were not measured here.
+Preserve exact serialized output and discovery continuation state. JSON/SSE,
+catalog continuation and a warm request must reuse the same uploaded file reference.
+This measures preparation, not real upload or provider generation.
 
 ### Pool rotation acceptance
 
-The ordinary core suite includes lifecycle churn and repeated local HTTP,
-SSE, WebSocket, and image waves. These fixtures use synthetic credentials and
-loopback providers; they do not consume account quota. The Build workflow also
-runs the opt-in queue test at the per-principal limit:
+The core suite covers lifecycle churn and mixed loopback transports. CI also
+runs the opt-in per-principal queue-limit test:
 
 ~~~powershell
 bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --lib large_mixed_queue_reaches_per_principal_limit_without_starvation -- --ignored --nocapture
@@ -651,20 +523,14 @@ Measure scheduler overhead separately from provider latency:
 bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --lib scheduling_latency_under_contention -- --ignored --nocapture
 ~~~
 
-For an extended loopback run, execute 240 mixed waves (5,760 requests) with
-shared member limits and alternating source availability:
+For an extended mixed-transport loopback run:
 
 ~~~powershell
 bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --test accounts extended_mixed_transport_soak -- --ignored --nocapture
 ~~~
 
-The local probe reports mutex-wait and reservation p50/p95/p99 in nanoseconds
-for 2, 16, and 64 members with four competing threads. It has no provider I/O
-or hardware-dependent pass threshold. Compare repeated runs of the same build
-profile and machine; these values are not model first-token measurements.
-The queue check reports local admission-wait p50/p95/p99, verifies bounded
-retained metadata, service across principals, and release after draining; it is
-not a process-memory or live-provider soak.
+Check bounded metadata, fairness across principals and release after draining.
+Scheduler timings have no hardware-dependent pass threshold or provider I/O.
 
 Live acceptance still requires an explicitly authorized isolated pool and the
 installed executable's identity. Include unequal generation durations, quota
@@ -674,49 +540,15 @@ a synthetic check.
 
 #### Cache-affinity admission comparison
 
-The 2026-10-23 comparison uses the same Windows host, optimized release profile
-and pre-existing dirty worktree before and after the cache-aware load margin.
-Reproduce the admission fixture with:
+Run the synthetic admission fixture with:
 
 ~~~powershell
 bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --target-dir src-tauri/target --locked --release --lib measure_cache_affinity_under_parallel_load -- --ignored --nocapture --test-threads=1
 ~~~
 
-Two synthetic physical members each allow four concurrent requests. The preferred
-member retains one background reservation; the other is idle. After 20 warmups,
-nine trials each reserve and release 1,000 preferred requests. Times are medians
-of trial averages, not individual-request percentiles or provider latency.
-
-| Measurement | Before | After |
-| --- | ---: | ---: |
-| Preferred-member selections | 0/9,000 | 9,000/9,000 |
-| Reserve and release, microseconds | 1.961 | 2.176 |
-| Trial-average range, microseconds | 1.931-2.326 | 2.153-2.445 |
-
-The local admission tradeoff is an additional 0.215 microseconds in this fixture,
-not a measured first-token speedup. Ordinary work without affinity still uses the
-least normalized load. Regressions cover both sides of the load margin, saturated
-and unequal physical capacities, material quota/credit leads, soft health/latency,
-explicit order, diagnostics, and consistent optional response-owner yield.
-
-Repeating the existing protocol probes preserves all four leading BPS input items
-for every tested tool choice: 38,407 compact / 34,177 discovery serialized bytes
-before and after. Preparation and fingerprinting code is unchanged by this patch;
-the repeated timings do not establish a speedup:
-
-| Unchanged-path probe | Before, microseconds | After, microseconds |
-| --- | ---: | ---: |
-| BPS compact / auto | 340.500 | 390.928 |
-| BPS discovery / auto | 223.408 | 220.348 |
-| Debug fingerprint / 16 items | 49.915 | 50.294 |
-| Debug fingerprint / 256 items | 596.376 | 597.818 |
-
-The compact/auto trial-average ranges were 332.632-348.828 before and
-342.880-474.332 after. Report this slower observed run rather than claiming all
-processing became faster. The admission fixture measures route reuse, not actual
-cached tokens or invoice savings. Payloads, reasoning, tools, provider cache
-controls and opaque-continuation ownership remain unchanged. Installed-app,
-provider cache-hit, actual billing and end-to-end latency acceptance remain open.
+Cover both sides of the margin, unequal/saturated capacity, quota/health/order
+policies, owner yield and ordinary no-affinity scheduling. This measures route
+reuse, not cached tokens; preserve payloads and continuation ownership.
 
 ### Manual quality observations
 
