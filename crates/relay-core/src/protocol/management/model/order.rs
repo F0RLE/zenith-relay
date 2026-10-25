@@ -45,7 +45,7 @@ impl ModelDisplayProjection<'_> {
             .enumerate()
             .map(|(position, model)| (crate::model_id_key(model), position))
             .collect::<BTreeMap<_, _>>();
-        models.sort_by_key(|model| {
+        models.sort_by_cached_key(|model| {
             positions
                 .get(&crate::model_id_key(&model.id))
                 .copied()

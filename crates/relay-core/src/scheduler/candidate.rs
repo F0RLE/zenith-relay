@@ -256,9 +256,13 @@ impl RuntimeCandidate {
     }
 
     pub(crate) fn supports_model(&self, model: &str) -> bool {
-        self.models
-            .iter()
-            .any(|candidate_model| candidate_model.eq_ignore_ascii_case(model))
+        // Catalog/snapshot callers already have the exact saved spelling.
+        // Use the set index before the compatibility case-insensitive scan.
+        self.models.contains(model)
+            || self
+                .models
+                .iter()
+                .any(|candidate_model| candidate_model.eq_ignore_ascii_case(model))
     }
 
     pub(crate) fn supports_protocol(&self, model: &str, allowed: &[WireApi]) -> bool {

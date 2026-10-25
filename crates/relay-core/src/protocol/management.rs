@@ -61,7 +61,8 @@ mod runtime;
 #[cfg(test)]
 pub use pool::pool_model_summaries;
 pub use pool::{
-    pool_model_summaries_with_pricing, pool_pricing_source_summary, PoolMembershipInput,
+    pool_model_projection_with_pricing, pool_model_summaries_with_pricing,
+    pool_pricing_source_summary, PoolMembershipInput, PoolModelProjection,
 };
 pub use presets::{
     max_retry_candidates_in_range, merge_configuration_preset_settings,
@@ -89,6 +90,9 @@ pub struct GatewayDiagnostic {
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeStateSnapshot {
     pub schema_version: u32,
+    /// Display-only local history revision; no quota or routing semantics.
+    #[serde(default)]
+    pub weekly_capacity_revision: u64,
     pub gateway: GatewaySummary,
     pub platform: String,
     pub capabilities: DesktopCapabilities,

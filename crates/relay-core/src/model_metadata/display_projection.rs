@@ -1,16 +1,11 @@
 use super::{order::ModelOrderKey, ModelDisplayIdentity, ModelMetadataCatalog};
 use std::collections::BTreeMap;
 
-struct DisplayEntry {
-    order: ModelOrderKey,
-    provider: String,
-}
-
 /// Presentation work shared only inside one immutable catalog projection.
 /// This never retains routing, entitlement, quota, or a mutable catalog handle.
 pub(crate) struct DisplayProjection<'a> {
     catalog: &'a ModelMetadataCatalog,
-    entries: BTreeMap<String, DisplayEntry>,
+    entries: BTreeMap<String, ModelOrderKey>,
 }
 
 impl<'a> DisplayProjection<'a> {
@@ -21,24 +16,16 @@ impl<'a> DisplayProjection<'a> {
         }
     }
 
-    fn entry(&mut self, model: &str) -> &DisplayEntry {
+    fn entry(&mut self, model: &str) -> &ModelOrderKey {
         if !self.entries.contains_key(model) {
-            self.entries.insert(
-                model.to_string(),
-                DisplayEntry {
-                    order: self.catalog.display_order_key(model),
-                    provider: self
-                        .catalog
-                        .display_provider_for(model)
-                        .unwrap_or_else(|| "other".into()),
-                },
-            );
+            self.entries
+                .insert(model.to_string(), self.catalog.display_order_key(model));
         }
         &self.entries[model]
     }
 
     pub(crate) fn identity(&mut self, model: &str) -> ModelDisplayIdentity {
-        self.entry(model).order.identity.clone()
+        self.entry(model).identity.clone()
     }
 
     pub(crate) fn merge<I, S>(&mut self, models: I, saved_order: &[String]) -> Vec<String>
@@ -58,12 +45,7 @@ impl<'a> DisplayProjection<'a> {
                 (model, entry, normalized)
             })
             .collect::<Vec<_>>();
-        keyed.sort_by(|left, right| {
-            left.1
-                .order
-                .compare(&right.1.order)
-                .then_with(|| left.2.cmp(&right.2))
-        });
+        keyed.sort_by(|left, right| left.1.compare(right.1).then_with(|| left.2.cmp(&right.2)));
         let ordered = keyed
             .into_iter()
             .map(|(model, _, _)| model)
@@ -76,7 +58,11 @@ impl<'a> DisplayProjection<'a> {
             .map(|model| {
                 (
                     crate::model_id_key(model),
-                    self.entries[model].provider.clone(),
+                    self.entries[model]
+                        .identity
+                        .provider
+                        .clone()
+                        .unwrap_or_else(|| "other".into()),
                 )
             })
             .collect();

@@ -42,12 +42,32 @@ pub fn pool_model_summaries_with_pricing(
     catalog: &PricingCatalog,
     context: &PricingContext,
 ) -> Vec<ModelSummary> {
+    pool_model_projection_with_pricing(sources, accounts, hidden_models, catalog, context).models
+}
+
+pub struct PoolModelProjection {
+    pub models: Vec<ModelSummary>,
+    pub pricing_source: PricingSourceSummary,
+}
+
+/// Resolve model prices and their aggregate provenance in the same pass.
+/// Reuse is limited to this projection; live pricing and member policy are
+/// always read from the supplied context, never a previous summary's prices.
+pub fn pool_model_projection_with_pricing(
+    sources: &[SourceSummary],
+    accounts: &[AccountSummary],
+    hidden_models: &[String],
+    catalog: &PricingCatalog,
+    context: &PricingContext,
+) -> PoolModelProjection {
     let models = collect_pool_models(sources, accounts);
+    let mut price_sources = Vec::new();
     let mut summaries = models
         .into_values()
         .map(|model| {
             let model_id = model.id.clone();
-            let resolved = resolve_pool_model_price(&model, &model_id, catalog, context);
+            let resolved =
+                resolve_pool_model_price(&model, &model_id, catalog, context, &mut price_sources);
             let quote = resolved.as_ref().and_then(|price| price.quote);
             let enabled = !hidden_models
                 .iter()
@@ -65,10 +85,13 @@ pub fn pool_model_summaries_with_pricing(
         })
         .collect::<Vec<_>>();
     summaries.sort_by_key(|(upstream_order, _)| *upstream_order);
-    summaries.into_iter().map(|(_, summary)| summary).collect()
+    PoolModelProjection {
+        models: summaries.into_iter().map(|(_, summary)| summary).collect(),
+        pricing_source: PricingSourceSummary::from_sources(price_sources),
+    }
 }
 
-/// Returns the provenance represented by the currently eligible pool models.
+/// Returns the provenance represented by the configured pool inventory.
 /// A snapshot can contain several source/account policies, so selecting the
 /// first model's source would be misleading; every resolved member contributes
 /// to the aggregate and mixed provenance is reported explicitly.
@@ -213,6 +236,7 @@ fn resolve_pool_model_price(
     model_id: &str,
     catalog: &PricingCatalog,
     context: &PricingContext,
+    price_sources: &mut Vec<PriceSource>,
 ) -> Option<ResolvedPrice> {
     let mut fallback = None;
     let mut resolved: Option<ResolvedPrice> = None;
@@ -222,6 +246,7 @@ fn resolve_pool_model_price(
         };
         let candidate = context.candidate_price(catalog, kind, candidate_id, Some(model_id));
         if let Some(candidate_quote) = candidate.quote {
+            price_sources.push(candidate.source);
             if let Some(mut current) = resolved {
                 let current_quote = current
                     .quote

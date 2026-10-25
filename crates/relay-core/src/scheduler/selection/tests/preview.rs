@@ -10,6 +10,18 @@ fn next(order: &[CandidateRuntimeSnapshot]) -> Option<&str> {
         .map(|candidate| candidate.candidate_id.as_str())
 }
 
+#[test]
+fn indexed_model_lookup_preserves_case_insensitive_fallback() {
+    let mut entry = candidate("synthetic-indexed-models");
+    entry.models = ["gpt-example", "MiXeD", "mödél"].map(str::to_string).into();
+    for model in ["gpt-example", "GPT-EXAMPLE", "MiXeD", "mixed", "mödél"] {
+        assert!(entry.supports_model(model), "{model}");
+    }
+    for model in ["missing", "gpt-example-extra", "MÖDÉL"] {
+        assert!(!entry.supports_model(model), "{model}");
+    }
+}
+
 // Reference the eager admission strategy, independent of the lazy preview loop.
 fn eager_preview(mut scheduler: PoolScheduler, now_ms: u64) -> Vec<String> {
     let scope = CandidateScope::default();
