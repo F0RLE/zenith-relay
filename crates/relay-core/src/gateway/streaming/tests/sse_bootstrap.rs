@@ -37,6 +37,42 @@ fn streaming_terminal_errors_keep_the_canonical_category() {
 }
 
 #[tokio::test]
+async fn only_an_explicit_prewarm_accepts_an_empty_successful_terminal() {
+    for prewarm in [false, true] {
+        for (terminal_type, response, valid) in [
+            (
+                "response.completed",
+                json!({"id":"resp_warmup","status":"completed","output":[],
+                    "usage":{"input_tokens":24,"output_tokens":0}}),
+                prewarm,
+            ),
+            (
+                "response.failed",
+                json!({"id":"resp_warmup","status":"failed","error":{
+                    "code":"invalid_request_error","message":"Synthetic failure"}}),
+                false,
+            ),
+        ] {
+            let event = format!(
+                "data: {}\n\n",
+                json!({"type":terminal_type,"response":response})
+            );
+            let (upstream, server) = response_from_sse_event(event).await;
+            let result = super::super::bootstrap::bootstrap_stream_impl(
+                upstream, None, false, 4096, prewarm,
+            )
+            .await;
+            server.await.unwrap();
+            assert_eq!(
+                result.is_ok(),
+                valid,
+                "prewarm={prewarm}, type={terminal_type}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn bootstrap_bounds_unfinished_events_and_setup_only_prefixes_without_retry() {
     let limit = 1024;
     for data in [
@@ -44,10 +80,11 @@ async fn bootstrap_bounds_unfinished_events_and_setup_only_prefixes_without_retr
         ": ping\n\n".repeat(limit),
     ] {
         let (upstream, server) = response_from_sse_event(data).await;
-        let failure = super::super::bootstrap::bootstrap_stream_impl(upstream, None, false, limit)
-            .await
-            .err()
-            .expect("setup buffer must be bounded");
+        let failure =
+            super::super::bootstrap::bootstrap_stream_impl(upstream, None, false, limit, false)
+                .await
+                .err()
+                .expect("setup buffer must be bounded");
         server.await.unwrap();
         assert_eq!(
             failure.failure.category,
@@ -66,9 +103,14 @@ async fn bootstrap_preserves_coalesced_bytes_beyond_the_prefix_budget() {
     let first = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"synthetic\"}\n\n";
     let input = first.repeat(10);
     let (upstream, server) = response_from_sse_event(input.clone()).await;
-    let result =
-        super::super::bootstrap::bootstrap_stream_impl(upstream, None, false, first.len() + 5)
-            .await;
+    let result = super::super::bootstrap::bootstrap_stream_impl(
+        upstream,
+        None,
+        false,
+        first.len() + 5,
+        false,
+    )
+    .await;
     server.await.unwrap();
     let (_, prefix, mut rest) = result.ok().expect("output within budget must stream");
     let mut forwarded = prefix.to_vec();

@@ -560,7 +560,7 @@ async fn catalog_continuation_rejects_replaced_incarnation_before_dispatch() {
         .unwrap();
     let budget = SharedRequestBudget::for_incoming_request(3);
     let result = runtime
-        .send_basis_points_catalog_continuation(
+        .send_catalog_continuation(
             &route,
             reqwest::Client::new()
                 .post(server.responses_url.clone())

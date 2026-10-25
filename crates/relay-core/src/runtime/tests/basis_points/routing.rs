@@ -379,6 +379,68 @@ async fn responses_routes_a_bps_only_model_without_sending_to_the_excluded_nativ
 }
 
 #[tokio::test]
+async fn websocket_http_handoff_keeps_the_selected_bps_account_in_a_mixed_pool() {
+    let bps = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+    let native = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+    bps.state.stream_generations.store(true, Ordering::SeqCst);
+    *crate::poison::mutex(&bps.state.generation_body) = json!({
+        "id":"resp_synthetic_bps_handoff","status":"completed","model":"gpt-test",
+        "output":[{"type":"message","role":"assistant","content":[{
+            "type":"output_text","text":"Synthetic reserved BPS answer"
+        }]}]
+    });
+    let mut runtime = retry_admission::pool_runtime(&bps, 1, true).await;
+    runtime
+        .chatgpt_accounts
+        .get_mut("synthetic-account-1")
+        .unwrap()
+        .responses_url = native.responses_url.clone();
+    let events = Arc::new(Mutex::new(Vec::<crate::UsageEvent>::new()));
+    let captured = events.clone();
+    runtime.usage = Arc::new(move |event| crate::poison::mutex(&captured).push(event));
+    let (base, task) = recovery::gateway(Arc::new(runtime)).await;
+    let mut socket = retry_admission::bounded_client()
+        .get(format!("{base}/v1/responses"))
+        .bearer_auth("local-secret")
+        .upgrade()
+        .send()
+        .await
+        .unwrap()
+        .into_websocket()
+        .await
+        .unwrap();
+    socket
+        .send(Message::Text(
+            json!({"type":"response.create","model":"gpt-test","input":"Synthetic input"})
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+    let terminal = tokio::time::timeout(Duration::from_secs(3), async {
+        while let Some(message) = socket.next().await {
+            if let Message::Text(text) = message.unwrap() {
+                let event: Value = serde_json::from_str(&text).unwrap();
+                if event["type"] == "response.completed" || event["type"] == "error" {
+                    return event;
+                }
+            }
+        }
+        panic!("mixed-pool socket closed without a terminal response");
+    })
+    .await
+    .unwrap();
+    assert_eq!(terminal["type"], "response.completed", "{terminal}");
+    assert_eq!(terminal["response"]["id"], "resp_synthetic_bps_handoff");
+    assert_eq!(bps.state.generation_requests.load(Ordering::SeqCst), 1);
+    assert_eq!(native.state.generation_requests.load(Ordering::SeqCst), 0);
+    let recorded = crate::poison::mutex(&events);
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].attempt, 1);
+    assert_eq!(recorded[0].transport, crate::UsageTransport::Websocket);
+    task.abort();
+}
+
+#[tokio::test]
 async fn websocket_routes_a_bps_only_model_through_http_without_trying_native_responses() {
     let bps = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
     let native = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;

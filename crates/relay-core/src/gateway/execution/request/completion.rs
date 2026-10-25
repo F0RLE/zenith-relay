@@ -438,18 +438,30 @@ async fn read_completed_body(
 ) -> Result<Vec<u8>, CompletionStep> {
     let expected_model = (read.account_route && read.runtime.block_degraded_routes_enabled())
         .then_some(read.route.source_model.as_str());
-    let collected =
-        if read.route.account_transport == crate::runtime::AccountTransport::ExcelBasisPoints {
-            super::super::super::response::collect_basis_points_response(
-                upstream,
-                expected_model,
-                read.started,
-                timing,
-            )
-            .await
-        } else {
-            collect_upstream_response(upstream, read.account_route, expected_model).await
-        };
+    let collected = if read.route.account_transport
+        == crate::runtime::AccountTransport::ExcelBasisPoints
+    {
+        super::super::super::response::collect_basis_points_response(
+            upstream,
+            expected_model,
+            read.started,
+            timing,
+        )
+        .await
+    } else if read.route.account_transport == crate::runtime::AccountTransport::Siwc
+        && (read.request.get("generate") == Some(&Value::Bool(false))
+            || read.request.pointer("/prompt_cache_options/prewarm") == Some(&Value::Bool(true)))
+    {
+        super::super::super::response::collect_upstream_response_with_prewarm(
+            upstream,
+            read.account_route,
+            expected_model,
+            true,
+        )
+        .await
+    } else {
+        collect_upstream_response(upstream, read.account_route, expected_model).await
+    };
     match collected {
         Ok(bytes) => Ok(bytes),
         Err(upstream_failure) => {

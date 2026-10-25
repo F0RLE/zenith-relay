@@ -4,6 +4,63 @@ use futures_util::{SinkExt, StreamExt};
 use reqwest_websocket::{Message, Upgrade};
 
 #[tokio::test]
+async fn siwc_defaults_missing_cache_keys_without_replacing_client_policy() {
+    for stream in [false, true] {
+        let siwc = AccessServer::start(json!([]), false).await;
+        let native = AccessServer::start(json!([]), false).await;
+        siwc.state.stream_generations.store(true, Ordering::SeqCst);
+        let runtime = runtime(&siwc, &native).await;
+        {
+            let mut scheduler = runtime.lock_scheduler();
+            let mut excluded = scheduler.candidate("synthetic-account-1").unwrap().clone();
+            excluded.model_rules.excluded.insert("gpt-test".into());
+            scheduler.upsert(excluded);
+        }
+        let (base, task) = recovery::gateway(runtime).await;
+        let client = retry_admission::bounded_client();
+        let mut generated_key = None;
+        for (turn, session) in ["synthetic-session", "synthetic-session", "other-session"]
+            .into_iter()
+            .enumerate()
+        {
+            let response = client
+                .post(format!("{base}/v1/responses"))
+                .bearer_auth("local-secret")
+                .header("x-codex-session-id", session)
+                .json(&json!({"model":"gpt-test","stream":stream,"input":[{
+                    "role":"user","content":"Synthetic input"
+                }],"prompt_cache_options":{"mode":"implicit","ttl":"30m"}}))
+                .send()
+                .await
+                .unwrap();
+            let status = response.status();
+            let text = response.text().await.unwrap();
+            assert_eq!(status, StatusCode::OK, "{text}");
+            let sent = crate::poison::mutex(&siwc.state.generation_bodies)[turn].clone();
+            let key = sent["prompt_cache_key"]
+                .as_str()
+                .expect("SIWC must receive the same scoped key as other account transports");
+            assert!(key.starts_with("relay_"));
+            assert!(!key.contains(session));
+            if turn == 0 {
+                generated_key = Some(key.to_owned());
+            } else if turn == 1 {
+                assert_eq!(Some(key), generated_key.as_deref());
+            } else {
+                assert_ne!(Some(key), generated_key.as_deref());
+            }
+            assert_eq!(
+                sent["prompt_cache_options"],
+                json!({"mode":"implicit","ttl":"30m"})
+            );
+            assert_eq!(sent["store"], false);
+            assert_eq!(sent["stream"], true);
+        }
+        task.abort();
+    }
+}
+
+#[tokio::test]
 async fn siwc_preserves_append_only_tool_prefix_and_reports_cache_context_without_prompts() {
     for debug in [false, true] {
         for stream in [false, true] {
@@ -195,6 +252,7 @@ async fn siwc_websocket_http_bridge_keeps_cache_context_across_tool_history() {
         .await
         .unwrap();
     let mut input = json!([{"role":"user","content":"Synthetic first turn"}]);
+    let mut generated_key = None;
     for turn in 0..2 {
         socket
             .send(Message::Text(
@@ -231,6 +289,14 @@ async fn siwc_websocket_http_bridge_keeps_cache_context_across_tool_history() {
             native.state.generation_requests.load(Ordering::SeqCst)
         );
         let sent = crate::poison::mutex(&siwc.state.generation_bodies)[turn].clone();
+        let key = sent["prompt_cache_key"]
+            .as_str()
+            .expect("the SIWC WebSocket bridge needs a stable scoped cache key");
+        if turn == 0 {
+            generated_key = Some(key.to_owned());
+        } else {
+            assert_eq!(Some(key), generated_key.as_deref());
+        }
         if turn == 0 {
             assert!(sent.get("prompt_cache_options").is_none());
         } else {

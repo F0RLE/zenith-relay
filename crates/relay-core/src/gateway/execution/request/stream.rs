@@ -115,6 +115,15 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
         .then_some(route.source_model.as_str());
     let opened = if basis_points_request.is_some() {
         crate::gateway::streaming::bootstrap_basis_points_stream(upstream, expected_model).await
+    } else if route.account_transport == crate::runtime::AccountTransport::Siwc
+        && adapter_request
+            .upstream_body()
+            .pointer("/prompt_cache_options/prewarm")
+            == Some(&Value::Bool(true))
+    {
+        // A requested warmup deliberately has no generated output. Do not
+        // misclassify its successful terminal as a broken generation stream.
+        crate::gateway::streaming::bootstrap_prewarm_stream(upstream, expected_model).await
     } else {
         bootstrap_stream(upstream, expected_model).await
     };
@@ -331,7 +340,7 @@ fn respond_opened_stream(
     discovery: Option<super::super::basis_points::discovery::execution::StreamingDiscovery>,
 ) -> OpenedStream {
     let account_route = execution.route.account_id.is_some();
-    let mut stream_response = if basis_points_request.is_some() {
+    let mut stream_response = if basis_points_request.is_some() || discovery.is_some() {
         execution.into_response_with_basis_points(
             status,
             headers.clone(),

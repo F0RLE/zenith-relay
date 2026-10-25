@@ -4,7 +4,7 @@ use super::super::super::execution::AttemptRepairs;
 use super::super::*;
 use super::drive::{drive_selected_candidate, DriveCandidateInput, DrivenConnect};
 use super::selection_gap::{recover_without_candidate, GapAction, SelectionGap};
-use super::Connected;
+use super::ConnectedTransport;
 
 pub(super) async fn connect_upstream(
     runtime: &GatewayRuntime,
@@ -13,7 +13,7 @@ pub(super) async fn connect_upstream(
     mut request: ClientRequest,
     allow_previous_response_reset: bool,
     attempt_offset: u16,
-) -> Result<Connected, GatewayFailure> {
+) -> Result<ConnectedTransport, GatewayFailure> {
     let mut tried = HashSet::new();
     let mut attempt = attempt_offset;
     let mut confirmed_response_missing = false;
@@ -113,7 +113,10 @@ pub(super) async fn connect_upstream(
                 request = returned;
                 break;
             }
-            DrivenConnect::Ready(connected) => return Ok(connected),
+            DrivenConnect::Ready(connected) => {
+                return Ok(ConnectedTransport::Websocket(Box::new(connected)));
+            }
+            DrivenConnect::Http(fallback) => return Ok(ConnectedTransport::Http(fallback)),
         }
     }
 

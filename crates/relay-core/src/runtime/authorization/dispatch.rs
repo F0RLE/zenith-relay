@@ -46,14 +46,16 @@ impl GatewayRuntime {
 
     /// Continue a completed read-only catalog lookup on its exact OAuth
     /// incarnation. No fallback, owner switch, or authorization replay occurs.
-    pub(crate) async fn send_basis_points_catalog_continuation(
+    pub(crate) async fn send_catalog_continuation(
         &self,
         route: &crate::runtime::ExecutorRoute,
         request: reqwest::RequestBuilder,
         dispatch: AuthorizationDispatch<'_>,
         expected: &AuthorizationIncarnation,
     ) -> std::result::Result<AuthorizedResponse, AuthorizedRequestError> {
-        if !self.is_basis_points_account(&route.candidate_id) {
+        if !self.is_basis_points_account(&route.candidate_id)
+            && !self.is_siwc_account(&route.candidate_id)
+        {
             return Err(AuthorizedRequestError::NotReplayable);
         }
         self.send_authorized_request_with_binding(

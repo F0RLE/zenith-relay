@@ -195,6 +195,14 @@ pub(super) fn prepare_account_attempt(
                 Some(request_id),
             ));
         }
+        crate::gateway::request::apply_account_prompt_cache_key(
+            upstream_body
+                .as_object_mut()
+                .expect("validated SIWC request"),
+            &key.id,
+            resolved_model,
+            client_context_id.as_deref(),
+        );
     }
     let mut preparation = RequestPreparationDiagnostics::default();
     if basis_points_route {

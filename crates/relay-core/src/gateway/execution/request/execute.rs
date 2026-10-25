@@ -46,6 +46,7 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
         budget,
         transport,
         transport_fallback,
+        mut reserved_candidate,
     } = context;
     let mut tried: HashSet<String> = Default::default();
     // Local preparation failures belong to this request, not provider health.
@@ -154,20 +155,34 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
         if admission_error.is_some() {
             last_adapter_error = admission_error;
         }
-        let selected = runtime
-            .select_and_reserve_with_budget(
-                &key,
-                &resolved_model,
-                candidate_protocols(client_wire_api),
-                &selection_exclusions,
-                (
-                    response_affinity_key.as_deref(),
-                    prompt_affinity_key.as_deref(),
-                ),
-                now_ms(),
-                &budget,
-            )
-            .await;
+        // Revalidate HTTP compatibility and identity, but keep the existing
+        // reservation. Releasing it and selecting again advances rotation twice
+        // and can silently move an HTTP-only account to another pool member.
+        // The normal dispatch fence still checks live scope and lease revisions.
+        let reserved = reserved_candidate.take().filter(|reserved| {
+            reserved.local_key_id == key.id
+                && reserved.model == resolved_model
+                && !selection_exclusions.contains(&reserved.selection.candidate_id)
+                && admitted.contains_key(&reserved.selection.candidate_id)
+        });
+        let selected = if let Some(reserved) = reserved {
+            Some((reserved.selection, reserved.lease))
+        } else {
+            runtime
+                .select_and_reserve_with_budget(
+                    &key,
+                    &resolved_model,
+                    candidate_protocols(client_wire_api),
+                    &selection_exclusions,
+                    (
+                        response_affinity_key.as_deref(),
+                        prompt_affinity_key.as_deref(),
+                    ),
+                    now_ms(),
+                    &budget,
+                )
+                .await
+        };
         let Some((selected, lease)) = selected else {
             release_encrypted_context_repair_owner(
                 &mut repairs,
@@ -354,6 +369,7 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
                 budget,
                 transport,
                 transport_fallback,
+                reserved_candidate: None,
             }))
             .await;
         }

@@ -118,6 +118,7 @@ impl GatewayRuntime {
         upstream: &Value,
         now_ms: u64,
     ) {
+        self.bind_response_tool_ownership(local_key_id, candidate_id, model, upstream, now_ms);
         let materialized_request = request
             .get("previous_response_id")
             .and_then(Value::as_str)

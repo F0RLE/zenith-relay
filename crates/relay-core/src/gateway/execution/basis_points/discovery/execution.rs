@@ -145,7 +145,7 @@ pub(in crate::gateway::execution) async fn resolve(
     if context.allow_streaming
         && streamed
         && original.get("stream").and_then(Value::as_bool) == Some(true)
-        && !requires_buffering(original)
+        && (session.is_native() || !requires_buffering(original))
     {
         return Ok(DiscoveryResponse {
             response: first.response,
@@ -174,7 +174,11 @@ pub(in crate::gateway::execution) async fn resolve(
             .then_some(context.route.source_model.as_str());
         let raw = match crate::transport::collect_with_progress_limit(
             response,
-            crate::transport::basis_points_progress_timeout(),
+            if session.is_native() {
+                None
+            } else {
+                crate::transport::basis_points_progress_timeout()
+            },
             MAX_RESPONSE_BYTES,
             |frame| crate::gateway::response::stop_basis_points_event(frame, expected_model),
         )
@@ -266,6 +270,9 @@ pub(in crate::gateway::execution) async fn resolve(
             ));
         }
         emit_usage(context.runtime, event.clone());
+        if session.is_native() {
+            super::native::capture_wire_catalog(context.tool_use, &upstream);
+        }
         context
             .budget
             .retain_input_bytes(crate::gateway::request_body::retained_request_bytes(
@@ -311,12 +318,18 @@ pub(in crate::gateway) async fn dispatch_continuation(
     owner: &crate::runtime::AuthorizationIncarnation,
     upstream: &Value,
 ) -> Result<AuthorizedResponse, crate::runtime::AuthorizedRequestError> {
+    let basis_points =
+        route.account_transport == crate::runtime::AccountTransport::ExcelBasisPoints;
     runtime.observe_basis_points_dispatch(route, upstream);
     let body = serde_json::to_vec(upstream).expect("prepared JSON is serializable");
     let payload = route.diagnostics_enabled.then(|| {
         crate::usage::RequestPayloadDiagnostics::identity(
             &body,
-            crate::usage::TransportMode::BasisPoints,
+            if basis_points {
+                crate::usage::TransportMode::BasisPoints
+            } else {
+                crate::usage::TransportMode::Native
+            },
         )
     });
     let request = runtime
@@ -334,7 +347,7 @@ pub(in crate::gateway) async fn dispatch_continuation(
         )
         .body(body);
     let mut response = runtime
-        .send_basis_points_catalog_continuation(
+        .send_catalog_continuation(
             route,
             request,
             AuthorizationDispatch {
@@ -348,7 +361,7 @@ pub(in crate::gateway) async fn dispatch_continuation(
             owner,
         )
         .await?;
-    // This BPS body is not compressed or rewritten by native Codex guards.
+    // Catalog continuations are not compressed or rewritten by Codex guards.
     if let Some(payload) = payload {
         response.response.extensions_mut().insert(payload);
     }

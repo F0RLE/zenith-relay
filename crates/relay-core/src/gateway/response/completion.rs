@@ -118,6 +118,15 @@ pub(in crate::gateway) async fn collect_upstream_response(
     account_stream: bool,
     expected_model: Option<&str>,
 ) -> Result<Vec<u8>, Box<StreamBootstrapFailure>> {
+    collect_upstream_response_with_prewarm(upstream, account_stream, expected_model, false).await
+}
+
+pub(in crate::gateway) async fn collect_upstream_response_with_prewarm(
+    upstream: reqwest::Response,
+    account_stream: bool,
+    expected_model: Option<&str>,
+    prewarm: bool,
+) -> Result<Vec<u8>, Box<StreamBootstrapFailure>> {
     let is_sse = upstream
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -129,8 +138,11 @@ pub(in crate::gateway) async fn collect_upstream_response(
                 .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
         });
     let bytes = if is_sse && account_stream {
-        let (_, first, mut remaining) =
-            super::super::streaming::bootstrap_stream(upstream, expected_model).await?;
+        let (_, first, mut remaining) = if prewarm {
+            super::super::streaming::bootstrap_prewarm_stream(upstream, expected_model).await?
+        } else {
+            super::super::streaming::bootstrap_stream(upstream, expected_model).await?
+        };
         let mut bytes = first.to_vec();
         let mut inspected = 0;
         loop {

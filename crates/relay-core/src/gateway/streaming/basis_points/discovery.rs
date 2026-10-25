@@ -105,10 +105,13 @@ struct DiscoveryStream {
     sse: bool,
     status: StatusCode,
     headers: HeaderMap,
+    sequence: u64,
 }
 
 impl DiscoveryStream {
     fn emit(&mut self, mut event: Value) {
+        event["sequence_number"] = json!(self.sequence);
+        self.sequence += 1;
         if let Some(index) = event.get_mut("output_index") {
             if let Some(local) = index.as_u64() {
                 *index = json!(local + self.offset as u64);
@@ -324,6 +327,16 @@ impl DiscoveryStream {
                 terminal["id"] = json!(id);
             }
             self.update_progress();
+            if self.discovery.session.is_native() {
+                // There is no BPS envelope translator after native discovery.
+                // Flush withheld client calls only after validating the entire
+                // terminal, preserving indexes of text already streamed.
+                let seen = (0..self.offset)
+                    .chain(self.seen.iter().map(|index| index + self.offset))
+                    .collect();
+                self.offset = 0;
+                emit_unseen_output(&terminal, &seen, |event| self.emit(event));
+            }
             // This is the only terminal exposed to BPS validation. Its tools
             // are still withheld by the existing translator until all validate.
             let kind = if terminal["status"] == "incomplete" {
@@ -361,6 +374,12 @@ impl DiscoveryStream {
                 .into());
         }
         emit_usage(&self.settlement.runtime, event);
+        if self.discovery.session.is_native() {
+            crate::gateway::execution::basis_points::discovery::native::capture_wire_catalog(
+                &mut self.tool_use,
+                &self.discovery.upstream,
+            );
+        }
         self.discovery.budget.retain_input_bytes(
             crate::gateway::request_body::retained_request_bytes(&self.discovery.upstream),
         );
@@ -428,7 +447,11 @@ impl DiscoveryStream {
                         (_, _, chunk) => chunk,
                     }),
             ),
-            crate::transport::basis_points_progress_timeout(),
+            if self.discovery.session.is_native() {
+                None
+            } else {
+                crate::transport::basis_points_progress_timeout()
+            },
         );
         self.raw.clear();
         self.received_bytes = 0;
@@ -472,6 +495,7 @@ pub(in crate::gateway::streaming) fn translate_stream(
         sse: true,
         status: StatusCode::OK,
         headers: HeaderMap::new(),
+        sequence: 0,
     };
     if let Err(error) = state.ingest(first) {
         state.reject(error.into());

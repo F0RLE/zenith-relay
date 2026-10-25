@@ -59,6 +59,7 @@ pub(in crate::gateway) async fn bootstrap_stream(
         expected_model,
         false,
         crate::protocol::sse::MAX_EVENT_BYTES,
+        false,
     )
     .await
 }
@@ -72,6 +73,21 @@ pub(in crate::gateway) async fn bootstrap_basis_points_stream(
         expected_model,
         true,
         crate::protocol::sse::MAX_EVENT_BYTES,
+        false,
+    )
+    .await
+}
+
+pub(in crate::gateway) async fn bootstrap_prewarm_stream(
+    upstream: reqwest::Response,
+    expected_model: Option<&str>,
+) -> Result<(reqwest::header::HeaderMap, Bytes, UpstreamStream), Box<StreamBootstrapFailure>> {
+    bootstrap_stream_impl(
+        upstream,
+        expected_model,
+        false,
+        crate::protocol::sse::MAX_EVENT_BYTES,
+        true,
     )
     .await
 }
@@ -81,6 +97,7 @@ pub(super) async fn bootstrap_stream_impl(
     expected_model: Option<&str>,
     basis_points: bool,
     max_buffered_bytes: usize,
+    prewarm: bool,
 ) -> Result<(reqwest::header::HeaderMap, Bytes, UpstreamStream), Box<StreamBootstrapFailure>> {
     let headers = upstream.headers().clone();
     let mut stream: UpstreamStream = Box::pin(upstream.bytes_stream());
@@ -181,16 +198,17 @@ pub(super) async fn bootstrap_stream_impl(
                     // does not prove that generation was never accepted.
                     // Its execution stays unknown, so no automatic retry is safe.
                     // A non-empty incomplete response belongs to the client.
-                    if event
-                        .event_payload
-                        .as_ref()
-                        .is_some_and(|terminal_payload| {
-                            is_empty_responses_terminal(
-                                terminal_payload,
-                                saw_output,
-                                completed_output_items,
-                            )
-                        })
+                    if !(prewarm && event.outcome == Some(TerminalOutcome::Success))
+                        && event
+                            .event_payload
+                            .as_ref()
+                            .is_some_and(|terminal_payload| {
+                                is_empty_responses_terminal(
+                                    terminal_payload,
+                                    saw_output,
+                                    completed_output_items,
+                                )
+                            })
                     {
                         return Err(Box::new(StreamBootstrapFailure {
                             partial_body: buffered,

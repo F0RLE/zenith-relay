@@ -1,6 +1,9 @@
 use super::*;
 
 mod cache_context;
+mod catalog;
+mod continuation;
+mod warmup;
 
 async fn runtime(siwc: &AccessServer, native: &AccessServer) -> Arc<GatewayRuntime> {
     let mut runtime = retry_admission::pool_runtime(siwc, 1, true).await;

@@ -37,6 +37,7 @@ pub(super) struct RequestDispatchInput<'a> {
     pub(super) reasoning_effort: &'a ReasoningEffortDiagnostics,
     pub(super) tool_use: &'a mut ToolUseDiagnostics,
     pub(super) basis_points_request: Option<&'a Value>,
+    pub(super) siwc_catalog_request: Option<&'a Value>,
     pub(super) request_id: &'a str,
     pub(super) requested_model: &'a str,
     pub(super) forwarded_headers: &'a HeaderMap,
@@ -69,6 +70,7 @@ pub(super) async fn dispatch_request_attempt(
         reasoning_effort,
         tool_use,
         basis_points_request,
+        siwc_catalog_request,
         request_id,
         requested_model,
         forwarded_headers,
@@ -107,37 +109,63 @@ pub(super) async fn dispatch_request_attempt(
         discovery_body = Some(body);
         discovery_session = session;
     }
-    if basis_points_request.is_some() {
+    if let Some(original) = siwc_catalog_request {
+        match super::super::basis_points::discovery::native::prepare_dispatch(
+            original,
+            adapter_request.upstream_body(),
+            budget,
+            tool_use,
+        ) {
+            Ok((mut body, session)) => {
+                if let Some(observation) = route.cache_context_observation.clone() {
+                    runtime.observe_cache_context(&observation, &mut route, &mut body);
+                }
+                tool_use.capture_upstream_context(&body);
+                discovery_body = Some(body);
+                discovery_session = session;
+            }
+            Err(error) => {
+                return RequestDispatch::Respond(super::adapter_error_response_for_origin(
+                    error,
+                    selected_error_origin,
+                    Some(request_id),
+                ))
+            }
+        }
+    }
+    if basis_points_request.is_some() || siwc_catalog_request.is_some() {
         preparation.catalog_ms = catalog_started.map(|start| start.elapsed().as_millis() as u64);
     }
     let attachments_started = preparation_started.map(|_| Instant::now());
     let request_body = if let Some(body) = discovery_body.as_mut() {
-        match super::super::basis_points::attach_input_images(
-            runtime,
-            &route.candidate_id,
-            &route.upstream_url,
-            &route.upstream_headers,
-            body,
-        )
-        .await
-        {
-            Ok(()) => {}
-            Err(super::super::basis_points::AttachmentFailure::Reject(failure)) => {
-                return RequestDispatch::Respond(attempt_error_response(
-                    failure,
-                    None,
-                    selected_error_origin,
-                    request_id,
-                ));
+        if basis_points_route {
+            match super::super::basis_points::attach_input_images(
+                runtime,
+                &route.candidate_id,
+                &route.upstream_url,
+                &route.upstream_headers,
+                body,
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(super::super::basis_points::AttachmentFailure::Reject(failure)) => {
+                    return RequestDispatch::Respond(attempt_error_response(
+                        failure,
+                        None,
+                        selected_error_origin,
+                        request_id,
+                    ));
+                }
+                Err(super::super::basis_points::AttachmentFailure::Retry(failure)) => {
+                    *last_failure = Some(failure);
+                    *last_failure_origin = selected_error_origin;
+                    return RequestDispatch::Continue;
+                }
             }
-            Err(super::super::basis_points::AttachmentFailure::Retry(failure)) => {
-                *last_failure = Some(failure);
-                *last_failure_origin = selected_error_origin;
-                return RequestDispatch::Continue;
-            }
+            preparation.attachments_ms =
+                attachments_started.map(|start| start.elapsed().as_millis() as u64);
         }
-        preparation.attachments_ms =
-            attachments_started.map(|start| start.elapsed().as_millis() as u64);
         let encoding_started = preparation_started.map(|_| Instant::now());
         let encoded = serde_json::to_vec(body).expect("prepared JSON is serializable");
         if let (Some(catalog_ms), Some(start)) = (&mut preparation.catalog_ms, encoding_started) {
@@ -147,7 +175,7 @@ pub(super) async fn dispatch_request_attempt(
     } else {
         request_body.expect("non-BPS requests are serialized during preparation")
     };
-    if let Some(body) = discovery_body.as_ref() {
+    if let Some(body) = discovery_body.as_ref().filter(|_| basis_points_route) {
         runtime.observe_basis_points_dispatch(&route, body);
     }
     let upstream_stream = stream || (account_route && !basis_points_route);
@@ -257,7 +285,10 @@ pub(super) async fn dispatch_request_attempt(
                 upstream.response.headers(),
                 started.elapsed().as_millis() as u64,
             );
-            if let (Some(original), Some(body)) = (basis_points_request, discovery_body) {
+            if let (Some(original), Some(body)) = (
+                basis_points_request.or(siwc_catalog_request),
+                discovery_body,
+            ) {
                 match super::super::basis_points::discovery::resolve(
                     upstream,
                     original,

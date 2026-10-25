@@ -7,6 +7,68 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
 impl GatewayRuntime {
+    /// Remember only hashed call ownership, even when full history cannot be
+    /// materialized or retained. This is volatile and shares its bounded
+    /// TTL store with route ownership; it never authorizes a different route.
+    pub(super) fn bind_response_tool_ownership(
+        &self,
+        local_key_id: &str,
+        candidate_id: &str,
+        model: &str,
+        upstream: &Value,
+        now_ms: u64,
+    ) {
+        let response = upstream
+            .pointer("/response/response")
+            .or_else(|| upstream.get("response"))
+            .unwrap_or(upstream);
+        if crate::protocol::completion::ResponseCompletion::from_body(response)
+            != crate::protocol::completion::ResponseCompletion::Completed
+        {
+            return;
+        }
+        let Some(response_id) = response.get("id").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(scope) =
+            response_tool_ownership_scope(local_key_id, response_id, candidate_id, model)
+        else {
+            return;
+        };
+        let calls: Vec<_> = response
+            .get("output")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|item| {
+                matches!(
+                    item.get("type").and_then(Value::as_str),
+                    Some("function_call" | "custom_tool_call")
+                )
+            })
+            .filter_map(|item| item.get("call_id").and_then(Value::as_str))
+            .filter(|id| !id.trim().is_empty() && id.len() <= 256)
+            .take(1_024)
+            .collect();
+        let mut ownership = crate::poison::mutex(&self.response_route_affinity);
+        if calls.is_empty() && ownership.get(&scope, now_ms).is_none() {
+            return;
+        }
+        // A reused response ID replaces its call set instead of accumulating
+        // stale permissions from an older response with the same identifier.
+        let mut digest = Sha256::new();
+        for call_id in &calls {
+            digest.update((call_id.len() as u64).to_be_bytes());
+            digest.update(call_id.as_bytes());
+        }
+        let generation = hex::encode(digest.finalize());
+        ownership.bind(scope.clone(), generation.clone(), now_ms);
+        for call_id in calls {
+            let key = response_tool_ownership_key(&scope, &generation, call_id);
+            ownership.bind(key, "observed", now_ms);
+        }
+    }
+
     fn continuation_route_fingerprint(&self, route: &ExecutorRoute) -> Option<String> {
         let mut digest = Sha256::new();
         let url = if route.account_id.is_none() {
@@ -118,6 +180,13 @@ impl GatewayRuntime {
         {
             return;
         }
+        self.bind_response_tool_ownership(
+            local_key_id,
+            &route.candidate_id,
+            &route.source_model,
+            &response.response_body,
+            now_ms,
+        );
         self.bind_response_route_affinity(Some(&response.response_id), route, now_ms);
         if let Some(key) = response.continuation.history_key() {
             self.bind_response_route_affinity(Some(key), route, now_ms);
@@ -223,6 +292,27 @@ impl GatewayRuntime {
                     .is_some_and(|owner| owner != fingerprint)
                     && !paired_tool_results.contains(call_id)
                 {
+                    if predecessor_route_validated
+                        && previous
+                            .and_then(|previous| {
+                                response_tool_ownership_scope(
+                                    local_key_id,
+                                    previous,
+                                    &route.candidate_id,
+                                    &route.source_model,
+                                )
+                            })
+                            .is_some_and(|scope| {
+                                let mut ownership =
+                                    crate::poison::mutex(&self.response_route_affinity);
+                                let key = ownership.get(&scope, now_ms).map(|generation| {
+                                    response_tool_ownership_key(&scope, generation, call_id)
+                                });
+                                key.is_some_and(|key| ownership.get(&key, now_ms).is_some())
+                            })
+                    {
+                        continue;
+                    }
                     // Provider call IDs can collide across conversations. A
                     // caller-scoped predecessor with this exact route remains
                     // authoritative only if its retained history proves the
@@ -279,6 +369,33 @@ impl GatewayRuntime {
         }
         Ok(())
     }
+}
+
+fn response_tool_ownership_scope(
+    local_key_id: &str,
+    response_id: &str,
+    candidate_id: &str,
+    model: &str,
+) -> Option<String> {
+    if local_key_id.is_empty() || response_id.trim().is_empty() {
+        return None;
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"relay-response-tools-v1");
+    for part in [local_key_id, response_id, candidate_id, model] {
+        digest.update((part.len() as u64).to_be_bytes());
+        digest.update(part.as_bytes());
+    }
+    Some(format!("response-tools:{}", hex::encode(digest.finalize())))
+}
+
+fn response_tool_ownership_key(scope: &str, generation: &str, call_id: &str) -> String {
+    let mut digest = Sha256::new();
+    for part in [scope, generation, call_id] {
+        digest.update((part.len() as u64).to_be_bytes());
+        digest.update(part.as_bytes());
+    }
+    format!("response-tool:{}", hex::encode(digest.finalize()))
 }
 
 fn tool_result_ids(request: &Value, client: WireApi) -> Vec<&str> {

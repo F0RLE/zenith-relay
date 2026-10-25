@@ -3,7 +3,7 @@ use super::errors::{
     apply_failure_state, current_failure_state, rate_limit_body_hint, settle_classified_failure,
     RateLimitBodyHint,
 };
-use super::execution::{execute_client_request, wait_for_recovery, CandidateRetryContext};
+use super::execution::{execute_reserved_client_request, wait_for_recovery, CandidateRetryContext};
 use super::execution::{repair_responses_item_prefixes, ResponsesItemPrefixRepairs};
 use super::now_ms;
 use super::request::{
@@ -52,9 +52,12 @@ use fallback::{
     fallback_event_message, fallback_response_origin, RELAY_ERROR_ORIGIN_HEADER,
     RELAY_UPSTREAM_ORIGIN_HEADER,
 };
-use upstream::connect_upstream_while_client_connected;
 #[cfg(test)]
 use upstream::initial_payloads_are_empty_incomplete;
+use upstream::{
+    connect_transport_while_client_connected, connect_upstream_while_client_connected,
+    ConnectedTransport,
+};
 
 use events::{
     event_terminal, incomplete_requires_cooldown, incomplete_status, resolved_terminal_failure,
@@ -162,11 +165,12 @@ async fn handle_connection(
             headers,
             fallback_request,
             crate::usage::TransportFallbackReason::WebsocketDisabled,
+            None,
         )
         .await;
         return;
     }
-    let connected = match connect_upstream_while_client_connected(
+    let connected = match connect_transport_while_client_connected(
         &mut downstream,
         &runtime,
         &key,
@@ -177,7 +181,20 @@ async fn handle_connection(
     )
     .await
     {
-        Ok(connected) => connected,
+        Ok(ConnectedTransport::Websocket(connected)) => *connected,
+        Ok(ConnectedTransport::Http(fallback)) => {
+            bridge_http_fallback(
+                downstream,
+                runtime,
+                key,
+                headers,
+                fallback.request,
+                crate::usage::TransportFallbackReason::WebsocketUnavailable,
+                Some(fallback.reserved_candidate),
+            )
+            .await;
+            return;
+        }
         Err(failure)
             if matches!(
                 failure.category,
@@ -198,6 +215,7 @@ async fn handle_connection(
                 headers,
                 fallback_request,
                 fallback_reason,
+                None,
             )
             .await;
             return;

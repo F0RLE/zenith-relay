@@ -121,14 +121,16 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
         allow_previous_response_reset,
         confirmed_response_missing,
     } = drive_input;
-    if route.account_transport == AccountTransport::ExcelBasisPoints
-        && route.adapter.is_passthrough()
+    if matches!(
+        route.account_transport,
+        AccountTransport::ExcelBasisPoints | AccountTransport::Siwc
+    ) && route.adapter.is_passthrough()
         && client_wire_api == WireApi::Responses
         && has_previous_response_id
     {
-        // BPS has no provider-side response store. Admission has already
-        // checked this predecessor's exact owner; materialize its bounded
-        // local history before preparation, not after excluding that owner.
+        // BPS and SIWC HTTP have no provider-side response store. Admission
+        // has already checked this predecessor's exact owner; materialize
+        // its bounded history before preparation, including WS-to-HTTP turns.
         let started = Instant::now();
         let replay = replay_native_tool_continuation(
             runtime,
@@ -217,6 +219,7 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
         summarize,
         adapter_request,
         basis_points_request,
+        siwc_catalog_request,
         reasoning_effort,
         adapter_is_passthrough,
         request_body,
@@ -242,6 +245,7 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
         reasoning_effort: &reasoning_effort,
         tool_use: &mut tool_use,
         basis_points_request: basis_points_request.as_ref(),
+        siwc_catalog_request: siwc_catalog_request.as_ref(),
         request_id: &request_id,
         requested_model: &requested_model,
         forwarded_headers,

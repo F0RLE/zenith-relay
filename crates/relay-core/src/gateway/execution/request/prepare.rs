@@ -25,6 +25,7 @@ pub(super) struct PreparedRequestAttempt {
     pub(super) summarize: bool,
     pub(super) adapter_request: PreparedAdapterRequest,
     pub(super) basis_points_request: Option<Value>,
+    pub(super) siwc_catalog_request: Option<Value>,
     pub(super) reasoning_effort: ReasoningEffortDiagnostics,
     pub(super) adapter_is_passthrough: bool,
     /// BPS is encoded only after catalog preparation and image resolution.
@@ -187,12 +188,28 @@ pub(super) fn prepare_request_attempt(
     if let Some(step) = apply_prepared_tool_policy(tool_policy, &mut adapter_request) {
         return step;
     }
+    let siwc_catalog_request = (siwc_route
+        && !should_summarize
+        && super::super::basis_points::discovery::native::eligible(
+            adapter_request.upstream_body(),
+        ))
+    .then(|| adapter_request.upstream_body().clone());
     if siwc_route {
         if let Err(error) =
             crate::providers::chatgpt::prepare_siwc_request(adapter_request.upstream_body_mut())
         {
             return RequestPrepare::Respond(super::adapter_error_response(error, Some(request_id)));
         }
+        // SIWC skips Codex normalization, not the shared account cache-key policy.
+        crate::gateway::request::apply_account_prompt_cache_key(
+            adapter_request
+                .upstream_body_mut()
+                .as_object_mut()
+                .expect("validated SIWC request"),
+            &key.id,
+            resolved_model,
+            client_context_id.as_deref(),
+        );
     }
     let mut preparation = RequestPreparationDiagnostics::default();
     let basis_points_request = if basis_points_route {
@@ -247,6 +264,7 @@ pub(super) fn prepare_request_attempt(
         summarize: should_summarize,
         adapter_request,
         basis_points_request,
+        siwc_catalog_request,
         reasoning_effort,
         adapter_is_passthrough,
         request_body,

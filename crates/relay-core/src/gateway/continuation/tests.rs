@@ -140,6 +140,87 @@ fn gemini_continuations_keep_the_original_owner_caller_model_and_contents() {
 }
 
 #[test]
+fn owned_predecessor_disambiguates_reused_call_ids_without_materialized_replay() {
+    let runtime = runtime();
+    let route = |id| {
+        runtime
+            .executor_route(
+                id,
+                "model",
+                &Default::default(),
+                &[WireApi::Responses],
+                false,
+            )
+            .unwrap()
+    };
+    let owner = route("source");
+    let other = route("other-source");
+    let initial = json!({"input":[
+        // Provider-owned references cannot become a self-contained local replay.
+        {"type":"item_reference","id":"synthetic-provider-owned-item"},
+        {"type":"reasoning","encrypted_content":"opaque-synthetic-state","summary":[]},
+        {"role":"user","content":"Synthetic request"}
+    ]});
+    let response = json!({"id":"resp_encrypted_owner","status":"completed","output":[{
+        "type":"function_call","call_id":"call_reused","name":"lookup","arguments":"{}"
+    }]});
+    runtime.capture_native_responses_replay("key", "source", &initial, "model", &response, 10);
+    assert!(
+        runtime
+            .load_native_responses_replay("key", "resp_encrypted_owner", "source", 10)
+            .is_none(),
+        "provider-owned references must not become portable replay"
+    );
+    runtime.bind_response_route_affinity(Some("resp_encrypted_owner"), &owner, 10);
+    runtime.bind_tool_call_route_affinity("key", "call_reused", &other, 11);
+    runtime.bind_tool_call_route_affinity("other-key", "call_reused", &other, 11);
+    let mut request = json!({"model":"model","previous_response_id":"resp_encrypted_owner",
+        "input":[{"type":"function_call_output","call_id":"call_reused","output":"Synthetic result"}]});
+    assert!(runtime
+        .validate_continuation_route(&owner, "key", &request, 12)
+        .is_ok());
+    assert!(runtime
+        .validate_continuation_route(&other, "key", &request, 12)
+        .is_err());
+    assert!(runtime
+        .validate_continuation_route(&owner, "other-key", &request, 12)
+        .is_err());
+    let mut other_model = owner.clone();
+    other_model.source_model = "other-model".into();
+    assert!(runtime
+        .validate_continuation_route(&other_model, "key", &request, 12)
+        .is_err());
+    request["input"][0]["call_id"] = json!("call_foreign");
+    runtime.bind_tool_call_route_affinity("key", "call_foreign", &other, 11);
+    assert!(runtime
+        .validate_continuation_route(&owner, "key", &request, 12)
+        .is_err());
+
+    request["input"][0]["call_id"] = json!("call_reused");
+    let mut replacement = response.clone();
+    replacement["output"][0]["call_id"] = json!("call_replacement");
+    runtime.capture_native_responses_replay("key", "source", &initial, "model", &replacement, 13);
+    assert!(
+        runtime
+            .validate_continuation_route(&owner, "key", &request, 14)
+            .is_err(),
+        "a reused response ID must not accumulate tool-call permissions"
+    );
+    runtime.capture_native_responses_replay("key", "source", &initial, "model", &response, 15);
+    assert!(runtime
+        .validate_continuation_route(&owner, "key", &request, 16)
+        .is_ok());
+
+    // Renewing route hints must not revive expired call-ownership evidence.
+    let expired = crate::RESPONSE_AFFINITY_TTL_MS + 16;
+    runtime.bind_response_route_affinity(Some("resp_encrypted_owner"), &owner, expired);
+    runtime.bind_tool_call_route_affinity("key", "call_reused", &other, expired);
+    assert!(runtime
+        .validate_continuation_route(&owner, "key", &request, expired)
+        .is_err());
+}
+
+#[test]
 fn saved_predecessor_disambiguates_a_reused_tool_call_id() {
     let runtime = runtime();
     let route = |id| {

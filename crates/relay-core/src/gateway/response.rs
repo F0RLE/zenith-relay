@@ -3,7 +3,8 @@ mod http;
 mod usage;
 
 pub(in crate::gateway) use completion::{
-    collect_basis_points_response, stop_basis_points_event, BufferedResponseTiming,
+    collect_basis_points_response, collect_upstream_response_with_prewarm, stop_basis_points_event,
+    BufferedResponseTiming,
 };
 pub(super) use completion::{
     collect_upstream_response, completed_upstream_response, validate_upstream_response,

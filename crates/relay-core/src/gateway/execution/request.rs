@@ -14,6 +14,14 @@ use axum::http::{HeaderMap, HeaderValue};
 use serde_json::Value;
 use std::sync::Arc;
 
+/// A transport handoff retains the original admission and pool choice.
+pub(in crate::gateway) struct ReservedCandidate {
+    pub(in crate::gateway) local_key_id: String,
+    pub(in crate::gateway) model: String,
+    pub(in crate::gateway) selection: crate::Selection,
+    pub(in crate::gateway) lease: crate::runtime::CandidateLease,
+}
+
 pub(super) struct RequestExecution {
     pub(super) tool_policy: RequestToolPolicy,
     pub(super) runtime: Arc<GatewayRuntime>,
@@ -36,6 +44,7 @@ pub(super) struct RequestExecution {
     pub(super) budget: SharedRequestBudget,
     pub(super) transport: UsageTransport,
     pub(super) transport_fallback: Option<crate::usage::TransportFallbackReason>,
+    pub(super) reserved_candidate: Option<ReservedCandidate>,
 }
 
 mod completion;

@@ -7,7 +7,7 @@ use super::handshake::{upgrade_with_authorization_refresh, AuthorizationUpgrade}
 use super::open::{open_upgraded_socket, OpenedSocket};
 use super::telemetry::record_connect_failure;
 use super::upgrade_reject::{handle_upgrade_rejection, UpgradeAction};
-use super::{ConnectProgress, ConnectScope, ConnectTrace, Connected};
+use super::{ConnectProgress, ConnectScope, ConnectTrace, Connected, HttpFallback};
 use crate::runtime::AccountTransport;
 
 #[allow(clippy::large_enum_variant)]
@@ -15,6 +15,7 @@ pub(super) enum DrivenConnect {
     Continue(ClientRequest),
     Break(ClientRequest),
     Ready(Connected),
+    Http(Box<HttpFallback>),
 }
 
 pub(super) struct DriveCandidateInput<'a> {
@@ -60,26 +61,33 @@ pub(super) async fn drive_selected_candidate(
     request.apply_service_tier();
     route.service_tier = request.service_tier();
     route.half_open_probe = selected.half_open_probe;
-    route.routing = Some(selected.diagnostics);
     route.client_context_id = request.client_context_id.clone();
     let source_error_origin = route_error_origin(&route);
     if route.client_wire_api != WireApi::Responses {
         return Ok(DrivenConnect::Continue(request));
     }
-    // Basis Points speaks HTTP on its responses URL. Upgrading that URL as a
-    // native Responses socket is rejected with 502 Invalid request body, so
-    // this client socket must go through the HTTP executor instead.
+    // These account transports use HTTP/SSE. Keep their admission when handing
+    // off to the HTTP executor: reservation already advanced the pool cursor.
     let basis_points = route.account_transport == AccountTransport::ExcelBasisPoints;
     let siwc = route.account_transport == AccountTransport::Siwc;
-    if basis_points || siwc || !route.adapter.is_passthrough() {
+    if basis_points || siwc {
+        let reserved_candidate = super::super::super::execution::ReservedCandidate {
+            local_key_id: key.id.clone(),
+            model: request.resolved_model.clone(),
+            selection: selected,
+            lease,
+        };
+        return Ok(DrivenConnect::Http(Box::new(HttpFallback {
+            request,
+            reserved_candidate,
+        })));
+    }
+    route.routing = Some(selected.diagnostics);
+    if !route.adapter.is_passthrough() {
         drop(lease);
         *websocket_http_fallback_origin = Some(source_error_origin);
         *last_failure = Some(GatewayFailure::websocket_http_fallback(source_error_origin));
-        return Ok(if basis_points || siwc {
-            DrivenConnect::Break(request)
-        } else {
-            DrivenConnect::Continue(request)
-        });
+        return Ok(DrivenConnect::Continue(request));
     }
     let started = Instant::now();
     // Reads the current attempt. The dispatch number changes after the request is sent.

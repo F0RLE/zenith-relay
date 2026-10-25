@@ -58,8 +58,8 @@ pub(super) use events::{
 
 mod bootstrap;
 pub(super) use bootstrap::{
-    bootstrap_basis_points_stream, bootstrap_stream, degraded_route_stream_failure,
-    StreamBootstrapFailure,
+    bootstrap_basis_points_stream, bootstrap_prewarm_stream, bootstrap_stream,
+    degraded_route_stream_failure, StreamBootstrapFailure,
 };
 
 /// Owns the work after an upstream stream has emitted client-visible output.
@@ -141,18 +141,18 @@ impl StreamExecution {
             0,
         );
         let mut first = first;
-        let upstream_usage =
-            (!adapter_is_passthrough || basis_points_request.is_some()).then(|| {
-                let mut capture = upstream_usage::UpstreamUsage::new(
-                    initial_event.clone(),
-                    expected_model.clone(),
-                );
-                if basis_points_request.is_some() {
-                    capture = capture.with_timing(started);
-                }
-                first = capture.forward(std::mem::take(&mut first));
-                Arc::new(Mutex::new(capture))
-            });
+        let upstream_usage = (!adapter_is_passthrough
+            || basis_points_request.is_some()
+            || discovery.is_some())
+        .then(|| {
+            let mut capture =
+                upstream_usage::UpstreamUsage::new(initial_event.clone(), expected_model.clone());
+            if basis_points_request.is_some() || discovery.is_some() {
+                capture = capture.with_timing(started);
+            }
+            first = capture.forward(std::mem::take(&mut first));
+            Arc::new(Mutex::new(capture))
+        });
         let capture_stream = upstream_usage.clone();
         let remaining: UpstreamStream =
             Box::pin(remaining.map(move |chunk| match (&capture_stream, chunk) {

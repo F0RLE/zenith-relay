@@ -5,8 +5,10 @@ pub(in crate::gateway) mod compatibility;
 mod request;
 
 pub(super) use account::{execute_account_endpoint, AccountExecution};
+pub(super) use client::execute_reserved_client_request;
 pub(super) use client::{execute_client_request, execute_gemini_client_request};
 pub(super) use client::{RoutedCompactionRequest, RoutedRequestIdentity};
+pub(super) use request::ReservedCandidate;
 
 use super::errors::{
     api_error_with_origin_and_category, cooldown_error, AttemptFailure, PreservedUpstreamError,

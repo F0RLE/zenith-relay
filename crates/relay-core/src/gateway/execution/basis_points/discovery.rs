@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(in crate::gateway) mod execution;
+pub(in crate::gateway) mod native;
 pub(in crate::gateway::execution) use execution::{resolve, DiscoveryExecution};
 
 const MAX_LOOKUP_ROUNDS: u8 = 8;
@@ -38,6 +39,7 @@ pub(in crate::gateway) struct DiscoverySession {
     prior_messages: Vec<Value>,
     prompt_prefix: Option<([u8; 32], String)>,
     preload_checkpoint: Option<[u8; 32]>,
+    native: Option<native::NativeSettings>,
 }
 
 impl DiscoverySession {
@@ -89,6 +91,7 @@ impl DiscoverySession {
             prior_messages: Vec::new(),
             prompt_prefix: None,
             preload_checkpoint: None,
+            native: None,
         }))
     }
 
@@ -136,6 +139,9 @@ impl DiscoverySession {
         local_key_id: &str,
         response: &Value,
     ) {
+        if self.is_native() {
+            return;
+        }
         runtime.basis_points_catalog_store.remember(
             local_key_id,
             &self.model,
@@ -153,6 +159,9 @@ impl DiscoverySession {
         response: &Value,
         upstream: &mut Value,
     ) -> Result<bool, AdapterError> {
+        if self.is_native() {
+            return native::advance(self, response, upstream);
+        }
         let Some(items) = response.get("output").and_then(Value::as_array) else {
             return Err(invalid_tool_output("response.output"));
         };
@@ -324,8 +333,17 @@ impl DiscoverySession {
     }
 
     pub(in crate::gateway) fn finish(&self, response: &mut Value) {
+        let completed = response["status"] == "completed";
         if let Some(items) = response.get_mut("output").and_then(Value::as_array_mut) {
             items.retain(|item| {
+                if self.is_native() {
+                    return !native::is_lookup(item)
+                        && (completed
+                            || !matches!(
+                                item["type"].as_str(),
+                                Some("function_call" | "custom_tool_call")
+                            ));
+                }
                 !item
                     .as_object()
                     .and_then(|item| parse_transport_envelope(item).ok())
@@ -335,6 +353,10 @@ impl DiscoverySession {
             });
             items.splice(0..0, self.prior_messages.iter().cloned());
         }
+    }
+
+    pub(in crate::gateway) fn is_native(&self) -> bool {
+        self.native.is_some()
     }
 
     pub(in crate::gateway) fn record(&self, tool_use: &mut ToolUseDiagnostics) {

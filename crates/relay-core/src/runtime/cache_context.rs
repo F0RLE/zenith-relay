@@ -334,10 +334,13 @@ impl GatewayRuntime {
     }
 
     /// Discovery preloads and attachment resolution can change the prepared
-    /// BPS body. Refresh the bounded snapshot at each actual dispatch, including
+    /// catalog body. Refresh the bounded snapshot at each actual dispatch, including
     /// discovery continuations; never modify the wire request or collect when off.
     pub(crate) fn observe_basis_points_dispatch(&self, route: &ExecutorRoute, upstream: &Value) {
-        if route.account_transport != AccountTransport::ExcelBasisPoints {
+        if !matches!(
+            route.account_transport,
+            AccountTransport::ExcelBasisPoints | AccountTransport::Siwc
+        ) {
             return;
         }
         if let Some(observation) = route.cache_context_observation.as_ref() {

@@ -63,6 +63,23 @@ pub(crate) fn prepare_siwc_request(body: &mut Value) -> Result<(), AdapterError>
     {
         return Err(AdapterError::parameter_unsupported_for("store"));
     }
+    // `generate` belongs to response.create on a WebSocket, not HTTP.
+    // Preserve no-generation warmups through the documented Responses cache
+    // prewarm option rather than dropping false and accidentally generating.
+    let prewarm = match object.get("generate") {
+        None | Some(Value::Bool(true)) => false,
+        Some(Value::Bool(false)) => true,
+        Some(_) => return Err(AdapterError::parameter_unsupported_for("generate")),
+    };
+    if prewarm
+        && object
+            .get("prompt_cache_options")
+            .is_some_and(|options| !options.is_object())
+    {
+        return Err(AdapterError::parameter_unsupported_for(
+            "prompt_cache_options",
+        ));
+    }
     if let Some(tools) = object.get("tools") {
         validate_tools(tools)?;
     }
@@ -169,6 +186,15 @@ pub(crate) fn prepare_siwc_request(body: &mut Value) -> Result<(), AdapterError>
         }
     }
     object.remove("previous_response_id");
+    object.remove("generate");
+    if prewarm {
+        object
+            .entry("prompt_cache_options")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .expect("validated cache options")
+            .insert("prewarm".into(), Value::Bool(true));
+    }
     object.insert("store".into(), Value::Bool(false));
     object.insert("stream".into(), Value::Bool(true));
     Ok(())
@@ -204,6 +230,31 @@ fn validate_tools(tools: &Value) -> Result<(), AdapterError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn websocket_generate_is_mapped_without_creating_an_unrequested_generation() {
+        for generate in [false, true] {
+            let mut request = json!({"model":"gpt-6.1-sol","input":[],"generate":generate,
+                "prompt_cache_options":{"mode":"explicit","ttl":"30m"}});
+            prepare_siwc_request(&mut request).unwrap();
+            assert!(request.get("generate").is_none());
+            assert_eq!(request["prompt_cache_options"]["mode"], "explicit");
+            assert_eq!(request["prompt_cache_options"]["ttl"], "30m");
+            assert_eq!(
+                request.pointer("/prompt_cache_options/prewarm"),
+                (!generate).then_some(&Value::Bool(true))
+            );
+        }
+        for invalid in [Value::Null, json!("false"), json!(0)] {
+            let mut request = json!({"input":[],"generate":invalid});
+            let original = request.clone();
+            assert!(prepare_siwc_request(&mut request).is_err());
+            assert_eq!(request, original);
+        }
+        let mut request = json!({"input":[],"generate":false,"prompt_cache_options":[]});
+        let original = request.clone();
+        assert!(prepare_siwc_request(&mut request).is_err());
+        assert_eq!(request, original);
+    }
     #[test]
     fn sends_bearer_without_codex_workspace_or_session_headers() {
         let mut headers = reqwest::header::HeaderMap::new();

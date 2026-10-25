@@ -11,7 +11,7 @@ use super::super::request::{
     is_managed_codex_client, normalize_codex_reasoning_placeholder, request_id, ServiceTierPolicy,
     CODEX_RESPONSES_LITE_HEADER,
 };
-use super::request::{execute_request, RequestExecution};
+use super::request::{execute_request, RequestExecution, ReservedCandidate};
 use crate::error_codes;
 use crate::protocol::ClientWireApi;
 use crate::scheduler::rotation::SharedRequestBudget;
@@ -42,7 +42,26 @@ pub(in crate::gateway) async fn execute_client_request(
     http_request: Request<Body>,
     client_wire_api: WireApi,
 ) -> Response<Body> {
-    execute_client_request_inner(runtime, http_request, client_wire_api, None, false).await
+    execute_reserved_client_request(runtime, http_request, client_wire_api, None).await
+}
+
+pub(in crate::gateway) async fn execute_reserved_client_request(
+    runtime: Arc<GatewayRuntime>,
+    http_request: Request<Body>,
+    client_wire_api: WireApi,
+    reserved_candidate: Option<ReservedCandidate>,
+) -> Response<Body> {
+    // The HTTP attempt future is large; a transport handoff must not multiply
+    // its stack footprint inside the WebSocket connection task.
+    Box::pin(execute_client_request_inner(
+        runtime,
+        http_request,
+        client_wire_api,
+        None,
+        false,
+        reserved_candidate,
+    ))
+    .await
 }
 
 pub(in crate::gateway) async fn execute_gemini_client_request(
@@ -57,6 +76,7 @@ pub(in crate::gateway) async fn execute_gemini_client_request(
         WireApi::Gemini,
         Some(model),
         force_stream,
+        None,
     )
     .await
 }
@@ -67,6 +87,7 @@ async fn execute_client_request_inner(
     client_wire_api: WireApi,
     path_model: Option<String>,
     force_stream: bool,
+    reserved_candidate: Option<ReservedCandidate>,
 ) -> Response<Body> {
     let (parts, request_body) = http_request.into_parts();
     let headers = parts.headers;
@@ -330,6 +351,7 @@ async fn execute_client_request_inner(
         budget,
         transport,
         transport_fallback,
+        reserved_candidate,
     })
     .await
 }

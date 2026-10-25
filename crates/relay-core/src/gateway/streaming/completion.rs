@@ -49,6 +49,8 @@ impl StreamCompletionSettlement {
                 .tool_use
                 .upstream_context
                 .clone_from(&progress.tool_use.upstream_context);
+            event.tool_use.forwarded_tool_count = progress.tool_use.forwarded_tool_count;
+            event.tool_use.forwarded_schema_bytes = progress.tool_use.forwarded_schema_bytes;
             if let Some(transport) = event
                 .routing
                 .as_mut()

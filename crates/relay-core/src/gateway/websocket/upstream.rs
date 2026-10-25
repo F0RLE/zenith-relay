@@ -20,8 +20,19 @@ pub(in crate::gateway::websocket) use messages::{
     first_message_terminal, message_serves_rejected_model,
 };
 pub(in crate::gateway::websocket) use session::{
-    await_while_client_connected, connect_upstream_while_client_connected,
+    await_while_client_connected, connect_transport_while_client_connected,
+    connect_upstream_while_client_connected,
 };
+
+pub(super) enum ConnectedTransport {
+    Websocket(Box<Connected>),
+    Http(Box<HttpFallback>),
+}
+
+pub(super) struct HttpFallback {
+    pub(super) request: ClientRequest,
+    pub(super) reserved_candidate: super::super::execution::ReservedCandidate,
+}
 
 /// The candidate reserved for the WebSocket upgrade that is in progress.
 pub(super) struct ConnectScope<'a> {

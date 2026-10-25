@@ -8,6 +8,7 @@ pub(super) async fn bridge_http_fallback(
     headers: HeaderMap,
     mut client_request: ClientRequest,
     mut transport_fallback: crate::usage::TransportFallbackReason,
+    mut reserved_candidate: Option<super::super::execution::ReservedCandidate>,
 ) {
     let mut stream_id = client_request.stream_id.clone();
     loop {
@@ -15,10 +16,10 @@ pub(super) async fn bridge_http_fallback(
         if let Err(failure) = serve_http_fallback_request(
             &mut downstream,
             runtime.clone(),
-            &key,
             &headers,
             &client_request,
             transport_fallback,
+            reserved_candidate.take(),
             &mut client_visible_output,
         )
         .await
@@ -111,10 +112,10 @@ pub(super) async fn bridge_http_fallback(
 async fn serve_http_fallback_request(
     downstream: &mut WebSocket,
     runtime: Arc<GatewayRuntime>,
-    _key: &AuthenticatedKey,
     client_headers: &HeaderMap,
     client_request: &ClientRequest,
     transport_fallback: crate::usage::TransportFallbackReason,
+    reserved_candidate: Option<super::super::execution::ReservedCandidate>,
     client_visible_output: &mut bool,
 ) -> Result<(), GatewayFailure> {
     let mut headers = client_headers.clone();
@@ -153,7 +154,12 @@ async fn serve_http_fallback_request(
         });
     let upstream_response = await_while_client_connected(
         downstream,
-        execute_client_request(Arc::clone(&runtime), http_request, WireApi::Responses),
+        execute_reserved_client_request(
+            Arc::clone(&runtime),
+            http_request,
+            WireApi::Responses,
+            reserved_candidate,
+        ),
     )
     .await?;
     // The HTTP executor already knows whether the selected route belongs to an
