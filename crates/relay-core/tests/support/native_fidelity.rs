@@ -166,6 +166,7 @@ async fn native_gemini_continuation_resumes_only_with_its_original_model_and_con
                 resume["continuationToken"]
             );
             let events = events.lock().unwrap();
+            let events = usage_observations::physical_attempts(&events);
             assert_eq!(events.len(), 2);
             assert_eq!(
                 events[0].error_category.as_deref(),

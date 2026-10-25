@@ -71,6 +71,13 @@ impl TranslationRequest {
         upstream: WireApi,
         capabilities: Option<&crate::model_metadata::ModelCapabilities>,
     ) -> AdapterResult<Self> {
+        if context.client_wire_api == WireApi::GeminiInteractions
+            || upstream == WireApi::GeminiInteractions
+        {
+            return Err(AdapterError::parameter_unsupported_for(
+                "gemini_interactions.native_only",
+            ));
+        }
         let mut effective_request = std::borrow::Cow::Borrowed(context.request);
         let response_tools = if context.client_wire_api == WireApi::Responses {
             let supplied = super::contracts::request_tool_catalog(

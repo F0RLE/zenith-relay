@@ -111,6 +111,7 @@ impl<'a> ReasoningPolicy<'a> {
             return Err(AdapterError::reasoning_unsupported());
         }
         match self.protocol {
+            WireApi::GeminiInteractions => return Err(AdapterError::reasoning_unsupported()),
             WireApi::Responses => {
                 fields.insert("reasoning".into(), json!({"effort": effort}));
             }

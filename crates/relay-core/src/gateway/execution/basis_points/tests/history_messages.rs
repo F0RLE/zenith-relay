@@ -1,6 +1,51 @@
 use super::*;
 
 #[test]
+fn codex_handoff_is_context_in_json_and_streaming_without_changing_turn_metadata() {
+    for stream in [false, true] {
+        let mut request = request_with_tool();
+        request["stream"] = json!(stream);
+        request["input"] = json!([
+            {"role":"user","content":"Synthetic task"},
+            {"type":"function_call_output","namespace":"codex_app","name":"create_thread",
+             "id":"synthetic-handoff","output":"<codex_delegation>\nSynthetic context\n</codex_delegation>"},
+            {"role":"developer","content":"Keep the original instructions"},
+            {"type":"function_call","name":"exec_command","call_id":"call_synthetic","arguments":"{\"cmd\":\"echo synthetic\"}"},
+            {"type":"function_call_output","call_id":"call_synthetic","output":"Synthetic tool result"}
+        ]);
+        let before = request.clone();
+        let prepared = prepare_request(&request).unwrap();
+        let items = prepared["input"].as_array().unwrap();
+        let handoff = items
+            .iter()
+            .find(|item| item["content"][1]["text"] == request["input"][1]["output"])
+            .unwrap();
+        assert_eq!(handoff["type"], "message");
+        assert_eq!(handoff["role"], "user");
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item["type"] == "function_call")
+                .count(),
+            1
+        );
+        let result = items
+            .iter()
+            .find(|item| item["type"] == "function_call_output")
+            .unwrap();
+        assert_eq!(result["call_id"], "call_synthetic");
+        assert_eq!(result["output"], "Synthetic tool result");
+        assert_eq!(prepared["stream"], stream);
+        assert_eq!(request, before);
+        request["input"].as_array_mut().unwrap().remove(1);
+        assert_eq!(
+            prepared["metadata"],
+            prepare_request(&request).unwrap()["metadata"]
+        );
+    }
+}
+
+#[test]
 fn translating_large_tool_results_reuses_the_owned_output_buffer() {
     use super::super::history::translate_input_items;
 

@@ -5,9 +5,11 @@ use crate::gateway::request::responses_item_has_ciphertext as has_item_ciphertex
 use crate::protocol::AdapterError;
 use serde_json::{json, Map, Value};
 
+mod handoff;
 mod identifiers;
 mod messages;
 
+pub(super) use handoff::is_thread_handoff;
 pub(super) use messages::separate_tool_images;
 
 pub(in crate::gateway::execution::basis_points) use identifiers::fit_responses_id as fit_item_id;
@@ -76,9 +78,18 @@ pub(super) fn record_client_call(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn translate_input_items(
     input_items: Vec<Value>,
     tools: &[ClientTool],
+) -> Result<Vec<Value>, AdapterError> {
+    translate_input_items_with_catalog(input_items, tools, &json!({}))
+}
+
+pub(super) fn translate_input_items_with_catalog(
+    input_items: Vec<Value>,
+    tools: &[ClientTool],
+    request: &Value,
 ) -> Result<Vec<Value>, AdapterError> {
     let input_items = super::batch::collapse_history(input_items, tools)?;
     let mut translated_items = Vec::with_capacity(input_items.len());
@@ -165,7 +176,18 @@ pub(super) fn translate_input_items(
                     translated_items.push(visible_item);
                 }
             }
-            "additional_tools" | "tool_search_output" => {}
+            "additional_tools" | "tool_search_output" => {
+                let declared = super::catalog::declared_tools(input_object.get("tools"))?;
+                if !declared.is_empty() {
+                    // Render the declared batch at its original position. A later batch
+                    // cannot change it; current schemas still validate executable calls.
+                    translated_items.push(super::codec::text_message(
+                        "developer",
+                        "input_text",
+                        super::prepare::historical_catalog(&declared, request),
+                    ));
+                }
+            }
             "item_reference" => {}
             _ => translated_items.push(input_item),
         }

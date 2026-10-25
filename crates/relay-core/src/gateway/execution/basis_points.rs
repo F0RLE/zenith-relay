@@ -21,6 +21,49 @@ mod prepare;
 mod presentation;
 pub(in crate::gateway) mod response;
 mod schema;
+
+/// Diagnostics and idle cleanup never initialize a cache or wait on a request.
+/// Returned values are dropped after releasing the cache lock.
+fn try_with_cache<T, R: Default>(
+    cache: &std::sync::OnceLock<std::sync::Mutex<T>>,
+    operation: impl FnOnce(&mut T) -> R,
+) -> Option<R> {
+    let Some(cache) = cache.get() else {
+        return Some(R::default());
+    };
+    let mut cache = cache.try_lock().ok()?;
+    Some(operation(&mut cache))
+}
+
+fn describe_cache<T>(
+    cache: &std::sync::OnceLock<std::sync::Mutex<T>>,
+    key: &'static str,
+    limit_bytes: usize,
+    basis: &'static str,
+    measure: impl FnOnce(&mut T) -> (usize, usize),
+) -> crate::gateway::CacheMemoryDiagnostics {
+    let usage = try_with_cache(cache, measure);
+    crate::gateway::CacheMemoryDiagnostics {
+        key,
+        entries: usage.map(|(entries, _)| entries),
+        bytes: usage.map(|(_, bytes)| bytes),
+        limit_bytes: Some(limit_bytes),
+        basis,
+    }
+}
+
+pub(in crate::gateway) fn cache_memory_diagnostics() -> Vec<crate::gateway::CacheMemoryDiagnostics>
+{
+    vec![
+        catalog::cache_memory_diagnostics(),
+        schema::cache_memory_diagnostics(),
+    ]
+}
+
+pub(in crate::gateway) fn release_expired_cache_entries() {
+    catalog::release_expired_cache_entries();
+    schema::release_expired_cache_entries();
+}
 pub(in crate::gateway::execution) mod structured_output;
 
 pub(in crate::gateway::execution) use attachments::{attach_input_images, AttachmentFailure};

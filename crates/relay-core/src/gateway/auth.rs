@@ -57,7 +57,7 @@ pub(super) fn authenticate_client(
         .or_else(|| {
             let header = match protocol {
                 crate::WireApi::Messages => "x-api-key",
-                crate::WireApi::Gemini => "x-goog-api-key",
+                crate::WireApi::Gemini | crate::WireApi::GeminiInteractions => "x-goog-api-key",
                 _ => return None,
             };
             headers

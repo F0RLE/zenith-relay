@@ -1,5 +1,12 @@
 use super::*;
 
+pub(in crate::gateway) async fn interactions(
+    State(runtime): State<Arc<GatewayRuntime>>,
+    request: Request<Body>,
+) -> Response<Body> {
+    execute_client_request(runtime, request, WireApi::GeminiInteractions).await
+}
+
 pub(in crate::gateway) async fn responses(
     State(runtime): State<Arc<GatewayRuntime>>,
     request: Request<Body>,

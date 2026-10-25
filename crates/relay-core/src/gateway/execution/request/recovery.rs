@@ -13,13 +13,17 @@ pub(in crate::gateway::execution) fn mark_adapter_failure(
         event.upstream_error = Some(crate::usage::UpstreamErrorDetails::from_value(
             Some(event.http_status),
             &serde_json::json!({"error": {
-                "code": error.code(), "type": "relay_adapter", "message": message
+                "code": error.code(), "type": "relay_adapter", "message": message,
+                "param": error.parameter()
             }}),
         ));
     }
     event.success = false;
     event.http_status = StatusCode::BAD_GATEWAY.as_u16();
     event.error_category = Some(error.code().to_string());
+    if let Some(routing) = event.routing.as_mut() {
+        routing.attempt_outcome = Some(crate::AttemptOutcome::ReturnedFailure);
+    }
     event
 }
 
@@ -225,6 +229,11 @@ pub(in crate::gateway::execution) fn adapter_error_response_for_origin(
         response
             .headers_mut()
             .insert("x-should-retry", HeaderValue::from_static("false"));
+    } else {
+        // The internal HTTP-to-WebSocket bridge must retain this local error
+        // contract, not reclassify its JSON as a provider's HTTP 400. A typed
+        // extension cannot be forged by an upstream error body or header.
+        response.extensions_mut().insert(error);
     }
     response
 }

@@ -9,14 +9,11 @@ async fn mixed_http(
     body: Bytes,
 ) -> Response<Body> {
     let value: Value = serde_json::from_slice(&body).unwrap();
-    let image = value["tools"]
-        .as_array()
-        .is_some_and(|tools| tools.iter().any(|tool| tool["type"] == "image_generation"));
+    let image = uri.path().ends_with("/images/generations");
     let reply = if image {
-        Reply::Stream(vec![
-            StreamChunk::Data("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"image_generation_call\",\"result\":\"aW1hZ2U=\",\"output_format\":\"png\"}}\n\n"),
-            StreamChunk::Data("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n"),
-        ])
+        assert_eq!(value["model"], "gpt-image-2.5-sunburst");
+        assert!(value.get("tools").is_none());
+        Reply::Json(StatusCode::OK, json!({"data":[{"b64_json":"aW1hZ2U="}]}))
     } else if value["stream"] == true {
         successful_sse_reply()
     } else {
@@ -49,6 +46,7 @@ async fn mixed_upstream() -> (TestServer, UpstreamState, WebSocketUpstreamState)
     let router = Router::new()
         .route("/v1/models", get(upstream_models))
         .route("/v1/responses", post(mixed_http))
+        .route("/v1/images/generations", post(mixed_http))
         .with_state(http.clone())
         .merge(
             Router::new()

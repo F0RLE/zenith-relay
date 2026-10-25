@@ -385,6 +385,33 @@ fn tasks_share_one_global_account_window_cycle() {
 }
 
 #[test]
+fn canceling_an_unclaimed_wake_does_not_block_the_same_quota_cycle() {
+    let task = task(1, 0);
+    let mut coordinator = WakeCoordinator::new(8, 8).unwrap();
+    schedule(&mut coordinator, &task, 110);
+    assert_eq!(coordinator.remove_pending_for_task(&task.id, 120), 1);
+    assert!(coordinator.pending().is_empty());
+    schedule(&mut coordinator, &task, 130);
+    assert_eq!(coordinator.claim_due_automatic(130, 8).len(), 1);
+    assert_eq!(coordinator.state().history().len(), 1);
+}
+
+#[test]
+fn canceling_a_claimed_wake_keeps_same_cycle_replay_protection() {
+    let task = task(1, 0);
+    let mut coordinator = WakeCoordinator::new(8, 8).unwrap();
+    schedule(&mut coordinator, &task, 110);
+    let permit = coordinator.claim_due_automatic(110, 1).pop().unwrap();
+    assert_eq!(coordinator.remove_pending_for_task(&task.id, 120), 1);
+    assert!(!coordinator.is_permit_active(&permit));
+    assert_eq!(
+        coordinator.evaluate(&task, &account(), &transition(), None, &policy(), 130),
+        WakeDecision::Skipped(WakeOutcome::SkippedDuplicate)
+    );
+    assert!(coordinator.claim_due_automatic(130, 1).is_empty());
+}
+
+#[test]
 fn task_and_account_cancellation_finish_pending_and_in_flight_cycles() {
     let first = task(1, 0);
     let mut second = task(1, 0);

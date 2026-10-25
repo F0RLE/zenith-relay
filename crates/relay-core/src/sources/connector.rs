@@ -105,7 +105,7 @@ impl SourceConnector {
             WireApi::Responses | WireApi::ChatCompletions => {
                 (AUTHORIZATION, self.bearer_authorization.clone())
             }
-            WireApi::Gemini => (
+            WireApi::Gemini | WireApi::GeminiInteractions => (
                 HeaderName::from_static("x-goog-api-key"),
                 self.messages_api_key.clone(),
             ),
@@ -118,7 +118,7 @@ impl SourceConnector {
                 HeaderName::from_static("x-api-key"),
                 self.messages_api_key.clone(),
             ),
-            UpstreamProtocol::GeminiGenerateContent => (
+            UpstreamProtocol::GeminiGenerateContent | UpstreamProtocol::GeminiInteractions => (
                 HeaderName::from_static("x-goog-api-key"),
                 self.messages_api_key.clone(),
             ),
@@ -141,6 +141,7 @@ impl SourceConnector {
             UpstreamProtocol::ChatCompletions => Some(self.chat_completions_url.clone()),
             UpstreamProtocol::Messages => Some(self.messages_url.clone()),
             UpstreamProtocol::GeminiGenerateContent => self.gemini_endpoint(model, stream),
+            UpstreamProtocol::GeminiInteractions => self.base_url.join("interactions").ok(),
         }
     }
 
@@ -176,7 +177,9 @@ impl SourceConnector {
 
     pub(crate) fn models_endpoint_for_binding(&self, binding: &SourceProtocolBinding) -> &Url {
         match binding.adapter.upstream_protocol(binding.wire_api) {
-            UpstreamProtocol::GeminiGenerateContent => &self.gemini_models_url,
+            UpstreamProtocol::GeminiGenerateContent | UpstreamProtocol::GeminiInteractions => {
+                &self.gemini_models_url
+            }
             _ => &self.models_url,
         }
     }

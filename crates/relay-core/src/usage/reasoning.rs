@@ -49,6 +49,7 @@ fn observed_reasoning_effort(request: &Value, wire_api: WireApi) -> Option<Strin
         WireApi::ChatCompletions => request.get("reasoning_effort"),
         WireApi::Messages => request.pointer("/output_config/effort"),
         WireApi::Gemini => request.pointer("/generationConfig/thinkingConfig/thinkingLevel"),
+        WireApi::GeminiInteractions => request.pointer("/generation_config/thinking_level"),
     };
     normalized_value(effort).or_else(|| {
         let budget = match wire_api {

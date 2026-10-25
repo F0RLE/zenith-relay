@@ -263,7 +263,6 @@ async fn bps_permission_transport_failure_is_not_replayed_as_a_native_catalog() 
     .await;
     let error = short_timeout_client(endpoint)
         .with_oauth_client_kind(super::super::super::OAuthClientKind::ExcelBps)
-        .with_subscription_plan_type(Some("plus"))
         .discover("synthetic-access", "synthetic-account", "1.0.0")
         .await
         .unwrap_err();

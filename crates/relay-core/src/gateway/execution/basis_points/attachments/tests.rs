@@ -2,6 +2,8 @@ use super::*;
 use serde_json::json;
 
 mod concurrency;
+mod prepared;
+mod serialization;
 
 fn png_bytes() -> Vec<u8> {
     STANDARD

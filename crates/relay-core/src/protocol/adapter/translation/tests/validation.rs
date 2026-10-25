@@ -208,6 +208,7 @@ fn converted_json_tool_calls_reject_blank_ids_without_normalizing_opaque_ids() {
         for id in ["   ", "\t\n", " call_opaque "] {
             let call = json!({"id":id,"name":"lookup","args":{"value":1}});
             let payload = match upstream {
+                WireApi::GeminiInteractions => unreachable!("native-only fixture is separate"),
                 WireApi::Responses => json!({"id":"resp_synthetic","status":"completed","output":[{
                     "type":"function_call","id":"fc_synthetic","call_id":id,"name":"lookup","arguments":"{\"value\":1}"
                 }]}),

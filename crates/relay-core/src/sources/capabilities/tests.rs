@@ -2,6 +2,29 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn interactions_is_an_explicit_native_contract_not_a_generate_content_alias() {
+    let models = vec!["synthetic-model".into()];
+    let generate_url = "https://example.test/v1beta/models/synthetic-model:generateContent";
+    let generate = SourceProtocolConfig::automatic(generate_url)
+        .resolve(generate_url, &models, &[], WireApi::Gemini)
+        .unwrap();
+    assert!(generate
+        .iter()
+        .all(|route| route.wire_api != WireApi::GeminiInteractions));
+    let interactions_url = "https://example.test/v1beta/interactions";
+    let interactions = SourceProtocolConfig::automatic(interactions_url)
+        .resolve(interactions_url, &models, &[], WireApi::GeminiInteractions)
+        .unwrap();
+    assert_eq!(interactions.len(), 1);
+    assert_eq!(interactions[0].wire_api, WireApi::GeminiInteractions);
+    assert!(interactions[0].adapter.is_passthrough());
+    for other in WireApi::ALL {
+        assert!(SourceAdapter::between(other, WireApi::GeminiInteractions).is_none());
+        assert!(SourceAdapter::between(WireApi::GeminiInteractions, other).is_none());
+    }
+}
+
+#[test]
 fn catalog_models_are_routable_without_generation_probes() {
     let config = SourceProtocolConfig::automatic("https://example.test/v1");
     let models = vec!["claude-test".into(), "gpt-test".into()];

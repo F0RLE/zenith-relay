@@ -120,6 +120,7 @@ fn failed_usage_event(category: &str, account_id: Option<&str>) -> UsageEvent {
         total_tokens: None,
         upstream_error: None,
         quota_snapshot: None,
+        image_usage: None,
     }
 }
 

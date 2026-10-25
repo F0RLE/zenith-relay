@@ -288,11 +288,18 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
             let failure_state =
                 settle_route_failure(runtime, &lease, &route, &failure, response_headers);
             apply_failure_state(&mut event, failure_state);
-            emit_usage(runtime, event);
-            if failure_category_is_request_terminal(failure.category)
+            let terminal = failure_category_is_request_terminal(failure.category)
                 || route_forbids_fallback(&route, failure.status, failure.category)
-                || failure.execution.certainty != ExecutionCertainty::NotSent
-            {
+                || failure.execution.certainty != ExecutionCertainty::NotSent;
+            if let Some(routing) = event.routing.as_mut() {
+                routing.attempt_outcome = Some(if terminal {
+                    crate::AttemptOutcome::ReturnedFailure
+                } else {
+                    crate::AttemptOutcome::RetrySelection
+                });
+            }
+            emit_usage(runtime, event);
+            if terminal {
                 return OpenedStream::Respond(attempt_error_response(
                     failure,
                     last_preserved_upstream_error.as_ref(),

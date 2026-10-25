@@ -316,6 +316,7 @@ fn disabled_reasoning_is_preserved_without_enabling_provider_defaults() {
         let mut request = input(client);
         request.as_object_mut().unwrap().extend(
             match client {
+                WireApi::GeminiInteractions => unreachable!("native-only fixture is separate"),
                 WireApi::Responses => json!({"reasoning":{"effort":"none"}}),
                 WireApi::ChatCompletions => json!({"reasoning_effort":"none"}),
                 WireApi::Messages => json!({"thinking":{"type":"disabled"}}),
@@ -341,6 +342,7 @@ fn disabled_reasoning_is_preserved_without_enabling_provider_defaults() {
                 let prepared = prepare_reasoning(client, upstream, &request, mode).unwrap();
                 let body = prepared.upstream_body();
                 match upstream {
+                    WireApi::GeminiInteractions => unreachable!("native-only fixture is separate"),
                     WireApi::Responses => assert_eq!(body["reasoning"]["effort"], "none"),
                     WireApi::ChatCompletions => assert_eq!(body["reasoning_effort"], "none"),
                     WireApi::Messages => assert_eq!(body["thinking"], json!({"type":"disabled"})),

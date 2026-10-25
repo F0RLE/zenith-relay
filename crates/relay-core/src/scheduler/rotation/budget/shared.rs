@@ -71,6 +71,29 @@ impl SharedRequestBudget {
         crate::poison::mutex(&self.waiting).persistent = persistent;
     }
 
+    /// Bound rate-limit recovery unless the user explicitly opted into waiting
+    /// for capacity. Retain the original deadline across policy changes; neither
+    /// persistent waiting nor a transport handoff refunds dispatches.
+    pub(crate) fn limit_rate_limit_recovery(&self, window_ms: u64) {
+        self.with_budget(|budget| {
+            let deadline = tokio::time::Instant::now()
+                + std::time::Duration::from_millis(window_ms.min(30_000));
+            budget.rate_limit_deadline = Some(
+                budget
+                    .rate_limit_deadline
+                    .map_or(deadline, |old| old.min(deadline)),
+            );
+        });
+    }
+
+    pub(crate) fn rate_limit_deadline(&self) -> Option<tokio::time::Instant> {
+        self.with_budget(|budget| {
+            budget
+                .rate_limit_deadline
+                .filter(|_| !budget.persistent_retry)
+        })
+    }
+
     pub(crate) fn attempted_members(&self) -> BTreeSet<String> {
         crate::poison::mutex(&self.attempted_members).clone()
     }
@@ -98,7 +121,11 @@ impl SharedRequestBudget {
             budget.retry_deadline = budget
                 .retry_window_ms
                 .map(|window_ms| started + std::time::Duration::from_millis(window_ms));
-            started + std::time::Duration::from_millis(window_ms)
+            let deadline = started + std::time::Duration::from_millis(window_ms);
+            budget
+                .rate_limit_deadline
+                .filter(|_| !budget.persistent_retry)
+                .map_or(deadline, |rate_limit| deadline.min(rate_limit))
         })
     }
 

@@ -20,6 +20,9 @@ use zenith_relay_core::{
 const LOCAL_KEY: &str = "p2-local-key";
 const MODEL: &str = "gpt-p2";
 
+#[path = "support/usage_observations.rs"]
+mod usage_observations;
+
 #[path = "support/rotation_recovery.rs"]
 mod rotation_recovery;
 

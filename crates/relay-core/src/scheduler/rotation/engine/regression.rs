@@ -1,5 +1,70 @@
 use super::*;
 
+#[test]
+fn account_health_failures_remain_isolated_by_model_and_protocol_route() {
+    let mut candidate = member("a");
+    candidate.add_route("messages:text", "text-model", RotationOperation::Text);
+    candidate.add_route("responses:other", "other-model", RotationOperation::Text);
+    let mut engine = engine(&["b"]);
+    engine.upsert(candidate).unwrap();
+    fail(&mut engine, "a", 1, 0);
+    assert!(engine
+        .health
+        .contains_key(&("a".into(), "responses:text".into())));
+    for (id, route, model) in [
+        ("a", "messages:text", "text-model"),
+        ("a", "responses:other", "other-model"),
+        ("b", "responses:text", "text-model"),
+    ] {
+        assert!(!engine.health.contains_key(&(id.into(), route.into())));
+        let request = RotationRequest::new(RequestId(2), route, model).with_owner(id);
+        assert!(matches!(
+            engine.candidate_availability(&request, id, 0),
+            CandidateAvailability::Ready { .. }
+        ));
+    }
+}
+
+#[test]
+fn cancelling_one_dispatched_lease_never_releases_or_penalizes_a_live_peer() {
+    let mut engine = engine(&[]);
+    engine
+        .upsert(member("a").with_capacity("shared", 2))
+        .unwrap();
+    let first = engine.reserve(&request(1), 0).unwrap();
+    let second = engine.reserve(&request(2), 0).unwrap();
+    let mut first_budget = RequestBudget::default_for(first.request_id);
+    let mut second_budget = RequestBudget::default_for(second.request_id);
+    engine
+        .begin_dispatch(first.lease_id, &mut first_budget)
+        .unwrap();
+    engine
+        .begin_dispatch(second.lease_id, &mut second_budget)
+        .unwrap();
+    assert_eq!(engine.active_leases(), 2);
+    engine.cancel(first.lease_id, &first_budget, 1).unwrap();
+    assert_eq!(engine.active_leases(), 1);
+    assert!(engine.cancel(first.lease_id, &first_budget, 2).is_err());
+    assert_eq!(engine.active_leases(), 1);
+    assert!(engine.health.is_empty());
+    engine
+        .settle(
+            second.lease_id,
+            AttemptObservation {
+                execution: ExecutionObservation::accepted(),
+                health: HealthObservation::Success,
+            },
+            &second_budget,
+            3,
+        )
+        .unwrap();
+    assert_eq!(engine.active_leases(), 0);
+    assert_eq!(
+        engine.health[&("a".into(), "responses:text".into())].failure_score_milli,
+        0
+    );
+}
+
 fn request(id: u64) -> RotationRequest {
     RotationRequest::new(RequestId(id), "responses:text", "text-model")
 }

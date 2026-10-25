@@ -88,7 +88,12 @@ async fn websocket_adapter_preparation_rejection_is_recorded_once() {
     };
     let error: Value = serde_json::from_str(&frame).unwrap();
     assert_eq!(error["type"], "error");
-    assert_eq!(error["error"]["code"], "adapter_continuation_missing");
+    assert_eq!(error["error"]["code"], "previous_response_not_found");
+    assert_eq!(error["error"]["param"], "previous_response_id");
+    assert_eq!(
+        error["error"]["zenith_relay"]["category"],
+        "adapter_continuation_missing"
+    );
     assert!(state.requests.lock().unwrap().is_empty());
     let recorded = events.lock().unwrap();
     assert_eq!(recorded.len(), 1);
@@ -148,6 +153,7 @@ async fn original_errors_reach_usage_for_http_failed_json_and_sse() {
         let response = response.text().await.unwrap();
         assert!(response.contains("Invalid field: temperature"));
         let events = events.lock().unwrap();
+        let events = usage_observations::physical_attempts(&events);
         assert_eq!(events.len(), 1);
         let event = &events[0];
         assert!(!event.success);

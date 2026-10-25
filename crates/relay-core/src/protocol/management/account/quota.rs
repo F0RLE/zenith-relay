@@ -15,6 +15,11 @@ pub struct QuotaWindowUsage {
     pub observed_at_ms: u64,
     pub window_minutes: u32,
     pub api_equivalent: ApiEquivalentSummary,
+    /// Optional paired recent observations from this exact quota window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recent_consumed_basis_points: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recent_api_equivalent: Option<ApiEquivalentSummary>,
 }
 
 /// Chooses the provider's weekly window for a time-aligned value projection.

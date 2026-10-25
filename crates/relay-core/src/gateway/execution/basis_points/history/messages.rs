@@ -5,6 +5,9 @@ use crate::protocol::AdapterError;
 use serde_json::{json, Map, Value};
 
 pub(super) fn normalize_message(mut item: Value) -> Result<Value, AdapterError> {
+    if let Some(context) = super::handoff::thread_context(&item)? {
+        return Ok(context);
+    }
     let Some(fields) = item.as_object_mut() else {
         return Ok(item);
     };

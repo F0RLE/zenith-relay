@@ -6,14 +6,26 @@ pub enum WireApi {
     ChatCompletions,
     Messages,
     Gemini,
+    /// Native-only Interactions; never inferred from Generate Content support.
+    GeminiInteractions,
 }
 
 impl WireApi {
+    /// The interoperable conversion matrix, retained for existing callers.
+    /// Native-only extensions must be enumerated with `ALL_NATIVE`.
     pub const ALL: [Self; 4] = [
         Self::Responses,
         Self::ChatCompletions,
         Self::Messages,
         Self::Gemini,
+    ];
+
+    pub const ALL_NATIVE: [Self; 5] = [
+        Self::Responses,
+        Self::ChatCompletions,
+        Self::Messages,
+        Self::Gemini,
+        Self::GeminiInteractions,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -22,6 +34,7 @@ impl WireApi {
             Self::ChatCompletions => "chat_completions",
             Self::Messages => "messages",
             Self::Gemini => "gemini",
+            Self::GeminiInteractions => "gemini_interactions",
         }
     }
 
@@ -33,6 +46,7 @@ impl WireApi {
             "chat_completions" | "chatcompletions" => Some(Self::ChatCompletions),
             "messages" => Some(Self::Messages),
             "gemini" => Some(Self::Gemini),
+            "gemini_interactions" => Some(Self::GeminiInteractions),
             _ => None,
         }
     }

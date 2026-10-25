@@ -59,7 +59,7 @@ pub(super) struct AccountDispatchInput<'a> {
     pub(super) selected_error_origin: ErrorOrigin,
     pub(super) upstream_url: url::Url,
     pub(super) upstream_body: Value,
-    pub(super) request_body: Vec<u8>,
+    pub(super) request_body: Option<Vec<u8>>,
     pub(super) reasoning_effort: ReasoningEffortDiagnostics,
     pub(super) tool_use: ToolUseDiagnostics,
     pub(super) request_id: &'a str,
@@ -112,7 +112,7 @@ pub(super) async fn dispatch_account_attempt(
         .zip(catalog_started)
         .map(|(start, end)| end.duration_since(start).as_millis() as u64);
     let mut discovery_session = None;
-    let request_body = if basis_points_route {
+    if basis_points_route {
         let (body, session) =
             match super::super::basis_points::discovery::execution::prepare_dispatch(
                 original_request,
@@ -137,10 +137,7 @@ pub(super) async fn dispatch_account_attempt(
         upstream_body = body;
         discovery_session = session;
         tool_use.capture_upstream_context(&upstream_body);
-        serde_json::to_vec(&upstream_body).expect("prepared JSON is serializable")
-    } else {
-        request_body
-    };
+    }
     if basis_points_route {
         preparation.catalog_ms = catalog_started.map(|start| start.elapsed().as_millis() as u64);
     }
@@ -151,11 +148,11 @@ pub(super) async fn dispatch_account_attempt(
             &route.candidate_id,
             &upstream_url,
             &route.upstream_headers,
-            request_body,
+            &mut upstream_body,
         )
         .await
         {
-            Ok(upstream_response_body) => upstream_response_body,
+            Ok(()) => {}
             Err(super::super::basis_points::AttachmentFailure::Reject(failure)) => {
                 return AccountDispatch::Respond(attempt_error_response(
                     failure,
@@ -170,13 +167,17 @@ pub(super) async fn dispatch_account_attempt(
                 return AccountDispatch::Continue;
             }
         }
-    } else {
-        request_body
-    };
-    if basis_points_route {
         preparation.attachments_ms =
             attachments_started.map(|start| start.elapsed().as_millis() as u64);
-    }
+        let encoding_started = preparation_started.map(|_| Instant::now());
+        let encoded = serde_json::to_vec(&upstream_body).expect("prepared JSON is serializable");
+        if let (Some(catalog_ms), Some(start)) = (&mut preparation.catalog_ms, encoding_started) {
+            *catalog_ms += start.elapsed().as_millis() as u64;
+        }
+        encoded
+    } else {
+        request_body.expect("non-BPS requests are serialized during preparation")
+    };
     let started = Instant::now();
     let failure_tool_use = tool_use.clone();
     let failed_usage = |route: &ExecutorRoute, attempt, failure: AttemptFailure| {
@@ -196,11 +197,6 @@ pub(super) async fn dispatch_account_attempt(
             started.elapsed().as_millis() as u64,
         )
     };
-    if basis_points_route {
-        // Continuations must reuse uploaded file references, not upload or
-        // resend the original inline images a second time.
-        upstream_body = serde_json::from_slice(&request_body).expect("prepared JSON is valid");
-    }
     let mut request_headers = if basis_points_route {
         route.upstream_headers.clone()
     } else {
@@ -285,6 +281,7 @@ pub(super) async fn dispatch_account_attempt(
     let attempt = u16::from(budget.dispatches());
     let upstream = match upstream {
         Ok(upstream) => {
+            route.observe_http_payload(&upstream.response);
             route.account_token_generation = upstream.account_token_generation;
             route.observe_http_response(
                 upstream.response.headers(),

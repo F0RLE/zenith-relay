@@ -22,7 +22,10 @@ impl QuotaWindow {
             .map(|reset| reset.normalize_ms(quota_input.observed_at_ms));
         let full_transition_fingerprint = if fully_available {
             previous_window
-                .filter(|previous_window| previous_window.is_fully_available())
+                .filter(|previous_window| {
+                    previous_window.is_fully_available()
+                        && !full_cycle_changed(previous_window, &quota_input, reset_at_ms)
+                })
                 .and_then(|previous_window| previous_window.full_transition_fingerprint.clone())
                 .or_else(|| {
                     Some(cycle_fingerprint(
@@ -96,8 +99,13 @@ impl QuotaWindow {
     pub fn full_transition_from(&self, previous_window: Option<&Self>) -> Option<QuotaTransition> {
         let previous_window = previous_window?;
         (previous_window.kind == self.kind
-            && !previous_window.is_fully_available()
-            && self.is_fully_available())
+            && self.is_fully_available()
+            && (!previous_window.is_fully_available()
+                || self
+                    .full_transition_fingerprint
+                    .as_ref()
+                    .zip(previous_window.full_transition_fingerprint.as_ref())
+                    .is_some_and(|(current, previous)| current != previous)))
         .then(|| QuotaTransition {
             window_kind: self.kind,
             fingerprint: self.full_transition_fingerprint.clone().unwrap_or_else(|| {
@@ -164,6 +172,34 @@ impl QuotaWindow {
             transitioned_at_ms: self.observed_at_ms,
         })
     }
+}
+
+fn full_cycle_changed(
+    previous: &QuotaWindow,
+    input: &QuotaWindowInput,
+    reset_at_ms: Option<u64>,
+) -> bool {
+    if let Some((previous_cycle, current_cycle)) = previous
+        .provider_cycle_id
+        .as_deref()
+        .zip(input.provider_cycle_id.as_deref())
+    {
+        if !previous_cycle.trim().is_empty()
+            && !current_cycle.trim().is_empty()
+            && previous_cycle != current_cycle
+            && input.observed_at_ms >= previous.observed_at_ms
+        {
+            return true;
+        }
+    }
+    // Relative reset values may drift between reads, and a wake itself may
+    // advance the deadline. Neither is another cycle before the old deadline.
+    previous
+        .reset_at_ms
+        .zip(reset_at_ms)
+        .is_some_and(|(previous_reset, current_reset)| {
+            input.observed_at_ms >= previous_reset && current_reset > input.observed_at_ms
+        })
 }
 
 fn percent_to_basis_points(percent: f64) -> Result<u16, QuotaNormalizationError> {

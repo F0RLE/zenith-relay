@@ -135,6 +135,11 @@ pub(super) async fn drive_selected_candidate(
     {
         AuthorizationUpgrade::ContinueCandidate => return Ok(DrivenConnect::Continue(request)),
         AuthorizationUpgrade::BudgetExhausted => return Ok(DrivenConnect::Break(request)),
+        AuthorizationUpgrade::FastPathMissed => {
+            return Err(GatewayFailure::websocket_slow_handshake(
+                source_error_origin,
+            ));
+        }
         AuthorizationUpgrade::Upgraded(upgrade) => upgrade,
     };
     // The final prepared authorization may differ from the first attempt
@@ -146,6 +151,12 @@ pub(super) async fn drive_selected_candidate(
     let response_headers = upgrade.headers().clone();
     runtime.observe_codex_quota_headers(&route.candidate_id, status, &response_headers, now_ms());
     if status == StatusCode::SWITCHING_PROTOCOLS {
+        runtime.observe_codex_models_etag(
+            &route.candidate_id,
+            &route.upstream_url,
+            &response_headers,
+            &prepared,
+        );
         let turn_scope = request_scope(
             &key.id,
             client_headers,

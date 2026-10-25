@@ -233,7 +233,7 @@ async fn start_next_request(
         route.half_open_probe = selected.half_open_probe;
         route.account_token_generation = prepared.token_generation;
         route.routing = Some(selected.diagnostics);
-        route.observe_websocket_dispatch(None);
+        route.observe_websocket_reuse();
         route.observe_websocket_response();
         route.client_context_id = client_request.client_context_id.clone();
         client_request.apply_service_tier();

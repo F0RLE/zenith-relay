@@ -160,6 +160,7 @@ pub(in crate::gateway::execution) async fn resolve(
     let expected_owner = first.authorization_incarnation;
     let mut response = first.response;
     loop {
+        context.route.observe_http_payload(&response);
         let status = response.status();
         let headers = response.headers().clone();
         context
@@ -271,6 +272,14 @@ pub(in crate::gateway::execution) async fn resolve(
                 &upstream,
             ));
         context.tool_use.capture_upstream_context(&upstream);
+        if let Some(transport) = context
+            .route
+            .routing
+            .as_mut()
+            .and_then(|routing| routing.transport.as_mut())
+        {
+            transport.request_payload = None;
+        }
         let before = context.budget.dispatches();
         response = match dispatch_continuation(
             context.runtime,
@@ -303,6 +312,13 @@ pub(in crate::gateway) async fn dispatch_continuation(
     upstream: &Value,
 ) -> Result<AuthorizedResponse, crate::runtime::AuthorizedRequestError> {
     runtime.observe_basis_points_dispatch(route, upstream);
+    let body = serde_json::to_vec(upstream).expect("prepared JSON is serializable");
+    let payload = route.diagnostics_enabled.then(|| {
+        crate::usage::RequestPayloadDiagnostics::identity(
+            &body,
+            crate::usage::TransportMode::BasisPoints,
+        )
+    });
     let request = runtime
         .request_client(&route.candidate_id)
         .post(route.upstream_url.clone())
@@ -316,8 +332,8 @@ pub(in crate::gateway) async fn dispatch_continuation(
                 "application/json"
             },
         )
-        .body(serde_json::to_vec(upstream).expect("prepared JSON is serializable"));
-    runtime
+        .body(body);
+    let mut response = runtime
         .send_basis_points_catalog_continuation(
             route,
             request,
@@ -331,7 +347,12 @@ pub(in crate::gateway) async fn dispatch_continuation(
             },
             owner,
         )
-        .await
+        .await?;
+    // This BPS body is not compressed or rewritten by native Codex guards.
+    if let Some(payload) = payload {
+        response.response.extensions_mut().insert(payload);
+    }
+    Ok(response)
 }
 
 pub(in crate::gateway) fn record_lookup(

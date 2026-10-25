@@ -12,6 +12,7 @@ use crate::runtime::PreparedAuthorization;
 pub(super) enum AuthorizationUpgrade {
     ContinueCandidate,
     BudgetExhausted,
+    FastPathMissed,
     Upgraded(UpgradeResponse),
 }
 
@@ -30,6 +31,12 @@ pub(super) async fn upgrade_with_authorization_refresh(
     last_failure: &mut Option<GatewayFailure>,
 ) -> AuthorizationUpgrade {
     let mut refresh_fence = None;
+    // Optional transport optimization only: never move an opaque continuation
+    // or an active health probe to another transport on a short deadline.
+    let fast_path = !request.has_previous_response_id()
+        && request.response_affinity_key.is_none()
+        && !route.half_open_probe;
+    let fast_deadline = started + Duration::from_secs(2);
     loop {
         // Every upgrade, including an authorization retry, spends the shared
         // wire budget. A handshake never spends a generation dispatch.
@@ -73,8 +80,19 @@ pub(super) async fn upgrade_with_authorization_refresh(
             .upgrade();
         let handshake_started = Instant::now();
         route.observe_websocket_dispatch(None);
-        let upgrade = timeout(UPSTREAM_CONNECT_TIMEOUT, upgrade.send()).await;
+        let connect_budget = if fast_path {
+            fast_deadline.saturating_duration_since(Instant::now())
+        } else {
+            UPSTREAM_CONNECT_TIMEOUT
+        };
+        let upgrade = timeout(connect_budget, upgrade.send()).await;
         let elapsed_ms = handshake_started.elapsed().as_millis() as u64;
+        if fast_path && upgrade.is_err() {
+            // Only GET/Upgrade was attempted, never response.create. Dropping
+            // the handshake cancels it; do not penalize the account/circuit or
+            // mark the endpoint permanently HTTP-only for being slow once.
+            return AuthorizationUpgrade::FastPathMissed;
+        }
         let Ok(Ok(upgrade)) = upgrade else {
             route.observe_websocket_handshake(elapsed_ms, false);
             return continue_candidate(

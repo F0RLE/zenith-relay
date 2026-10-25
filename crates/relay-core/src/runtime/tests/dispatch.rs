@@ -397,7 +397,7 @@ async fn model_inventory_refresh_keeps_live_capacity_health_and_exact_dispatch_o
     .is_none());
 }
 #[test]
-fn model_inventory_refresh_updates_image_bridge_and_retires_old_transport_evidence() {
+fn model_inventory_refresh_keeps_native_images_and_retires_old_transport_evidence() {
     let runtime = quota_runtime(QuotaSnapshot::default());
     let key = runtime
         .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
@@ -426,7 +426,7 @@ fn model_inventory_refresh_updates_image_bridge_and_retires_old_transport_eviden
             )
             .unwrap()
             .source_model,
-        "gpt-5.6-sol"
+        IMAGE_API_MODEL
     );
     assert!(runtime.update_account_models("account-1", &["gpt-test".into()]));
     assert!(runtime
@@ -436,7 +436,7 @@ fn model_inventory_refresh_updates_image_bridge_and_retires_old_transport_eviden
             &scope,
             &[WireApi::ChatCompletions],
         )
-        .is_none());
+        .is_some());
 }
 #[tokio::test]
 async fn removed_and_reintroduced_model_cannot_reuse_an_old_pending_lease() {
@@ -484,7 +484,7 @@ async fn removed_and_reintroduced_model_cannot_reuse_an_old_pending_lease() {
     assert_eq!(budget.dispatches(), 1);
 }
 #[tokio::test]
-async fn changed_image_bridge_revokes_pending_dispatch_without_charging_a_generation() {
+async fn image_inventory_change_revokes_pending_dispatch_without_charging_a_generation() {
     use crate::scheduler::rotation::{DispatchStartError, SharedRequestBudget};
 
     let runtime = quota_runtime(QuotaSnapshot::default());
@@ -512,7 +512,7 @@ async fn changed_image_bridge_revokes_pending_dispatch_without_charging_a_genera
             .image_executor_route("account-1", IMAGE_API_MODEL, &scope, &protocols)
             .unwrap()
             .source_model,
-        "gpt-5.4"
+        IMAGE_API_MODEL
     );
     assert!(runtime.update_account_models("account-1", &["gpt-5.6-sol".into()]));
     assert_eq!(
@@ -543,7 +543,7 @@ async fn changed_image_bridge_revokes_pending_dispatch_without_charging_a_genera
             .image_executor_route("account-1", IMAGE_API_MODEL, &scope, &protocols)
             .unwrap()
             .source_model,
-        "gpt-5.6-sol"
+        IMAGE_API_MODEL
     );
     fresh.begin_rotation_http_dispatch().unwrap();
     fresh.settle_rotation_success(crate::unix_time_ms());

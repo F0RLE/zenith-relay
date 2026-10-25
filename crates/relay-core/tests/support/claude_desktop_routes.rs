@@ -268,7 +268,7 @@ async fn claude_desktop_effort_choices_reach_native_and_bridged_upstreams() {
 }
 
 #[tokio::test]
-async fn claude_desktop_sparse_efforts_use_the_nearest_allowed_lower_level() {
+async fn claude_desktop_sparse_efforts_reject_unadvertised_levels_without_remapping() {
     use zenith_relay_core::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
 
     for protocol in [WireApi::Messages, WireApi::Responses] {
@@ -276,18 +276,12 @@ async fn claude_desktop_sparse_efforts_use_the_nearest_allowed_lower_level() {
             (
                 vec!["none", "low", "high", "max"],
                 vec!["none", "low", "high", "max"],
-                vec![
-                    ("low", "low"),
-                    ("medium", "low"),
-                    ("high", "high"),
-                    ("xhigh", "high"),
-                    ("max", "max"),
-                ],
+                vec!["low", "high", "max"],
             ),
             (
                 vec!["none", "low", "medium", "high", "xhigh", "max"],
                 vec!["none", "high", "max"],
-                vec![("low", "high"), ("medium", "high"), ("xhigh", "high")],
+                vec!["high", "max"],
             ),
             (vec!["none"], vec!["none"], vec![]),
         ] {
@@ -330,6 +324,14 @@ async fn claude_desktop_sparse_efforts_use_the_nearest_allowed_lower_level() {
             let history = [json!({"role":"user","content":"Synthetic input."})];
             let original = desktop_request(&alias, &history, false);
             let mut rejected = Vec::new();
+            for effort in ["low", "medium", "high", "xhigh", "max"] {
+                if !cases.contains(&effort) {
+                    let mut body = original.clone();
+                    body["output_config"] = json!({"effort":effort});
+                    body["thinking"] = json!({"type":"adaptive"});
+                    rejected.push(("/v1/messages".to_string(), body));
+                }
+            }
             for model in [
                 MODEL.to_string(),
                 zenith_relay_core::claude_desktop_model_alias(MODEL),
@@ -410,7 +412,7 @@ async fn claude_desktop_sparse_efforts_use_the_nearest_allowed_lower_level() {
                 StatusCode::OK,
                 "{protocol:?} disabled {allowed:?}: {output}"
             );
-            for (requested, _) in &cases {
+            for requested in &cases {
                 let mut body = desktop_request(
                     &alias,
                     &[json!({"role":"user","content":"Synthetic input."})],
@@ -437,14 +439,14 @@ async fn claude_desktop_sparse_efforts_use_the_nearest_allowed_lower_level() {
             } else {
                 assert_eq!(requests[0].body["reasoning"]["effort"], "none");
             }
-            for (request, (_, effective)) in requests.iter().skip(1).zip(&cases) {
+            for (request, effort) in requests.iter().skip(1).zip(&cases) {
                 assert_eq!(request.body["model"], MODEL);
                 let pointer = if protocol == WireApi::Messages {
                     "/output_config/effort"
                 } else {
                     "/reasoning/effort"
                 };
-                assert_eq!(request.body.pointer(pointer), Some(&json!(effective)));
+                assert_eq!(request.body.pointer(pointer), Some(&json!(effort)));
             }
             let events = events.lock().unwrap();
             assert_eq!(events.len(), cases.len() + 1);
@@ -456,16 +458,10 @@ async fn claude_desktop_sparse_efforts_use_the_nearest_allowed_lower_level() {
                 events[0].effective_reasoning_effort.as_deref(),
                 Some("none")
             );
-            for (event, (requested, effective)) in events.iter().skip(1).zip(&cases) {
+            for (event, effort) in events.iter().skip(1).zip(&cases) {
                 assert!(event.success);
-                assert_eq!(
-                    event.requested_reasoning_effort.as_deref(),
-                    Some(*requested)
-                );
-                assert_eq!(
-                    event.effective_reasoning_effort.as_deref(),
-                    Some(*effective)
-                );
+                assert_eq!(event.requested_reasoning_effort.as_deref(), Some(*effort));
+                assert_eq!(event.effective_reasoning_effort.as_deref(), Some(*effort));
             }
         }
     }
@@ -540,7 +536,7 @@ async fn claude_desktop_aliases_preserve_native_and_bridged_streaming() {
             true,
         );
         if reasoning {
-            body["output_config"] = json!({"effort":"xhigh"});
+            body["output_config"] = json!({"effort":"high"});
             body["thinking"] = json!({"type":"adaptive"});
         }
         let response = reqwest::Client::new()
@@ -581,7 +577,7 @@ async fn claude_desktop_aliases_preserve_native_and_bridged_streaming() {
         if reasoning {
             assert_eq!(
                 events[0].requested_reasoning_effort.as_deref(),
-                Some("xhigh")
+                Some("high")
             );
             assert_eq!(
                 events[0].effective_reasoning_effort.as_deref(),
@@ -669,7 +665,10 @@ async fn claude_desktop_prefers_exact_effort_without_crossing_key_scope() {
     );
     body["thinking"] = json!({"type":"adaptive"});
     body["output_config"] = json!({"effort":"xhigh"});
-    for secret in [LOCAL_KEY, "restricted-local-key"] {
+    for (secret, expected_status) in [
+        (LOCAL_KEY, StatusCode::OK),
+        ("restricted-local-key", StatusCode::BAD_REQUEST),
+    ] {
         let response = reqwest::Client::new()
             .post(format!("{}/v1/messages", gateway.base_url))
             .bearer_auth(secret)
@@ -679,31 +678,31 @@ async fn claude_desktop_prefers_exact_effort_without_crossing_key_scope() {
             .unwrap();
         let status = response.status();
         let output = response.text().await.unwrap();
-        assert_eq!(status, StatusCode::OK, "{output}");
+        assert_eq!(status, expected_status, "{output}");
     }
     assert_eq!(exact_state.requests.lock().unwrap().len(), 1);
     assert_eq!(
         exact_state.requests.lock().unwrap()[0].body["output_config"]["effort"],
         "xhigh"
     );
-    assert_eq!(lower_state.requests.lock().unwrap().len(), 1);
-    assert_eq!(
-        lower_state.requests.lock().unwrap()[0].body["output_config"]["effort"],
-        "high"
-    );
+    assert!(lower_state.requests.lock().unwrap().is_empty());
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 2);
+    assert_eq!(
+        events[0].requested_reasoning_effort.as_deref(),
+        Some("xhigh")
+    );
     assert_eq!(
         events[0].effective_reasoning_effort.as_deref(),
         Some("xhigh")
     );
-    assert_eq!(
-        events[1].effective_reasoning_effort.as_deref(),
-        Some("high")
-    );
-    assert!(events
-        .iter()
-        .all(|event| event.requested_reasoning_effort.as_deref() == Some("xhigh")));
+    assert!(!events[1].success);
+    assert_eq!(events[1].http_status, 400);
+    assert_eq!(events[1].source_id, "relay");
+    assert!(events[1].candidate_id.is_none());
+    assert!(events[1].effective_reasoning_effort.is_none());
+    // Pre-admission failures use the local-error event, not executed-attempt usage.
+    assert!(events[1].requested_reasoning_effort.is_none());
 }
 
 #[tokio::test]

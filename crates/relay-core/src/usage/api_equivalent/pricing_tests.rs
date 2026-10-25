@@ -9,6 +9,30 @@ fn fixture_catalog() -> PricingCatalog {
 }
 
 #[test]
+fn image_token_aggregates_never_borrow_a_text_rate() {
+    let catalog = PricingCatalog::from_litellm_json(
+        r#"{
+        "gpt-image-synthetic": {"litellm_provider":"openai",
+            "input_cost_per_token":0.000005,"output_cost_per_token":0.00003}
+    }"#,
+    )
+    .unwrap();
+    let context = PricingContext::default();
+    let usage =
+        ApiEquivalentUsage::from_reported_tokens(Some(10), None, None, None, Some(5), Some(15));
+    let resolver = CatalogPriceResolver::new(&catalog, &context);
+    for kind in ["account", "source"] {
+        let result = resolver.estimate(kind, "synthetic", Some("gpt-image-synthetic"), usage);
+        assert_eq!(result.priced_tokens, 0);
+        assert_eq!(result.unpriced_tokens, 15);
+        assert_eq!(
+            resolver.source(kind, "synthetic", Some("gpt-image-synthetic")),
+            PriceSource::Unpriced
+        );
+    }
+}
+
+#[test]
 fn explicit_unknown_service_tiers_never_borrow_standard_or_other_schedule_prices() {
     let quote = crate::pricing::TokenPrice {
         input: 1_000_000,

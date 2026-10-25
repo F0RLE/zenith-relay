@@ -102,13 +102,17 @@ impl WakeCoordinator {
         error_code: &str,
     ) -> usize {
         let mut history = Vec::new();
-        for cycle in &mut self.state.cycles {
+        self.state.cycles.retain_mut(|cycle| {
             if cycle.status == WakeCycleStatus::Completed || !matches(cycle) {
-                continue;
+                return true;
             }
             history.push(canceled_history(cycle, completed_at_ms, error_code));
             cycle.finish(completed_at_ms);
-        }
+            // A canceled reservation that was never claimed cannot have spent
+            // quota. Release its identity so editing/re-enabling the rule can
+            // schedule it again. Claimed work keeps its replay protection.
+            cycle.attempts_started != 0
+        });
         let completed = history.len();
         for history_record in history {
             self.push_history(history_record);

@@ -160,8 +160,6 @@ impl GatewayRuntime {
         &self,
         candidate_id: &str,
     ) -> Result<PreparedAuthorization, super::AuthorizedRequestError> {
-        self.validate_basis_points_plan(candidate_id, None)
-            .map_err(super::AuthorizedRequestError::ModelAccess)?;
         let mut prepared = self
             .prepare_authorization(candidate_id, super::runtime_now_ms())
             .await
@@ -220,7 +218,6 @@ impl GatewayRuntime {
         candidate_id: &str,
         prepared: &PreparedAuthorization,
     ) -> Result<BasisPointsModelAccess, ModelDiscoveryFailure> {
-        self.validate_basis_points_plan(candidate_id, Some(prepared))?;
         let account = self
             .chatgpt_accounts
             .get(candidate_id)
@@ -304,49 +301,8 @@ impl GatewayRuntime {
         let _fence = self.fence_candidate_dispatch(account_id);
         *current = plan_type.map(str::to_owned);
         *crate::poison::write(&account.basis_points_access) = None;
-        if !account.oauth_client_kind.supports_pool(plan_type) {
-            let mut scheduler = self.lock_scheduler();
-            if let Some(candidate) = scheduler.candidate(account_id).cloned() {
-                scheduler.update_candidate_availability(
-                    account_id,
-                    false,
-                    candidate.health,
-                    candidate.quota,
-                );
-            }
-        }
         self.candidate_availability.notify_waiters();
         true
-    }
-
-    pub(in crate::runtime) fn validate_basis_points_plan(
-        &self,
-        candidate_id: &str,
-        prepared: Option<&PreparedAuthorization>,
-    ) -> Result<(), ModelDiscoveryFailure> {
-        let account = self
-            .chatgpt_accounts
-            .get(candidate_id)
-            .ok_or_else(|| failure(ModelDiscoveryFailureCode::InvalidAccountId, false))?;
-        if prepared.is_some_and(|prepared| !prepared.account_plan_supported) {
-            return Err(failure(
-                ModelDiscoveryFailureCode::BasisPointsFreeAccountUnsupported,
-                false,
-            ));
-        }
-        let plan = crate::poison::read(&account.subscription_plan_type);
-        let access_token = prepared
-            .and_then(|prepared| prepared.authorization.to_str().ok())
-            .and_then(|header| header.strip_prefix("Bearer "));
-        account
-            .oauth_client_kind
-            .validate_plan(plan.as_deref(), None, access_token)
-            .map_err(|_| {
-                failure(
-                    ModelDiscoveryFailureCode::BasisPointsFreeAccountUnsupported,
-                    false,
-                )
-            })
     }
 
     async fn fetch_basis_points_access(

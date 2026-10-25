@@ -53,7 +53,6 @@ impl GatewayRuntime {
             identity: None,
             token_generation: None,
             token_revision: None,
-            account_plan_supported: true,
             agent_task_id: None,
             agent_credential_fingerprint: None,
             agent_identity_revision: None,
@@ -110,7 +109,6 @@ impl GatewayRuntime {
                         ),
                         token_generation: None,
                         token_revision: None,
-                        account_plan_supported: true,
                         agent_task_id: agent.task_id().map(str::to_string),
                         agent_credential_fingerprint: Some(agent_credential_fingerprint(&agent)),
                         agent_identity_revision: Some(
@@ -184,14 +182,6 @@ impl GatewayRuntime {
             },
             token_generation: Some(prepared.tokens.generation()),
             token_revision: Some(prepared.dispatch_revision),
-            account_plan_supported: account
-                .oauth_client_kind
-                .validate_plan(
-                    None,
-                    prepared.tokens.id_token(),
-                    Some(prepared.tokens.access_token()),
-                )
-                .is_ok(),
             agent_task_id: None,
             agent_credential_fingerprint: None,
             agent_identity_revision: None,
@@ -360,6 +350,14 @@ pub(super) fn agent_credential_fingerprint(agent: &AgentIdentityCredential) -> [
 
 fn classify_token_authority_error(error: TokenAuthorityError) -> ExecutorPrepareError {
     match error {
+        TokenAuthorityError::RequiresReauth(
+            crate::accounts::ReauthReason::TokenRotationRecoveryRequired,
+        ) => ExecutorPrepareError::RotationRecoveryRequired,
+        TokenAuthorityError::RefreshFailed(ref code)
+            if code == "siwc_rotation_store_unavailable" =>
+        {
+            ExecutorPrepareError::CredentialStoreUnavailable
+        }
         TokenAuthorityError::AccessTokenExpired
         | TokenAuthorityError::RequiresReauth(_)
         | TokenAuthorityError::AccountNotFound

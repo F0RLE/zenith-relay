@@ -125,7 +125,7 @@ impl GatewayRuntime {
         let mut order = projection.into_runtime_order(
             &CandidateScope::default(),
             &crate::ModelRules::default(),
-            &crate::WireApi::ALL,
+            &crate::WireApi::ALL_NATIVE,
             runtime_now_ms(),
         );
         let revision = self.activity_revision.load(Ordering::Acquire);

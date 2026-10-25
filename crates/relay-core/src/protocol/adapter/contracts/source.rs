@@ -41,6 +41,7 @@ pub enum UpstreamProtocol {
     ChatCompletions,
     Messages,
     GeminiGenerateContent,
+    GeminiInteractions,
 }
 
 impl UpstreamProtocol {
@@ -50,6 +51,7 @@ impl UpstreamProtocol {
             Self::ChatCompletions => WireApi::ChatCompletions,
             Self::Messages => WireApi::Messages,
             Self::GeminiGenerateContent => WireApi::Gemini,
+            Self::GeminiInteractions => WireApi::GeminiInteractions,
         }
     }
 }
@@ -104,6 +106,7 @@ impl SourceAdapter {
                 WireApi::ChatCompletions => UpstreamProtocol::ChatCompletions,
                 WireApi::Messages => UpstreamProtocol::Messages,
                 WireApi::Gemini => UpstreamProtocol::GeminiGenerateContent,
+                WireApi::GeminiInteractions => UpstreamProtocol::GeminiInteractions,
             },
             Self::ResponsesToMessages
             | Self::ChatCompletionsToMessages
@@ -144,6 +147,7 @@ impl SourceAdapter {
                 }
             }
             UpstreamProtocol::Responses | UpstreamProtocol::ChatCompletions => true,
+            UpstreamProtocol::GeminiInteractions => false,
         }
     }
 
@@ -174,6 +178,7 @@ impl SourceAdapter {
 
     pub const fn route_suffix(self, client_wire_api: WireApi) -> &'static str {
         match (client_wire_api, self) {
+            (WireApi::GeminiInteractions, Self::Native) => "gemini_interactions",
             (WireApi::Responses, Self::ResponsesToMessages) => "responses_to_messages",
             (WireApi::Responses, Self::ResponsesToGemini) => "responses_to_gemini",
             (WireApi::Responses, Self::Native) => "responses",

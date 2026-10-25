@@ -13,6 +13,15 @@ pub(in crate::gateway) struct ToolCallCapture {
 impl ToolCallCapture {
     pub(in crate::gateway) fn observe(&mut self, body: &Value, client: WireApi) {
         let ids: Vec<&str> = match client {
+            WireApi::GeminiInteractions => crate::protocol::interactions::resource(body)
+                .get("outputs")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .chain(body.get("content"))
+                .filter(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
+                .filter_map(|item| item.get("id").and_then(Value::as_str))
+                .collect(),
             WireApi::Responses => {
                 let response = body.get("response").unwrap_or(body);
                 response

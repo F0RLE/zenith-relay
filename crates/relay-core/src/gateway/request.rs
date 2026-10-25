@@ -15,15 +15,14 @@ mod tool_policy;
 pub(in crate::gateway) use tool_calls::ToolCallCapture;
 
 pub(super) use background::codex_background_request_kind;
-pub(super) use dispatch::{chat_completions, gemini, messages, responses};
+pub(super) use dispatch::{chat_completions, gemini, interactions, messages, responses};
 pub(super) use responses_items::{
     contains_tool_call_output, remove_unpaired_responses_tool_call,
     repair_legacy_responses_call_ids, response_tool_call_ids, responses_item_has_ciphertext,
     tool_call_output_ids, unpaired_tool_output_ids,
 };
 pub(super) use routing::{
-    candidate_protocols, chat_request_has_supported_content, claude_desktop_effort_override,
-    request_id, requested_reasoning_effort,
+    candidate_protocols, chat_request_has_supported_content, request_id, requested_reasoning_effort,
 };
 #[cfg(test)]
 pub(super) use tool_policy::tool_use_diagnostics;
@@ -43,6 +42,7 @@ pub(super) use headers::{
     forwarded_bridge_messages_headers, forwarded_codex_headers, forwarded_messages_headers,
     forwarded_responses_headers, is_managed_codex_client,
 };
+pub(in crate::gateway) use identity::history_affinity_fingerprint;
 pub(super) use identity::{client_context_fingerprint, client_request_identity};
 mod codex_reasoning;
 pub(in crate::gateway) use codex_reasoning::normalize_codex_reasoning_placeholder;

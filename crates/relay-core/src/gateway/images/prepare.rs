@@ -24,12 +24,12 @@ pub(super) async fn prepare_request(
     request_body: Body,
     endpoint: ImageEndpoint,
 ) -> Result<PreparedImageRequest, Response<Body>> {
-    let raw_body = axum::body::to_bytes(request_body, usize::MAX)
+    let raw_body = axum::body::to_bytes(request_body, super::MAX_IMAGE_BODY_BYTES)
         .await
         .map_err(|_| {
             api_error(
                 StatusCode::BAD_REQUEST,
-                "request body could not be read",
+                "image request body could not be read or exceeds 128 MiB",
                 error_codes::INVALID_REQUEST,
             )
         })?;
@@ -121,6 +121,22 @@ pub(super) async fn prepare_request(
             error_codes::INVALID_REQUEST,
         ));
     }
+    if stream && response_format == "url" {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "streaming images use b64_json; response_format=url requires stream=false",
+            error_codes::INVALID_REQUEST,
+        ));
+    }
+    if let Some(count) = request_fields.get("n") {
+        if count.as_u64().is_none_or(|count| count == 0 || count > 10) {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "n must be an integer from 1 to 10",
+                error_codes::INVALID_REQUEST,
+            ));
+        }
+    }
 
     Ok(PreparedImageRequest {
         requested_model,
@@ -153,18 +169,29 @@ fn parse_json(
     }
 
     let mut images = Vec::new();
-    if let Some(image) = request_fields.get("image").and_then(Value::as_str) {
+    if let Some(image) = request_fields.get("image").filter(|value| !value.is_null()) {
+        let Some(image) = image.as_str().filter(|value| !value.trim().is_empty()) else {
+            return Err(invalid_image_reference());
+        };
         push_non_empty(&mut images, image);
     }
-    if let Some(image_entries) = request_fields.get("images").and_then(Value::as_array) {
+    if let Some(image_entries) = request_fields
+        .get("images")
+        .filter(|value| !value.is_null())
+    {
+        let Some(image_entries) = image_entries.as_array() else {
+            return Err(invalid_image_reference());
+        };
         for image in image_entries {
-            if let Some(url) = image
+            let Some(url) = image
                 .get("image_url")
                 .and_then(Value::as_str)
                 .or_else(|| image.as_str())
-            {
-                push_non_empty(&mut images, url);
-            }
+                .filter(|value| !value.trim().is_empty())
+            else {
+                return Err(invalid_image_reference());
+            };
+            push_non_empty(&mut images, url);
         }
     }
     let mask = request_fields.get("mask").and_then(|mask| {
@@ -175,7 +202,22 @@ fn parse_json(
             .filter(|mask_value| !mask_value.is_empty())
             .map(str::to_string)
     });
+    if request_fields
+        .get("mask")
+        .is_some_and(|value| !value.is_null())
+        && mask.is_none()
+    {
+        return Err(invalid_image_reference());
+    }
     Ok((request_fields, images, mask))
+}
+
+fn invalid_image_reference() -> Response<Body> {
+    api_error(
+        StatusCode::BAD_REQUEST,
+        "image and mask inputs require non-empty URL/data URL references or multipart files",
+        error_codes::INVALID_REQUEST,
+    )
 }
 
 #[allow(clippy::result_large_err)]
@@ -300,5 +342,28 @@ fn push_non_empty(target: &mut Vec<String>, text_value: &str) {
     let text_value = text_value.trim();
     if !text_value.is_empty() {
         target.push(text_value.to_string());
+    }
+}
+
+#[cfg(test)]
+mod image_reference_tests {
+    use super::*;
+
+    #[test]
+    fn image_edit_inputs_do_not_silently_drop_unsupported_references() {
+        let (_, images, mask) = parse_json(
+            br#"{"images":[{"image_url":"data:image/png;base64,YQ=="}],"image":null,"mask":null}"#,
+            ImageEndpoint::Edits,
+        )
+        .unwrap();
+        assert_eq!(images.len(), 1);
+        assert!(mask.is_none());
+        for body in [
+            br#"{"images":[{"image_url":"data:image/png;base64,YQ=="},{"file_id":"unsupported"}]}"#
+                .as_slice(),
+            br#"{"image":"valid","mask":{"file_id":"unsupported"}}"#.as_slice(),
+        ] {
+            assert!(parse_json(body, ImageEndpoint::Edits).is_err());
+        }
     }
 }

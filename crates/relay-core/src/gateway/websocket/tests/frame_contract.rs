@@ -435,6 +435,25 @@ fn websocket_errors_keep_the_source_origin_and_unmapped_category() {
 }
 
 #[test]
+fn websocket_missing_local_history_uses_the_client_full_request_recovery_code() {
+    let failure = GatewayFailure::adapter(crate::AdapterError::continuation_missing());
+    let event = super::super::failure::gateway_error_event(&failure, Some("synthetic"), None);
+
+    assert_eq!(event["error"]["code"], "previous_response_not_found");
+    assert_eq!(event["error"]["param"], "previous_response_id");
+    assert_eq!(event["error"]["zenith_relay"]["origin"], "relay");
+    assert_eq!(
+        event["error"]["zenith_relay"]["category"],
+        "adapter_continuation_missing"
+    );
+
+    let mismatch = GatewayFailure::adapter(crate::AdapterError::continuation_mismatch());
+    let event = super::super::failure::gateway_error_event(&mismatch, None, None);
+    assert_eq!(event["error"]["code"], "adapter_continuation_mismatch");
+    assert!(event["error"]["param"].is_null());
+}
+
+#[test]
 fn http_fallback_preserves_provider_and_account_error_origins() {
     let provider = Response::builder()
         .status(StatusCode::TOO_MANY_REQUESTS)

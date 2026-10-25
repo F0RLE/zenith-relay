@@ -135,6 +135,7 @@ fn model_discovery_state_transitions_keep_user_reauthentication_intact() {
     // A previously confirmed account block must not be cleared by a
     // separate model-discovery permission failure.
     health = AccountHealthState::Blocked;
+    last_error_code = Some("workspace_disabled".to_string());
     apply_model_discovery_failure(
         &mut auth_state,
         &mut health,
@@ -264,17 +265,67 @@ fn model_discovery_transient_failure_preserves_terminal_catalog_failure() {
 }
 
 #[test]
-fn model_discovery_success_does_not_clear_persisted_block() {
+fn model_discovery_success_recovers_legacy_catalog_block() {
     let mut auth_state = AccountAuthState::Active;
     let mut health = AccountHealthState::Blocked;
     let mut last_error_code = Some("models_forbidden".to_string());
-    assert!(!recover_model_discovery_state(
+    assert!(recover_model_discovery_state(
         &mut auth_state,
         &mut health,
         &mut last_error_code,
     ));
-    assert_eq!(health, AccountHealthState::Blocked);
-    assert_eq!(last_error_code.as_deref(), Some("models_forbidden"));
+    assert_eq!(auth_state, AccountAuthState::Active);
+    assert_eq!(health, AccountHealthState::Healthy);
+    assert!(last_error_code.is_none());
+}
+
+#[test]
+fn model_discovery_block_repair_is_scoped_and_keeps_permission_error() {
+    let mut health = AccountHealthState::Blocked;
+    assert!(repair_model_discovery_block(
+        AccountAuthState::Active,
+        &mut health,
+        Some("models_forbidden"),
+    ));
+    assert_eq!(health, AccountHealthState::Degraded);
+    assert!(!repair_model_discovery_block(
+        AccountAuthState::Active,
+        &mut health,
+        Some("models_forbidden"),
+    ));
+    for (auth, code) in [
+        (AccountAuthState::Active, "workspace_disabled"),
+        (AccountAuthState::Active, "quota_forbidden"),
+        (AccountAuthState::Active, "checkpoint"),
+        (AccountAuthState::Error, "models_forbidden"),
+        (
+            AccountAuthState::RequiresReauth(ReauthReason::InvalidGrant),
+            "models_forbidden",
+        ),
+    ] {
+        let mut health = AccountHealthState::Blocked;
+        assert!(!repair_model_discovery_block(auth, &mut health, Some(code)));
+        let mut auth = auth;
+        let mut last_error = Some(code.to_string());
+        assert!(!recover_model_discovery_state(
+            &mut auth,
+            &mut health,
+            &mut last_error
+        ));
+        assert_eq!(health, AccountHealthState::Blocked);
+        assert_eq!(last_error.as_deref(), Some(code));
+    }
+}
+
+#[test]
+fn model_discovery_failure_rechecks_legacy_block_without_granting_access() {
+    let mut auth = AccountAuthState::Active;
+    let mut health = AccountHealthState::Blocked;
+    let mut code = Some("models_forbidden".to_string());
+    apply_model_discovery_failure(&mut auth, &mut health, &mut code, "models_forbidden", false);
+    assert_eq!(auth, AccountAuthState::Active);
+    assert_eq!(health, AccountHealthState::Degraded);
+    assert_eq!(code.as_deref(), Some("models_forbidden"));
 }
 
 #[test]

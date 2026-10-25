@@ -40,97 +40,82 @@ fn discovery_failure_codes_keep_the_management_contract_stable() {
             ModelDiscoveryFailureCode::AgentTaskInvalid,
             "models_agent_task_invalid",
             false,
-            false,
         ),
         (
             ModelDiscoveryFailureCode::BasisPointsFreeAccountUnsupported,
             "basis_points_free_account_unsupported",
-            false,
             false,
         ),
         (
             ModelDiscoveryFailureCode::Forbidden,
             "models_forbidden",
             false,
-            true,
         ),
         (
             ModelDiscoveryFailureCode::HttpStatus,
             "models_http_status",
-            false,
             false,
         ),
         (
             ModelDiscoveryFailureCode::InvalidAccessToken,
             "models_invalid_access_token",
             true,
-            false,
         ),
         (
             ModelDiscoveryFailureCode::InvalidAccountId,
             "models_invalid_account_id",
             true,
-            false,
         ),
         (
             ModelDiscoveryFailureCode::InvalidClientVersion,
             "models_invalid_client_version",
-            false,
             false,
         ),
         (
             ModelDiscoveryFailureCode::InvalidEndpoint,
             "models_invalid_endpoint",
             false,
-            false,
         ),
         (
             ModelDiscoveryFailureCode::InvalidResponse,
             "models_invalid_response",
-            false,
             false,
         ),
         (
             ModelDiscoveryFailureCode::RateLimited,
             "models_rate_limited",
             false,
-            false,
         ),
         (
             ModelDiscoveryFailureCode::ResponseTooLarge,
             "models_response_too_large",
-            false,
             false,
         ),
         (
             ModelDiscoveryFailureCode::Transport,
             "models_transport",
             false,
-            false,
         ),
         (
             ModelDiscoveryFailureCode::Unauthorized,
             "models_unauthorized",
             true,
-            false,
         ),
         (
             ModelDiscoveryFailureCode::Upstream,
             "models_upstream",
             false,
-            false,
         ),
     ];
 
-    for (code, management_code, authentication_failure, blocks_account) in cases {
+    for (code, management_code, authentication_failure) in cases {
         assert_eq!(code.management_code(), management_code);
         assert_eq!(code.is_authentication_failure(), authentication_failure);
-        assert_eq!(code.blocks_account(), blocks_account);
     }
 }
 
 #[tokio::test]
-async fn bps_free_discovery_rejects_metadata_and_token_claims_before_http() {
+async fn bps_free_token_claims_do_not_replace_provider_access_checks() {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     let token = format!(
         "e30.{}.synthetic",
@@ -141,26 +126,35 @@ async fn bps_free_discovery_rejects_metadata_and_token_claims_before_http() {
             .to_string()
         )
     );
-    for (plan, access) in [
-        (Some("Free plan"), "synthetic-access"),
-        (Some("plus"), token.as_str()),
-    ] {
-        let client = AccountModelsClient::with_endpoint(
-            Url::parse("http://127.0.0.1:1/basispoints/api/responses/access").unwrap(),
-        )
-        .unwrap()
-        .with_oauth_client_kind(super::super::OAuthClientKind::ExcelBps)
-        .with_subscription_plan_type(plan);
-        let error = client
-            .discover(access, "synthetic-account", "ignored")
-            .await
-            .unwrap_err();
-        assert_eq!(
-            error.code,
-            ModelDiscoveryFailureCode::BasisPointsFreeAccountUnsupported
-        );
-        assert!(!error.retryable);
-        assert_eq!(error.http_status, None);
+    for status in [StatusCode::OK, StatusCode::FORBIDDEN] {
+        let (mut endpoint, server) = spawn(Router::new().route(
+            "/basispoints/api/responses/access",
+            get(move || async move {
+                (
+                    status,
+                    Json(
+                        json!({"allowed": true, "model_catalog": {"models": [{"id": "gpt-bps"}]}}),
+                    ),
+                )
+            }),
+        ))
+        .await;
+        endpoint.set_path("/basispoints/api/responses/access");
+        let client = AccountModelsClient::with_endpoint(endpoint)
+            .unwrap()
+            .with_oauth_client_kind(super::super::OAuthClientKind::ExcelBps);
+        let result = client
+            .discover(&token, "synthetic-account", "ignored")
+            .await;
+        if status == StatusCode::OK {
+            assert_eq!(result.unwrap(), vec!["gpt-bps"]);
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.code, ModelDiscoveryFailureCode::Forbidden);
+            assert!(!error.retryable);
+            assert_eq!(error.http_status, Some(403));
+        }
+        server.abort();
     }
 }
 

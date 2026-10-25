@@ -1,5 +1,6 @@
 use crate::usage::{
     CacheContextSection, CacheHistoryComparison, CacheHistoryDiagnostics, CacheInputKind,
+    LeadingContextAlignment,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -119,7 +120,35 @@ impl RequestFingerprint {
     }
 
     pub(super) fn relay_history(&self, client: &Self) -> CacheHistoryDiagnostics {
-        self.compare_history(Some(client), true)
+        let mut diagnostics = self.compare_history(Some(client), true);
+        // Never align a continuation delta with materialized full history.
+        if self.continuation || client.continuation {
+            return diagnostics;
+        }
+        let leading = |items: &[InputFingerprint]| {
+            items
+                .iter()
+                .take_while(|item| item.kind == CacheInputKind::Developer)
+                .count()
+        };
+        let client_prefix = leading(&client.input);
+        let upstream_prefix = leading(&self.input);
+        if diagnostics.shared_prefix_items.unwrap_or(0) >= client_prefix.max(upstream_prefix) as u32
+            || (client_prefix == client.input.len() && upstream_prefix == self.input.len())
+        {
+            return diagnostics;
+        }
+        let (comparison, shared, _) = compare_items(
+            &self.input[upstream_prefix..],
+            &client.input[client_prefix..],
+        );
+        diagnostics.leading_context_alignment = Some(LeadingContextAlignment {
+            skipped_client_items: client_prefix as u32,
+            skipped_upstream_items: upstream_prefix as u32,
+            shared_prefix_items: shared as u32,
+            comparison,
+        });
+        diagnostics
     }
 
     fn compare_history(
@@ -142,25 +171,35 @@ impl RequestFingerprint {
         else {
             return diagnostics;
         };
-        let shared = self
-            .input
-            .iter()
-            .zip(&previous.input)
-            .take_while(|(current, old)| current.digest == old.digest)
-            .count();
+        let (comparison, shared, changed) = compare_items(&self.input, &previous.input);
         diagnostics.shared_prefix_items = Some(shared as u32);
-        diagnostics.comparison = if shared < self.input.len().min(previous.input.len()) {
-            diagnostics.first_changed_item_kind = self.input.get(shared).map(|item| item.kind);
-            CacheHistoryComparison::Rewritten
-        } else if self.input.len() < previous.input.len() {
-            CacheHistoryComparison::Truncated
-        } else if self.input.len() > previous.input.len() {
-            CacheHistoryComparison::Appended
-        } else {
-            CacheHistoryComparison::Unchanged
-        };
+        diagnostics.comparison = comparison;
+        diagnostics.first_changed_item_kind = changed;
         diagnostics
     }
+}
+
+fn compare_items(
+    current: &[InputFingerprint],
+    previous: &[InputFingerprint],
+) -> (CacheHistoryComparison, usize, Option<CacheInputKind>) {
+    let shared = current
+        .iter()
+        .zip(previous)
+        .take_while(|(current, old)| current.digest == old.digest)
+        .count();
+    let mut changed = None;
+    let comparison = if shared < current.len().min(previous.len()) {
+        changed = current.get(shared).map(|item| item.kind);
+        CacheHistoryComparison::Rewritten
+    } else if current.len() < previous.len() {
+        CacheHistoryComparison::Truncated
+    } else if current.len() > previous.len() {
+        CacheHistoryComparison::Appended
+    } else {
+        CacheHistoryComparison::Unchanged
+    };
+    (comparison, shared, changed)
 }
 
 pub(super) fn identity(salt: &[u8; 32], parts: &[&[u8]]) -> Fingerprint {

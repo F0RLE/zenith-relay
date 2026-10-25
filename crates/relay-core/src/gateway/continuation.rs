@@ -1,6 +1,7 @@
 use crate::error_codes;
 mod compacted;
 pub(in crate::gateway) mod gemini;
+pub(in crate::gateway) mod interactions;
 mod replay;
 
 pub(super) use replay::{drop_materialized_previous_response_id, recover_stale_tool_history};
@@ -38,6 +39,12 @@ pub(super) fn prepare_response_owner_change(
     requires_affinity_owner: bool,
     now_ms: u64,
 ) -> bool {
+    if request
+        .get("previous_interaction_id")
+        .is_some_and(|value| !value.is_null())
+    {
+        return false;
+    }
     if request.get("contents").is_some()
         && previous_response_id(request).is_none()
         && request

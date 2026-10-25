@@ -17,7 +17,7 @@ pub use availability::{
 pub use order::{
     apply_member_model_display_order, apply_model_display_order,
     apply_model_display_order_with_catalog, apply_model_metadata, member_model_catalog,
-    ModelCatalogIdentity,
+    ModelCatalogIdentity, ModelDisplayProjection,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -25,8 +25,6 @@ pub use order::{
 pub struct GatewaySummary {
     #[serde(default)]
     pub tool_policy: crate::ToolPolicy,
-    #[serde(default)]
-    pub request_timezone: crate::RequestTimezonePolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_routing: Option<crate::PoolRoutingPolicy>,
     pub running: bool,
@@ -285,10 +283,6 @@ pub fn apply_pool_model_configuration_with_context(
             model.token_price = Some((*price).into());
             model.custom_price = true;
         }
-        let reported_reasoning_levels = Some(runtime.map_or_else(
-            || model.catalog_reasoning_effort_levels.clone(),
-            |runtime| runtime.model_reasoning_levels(&model_id),
-        ));
         let capabilities = runtime.map_or_else(
             || {
                 model
@@ -305,6 +299,11 @@ pub fn apply_pool_model_configuration_with_context(
             },
             |runtime| runtime.model_capabilities(&model_id),
         );
+        let reported_reasoning_levels = Some(if runtime.is_some() {
+            crate::canonicalize_reasoning_levels(capabilities.reasoning_effort_levels.clone())
+        } else {
+            model.catalog_reasoning_effort_levels.clone()
+        });
         for route in &mut model.protocol_routes {
             route.features = capabilities.protocol_features();
             route.reasoning_efforts.clear();

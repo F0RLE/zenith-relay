@@ -9,6 +9,7 @@ struct MatrixUpstream {
 
 fn generation_path(protocol: WireApi, streaming: bool) -> &'static str {
     match (protocol, streaming) {
+        (WireApi::GeminiInteractions, _) => "/v1beta/interactions",
         (WireApi::Responses, _) => "/v1/responses",
         (WireApi::ChatCompletions, _) => "/v1/chat/completions",
         (WireApi::Messages, _) => "/v1/messages",
@@ -19,6 +20,7 @@ fn generation_path(protocol: WireApi, streaming: bool) -> &'static str {
 
 fn request_body(protocol: WireApi, streaming: bool) -> Value {
     let mut request = match protocol {
+        WireApi::GeminiInteractions => json!({"input":"Synthetic matrix request","store":false}),
         WireApi::Responses => json!({
             "input":"Synthetic matrix request",
             "store":false,
@@ -51,6 +53,9 @@ fn request_body(protocol: WireApi, streaming: bool) -> Value {
 
 fn response_body(protocol: WireApi) -> Value {
     match protocol {
+        WireApi::GeminiInteractions => {
+            json!({"id":"interaction_matrix","status":"completed","model":"matrix-model","outputs":[{"type":"text","text":"Matrix reply"}],"usage":{"total_input_tokens":13,"total_output_tokens":7,"total_tokens":20}})
+        }
         WireApi::Responses => json!({
             "id":"resp_matrix","object":"response","status":"completed","model":"matrix-model",
             "output":[{"type":"message","id":"msg_matrix","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Matrix reply","annotations":[]}]}],
@@ -75,6 +80,9 @@ fn response_body(protocol: WireApi) -> Value {
 
 fn stream_body(protocol: WireApi) -> String {
     let events = match protocol {
+        WireApi::GeminiInteractions => vec![
+            json!({"event_type":"interaction.completed","interaction":response_body(protocol)}),
+        ],
         WireApi::Responses => vec![
             json!({"type":"response.created","response":{"id":"resp_matrix","output":[]}}),
             json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_matrix","role":"assistant","content":[]}}),
@@ -227,6 +235,9 @@ async fn chat_pdf_reaches_native_and_converted_upstreams_without_extraction() {
         let requests = observed.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
         let (data_path, filename_path, expected_data) = match output {
+            WireApi::GeminiInteractions => {
+                unreachable!("native-only protocol has separate media acceptance")
+            }
             WireApi::ChatCompletions => (
                 "/messages/0/content/0/file/file_data",
                 "/messages/0/content/0/file/filename",
@@ -363,6 +374,7 @@ async fn all_sixteen_routes_execute_json_and_sse_with_actual_upstream_usage() {
                         assert_eq!(body, stream_body(output), "native {input:?}");
                     }
                     let terminal = match input {
+                        WireApi::GeminiInteractions => "completed",
                         WireApi::Responses => "response.completed",
                         WireApi::ChatCompletions => "[DONE]",
                         WireApi::Messages => "message_stop",

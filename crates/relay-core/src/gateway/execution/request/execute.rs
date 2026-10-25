@@ -10,6 +10,19 @@ use super::RequestExecution;
 pub(in crate::gateway::execution) async fn execute_request(
     context: RequestExecution,
 ) -> Response<Body> {
+    let scope = context.runtime.track_request_usage(&context.request_id);
+    let response = execute_request_inner(context).await;
+    let streaming = response.status().is_success()
+        && response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/event-stream"));
+    scope.finish(response.status().as_u16(), streaming);
+    response
+}
+
+async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
     let started = Instant::now();
     let RequestExecution {
         mut tool_policy,

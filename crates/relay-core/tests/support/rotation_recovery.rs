@@ -95,6 +95,7 @@ async fn bounded_requests_reach_the_ninth_candidate_without_hiding_it_from_the_p
         .all(|state| state.requests.lock().unwrap().len() == 1));
     assert_eq!(success.requests.lock().unwrap().len(), 1);
     let events = events.lock().unwrap();
+    let events = usage_observations::physical_attempts(&events);
     assert_eq!(events.len(), 9);
     assert!(events[..8]
         .iter()
@@ -158,6 +159,7 @@ async fn repeated_rejection_stops_at_the_shared_request_budget_without_multiple_
     );
     assert_eq!(state.requests.lock().unwrap().len(), 3);
     let events = events.lock().unwrap();
+    let events = usage_observations::physical_attempts(&events);
     assert_eq!(events.len(), 3);
     assert!(events
         .iter()

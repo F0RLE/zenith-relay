@@ -31,6 +31,55 @@ impl fmt::Debug for RuntimeContinuationStores {
     }
 }
 
+impl RuntimeContinuationStores {
+    /// Read already-accounted byte counts without cloning or serializing history.
+    /// A busy store stays unavailable and is never pruned by a measurement.
+    pub fn memory_diagnostics(&self) -> Vec<crate::gateway::CacheMemoryDiagnostics> {
+        [
+            (
+                "adapter_continuations",
+                self.adapters
+                    .try_lock()
+                    .ok()
+                    .map(|store| store.memory_usage()),
+            ),
+            (
+                "native_replays",
+                self.native_responses
+                    .try_lock()
+                    .ok()
+                    .map(|store| store.memory_usage()),
+            ),
+        ]
+        .into_iter()
+        .map(|(key, usage)| crate::gateway::CacheMemoryDiagnostics {
+            key,
+            entries: usage.map(|value| value.0),
+            bytes: usage.map(|value| value.1),
+            limit_bytes: usage.map(|value| value.2),
+            basis: "serialized_state",
+        })
+        .collect()
+    }
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+
+    #[test]
+    fn continuation_memory_is_numeric_nonblocking_and_does_not_mutate_stores() {
+        let stores = RuntimeContinuationStores::default();
+        let snapshot = stores.memory_diagnostics();
+        assert_eq!(snapshot.len(), 2);
+        assert!(snapshot.iter().all(|entry| entry.bytes == Some(0)));
+        let _busy = stores.adapters.lock().unwrap();
+        let busy = stores.memory_diagnostics();
+        assert_eq!(busy[0].bytes, None);
+        assert_eq!(busy[1].bytes, Some(0));
+    }
+}
+
 pub(super) mod request;
 
 const CODEX_TURN_STATE_TTL_MS: u64 = 60 * 60 * 1_000;

@@ -27,6 +27,9 @@ const SOURCE_KEY: &str = "upstream-test-key";
 const OVERSIZED_MODELS_CONTENT_LENGTH: &str = "4194305";
 const MAX_CLIENT_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
 
+#[path = "support/usage_observations.rs"]
+mod usage_observations;
+
 #[path = "support/protocol_matrix.rs"]
 mod protocol_matrix;
 
@@ -35,6 +38,9 @@ mod native_admission;
 
 #[path = "support/native_fidelity.rs"]
 mod native_fidelity;
+
+#[path = "support/native_interactions.rs"]
+mod native_interactions;
 
 #[path = "support/cache_context.rs"]
 mod cache_context;

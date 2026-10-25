@@ -153,6 +153,13 @@ pub struct UsageEvent {
 }
 
 impl UsageEvent {
+    pub fn is_request_completion(&self) -> bool {
+        self.routing
+            .as_ref()
+            .and_then(|routing| routing.request_timing.as_ref())
+            .is_some_and(|timing| timing.projection_only)
+    }
+
     pub(crate) fn observe_response_metadata(&mut self, payload: &serde_json::Value) {
         // Responses echoes the applied cache policy outside `usage`, including
         // response.created/completed SSE envelopes. Do not infer it from the

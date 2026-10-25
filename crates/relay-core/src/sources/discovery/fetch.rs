@@ -334,10 +334,12 @@ pub(super) fn parse_upstream_models(
     catalog_payload: &Value,
 ) -> Option<Vec<(String, Option<ApiModelPriceOverride>)>> {
     let model_records = match protocol {
-        UpstreamProtocol::GeminiGenerateContent => catalog_payload
-            .get("models")
-            .or_else(|| catalog_payload.get("data"))?
-            .as_array()?,
+        UpstreamProtocol::GeminiGenerateContent | UpstreamProtocol::GeminiInteractions => {
+            catalog_payload
+                .get("models")
+                .or_else(|| catalog_payload.get("data"))?
+                .as_array()?
+        }
         UpstreamProtocol::Responses
         | UpstreamProtocol::ChatCompletions
         | UpstreamProtocol::Messages => catalog_payload
@@ -351,6 +353,11 @@ pub(super) fn parse_upstream_models(
             .iter()
             .filter_map(|model_record| {
                 let model_id = match protocol {
+                    UpstreamProtocol::GeminiInteractions => model_record
+                        .get("name")
+                        .or_else(|| model_record.get("id"))?
+                        .as_str()
+                        .map(|name| name.strip_prefix("models/").unwrap_or(name)),
                     UpstreamProtocol::GeminiGenerateContent => model_record
                         .get("supportedGenerationMethods")
                         .and_then(Value::as_array)

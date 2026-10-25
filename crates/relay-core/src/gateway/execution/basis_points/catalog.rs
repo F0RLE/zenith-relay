@@ -1,13 +1,21 @@
 use crate::protocol::AdapterError;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+
+mod prepared;
+pub(super) use prepared::{cache_memory_diagnostics, release_expired_cache_entries};
 
 #[derive(Clone, Debug)]
 pub(super) struct ClientTool {
     pub(super) name: String,
     pub(super) namespace: Option<String>,
     pub(super) kind: String,
-    pub(super) spec: Map<String, Value>,
+    pub(super) spec: Arc<Map<String, Value>>,
+    pub(super) serialized_spec: Arc<str>,
+    schema_size: Arc<OnceLock<u64>>,
+    schema_validated: Arc<OnceLock<()>>,
+    presentation: Arc<OnceLock<prepared::Presentation>>,
 }
 
 impl ClientTool {
@@ -21,12 +29,39 @@ impl ClientTool {
     pub(super) fn call_name(&self) -> String {
         self.key()
     }
+
+    pub(super) fn validate_parameter_schema(&self) -> Result<(), AdapterError> {
+        if self.schema_validated.get().is_some() {
+            return Ok(());
+        }
+        if let Some(schema) = super::schema::parameter_schema(self) {
+            super::schema::validator(schema)
+                .map_err(|error| super::schema::validation_error(&error, true))?;
+        }
+        // The content-addressed declaration is immutable. Remember successful
+        // compilation, not a compiled validator or any per-request permission.
+        let _ = self.schema_validated.set(());
+        Ok(())
+    }
 }
 
-fn collect_tools(
-    tool_value: Option<&Value>,
+struct ToolDeclaration<'a> {
+    name: &'a str,
+    namespace: Option<String>,
+    kind: String,
+    spec: &'a Map<String, Value>,
+}
+
+impl ToolDeclaration<'_> {
+    fn prepare(self) -> ClientTool {
+        prepared::tool(self.name, self.namespace.as_deref(), &self.kind, self.spec)
+    }
+}
+
+fn collect_tools<'a>(
+    tool_value: Option<&'a Value>,
     namespace: Option<&str>,
-    collected_tools: &mut Vec<ClientTool>,
+    collected_tools: &mut Vec<ToolDeclaration<'a>>,
     positions: &mut HashMap<String, usize>,
 ) -> Result<(), AdapterError> {
     let Some(tool_value) = tool_value else {
@@ -75,14 +110,18 @@ fn collect_tools(
                 positions,
             )?;
         } else if matches!(tool_kind.as_str(), "function" | "custom") {
-            let tool = ClientTool {
-                name: tool_name.to_string(),
-                namespace: namespace.map(str::to_string),
+            let tool = ToolDeclaration {
+                name: tool_name,
+                namespace: namespace.map(str::to_owned),
                 kind: tool_kind,
-                spec: tool_object.clone(),
+                spec: tool_object,
             };
             // Replace the definition without moving its catalog position.
-            let key = tool.key();
+            // Borrow until overrides are resolved: superseded history must not
+            // be serialized, cloned or retained in the presentation cache.
+            let key = namespace
+                .map(|namespace| format!("{namespace}.{tool_name}"))
+                .unwrap_or_else(|| tool_name.to_owned());
             if let Some(&position) = positions.get(&key) {
                 collected_tools[position] = tool;
             } else {
@@ -119,7 +158,27 @@ pub(super) fn client_tools(request_body: &Value) -> Result<Vec<ClientTool>, Adap
         &mut client_tools,
         &mut positions,
     )?;
-    Ok(client_tools)
+    Ok(client_tools
+        .into_iter()
+        .map(ToolDeclaration::prepare)
+        .collect())
+}
+
+pub(super) fn declared_tools(value: Option<&Value>) -> Result<Vec<ClientTool>, AdapterError> {
+    let mut tools = Vec::new();
+    collect_tools(value, None, &mut tools, &mut HashMap::new())?;
+    Ok(tools.into_iter().map(ToolDeclaration::prepare).collect())
+}
+
+pub(super) fn has_historical_declarations(request: &Value) -> bool {
+    request["input"].as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            matches!(
+                item["type"].as_str(),
+                Some("additional_tools" | "tool_search_output")
+            )
+        })
+    })
 }
 
 pub(super) fn selected_tools(request_body: &Value, tools: &[ClientTool]) -> Vec<ClientTool> {
@@ -238,6 +297,13 @@ pub(super) fn history_tool(tool_call_object: &Map<String, Value>) -> Option<Clie
         name: qualified_tool_name,
         namespace: None,
         kind: kind.to_string(),
-        spec: Map::new(),
+        spec: Arc::new(Map::new()),
+        serialized_spec: Arc::from("{}"),
+        schema_size: Arc::new(OnceLock::new()),
+        schema_validated: Arc::new(OnceLock::new()),
+        presentation: Arc::new(OnceLock::new()),
     })
 }
+
+#[cfg(test)]
+mod tests;

@@ -32,6 +32,13 @@ struct InlineImage {
     media_type: &'static str,
     filename: &'static str,
     bytes: Vec<u8>,
+    source_key: Option<[u8; 32]>,
+}
+
+struct AttachmentScope<'a> {
+    endpoint: &'a str,
+    candidate_id: &'a str,
+    credential: &'a [u8; 32],
 }
 
 enum ImageJob {
@@ -74,28 +81,27 @@ pub(in crate::gateway::execution) async fn attach_input_images(
     candidate_id: &str,
     responses_url: &url::Url,
     headers: &HeaderMap,
-    request_body: Vec<u8>,
-) -> Result<Vec<u8>, AttachmentFailure> {
-    if !request_body
-        .windows(13)
-        .any(|window| window == b"\"input_image\"")
-    {
-        return Ok(request_body);
-    }
-    let mut request_fields: Value = match serde_json::from_slice(&request_body) {
-        Ok(request_body) => request_body,
-        Err(_) => return Ok(request_body),
-    };
-    let jobs = stage_input_images(&request_fields)?;
-    if jobs.is_empty() {
-        return Ok(request_body);
+    request_fields: &mut Value,
+) -> Result<(), AttachmentFailure> {
+    // Work on the already prepared body. Encoding inline images here and
+    // reparsing them both for uploads and discovery needlessly copies history.
+    if input_image_parts(request_fields).next().is_none() {
+        return Ok(());
     }
     let endpoint = attachment_url(responses_url).map_err(|_| upload_failed())?;
     let credential_fingerprint = runtime
         .basis_points_credential_fingerprint(candidate_id)
-        .await
-        .unwrap_or_default();
-    resolve_input_images(&mut request_fields, jobs, |image| {
+        .await;
+    let scope = credential_fingerprint
+        .as_ref()
+        .map(|credential| AttachmentScope {
+            endpoint: &endpoint,
+            candidate_id,
+            credential,
+        });
+    let jobs = stage_input_images_with_cache(request_fields, scope.as_ref())?;
+    let credential_fingerprint = credential_fingerprint.unwrap_or_default();
+    resolve_input_images(request_fields, jobs, |image| {
         let endpoint = &endpoint;
         async move {
             let key = attachment_key(
@@ -105,14 +111,19 @@ pub(in crate::gateway::execution) async fn attach_input_images(
                 image.media_type,
                 &image.bytes,
             );
-            cached_upload(key, || {
+            let file_id = cached_upload(key, || {
                 upload_image(runtime, candidate_id, endpoint, headers, &image)
             })
-            .await
+            .await?;
+            // Only a validated, successfully uploaded image can seed this shortcut.
+            // Retain a scoped digest and ID, never the data URL or decoded bytes.
+            if let Some(source_key) = image.source_key {
+                remember_file_id(source_key, file_id.clone());
+            }
+            Ok(file_id)
         }
     })
-    .await?;
-    serde_json::to_vec(&request_fields).map_err(|_| upload_failed())
+    .await
 }
 
 async fn resolve_input_images<F>(
@@ -159,47 +170,63 @@ where
     Ok(())
 }
 
+#[cfg(test)]
 fn stage_input_images(request_fields: &Value) -> Result<Vec<LocatedJob>, AttachmentFailure> {
-    let Some(input_items) = request_fields.get("input").and_then(Value::as_array) else {
-        return Ok(Vec::new());
-    };
-    let mut jobs = Vec::new();
-    for (input_index, input_item) in input_items.iter().enumerate() {
-        let Some(input_item_fields) = input_item.as_object() else {
-            continue;
-        };
-        let role = input_item_fields
-            .get("role")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let kind = input_item_fields
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if role != "user" || !(kind.is_empty() || kind == "message") {
-            continue;
-        }
-        let Some(content_parts) = input_item_fields.get("content").and_then(Value::as_array) else {
-            continue;
-        };
-        for (content_index, content_part) in content_parts.iter().enumerate() {
-            let Some(content_part_fields) = content_part.as_object() else {
-                continue;
-            };
-            if content_part_fields.get("type").and_then(Value::as_str) != Some("input_image") {
-                continue;
-            }
-            jobs.push(LocatedJob {
-                input_index,
-                content_index,
-                job: image_job(content_part_fields)?,
-            });
-        }
-    }
-    Ok(jobs)
+    stage_input_images_with_cache(request_fields, None)
 }
 
-fn image_job(part: &Map<String, Value>) -> Result<ImageJob, AttachmentFailure> {
+fn stage_input_images_with_cache(
+    request_fields: &Value,
+    scope: Option<&AttachmentScope<'_>>,
+) -> Result<Vec<LocatedJob>, AttachmentFailure> {
+    input_image_parts(request_fields)
+        .map(|(input_index, content_index, content_part_fields)| {
+            Ok(LocatedJob {
+                input_index,
+                content_index,
+                job: image_job(content_part_fields, scope)?,
+            })
+        })
+        .collect()
+}
+
+fn input_image_parts(
+    request_fields: &Value,
+) -> impl Iterator<Item = (usize, usize, &Map<String, Value>)> {
+    request_fields
+        .get("input")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter(|(_, item)| {
+            item.get("role").and_then(Value::as_str) == Some("user")
+                && matches!(
+                    item.get("type").and_then(Value::as_str).unwrap_or(""),
+                    "" | "message"
+                )
+        })
+        .flat_map(|(input_index, item)| {
+            item.get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .filter_map(move |(content_index, part)| {
+                    let fields = part.as_object()?;
+                    (fields.get("type").and_then(Value::as_str) == Some("input_image")).then_some((
+                        input_index,
+                        content_index,
+                        fields,
+                    ))
+                })
+        })
+}
+
+fn image_job(
+    part: &Map<String, Value>,
+    scope: Option<&AttachmentScope<'_>>,
+) -> Result<ImageJob, AttachmentFailure> {
     let file_id = match part.get("file_id") {
         None | Some(Value::Null) => None,
         Some(Value::String(file_id)) => {
@@ -236,7 +263,21 @@ fn image_job(part: &Map<String, Value>) -> Result<ImageJob, AttachmentFailure> {
             {
                 return Err(invalid_image("input_image must be a data URL or file_id"));
             }
-            decode_inline_image(image_url).map(ImageJob::Upload)
+            let source_key = scope.map(|scope| {
+                attachment_key(
+                    scope.endpoint,
+                    scope.candidate_id,
+                    scope.credential,
+                    "relay-inline-image-v1",
+                    image_url.as_bytes(),
+                )
+            });
+            if let Some(file_id) = source_key.as_ref().and_then(cached_file_id) {
+                return Ok(ImageJob::File(file_id));
+            }
+            let mut image = decode_inline_image(image_url)?;
+            image.source_key = source_key;
+            Ok(ImageJob::Upload(image))
         }
         (None, None) => Err(invalid_image("input_image must be a data URL or file_id")),
     }
@@ -250,14 +291,19 @@ fn decode_inline_image(data_url: &str) -> Result<InlineImage, AttachmentFailure>
         return Err(invalid_image("input_image data URL is invalid"));
     };
     let base64 = declared_image_base64(metadata)?;
-    let decoded =
-        path_unescape(encoded).map_err(|_| invalid_image("input_image data URL is invalid"))?;
+    let decoded = if encoded.as_bytes().contains(&b'%') {
+        std::borrow::Cow::Owned(
+            path_unescape(encoded).map_err(|_| invalid_image("input_image data URL is invalid"))?,
+        )
+    } else {
+        std::borrow::Cow::Borrowed(encoded.as_bytes())
+    };
     let image_bytes = if base64 {
         let text = std::str::from_utf8(&decoded)
             .map_err(|_| invalid_image("input_image data URL is invalid"))?;
         decode_base64(text)?
     } else {
-        decoded
+        decoded.into_owned()
     };
     if image_bytes.is_empty() {
         return Err(invalid_image("input_image data URL is invalid"));
@@ -268,6 +314,7 @@ fn decode_inline_image(data_url: &str) -> Result<InlineImage, AttachmentFailure>
         media_type,
         filename,
         bytes: image_bytes,
+        source_key: None,
     })
 }
 

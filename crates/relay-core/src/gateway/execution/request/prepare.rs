@@ -27,7 +27,8 @@ pub(super) struct PreparedRequestAttempt {
     pub(super) basis_points_request: Option<Value>,
     pub(super) reasoning_effort: ReasoningEffortDiagnostics,
     pub(super) adapter_is_passthrough: bool,
-    pub(super) request_body: Vec<u8>,
+    /// BPS is encoded only after catalog preparation and image resolution.
+    pub(super) request_body: Option<Vec<u8>>,
     pub(super) tool_use: ToolUseDiagnostics,
 }
 
@@ -193,19 +194,19 @@ pub(super) fn prepare_request_attempt(
             return RequestPrepare::Respond(super::adapter_error_response(error, Some(request_id)));
         }
     }
-    let basis_points_request = basis_points_route.then(|| adapter_request.upstream_body().clone());
     let mut preparation = RequestPreparationDiagnostics::default();
-    if basis_points_route {
-        if let Some(step) = rewrite_basis_points_body(
+    let basis_points_request = if basis_points_route {
+        match rewrite_basis_points_body(
             &mut adapter_request,
-            request_id,
-            last_adapter_error,
             &mut preparation.schema_validation_ms,
             tool_policy.diagnostics.client_context.is_some(),
         ) {
-            return step;
+            Ok(original) => Some(original),
+            Err(error) => return stop_for_adapter_error(error, request_id, last_adapter_error),
         }
-    }
+    } else {
+        None
+    };
     let reasoning_effort = if basis_points_route {
         ReasoningEffortDiagnostics::from_basis_points_bodies(
             request,
@@ -222,7 +223,10 @@ pub(super) fn prepare_request_attempt(
     };
     let adapter_is_passthrough = adapter_request.is_passthrough();
     tool_policy.observe_cache_context(runtime, &mut route, adapter_request.upstream_body_mut());
-    let Ok(request_body) = serde_json::to_vec(adapter_request.upstream_body()) else {
+    let Ok(request_body) = (!basis_points_route)
+        .then(|| serde_json::to_vec(adapter_request.upstream_body()))
+        .transpose()
+    else {
         return RequestPrepare::Respond(api_error(
             StatusCode::BAD_REQUEST,
             "request body could not be serialized",
@@ -358,7 +362,7 @@ fn translate_prepared_request(
     route: &ExecutorRoute,
     client_wire_api: WireApi,
     compaction: &BridgedCompaction,
-    request: &mut Value,
+    request: &Value,
     source_model: &str,
     stream: bool,
     previous_bridge_state: Option<crate::AdapterContinuationState>,
@@ -368,15 +372,6 @@ fn translate_prepared_request(
     let capabilities = runtime
         .model_capabilities(source_model)
         .for_route(route.route_capability.as_ref());
-    // Restore the client value for usage and retries without copying the whole history.
-    let original_effort = route.reasoning_effort_override.as_ref().map(|effort| {
-        std::mem::replace(
-            request
-                .pointer_mut("/output_config/effort")
-                .expect("admitted Desktop effort exists"),
-            effort.clone().into(),
-        )
-    });
     let prepared = route.adapter.prepare_request_with_capabilities(
         AdapterRequestContext {
             client_wire_api,
@@ -391,11 +386,6 @@ fn translate_prepared_request(
         },
         &capabilities,
     );
-    if let Some(original_effort) = original_effort {
-        *request
-            .pointer_mut("/output_config/effort")
-            .expect("admitted Desktop effort exists") = original_effort;
-    }
     match prepared {
         Ok(request) => Ok(request),
         Err(error) => Err(stop_for_adapter_error(
@@ -444,26 +434,18 @@ fn apply_prepared_tool_policy(
 
 fn rewrite_basis_points_body(
     adapter_request: &mut PreparedAdapterRequest,
-    request_id: &str,
-    last_adapter_error: &mut Option<AdapterError>,
     schema_validation_ms: &mut Option<u64>,
     diagnostics_enabled: bool,
-) -> Option<RequestPrepare> {
-    match super::super::basis_points::prepare_request_with_timing(
-        adapter_request.upstream_body(),
+) -> Result<Value, AdapterError> {
+    // The original is needed by response validation, but need not be copied.
+    let original = std::mem::take(adapter_request.upstream_body_mut());
+    let prepared = super::super::basis_points::prepare_request_with_timing(
+        &original,
         schema_validation_ms,
         diagnostics_enabled,
-    ) {
-        Ok(prepared) => {
-            *adapter_request.upstream_body_mut() = prepared;
-            None
-        }
-        Err(error) => Some(stop_for_adapter_error(
-            error,
-            request_id,
-            last_adapter_error,
-        )),
-    }
+    )?;
+    *adapter_request.upstream_body_mut() = prepared;
+    Ok(original)
 }
 
 fn stop_for_adapter_error(

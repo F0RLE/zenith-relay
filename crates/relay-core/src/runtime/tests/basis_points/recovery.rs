@@ -126,7 +126,7 @@ async fn claude_desktop_effort_is_separate_from_model_and_obeys_pool_policy() {
         )]))
         .unwrap();
     for (model, expected) in [
-        (alias.clone(), StatusCode::OK),
+        (alias.clone(), StatusCode::BAD_REQUEST),
         ("gpt-test".to_string(), StatusCode::BAD_REQUEST),
         (
             crate::claude_desktop_model_alias("gpt-test"),
@@ -147,9 +147,23 @@ async fn claude_desktop_effort_is_separate_from_model_and_obeys_pool_policy() {
         assert_eq!(response.status(), expected);
         response.bytes().await.unwrap();
     }
+    assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 12);
+    let response = client
+        .post(format!("{base}/v1/messages"))
+        .bearer_auth("local-secret")
+        .json(&json!({
+            "model":alias,"max_tokens":128,"output_config":{"effort":"low"},
+            "thinking":{"type":"adaptive"},
+            "messages":[{"role":"user","content":"Synthetic request"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.bytes().await.unwrap();
     assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 13);
     let bodies = crate::poison::mutex(&server.state.generation_bodies);
-    // The fixed picker stays within pool policy; ordinary API model IDs remain strict.
+    // Only an explicitly selected allowed effort reaches BPS; no High-to-Low substitution.
     assert_eq!(bodies.last().unwrap()["model"], "gpt-test");
     assert_eq!(bodies.last().unwrap()["reasoning_effort"], "low");
     drop(bodies);
@@ -511,27 +525,20 @@ async fn bps_401_does_not_fallback_to_another_eligible_account() {
 }
 
 #[tokio::test]
-async fn request_timezone_rewrites_bps_body_and_hot_disable_preserves_configuration() {
+async fn request_timezone_rewrites_bps_body_only_with_current_proxy_evidence() {
     let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
     let runtime = Arc::new(runtime(&server).await);
-    let policy = crate::RequestTimezonePolicy {
-        enabled: true,
-        account_timezones: std::collections::BTreeMap::from([(
-            "account-1".into(),
-            "Etc/GMT-3".into(),
-        )]),
-        account_timezone_bindings: std::collections::BTreeMap::new(),
-        account_timezone_sources: std::collections::BTreeMap::new(),
-    };
-    runtime.set_request_timezone(policy.clone()).unwrap();
     let (base, task) = gateway(runtime.clone()).await;
     let environment = "<environment_context><current_date>2026-10-10</current_date><timezone>UTC</timezone></environment_context>";
     for enabled in [true, false] {
         runtime
-            .set_request_timezone(crate::RequestTimezonePolicy {
-                enabled,
-                ..policy.clone()
-            })
+            .set_account_proxy_timezone(
+                "account-1",
+                enabled.then(|| crate::request_timezone::ProxyTimezone {
+                    timezone: "Etc/GMT-3".into(),
+                    observed_at_ms: crate::unix_time_ms(),
+                }),
+            )
             .unwrap();
         let response = reqwest::Client::new()
             .post(format!("{base}/v1/responses"))

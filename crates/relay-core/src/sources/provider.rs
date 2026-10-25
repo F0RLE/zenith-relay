@@ -114,10 +114,12 @@ pub(crate) fn normalized_base_url(base_url_text: &str) -> Result<Url> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let strip_count = if segments
-        .last()
-        .is_some_and(|segment| matches!(*segment, "models" | "responses" | "messages"))
-    {
+    let strip_count = if segments.last().is_some_and(|segment| {
+        matches!(
+            *segment,
+            "models" | "responses" | "messages" | "interactions"
+        )
+    }) {
         1
     } else if (segments.len() >= 2
         && segments[segments.len() - 2] == "chat"

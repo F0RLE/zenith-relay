@@ -15,11 +15,59 @@ use std::time::Instant;
 
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
+// Keep the same terminal/error/usage validator, without retaining every text
+// delta a second time after it has already been forwarded to the client.
+fn retain_frame(
+    event: &crate::gateway::streaming::TerminalEvent,
+    saw_generation: &mut bool,
+) -> bool {
+    let generated = event.semantic_output
+        || event
+            .event_payload
+            .as_ref()
+            .is_some_and(crate::gateway::response::has_generated_tokens);
+    let first_generation = generated && !*saw_generation;
+    *saw_generation |= generated;
+    let ordinary_delta = event.event_payload.as_ref().is_some_and(|payload| {
+        matches!(
+            payload["type"].as_str(),
+            Some(
+                "response.output_text.delta"
+                    | "response.reasoning_text.delta"
+                    | "response.reasoning_summary_text.delta"
+            )
+        ) && payload.as_object().is_some_and(|fields| {
+            fields.keys().all(|field| {
+                matches!(
+                    field.as_str(),
+                    "type"
+                        | "sequence_number"
+                        | "item_id"
+                        | "output_index"
+                        | "content_index"
+                        | "summary_index"
+                        | "delta"
+                        | "logprobs"
+                )
+            })
+        })
+    });
+    // Only known ordinary deltas are redundant. Keep model/tier/usage/error
+    // evidence and unknown metadata even when a live guard is disabled now.
+    first_generation
+        || !event.valid
+        || event.outcome.is_some()
+        || event.output_item.is_some()
+        || event.applied_service_tier.is_some()
+        || !ordinary_delta
+}
+
 pub(in crate::gateway::streaming) struct DiscoveryProgress {
     pub upstream_error: Option<crate::usage::UpstreamErrorDetails>,
     pub cooldown_hint: RateLimitBodyHint,
     pub budget: crate::scheduler::rotation::SharedRequestBudget,
     pub tool_use: ToolUseDiagnostics,
+    pub request_payload: Option<crate::usage::RequestPayloadDiagnostics>,
     pub headers: Option<HeaderMap>,
 }
 
@@ -45,6 +93,8 @@ struct DiscoveryStream {
     pending: Vec<u8>,
     tools: NativeTools,
     raw: Vec<u8>,
+    received_bytes: usize,
+    saw_generation: bool,
     output: VecDeque<Bytes>,
     response_id: Option<String>,
     offset: usize,
@@ -81,13 +131,14 @@ impl DiscoveryStream {
     }
 
     fn ingest(&mut self, bytes: Bytes) -> Result<(), AdapterError> {
-        if self.raw.len().saturating_add(bytes.len()) > MAX_RESPONSE_BYTES {
+        self.received_bytes = self.received_bytes.saturating_add(bytes.len());
+        if self.received_bytes > MAX_RESPONSE_BYTES {
             return Err(
                 AdapterError::upstream_stream_invalid().with_parameter("stream.response_size")
             );
         }
-        self.raw.extend_from_slice(&bytes);
         if !self.sse {
+            self.raw.extend_from_slice(&bytes);
             return Ok(());
         }
         let mut pending = std::mem::take(&mut self.pending);
@@ -113,7 +164,11 @@ impl DiscoveryStream {
         if data.is_empty() {
             return Ok(());
         }
-        let mut event: Value = serde_json::from_slice(&data).map_err(|_| {
+        let mut parsed = crate::gateway::streaming::parse_sse_event(frame);
+        if retain_frame(&parsed, &mut self.saw_generation) {
+            self.raw.extend_from_slice(frame);
+        }
+        let mut event = parsed.event_payload.take().ok_or_else(|| {
             AdapterError::upstream_stream_invalid().with_parameter("stream.event.json")
         })?;
         if event.get("type").is_none() && event["error"].is_object() {
@@ -180,6 +235,12 @@ impl DiscoveryStream {
     fn update_progress(&mut self) {
         let mut progress = crate::poison::mutex(&self.progress);
         progress.tool_use = self.tool_use.clone();
+        progress.request_payload = self
+            .event
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.transport.as_ref())
+            .and_then(|transport| transport.request_payload.clone());
     }
 
     fn reject(&mut self, error: DiscoveryFailure) {
@@ -233,6 +294,9 @@ impl DiscoveryStream {
         let mut terminal: Value = serde_json::from_slice(&bytes)
             .map_err(|_| AdapterError::upstream_response_invalid())?;
         populate_tokens(&mut event, &self.raw);
+        // The parsed terminal now owns the required output. Release retained
+        // wire frames before waiting for another lookup round or client poll.
+        self.raw = Vec::new();
         if terminal["status"] == "completed" {
             let items = terminal["output"]
                 .as_array()
@@ -306,6 +370,14 @@ impl DiscoveryStream {
         if let Some(capture) = &self.settlement.upstream_usage {
             crate::poison::mutex(capture).reset_generation();
         }
+        if let Some(transport) = self
+            .event
+            .routing
+            .as_mut()
+            .and_then(|routing| routing.transport.as_mut())
+        {
+            transport.request_payload = None;
+        }
         let response = dispatch_continuation(
             &self.settlement.runtime,
             &self.settlement.lease,
@@ -319,6 +391,18 @@ impl DiscoveryStream {
         let response = response
             .map_err(|error| DiscoveryFailure::Upstream(AttemptFailure::authorized_request(error)))?
             .response;
+        if let Some(transport) = self
+            .event
+            .routing
+            .as_mut()
+            .and_then(|routing| routing.transport.as_mut())
+        {
+            transport.request_payload = response
+                .extensions()
+                .get::<crate::usage::RequestPayloadDiagnostics>()
+                .cloned();
+        }
+        self.update_progress();
         self.status = response.status();
         self.headers = response.headers().clone();
         crate::poison::mutex(&self.progress).headers = Some(self.headers.clone());
@@ -347,6 +431,8 @@ impl DiscoveryStream {
             crate::transport::basis_points_progress_timeout(),
         );
         self.raw.clear();
+        self.received_bytes = 0;
+        self.saw_generation = false;
         self.pending.clear();
         self.blocked = false;
         self.round_terminal = false;
@@ -374,6 +460,8 @@ pub(in crate::gateway::streaming) fn translate_stream(
         pending: Vec::new(),
         tools: NativeTools::default(),
         raw: Vec::new(),
+        received_bytes: 0,
+        saw_generation: false,
         output: VecDeque::new(),
         response_id: None,
         offset: 0,
@@ -423,4 +511,107 @@ pub(in crate::gateway::streaming) fn translate_stream(
             }
         }
     }))
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+
+    fn frame(value: Value) -> Vec<u8> {
+        format!(
+            "event: {}\ndata: {value}\n\n",
+            value["type"].as_str().unwrap()
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn compact_capture_keeps_completed_items_and_usage_without_text_deltas() {
+        let mut wire = Vec::new();
+        for _ in 0..1_000 {
+            wire.extend(frame(
+                json!({"type":"response.output_text.delta","output_index":0,"delta":"hello"}),
+            ));
+        }
+        wire.extend(frame(json!({"type":"response.output_item.done","output_index":0,
+            "item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}})));
+        wire.extend(frame(json!({"type":"response.completed","response":{
+            "id":"resp_synthetic","status":"completed","output":[],"usage":{"input_tokens":12,"output_tokens":3}}})));
+        let mut retained = Vec::new();
+        let mut seen = false;
+        let mut offset = 0;
+        while let Some(end) = crate::protocol::sse_event_end(&wire[offset..]) {
+            let bytes = &wire[offset..offset + end];
+            let parsed = crate::gateway::streaming::parse_sse_event(bytes);
+            if retain_frame(&parsed, &mut seen) {
+                retained.extend_from_slice(bytes);
+            }
+            offset += end;
+        }
+        let complete = |bytes: &[u8]| {
+            completed_upstream_response(bytes, true, None)
+                .map_err(|_| ())
+                .expect("Synthetic SSE capture rejected")
+        };
+        assert_eq!(complete(&retained), complete(&wire));
+        assert!(retained.len() * 100 < wire.len());
+    }
+
+    #[test]
+    fn compact_capture_keeps_failure_generation_and_model_evidence() {
+        let delta =
+            frame(json!({"type":"response.output_text.delta","output_index":0,"delta":"hello"}));
+        let failure =
+            frame(json!({"type":"error","code":"server_error","message":"Synthetic failure"}));
+        let mut seen = false;
+        assert!(retain_frame(
+            &crate::gateway::streaming::parse_sse_event(&delta),
+            &mut seen
+        ));
+        assert!(retain_frame(
+            &crate::gateway::streaming::parse_sse_event(&failure),
+            &mut seen
+        ));
+        let error =
+            completed_upstream_response(&[delta, failure].concat(), true, None).unwrap_err();
+        assert_eq!(
+            error.execution,
+            crate::scheduler::rotation::ExecutionObservation::accepted()
+        );
+        let model = frame(json!({"type":"response.created","response":{"model":"different"}}));
+        assert!(retain_frame(
+            &crate::gateway::streaming::parse_sse_event(&model),
+            &mut seen
+        ));
+    }
+
+    #[test]
+    fn compact_capture_retains_metadata_and_degraded_evidence_after_generation() {
+        let mut seen = true;
+        for payload in [
+            json!({"type":"response.metadata","service_tier":"priority"}),
+            json!({"type":"response.future_metadata","future_field":true}),
+            json!({"type":"response.output_text.delta","delta":"x","model":"degrade1"}),
+            json!({"type":"response.output_text.delta","delta":"x","service_tier":"priority"}),
+            json!({"type":"response.reasoning_text.delta","delta":"x","usage":{"output_tokens":3}}),
+            json!({"type":"response.output_text.delta","delta":"x","future_field":true}),
+        ] {
+            assert!(retain_frame(
+                &crate::gateway::streaming::parse_sse_event(&frame(payload)),
+                &mut seen
+            ));
+        }
+        for kind in [
+            "response.output_text.delta",
+            "response.reasoning_text.delta",
+            "response.reasoning_summary_text.delta",
+        ] {
+            assert!(!retain_frame(
+                &crate::gateway::streaming::parse_sse_event(&frame(
+                    json!({"type":kind,"delta":"x"})
+                )),
+                &mut seen
+            ));
+        }
+    }
 }

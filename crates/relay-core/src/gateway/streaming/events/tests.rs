@@ -253,6 +253,7 @@ fn served_model_identity_keeps_distinct_models_and_accepts_snapshots() {
         for value in [
             json!({"model": served}),
             json!({"response": {"model": served}}),
+            json!({"event_type":"interaction.created", "interaction": {"model": served}}),
         ] {
             assert_eq!(
                 served_model_is_rejected(&value, expected),

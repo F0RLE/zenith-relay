@@ -162,6 +162,9 @@ async fn serve_http_fallback_request(
     // error merely because the bridge is the component reading it.
     let response_origin = fallback_response_origin(&upstream_response);
     if !upstream_response.status().is_success() {
+        if let Some(error) = upstream_response.extensions().get::<crate::AdapterError>() {
+            return Err(GatewayFailure::adapter(*error));
+        }
         let status = upstream_response.status();
         let error_body = await_while_client_connected(
             downstream,

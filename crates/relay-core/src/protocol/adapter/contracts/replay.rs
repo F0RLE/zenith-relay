@@ -7,14 +7,14 @@ use std::collections::BTreeSet;
 
 /// Local history for native Responses recovery before client-visible output.
 ///
-/// The initial request and completed output are kept in memory so the next
+/// The initial input and completed output are kept in memory so the next
 /// request can replay the conversation without pretending that the upstream
 /// response id is portable across transports. This is deliberately separate
 /// from `ResponsesToMessages`: no protocol conversion happens here.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct NativeResponsesReplayState {
     pub(super) model: String,
-    initial_request: Value,
+    initial_input: Value,
     completed_output: Vec<Value>,
 }
 
@@ -41,10 +41,7 @@ impl NativeResponsesReplayState {
         if native_replay_has_provider_state(initial_request) {
             return None;
         }
-        let initial_request = initial_request.as_object()?.clone();
-        if !initial_request.contains_key("input") {
-            return None;
-        }
+        let initial_request = initial_request.as_object()?;
         let initial_input = initial_request.get("input")?;
         let input_items = initial_input
             .as_array()
@@ -74,7 +71,10 @@ impl NativeResponsesReplayState {
             response_id,
             Self {
                 model: model.to_string(),
-                initial_request: Value::Object(initial_request),
+                // Replay uses the current turn's options, never the old tool
+                // catalog or instructions. Retaining those unused fields can
+                // evict otherwise valid history from the bounded store.
+                initial_input: initial_input.clone(),
                 completed_output,
             },
         ))
@@ -96,15 +96,11 @@ impl NativeResponsesReplayState {
         let continuation_request = continuation
             .as_object()
             .ok_or_else(AdapterError::invalid_request)?;
-        let initial_input = self
-            .initial_request
-            .get("input")
-            .ok_or_else(AdapterError::invalid_request)?;
         let current_input = continuation_request
             .get("input")
             .ok_or_else(AdapterError::invalid_request)?;
         let mut replay_input = Vec::new();
-        append_replay_input(&mut replay_input, initial_input)?;
+        append_replay_input(&mut replay_input, &self.initial_input)?;
         replay_input.extend(self.completed_output.iter().cloned());
         append_replay_input(&mut replay_input, current_input)?;
         if replay_input.is_empty() {

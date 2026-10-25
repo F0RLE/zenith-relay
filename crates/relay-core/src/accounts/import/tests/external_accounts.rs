@@ -27,7 +27,7 @@ fn siwc_token_hints_cannot_be_imported_as_legacy_codex() {
 }
 
 #[test]
-fn import_rejects_free_bps_but_keeps_native_free_and_paid_or_unknown_bps() {
+fn import_accepts_free_native_and_bps_alongside_paid_or_unknown_plans() {
     let input = serde_json::json!([
         {"oauth_client_kind":"codex","access_token":"synthetic-native","plan_type":"free"},
         {"oauth_client_kind":"excel_bps","access_token":"synthetic-bps-free","plan_type":"Free"},
@@ -37,21 +37,15 @@ fn import_rejects_free_bps_but_keeps_native_free_and_paid_or_unknown_bps() {
     ]);
     let parsed = parse_import(&input.to_string(), None, &[]).unwrap();
     assert_eq!(parsed.preview.rows.len(), 5);
-    assert_eq!(parsed.items.len(), 3);
-    for row in &parsed.preview.rows[1..3] {
-        assert_eq!(row.status, ImportPreviewStatus::Invalid);
-        assert_eq!(
-            row.error.as_ref().unwrap().code,
-            ImportIssueCode::BasisPointsFreeAccountUnsupported
-        );
+    assert_eq!(parsed.items.len(), 5);
+    for row in &parsed.preview.rows {
+        assert_ne!(row.status, ImportPreviewStatus::Invalid);
+        assert!(row.error.is_none());
     }
-    assert!(parsed.preview.rows[0].error.is_none());
-    assert!(parsed.preview.rows[3].error.is_none());
-    assert!(parsed.preview.rows[4].error.is_none());
 }
 
 #[test]
-fn import_paid_metadata_cannot_hide_a_free_bps_token_claim() {
+fn import_does_not_reject_a_free_bps_token_claim_with_paid_metadata() {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     let token = format!(
         "e30.{}.synthetic",
@@ -74,11 +68,8 @@ fn import_paid_metadata_cannot_hide_a_free_bps_token_claim() {
         &[],
     )
     .unwrap();
-    assert!(parsed.items.is_empty());
-    assert_eq!(
-        parsed.preview.rows[0].error.as_ref().unwrap().code,
-        ImportIssueCode::BasisPointsFreeAccountUnsupported
-    );
+    assert_eq!(parsed.items.len(), 1);
+    assert!(parsed.preview.rows[0].error.is_none());
 }
 
 #[test]

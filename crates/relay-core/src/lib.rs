@@ -25,6 +25,8 @@ macro_rules! define_usage_request_contract {
             pub error_category: Option<String>,
             #[serde(default, skip_serializing_if = "Option::is_none")]
             pub upstream_error: Option<crate::usage::UpstreamErrorDetails>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub image_usage: Option<crate::usage::ImageUsage>,
             $($fields)*
         }
     };
@@ -98,10 +100,7 @@ pub use protocol::{
 };
 pub use providers::chatgpt::{RuntimeChatGptAccount, RuntimeChatGptAuth};
 pub use proxy::{normalize_proxy_url, proxy_reference_id, ProxyConfig};
-pub use request_timezone::{
-    is_valid_timezone, normalize_timezone, AccountTimezoneSource, RequestTimezonePolicy,
-    RequestTimezoneUpdate,
-};
+pub use request_timezone::{is_valid_timezone, normalize_timezone};
 pub use runtime::{
     changed_runtime_source_policy_updates, normalize_image_base_model,
     normalize_model_service_tier_overrides, pool_catalog_visibility_changed,
@@ -109,9 +108,9 @@ pub use runtime::{
     GatewayRuntimeOptions, PoolAccess, PoolParticipant, ResponseAffinityBinding,
     ResponseAffinityStore, RuntimeActivitySnapshot, RuntimeCandidatePolicy,
     RuntimeContinuationStores, RuntimeLocalKey, RuntimeMixedLocalKey, RuntimeSource,
-    RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate, RESPONSE_AFFINITY_DELETE_CANDIDATE_SQL,
-    RESPONSE_AFFINITY_DELETE_EXPIRED_SQL, RESPONSE_AFFINITY_DELETE_SQL, RESPONSE_AFFINITY_FIND_SQL,
-    RESPONSE_AFFINITY_UPSERT_SQL,
+    RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate, IMAGE_API_MODEL,
+    RESPONSE_AFFINITY_DELETE_CANDIDATE_SQL, RESPONSE_AFFINITY_DELETE_EXPIRED_SQL,
+    RESPONSE_AFFINITY_DELETE_SQL, RESPONSE_AFFINITY_FIND_SQL, RESPONSE_AFFINITY_UPSERT_SQL,
 };
 pub use scheduler::refresh::{
     RefreshCompletion, RefreshCoordinator, RefreshIdentity, RefreshJob, RefreshJobId, RefreshKind,

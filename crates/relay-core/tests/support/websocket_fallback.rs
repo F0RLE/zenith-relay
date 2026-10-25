@@ -1,6 +1,86 @@
 use super::*;
 
 #[tokio::test]
+async fn slow_optional_handshake_falls_back_once_without_disabling_native_websocket() {
+    let connects = Arc::new(AtomicUsize::new(0));
+    let http_sends = Arc::new(AtomicUsize::new(0));
+    let ws_sends = Arc::new(AtomicUsize::new(0));
+    let get_connects = connects.clone();
+    let get_sends = ws_sends.clone();
+    let post_sends = http_sends.clone();
+    let app = Router::new().route("/v1/responses", get(move |upgrade: WebSocketUpgrade| {
+        let connects = get_connects.clone();
+        let sends = get_sends.clone();
+        async move {
+            if connects.fetch_add(1, Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
+            upgrade.on_upgrade(move |mut socket| async move {
+                if let Some(Ok(AxumWsMessage::Text(_))) = socket.recv().await {
+                    sends.fetch_add(1, Ordering::SeqCst);
+                    let _ = socket.send(AxumWsMessage::Text(json!({
+                        "type": "response.completed", "response": {"id": "native-after-slow", "status": "completed", "output": []}
+                    }).to_string().into())).await;
+                }
+            })
+        }
+    }).post(move || {
+        post_sends.fetch_add(1, Ordering::SeqCst);
+        async {
+            Response::builder().header(CONTENT_TYPE, "text/event-stream").body(Body::from(
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"safe-http-fallback\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"
+            )).unwrap()
+        }
+    }));
+    let upstream = spawn(app).await;
+    let (gateway, events, _, _) = spawn_mixed_gateway_with_options(
+        vec![source("slow-source", &upstream, "synthetic-key", 10)],
+        Vec::new(),
+        vec![mixed_key(None, None)],
+        Arc::new(TokenAuthority::new(4).unwrap()),
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+        GatewayRuntimeOptions {
+            diagnostics_enabled: || true,
+            ..Default::default()
+        },
+    )
+    .await;
+    for expected_id in ["safe-http-fallback", "native-after-slow"] {
+        let upgraded = reqwest::Client::new()
+            .get(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .upgrade()
+            .send()
+            .await
+            .unwrap();
+        let mut socket = upgraded.into_websocket().await.unwrap();
+        socket
+            .send(ClientWsMessage::Text(
+                json!({"type":"response.create", "model":MODEL, "input":"synthetic"}).to_string(),
+            ))
+            .await
+            .unwrap();
+        let completion =
+            receive_websocket_completion_with_timeout(&mut socket, Duration::from_secs(8)).await;
+        assert_eq!(completion["response"]["id"], expected_id);
+    }
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert_eq!(http_sends.load(Ordering::SeqCst), 1);
+    assert_eq!(ws_sends.load(Ordering::SeqCst), 1);
+    assert_eq!(connects.load(Ordering::SeqCst), 2);
+    let events = events.lock().unwrap();
+    assert_eq!(
+        events.len(),
+        2,
+        "an unsent optional handshake is not a failed generation"
+    );
+    assert!(events.iter().all(|event| event.success));
+    let transport = serde_json::to_value(&events[0].routing.as_ref().unwrap().transport).unwrap();
+    assert_eq!(transport["fallbackReason"], "websocket_slow_handshake");
+}
+
+#[tokio::test]
 async fn websocket_http_fallback_preserves_json_compaction_events() {
     let (upstream, state) = spawn_upstream(vec![Reply::Stream(vec![
         StreamChunk::Data(

@@ -11,7 +11,7 @@ fn tool_prompt_is_compact_but_keeps_the_original_schema_for_validation() {
     let request = json!({"model":"gpt-test","input":"Find a file","tools":[{"type":"function","name":"lookup","parameters":schema}]});
     let original = request.clone();
     let prepared = prepare_request(&request).unwrap();
-    let instructions = prepared["input"][0]["content"][0]["text"].as_str().unwrap();
+    let instructions = prompt_text(&prepared);
     assert!(instructions.contains("complete argument contract"));
     assert!(instructions.contains(". Parameters: "));
     assert!(instructions.contains("\"path\":string @"));
@@ -178,7 +178,7 @@ fn latest_historical_search_catalog_keeps_nested_namespaces_and_original_schema(
     });
     let before = request.clone();
     let prepared = prepare_request(&request).unwrap();
-    let instructions = prepared["input"][0]["content"][0]["text"].as_str().unwrap();
+    let instructions = prepared["input"][2]["content"][0]["text"].as_str().unwrap();
     assert!(instructions.contains("mcp.repo.read (function): latest"));
     assert!(!instructions.contains("mcp.repo.read (function): old"));
     assert!(!instructions.contains("Client tool_choice:"));
@@ -188,7 +188,7 @@ fn latest_historical_search_catalog_keeps_nested_namespaces_and_original_schema(
     assert!(turn_policy.contains("Invoke at most one client tool in this response."));
     assert!(turn_policy.contains(r#""name":"read""#));
     assert_eq!(request, before);
-    assert_eq!(prepared["input"].as_array().unwrap().len(), 3);
+    assert_eq!(prepared["input"].as_array().unwrap().len(), 5);
     let response = serde_json::to_vec(&json!({"status":"completed","output":[{
         "type":"function_call","name":"run_officejs","call_id":"call_fixture",
         "arguments":json!({"references":["mcp.repo.read"],"code":r#"{"path":"src/main.rs"}"#}).to_string()
@@ -345,16 +345,13 @@ fn preparation_wraps_tools_and_omits_empty_context() {
     assert!(prepared.get("context_management").is_none());
     assert!(prepared.get("tools").is_none());
     assert!(prepared.get("tool_choice").is_none());
-    assert!(prepared["input"][0]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("exec_command"));
+    assert!(prompt_text(&prepared).contains("exec_command"));
 }
 
 #[test]
 fn tool_examples_follow_the_declared_tool_instead_of_a_fixed_patch() {
     let prepared = prepare_request(&request_with_tool()).unwrap();
-    let instructions = prepared["input"][0]["content"][0]["text"].as_str().unwrap();
+    let instructions = prompt_text(&prepared);
     assert!(instructions.contains("Example outer arguments for exec_command (function)"));
     let encoded = instructions
         .split_once("Example outer arguments for exec_command (function): ")
@@ -389,10 +386,7 @@ fn tool_examples_follow_the_declared_tool_instead_of_a_fixed_patch() {
             }
         }]
     });
-    let instructions = prepare_request(&function_patch).unwrap()["input"][0]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let instructions = prompt_text(&prepare_request(&function_patch).unwrap());
     assert!(instructions.contains("Example outer arguments for apply_patch (function)"));
     assert!(instructions.contains("\\\"patch\\\""));
     assert!(!instructions.contains("exec_command"));
@@ -402,10 +396,7 @@ fn tool_examples_follow_the_declared_tool_instead_of_a_fixed_patch() {
         "input": "edit",
         "tools": [{"type": "custom", "name": "apply_patch"}]
     });
-    let instructions = prepare_request(&custom_patch).unwrap()["input"][0]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let instructions = prompt_text(&prepare_request(&custom_patch).unwrap());
     assert!(instructions.contains("Example outer arguments for apply_patch (custom)"));
     assert!(instructions.contains("*** Begin Patch"));
 }
@@ -455,7 +446,7 @@ fn tool_catalog_is_one_message_and_examples_follow_the_bare_name() {
     });
     let prepared = prepare_request(&request).unwrap();
     let input = prepared["input"].as_array().unwrap();
-    let instructions = input[0]["content"][0]["text"].as_str().unwrap();
+    let instructions = prompt_text(&prepared);
     assert_eq!(input[0]["role"], "developer");
     assert!(instructions.contains("Example outer arguments for exec_command (function)"));
     assert!(
@@ -500,7 +491,7 @@ fn large_catalog_keeps_every_schema_without_repeating_shared_instructions() {
     let request = json!({"input":"hello", "tools":tools});
     let original = request.clone();
     let prepared = prepare_request(&request).unwrap();
-    let instructions = prepared["input"][0]["content"][0]["text"].as_str().unwrap();
+    let instructions = prompt_text(&prepared);
     assert_eq!(
         instructions
             .matches("pass one JSON object matching it")
@@ -541,7 +532,7 @@ fn large_historical_catalog_keeps_current_definitions_without_duplicates() {
         ]
     });
     let prepared = prepare_request(&request).unwrap();
-    let instructions = prepared["input"][0]["content"][0]["text"].as_str().unwrap();
+    let instructions = current_catalog_text(&prepared);
     assert_eq!(instructions.matches(". Parameters: ").count(), 201);
     assert_eq!(instructions.matches("- fixture_37 (function)").count(), 1);
     assert!(instructions.contains("Current definition wins."));
@@ -563,10 +554,7 @@ fn boolean_property_schema_is_valid_with_closed_additional_properties() {
             }
         }]
     });
-    let open_instructions = prepare_request(&open).unwrap()["input"][0]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let open_instructions = prompt_text(&prepare_request(&open).unwrap());
     assert!(open_instructions.contains("Example outer arguments for exec_command (function)"));
 
     let closed = json!({
@@ -583,10 +571,7 @@ fn boolean_property_schema_is_valid_with_closed_additional_properties() {
             }
         }]
     });
-    let closed_instructions = prepare_request(&closed).unwrap()["input"][0]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let closed_instructions = prompt_text(&prepare_request(&closed).unwrap());
     assert!(closed_instructions.contains("Example outer arguments"));
 }
 
@@ -698,6 +683,7 @@ fn discovery_checkpoints_borrow_the_exact_prepared_catalog_with_instruction_offs
             Some(expected.as_str())
         );
         assert!(expected.contains("apply_patch"));
+        assert!(prompt_text(&upstream).contains("apply_patch"));
         assert!(prepare::prepared_tool_instructions(&request, &json!({})).is_none());
     }
 }

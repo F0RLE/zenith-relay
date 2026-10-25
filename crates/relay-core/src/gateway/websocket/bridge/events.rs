@@ -300,6 +300,28 @@ pub(super) fn inspect_upstream_event(
 fn inspect_parsed_event(event_payload: &Value, state: &mut BridgeState) -> EventTerminal {
     let event_type = event_payload.get("type").and_then(Value::as_str);
     if let Some(in_flight) = state.in_flight.as_mut() {
+        if in_flight.route.account_id.is_some()
+            && in_flight.route.account_transport
+                == crate::runtime::AccountTransport::NativeResponses
+            && crate::runtime::catalog_hints::native_codex_responses_url(
+                &in_flight.route.upstream_url,
+            )
+        {
+            if let Some(transport) = in_flight
+                .event
+                .routing
+                .as_mut()
+                .and_then(|routing| routing.transport.as_mut())
+            {
+                transport
+                    .observe_codex_server_timing(event_payload, in_flight.response_id.as_deref());
+            }
+        }
+        // A timing notification is not a response event. In particular, a late
+        // notification must never replace the active response's identity.
+        if event_type == Some("responsesapi.websocket_timing") {
+            return EventTerminal::default();
+        }
         in_flight.event.observe_response_metadata(event_payload);
         in_flight.native_replay_capture.observe(event_payload);
         in_flight

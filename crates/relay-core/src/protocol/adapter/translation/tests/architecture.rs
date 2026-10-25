@@ -172,6 +172,7 @@ fn gemini_openapi_tools_and_output_use_the_destination_schema_dialect() {
     for upstream in WireApi::ALL {
         let prepared = prepare(WireApi::Gemini, upstream, &request, false);
         let (tool, output) = match upstream {
+            WireApi::GeminiInteractions => unreachable!("native-only fixture is separate"),
             WireApi::Responses => ("/tools/0/parameters", "/text/format/schema"),
             WireApi::ChatCompletions => (
                 "/tools/0/function/parameters",
@@ -320,6 +321,7 @@ fn structured_output_keeps_envelope_and_schema_descriptions() {
 pub(super) fn tool_reply(protocol: WireApi) -> Value {
     let calls = (0..2).map(|index| json!({"type":"function_call","id":format!("fc_{index}"),"call_id":format!("call_new_{index}"),"name":"lookup","arguments":format!("{{\"value\":{index}}}")})).collect::<Vec<_>>();
     match protocol {
+        WireApi::GeminiInteractions => unreachable!("native-only fixture is separate"),
         WireApi::Responses => {
             json!({"id":"resp_tools","status":"completed","output":calls,"usage":{"input_tokens":11,"output_tokens":7}})
         }

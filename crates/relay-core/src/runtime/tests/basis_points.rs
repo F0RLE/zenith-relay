@@ -34,6 +34,7 @@ struct AccessState {
     access_requests: AtomicUsize,
     generation_requests: AtomicUsize,
     attachment_requests: AtomicUsize,
+    attachment_file_id: Mutex<Option<String>>,
     generation_status: Mutex<StatusCode>,
     strict_request_schema: AtomicBool,
     stream_generations: AtomicBool,
@@ -71,6 +72,7 @@ impl AccessServer {
             access_requests: AtomicUsize::new(0),
             generation_requests: AtomicUsize::new(0),
             attachment_requests: AtomicUsize::new(0),
+            attachment_file_id: Mutex::new(None),
             generation_status: Mutex::new(StatusCode::OK),
             strict_request_schema: AtomicBool::new(false),
             stream_generations: AtomicBool::new(false),
@@ -84,13 +86,17 @@ impl AccessServer {
             .route("/responses/access", get(access))
             .route(
                 "/responses",
-                post(generation).get(|State(state): State<Arc<AccessState>>| async move {
-                    // Count rejected upgrades so tests catch stray native WebSocket requests.
-                    state.generation_requests.fetch_add(1, Ordering::SeqCst);
-                    StatusCode::METHOD_NOT_ALLOWED
-                }),
+                post(generation)
+                    .get(|State(state): State<Arc<AccessState>>| async move {
+                        // Count rejected upgrades so tests catch stray native WebSocket requests.
+                        state.generation_requests.fetch_add(1, Ordering::SeqCst);
+                        StatusCode::METHOD_NOT_ALLOWED
+                    })
+                    // Large-history regressions must exercise Relay's replay
+                    // budget, not Axum's unrelated 2 MiB JSON extractor limit.
+                    .layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)),
             )
-            .route("/attachments", post(failed_attachment))
+            .route("/attachments", post(attachment))
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let responses_url = Url::parse(&format!(
@@ -111,9 +117,13 @@ impl AccessServer {
     }
 }
 
-async fn failed_attachment(State(state): State<Arc<AccessState>>) -> StatusCode {
+async fn attachment(State(state): State<Arc<AccessState>>) -> Response {
     state.attachment_requests.fetch_add(1, Ordering::SeqCst);
-    StatusCode::BAD_GATEWAY
+    let file_id = crate::poison::mutex(&state.attachment_file_id).clone();
+    match file_id {
+        Some(file_id) => Json(json!({"openai_file_id":file_id})).into_response(),
+        None => StatusCode::BAD_GATEWAY.into_response(),
+    }
 }
 
 async fn access(State(state): State<Arc<AccessState>>, uri: Uri, headers: HeaderMap) -> Response {
@@ -330,6 +340,9 @@ async fn runtime(server: &AccessServer) -> GatewayRuntime {
         )
         .await
         .unwrap();
+    // The fixture starts as Codex; reconcile its inventory after changing the
+    // transport so it does not retain the native-only Images route.
+    assert!(runtime.update_account_models("account-1", &["gpt-test".to_string()]));
     runtime
 }
 
@@ -341,17 +354,14 @@ fn expire_access(runtime: &GatewayRuntime) {
 }
 
 #[tokio::test]
-async fn free_bps_rejects_discovery_and_all_dispatches_without_provider_requests() {
+async fn free_bps_uses_provider_access_and_all_dispatch_paths() {
     let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
     let runtime = runtime(&server).await;
     assert!(runtime.update_account_subscription_plan("account-1", Some("chatgpt_free_tier")));
-    let result = runtime
+    runtime
         .prepare_basis_points_authorization("account-1")
-        .await;
-    assert!(
-        matches!(result, Err(AuthorizedRequestError::ModelAccess(failure))
-        if failure.code == ModelDiscoveryFailureCode::BasisPointsFreeAccountUnsupported)
-    );
+        .await
+        .unwrap();
     let key = runtime.authenticate_secret("local-secret").unwrap();
     runtime.refresh_basis_points_access(&key).await;
     let budget = SharedRequestBudget::for_incoming_request(3);
@@ -372,13 +382,56 @@ async fn free_bps_rejects_discovery_and_all_dispatches_without_provider_requests
                 },
             )
             .await;
+        assert!(result.unwrap().response.status().is_success());
+    }
+    assert_eq!(budget.dispatches(), 1);
+    assert_eq!(budget.with_budget(|budget| budget.wire_attempts()), 1);
+    assert_eq!(server.state.access_requests.load(Ordering::SeqCst), 1);
+    assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn free_bps_still_obeys_provider_denial() {
+    let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+    crate::poison::mutex(&server.state.reply).status = StatusCode::FORBIDDEN;
+    let runtime = runtime(&server).await;
+    runtime.update_account_subscription_plan("account-1", Some("free"));
+    let result = runtime
+        .prepare_basis_points_authorization("account-1")
+        .await;
+    assert!(
+        matches!(result, Err(AuthorizedRequestError::ModelAccess(failure))
+        if failure.code == ModelDiscoveryFailureCode::Forbidden)
+    );
+    assert_eq!(server.state.access_requests.load(Ordering::SeqCst), 1);
+    assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn free_plan_metadata_does_not_reenable_an_operator_disabled_account() {
+    let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+    let runtime = runtime(&server).await;
+    assert!(runtime.update_account_policy(
+        "account-1",
+        RuntimeCandidatePolicy {
+            enabled: false,
+            draining: false,
+            priority: 0,
+            weight: 1,
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+        }
+    ));
+    for plan in ["free", "plus"] {
+        runtime.update_account_subscription_plan("account-1", Some(plan));
         assert!(
-            matches!(result, Err(AuthorizedRequestError::ModelAccess(failure))
-            if failure.code == ModelDiscoveryFailureCode::BasisPointsFreeAccountUnsupported)
+            !runtime
+                .lock_scheduler()
+                .candidate("account-1")
+                .unwrap()
+                .enabled
         );
     }
-    assert_eq!(budget.dispatches(), 0);
-    assert_eq!(budget.with_budget(|budget| budget.wire_attempts()), 0);
     assert_eq!(server.state.access_requests.load(Ordering::SeqCst), 0);
     assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 0);
 }
@@ -415,7 +468,7 @@ impl TokenRefreshAdapter for FreePlanRefresh {
 }
 
 #[tokio::test]
-async fn refreshed_free_id_token_blocks_bps_despite_paid_metadata_and_opaque_access() {
+async fn refreshed_free_id_token_keeps_bps_provider_access_checks() {
     let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
     let mut runtime = runtime(&server).await;
     runtime.update_account_subscription_plan("account-1", Some("plus"));
@@ -441,18 +494,15 @@ async fn refreshed_free_id_token_blocks_bps_despite_paid_metadata_and_opaque_acc
         )
         .await
         .unwrap();
-    let result = runtime
+    runtime
         .prepare_basis_points_authorization("account-1")
-        .await;
-    assert!(
-        matches!(result, Err(AuthorizedRequestError::ModelAccess(failure))
-        if failure.code == ModelDiscoveryFailureCode::BasisPointsFreeAccountUnsupported)
-    );
+        .await
+        .unwrap();
     let prepared = runtime
         .prepare_authorization("account-1", crate::unix_time_ms())
         .await
         .unwrap();
-    assert!(prepared.dispatch_guard(&runtime, "account-1").is_none());
+    assert!(prepared.dispatch_guard(&runtime, "account-1").is_some());
     let budget = SharedRequestBudget::for_incoming_request(3);
     for request_budget in [Some(&budget), None] {
         let result = runtime
@@ -471,25 +521,21 @@ async fn refreshed_free_id_token_blocks_bps_despite_paid_metadata_and_opaque_acc
                 },
             )
             .await;
-        assert!(
-            matches!(result, Err(AuthorizedRequestError::ModelAccess(failure))
-            if failure.code == ModelDiscoveryFailureCode::BasisPointsFreeAccountUnsupported)
-        );
+        assert!(result.unwrap().response.status().is_success());
     }
     assert_eq!(refresh.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(budget.dispatches(), 0);
-    assert_eq!(budget.with_budget(|budget| budget.wire_attempts()), 0);
-    assert_eq!(server.state.access_requests.load(Ordering::SeqCst), 0);
-    assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 0);
+    assert_eq!(budget.dispatches(), 1);
+    assert_eq!(budget.with_budget(|budget| budget.wire_attempts()), 1);
+    assert_eq!(server.state.access_requests.load(Ordering::SeqCst), 1);
+    assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
-async fn bps_plan_downgrade_revokes_cached_access_and_pending_dispatch() {
-    use crate::scheduler::rotation::DispatchStartError;
+async fn bps_plan_change_refreshes_access_without_disabling_the_account() {
     let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
     let runtime = runtime(&server).await;
     runtime.update_account_subscription_plan("account-1", Some("plus"));
-    let prepared = runtime
+    runtime
         .prepare_basis_points_authorization("account-1")
         .await
         .unwrap();
@@ -510,10 +556,25 @@ async fn bps_plan_downgrade_revokes_cached_access_and_pending_dispatch() {
         .1;
     assert!(runtime.update_account_subscription_plan("account-1", Some("free")));
     assert!(runtime.fresh_basis_points_access("account-1").is_none());
-    assert_eq!(
-        lease.begin_rotation_http_dispatch_for(&prepared, &runtime),
-        Err(DispatchStartError::CandidateChanged)
-    );
+    let response = runtime
+        .send_authorized_request(
+            "account-1",
+            reqwest::Client::new()
+                .post(server.responses_url.clone())
+                .json(&json!({"model":"gpt-test"})),
+            AuthorizationDispatch {
+                client_version: None,
+                identity_policy: AuthorizationIdentityPolicy::PreserveUpstream,
+                turn_scope: None,
+                budget: Some(&budget),
+                lease: Some(&lease),
+                usage_event: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(response.response.status().is_success());
+    assert_eq!(server.state.access_requests.load(Ordering::SeqCst), 2);
     assert!(runtime.update_account_policy(
         "account-1",
         RuntimeCandidatePolicy {
@@ -533,14 +594,14 @@ async fn bps_plan_downgrade_revokes_cached_access_and_pending_dispatch() {
         crate::unix_time_ms(),
     ));
     assert!(
-        !runtime
+        runtime
             .lock_scheduler()
             .candidate("account-1")
             .unwrap()
             .enabled
     );
-    assert_eq!(budget.dispatches(), 0);
-    assert_eq!(budget.with_budget(|budget| budget.wire_attempts()), 0);
+    assert_eq!(budget.dispatches(), 1);
+    assert_eq!(budget.with_budget(|budget| budget.wire_attempts()), 1);
     drop(lease);
     runtime.update_account_subscription_plan("account-1", Some("plus"));
     runtime.sync_account_availability_with_quota(
@@ -561,12 +622,12 @@ async fn bps_plan_downgrade_revokes_cached_access_and_pending_dispatch() {
         .prepare_basis_points_authorization("account-1")
         .await
         .unwrap();
-    assert_eq!(server.state.access_requests.load(Ordering::SeqCst), 2);
-    assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 0);
+    assert_eq!(server.state.access_requests.load(Ordering::SeqCst), 3);
+    assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
-async fn delayed_access_cannot_publish_after_a_free_plan_downgrade() {
+async fn delayed_access_is_not_rejected_solely_by_a_free_plan_change() {
     let server = AccessServer::start(json!([{"id":"gpt-test"}]), true).await;
     let runtime = Arc::new(runtime(&server).await);
     let reading = {
@@ -585,10 +646,10 @@ async fn delayed_access_cannot_publish_after_a_free_plan_downgrade() {
     .unwrap();
     runtime.update_account_subscription_plan("account-1", Some("free"));
     server.state.first_release.add_permits(1);
-    assert!(reading.await.unwrap().is_err());
-    assert!(runtime.fresh_basis_points_access("account-1").is_none());
+    assert!(reading.await.unwrap().is_ok());
+    assert!(runtime.fresh_basis_points_access("account-1").is_some());
     assert!(
-        !runtime
+        runtime
             .lock_scheduler()
             .candidate("account-1")
             .unwrap()

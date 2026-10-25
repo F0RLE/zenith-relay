@@ -28,6 +28,11 @@ impl GatewayRuntime {
         allowed_protocols: &[WireApi],
         upstream_stream: bool,
     ) -> Vec<ExecutorRoute> {
+        // Images have a separate endpoint and dispatch lane. Publishing an
+        // image model must not make it executable as a text/tool request.
+        if is_image_model_id(model) {
+            return Vec::new();
+        }
         if !self
             .lock_scheduler()
             .candidate(candidate_id)
@@ -96,6 +101,9 @@ impl GatewayRuntime {
         let Some(account) = self.chatgpt_accounts.get(candidate_id) else {
             return Vec::new();
         };
+        if account.images_only {
+            return Vec::new();
+        }
         let Some(source_model) = account.canonical_model(model) else {
             return Vec::new();
         };
@@ -128,18 +136,13 @@ impl GatewayRuntime {
                 });
         }
         let account = self.chatgpt_accounts.get(candidate_id)?;
-        if account.oauth_client_kind == crate::providers::chatgpt::OAuthClientKind::ExcelBps {
+        if account.oauth_client_kind != crate::providers::chatgpt::OAuthClientKind::Codex {
             return None;
         }
-        Some(
-            self.account_executor_route(
-                account,
-                crate::poison::read(&account.model_inventory)
-                    .image_main_model
-                    .clone()?,
-                allowed_protocols,
-            ),
-        )
+        crate::poison::read(&account.model_inventory)
+            .image_main_model
+            .as_ref()?;
+        Some(self.account_executor_route(account, model.to_owned(), allowed_protocols))
     }
 
     fn source_executor_route(
@@ -170,7 +173,6 @@ impl GatewayRuntime {
             client_wire_api: source_route.wire_api,
             adapter: source_route.adapter,
             reasoning_mode: source_route.reasoning_mode,
-            reasoning_effort_override: None,
             cache_write_ttl: source_route.cache_write_ttl,
             service_tier: DefaultServiceTier::Standard,
             upstream_url: provider_source.endpoint(
@@ -236,7 +238,6 @@ impl GatewayRuntime {
                 MessagesReasoningMode::Adaptive
             },
             cache_write_ttl: CacheWriteTtl::Provider,
-            reasoning_effort_override: None,
             service_tier: DefaultServiceTier::Standard,
             upstream_url: match account_transport {
                 AccountTransport::NativeResponses | AccountTransport::Siwc => {

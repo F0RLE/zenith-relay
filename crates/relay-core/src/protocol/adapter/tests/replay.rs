@@ -2,6 +2,63 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn native_responses_replay_retains_only_history_within_budget() {
+    let input = json!([{"role":"user","content":"Synthetic retained history"}]);
+    let output = json!([{
+        "type":"function_call","call_id":"synthetic-call","name":"lookup","arguments":"{}"
+    }]);
+    let initial = json!({
+        "model":"gpt-test","input":input,
+        "instructions":"i".repeat(4096),
+        "tools":[{"type":"function","name":"lookup","description":"d".repeat(4096),
+            "parameters":{"type":"object"}}]
+    });
+    let (_, replay) = NativeResponsesReplayState::from_response(
+        &initial,
+        "gpt-test",
+        &json!({"id":"synthetic-response","output":output}),
+    )
+    .unwrap();
+    let mut store = NativeResponsesReplayStore::with_limits(4, 1000, 1024, 4096);
+    store.insert("key-a", "synthetic-response", "route-a", replay, 100);
+    let replay = store
+        .get("key-a", "synthetic-response", "route-a", 100)
+        .expect("unused previous options must not crowd history out of its byte budget");
+    assert!(store
+        .get("key-b", "synthetic-response", "route-a", 100)
+        .is_none());
+    assert!(store
+        .get("key-a", "synthetic-response", "route-b", 100)
+        .is_none());
+    let continuation = json!({
+        "previous_response_id":"synthetic-response",
+        "input":[{"type":"function_call_output","call_id":"synthetic-call","output":"ok"}],
+        "instructions":"Synthetic current instructions","tools":[],"tool_choice":"none"
+    });
+    let replayed = replay
+        .replay_request(&continuation, "gpt-test", true)
+        .unwrap();
+    assert_eq!(
+        replayed["input"],
+        json!([input[0], output[0], continuation["input"][0]])
+    );
+    assert_eq!(replayed["instructions"], continuation["instructions"]);
+    assert_eq!(replayed["tools"], continuation["tools"]);
+    assert_eq!(replayed["tool_choice"], continuation["tool_choice"]);
+
+    let (_, oversized) = NativeResponsesReplayState::from_response(
+        &json!({"input":[{"role":"user","content":"x".repeat(4096)}]}),
+        "gpt-test",
+        &json!({"id":"synthetic-oversized","output":[]}),
+    )
+    .unwrap();
+    store.insert("key-a", "synthetic-oversized", "route-a", oversized, 100);
+    assert!(store
+        .get("key-a", "synthetic-oversized", "route-a", 100)
+        .is_none());
+}
+
+#[test]
 fn native_responses_replay_materializes_tool_turn_without_protocol_conversion() {
     let initial = json!({
         "model": "alias",

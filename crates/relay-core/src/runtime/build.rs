@@ -61,10 +61,6 @@ pub(super) struct KeyRuntimeParts {
 }
 
 pub(super) fn validate_runtime_options(options: &GatewayRuntimeOptions) -> Result<()> {
-    options
-        .request_timezone
-        .validate()
-        .map_err(|message| Error::Validation(message.into()))?;
     if let Some(policy) = &options.pool_routing {
         policy
             .validate_activation()
@@ -235,8 +231,9 @@ impl GatewayRuntime {
 
         let mut scheduler = configure_scheduler(&options)?;
         let mut registry = ModelRegistry::default();
-        let image_base_model = normalize_image_base_model(options.image_base_model.clone())?;
-        let image_pricing_catalog = options.image_pricing_catalog.as_deref();
+        // Validate legacy configuration on import; native image requests no
+        // longer select a text model or use text pricing for route selection.
+        normalize_image_base_model(options.image_base_model.clone())?;
         let reference_catalog = options
             .model_metadata_catalog
             .as_ref()
@@ -250,8 +247,7 @@ impl GatewayRuntime {
         let account_parts = accounts::build_accounts(
             accounts,
             account_auth.as_ref(),
-            image_base_model.as_deref(),
-            image_pricing_catalog,
+            options.native_codex_images_only,
             &source_parts,
             &mut registry,
             &mut scheduler,
@@ -374,7 +370,6 @@ impl GatewayRuntime {
         Ok(Self {
             diagnostics_enabled: options.diagnostics_enabled,
             tool_policy: RwLock::new(options.tool_policy.clone()),
-            request_timezone: RwLock::new(options.request_timezone.clone()),
             clients,
             discovery_client,
             sources: source_parts.executors,
@@ -394,8 +389,6 @@ impl GatewayRuntime {
             admission: Mutex::default(),
             admission_changed: tokio::sync::Notify::new(),
             registry: Mutex::new(registry),
-            image_base_model,
-            image_pricing_catalog: options.image_pricing_catalog.clone(),
             codex_responses_lite_models: Mutex::new(BTreeSet::new()),
             official_codex_ultra: Mutex::new(BTreeMap::new()),
             websocket_http_only: Mutex::new(BTreeMap::new()),
@@ -420,6 +413,8 @@ impl GatewayRuntime {
             activity_runtime_id: NEXT_ACTIVITY_RUNTIME_ID.fetch_add(1, Ordering::Relaxed),
             activity_revision: Arc::new(AtomicU64::new(0)),
             chatgpt_team_breaker_callback: Arc::new(Mutex::new(Arc::new(|_| {}))),
+            codex_catalog_hints: Mutex::new(BTreeMap::new()),
+            codex_catalog_hint_callback: Mutex::new(Arc::new(|_, _| false)),
             usage,
         })
     }

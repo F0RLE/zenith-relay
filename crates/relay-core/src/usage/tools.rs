@@ -46,6 +46,7 @@ pub struct BasisPointsCatalogDiagnostics {
 #[serde(rename_all = "camelCase")]
 pub struct ToolUseDiagnostics {
     pub client_tool_count: u16,
+    /// Post-policy catalog before transport encoding, not native upstream tools.
     pub forwarded_tool_count: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_schema_bytes: Option<u64>,

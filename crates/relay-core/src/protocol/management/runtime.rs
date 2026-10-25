@@ -7,6 +7,7 @@ pub enum ClientWireApi {
     ChatCompletions,
     Messages,
     Gemini,
+    GeminiInteractions,
     Images,
 }
 
@@ -18,5 +19,6 @@ pub fn local_gateway_client_wire_apis() -> Vec<ClientWireApi> {
         ClientWireApi::Messages,
         ClientWireApi::ChatCompletions,
         ClientWireApi::Gemini,
+        ClientWireApi::GeminiInteractions,
     ]
 }

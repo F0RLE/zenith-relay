@@ -66,6 +66,11 @@ pub(super) fn responses_history(input: &Value) -> AdapterResult<Vec<Message>> {
 
 pub(super) fn request(protocol: WireApi, request_body: &Value) -> AdapterResult<Request> {
     let mut decoded_request = match protocol {
+        WireApi::GeminiInteractions => {
+            return Err(AdapterError::parameter_unsupported_for(
+                "gemini_interactions.native_only",
+            ))
+        }
         WireApi::Responses => responses::decode(request_body)?,
         WireApi::ChatCompletions => chat::decode(request_body)?,
         WireApi::Messages => messages::decode(request_body)?,

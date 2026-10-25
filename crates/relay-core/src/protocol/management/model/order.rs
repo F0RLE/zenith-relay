@@ -1,7 +1,21 @@
 use super::{AccountSummary, ModelSummary, SourceSummary};
-use crate::model_metadata::ModelMetadataCatalog;
+use crate::model_metadata::{DisplayProjection, ModelMetadataCatalog};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+/// Reuses model classification within one snapshot, never live route decisions.
+/// Each member still merges its own inventory and saved anchors independently.
+pub struct ModelDisplayProjection<'a> {
+    display: DisplayProjection<'a>,
+}
+
+impl<'a> ModelDisplayProjection<'a> {
+    pub fn new(catalog: &'a ModelMetadataCatalog) -> Self {
+        Self {
+            display: DisplayProjection::new(catalog),
+        }
+    }
+}
 
 /// Applies the operator's explicit presentation order without dropping a
 /// newly discovered upstream model. Unknown or stale saved IDs are ignored;
@@ -18,18 +32,26 @@ pub fn apply_model_display_order_with_catalog(
     saved_order: &[String],
     catalog: &ModelMetadataCatalog,
 ) {
-    let order = catalog.merge_display_order(models.iter().map(|model| &model.id), saved_order);
-    let positions = order
-        .iter()
-        .enumerate()
-        .map(|(position, model)| (crate::model_id_key(model), position))
-        .collect::<BTreeMap<_, _>>();
-    models.sort_by_key(|model| {
-        positions
-            .get(&crate::model_id_key(&model.id))
-            .copied()
-            .unwrap_or(usize::MAX)
-    });
+    ModelDisplayProjection::new(catalog).apply_model_order(models, saved_order);
+}
+
+impl ModelDisplayProjection<'_> {
+    pub fn apply_model_order(&mut self, models: &mut [ModelSummary], saved_order: &[String]) {
+        let order = self
+            .display
+            .merge(models.iter().map(|model| &model.id), saved_order);
+        let positions = order
+            .iter()
+            .enumerate()
+            .map(|(position, model)| (crate::model_id_key(model), position))
+            .collect::<BTreeMap<_, _>>();
+        models.sort_by_key(|model| {
+            positions
+                .get(&crate::model_id_key(&model.id))
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -51,51 +73,62 @@ pub fn member_model_catalog(
     saved_order: &[String],
     catalog: &ModelMetadataCatalog,
 ) -> BTreeMap<String, ModelCatalogIdentity> {
-    let source_models = sources.iter().flat_map(|source| {
-        source
-            .models
-            .iter()
-            .chain(
-                source
-                    .protocol_bindings
-                    .iter()
-                    .flat_map(|binding| &binding.model_ids),
-            )
-            .chain(
-                source
+    ModelDisplayProjection::new(catalog).member_catalog(sources, accounts, saved_order)
+}
+
+impl ModelDisplayProjection<'_> {
+    pub fn member_catalog(
+        &mut self,
+        sources: &[SourceSummary],
+        accounts: &[AccountSummary],
+        saved_order: &[String],
+    ) -> BTreeMap<String, ModelCatalogIdentity> {
+        let source_models = sources.iter().flat_map(|source| {
+            source
+                .models
+                .iter()
+                .chain(
+                    source
+                        .protocol_bindings
+                        .iter()
+                        .flat_map(|binding| &binding.model_ids),
+                )
+                .chain(
+                    source
+                        .allowed_models
+                        .iter()
+                        .chain(&source.excluded_models)
+                        .filter(|model| !model.contains('*')),
+                )
+                .chain(source.model_price_overrides.keys())
+                .chain(source.detected_model_prices.keys())
+        });
+        let account_models = accounts.iter().flat_map(|account| {
+            account.models.iter().chain(
+                account
                     .allowed_models
                     .iter()
-                    .chain(&source.excluded_models)
+                    .chain(&account.excluded_models)
                     .filter(|model| !model.contains('*')),
             )
-            .chain(source.model_price_overrides.keys())
-            .chain(source.detected_model_prices.keys())
-    });
-    let account_models = accounts.iter().flat_map(|account| {
-        account.models.iter().chain(
-            account
-                .allowed_models
-                .iter()
-                .chain(&account.excluded_models)
-                .filter(|model| !model.contains('*')),
-        )
-    });
-    catalog
-        .merge_display_order(source_models.chain(account_models), saved_order)
-        .into_iter()
-        .enumerate()
-        .map(|(position, model_id)| {
-            let identity = catalog.display_identity_for(&model_id);
-            (
-                crate::model_id_key(&model_id),
-                ModelCatalogIdentity {
-                    catalog_provider: identity.provider.unwrap_or_else(|| "other".into()),
-                    catalog_family: (!identity.family.is_empty()).then_some(identity.family),
-                    catalog_order: Some(position),
-                },
-            )
-        })
-        .collect()
+        });
+        self.display
+            .merge(source_models.chain(account_models), saved_order)
+            .into_iter()
+            .enumerate()
+            .map(|(position, model_id)| {
+                let identity = self.display.identity(&model_id);
+                (
+                    crate::model_id_key(&model_id),
+                    ModelCatalogIdentity {
+                        catalog_provider: identity.provider.unwrap_or_else(|| "other".into()),
+                        catalog_family: (!identity.family.is_empty()).then_some(identity.family),
+                        catalog_order: Some(position),
+                    },
+                )
+            })
+            .collect()
+    }
 }
 
 /// Order complete member inventories for the editors, including excluded models
@@ -107,19 +140,30 @@ pub fn apply_member_model_display_order(
     saved_order: &[String],
     catalog: &ModelMetadataCatalog,
 ) {
-    for source in sources {
-        source.models = catalog.merge_display_order(
-            source.models.iter().chain(
-                source
-                    .protocol_bindings
-                    .iter()
-                    .flat_map(|binding| &binding.model_ids),
-            ),
-            saved_order,
-        );
-    }
-    for account in accounts {
-        account.models = catalog.merge_display_order(account.models.iter(), saved_order);
+    ModelDisplayProjection::new(catalog).apply_member_order(sources, accounts, saved_order);
+}
+
+impl ModelDisplayProjection<'_> {
+    pub fn apply_member_order(
+        &mut self,
+        sources: &mut [SourceSummary],
+        accounts: &mut [AccountSummary],
+        saved_order: &[String],
+    ) {
+        for source in sources {
+            source.models = self.display.merge(
+                source.models.iter().chain(
+                    source
+                        .protocol_bindings
+                        .iter()
+                        .flat_map(|binding| &binding.model_ids),
+                ),
+                saved_order,
+            );
+        }
+        for account in accounts {
+            account.models = self.display.merge(account.models.iter(), saved_order);
+        }
     }
 }
 

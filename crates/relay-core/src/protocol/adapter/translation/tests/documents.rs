@@ -5,6 +5,7 @@ const PDF: &str = "JVBERi0xLjQK";
 fn request(client: WireApi) -> Value {
     let data = format!("data:application/pdf;base64,{PDF}");
     match client {
+        WireApi::GeminiInteractions => unreachable!("native-only fixture is separate"),
         WireApi::Responses => {
             json!({"input":[{"role":"user","content":[{"type":"input_file","filename":"synthetic.pdf","file_data":data}]}]})
         }

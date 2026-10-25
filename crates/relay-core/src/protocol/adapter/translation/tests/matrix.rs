@@ -10,6 +10,7 @@ fn all_protocol_paths_include_each_instruction_and_history_text_once() {
     const NEXT: &str = "SYNTHETIC_NEXT_SENTINEL";
     for client in WireApi::ALL {
         let request = match client {
+            WireApi::GeminiInteractions => unreachable!("native-only fixture is separate"),
             WireApi::Responses => json!({"model":"test","instructions":POLICY_A,"input":[
                 {"role":"developer","content":POLICY_B},
                 {"role":"user","content":QUESTION},{"role":"assistant","content":ANSWER},{"role":"user","content":NEXT}
@@ -93,6 +94,7 @@ fn all_sixteen_request_and_json_contracts() {
             }
             let translated = translated.unwrap();
             let text = match client {
+                WireApi::GeminiInteractions => unreachable!("native-only fixture is separate"),
                 WireApi::Responses => translated
                     .response_body()
                     .pointer("/output/0/content/0/text"),
@@ -117,6 +119,7 @@ fn image_schema_and_reasoning_survive_all_protocol_pairs() {
     let schema = json!({"type":"object","properties":{"caption":{"type":"string","minLength":2}},"required":["caption"],"additionalProperties":false});
     for client in WireApi::ALL {
         let request = match client {
+            WireApi::GeminiInteractions => unreachable!("native-only fixture is separate"),
             WireApi::Responses => {
                 json!({"input":[{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AA=="}]}],"max_output_tokens":128,"text":{"format":{"type":"json_schema","name":"caption","schema":schema}},"reasoning":{"effort":"high"}})
             }
@@ -133,6 +136,7 @@ fn image_schema_and_reasoning_survive_all_protocol_pairs() {
         for upstream in WireApi::ALL {
             let prepared = prepare(client, upstream, &request, false);
             let (image, format, tokens, effort, expected_image) = match upstream {
+                WireApi::GeminiInteractions => unreachable!("native-only fixture is separate"),
                 WireApi::Responses => (
                     "/input/0/content/0/image_url",
                     "/text/format/schema",
@@ -182,6 +186,7 @@ fn image_schema_and_reasoning_survive_all_protocol_pairs() {
 fn claude_cache_write_ttl_is_applied_for_every_client_protocol() {
     for client in WireApi::ALL {
         let request = match client {
+            WireApi::GeminiInteractions => unreachable!("native-only fixture is separate"),
             WireApi::Responses => json!({"model":"test","input":"Hello"}),
             WireApi::ChatCompletions => {
                 json!({"model":"test","messages":[{"role":"user","content":"Hello"}]})

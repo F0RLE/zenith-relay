@@ -32,10 +32,18 @@ impl AttemptFailure {
         cooldown: Option<CooldownRequest<'_>>,
         now_ms: u64,
     ) {
+        if self.category == error_codes::UPSTREAM_RATE_LIMITED
+            && self.execution.certainty == crate::scheduler::rotation::ExecutionCertainty::NotSent
+            && runtime.is_basis_points_account(lease.candidate_id())
+        {
+            lease.limit_rate_limit_recovery(runtime.route_recovery_window_ms());
+        }
         let health = if !lease.has_dispatched()
             || matches!(
                 self.category,
                 error_codes::ACCOUNT_REFRESH
+                    | error_codes::ACCOUNT_ROTATION_RECOVERY_REQUIRED
+                    | error_codes::ACCOUNT_CREDENTIAL_STORE_UNAVAILABLE
                     | error_codes::ACCOUNT_TOKEN_PERSISTENCE
                     | error_codes::ACCOUNT_AUTH
             ) {
@@ -270,7 +278,13 @@ impl AttemptFailure {
         retry_window_expired: bool,
         last_failure: Option<Self>,
     ) -> Self {
-        if retry_window_expired {
+        // Expiring our recovery budget does not turn a provider's rate-limit
+        // refusal into an unrelated 503 or discard its Retry-After evidence.
+        if retry_window_expired
+            && !last_failure
+                .as_ref()
+                .is_some_and(|failure| failure.category == error_codes::UPSTREAM_RATE_LIMITED)
+        {
             Self::classified_with_hint(
                 StatusCode::SERVICE_UNAVAILABLE,
                 error_codes::UPSTREAM_UNAVAILABLE,
@@ -283,6 +297,20 @@ impl AttemptFailure {
 
     pub(crate) fn prepare(error: ExecutorPrepareError) -> Self {
         match error {
+            ExecutorPrepareError::RotationRecoveryRequired => Self {
+                execution: ExecutionObservation::not_sent(),
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                category: error_codes::ACCOUNT_ROTATION_RECOVERY_REQUIRED,
+                message: "account token rotation needs recovery; sign in again",
+                cooldown_hint: RateLimitBodyHint::default(),
+            },
+            ExecutorPrepareError::CredentialStoreUnavailable => Self {
+                execution: ExecutionObservation::not_sent(),
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                category: error_codes::ACCOUNT_CREDENTIAL_STORE_UNAVAILABLE,
+                message: "account credential storage is temporarily unavailable",
+                cooldown_hint: RateLimitBodyHint::default(),
+            },
             ExecutorPrepareError::Authentication | ExecutorPrepareError::InvalidCredential => {
                 Self {
                     execution: ExecutionObservation::not_sent(),

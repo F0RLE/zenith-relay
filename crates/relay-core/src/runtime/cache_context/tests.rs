@@ -3,6 +3,7 @@ use crate::usage::{CacheContextSection, CacheHistoryComparison, CacheInputKind};
 use crate::{DefaultServiceTier, RoutingDiagnostics, SelectionReason, ToolUseDiagnostics};
 use serde_json::json;
 
+mod alignment;
 mod provider;
 
 fn payload() -> Value {
@@ -51,6 +52,7 @@ fn event(
             transport: None,
             cache_context: Some(diagnostics),
             attempt_outcome: None,
+            request_timing: None,
         }),
         requested_model: Some("synthetic".into()),
         resolved_model: Some("synthetic".into()),
@@ -79,6 +81,7 @@ fn event(
         total_tokens: None,
         upstream_error: None,
         quota_snapshot: None,
+        image_usage: None,
     }
 }
 

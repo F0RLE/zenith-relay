@@ -29,6 +29,7 @@ fn responses_upstream_preserves_foreign_tool_strict_defaults_and_optional_fields
                 declaration["strict"] = strict.into();
             }
             request["tools"] = match client {
+                WireApi::GeminiInteractions => unreachable!("native-only fixture is separate"),
                 WireApi::ChatCompletions => json!([{"type":"function","function":declaration}]),
                 WireApi::Messages => json!([declaration]),
                 WireApi::Gemini => json!([{"functionDeclarations":[declaration]}]),
@@ -59,6 +60,7 @@ fn required_tool_choices_reject_text_only_success_without_rejecting_limits_or_re
             let mut request = input(client);
             let schema = json!({"type":"object","properties":{}});
             request["tools"] = match client {
+                WireApi::GeminiInteractions => unreachable!("native-only fixture is separate"),
                 WireApi::Responses => {
                     json!([{"type":"function","name":"lookup","parameters":schema}])
                 }
@@ -71,6 +73,7 @@ fn required_tool_choices_reject_text_only_success_without_rejecting_limits_or_re
                 }
             };
             match client {
+                WireApi::GeminiInteractions => unreachable!("native-only fixture is separate"),
                 WireApi::Responses => {
                     request["tool_choice"] = if named {
                         json!({"type":"function","name":"lookup"})
@@ -141,6 +144,7 @@ fn required_tool_choices_reject_text_only_success_without_rejecting_limits_or_re
                 let mut limited = output(upstream);
                 let mut refused = output(upstream);
                 match upstream {
+                    WireApi::GeminiInteractions => unreachable!("native-only fixture is separate"),
                     WireApi::Responses => {
                         limited["status"] = "incomplete".into();
                         limited["incomplete_details"] = json!({"reason":"max_output_tokens"});
@@ -358,6 +362,7 @@ fn parallel_history_keeps_every_call_and_result_across_all_upstreams() {
             .unwrap();
         let body = prepared.upstream_body();
         let calls: Vec<&Value> = match upstream {
+            WireApi::GeminiInteractions => unreachable!("native-only fixture is separate"),
             WireApi::Responses => body["input"]
                 .as_array()
                 .unwrap()

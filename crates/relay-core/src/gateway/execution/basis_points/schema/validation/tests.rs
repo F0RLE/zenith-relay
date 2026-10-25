@@ -2,6 +2,19 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn memory_diagnostics_distinguish_input_bytes_from_compiled_validator_memory() {
+    let schema = json!({"type":"string","description":"synthetic-private-schema"});
+    validator(&schema).unwrap();
+    let snapshot = cache_memory_diagnostics();
+    assert_eq!(snapshot.key, "schema_validators");
+    assert_eq!(snapshot.basis, "schema_input");
+    assert_eq!(snapshot.limit_bytes, Some(MAX_RETAINED_SCHEMA_BYTES));
+    assert!(!serde_json::to_string(&snapshot)
+        .unwrap()
+        .contains("synthetic-private-schema"));
+}
+
+#[test]
 fn cached_validator_keeps_the_original_contract_and_detects_schema_changes() {
     let schema = json!({"type":"object","properties":{"query":{"type":"string","minLength":2}},"required":["query"],"additionalProperties":false});
     let first = validator(&schema).unwrap();
@@ -54,6 +67,23 @@ fn entry(schema_bytes: usize, now: Instant) -> Entry {
         schema_bytes,
         last_used: now,
     }
+}
+
+#[test]
+fn idle_maintenance_releases_expired_entries_without_invalidating_request_handles() {
+    let mut cache = ValidatorCache::default();
+    let now = Instant::now();
+    cache.insert([0; 32], entry(10, now), now);
+    cache.insert([1; 32], entry(10, now), now);
+    let live = cache.get(&[0; 32], now).unwrap();
+    assert!(cache.get(&[1; 32], now + IDLE_TTL / 2).is_some());
+    let expired = cache.take_expired(now + IDLE_TTL);
+    assert_eq!(expired.len(), 1);
+    assert_eq!(cache.entries.len(), 1);
+    drop(expired);
+    assert_eq!(Arc::strong_count(&live), 1);
+    assert!(live.is_valid(&json!({"still":"valid"})));
+    assert!(cache.get(&[1; 32], now + IDLE_TTL).is_some());
 }
 
 #[test]

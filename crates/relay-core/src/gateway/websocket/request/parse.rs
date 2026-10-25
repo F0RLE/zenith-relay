@@ -120,7 +120,16 @@ impl super::ClientRequest {
                 }
             }
         }
-        let client_identity = client_request_identity(headers, &request_body);
+        let mut client_identity = client_request_identity(headers, &request_body);
+        if client_identity.affinity_id.is_none()
+            && !request_body
+                .get("prompt_cache_key")
+                .and_then(Value::as_str)
+                .is_some_and(|key| !key.trim().is_empty())
+        {
+            client_identity.affinity_id =
+                crate::gateway::request::history_affinity_fingerprint(&key.id, &request_body);
+        }
         let client_context_id = client_identity.context_id;
         if background_kind.is_none() {
             tool_policy.capture_cache_context(

@@ -49,6 +49,15 @@ impl StreamCompletionSettlement {
                 .tool_use
                 .upstream_context
                 .clone_from(&progress.tool_use.upstream_context);
+            if let Some(transport) = event
+                .routing
+                .as_mut()
+                .and_then(|routing| routing.transport.as_mut())
+            {
+                transport
+                    .request_payload
+                    .clone_from(&progress.request_payload);
+            }
             discovery_headers.clone_from(&progress.headers);
             // Canonical client errors omit the original provider's retry fields.
             hint.retry_after_ms = hint
@@ -70,6 +79,22 @@ impl StreamCompletionSettlement {
                         &self.local_key,
                         &self.route,
                         &self.native_template,
+                        &response,
+                        now_ms(),
+                    );
+                }
+            }
+        }
+        if event.success
+            && self.route.client_wire_api == crate::WireApi::GeminiInteractions
+            && self.route.adapter.is_passthrough()
+        {
+            if let Some(shared) = &self.native_response {
+                if let Some(response) = crate::poison::mutex(shared).take() {
+                    crate::gateway::continuation::interactions::bind_response(
+                        &self.runtime,
+                        &self.local_key,
+                        &self.route,
                         &response,
                         now_ms(),
                     );

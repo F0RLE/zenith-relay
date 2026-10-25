@@ -3,6 +3,13 @@ use crate::runtime::{AccountTransport, ExecutorRoute};
 use axum::http::{header::CONTENT_TYPE, HeaderMap};
 use serde::{Deserialize, Serialize};
 
+mod payload;
+mod server_timing;
+pub use payload::{
+    FullRequestReason, RequestContentEncoding, RequestPayloadDiagnostics, RequestPayloadMode,
+};
+pub use server_timing::CodexServerTiming;
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestPreparationDiagnostics {
@@ -29,6 +36,9 @@ pub struct TransportDiagnostics {
     pub response_format: Option<TransportResponseFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handshake_ms: Option<u64>,
+    /// Native WS: false is selected-route setup before generation, true is reuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_reused: Option<bool>,
     /// First HTTP response headers since the executor's dispatch clock started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_headers_ms: Option<u64>,
@@ -37,6 +47,9 @@ pub struct TransportDiagnostics {
     pub request_preparation_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_preparation: Option<RequestPreparationDiagnostics>,
+    /// Encoded HTTP body or WebSocket JSON text; excludes framing/TLS and delivery claims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_payload: Option<RequestPayloadDiagnostics>,
     /// Raw upstream completion offset, before client translation/validation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_response_ms: Option<u64>,
@@ -46,6 +59,9 @@ pub struct TransportDiagnostics {
     /// Successful normalized response readiness offset; not client receipt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_response_ready_ms: Option<u64>,
+    /// Optional provider-reported values. Not additive Relay phases or cache-hit evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_server_timing: Option<CodexServerTiming>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -63,6 +79,7 @@ pub enum TransportFallbackReason {
     ProtocolConversion,
     WebsocketDisabled,
     WebsocketUnavailable,
+    WebsocketSlowHandshake,
     ExistingHttpBridge,
 }
 
@@ -101,12 +118,15 @@ impl ExecutorRoute {
                 fallback_reason,
                 response_format: None,
                 handshake_ms: None,
+                connection_reused: None,
                 response_headers_ms: None,
                 request_preparation_ms: None,
                 request_preparation: None,
+                request_payload: None,
                 upstream_response_ms: None,
                 client_first_output_ms: None,
                 client_response_ready_ms: None,
+                codex_server_timing: None,
             });
         }
     }
@@ -152,12 +172,15 @@ impl ExecutorRoute {
                 fallback_reason: None,
                 response_format: None,
                 handshake_ms,
+                connection_reused: Some(false),
                 response_headers_ms: None,
                 request_preparation_ms: None,
                 request_preparation: None,
+                request_payload: None,
                 upstream_response_ms: None,
                 client_first_output_ms: None,
                 client_response_ready_ms: None,
+                codex_server_timing: None,
             });
         }
     }
@@ -294,11 +317,23 @@ mod tests {
         route.observe_websocket_handshake(12, true);
         let actual = route.routing.as_ref().unwrap().transport.as_ref().unwrap();
         assert_eq!(actual.handshake_ms, Some(12));
+        assert_eq!(actual.connection_reused, Some(false));
         assert_eq!(
             actual.response_format,
             Some(TransportResponseFormat::WebsocketFrames)
         );
-        route.observe_websocket_dispatch(None);
+        route.observe_websocket_reuse();
+        assert_eq!(
+            route
+                .routing
+                .as_ref()
+                .unwrap()
+                .transport
+                .as_ref()
+                .unwrap()
+                .connection_reused,
+            Some(true)
+        );
         assert_eq!(
             route
                 .routing
@@ -314,6 +349,37 @@ mod tests {
         let actual = route.routing.as_ref().unwrap().transport.as_ref().unwrap();
         assert_eq!(actual.response_format, None);
         assert_eq!(actual.handshake_ms, None);
+        assert_eq!(actual.connection_reused, None);
+    }
+
+    #[test]
+    fn websocket_timing_does_not_leak_across_reused_or_unknown_connections() {
+        let mut route = route();
+        let mut timing = json!({"type":"responsesapi.websocket_timing",
+            "timing_metrics":{"engine_service_total_ms":42}});
+        route.observe_websocket_handshake(12, true);
+        let transport = route.routing.as_mut().unwrap().transport.as_mut().unwrap();
+        transport.observe_codex_server_timing(&timing, Some("first"));
+        assert!(transport.codex_server_timing.is_some());
+
+        // This is the same reset used by the bridge before its second dispatch.
+        route.observe_websocket_reuse();
+        let transport = route.routing.as_mut().unwrap().transport.as_mut().unwrap();
+        assert!(transport.codex_server_timing.is_none());
+        transport.observe_codex_server_timing(&timing, Some("second"));
+        assert!(transport.codex_server_timing.is_none());
+        timing["response_id"] = json!("first");
+        transport.observe_codex_server_timing(&timing, Some("second"));
+        assert!(transport.codex_server_timing.is_none());
+        timing["response_id"] = json!("second");
+        transport.observe_codex_server_timing(&timing, Some("second"));
+        assert!(transport.codex_server_timing.is_some());
+
+        transport.codex_server_timing = None;
+        transport.connection_reused = None;
+        timing.as_object_mut().unwrap().remove("response_id");
+        transport.observe_codex_server_timing(&timing, Some("third"));
+        assert!(transport.codex_server_timing.is_none());
     }
 
     #[test]

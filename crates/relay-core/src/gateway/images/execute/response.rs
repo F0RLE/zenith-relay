@@ -1,17 +1,16 @@
 use super::super::super::errors::{
-    apply_failure_state, retryable_route_failure, route_forbids_fallback,
-    settle_classified_failure, settle_image_capability_failure, settle_status_failure,
-    AttemptFailure, TRANSIENT_COOLDOWN_MS,
+    api_error, apply_failure_state, retryable_route_failure, route_forbids_fallback,
+    settle_image_capability_failure, settle_status_failure, AttemptFailure, TRANSIENT_COOLDOWN_MS,
 };
 use super::super::super::now_ms;
 use super::super::super::response::{
-    apply_usage, emit_usage, populate_tokens, proxy_json_response, proxy_response,
-    proxy_sse_response, route_error_origin,
+    emit_usage, populate_tokens, proxy_json_response, route_error_origin,
 };
-use super::super::account::{
-    image_capability_unavailable, image_error_response, translate_account_response, ImageAttempt,
+use super::super::account::{image_capability_unavailable, ImageAttempt};
+use super::super::{
+    native::{normalize_response, ImageEnvelope},
+    PreparedImageRequest,
 };
-use super::super::{ImageEndpoint, PreparedImageRequest};
 use super::ImageAttemptStep;
 use crate::error_codes;
 use crate::runtime::{CandidateLease, ExecutorRoute};
@@ -26,8 +25,6 @@ pub(super) fn handle_collected_image(
     lease: &CandidateLease,
     route: &ExecutorRoute,
     prepared: &PreparedImageRequest,
-    endpoint: ImageEndpoint,
-    account_route: bool,
     observed: ImageAttempt<'_>,
     status: StatusCode,
     response_headers: HeaderMap,
@@ -70,12 +67,19 @@ pub(super) fn handle_collected_image(
                 }),
             );
             event.upstream_error = Some(upstream_error);
+            populate_tokens(&mut event, &bytes);
+            if let Ok(envelope) = serde_json::from_slice::<ImageEnvelope<'_>>(&bytes) {
+                envelope.observe_usage(&mut event);
+            }
             apply_failure_state(&mut event, failure_state);
             emit_usage(runtime, event);
             return ImageAttemptStep::Retry(failure);
         }
         let mut event = observed.event(false, status, Some(failure.category.to_string()));
         populate_tokens(&mut event, &bytes);
+        if let Ok(envelope) = serde_json::from_slice::<ImageEnvelope<'_>>(&bytes) {
+            envelope.observe_usage(&mut event);
+        }
         event.upstream_error = Some(upstream_error);
         emit_usage(runtime, event);
         let origin = route_error_origin(route).for_category(failure.category);
@@ -90,93 +94,57 @@ pub(super) fn handle_collected_image(
         return ImageAttemptStep::Respond(error_response);
     }
 
-    if !account_route {
-        let mut event = observed.event(true, status, None);
-        populate_tokens(&mut event, &bytes);
-        finish_image_success(runtime, lease, event);
-        return ImageAttemptStep::Respond(if prepared.stream {
-            proxy_sse_response(status, &response_headers, Body::from(bytes))
-        } else {
-            proxy_response(status, &response_headers, Body::from(bytes))
-        });
-    }
-
-    let translated = match translate_account_response(
-        &bytes,
-        &prepared.response_format,
-        endpoint.stream_prefix(),
-    ) {
-        Ok(translated) => translated,
-        Err(failure)
-            if failure.retryable
-                && retryable_route_failure(route, failure.status, failure.category, false) =>
-        {
-            if matches!(
-                failure.category,
-                error_codes::STREAM_INCOMPLETE
-                    | error_codes::IMAGE_OUTPUT_MISSING
-                    | error_codes::STREAM_INVALID
-            ) {
-                lease.settle_rotation_unknown(now_ms());
+    let mut event = observed.event(false, status, None);
+    let error = match serde_json::from_slice::<ImageEnvelope<'_>>(&bytes) {
+        Ok(envelope) => {
+            envelope.observe_usage(&mut event);
+            if let Some(image_usage) = event.image_usage.as_mut() {
+                image_usage.generated_images = envelope.output_count() as u64;
             }
-            let failure_state = if failure.category == error_codes::IMAGE_GENERATION_NOT_ENABLED {
-                settle_image_capability_failure(
-                    runtime,
-                    lease,
-                    &prepared.resolved_model,
-                    TRANSIENT_COOLDOWN_MS,
-                )
+            if envelope.error.is_some() {
+                event.upstream_error =
+                    Some(crate::usage::UpstreamErrorDetails::from_response_body(
+                        Some(status.as_u16()),
+                        &bytes,
+                    ));
+                Some(error_codes::STREAM_ERROR)
+            } else if (envelope.output_count() as u64)
+                < prepared
+                    .fields
+                    .get("n")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(1)
+            {
+                Some(error_codes::IMAGE_OUTPUT_MISSING)
             } else {
-                settle_classified_failure(
-                    runtime,
-                    lease,
-                    &prepared.resolved_model,
-                    failure.status,
-                    failure.category,
-                    &response_headers,
-                    failure.cooldown_hint,
-                )
-            };
-            let mut event =
-                observed.event(false, failure.status, Some(failure.category.to_string()));
-            event.upstream_error = failure.upstream_error.map(|mut details| {
-                details.http_status = Some(status.as_u16());
-                *details
-            });
-            apply_failure_state(&mut event, failure_state);
-            emit_usage(runtime, event);
-            return ImageAttemptStep::Retry(AttemptFailure::classified_with_hint(
-                failure.status,
-                failure.category,
-                failure.cooldown_hint,
-            ));
+                None
+            }
         }
-        Err(failure) => {
-            lease.settle_rotation_terminal(now_ms());
-            let mut event =
-                observed.event(false, failure.status, Some(failure.category.to_string()));
-            event.upstream_error = failure.upstream_error.clone().map(|mut details| {
-                details.http_status = Some(status.as_u16());
-                *details
-            });
-            emit_usage(runtime, event);
-            return ImageAttemptStep::Respond(image_error_response(
-                *failure,
-                route_error_origin(route),
-                observed.request_id,
-            ));
-        }
+        Err(_) => Some(error_codes::STREAM_INVALID),
     };
-    let mut event = observed.event(true, status, None);
-    if let Some(usage) = translated.usage.as_ref() {
-        apply_usage(&mut event, usage);
+    if let Some(category) = error {
+        // An accepted but missing/invalid result is never safe to replay.
+        lease.settle_rotation_unknown(now_ms());
+        event.http_status = 502;
+        event.error_category = Some(category.to_owned());
+        if let Some(routing) = event.routing.as_mut() {
+            routing.attempt_outcome = Some(crate::AttemptOutcome::ExecutionUncertain);
+        }
+        emit_usage(runtime, event);
+        return ImageAttemptStep::Respond(api_error(
+            StatusCode::BAD_GATEWAY,
+            "upstream did not return a completed image",
+            category,
+        ));
     }
+    event.success = true;
+    event.latency_ms = observed.started.elapsed().as_millis() as u64;
     finish_image_success(runtime, lease, event);
-    ImageAttemptStep::Respond(if prepared.stream {
-        proxy_sse_response(status, &response_headers, Body::from(translated.stream))
-    } else {
-        proxy_json_response(status, &response_headers, Body::from(translated.json))
-    })
+    ImageAttemptStep::Respond(proxy_json_response(
+        status,
+        &response_headers,
+        Body::from(normalize_response(bytes, &prepared.response_format)),
+    ))
 }
 
 fn finish_image_success(runtime: &GatewayRuntime, lease: &CandidateLease, mut event: UsageEvent) {

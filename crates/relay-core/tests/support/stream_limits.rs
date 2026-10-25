@@ -352,6 +352,7 @@ async fn responses_route_to_chat_completions_sources() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     let events = events.lock().unwrap();
+    let events = usage_observations::physical_attempts(&events);
     assert_eq!(events.len(), 3);
     for (index, event) in events.iter().enumerate() {
         assert!(!event.success);
@@ -504,6 +505,7 @@ async fn non_success_stream_done_does_not_override_upstream_status() {
     let _ = response.bytes().await.unwrap();
 
     let events = events.lock().unwrap();
+    let events = usage_observations::physical_attempts(&events);
     assert_eq!(events.len(), 3);
     for (index, event) in events.iter().enumerate() {
         assert!(!event.success);

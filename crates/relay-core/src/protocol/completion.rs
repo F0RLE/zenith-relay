@@ -62,7 +62,9 @@ impl ResponseCompletion {
 
     pub(crate) fn from_body(body: &Value) -> Self {
         let body = body.get("response").unwrap_or(body);
-        let protocol = if body.get("choices").is_some() {
+        let protocol = if body.get("outputs").is_some() || body.get("interaction").is_some() {
+            WireApi::GeminiInteractions
+        } else if body.get("choices").is_some() {
             WireApi::ChatCompletions
         } else if body.get("candidates").is_some() || body.get("promptFeedback").is_some() {
             WireApi::Gemini
@@ -80,6 +82,7 @@ impl ResponseCompletion {
             return Self::Invalid;
         }
         match protocol {
+            WireApi::GeminiInteractions => crate::protocol::interactions::completion(body),
             WireApi::Responses => {
                 if !body.get("output").is_some_and(Value::is_array) {
                     return Self::Invalid;

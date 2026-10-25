@@ -85,11 +85,12 @@ pub(super) fn history_key(
                     name,
                     arguments,
                 } => {
-                    let mut arguments = serde_json::from_str::<Value>(arguments)
+                    let normalized = tool_arguments::normalize(arguments, true);
+                    let mut arguments = serde_json::from_str::<Value>(&normalized)
                         .map_err(|_| AdapterError::invalid_request())?;
                     // Clients may serialize tool input fields in schema order.
-                    // Object order is not call identity; arrays and exact values
-                    // still are. Canonicalize only this comparison copy, never
+                    // Object order and exact integral numeric spelling are not
+                    // call identity. Normalize only this comparison copy, never
                     // native replay blocks, signatures or the outgoing payload.
                     arguments.sort_all_objects();
                     json!({"call": id, "name": name, "arguments": arguments})
@@ -103,16 +104,7 @@ pub(super) fn history_key(
                     json!({"result": id, "content": content, "is_error": is_error})
                 }
             };
-            if let Some(previous) = blocks.last_mut().and_then(Value::as_object_mut) {
-                if let (Some(Value::String(previous_text)), Some(text)) = (
-                    previous.get_mut("text"),
-                    value.get("text").and_then(Value::as_str),
-                ) {
-                    previous_text.push_str(text);
-                    continue;
-                }
-            }
-            blocks.push(value);
+            append_history_block(&mut blocks, value);
         }
         if blocks.is_empty() {
             continue;
@@ -123,10 +115,10 @@ pub(super) fn history_key(
             .last_mut()
             .filter(|previous| previous["role"] == role)
         {
-            previous["blocks"]
-                .as_array_mut()
-                .expect("history blocks")
-                .extend(blocks);
+            let previous_blocks = previous["blocks"].as_array_mut().expect("history blocks");
+            for block in blocks {
+                append_history_block(previous_blocks, block);
+            }
         } else {
             messages.push(json!({"role": role, "blocks": blocks}));
         }
@@ -134,6 +126,22 @@ pub(super) fn history_key(
     let digest = crate::json_fingerprint::sha256(&(client, model, messages))
         .map_err(|_| AdapterError::invalid_request())?;
     Ok(format!("adapter-history:{}", hex::encode(digest)))
+}
+
+/// Message splitting does not distinguish adjacent same-role text. Apply the
+/// same comparison normalization within a message and across its boundaries;
+/// the retained portable history and native blocks remain untouched.
+fn append_history_block(blocks: &mut Vec<Value>, value: Value) {
+    if let Some(previous) = blocks.last_mut().and_then(Value::as_object_mut) {
+        if let (Some(Value::String(previous_text)), Some(text)) = (
+            previous.get_mut("text"),
+            value.get("text").and_then(Value::as_str),
+        ) {
+            previous_text.push_str(text);
+            return;
+        }
+    }
+    blocks.push(value);
 }
 
 pub(super) fn restore(
@@ -178,6 +186,6 @@ pub(super) fn replay_items(protocol: WireApi, native: &[Value]) -> Vec<Value> {
         WireApi::Responses => native.to_vec(),
         WireApi::Messages => vec![json!({"role":"assistant", "content":native})],
         WireApi::Gemini => vec![json!({"role":"model", "parts":native})],
-        WireApi::ChatCompletions => Vec::new(),
+        WireApi::ChatCompletions | WireApi::GeminiInteractions => Vec::new(),
     }
 }

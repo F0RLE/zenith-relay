@@ -16,7 +16,12 @@ pub(super) fn from_gemini(schema: &Value) -> AdapterResult<Value> {
 }
 
 pub(super) fn to_gemini(schema: &Value) -> AdapterResult<Value> {
-    convert(schema, Direction::ToGemini)
+    to_gemini_owned(schema.clone())
+}
+
+pub(super) fn to_gemini_owned(mut schema: Value) -> AdapterResult<Value> {
+    transform(&mut schema, Direction::ToGemini)?;
+    Ok(schema)
 }
 
 fn convert(schema: &Value, direction: Direction) -> AdapterResult<Value> {
@@ -37,17 +42,16 @@ fn transform(schema: &mut Value, direction: Direction) -> AdapterResult<()> {
         }
         Direction::FromGemini => {
             if let Some(kind) = fields.get_mut("type") {
-                let normalized = kind
-                    .as_str()
-                    .ok_or_else(AdapterError::invalid_request)?
-                    .to_ascii_lowercase();
-                if !matches!(
-                    normalized.as_str(),
-                    "object" | "array" | "string" | "number" | "integer" | "boolean" | "null"
-                ) {
-                    return Err(AdapterError::parameter_unsupported_for("schema.type"));
+                let text = kind.as_str().ok_or_else(AdapterError::invalid_request)?;
+                // Most large tool catalogs already use canonical types. Do not
+                // allocate and replace every string on this no-op path.
+                if !canonical_type(text) {
+                    let normalized = text.to_ascii_lowercase();
+                    if !canonical_type(&normalized) {
+                        return Err(AdapterError::parameter_unsupported_for("schema.type"));
+                    }
+                    *kind = normalized.into();
                 }
-                *kind = normalized.into();
             }
             if let Some(value) = fields.shift_remove("nullable") {
                 nullable = value.as_bool().ok_or_else(AdapterError::invalid_request)?;
@@ -130,4 +134,11 @@ fn transform(schema: &mut Value, direction: Direction) -> AdapterResult<()> {
         *schema = json!({"anyOf":[non_null,{"type":"null"}]});
     }
     Ok(())
+}
+
+fn canonical_type(kind: &str) -> bool {
+    matches!(
+        kind,
+        "object" | "array" | "string" | "number" | "integer" | "boolean" | "null"
+    )
 }

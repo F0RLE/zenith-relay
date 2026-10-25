@@ -38,7 +38,7 @@ pub struct RuntimeChatGptAccount {
     pub cooldowns: BTreeMap<String, u64>,
     pub consecutive_failures: u32,
     pub proxy: Option<ProxyConfig>,
-    pub proxy_timezone: Option<String>,
+    pub proxy_timezone: Option<crate::request_timezone::ProxyTimezone>,
 }
 
 impl fmt::Debug for RuntimeChatGptAccount {

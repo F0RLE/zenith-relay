@@ -40,7 +40,7 @@ impl SourceProtocolConfig {
         let mut effective_capabilities = Vec::new();
         for model in models {
             let model_key = crate::model_id_key(model);
-            for upstream in WireApi::ALL {
+            for upstream in WireApi::ALL_NATIVE {
                 let observations = indexed
                     .get(&(model_key.clone(), upstream))
                     .map(Vec::as_slice)
@@ -273,7 +273,7 @@ impl SourceProtocolConfig {
                 fallback_protocol,
             );
             for upstream in supported_protocols {
-                for client_protocol in WireApi::ALL {
+                for client_protocol in WireApi::ALL_NATIVE {
                     if let Some(adapter) = SourceAdapter::between(client_protocol, upstream) {
                         let model_ids = routes
                             .entry((client_protocol, adapter))

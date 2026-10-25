@@ -1060,6 +1060,55 @@ fn serial_tool_requests_do_not_return_multiple_client_tool_calls() {
 }
 
 #[test]
+fn parallel_single_tool_frames_preserve_complex_commands_and_custom_input() {
+    let mut request = request_with_tool();
+    request["parallel_tool_calls"] = json!(true);
+    request["tools"].as_array_mut().unwrap().push(json!({
+        "type":"custom","name":"raw_input","format":{"type":"text"}
+    }));
+    let commands = [
+        "Write-Output \"quoted\"\r\n$path = 'C:\\synthetic\\a'\n",
+        "$json = '{\"items\":[1,2]}'\nWrite-Output \"кириллица 😀\"\n",
+    ];
+    let mut calls = commands.iter().enumerate().map(|(index, command)| json!({
+        "type":"function_call","call_id":format!("call_frame_{index}"),"name":TRANSPORT_TOOL,
+        "arguments":json!({"references":["exec_command"],"code":format!(
+            "{}{}\n{command}", super::super::FUNCTION_STRING_PREFIX,
+            json!({"field":"cmd","args":{}})
+        )}).to_string()
+    })).collect::<Vec<_>>();
+    let raw =
+        "*** Begin Patch\n*** Add File: synthetic.txt\n+literal \\\"text\\\"\n*** End Patch\n";
+    calls.push(json!({
+        "type":"function_call","call_id":"call_raw","name":TRANSPORT_TOOL,
+        "arguments":json!({"references":["raw_input"],"code":raw}).to_string()
+    }));
+    let body = serde_json::to_vec(&json!({
+        "id":"resp_parallel_frames","status":"completed","output":calls
+    }))
+    .unwrap();
+    let translated: Value =
+        serde_json::from_slice(&translate_response(&body, &request).unwrap()).unwrap();
+    assert_eq!(translated["output"].as_array().unwrap().len(), 3);
+    for (index, command) in commands.iter().enumerate() {
+        let call = &translated["output"][index];
+        assert_eq!(call["call_id"], format!("call_frame_{index}"));
+        assert_eq!(call["name"], "exec_command");
+        let args: Value = serde_json::from_str(call["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(args["cmd"], *command);
+    }
+    assert_eq!(translated["output"][2]["call_id"], "call_raw");
+    assert_eq!(translated["output"][2]["type"], "custom_tool_call");
+    assert_eq!(translated["output"][2]["input"], raw);
+
+    request["parallel_tool_calls"] = json!(false);
+    assert_eq!(
+        translate_response(&body, &request).unwrap_err().parameter(),
+        Some("output.run_officejs.parallel_tool_calls")
+    );
+}
+
+#[test]
 fn parallel_responses_keep_repeated_tool_names_and_distinct_call_ids() {
     for parallel in [None, Some(true)] {
         let mut request = request_with_tool();
@@ -1162,7 +1211,7 @@ fn current_tools_override_history_and_keep_namespaces() {
         ]}
     });
     let prepared = prepare_request(&request).unwrap();
-    let instructions = prepared["input"][0]["content"][0]["text"].as_str().unwrap();
+    let instructions = current_catalog_text(&prepared);
     assert!(instructions.contains("functions.exec (custom): LATEST_DEFINITION"));
     assert!(!instructions.contains("OLD_DEFINITION"));
     assert!(instructions.contains("clock.sleep"));
@@ -1235,13 +1284,19 @@ fn history_replays_client_tools_without_the_current_catalog() {
             }
             let prepared = prepare_request(&request).unwrap();
             let items = prepared["input"].as_array().unwrap();
-            let replayed = &items[items.len() - 3];
+            let replayed = items
+                .iter()
+                .find(|item| item["type"] == "function_call")
+                .unwrap();
             assert_eq!(replayed["name"], TRANSPORT_TOOL, "{kind}");
             assert_eq!(replayed["call_id"], call["call_id"], "{kind}");
             let arguments: Value =
                 serde_json::from_str(replayed["arguments"].as_str().unwrap()).unwrap();
             assert_eq!(arguments["references"][0], payload, "{kind}");
-            let output = &items[items.len() - 2];
+            let output = items
+                .iter()
+                .find(|item| item["type"] == "function_call_output")
+                .unwrap();
             assert_eq!(output["type"], "function_call_output", "{kind}");
             assert_eq!(output["call_id"], call["call_id"], "{kind}");
             assert!(output.get("name").is_none(), "{kind}");

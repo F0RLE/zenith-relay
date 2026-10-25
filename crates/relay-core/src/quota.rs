@@ -16,7 +16,6 @@ pub use refresh::{
     QuotaAdapterContext, QuotaRefreshData, QuotaRefreshFailure, QuotaRefreshResult,
     SupplementalQuotaWindowInput,
 };
-pub(crate) use windows::normalize_subscription_plan;
 pub use windows::{
     QuotaErrorState, QuotaNormalizationError, QuotaSnapshot, QuotaTransition, QuotaWindow,
     QuotaWindowInput, QuotaWindowKind, ResetTime, Subscription, SubscriptionInput,

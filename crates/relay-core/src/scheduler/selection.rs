@@ -33,7 +33,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 pub use snapshot::{
     ActiveModelRuntime, AttemptOutcome, CandidateResourceHeadroom, CandidateRuntimeSnapshot,
-    ModelRetryRuntime, RoutingDiagnostics, SelectionReason,
+    ModelRetryRuntime, RequestTiming, RoutingDiagnostics, SelectionReason,
 };
 
 // Keep response ownership across busy personal pools without allowing an

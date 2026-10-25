@@ -1,11 +1,9 @@
-use super::super::images::select_image_main_model_with_catalog;
 use super::super::{
     model_rules, normalized_responses_url, normalized_set, require_runtime_value,
     AccountModelInventory, ChatGptAccountExecutor, PassiveQuotaState, RuntimeHttpClients,
     IMAGE_API_MODEL,
 };
 use super::{AccountRuntimeParts, SourceRuntimeParts};
-use crate::pricing::PricingCatalog;
 use crate::providers::chatgpt::{
     CodexIdentityEnvelope, OAuthClientKind, RuntimeChatGptAccount, RuntimeChatGptAuth,
     BASIS_POINTS_RESPONSES_URL,
@@ -20,8 +18,7 @@ use std::sync::{Arc, RwLock};
 pub(super) fn build_accounts(
     accounts: Vec<RuntimeChatGptAccount>,
     account_auth: Option<&RuntimeChatGptAuth>,
-    image_base_model: Option<&str>,
-    image_pricing_catalog: Option<&PricingCatalog>,
+    native_codex_images_only: bool,
     sources: &SourceRuntimeParts,
     registry: &mut ModelRegistry,
     scheduler: &mut PoolScheduler,
@@ -80,18 +77,23 @@ pub(super) fn build_accounts(
         let clients = RuntimeHttpClients::new(account.proxy.as_ref())?;
         let identity = CodexIdentityEnvelope::standard(&account.chatgpt_account_id)
             .map_err(|message| Error::Validation(message.to_string()))?;
-        let mut published_models = account.models.clone();
+        let images_only =
+            native_codex_images_only && account.oauth_client_kind == OAuthClientKind::Codex;
+        let mut published_models = if images_only {
+            Vec::new()
+        } else {
+            account.models.clone()
+        };
         let models = normalized_set(account.models.iter());
-        let image_main_model = (!excel && !siwc)
-            .then(|| {
-                select_image_main_model_with_catalog(
-                    &models,
-                    image_base_model,
-                    image_pricing_catalog,
-                )
-            })
-            .flatten();
-        let mut candidate_models = models.clone();
+        // Native Images is a separate operation, not a GPT text-tool bridge.
+        // Publishing the route is not proof of the account's image quota.
+        let image_main_model = (account.oauth_client_kind == OAuthClientKind::Codex)
+            .then(|| IMAGE_API_MODEL.to_owned());
+        let mut candidate_models = if images_only {
+            BTreeSet::new()
+        } else {
+            models.clone()
+        };
         if image_main_model.is_some() {
             candidate_models.insert(IMAGE_API_MODEL.to_string());
             published_models.push(IMAGE_API_MODEL.to_string());
@@ -103,10 +105,7 @@ pub(super) fn build_accounts(
             account_id: Some(account.id.clone()),
             protocol: WireApi::Responses,
             model_protocols: BTreeMap::new(),
-            enabled: account.enabled
-                && account
-                    .oauth_client_kind
-                    .supports_pool(account.subscription_plan_type.as_deref()),
+            enabled: account.enabled,
             draining: account.draining,
             priority: account.priority,
             weight: account.weight,
@@ -137,6 +136,7 @@ pub(super) fn build_accounts(
         executors.insert(
             account.id.clone(),
             ChatGptAccountExecutor {
+                images_only,
                 oauth_client_kind: account.oauth_client_kind,
                 subscription_plan_type: RwLock::new(account.subscription_plan_type),
                 id: account.id,

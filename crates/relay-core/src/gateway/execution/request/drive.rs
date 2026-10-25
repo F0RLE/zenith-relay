@@ -1,5 +1,6 @@
 use super::super::super::request::ServiceTierPolicy;
 use super::super::basis_points::structured_output::requires_buffering;
+use super::super::compatibility::{record_adapter_rejection, AdapterRejection};
 use super::completion::{complete_buffered_response, BufferedCompletionInput, CompletionStep};
 use super::dispatch::{
     dispatch_request_attempt, DispatchedRequestAttempt, RequestDispatch, RequestDispatchInput,
@@ -9,6 +10,7 @@ use super::prelude::*;
 use super::prepare::{
     prepare_request_attempt, PreparedRequestAttempt, RequestPrepare, RequestPrepareInput,
 };
+use super::recovery::{adapter_error_response, replay_native_tool_continuation};
 use super::stream::{open_response_stream, OpenStreamInput, OpenedStream};
 use std::sync::Arc;
 
@@ -110,7 +112,7 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
         last_failure_origin,
         tried,
         preparation_exclusions,
-        has_previous_response_id,
+        mut has_previous_response_id,
         has_unpaired_tool_output,
         requires_affinity_owner,
         repairs,
@@ -119,6 +121,54 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
         allow_previous_response_reset,
         confirmed_response_missing,
     } = drive_input;
+    if route.account_transport == AccountTransport::ExcelBasisPoints
+        && route.adapter.is_passthrough()
+        && client_wire_api == WireApi::Responses
+        && has_previous_response_id
+    {
+        // BPS has no provider-side response store. Admission has already
+        // checked this predecessor's exact owner; materialize its bounded
+        // local history before preparation, not after excluding that owner.
+        let started = Instant::now();
+        let replay = replay_native_tool_continuation(
+            runtime,
+            &key.id,
+            &mut request,
+            &route,
+            stream,
+            &mut repairs.native_replay,
+        )
+        .and_then(|restored| {
+            restored
+                .then_some(())
+                .ok_or_else(AdapterError::continuation_missing)
+        });
+        if let Err(error) = replay {
+            record_adapter_rejection(
+                runtime,
+                AdapterRejection {
+                    request_id: &request_id,
+                    attempt: *attempt,
+                    local_key_id: &key.id,
+                    requested_model: &requested_model,
+                    resolved_model,
+                    client_context_id: client_context_id.as_deref(),
+                    wire_api: client_wire_api,
+                    transport,
+                    service_tier: service_tier_policy.selected_tier(),
+                },
+                &error,
+                started.elapsed().as_millis() as u64,
+            );
+            return DrivenAttempt::Respond(adapter_error_response(error, Some(&request_id)));
+        }
+        clear_materialized_continuation(
+            response_affinity_key,
+            requires_affinity_owner,
+            has_unpaired_tool_output,
+        );
+        has_previous_response_id = false;
+    }
     tried.insert(selected.candidate_id.clone());
     let response_affinity_hit = selected.response_affinity_hit;
     let preparation_started = route.diagnostics_enabled.then(Instant::now);
@@ -209,6 +259,14 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
                 preparation_exclusions.insert(selected.candidate_id.clone());
             }
             return DrivenAttempt::Continue(carry(
+                request,
+                request_id,
+                requested_model,
+                prompt_affinity_key,
+            ));
+        }
+        RequestDispatch::Break => {
+            return DrivenAttempt::Break(carry(
                 request,
                 request_id,
                 requested_model,

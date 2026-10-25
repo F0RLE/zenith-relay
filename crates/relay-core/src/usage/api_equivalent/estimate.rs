@@ -291,7 +291,7 @@ pub fn resolve_candidate_price(query: CandidatePriceQuery<'_>) -> ResolvedPrice 
         provider_price,
         manual_price,
     } = query;
-    let Some(model) = model else {
+    let Some(model) = model.filter(|model| !crate::runtime::is_image_model_id(model)) else {
         return ResolvedPrice {
             quote: None,
             source: PriceSource::Unpriced,

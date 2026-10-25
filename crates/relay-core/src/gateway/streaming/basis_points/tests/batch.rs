@@ -16,6 +16,42 @@ fn events(translator: &mut Translator) -> Vec<Value> {
 }
 
 #[test]
+fn trailing_batch_data_rejects_json_and_fragmented_streams_without_a_valid_subset() {
+    for suffix in ["]", "{}"] {
+        let mut item = batch();
+        item["id"] = json!("fc_invalid_batch");
+        item["call_id"] = json!("call_invalid_batch");
+        item["arguments"] = json!({
+            "references":["inspect","inspect"],
+            "code":format!("relay-tool-batch-v1\n[{{\"path\":\"synthetic-private\"}},{{\"path\":\"b\"}}]{suffix}")
+        }).to_string().into();
+        let event = completed(json!([call("inspect"), item]));
+        let error = crate::gateway::execution::basis_points::translate_response(
+            &serde_json::to_vec(&event["response"]).unwrap(),
+            &request(),
+        )
+        .unwrap_err();
+        assert_eq!(error.parameter(), Some("output.run_officejs.batch.json"));
+        assert!(error.to_string().contains("json_reason=trailing_data"));
+
+        let wire = frame(event);
+        for size in [1, 7, wire.len()] {
+            let mut translator = Translator::new(request());
+            for chunk in wire.chunks(size) {
+                translator.push(chunk);
+            }
+            let body = output(&mut translator);
+            assert!(body.contains("json_reason=trailing_data"));
+            assert!(!body.contains("synthetic-private"));
+            assert!(!body.contains("response.function_call_arguments"));
+            assert!(!body.contains("response.output_item.added"));
+            assert!(!body.contains("response.completed"));
+            assert!(translator.terminal);
+        }
+    }
+}
+
+#[test]
 fn batch_buffers_tail_and_emits_final_indexes_once_with_opaque_reasoning() {
     for arguments_first in [false, true] {
         let mut translator = Translator::new(request());

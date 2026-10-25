@@ -126,8 +126,31 @@ impl<S> UsageStream<S> {
         }
     }
 
+    fn queue_interactions_failure(&mut self, category: &str) -> bool {
+        let Some(event) = self
+            .event
+            .as_ref()
+            .filter(|event| event.wire_api == WireApi::GeminiInteractions)
+        else {
+            return false;
+        };
+        if self.client_frame_open {
+            return false;
+        }
+        let origin = Self::stream_error_origin(event).for_category(category);
+        let payload = json!({"event_type":"error","error":{
+            "code":category,
+            "message":origin.prefix_message("Upstream interaction stream ended without a valid terminal event"),
+            "zenith_relay":{"origin":origin.as_str(),"category":category,"request_id":event.request_id}
+        }});
+        self.output_pending
+            .push_back(Bytes::from(format!("event: error\ndata: {payload}\n\n")));
+        true
+    }
+
     pub(super) fn fail_stream(&mut self, category: &str) -> bool {
-        let framed = self.queue_responses_failure(category);
+        let framed =
+            self.queue_responses_failure(category) || self.queue_interactions_failure(category);
         self.finish(Some(false), Some(category));
         self.terminated = true;
         framed
@@ -312,8 +335,26 @@ impl<S> UsageStream<S> {
             self.fail_stream(error_codes::STREAM_INVALID);
             return false;
         }
+        if self
+            .event
+            .as_ref()
+            .is_some_and(|event| event.wire_api == WireApi::GeminiInteractions)
+            && terminal.outcome == Some(TerminalOutcome::Failure)
+            && terminal.error_category == Some(error_codes::STREAM_INVALID)
+            && terminal.event_payload.as_ref().is_some_and(|payload| {
+                payload.get("event_type").and_then(Value::as_str) != Some("error")
+            })
+        {
+            self.fail_stream(error_codes::STREAM_INVALID);
+            return false;
+        }
         if !matches!(terminal.outcome, Some(TerminalOutcome::Failure)) {
             let completion = match self.event.as_ref().map(|event| event.wire_api) {
+                Some(WireApi::GeminiInteractions) => match terminal.event_payload.as_ref() {
+                    Some(payload) => Ok(self.interactions_completion.observe(payload)),
+                    None if terminal.has_data => Err(()),
+                    None => Ok(None),
+                },
                 Some(WireApi::ChatCompletions) => match terminal.event_payload.as_ref() {
                     Some(payload) => self.chat_completion.observe(payload).map(|()| None),
                     None if terminal.has_data => Ok(Some(self.chat_completion.outcome())),
@@ -520,6 +561,16 @@ impl<S> UsageStream<S> {
         if self
             .event
             .as_ref()
+            .is_some_and(|event| event.wire_api == WireApi::GeminiInteractions)
+        {
+            if crate::protocol::interactions::terminal_event(payload).is_some() {
+                *crate::poison::mutex(shared) = Some(payload.clone());
+            }
+            return;
+        }
+        if self
+            .event
+            .as_ref()
             .is_some_and(|event| event.wire_api == WireApi::Gemini)
         {
             for candidate in payload
@@ -543,11 +594,12 @@ impl<S> UsageStream<S> {
     }
 
     fn capture_native_response(&mut self, completed_response: Option<Value>) {
-        if self
-            .event
-            .as_ref()
-            .is_some_and(|event| event.wire_api == crate::WireApi::Gemini)
-        {
+        if self.event.as_ref().is_some_and(|event| {
+            matches!(
+                event.wire_api,
+                crate::WireApi::Gemini | crate::WireApi::GeminiInteractions
+            )
+        }) {
             return;
         }
         let Some(shared) = self.native_response.as_ref() else {

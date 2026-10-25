@@ -336,6 +336,7 @@ async fn source_capability_failure_does_not_permanently_hide_a_declared_model() 
             total_tokens: None,
             upstream_error: None,
             quota_snapshot: None,
+            image_usage: None,
         },
         now_ms,
     );
@@ -455,81 +456,82 @@ fn reference_speed_choices_survive_temporary_route_health_changes() {
     );
 }
 #[test]
-fn image_main_model_prefers_cheapest_tier_without_model_name_allowlist() {
-    let models = normalized_set(
-        [
-            "gpt-5.6-terra".to_string(),
-            "gpt-5.6-sol".to_string(),
-            "gpt-5.4-mini".to_string(),
-        ]
-        .iter()
-        .collect::<Vec<_>>(),
-    );
-    // Automatic selection uses the immutable LiteLLM snapshot when one is
-    // available.  Keep the fixture explicit so this test does not depend on
-    // the shared LiteLLM fixture catalog.
-    let catalog = crate::pricing::PricingCatalog::from_litellm_json(
-        r#"{
-            "gpt-5.6-terra": {
-                "litellm_provider": "openai",
-                "input_cost_per_token": "0.000002",
-                "output_cost_per_token": "0.000012"
-            },
-            "gpt-5.6-sol": {
-                "litellm_provider": "openai",
-                "input_cost_per_token": "0.000004",
-                "output_cost_per_token": "0.000020"
-            },
-            "gpt-5.4-mini": {
-                "litellm_provider": "openai",
-                "input_cost_per_token": "0.000001",
-                "output_cost_per_token": "0.000006"
-            }
-        }"#,
+fn standard_tier_shortcut_matches_route_projection_after_catalog_and_membership_changes() {
+    use crate::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
+
+    let model = "gpt-future-synthetic";
+    let catalog = ModelMetadataCatalogHandle::new(ModelMetadataCatalog::empty());
+    let runtime = GatewayRuntime::from_pool(
+        vec![RuntimeSource::unrestricted(source(
+            "source-1",
+            "synthetic",
+            &[model],
+        ))],
+        vec![RuntimeLocalKey::unrestricted(key(
+            "key-1",
+            "synthetic-pool",
+        ))],
+        GatewayRuntimeOptions {
+            model_metadata_catalog: Some(catalog.clone()),
+            ..GatewayRuntimeOptions::default()
+        },
+        Arc::new(|_| {}),
     )
     .unwrap();
+    for payload in [
+        r#"{"gpt-future-synthetic":{"reasoning":false}}"#,
+        r#"{"gpt-future-synthetic":{"service_tiers":["priority"]}}"#,
+        r#"{"gpt-future-synthetic":{"service_tiers":["priority","ultrafast"]}}"#,
+        r#"{"gpt-future-synthetic":{"reasoning":false}}"#,
+    ] {
+        catalog.replace(ModelMetadataCatalog::from_models_dev_json(payload).unwrap());
+        for lookup in [model, "MODEL-NOT-CONFIGURED"] {
+            let scope = CandidateScope::default();
+            let ids = runtime
+                .lock_scheduler()
+                .candidates()
+                .filter(|candidate| candidate.is_configured(lookup, &WireApi::ALL_NATIVE, &scope))
+                .map(|candidate| candidate.id.clone())
+                .collect::<Vec<_>>();
+            let routes = ids
+                .iter()
+                .filter_map(|id| {
+                    runtime.executor_route(id, lookup, &scope, &WireApi::ALL_NATIVE, false)
+                })
+                .collect::<Vec<_>>();
+            let expected = crate::catalog::model_service_tiers(
+                lookup,
+                &runtime.model_capabilities(lookup).service_tiers,
+            )
+            .into_iter()
+            .filter(|tier| {
+                *tier == DefaultServiceTier::Standard
+                    || routes
+                        .iter()
+                        .any(|route| GatewayRuntime::route_supports_service_tier(route, *tier))
+            })
+            .collect::<Vec<_>>();
+            assert_eq!(runtime.model_supported_service_tiers(lookup), expected);
+        }
+    }
+    runtime.remove_candidate("source-1");
     assert_eq!(
-        super::images::cheapest_image_main_model_with_catalog(&models, Some(&catalog)).as_deref(),
-        Some("gpt-5.4-mini")
+        runtime.model_supported_service_tiers(model),
+        [DefaultServiceTier::Standard]
     );
-    // An empty/offline snapshot must still allow a deterministic runtime
-    // build; its choice is a stable fallback, not an implicit price claim.
-    let empty = crate::pricing::PricingCatalog::empty();
-    assert_eq!(
-        super::images::cheapest_image_main_model_with_catalog(&models, Some(&empty)).as_deref(),
-        Some("gpt-5.6-sol")
-    );
-    let terra = normalized_set(["gpt-5.6-terra".to_string()].iter());
-    assert_eq!(
-        cheapest_image_main_model(&terra).as_deref(),
-        Some("gpt-5.6-terra")
-    );
-    let image = normalized_set([IMAGE_API_MODEL.to_string()].iter());
-    assert!(cheapest_image_main_model(&image).is_none());
 }
+
 #[test]
-fn explicit_image_base_model_is_used_only_when_available() {
-    let models = normalized_set(
-        ["gpt-5.4-mini".to_string(), "gpt-5.6-sol".to_string()]
-            .iter()
-            .collect::<Vec<_>>(),
-    );
-    assert_eq!(
-        select_image_main_model(&models, Some("gpt-5.6-sol")).as_deref(),
-        Some("gpt-5.6-sol")
-    );
-    assert_eq!(select_image_main_model(&models, Some("future-model")), None);
-    let future = normalized_set(["gpt-future".to_string()].iter());
-    assert!(cheapest_image_main_model(&future).is_none());
-    assert_eq!(
-        select_image_main_model(&future, Some("gpt-future")).as_deref(),
-        Some("gpt-future")
-    );
-    let legacy = normalized_set(["gpt-4.1-mini".to_string()].iter());
-    assert!(cheapest_image_main_model(&legacy).is_none());
+fn legacy_image_base_model_configuration_remains_readable() {
     assert_eq!(
         normalize_image_base_model(Some(" auto ".into())).unwrap(),
         None
+    );
+    assert_eq!(
+        normalize_image_base_model(Some("gpt-legacy".into()))
+            .unwrap()
+            .as_deref(),
+        Some("gpt-legacy")
     );
 }
 #[test]

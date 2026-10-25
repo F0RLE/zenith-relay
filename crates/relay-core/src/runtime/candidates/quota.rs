@@ -152,11 +152,9 @@ impl GatewayRuntime {
         observed_at_ms: u64,
         preserve_live_block: bool,
     ) -> bool {
-        let Some(account) = self.chatgpt_accounts.get(candidate_id) else {
+        if !self.chatgpt_accounts.contains_key(candidate_id) {
             return false;
-        };
-        let plan = crate::poison::read(&account.subscription_plan_type);
-        let enabled = enabled && account.oauth_client_kind.supports_pool(plan.as_deref());
+        }
         let mut quotas = crate::poison::mutex(&self.passive_quotas);
         let effective = quotas
             .get_mut(candidate_id)
@@ -186,7 +184,6 @@ impl GatewayRuntime {
         );
         drop(scheduler);
         drop(quotas);
-        drop(plan);
         if updated {
             self.candidate_availability.notify_waiters();
         }

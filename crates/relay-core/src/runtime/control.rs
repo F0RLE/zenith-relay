@@ -17,6 +17,7 @@ pub(crate) struct RuntimeControl {
     route_recovery_enabled: AtomicBool,
     route_recovery_window_ms: AtomicU64,
     request_origins: Mutex<BTreeMap<String, &'static str>>,
+    pub(super) request_usage: Mutex<super::request_usage::RequestUsageRegistry>,
 }
 
 impl Default for RuntimeControl {
@@ -30,6 +31,7 @@ impl Default for RuntimeControl {
             route_recovery_enabled: AtomicBool::new(false),
             route_recovery_window_ms: AtomicU64::new(DEFAULT_ROUTE_RECOVERY_WINDOW_MS),
             request_origins: Mutex::new(BTreeMap::new()),
+            request_usage: Mutex::default(),
         }
     }
 }
@@ -168,6 +170,7 @@ impl RuntimeControl {
             total_tokens: Some(0),
             upstream_error: None,
             quota_snapshot: None,
+            image_usage: None,
         };
         usage(event);
     }

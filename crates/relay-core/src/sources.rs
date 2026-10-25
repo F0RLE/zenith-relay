@@ -92,13 +92,24 @@ pub fn source_runtime_policy_compatible<T: SourceTransportRecord>(
     previous_sources: &[T],
     updated_sources: &[T],
 ) -> bool {
-    previous_sources.len() == updated_sources.len()
-        && previous_sources.iter().all(|source| {
-            let transport_identity = source.transport_identity();
-            updated_sources
-                .iter()
-                .any(|candidate| candidate.transport_identity() == transport_identity)
-        })
+    if previous_sources.len() != updated_sources.len() {
+        return false;
+    }
+    // A keyed snapshot avoids quadratic rescanning on large inventories and
+    // refuses ambiguous duplicate identities instead of matching one twice.
+    let mut updated = BTreeMap::new();
+    for source in updated_sources {
+        let identity = source.transport_identity();
+        if updated.insert(identity.id, identity).is_some() {
+            return false;
+        }
+    }
+    previous_sources.iter().all(|source| {
+        let identity = source.transport_identity();
+        updated
+            .remove(identity.id)
+            .is_some_and(|candidate| candidate == identity)
+    })
 }
 
 /// Writes operator priorities onto existing sources.

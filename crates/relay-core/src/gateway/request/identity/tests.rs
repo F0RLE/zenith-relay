@@ -171,3 +171,30 @@ fn prompts_cache_keys_credentials_and_parent_hints_do_not_create_root_sessions()
         client_request_identity(&headers, &Value::Null).affinity_id
     );
 }
+
+#[test]
+fn claude_child_sessions_share_only_parent_affinity_and_keep_their_own_context() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-claude-code-session-id",
+        HeaderValue::from_static("parent"),
+    );
+    let parent = client_request_identity(&headers, &Value::Null);
+    headers.insert(
+        "x-claude-code-session-id",
+        HeaderValue::from_static("child"),
+    );
+    let request =
+        json!({"metadata":{"user_id":r#"{"session_id":"child","parent_session_id":"parent"}"#}});
+    let child = client_request_identity(&headers, &request);
+    assert_eq!(child.affinity_id, parent.affinity_id);
+    assert_ne!(child.context_id, parent.context_id);
+    headers.insert(
+        "x-codex-session-id",
+        HeaderValue::from_static("explicit-root"),
+    );
+    assert_ne!(
+        client_request_identity(&headers, &request).affinity_id,
+        child.affinity_id
+    );
+}

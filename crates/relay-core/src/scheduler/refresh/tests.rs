@@ -35,9 +35,8 @@ fn refresh_failure_waits_at_least_one_minute_and_keeps_a_longer_delay() {
     );
 }
 
-#[test]
-fn quota_reset_delay_uses_the_earliest_future_window_and_stable_jitter() {
-    let window = |kind, reset_at_ms| QuotaWindow {
+fn reset_window(kind: QuotaWindowKind, reset_at_ms: u64, observed_at_ms: u64) -> QuotaWindow {
+    QuotaWindow {
         kind,
         provider_cycle_id: None,
         window_start_ms: None,
@@ -45,21 +44,111 @@ fn quota_reset_delay_uses_the_earliest_future_window_and_stable_jitter() {
         explicitly_full: Some(false),
         reset_at_ms: Some(reset_at_ms),
         window_minutes: None,
-        observed_at_ms: 90_000,
+        observed_at_ms,
         full_transition_fingerprint: None,
         exhaustion_transition_fingerprint: None,
-    };
+    }
+}
+
+#[test]
+fn quota_reset_delay_keeps_the_earliest_unverified_window_and_stable_jitter() {
     let mut quota = QuotaSnapshot {
-        primary: Some(window(QuotaWindowKind::Primary, 100_000)),
-        secondary: Some(window(QuotaWindowKind::Secondary, 120_000)),
+        primary: Some(reset_window(QuotaWindowKind::Primary, 100_000, 90_000)),
+        secondary: Some(reset_window(QuotaWindowKind::Secondary, 120_000, 90_000)),
         ..QuotaSnapshot::default()
     };
     let delay = quota_reset_delay("synthetic", &quota, 90_000).unwrap();
     assert!((15_000..25_000).contains(&delay));
     assert_eq!(quota_reset_delay("synthetic", &quota, 90_000), Some(delay));
-    assert!(quota_reset_delay("synthetic", &quota, 120_000).is_none());
+    assert_eq!(
+        quota_reset_delay("synthetic", &quota, 100_000),
+        Some(delay - 10_000)
+    );
+    assert_eq!(quota_reset_delay("synthetic", &quota, 120_000), Some(0));
     quota.primary = None;
     assert!((35_000..45_000).contains(&quota_reset_delay("synthetic", &quota, 90_000).unwrap()));
+}
+
+#[test]
+fn quota_reset_verification_is_consumed_by_a_post_reset_observation() {
+    let mut quota = QuotaSnapshot {
+        primary: Some(reset_window(QuotaWindowKind::Primary, 100_000, 90_000)),
+        ..QuotaSnapshot::default()
+    };
+    let verification_at = 90_000 + quota_reset_delay("synthetic", &quota, 90_000).unwrap();
+    assert_eq!(
+        quota_reset_delay("synthetic", &quota, verification_at),
+        Some(0)
+    );
+    // A read just after reset can precede provider propagation: retain the
+    // scheduled jitter, rather than lose the reset at the zero-second boundary.
+    quota.primary.as_mut().unwrap().observed_at_ms = 100_000;
+    assert_eq!(
+        quota_reset_delay("synthetic", &quota, 100_000),
+        Some(verification_at - 100_000)
+    );
+    quota.primary.as_mut().unwrap().observed_at_ms = verification_at;
+    assert_eq!(
+        quota_reset_delay("synthetic", &quota, verification_at),
+        None
+    );
+    assert_eq!(
+        quota_verification_delay("synthetic", &quota, verification_at + 60_000),
+        None
+    );
+    // Neither a stale deadline nor a local clock tick fabricates new capacity.
+    assert_eq!(
+        quota.primary.as_ref().unwrap().available_basis_points,
+        Some(0)
+    );
+    quota.secondary = Some(reset_window(QuotaWindowKind::Secondary, 200_000, 90_000));
+    assert_eq!(quota_reset_delay("synthetic", &quota, 220_000), Some(0));
+    quota.secondary = None;
+    quota.primary.as_mut().unwrap().reset_at_ms = None;
+    assert_eq!(quota_verification_delay("synthetic", &quota, 200_000), None);
+}
+
+#[test]
+fn overdue_reset_coalesces_and_respects_failure_and_provider_backoff() {
+    let quota = QuotaSnapshot {
+        primary: Some(reset_window(QuotaWindowKind::Primary, 100_000, 90_000)),
+        ..QuotaSnapshot::default()
+    };
+    let now_ms = 200_000;
+    let delay = quota_verification_delay("synthetic", &quota, now_ms).unwrap();
+    assert_eq!(delay, 0);
+    let mut coordinator = coordinator();
+    let member = identity(1);
+    coordinator.register(member.clone(), RefreshKind::Quota, now_ms, true, false);
+    // Duplicate observations coalesce; passive headers cannot defer the reset.
+    for _ in 0..2 {
+        assert!(coordinator.schedule_event(&member, RefreshKind::Quota, now_ms + delay));
+    }
+    assert!(coordinator.observe_passive_quota(&member, now_ms, 0, now_ms));
+    coordinator.defer_until(&member, RefreshKind::Quota, now_ms + 60_000);
+    assert!(coordinator.claim_due(now_ms + 59_999).is_none());
+    let job = coordinator.claim_due(now_ms + 60_000).unwrap();
+    assert!(!job.manual);
+    assert!(coordinator.claim_due(now_ms + 60_000).is_none());
+    assert_eq!(
+        coordinator.complete(
+            &job,
+            RefreshOutcome::retry_after(now_ms + 60_000, None),
+            now_ms + 60_000,
+        ),
+        RefreshCompletion::Applied {
+            next_due_ms: Some(now_ms + 120_000)
+        }
+    );
+    assert!(coordinator.claim_due(now_ms + 119_999).is_none());
+    let retry = coordinator.claim_due(now_ms + 120_000).unwrap();
+    assert_eq!(
+        coordinator.complete(&retry, RefreshOutcome::Success, now_ms + 120_000),
+        RefreshCompletion::Applied {
+            next_due_ms: Some(now_ms + 120_000 + 5 * 60_000)
+        }
+    );
+    assert!(coordinator.claim_due(now_ms + 120_000).is_none());
 }
 
 #[test]

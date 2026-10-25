@@ -7,22 +7,16 @@ impl GatewayRuntime {
         (self.diagnostics_enabled)()
     }
 
-    pub fn set_request_timezone(&self, policy: crate::RequestTimezonePolicy) -> Result<()> {
-        policy
-            .validate()
-            .map_err(|message| Error::Validation(message.into()))?;
-        *crate::poison::write(&self.request_timezone) = policy;
-        Ok(())
-    }
-
     pub(crate) fn apply_request_timezone(&self, candidate_id: &str, body: &mut Value) {
         let Some(account) = self.chatgpt_accounts.get(candidate_id) else {
             return;
         };
-        let policy = crate::poison::read(&self.request_timezone);
         let proxy_timezone = crate::poison::read(&account.proxy_timezone);
-        if let Some(timezone) = policy.timezone_for(candidate_id, proxy_timezone.as_deref()) {
-            crate::request_timezone::rewrite_request_timezone(body, &timezone);
+        if let Some(timezone) = proxy_timezone
+            .as_ref()
+            .and_then(|evidence| evidence.current(crate::unix_time_ms()))
+        {
+            crate::request_timezone::rewrite_request_timezone(body, timezone);
         }
     }
 
@@ -32,10 +26,14 @@ impl GatewayRuntime {
     pub fn set_account_proxy_timezone(
         &self,
         account_id: &str,
-        timezone: Option<String>,
+        timezone: Option<crate::request_timezone::ProxyTimezone>,
     ) -> Result<()> {
-        let timezone = crate::normalize_timezone(timezone)
-            .map_err(|message| Error::Validation(message.into()))?;
+        if timezone
+            .as_ref()
+            .is_some_and(|evidence| !crate::is_valid_timezone(&evidence.timezone))
+        {
+            return Err(Error::Validation("invalid proxy timezone".into()));
+        }
         if let Some(account) = self.chatgpt_accounts.get(account_id) {
             *crate::poison::write(&account.proxy_timezone) = timezone;
         }

@@ -50,10 +50,6 @@ impl ModelDiscoveryFailureCode {
             Self::InvalidAccessToken | Self::InvalidAccountId | Self::Unauthorized
         )
     }
-
-    pub fn blocks_account(self) -> bool {
-        self == Self::Forbidden
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

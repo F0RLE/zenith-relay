@@ -7,6 +7,7 @@ use crate::{DefaultServiceTier, GatewayRuntime, ToolUseDiagnostics, WireApi};
 use axum::http::HeaderMap;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
+use std::time::Instant;
 
 mod continuation;
 mod parse;
@@ -76,10 +77,8 @@ impl ClientRequest {
         runtime: &GatewayRuntime,
         key: &crate::runtime::AuthenticatedKey,
     ) -> Result<(HashSet<String>, BTreeMap<String, ExecutorRoute>), GatewayFailure> {
-        use crate::gateway::execution::compatibility::{
-            incompatible_routes, record_adapter_rejection, AdapterRejection, RouteCompatibility,
-        };
-        let started = std::time::Instant::now();
+        use crate::gateway::execution::compatibility::{incompatible_routes, RouteCompatibility};
+        let started = Instant::now();
         let mut request = self.request_body.clone();
         if let Some(object) = request.as_object_mut() {
             object.remove("type");
@@ -100,26 +99,39 @@ impl ClientRequest {
                 !(self.has_previous_response_id()
                     && error.code() == error_codes::ADAPTER_CONTINUATION_MISMATCH)
             }) {
-                record_adapter_rejection(
-                    runtime,
-                    AdapterRejection {
-                        request_id: &self.request_id,
-                        attempt: 0,
-                        local_key_id: &self.local_key_id,
-                        requested_model: &self.requested_model,
-                        resolved_model: &self.resolved_model,
-                        client_context_id: self.client_context_id.as_deref(),
-                        wire_api: WireApi::Responses,
-                        transport: crate::UsageTransport::Websocket,
-                        service_tier: self.service_tier(),
-                    },
-                    &error,
-                    started.elapsed().as_millis() as u64,
-                );
-                return Err(GatewayFailure::adapter(error));
+                return Err(self.reject_adapter_request(runtime, error, started));
             }
         }
         Ok((excluded, admitted))
+    }
+
+    fn reject_adapter_request(
+        &self,
+        runtime: &GatewayRuntime,
+        error: crate::AdapterError,
+        started: Instant,
+    ) -> GatewayFailure {
+        use crate::gateway::execution::compatibility::{
+            record_adapter_rejection, AdapterRejection,
+        };
+
+        record_adapter_rejection(
+            runtime,
+            AdapterRejection {
+                request_id: &self.request_id,
+                attempt: 0,
+                local_key_id: &self.local_key_id,
+                requested_model: &self.requested_model,
+                resolved_model: &self.resolved_model,
+                client_context_id: self.client_context_id.as_deref(),
+                wire_api: WireApi::Responses,
+                transport: crate::UsageTransport::Websocket,
+                service_tier: self.service_tier(),
+            },
+            &error,
+            started.elapsed().as_millis() as u64,
+        );
+        GatewayFailure::adapter(error)
     }
 
     #[cfg(test)]
@@ -136,6 +148,7 @@ impl ClientRequest {
         client_headers: &HeaderMap,
         prepared: &crate::runtime::PreparedAuthorization,
     ) -> Result<PreparedPayload, GatewayFailure> {
+        let started = Instant::now();
         runtime
             .validate_continuation_route(
                 route,
@@ -143,7 +156,9 @@ impl ClientRequest {
                 &self.request_body,
                 crate::unix_time_ms(),
             )
-            .map_err(GatewayFailure::adapter)?;
+            // No in-flight usage event exists until response.create is sent.
+            // Record this final guard failure here, like admission rejection.
+            .map_err(|error| self.reject_adapter_request(runtime, error, started))?;
         if !GatewayRuntime::route_supports_service_tier(route, self.service_tier()) {
             return Err(GatewayFailure::unsupported_service_tier());
         }
@@ -167,6 +182,7 @@ impl ClientRequest {
             .observe_cache_context(runtime, route, &mut filtered_request);
         let payload = serde_json::to_string(&filtered_request)
             .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))?;
+        route.observe_websocket_payload(&payload);
         tool_use.capture_upstream_context(&filtered_request);
         Ok(PreparedPayload {
             payload,

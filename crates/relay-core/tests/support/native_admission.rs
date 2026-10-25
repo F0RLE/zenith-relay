@@ -18,6 +18,9 @@ async fn reasoning_checks_exact_capabilities_and_preserves_supported_native_exte
                 let observed = Arc::new(Mutex::new(Vec::new()));
                 let captured = observed.clone();
                 let response_body = match upstream_wire_api {
+                    WireApi::GeminiInteractions => {
+                        json!({"id":"interaction_synthetic","status":"completed","outputs":[{"type":"text","text":"synthetic response"}]})
+                    }
                     WireApi::Responses => json!({
                         "id":"resp_synthetic",
                         "status":"completed",
@@ -122,6 +125,11 @@ async fn reasoning_checks_exact_capabilities_and_preserves_supported_native_exte
 
 fn native_request(protocol: WireApi) -> (&'static str, Value, &'static str) {
     match protocol {
+        WireApi::GeminiInteractions => (
+            "/v1beta/interactions",
+            json!({"model":"synthetic-model","input":"synthetic input","generation_config":{"thinking_level":"high"}}),
+            "generation_config",
+        ),
         WireApi::Responses => (
             "/v1/responses",
             json!({"model":"synthetic-model", "input":"synthetic input",

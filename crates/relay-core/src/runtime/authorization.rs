@@ -14,6 +14,7 @@ pub(crate) struct AuthorizationDispatch<'a> {
 }
 
 mod dispatch;
+mod payload;
 mod prepare;
 
 impl AuthorizedRequestError {
@@ -56,7 +57,6 @@ mod tests {
             identity: None,
             token_generation: None,
             token_revision: None,
-            account_plan_supported: true,
             agent_task_id: agent.task_id().map(str::to_string),
             agent_credential_fingerprint: Some(agent_credential_fingerprint(agent)),
             agent_identity_revision: Some(0),

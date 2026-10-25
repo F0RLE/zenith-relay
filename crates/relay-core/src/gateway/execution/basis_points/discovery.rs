@@ -262,7 +262,7 @@ impl DiscoverySession {
                         .map(crate::tool_policy::serialized_bytes)
                         .unwrap_or(0);
                 }
-                let mut contract = Value::Object(tool.spec.clone());
+                let mut contract = Value::Object((*tool.spec).clone());
                 contract["name"] = json!(name);
                 contracts.push(contract);
             }
@@ -405,12 +405,7 @@ fn lookup<'a>(
         .iter()
         .filter_map(|tool| {
             let name = tool.key().to_lowercase();
-            let text = format!(
-                "{} {}",
-                name,
-                serde_json::to_string(&tool.spec).unwrap_or_default()
-            )
-            .to_lowercase();
+            let text = format!("{} {}", name, tool.serialized_spec.as_ref()).to_lowercase();
             let score = terms
                 .iter()
                 .map(|term| usize::from(text.contains(term)) + 3 * usize::from(name.contains(term)))

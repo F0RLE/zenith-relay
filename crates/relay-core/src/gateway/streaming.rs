@@ -165,10 +165,11 @@ impl StreamExecution {
         let completion_prompt_affinity = prompt_affinity_key.clone();
         let completion_headers = headers.clone();
         let completion_uses_response_affinity = client_wire_api == WireApi::Responses;
-        let completion_native_response =
-            (matches!(client_wire_api, WireApi::Responses | WireApi::Gemini)
-                && adapter_is_passthrough)
-                .then(|| Arc::new(Mutex::new(None::<Value>)));
+        let completion_native_response = (matches!(
+            client_wire_api,
+            WireApi::Responses | WireApi::Gemini | WireApi::GeminiInteractions
+        ) && adapter_is_passthrough)
+            .then(|| Arc::new(Mutex::new(None::<Value>)));
         let completion_native_response_for_callback = completion_native_response.clone();
         let tool_call_capture = Arc::new(Mutex::new(
             crate::gateway::request::ToolCallCapture::default(),
@@ -181,6 +182,11 @@ impl StreamExecution {
                 cooldown_hint: Default::default(),
                 budget: discovery.budget.clone(),
                 tool_use: initial_event.tool_use.clone(),
+                request_payload: initial_event
+                    .routing
+                    .as_ref()
+                    .and_then(|routing| routing.transport.as_ref())
+                    .and_then(|transport| transport.request_payload.clone()),
                 headers: None,
             }))
         });

@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 mod affinity;
 mod basis_points;
+mod catalog_hints;
 mod claude_desktop;
 mod continuation;
 mod dispatch;

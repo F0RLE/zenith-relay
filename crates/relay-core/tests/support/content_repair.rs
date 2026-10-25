@@ -370,15 +370,15 @@ async fn compact_account_repairs_legacy_call_ids_after_strict_rejection() {
 }
 
 #[tokio::test]
-async fn image_generation_uses_cheapest_account_model_and_translates_response() {
-    let (upstream, state) = spawn_upstream(vec![Reply::Stream(vec![
-        StreamChunk::Data(
-            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"image_generation_call\",\"result\":\"aW1hZ2U=\",\"output_format\":\"png\"}}\n\n",
-        ),
-        StreamChunk::Data(
-            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"created_at\":7,\"output\":[],\"tool_usage\":{\"image_gen\":{\"image_tokens\":4}}}}\n\n",
-        ),
-    ])])
+async fn image_generation_uses_native_account_endpoint_without_a_text_model() {
+    let (upstream, state) = spawn_upstream(vec![Reply::Json(
+        StatusCode::OK,
+        json!({
+            "created":7, "data":[{"b64_json":"aW1hZ2U="}],
+            "usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7,
+                "input_tokens_details":{"text_tokens":3,"image_tokens":0}}
+        }),
+    )])
     .await;
     let authority = ready_authority("relay-image-account", "image-access").await;
     let mut image_account = account(
@@ -413,14 +413,15 @@ async fn image_generation_uses_cheapest_account_model_and_translates_response() 
 
     let requests = state.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].path, "/v1/responses");
-    assert_eq!(requests[0].body["model"], "gpt-5.6-terra");
-    assert_eq!(requests[0].body["tools"][0]["type"], "image_generation");
+    assert_eq!(requests[0].path, "/v1/images/generations");
+    assert_eq!(requests[0].body["model"], "gpt-image-2.5-sunburst");
+    assert!(requests[0].body.get("tools").is_none());
+    assert!(requests[0].body.get("reasoning").is_none());
+    assert!(requests[0].body.get("size").is_none());
     assert_eq!(
-        requests[0].body["tools"][0]["model"],
-        "gpt-image-2.5-sunburst"
+        requests[0].authorization.as_deref(),
+        Some("Bearer image-access")
     );
-    assert!(requests[0].body["tools"][0].get("size").is_none());
     drop(requests);
 
     let events = events.lock().unwrap();
@@ -430,7 +431,16 @@ async fn image_generation_uses_cheapest_account_model_and_translates_response() 
         events[0].requested_model.as_deref(),
         Some("gpt-image-2.5-sunburst")
     );
-    assert_eq!(events[0].resolved_model.as_deref(), Some("gpt-5.6-terra"));
+    assert_eq!(
+        events[0].resolved_model.as_deref(),
+        Some("gpt-image-2.5-sunburst")
+    );
+    assert_eq!(events[0].total_tokens, Some(7));
+    assert_eq!(
+        events[0].image_usage.as_ref().unwrap().input_text_tokens,
+        Some(3)
+    );
+    assert_eq!(events[0].image_usage.as_ref().unwrap().generated_images, 1);
 }
 
 #[tokio::test]
@@ -482,4 +492,33 @@ async fn bounded_image_retry_does_not_report_an_untried_account_as_cooled() {
     );
     assert_eq!(limited_state.requests.lock().unwrap().len(), 1);
     assert!(ready_state.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn native_image_stream_and_incomplete_json_keep_usage_without_replay() {
+    for (stream, reply) in [
+        (true, Reply::Stream(vec![
+            StreamChunk::Data("data: {\"type\":\"image_generation.partial_image\",\"b64_json\":\"cHJldmlldw==\"}\n\n"),
+            StreamChunk::Data("data: {\"type\":\"image_generation.completed\",\"b64_json\":\"aW1hZ2U=\",\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}\n\n"),
+        ])),
+        (false, Reply::Json(StatusCode::OK, json!({"data":[],"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}))),
+    ] {
+        let (upstream, state) = spawn_upstream(vec![reply]).await;
+        let authority = ready_authority("image-account", "synthetic-access").await;
+        let (gateway, events, _, _) = spawn_mixed_gateway(Vec::new(),
+            vec![account("image-account", "synthetic-provider", &upstream, 10)],
+            vec![mixed_key(None, None)], authority, refresh_adapter(), Arc::new(PersistenceAdapter::default())).await;
+        let response = reqwest::Client::new().post(format!("{}/v1/images/generations", gateway.base_url))
+            .bearer_auth(LOCAL_KEY).json(&json!({"model":"gpt-image-2.5-sunburst","prompt":"synthetic","stream":stream}))
+            .send().await.unwrap();
+        assert_eq!(response.status(), if stream { StatusCode::OK } else { StatusCode::BAD_GATEWAY });
+        let body = response.text().await.unwrap();
+        if stream { assert!(body.contains("image_generation.partial_image")); assert!(body.contains("image_generation.completed")); }
+        assert_eq!(state.requests.lock().unwrap().len(), 1);
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].success, stream);
+        assert_eq!(events[0].total_tokens, Some(5));
+        if !stream { assert_eq!(events[0].error_category.as_deref(), Some("image_output_missing")); }
+    }
 }

@@ -104,7 +104,7 @@ impl ModelProtocolIndex {
                         == crate::providers::chatgpt::OAuthClientKind::ExcelBps,
                     None,
                 );
-                for client in WireApi::ALL {
+                for client in WireApi::ALL_NATIVE {
                     index.insert(crate::model_id_key(model), client, WireApi::Responses);
                 }
             }

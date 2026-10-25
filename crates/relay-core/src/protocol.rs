@@ -1,6 +1,7 @@
 mod account_trash;
 mod adapter;
 pub(crate) mod completion;
+pub(crate) mod interactions;
 mod management;
 pub(crate) mod sse;
 
@@ -41,14 +42,14 @@ pub use management::{
     ConfigurationPresetApplyInput, ConfigurationPresetApplyResult, ConfigurationPresetChange,
     ConfigurationPresetDocument, ConfigurationPresetPreview, ConfigurationPresetPreviewInput,
     ConfigurationPresetSettings, CredentialDiagnostics, CredentialRecovery, CredentialStatus,
-    DesktopCapabilities, GatewayDiagnostic, GatewaySummary, ModelCatalogIdentity, ModelPolicyError,
-    ModelProtocolRoute, ModelSummary, OperationalStatus, PoolMembershipInput,
-    PoolModelConfigurationInput, PresetQuotaPolicy, PresetRoutingPolicy, ProxyMode,
-    QuotaRefreshStatus, QuotaWindowUsage, RefreshStatus, RevealedAccountIdentity,
+    DesktopCapabilities, GatewayDiagnostic, GatewaySummary, ModelCatalogIdentity,
+    ModelDisplayProjection, ModelPolicyError, ModelProtocolRoute, ModelSummary, OperationalStatus,
+    PoolMembershipInput, PoolModelConfigurationInput, PresetQuotaPolicy, PresetRoutingPolicy,
+    ProxyMode, QuotaRefreshStatus, QuotaWindowUsage, RefreshStatus, RevealedAccountIdentity,
     RuntimeStateSnapshot, SetModelContextInput, SetModelEnabledInput, SetModelOrderInput,
     SetModelReasoningInput, SetModelServiceTierInput, SourcePresetRule, SourceRefreshState,
     SourceSummary, SourceSummaryRecord, UsageBucket, UsageGroup, UsagePage, UsageQuery, UsageRange,
-    UsageSummary, UsageTokenBreakdown, UsageTotals, CONFIGURATION_PRESET_FORMAT,
+    UsageSummary, UsageTokenBreakdown, UsageTotals, UsageWorkload, CONFIGURATION_PRESET_FORMAT,
     CONFIGURATION_PRESET_SCHEMA_VERSION, DEFAULT_MAX_RETRY_CANDIDATES,
     DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS, MAX_MAX_RETRY_CANDIDATES,
     MAX_QUOTA_REQUEST_TIMEOUT_SECONDS, MIN_MAX_RETRY_CANDIDATES, MIN_QUOTA_REQUEST_TIMEOUT_SECONDS,

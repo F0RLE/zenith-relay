@@ -38,6 +38,9 @@ const LOCAL_KEY: &str = "p3-local-key";
 const MODEL: &str = "gpt-p3";
 const OFFICIAL_CODEX_MODEL: &str = "gpt-5.6-terra";
 
+#[path = "support/usage_observations.rs"]
+mod usage_observations;
+
 fn reference_metadata_options() -> GatewayRuntimeOptions {
     use zenith_relay_core::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
     let mut records = serde_json::Map::new();
@@ -93,6 +96,8 @@ mod lite_and_wake;
 mod mixed_rotation;
 #[path = "support/model_identity.rs"]
 mod model_identity;
+#[path = "support/native_images.rs"]
+mod native_images;
 #[path = "support/route_capacity.rs"]
 mod route_capacity;
 #[path = "support/route_fallback.rs"]
@@ -115,6 +120,7 @@ struct ObservedRequest {
     responses_lite: Option<String>,
     session_id: Option<String>,
     turn_state: Option<String>,
+    image_turn_id: Option<String>,
     body: Value,
 }
 
@@ -546,6 +552,8 @@ async fn spawn_upstream_with_catalog_and_delay_and_barrier(
         .route("/v1/models", get(upstream_models))
         .route("/v1/responses", post(upstream))
         .route("/v1/responses/compact", post(upstream))
+        .route("/v1/images/generations", post(upstream))
+        .route("/v1/images/edits", post(upstream))
         .route("/v1/alpha/search", post(upstream))
         .with_state(state.clone());
     (spawn(app).await, state)
@@ -660,6 +668,7 @@ async fn upstream(
         responses_lite: header(&headers, "x-openai-internal-codex-responses-lite"),
         session_id: header(&headers, "x-session-id"),
         turn_state: header(&headers, "x-codex-turn-state"),
+        image_turn_id: header(&headers, "x-codex-image-turn-id"),
         body: body_value.clone(),
     });
     if let Some(request_barrier) = &state.request_barrier {
@@ -756,6 +765,7 @@ async fn held_stream_upstream(
         responses_lite: header(&headers, "x-openai-internal-codex-responses-lite"),
         session_id: header(&headers, "x-session-id"),
         turn_state: header(&headers, "x-codex-turn-state"),
+        image_turn_id: header(&headers, "x-codex-image-turn-id"),
         body: serde_json::from_slice(&body).unwrap_or(Value::Null),
     });
     held_stream_response(state.release)
@@ -777,6 +787,7 @@ async fn held_then_json_upstream(
             responses_lite: header(&headers, "x-openai-internal-codex-responses-lite"),
             session_id: header(&headers, "x-session-id"),
             turn_state: header(&headers, "x-codex-turn-state"),
+            image_turn_id: header(&headers, "x-codex-image-turn-id"),
             body: serde_json::from_slice(&body).unwrap_or(Value::Null),
         });
         requests.len()
@@ -1085,6 +1096,7 @@ async fn upstream_models(
         responses_lite: header(&headers, "x-openai-internal-codex-responses-lite"),
         session_id: header(&headers, "x-session-id"),
         turn_state: header(&headers, "x-codex-turn-state"),
+        image_turn_id: header(&headers, "x-codex-image-turn-id"),
         body: json!({ "client_version": client_version }),
     });
     let status = if client_version == CODEX_MODELS_CLIENT_VERSION {

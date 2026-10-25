@@ -84,6 +84,7 @@ pub(in crate::gateway) fn usage_event(
         total_tokens: None,
         upstream_error: None,
         quota_snapshot: None,
+        image_usage: None,
     };
     if let Some(reasoning_effort) = reasoning_effort {
         reasoning_effort.apply_to(&mut event);
@@ -163,6 +164,7 @@ pub(in crate::gateway) fn emit_usage(runtime: &GatewayRuntime, mut event: UsageE
             runtime.take_passive_quota_snapshot(candidate_id, observed_at_ms)
         });
     }
+    runtime.observe_request_usage(&mut event);
     emit_callback(&runtime.usage, event);
 }
 
@@ -180,6 +182,7 @@ pub(in crate::gateway) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
     let gemini_usage_metadata = usage.get("usageMetadata").unwrap_or(usage);
     let reported_input_tokens = usage
         .get("input_tokens")
+        .or_else(|| usage.get("total_input_tokens"))
         .or_else(|| usage.get("prompt_tokens"))
         .or_else(|| gemini_usage_metadata.get("promptTokenCount"))
         .and_then(Value::as_u64);
@@ -212,6 +215,7 @@ pub(in crate::gateway) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
                 .and_then(|details| details.get("cached_tokens"))
         })
         .or_else(|| usage.get("cached_tokens"))
+        .or_else(|| usage.get("total_cached_tokens"))
         .or_else(|| usage.get("cache_read_input_tokens"))
         .or_else(|| usage.get("prompt_cache_hit_tokens"))
         .or_else(|| gemini_usage_metadata.get("cachedContentTokenCount"))
@@ -239,6 +243,7 @@ pub(in crate::gateway) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
         event.reasoning_tokens = Some(reasoning_tokens);
     }
     if usage.get("output_tokens").is_some()
+        || usage.get("total_output_tokens").is_some()
         || usage.get("completion_tokens").is_some()
         || gemini_usage_metadata.get("candidatesTokenCount").is_some()
     {
@@ -259,10 +264,20 @@ fn generated_token_counts(usage: &Value) -> (Option<u64>, Option<u64>) {
     let gemini_usage_metadata = usage.get("usageMetadata").unwrap_or(usage);
     let mut output_tokens = usage
         .get("output_tokens")
+        .or_else(|| usage.get("total_output_tokens"))
         .or_else(|| usage.get("completion_tokens"))
         .or_else(|| gemini_usage_metadata.get("candidatesTokenCount"))
         .and_then(Value::as_u64);
-    if gemini_usage_metadata.get("candidatesTokenCount").is_some() {
+    if usage.get("total_output_tokens").is_some() {
+        output_tokens = output_tokens.and_then(|count| {
+            count.checked_add(
+                usage
+                    .get("total_thought_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default(),
+            )
+        });
+    } else if gemini_usage_metadata.get("candidatesTokenCount").is_some() {
         output_tokens = output_tokens.and_then(|output_token_count| {
             output_token_count.checked_add(
                 gemini_usage_metadata
@@ -274,6 +289,7 @@ fn generated_token_counts(usage: &Value) -> (Option<u64>, Option<u64>) {
     }
     let reasoning_tokens = usage
         .get("reasoning_tokens")
+        .or_else(|| usage.get("total_thought_tokens"))
         .or_else(|| {
             usage
                 .get("output_tokens_details")
@@ -299,6 +315,7 @@ pub(in crate::gateway) fn has_generated_tokens(response_payload: &Value) -> bool
 pub(in crate::gateway) fn find_usage(response_payload: &Value) -> Option<&Value> {
     response_payload
         .get("usage")
+        .or_else(|| response_payload.pointer("/interaction/usage"))
         .or_else(|| response_payload.get("usageMetadata"))
         .or_else(|| response_payload.pointer("/message/usage"))
         .or_else(|| {
@@ -314,6 +331,7 @@ pub(in crate::gateway) fn find_usage(response_payload: &Value) -> Option<&Value>
 pub(in crate::gateway) fn response_id(response_payload: &Value) -> Option<&str> {
     response_payload
         .pointer("/response/response/id")
+        .or_else(|| response_payload.pointer("/interaction/id"))
         .or_else(|| response_payload.pointer("/response/id"))
         .or_else(|| response_payload.get("id"))
         .and_then(Value::as_str)

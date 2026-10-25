@@ -394,7 +394,7 @@ pub(super) fn request_iteration(input_items: &[Value]) -> String {
             matches!(
                 input_item.get("type").and_then(Value::as_str),
                 Some("function_call_output" | "custom_tool_call_output")
-            )
+            ) && !super::history::is_thread_handoff(input_item)
         })
         .count()
         .saturating_add(1);

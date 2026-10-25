@@ -196,6 +196,45 @@ fn fragmented_history_text_keeps_the_same_scoped_fingerprint() {
 }
 
 #[test]
+fn adjacent_same_role_messages_keep_the_same_scoped_fingerprint() {
+    for client in WireApi::ALL {
+        let split = vec![
+            Message {
+                role: Role::Assistant,
+                blocks: vec![Block::Text("Creating ".into())],
+            },
+            Message {
+                role: Role::Assistant,
+                blocks: vec![
+                    Block::Text("the SVG.".into()),
+                    Block::ToolCall {
+                        id: "call_synthetic".into(),
+                        name: "write_file".into(),
+                        arguments: "{}".into(),
+                    },
+                ],
+            },
+        ];
+        let joined = vec![Message {
+            role: Role::Assistant,
+            blocks: vec![
+                Block::Text("Creating the SVG.".into()),
+                Block::ToolCall {
+                    id: "call_synthetic".into(),
+                    name: "write_file".into(),
+                    arguments: "{}".into(),
+                },
+            ],
+        }];
+        assert_eq!(
+            continuation::history_key(client, "test", &split).unwrap(),
+            continuation::history_key(client, "test", &joined).unwrap(),
+            "{client:?}",
+        );
+    }
+}
+
+#[test]
 fn tool_argument_objects_have_order_independent_continuation_keys() {
     let history = |arguments: &str| {
         vec![Message {
@@ -218,6 +257,14 @@ fn tool_argument_objects_have_order_independent_continuation_keys() {
         assert_eq!(
             expected,
             continuation::history_key(client, "test", &reordered).unwrap()
+        );
+        let decimal = history(
+            r#"{"path":"pelican.svg","options":{"encoding":"utf-8","layers":[{"name":"body","visible":true},{"name":"wheel","visible":false}]},"count":1.30e2,"zero":-0.0,"large":90071992547409931234567}"#,
+        );
+        assert_eq!(
+            expected,
+            continuation::history_key(client, "test", &decimal).unwrap(),
+            "a client may serialize an exact integral number without its exponent",
         );
         for (before, after) in [
             ("pelican.svg", "different.svg"),

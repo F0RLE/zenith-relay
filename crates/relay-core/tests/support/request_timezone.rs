@@ -1,6 +1,20 @@
 use super::*;
-use std::collections::BTreeMap;
-use zenith_relay_core::RequestTimezonePolicy;
+use zenith_relay_core::request_timezone::{ProxyTimezone, PROXY_TIMEZONE_MAX_AGE_MS};
+
+fn account_with_timezone(
+    id: &str,
+    provider: &str,
+    upstream: &TestServer,
+    priority: i32,
+    timezone: Option<&str>,
+) -> zenith_relay_core::RuntimeChatGptAccount {
+    let mut account = account(id, provider, upstream, priority);
+    account.proxy_timezone = timezone.map(|timezone| ProxyTimezone {
+        timezone: timezone.into(),
+        observed_at_ms: zenith_relay_core::unix_time_ms(),
+    });
+    account
+}
 
 const ENVIRONMENT: &str = "<environment_context><current_date>2026-10-10</current_date><timezone>UTC</timezone></environment_context>";
 
@@ -26,11 +40,11 @@ fn assert_timezone(request: &Value, timezone: &str) {
 }
 
 #[tokio::test]
-async fn request_timezone_http_uses_the_selected_account_and_disabled_default() {
-    for (enabled, configured, expected) in [
-        (false, Some("Etc/GMT-3"), "UTC"),
-        (true, None, "America/New_York"),
-        (true, Some("Etc/GMT-3"), "Etc/GMT-3"),
+async fn request_timezone_http_uses_only_the_selected_proxy_without_a_default() {
+    for (configured, expected) in [
+        (None, "UTC"),
+        (Some("Asia/Tokyo"), "Asia/Tokyo"),
+        (Some("Etc/GMT-3"), "Etc/GMT-3"),
     ] {
         let (upstream, state) = spawn_upstream(vec![
             success_reply("synthetic-response"),
@@ -39,27 +53,18 @@ async fn request_timezone_http_uses_the_selected_account_and_disabled_default() 
         .await;
         let (gateway, _, _, _) = spawn_mixed_gateway_with_options(
             Vec::new(),
-            vec![account(
+            vec![account_with_timezone(
                 "relay-account",
                 "synthetic-provider",
                 &upstream,
                 10,
+                configured,
             )],
             vec![mixed_key(None, None)],
             ready_authority("relay-account", "synthetic-access").await,
             refresh_adapter(),
             Arc::new(PersistenceAdapter::default()),
-            GatewayRuntimeOptions {
-                request_timezone: RequestTimezonePolicy {
-                    enabled,
-                    account_timezones: configured
-                        .map(|zone| BTreeMap::from([("relay-account".into(), zone.into())]))
-                        .unwrap_or_default(),
-                    account_timezone_bindings: BTreeMap::new(),
-                    account_timezone_sources: BTreeMap::new(),
-                },
-                ..Default::default()
-            },
+            GatewayRuntimeOptions::default(),
         )
         .await;
         for path in ["/v1/responses", "/v1/responses/compact"] {
@@ -81,11 +86,15 @@ async fn request_timezone_http_uses_the_selected_account_and_disabled_default() 
 }
 
 #[tokio::test]
-async fn request_timezone_follows_the_account_proxy_unless_the_account_is_disabled() {
-    for (binding, expected) in [(None, "Etc/GMT-3"), (Some(false), "UTC")] {
+async fn request_timezone_does_not_apply_an_expired_proxy_observation() {
+    for (fresh, expected) in [(true, "Etc/GMT-3"), (false, "UTC")] {
         let (upstream, state) = spawn_upstream(vec![success_reply("synthetic-response")]).await;
         let mut proxied_account = account("relay-account", "synthetic-provider", &upstream, 10);
-        proxied_account.proxy_timezone = Some("Etc/GMT-3".into());
+        proxied_account.proxy_timezone = Some(ProxyTimezone {
+            timezone: "Etc/GMT-3".into(),
+            observed_at_ms: zenith_relay_core::unix_time_ms()
+                - if fresh { 0 } else { PROXY_TIMEZONE_MAX_AGE_MS },
+        });
         let (gateway, _, _, _) = spawn_mixed_gateway_with_options(
             Vec::new(),
             vec![proxied_account],
@@ -93,17 +102,7 @@ async fn request_timezone_follows_the_account_proxy_unless_the_account_is_disabl
             ready_authority("relay-account", "synthetic-access").await,
             refresh_adapter(),
             Arc::new(PersistenceAdapter::default()),
-            GatewayRuntimeOptions {
-                request_timezone: RequestTimezonePolicy {
-                    enabled: false,
-                    account_timezones: BTreeMap::new(),
-                    account_timezone_bindings: binding
-                        .map(|enabled| BTreeMap::from([("relay-account".into(), enabled)]))
-                        .unwrap_or_default(),
-                    account_timezone_sources: BTreeMap::new(),
-                },
-                ..Default::default()
-            },
+            GatewayRuntimeOptions::default(),
         )
         .await;
         let response = reqwest::Client::new()
@@ -135,18 +134,7 @@ async fn request_timezone_does_not_rewrite_api_source_requests() {
         Arc::new(TokenAuthority::new(1).unwrap()),
         refresh_adapter(),
         Arc::new(PersistenceAdapter::default()),
-        GatewayRuntimeOptions {
-            request_timezone: RequestTimezonePolicy {
-                enabled: true,
-                account_timezones: BTreeMap::from([(
-                    "synthetic-source".into(),
-                    "Etc/GMT-3".into(),
-                )]),
-                account_timezone_bindings: BTreeMap::new(),
-                account_timezone_sources: BTreeMap::new(),
-            },
-            ..Default::default()
-        },
+        GatewayRuntimeOptions::default(),
     )
     .await;
     let original = body();
@@ -177,25 +165,26 @@ async fn request_timezone_fallback_uses_each_account_without_mutating_client_his
     let (gateway, _, _, _) = spawn_mixed_gateway_with_options(
         Vec::new(),
         vec![
-            account("first-account", "synthetic-first", &first, 100),
-            account("second-account", "synthetic-second", &second, 10),
+            account_with_timezone(
+                "first-account",
+                "synthetic-first",
+                &first,
+                100,
+                Some("Etc/GMT-3"),
+            ),
+            account_with_timezone(
+                "second-account",
+                "synthetic-second",
+                &second,
+                10,
+                Some("Asia/Tokyo"),
+            ),
         ],
         vec![mixed_key(None, None)],
         authority,
         refresh_adapter(),
         Arc::new(PersistenceAdapter::default()),
-        GatewayRuntimeOptions {
-            request_timezone: RequestTimezonePolicy {
-                enabled: true,
-                account_timezones: BTreeMap::from([
-                    ("first-account".into(), "Etc/GMT-3".into()),
-                    ("second-account".into(), "Asia/Tokyo".into()),
-                ]),
-                account_timezone_bindings: BTreeMap::new(),
-                account_timezone_sources: BTreeMap::new(),
-            },
-            ..Default::default()
-        },
+        GatewayRuntimeOptions::default(),
     )
     .await;
     let response = reqwest::Client::new()
@@ -219,25 +208,18 @@ async fn request_timezone_websocket_rewrites_first_and_subsequent_turns() {
     let (upstream, state) = spawn_websocket_upstream().await;
     let (gateway, _, _, _) = spawn_mixed_gateway_with_options(
         Vec::new(),
-        vec![account(
+        vec![account_with_timezone(
             "relay-account",
             "synthetic-provider",
             &upstream,
             10,
+            Some("Etc/GMT-3"),
         )],
         vec![mixed_key(None, None)],
         ready_authority("relay-account", "synthetic-access").await,
         refresh_adapter(),
         Arc::new(PersistenceAdapter::default()),
-        GatewayRuntimeOptions {
-            request_timezone: RequestTimezonePolicy {
-                enabled: true,
-                account_timezones: BTreeMap::from([("relay-account".into(), "Etc/GMT-3".into())]),
-                account_timezone_bindings: BTreeMap::new(),
-                account_timezone_sources: BTreeMap::new(),
-            },
-            ..Default::default()
-        },
+        GatewayRuntimeOptions::default(),
     )
     .await;
     let upgraded = reqwest::Client::new()

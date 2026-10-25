@@ -30,6 +30,7 @@ fn history_request(input: Value) -> Value {
 
 fn native_call_response(upstream: WireApi) -> Value {
     match upstream {
+        WireApi::GeminiInteractions => unreachable!("native-only fixture is separate"),
         WireApi::Messages => json!({
             "id":"message-test","type":"message","role":"assistant",
             "stop_reason":"tool_use",
@@ -99,6 +100,7 @@ fn full_responses_history_restores_native_tool_state_on_each_bridge() {
         let continued = prepare_history(upstream, &request, Some(restored)).unwrap();
         let body = continued.upstream_body();
         match upstream {
+            WireApi::GeminiInteractions => unreachable!("native-only fixture is separate"),
             WireApi::Messages => {
                 assert_eq!(body["messages"].as_array().unwrap().len(), 3);
                 assert_eq!(

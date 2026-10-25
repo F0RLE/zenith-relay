@@ -39,9 +39,9 @@ pub use quota_state::{reduce_account_quota, AccountQuotaOutcome, AccountQuotaUpd
 pub use record::{
     accept_discovered_models, apply_model_discovery_failure, automatic_quota_monitoring_eligible,
     clear_false_upstream_block, provider_account_failure, recover_model_discovery_state,
-    reduce_account_usage, AccountAccessState, AccountAuthMode, AccountAuthState,
-    AccountHealthState, AccountIdentity, AccountRecord, AccountUsageObservation, AccountUsageState,
-    AccountUsageUpdate, ProviderAccountFailure, ReauthReason,
+    reduce_account_usage, repair_model_discovery_block, AccountAccessState, AccountAuthMode,
+    AccountAuthState, AccountHealthState, AccountIdentity, AccountRecord, AccountUsageObservation,
+    AccountUsageState, AccountUsageUpdate, ProviderAccountFailure, ReauthReason,
 };
 pub use routes::{
     detach_account_route, select_account_route_group, validate_account_route_connection,

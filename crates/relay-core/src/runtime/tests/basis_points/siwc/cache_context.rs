@@ -106,6 +106,19 @@ async fn siwc_preserves_append_only_tool_prefix_and_reports_cache_context_withou
                 );
             }
             if debug {
+                for event in events.iter() {
+                    let transport = event.routing.as_ref().unwrap().transport.as_ref().unwrap();
+                    let payload = transport.request_payload.as_ref().unwrap();
+                    assert_eq!(
+                        payload.content_encoding,
+                        crate::usage::RequestContentEncoding::Identity
+                    );
+                    assert_eq!(payload.compression_us, None);
+                    let send_ms = payload
+                        .http_send_to_headers_ms
+                        .expect("HTTP execute was observed");
+                    assert!(transport.response_headers_ms.unwrap() >= send_ms);
+                }
                 let diagnostics = |index: usize| {
                     events[index]
                         .routing

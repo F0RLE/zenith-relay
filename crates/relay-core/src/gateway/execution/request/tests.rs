@@ -23,6 +23,7 @@ fn basis_points_completed_json_and_stream_use_the_client_protocol() {
     .unwrap();
     for client in WireApi::ALL {
         let input = match client {
+            WireApi::GeminiInteractions => unreachable!("native-only fixture is separate"),
             WireApi::Responses => json!({"model":"test","input":"Hi"}),
             WireApi::ChatCompletions => {
                 json!({"model":"test","messages":[{"role":"user","content":"Hi"}]})
@@ -54,6 +55,7 @@ fn basis_points_completed_json_and_stream_use_the_client_protocol() {
             let body: serde_json::Value = serde_json::from_slice(&result.bytes).unwrap();
             let events = result.stream.map(|bytes| String::from_utf8(bytes).unwrap());
             match client {
+                WireApi::GeminiInteractions => unreachable!("native-only fixture is separate"),
                 WireApi::Responses => {
                     assert_eq!(body["output"][0]["content"][0]["text"], "Hello");
                     if let Some(events) = &events {

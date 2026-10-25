@@ -216,6 +216,7 @@ fn messages_tool_search_does_not_repair_an_orphan_result() {
 fn tool_reply(protocol: WireApi, id: &str, name: &str, arguments: &Value) -> Value {
     let mut reply = output(protocol);
     match protocol {
+        WireApi::GeminiInteractions => unreachable!("native-only fixture is separate"),
         WireApi::Responses => {
             reply["output"] = json!([{"type":"function_call","id":"item_1","call_id":id,"name":name,"arguments":arguments.to_string()}]);
         }
@@ -232,6 +233,7 @@ fn tool_reply(protocol: WireApi, id: &str, name: &str, arguments: &Value) -> Val
 
 fn reply_stream(protocol: WireApi, reply: &Value) -> Vec<u8> {
     let events = match protocol {
+        WireApi::GeminiInteractions => unreachable!("native-only fixture is separate"),
         WireApi::Responses => {
             let call = &reply["output"][0];
             let mut start = call.clone();

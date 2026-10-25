@@ -17,6 +17,10 @@ fn adapter_failure_preserves_usage_and_static_reason_without_overwriting_provide
     let details = marked.upstream_error.as_ref().unwrap();
     assert_eq!(details.http_status, Some(200));
     assert_eq!(details.error_type.as_deref(), Some("relay_adapter"));
+    assert_eq!(
+        details.parameter.as_deref(),
+        Some("output.run_officejs.args")
+    );
     assert!(details
         .message
         .as_ref()

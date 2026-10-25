@@ -146,6 +146,8 @@ pub fn source_stats_outcome(stats: &crate::SourceProviderStats, now_ms: u64) -> 
 /// Schedule a quota verification shortly after the provider's reported reset.
 /// The stable per-account jitter spreads simultaneous resets without replacing
 /// the ordinary cadence or shortening a provider Retry-After floor.
+/// An elapsed deadline remains due until the window is observed at or after
+/// that deadline. Otherwise a read crossing reset can drop the pending check.
 pub fn quota_reset_delay(
     account_id: &str,
     quota: &crate::quota::QuotaSnapshot,
@@ -159,9 +161,11 @@ pub fn quota_reset_delay(
         .primary
         .iter()
         .chain(quota.secondary.iter())
-        .filter_map(|window| window.reset_at_ms)
-        .filter(|at| *at > now_ms)
-        .map(|at| at.saturating_add(jitter).saturating_sub(now_ms))
+        .filter_map(|window| {
+            let verification_at_ms = window.reset_at_ms?.saturating_add(jitter);
+            (window.observed_at_ms < verification_at_ms)
+                .then(|| verification_at_ms.saturating_sub(now_ms))
+        })
         .min()
 }
 

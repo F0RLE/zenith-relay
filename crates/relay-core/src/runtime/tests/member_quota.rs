@@ -609,6 +609,7 @@ fn quota_429_does_not_turn_a_slot_into_permanent_exhaustion() {
             total_tokens: None,
             upstream_error: None,
             quota_snapshot: None,
+            image_usage: None,
         },
         1_000,
     );
@@ -682,6 +683,7 @@ fn reported_quota_exhaustion_zeroes_an_open_primary_window_without_inventing_a_l
             total_tokens: None,
             upstream_error: None,
             quota_snapshot: None,
+            image_usage: None,
         },
         observed_at_ms,
     );

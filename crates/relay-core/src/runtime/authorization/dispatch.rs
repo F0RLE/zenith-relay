@@ -74,10 +74,6 @@ impl GatewayRuntime {
         binding: Option<crate::SourceProtocolBindingKey>,
         expected: Option<&AuthorizationIncarnation>,
     ) -> std::result::Result<AuthorizedResponse, AuthorizedRequestError> {
-        if self.is_basis_points_account(candidate_id) {
-            self.validate_basis_points_plan(candidate_id, None)
-                .map_err(AuthorizedRequestError::ModelAccess)?;
-        }
         let budget = dispatch.budget;
         let first_request = request
             .try_clone()
@@ -120,7 +116,11 @@ impl GatewayRuntime {
                         authorization_incarnation: prepared.incarnation(),
                     });
                 }
-                self.record_authorization_replay(dispatch, prepared.token_generation);
+                self.record_authorization_replay(
+                    dispatch,
+                    prepared.token_generation,
+                    &unauthorized_response,
+                );
                 drop(unauthorized_response);
                 if let Some(budget) = budget {
                     budget.observe_rejection();
@@ -189,7 +189,7 @@ impl GatewayRuntime {
                 authorization_incarnation: prepared.incarnation(),
             });
         }
-        self.record_authorization_replay(dispatch, prepared.token_generation);
+        self.record_authorization_replay(dispatch, prepared.token_generation, &upstream_response);
         drop(upstream_response);
         if let Some(budget) = budget {
             budget.observe_rejection();
@@ -232,6 +232,7 @@ impl GatewayRuntime {
         &self,
         dispatch: AuthorizationDispatch<'_>,
         generation: Option<u64>,
+        response: &reqwest::Response,
     ) {
         let Some((template, started)) = dispatch.usage_event else {
             return;
@@ -252,6 +253,12 @@ impl GatewayRuntime {
         event.error_category = Some(crate::error_codes::UPSTREAM_UNAUTHORIZED.to_string());
         if let Some(routing) = event.routing.as_mut() {
             routing.attempt_outcome = Some(crate::AttemptOutcome::RetryAuthorization);
+            if let Some(transport) = routing.transport.as_mut() {
+                transport.request_payload = response
+                    .extensions()
+                    .get::<crate::usage::RequestPayloadDiagnostics>()
+                    .cloned();
+            }
         }
         // Audit only: the authorization owner is already repairing this 401.
         // Do not submit a second health/auth vote or reset cache-context state.
@@ -355,10 +362,6 @@ impl GatewayRuntime {
         if self.is_siwc_account(candidate_id) {
             crate::providers::chatgpt::sanitize_siwc_headers(authorized_request.headers_mut());
         }
-        if self.is_basis_points_account(candidate_id) {
-            self.validate_basis_points_plan(candidate_id, Some(prepared))
-                .map_err(AuthorizedRequestError::ModelAccess)?;
-        }
         if budget.is_some() {
             self.verify_basis_points_request(candidate_id, prepared, &authorized_request)
                 .await?;
@@ -388,6 +391,19 @@ impl GatewayRuntime {
                 }
             }
         }
+        let native_codex_account = self.chatgpt_accounts.contains_key(candidate_id)
+            && !self.is_siwc_account(candidate_id)
+            && !self.is_basis_points_account(candidate_id)
+            && identity_policy == AuthorizationIdentityPolicy::RelayCodex
+            && prepared.identity.is_some();
+        let diagnostics_mode = dispatch
+            .usage_event
+            .and_then(|(event, _)| event.routing.as_ref())
+            .and_then(|routing| routing.transport.as_ref())
+            .map(|transport| transport.mode);
+        let (mut authorized_request, payload_diagnostics) =
+            super::payload::encode(authorized_request, native_codex_account, diagnostics_mode)
+                .await;
         let url = authorized_request.url().clone();
         let cookies = if self.is_siwc_account(candidate_id) {
             None
@@ -442,7 +458,12 @@ impl GatewayRuntime {
                 .dispatch_guard(self, candidate_id)
                 .ok_or_else(stale_authorization)?;
         }
-        let upstream_response = if let Some(deadline) = headers_deadline {
+        // This boundary deliberately excludes authorization and body encoding.
+        // reqwest does not expose upload completion: do not label this upload time.
+        let send_started = payload_diagnostics
+            .as_ref()
+            .map(|_| std::time::Instant::now());
+        let mut upstream_response = if let Some(deadline) = headers_deadline {
             crate::transport::execute_with_headers_deadline(&client, authorized_request, deadline)
                 .await?
         } else {
@@ -458,11 +479,24 @@ impl GatewayRuntime {
             }
             .map_err(AuthorizedRequestError::Transport)?
         };
+        let send_to_headers_ms = send_started.map(|start| start.elapsed().as_millis() as u64);
         if let Some(cookies) = cookies {
             cookies.observe(&url, upstream_response.headers());
         }
+        if let Some(mut payload_diagnostics) = payload_diagnostics {
+            payload_diagnostics.http_send_to_headers_ms = send_to_headers_ms;
+            upstream_response
+                .extensions_mut()
+                .insert(payload_diagnostics);
+        }
         if upstream_response.status().is_success() {
             self.observe_turn_state(upstream_response.headers(), scope, prepared);
+            self.observe_codex_models_etag(
+                candidate_id,
+                &url,
+                upstream_response.headers(),
+                prepared,
+            );
         }
         Ok(upstream_response)
     }

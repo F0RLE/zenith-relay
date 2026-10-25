@@ -2,6 +2,7 @@ mod api_equivalent;
 mod cache_context;
 mod context_size;
 mod event;
+mod image;
 mod reasoning;
 mod tools;
 mod transport;
@@ -23,19 +24,21 @@ pub use api_equivalent::{
 };
 pub use cache_context::{
     CacheContextBaseline, CacheContextDiagnostics, CacheContextScope, CacheContextSection,
-    CacheHistoryComparison, CacheHistoryDiagnostics, CacheInputKind, ProviderCacheDiagnostics,
-    ProviderCacheMissReason,
+    CacheHistoryComparison, CacheHistoryDiagnostics, CacheInputKind, LeadingContextAlignment,
+    ProviderCacheDiagnostics, ProviderCacheMissReason,
 };
 pub use context_size::RequestContextSize;
 pub use event::{ErrorOrigin, UsageEvent, UsageTransport};
+pub use image::ImageUsage;
 pub use reasoning::normalize_reasoning_effort;
 pub(crate) use reasoning::ReasoningEffortDiagnostics;
 pub use tools::{
     BasisPointsCatalogDiagnostics, TerminalOutputKind, ToolChoiceMode, ToolUseDiagnostics,
 };
 pub use transport::{
-    RequestPreparationDiagnostics, TransportDiagnostics, TransportFallbackReason, TransportMode,
-    TransportResponseFormat,
+    CodexServerTiming, FullRequestReason, RequestContentEncoding, RequestPayloadDiagnostics,
+    RequestPayloadMode, RequestPreparationDiagnostics, TransportDiagnostics,
+    TransportFallbackReason, TransportMode, TransportResponseFormat,
 };
 pub use upstream_error::UpstreamErrorDetails;
 

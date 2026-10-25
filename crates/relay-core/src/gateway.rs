@@ -30,6 +30,27 @@ mod streaming;
 mod turn_state;
 mod websocket;
 
+/// Read-only cache accounting. These categories are not additive process RSS.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheMemoryDiagnostics {
+    pub key: &'static str,
+    pub entries: Option<usize>,
+    pub bytes: Option<usize>,
+    pub limit_bytes: Option<usize>,
+    pub basis: &'static str,
+}
+
+pub fn cache_memory_diagnostics() -> Vec<CacheMemoryDiagnostics> {
+    execution::basis_points::cache_memory_diagnostics()
+}
+
+/// Nonblocking housekeeping for already-expired, reconstructible tool caches.
+/// Live request-owned Arcs remain valid; no cache budget or TTL is reduced.
+pub fn release_expired_cache_entries() {
+    execution::basis_points::release_expired_cache_entries();
+}
+
 /// A scheduler-owned, non-streaming probe sent through one exact OAuth
 /// account.  The request never enters the public listener; it reuses the
 /// running [`GatewayRuntime`] so token refresh, cooldowns, leases, usage, and
@@ -223,6 +244,7 @@ pub fn router(runtime: Arc<GatewayRuntime>) -> Router {
         .route("/backend-api/codex/alpha/search", post(alpha_search))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/messages", post(messages))
+        .route("/v1beta/interactions", post(request::interactions))
         .route("/v1beta/models", get(catalog::gemini_models))
         .route(
             "/v1beta/models/{*model_action}",
@@ -263,7 +285,7 @@ pub(crate) mod test_support {
     use crate::runtime::DefaultServiceTier;
     use crate::{ToolUseDiagnostics, UsageEvent};
 
-    pub(super) fn test_usage_event() -> UsageEvent {
+    pub(crate) fn test_usage_event() -> UsageEvent {
         UsageEvent {
             request_id: "request".into(),
             attempt: 1,
@@ -301,6 +323,7 @@ pub(crate) mod test_support {
             total_tokens: None,
             upstream_error: None,
             quota_snapshot: None,
+            image_usage: None,
         }
     }
 }

@@ -4,6 +4,7 @@ use crate::error_codes;
 use axum::http::StatusCode;
 use serde_json::Value;
 
+mod scoped;
 mod text;
 use text::classify_upstream_error_text;
 
@@ -22,7 +23,14 @@ pub(in crate::gateway) fn classify_upstream_error(
     };
     match serde_json::from_slice::<Value>(response_body) {
         Ok(error_payload) => classify_upstream_error_value(status, &error_payload),
-        Err(_) => classify_upstream_error_text(status, &normalized_error_text(response_body)),
+        Err(_) => {
+            if status == StatusCode::FORBIDDEN {
+                if let Some(error_payload) = scoped::error_before_sse(response_body) {
+                    return classify_upstream_error_value(status, &error_payload);
+                }
+            }
+            classify_upstream_error_text(status, &normalized_error_text(response_body))
+        }
     }
 }
 
@@ -122,7 +130,24 @@ pub(in crate::gateway) fn classify_upstream_error_value(
             message: upstream_failure_message(error_codes::UPSTREAM_INVALID_REQUEST),
         };
     }
-    classify_upstream_error_text(status, &upstream_error_text(error_payload))
+    let classification = classify_upstream_error_text(status, &upstream_error_text(error_payload));
+    // Narrow compatibility evidence may refine a generic refusal, never hide
+    // an explicit account, workspace, quota or policy discriminator.
+    if matches!(
+        classification.category,
+        error_codes::UPSTREAM_STATUS
+            | error_codes::UPSTREAM_FORBIDDEN
+            | error_codes::UPSTREAM_ERROR
+            | error_codes::UPSTREAM_EDGE_CHALLENGE
+    ) {
+        if let Some(category) = scoped::forbidden_category(status, error_payload) {
+            return UpstreamErrorClassification {
+                category,
+                message: upstream_failure_message(category),
+            };
+        }
+    }
+    classification
 }
 
 pub(crate) fn is_deactivated_workspace_value(error_payload: &Value) -> bool {

@@ -235,10 +235,26 @@ pub(in crate::gateway) fn translate_response(
     upstream_response_body: &[u8],
     request_body: &Value,
 ) -> Result<Vec<u8>, AdapterError> {
-    let upstream_response: Value = serde_json::from_slice(upstream_response_body)
-        .map_err(|_| AdapterError::upstream_response_invalid())?;
+    let upstream_response: Value =
+        serde_json::from_slice(upstream_response_body).map_err(|error| {
+            AdapterError::upstream_response_invalid()
+                .with_parameter("response.json")
+                .with_json_diagnostic(
+                    if error.is_eof() {
+                        "unexpected_eof"
+                    } else {
+                        "invalid_json"
+                    },
+                    "json_document",
+                    error.line(),
+                    error.column(),
+                    upstream_response_body.len(),
+                )
+        })?;
     let translated = translate_response_value(upstream_response, request_body)?;
-    serde_json::to_vec(&translated).map_err(|_| AdapterError::upstream_response_invalid())
+    serde_json::to_vec(&translated).map_err(|_| {
+        AdapterError::upstream_response_invalid().with_parameter("response.serialization")
+    })
 }
 
 /// Streaming already owns the parsed terminal response. Do not serialize and
@@ -251,7 +267,14 @@ pub(in crate::gateway) fn translate_response_value(
         upstream_response.get("status").and_then(Value::as_str),
         Some("completed" | "incomplete")
     ) {
-        return Err(AdapterError::upstream_response_invalid().with_parameter("response.status"));
+        return Err(AdapterError::upstream_response_invalid()
+            .with_parameter("response.status")
+            .with_shape_diagnostic(
+                &upstream_response,
+                upstream_response
+                    .get("status")
+                    .map(|value| ("status", value)),
+            ));
     }
     let completed = upstream_response["status"] == "completed";
     let Some(output_items) = upstream_response
@@ -401,6 +424,23 @@ pub(in crate::gateway) fn translate_response_value(
         .cloned()
         .unwrap_or_else(|| json!({}));
     Ok(upstream_response)
+}
+
+#[cfg(test)]
+mod diagnostics_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_response_json_reports_coordinates_without_body_contents() {
+        let body = br#"{"private":"synthetic-private-value","output": ["#;
+        let error = translate_response(body, &json!({})).unwrap_err();
+        assert_eq!(error.parameter(), Some("response.json"));
+        let message = error.to_string();
+        assert!(message.contains("json_reason=unexpected_eof"));
+        assert!(message.contains(&format!("payload_bytes={}", body.len())));
+        assert!(!message.contains("synthetic-private-value"));
+        assert!(!message.contains("\"private\""));
+    }
 }
 
 pub(super) fn has_encrypted_agent_message(request_input: Option<&Value>) -> bool {

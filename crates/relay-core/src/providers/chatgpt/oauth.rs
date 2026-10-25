@@ -7,8 +7,9 @@ pub const SIWC_RESOURCE: &str = "https://api.openai.com/v1";
 pub const BASIS_POINTS_OAUTH_CLIENT_ID: &str = "app_fnr0pYvVwwFDocDumLG3H2Bp";
 pub const BASIS_POINTS_OAUTH_REDIRECT_URI: &str =
     "https://bps.openai.com/basispoints/extension/360590d7-f8f9-4d88-bf75-0edfe0a4b9f3/auth/callback";
+/// Retained for decoding legacy diagnostics; current admission does not reject plan names.
 pub const BASIS_POINTS_FREE_ACCOUNT_MESSAGE: &str =
-    "Free ChatGPT accounts cannot use Excel / Basis Points. Use a native ChatGPT connection.";
+    "Legacy Free plan restriction. Refresh the account to check current provider access.";
 
 /// The client that issued a token set also owns its refresh flow.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -22,41 +23,6 @@ pub enum OAuthClientKind {
 }
 
 impl OAuthClientKind {
-    pub fn supports_pool(self, plan_type: Option<&str>) -> bool {
-        self != Self::ExcelBps
-            || plan_type
-                .is_none_or(|plan| crate::quota::normalize_subscription_plan(plan) != "free")
-    }
-
-    /// Metadata and token claims can reject a known Free plan; neither grants access.
-    pub fn validate_plan(
-        self,
-        plan_type: Option<&str>,
-        id_token: Option<&str>,
-        access_token: Option<&str>,
-    ) -> Result<(), &'static str> {
-        if !self.supports_pool(plan_type) {
-            return Err(BASIS_POINTS_FREE_ACCOUNT_MESSAGE);
-        }
-        if self == Self::ExcelBps {
-            for token in [id_token, access_token].into_iter().flatten() {
-                let Some(claims) =
-                    crate::accounts::decode_unverified_jwt_payload::<serde_json::Value>(token)
-                else {
-                    continue;
-                };
-                let plan = claims
-                    .get("https://api.openai.com/auth")
-                    .and_then(|auth| auth.get("chatgpt_plan_type"))
-                    .and_then(serde_json::Value::as_str);
-                if !self.supports_pool(plan) {
-                    return Err(BASIS_POINTS_FREE_ACCOUNT_MESSAGE);
-                }
-            }
-        }
-        Ok(())
-    }
-
     pub const fn client_id(self) -> &'static str {
         match self {
             Self::Codex => CODEX_OAUTH_CLIENT_ID,

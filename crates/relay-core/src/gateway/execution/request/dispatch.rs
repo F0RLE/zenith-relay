@@ -4,6 +4,7 @@ use crate::usage::{RequestPreparationDiagnostics, ToolUseDiagnostics};
 
 pub(super) enum RequestDispatch {
     Continue,
+    Break,
     Respond(Response<Body>),
     Ready(Box<DispatchedRequestAttempt>),
 }
@@ -32,7 +33,7 @@ pub(super) struct RequestDispatchInput<'a> {
     pub(super) basis_points_route: bool,
     pub(super) route_responses_lite: Option<HeaderValue>,
     pub(super) adapter_request: &'a PreparedAdapterRequest,
-    pub(super) request_body: Vec<u8>,
+    pub(super) request_body: Option<Vec<u8>>,
     pub(super) reasoning_effort: &'a ReasoningEffortDiagnostics,
     pub(super) tool_use: &'a mut ToolUseDiagnostics,
     pub(super) basis_points_request: Option<&'a Value>,
@@ -82,7 +83,7 @@ pub(super) async fn dispatch_request_attempt(
         .map(|(start, end)| end.duration_since(start).as_millis() as u64);
     let mut discovery_body = None;
     let mut discovery_session = None;
-    let request_body = if let Some(original) = basis_points_request {
+    if let Some(original) = basis_points_request {
         let (body, session) =
             match super::super::basis_points::discovery::execution::prepare_dispatch(
                 original,
@@ -103,28 +104,24 @@ pub(super) async fn dispatch_request_attempt(
                 }
             };
         tool_use.capture_upstream_context(&body);
-        let encoded = serde_json::to_vec(&body).expect("prepared JSON is serializable");
         discovery_body = Some(body);
         discovery_session = session;
-        encoded
-    } else {
-        request_body
-    };
+    }
     if basis_points_request.is_some() {
         preparation.catalog_ms = catalog_started.map(|start| start.elapsed().as_millis() as u64);
     }
     let attachments_started = preparation_started.map(|_| Instant::now());
-    let request_body = if basis_points_route {
+    let request_body = if let Some(body) = discovery_body.as_mut() {
         match super::super::basis_points::attach_input_images(
             runtime,
             &route.candidate_id,
             &route.upstream_url,
             &route.upstream_headers,
-            request_body,
+            body,
         )
         .await
         {
-            Ok(upstream_response_body) => upstream_response_body,
+            Ok(()) => {}
             Err(super::super::basis_points::AttachmentFailure::Reject(failure)) => {
                 return RequestDispatch::Respond(attempt_error_response(
                     failure,
@@ -139,17 +136,17 @@ pub(super) async fn dispatch_request_attempt(
                 return RequestDispatch::Continue;
             }
         }
-    } else {
-        request_body
-    };
-    if basis_points_route {
         preparation.attachments_ms =
             attachments_started.map(|start| start.elapsed().as_millis() as u64);
-    }
-    if discovery_body.is_some() {
-        discovery_body =
-            Some(serde_json::from_slice(&request_body).expect("prepared JSON is valid"));
-    }
+        let encoding_started = preparation_started.map(|_| Instant::now());
+        let encoded = serde_json::to_vec(body).expect("prepared JSON is serializable");
+        if let (Some(catalog_ms), Some(start)) = (&mut preparation.catalog_ms, encoding_started) {
+            *catalog_ms += start.elapsed().as_millis() as u64;
+        }
+        encoded
+    } else {
+        request_body.expect("non-BPS requests are serialized during preparation")
+    };
     if let Some(body) = discovery_body.as_ref() {
         runtime.observe_basis_points_dispatch(&route, body);
     }
@@ -254,6 +251,7 @@ pub(super) async fn dispatch_request_attempt(
     let mut discovery = None;
     let upstream = match upstream {
         Ok(upstream) => {
+            route.observe_http_payload(&upstream.response);
             route.account_token_generation = upstream.account_token_generation;
             route.observe_http_response(
                 upstream.response.headers(),
@@ -296,6 +294,12 @@ pub(super) async fn dispatch_request_attempt(
         Err(error) => {
             let uncertain = error.execution_certainty() == ExecutionCertainty::Unknown;
             let exhausted = matches!(error, AuthorizedRequestError::DispatchBudgetExhausted);
+            if exhausted && last_failure.is_some() {
+                // Preparation may outlive the retry deadline. Nothing was sent
+                // on this lease: finalize the earlier provider rejection rather
+                // than inventing another attempt or replacing its 429 with 503.
+                return RequestDispatch::Break;
+            }
             let failure = AttemptFailure::authorized_request(error);
             let mut event = usage_event(
                 UsageAttempt {
@@ -382,7 +386,8 @@ fn upstream_headers_for_route(
         // credentials or OpenAI/Codex-only headers to another provider.
         return match provider_protocol {
             crate::UpstreamProtocol::Messages => forwarded_bridge_messages_headers(client_headers),
-            crate::UpstreamProtocol::GeminiGenerateContent => {
+            crate::UpstreamProtocol::GeminiGenerateContent
+            | crate::UpstreamProtocol::GeminiInteractions => {
                 forwarded_bridge_gemini_headers(client_headers)
             }
             crate::UpstreamProtocol::Responses | crate::UpstreamProtocol::ChatCompletions => {
@@ -401,7 +406,8 @@ fn upstream_headers_for_route(
             crate::UpstreamProtocol::Messages => forwarded_messages_headers(client_headers),
             crate::UpstreamProtocol::Responses => forwarded_responses_headers(client_headers),
             crate::UpstreamProtocol::ChatCompletions
-            | crate::UpstreamProtocol::GeminiGenerateContent => HeaderMap::new(),
+            | crate::UpstreamProtocol::GeminiGenerateContent
+            | crate::UpstreamProtocol::GeminiInteractions => HeaderMap::new(),
         }
     }
 }

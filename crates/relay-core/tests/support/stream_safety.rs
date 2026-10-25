@@ -44,6 +44,7 @@ async fn automatic_adapter_candidate_shares_the_execution_budget() {
     drop(chat_requests);
     assert!(responses_state.requests.lock().unwrap().is_empty());
     let events = events.lock().unwrap();
+    let events = usage_observations::physical_attempts(&events);
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].attempt, 1);
     assert_eq!(events[0].source_id, "chat");

@@ -14,6 +14,8 @@ pub struct UpstreamErrorDetails {
     pub code: Option<String>,
     pub error_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub parameter: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
     pub message: Option<String>,
     pub redacted: bool,
@@ -111,6 +113,12 @@ impl UpstreamErrorDetails {
                 .or_else(|| envelope.get("status"))
                 .and_then(Value::as_str);
             details.error_type = error_type.and_then(safe_identifier);
+            let parameter = envelope
+                .get("param")
+                .or_else(|| envelope.get("parameter"))
+                .and_then(Value::as_str);
+            details.parameter = parameter.and_then(safe_parameter);
+            details.redacted |= parameter.is_some() && details.parameter.is_none();
             let request_id = envelope
                 .get("request_id")
                 .or_else(|| envelope.get("requestId"))
@@ -138,6 +146,7 @@ impl UpstreamErrorDetails {
             http_status: http_status.filter(|status| (100..600).contains(status)),
             code: None,
             error_type: None,
+            parameter: None,
             request_id: None,
             message: None,
             redacted: false,
@@ -149,10 +158,12 @@ impl UpstreamErrorDetails {
         let mut details = Self::empty(self.http_status);
         details.code = self.code.as_deref().and_then(safe_identifier);
         details.error_type = self.error_type.as_deref().and_then(safe_identifier);
+        details.parameter = self.parameter.as_deref().and_then(safe_parameter);
         details.request_id = self.request_id.as_deref().and_then(safe_request_id);
         details.redacted = self.redacted
             || self.code.is_some() && details.code.is_none()
             || self.error_type.is_some() && details.error_type.is_none()
+            || self.parameter.is_some() && details.parameter.is_none()
             || self.request_id.is_some() && details.request_id.is_none();
         details.truncated = self.truncated;
         if let Some(message) = &self.message {
@@ -193,6 +204,36 @@ fn safe_identifier(identifier_text: &str) -> Option<String> {
     let (_, redacted, truncated) = sanitize_message(identifier_text);
     (!redacted && !truncated && !normalized.starts_with("eyj"))
         .then(|| identifier_text.trim().to_string())
+}
+
+// These are fixed Relay validation paths, not user-selected tool names, keys or values.
+fn safe_parameter(value: &str) -> Option<String> {
+    matches!(
+        value,
+        "response.json"
+            | "response.serialization"
+            | "response.status"
+            | "response.output"
+            | "stream.response_size"
+            | "stream.event.json"
+            | "stream.terminal"
+            | "output.tool_call"
+            | "output.run_officejs.status"
+            | "output.run_officejs.name"
+            | "output.run_officejs.tool"
+            | "output.run_officejs.tool_choice"
+            | "output.run_officejs.call_id"
+            | "output.run_officejs.references"
+            | "output.run_officejs.parallel_tool_calls"
+            | "output.run_officejs.args"
+            | "output.run_officejs.args.frame"
+            | "output.run_officejs.args.schema"
+            | "output.run_officejs.args.json"
+            | "output.run_officejs.args.object"
+            | "output.run_officejs.args.json.eof"
+            | "output.run_officejs.args.json.syntax"
+    )
+    .then(|| value.to_owned())
 }
 
 fn safe_request_id(request_id: &str) -> Option<String> {
@@ -252,6 +293,29 @@ pub(super) fn sanitize_message(raw_message: &str) -> (String, bool, bool) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn adapter_parameter_survives_storage_but_arbitrary_paths_are_redacted() {
+        for parameter in ["response.json", "output.run_officejs.args.json.syntax"] {
+            let details = super::UpstreamErrorDetails::from_value(
+                Some(502),
+                &serde_json::json!({
+                    "error":{"code":"adapter_upstream_response_invalid","param":parameter,"message":"Invalid response"}
+                }),
+            );
+            assert_eq!(details.parameter.as_deref(), Some(parameter));
+            let stored: super::UpstreamErrorDetails =
+                serde_json::from_value(serde_json::to_value(details.sanitized()).unwrap()).unwrap();
+            assert_eq!(stored.parameter.as_deref(), Some(parameter));
+        }
+        let details = super::UpstreamErrorDetails::from_value(
+            Some(502),
+            &serde_json::json!({
+                "error":{"code":"adapter_upstream_response_invalid","param":"output.private-user-content","message":"Invalid response"}
+            }),
+        );
+        assert!(details.parameter.is_none());
+        assert!(details.redacted);
+    }
     #[test]
     fn response_headers_supply_only_safe_request_ids_without_body_echoes() {
         let mut headers = reqwest::header::HeaderMap::new();

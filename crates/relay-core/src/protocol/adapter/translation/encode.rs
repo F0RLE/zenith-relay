@@ -240,6 +240,11 @@ fn write_sampling(
         controls.insert(
             match protocol {
                 WireApi::Responses => "max_output_tokens",
+                WireApi::GeminiInteractions => {
+                    return Err(AdapterError::parameter_unsupported_for(
+                        "gemini_interactions.native_only",
+                    ))
+                }
                 WireApi::ChatCompletions => "max_completion_tokens",
                 WireApi::Messages => "max_tokens",
                 WireApi::Gemini => "maxOutputTokens",
@@ -356,11 +361,16 @@ fn write_tools(
                 "tool_choice"
             }
             .into(),
-            parts::tool_choice(choice, protocol),
+            parts::tool_choice(choice, protocol)?,
         );
     }
     if let Some(parallel) = request.parallel_tools {
         match protocol {
+            WireApi::GeminiInteractions => {
+                return Err(AdapterError::parameter_unsupported_for(
+                    "gemini_interactions.native_only",
+                ))
+            }
             WireApi::Responses | WireApi::ChatCompletions => {
                 request_fields.insert("parallel_tool_calls".into(), parallel.into());
             }

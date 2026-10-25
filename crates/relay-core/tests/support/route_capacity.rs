@@ -272,7 +272,10 @@ async fn local_key_account_scope_uses_relay_ids_not_provider_header_ids() {
     )
     .await;
 
-    assert_eq!(models(&gateway).await, [MODEL]);
+    assert_eq!(
+        models(&gateway).await,
+        [zenith_relay_core::IMAGE_API_MODEL, MODEL]
+    );
     assert_eq!(request(&gateway, false).await.status(), StatusCode::OK);
     assert_eq!(allowed_state.requests.lock().unwrap().len(), 1);
     assert!(denied_state.requests.lock().unwrap().is_empty());
@@ -710,13 +713,17 @@ async fn assert_tool_affinity_retry(
         // this must stay inside the same three-send request budget.
         assert!((2..=4).contains(&owner_attempts));
     } else {
-        assert_eq!(owner_attempts, 2);
+        assert_eq!(
+            owner_attempts, 2,
+            "stream={stream}, include_call={include_call}, previous_response={previous_response}, replay_safe={replay_safe}"
+        );
     }
     assert_eq!(
         backup_state.requests.lock().unwrap().len(),
         usize::from(fallback)
     );
     let events = events.lock().unwrap();
+    let events = usage_observations::physical_attempts(&events);
     assert_eq!(events.len(), owner_attempts + usize::from(fallback));
     assert_eq!(
         events[1].routing.as_ref().unwrap().reason,

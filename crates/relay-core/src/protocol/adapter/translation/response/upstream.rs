@@ -33,6 +33,11 @@ pub(in crate::protocol::adapter::translation) fn decode(
         native_output: Vec::new(),
     };
     match protocol {
+        WireApi::GeminiInteractions => {
+            return Err(AdapterError::parameter_unsupported_for(
+                "gemini_interactions.native_only",
+            ))
+        }
         WireApi::ChatCompletions => {
             decode_chat_completion(upstream_response, protocol, &mut response, invalid)?
         }

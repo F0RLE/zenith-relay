@@ -36,8 +36,13 @@ pub(super) fn function(tool: &Function, protocol: WireApi) -> AdapterResult<Valu
     })
 }
 
-pub(super) fn tool_choice(choice: &ToolChoice, protocol: WireApi) -> Value {
-    match protocol {
+pub(super) fn tool_choice(choice: &ToolChoice, protocol: WireApi) -> AdapterResult<Value> {
+    Ok(match protocol {
+        WireApi::GeminiInteractions => {
+            return Err(AdapterError::parameter_unsupported_for(
+                "gemini_interactions.native_only",
+            ))
+        }
         WireApi::Responses | WireApi::ChatCompletions => match choice {
             ToolChoice::Auto => "auto".into(),
             ToolChoice::None => "none".into(),
@@ -57,7 +62,7 @@ pub(super) fn tool_choice(choice: &ToolChoice, protocol: WireApi) -> Value {
             ToolChoice::Auto => json!({"mode":"AUTO"}), ToolChoice::None => json!({"mode":"NONE"}), ToolChoice::Required => json!({"mode":"ANY"}),
             ToolChoice::Function(name) => json!({"mode":"ANY","allowedFunctionNames":[name]}),
         }}),
-    }
+    })
 }
 
 pub(super) fn output_format(
@@ -67,6 +72,11 @@ pub(super) fn output_format(
     protocol: WireApi,
 ) -> AdapterResult<()> {
     match protocol {
+        WireApi::GeminiInteractions => {
+            return Err(AdapterError::parameter_unsupported_for(
+                "gemini_interactions.native_only",
+            ))
+        }
         WireApi::Responses | WireApi::ChatCompletions => {
             let mut format_value = match format {
                 OutputFormat::JsonObject => json!({"type":"json_object"}),
@@ -131,7 +141,7 @@ pub(super) fn output_format(
             {
                 generation.insert(
                     "responseJsonSchema".into(),
-                    super::super::schema::to_gemini(&described_schema(
+                    super::super::schema::to_gemini_owned(described_schema(
                         schema,
                         description.as_deref(),
                     ))?,
@@ -325,6 +335,11 @@ pub(super) fn content_block(block: &Block, protocol: WireApi, role: Role) -> Ada
             _ => json!({"type":"text","text":text}),
         },
         Block::Image { url, detail } => match protocol {
+            WireApi::GeminiInteractions => {
+                return Err(AdapterError::parameter_unsupported_for(
+                    "gemini_interactions.native_only",
+                ))
+            }
             WireApi::Responses => {
                 let mut responses_image = json!({"type":"input_image","image_url":url});
                 if let Some(detail) = detail {
@@ -371,6 +386,11 @@ pub(super) fn content_block(block: &Block, protocol: WireApi, role: Role) -> Ada
             }
             let data = url.strip_prefix("data:application/pdf;base64,");
             match protocol {
+                WireApi::GeminiInteractions => {
+                    return Err(AdapterError::parameter_unsupported_for(
+                        "gemini_interactions.native_only",
+                    ))
+                }
                 WireApi::Responses => {
                     let mut file = json!({"type":"input_file"});
                     file[if data.is_some() {

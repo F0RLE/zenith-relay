@@ -34,7 +34,16 @@ pub(super) fn gateway_error_event(
     request_id: Option<&str>,
     stream_id: Option<&str>,
 ) -> Value {
-    let code = super::super::errors::api_error_code(failure.category);
+    // Responses clients recognize this code and can resend their complete
+    // history after reconnecting. Keep the Relay category in diagnostics and
+    // never turn an ownership mismatch into permission to reset a conversation.
+    let local_history_missing = failure.origin == ErrorOrigin::Relay
+        && failure.category == error_codes::ADAPTER_CONTINUATION_MISSING;
+    let code = super::super::errors::api_error_code(if local_history_missing {
+        error_codes::UPSTREAM_PREVIOUS_RESPONSE_NOT_FOUND
+    } else {
+        failure.category
+    });
     let origin = failure.origin.for_category(failure.category);
     let message = failure
         .upstream_error
@@ -51,7 +60,7 @@ pub(super) fn gateway_error_event(
             ),
             "code": code,
             "message": origin.prefix_message(message),
-            "param": null,
+            "param": local_history_missing.then_some("previous_response_id"),
             "zenith_relay": {
                 "origin": origin.as_str(),
                 "category": failure.category,
@@ -228,6 +237,14 @@ impl GatewayFailure {
             retry_at_ms: None,
             upstream_error: None,
             origin,
+        }
+    }
+
+    pub(super) fn websocket_slow_handshake(origin: ErrorOrigin) -> Self {
+        Self {
+            category: error_codes::UPSTREAM_WEBSOCKET_SLOW_HANDSHAKE,
+            message: "optional WebSocket handshake exceeded its budget; using HTTP streaming",
+            ..Self::websocket_http_fallback(origin)
         }
     }
 

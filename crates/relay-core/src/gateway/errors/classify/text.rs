@@ -432,7 +432,7 @@ fn server_error_text(_status: StatusCode, text: &str) -> Option<&'static str> {
 
 fn edge_challenge(status: StatusCode, text: &str) -> Option<&'static str> {
     (status == StatusCode::FORBIDDEN
-        && text_has_any(
+        && (text_has_any(
             text,
             &[
                 "cf-mitigated",
@@ -442,7 +442,7 @@ fn edge_challenge(status: StatusCode, text: &str) -> Option<&'static str> {
                 "attention required",
                 "just a moment",
             ],
-        ))
+        ) || (text.trim_start().starts_with('<') && text.contains("error code: 1010"))))
     .then_some(error_codes::UPSTREAM_EDGE_CHALLENGE)
 }
 

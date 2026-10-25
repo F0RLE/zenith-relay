@@ -3,6 +3,7 @@ use super::*;
 fn with_format(client: WireApi, format: Value) -> Value {
     let mut request = input(client);
     match client {
+        WireApi::GeminiInteractions => unreachable!("native-only fixture is separate"),
         WireApi::Responses => request["text"] = json!({"format":format}),
         WireApi::ChatCompletions => request["response_format"] = format,
         WireApi::Messages => request["output_config"] = json!({"format":format}),

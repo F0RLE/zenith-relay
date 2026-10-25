@@ -2,6 +2,140 @@ use super::*;
 use serde_json::json;
 
 #[tokio::test]
+async fn final_websocket_continuation_rejection_is_recorded_without_dispatch() {
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = events.clone();
+    let runtime = runtime_with_events(Arc::new(move |event| {
+        captured.lock().unwrap().push(event);
+    }));
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let mut route = runtime
+        .executor_route(
+            "source",
+            "upstream-model",
+            &key.scope_snapshot(),
+            WEBSOCKET_PROTOCOLS,
+            false,
+        )
+        .unwrap();
+    route.client_transport = crate::UsageTransport::Websocket;
+    let now = crate::unix_time_ms();
+    runtime.bind_response_route_affinity(Some("resp_synthetic"), &route, now);
+    let request = ClientRequest::parse(
+        &runtime,
+        &key,
+        &HeaderMap::new(),
+        &serde_json::to_vec(&json!({
+            "type": "response.create",
+            "model": "relay/upstream-model",
+            "previous_response_id": "resp_synthetic",
+            "input": "private-synthetic-context"
+        }))
+        .unwrap(),
+    )
+    .unwrap_or_else(|error| panic!("request should parse: {}", error.message));
+    let (_, admitted) = request
+        .compatible_routes(&runtime, &key)
+        .unwrap_or_else(|error| panic!("request should be admitted: {}", error.message));
+    assert!(admitted.contains_key("source"));
+    let authorization = runtime
+        .prepare_route_authorization(&route, now)
+        .await
+        .unwrap();
+    request
+        .observed_payload_for(&runtime, &mut route, &HeaderMap::new(), &authorization)
+        .unwrap_or_else(|error| panic!("original route should prepare: {}", error.message));
+    assert!(events.lock().unwrap().is_empty());
+
+    // The final guard must still reject a route differing from the admitted
+    // predecessor, and report the local failure even before a send/usage event.
+    route.source_model = "other-model".into();
+    let failure = request
+        .observed_payload_for(&runtime, &mut route, &HeaderMap::new(), &authorization)
+        .err()
+        .expect("a different model must not inherit the opaque predecessor");
+    assert_eq!(failure.category, "adapter_continuation_mismatch");
+    assert_eq!(request.budget.dispatches(), 0);
+    let events = events.lock().unwrap();
+    assert_eq!(
+        events.len(),
+        1,
+        "the final rejection must reach usage diagnostics"
+    );
+    let event = &events[0];
+    assert_eq!(event.request_id, request.request_id);
+    assert_eq!(event.source_id, "relay");
+    assert_eq!(event.error_category.as_deref(), Some(failure.category));
+    assert_eq!(event.transport, crate::UsageTransport::Websocket);
+    assert_eq!(event.attempt, 0);
+    assert_eq!(event.http_status, 400);
+    assert!(!event.success);
+    assert!(event.candidate_id.is_none());
+    assert!(event.account_id.is_none());
+    assert!(event.routing.is_none());
+    assert!(event.input_tokens.is_none());
+    assert!(event.output_tokens.is_none());
+    assert!(event.upstream_error.is_none());
+    assert!(event.cooldown_scope.is_none());
+}
+
+#[test]
+fn websocket_continuation_admission_rejection_is_recorded_once() {
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = events.clone();
+    let runtime = runtime_with_events(Arc::new(move |event| {
+        captured.lock().unwrap().push(event);
+    }));
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let mut original_route = runtime
+        .executor_route(
+            "source",
+            "upstream-model",
+            &key.scope_snapshot(),
+            WEBSOCKET_PROTOCOLS,
+            false,
+        )
+        .unwrap();
+    original_route.source_model = "other-model".into();
+    runtime.bind_tool_call_route_affinity(
+        &key.id,
+        "call_synthetic",
+        &original_route,
+        crate::unix_time_ms(),
+    );
+    let request = ClientRequest::parse(
+        &runtime,
+        &key,
+        &HeaderMap::new(),
+        &serde_json::to_vec(&json!({
+            "type": "response.create",
+            "model": "relay/upstream-model",
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "call_synthetic",
+                "output": "private-synthetic-result"
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap_or_else(|error| panic!("request should parse: {}", error.message));
+    let failure = request
+        .compatible_routes(&runtime, &key)
+        .err()
+        .expect("an orphan result must retain its original model");
+    assert_eq!(failure.category, "adapter_continuation_mismatch");
+    assert_eq!(request.budget.dispatches(), 0);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].request_id, request.request_id);
+    assert_eq!(events[0].error_category.as_deref(), Some(failure.category));
+}
+
+#[tokio::test]
 async fn prepared_websocket_diagnostics_match_the_exact_sent_body() {
     let runtime = runtime();
     let key = runtime

@@ -30,9 +30,9 @@ pub use model::{
     apply_model_speed_summary, apply_pool_model_configuration,
     apply_pool_model_configuration_with_context, member_model_catalog, model_has_api_source_route,
     pool_candidate_count, pooled_source_runtime_available, source_runtime_available,
-    GatewaySummary, ModelCatalogIdentity, ModelSummary, PoolModelConfigurationInput,
-    SetModelContextInput, SetModelEnabledInput, SetModelOrderInput, SetModelReasoningInput,
-    SetModelServiceTierInput,
+    GatewaySummary, ModelCatalogIdentity, ModelDisplayProjection, ModelSummary,
+    PoolModelConfigurationInput, SetModelContextInput, SetModelEnabledInput, SetModelOrderInput,
+    SetModelReasoningInput, SetModelServiceTierInput,
 };
 pub use model_policy::{
     canonical_pool_model_id, complete_model_display_order, configured_source_model_ids,
@@ -47,7 +47,7 @@ pub use routing::{
 };
 pub use usage::{
     assign_bucket_equivalents, merge_model_equivalents, UsageBucket, UsageGroup, UsagePage,
-    UsageQuery, UsageRange, UsageSummary, UsageTokenBreakdown, UsageTotals,
+    UsageQuery, UsageRange, UsageSummary, UsageTokenBreakdown, UsageTotals, UsageWorkload,
 };
 
 use serde::{ser::SerializeStruct, Deserialize, Deserializer, Serialize, Serializer};

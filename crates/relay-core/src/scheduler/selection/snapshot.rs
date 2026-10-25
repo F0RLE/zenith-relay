@@ -107,6 +107,18 @@ pub struct RoutingDiagnostics {
     /// The executor's actual disposition, never inferred from HTTP status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt_outcome: Option<AttemptOutcome>,
+    /// Logical execution timing; the event's latency/TTFT still describe its send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timing: Option<RequestTiming>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestTiming {
+    pub duration_ms: u64,
+    pub ttft_ms: Option<u64>,
+    /// A request-loop finalization, not another physical attempt or quota observation.
+    pub projection_only: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -127,7 +139,7 @@ impl PoolScheduler {
         self.runtime_order_for(
             &CandidateScope::default(),
             &crate::ModelRules::default(),
-            &WireApi::ALL,
+            &WireApi::ALL_NATIVE,
             now_ms,
         )
     }
@@ -307,33 +319,37 @@ impl PoolScheduler {
                     })
             })
             .collect::<BTreeSet<_>>();
-        // The cloned snapshot is fixed: prepare admission once per route,
-        // rather than rebuilding every candidate for each fallback rank.
+        // The cloned snapshot is fixed: prepare admission once per route, but
+        // only when reached. Divergent model routes often make the first rank
+        // ambiguous, so do not prepare the rest of the catalog in that case.
         let mut requests = Vec::new();
-        for (model, protocol) in &routes {
-            let Some(mut request) = self.prepare_rotation_request(
-                &SelectionRequest {
-                    model,
-                    allowed_protocols: &[*protocol],
-                    scope,
-                    tried: &HashSet::new(),
-                    response_affinity_key: None,
-                    prompt_affinity_key: None,
-                    now_ms,
-                },
-                RotationOperation::Text,
-            ) else {
-                return Vec::new();
-            };
-            if let Some(allowed) = &mut request.allowed_candidates {
-                allowed.retain(|id| self.lane_allows(&self.candidates[id], InFlightLane::Text));
-            }
-            requests.push(request);
-        }
         let mut order = Vec::new();
         loop {
             let mut selected_candidate_id: Option<String> = None;
-            for request in &requests {
+            for (route_index, (model, protocol)) in routes.iter().enumerate() {
+                if route_index == requests.len() {
+                    let Some(mut request) = self.rotation_request_from_synced_state(
+                        &SelectionRequest {
+                            model,
+                            allowed_protocols: &[*protocol],
+                            scope,
+                            tried: &HashSet::new(),
+                            response_affinity_key: None,
+                            prompt_affinity_key: None,
+                            now_ms,
+                        },
+                        RotationOperation::Text,
+                    ) else {
+                        return order;
+                    };
+                    if let Some(allowed) = &mut request.allowed_candidates {
+                        allowed.retain(|id| {
+                            self.lane_allows(&self.candidates[id], InFlightLane::Text)
+                        });
+                    }
+                    requests.push(request);
+                }
+                let request = &requests[route_index];
                 let Some(selected) = self.rotation.select(request, now_ms) else {
                     return order;
                 };
@@ -387,6 +403,7 @@ impl PoolScheduler {
             transport: None,
             cache_context: None,
             attempt_outcome: None,
+            request_timing: None,
         })
     }
 }

@@ -96,6 +96,14 @@ fn batch_failures_keep_safe_causes_and_never_expand_a_partial_batch() {
             "relay-tool-batch-v1\n[{\"path\":\"synthetic-private\nvalue\"},",
             "json",
         ),
+        (
+            "relay-tool-batch-v1\n[{\"path\":\"synthetic-private\"},{\"path\":\"b\"}]]",
+            "json",
+        ),
+        (
+            "relay-tool-batch-v1\n[{\"path\":\"synthetic-private\"},{\"path\":\"b\"}]{}",
+            "json",
+        ),
     ] {
         let mut item = pair();
         item["arguments"] = json!({"references":["inspect","inspect"],"code":code})

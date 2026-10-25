@@ -294,6 +294,17 @@ pub(super) async fn complete_buffered_response(
             );
         }
     }
+    if completed && adapter_is_passthrough && client_wire_api == WireApi::GeminiInteractions {
+        if let Ok(response) = serde_json::from_slice::<Value>(&bytes) {
+            crate::gateway::continuation::interactions::bind_response(
+                runtime,
+                &key.id,
+                route,
+                &response,
+                now_ms(),
+            );
+        }
+    }
     if completed && client_wire_api == WireApi::Responses {
         bind_responses_turn(
             runtime,

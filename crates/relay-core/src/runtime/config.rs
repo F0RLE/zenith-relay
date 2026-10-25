@@ -335,17 +335,17 @@ pub struct GatewayRuntimeOptions {
     /// Host-owned opt-in for detailed request telemetry; never changes execution.
     pub diagnostics_enabled: fn() -> bool,
     pub tool_policy: crate::ToolPolicy,
-    pub request_timezone: crate::RequestTimezonePolicy,
     pub max_retry_candidates: usize,
     pub pool_routing: Option<crate::PoolRoutingPolicy>,
     pub hidden_models: Vec<String>,
     pub default_service_tier: DefaultServiceTier,
     pub quota_stale_after_ms: u64,
-    /// Optional text model used as the Responses image-generation bridge.
-    /// `None` selects the cheapest known compatible model per account.
+    /// Host restriction: native Codex credentials may execute Images only.
+    /// Independent of editable model rules and preserved across catalog refreshes.
+    pub native_codex_images_only: bool,
+    /// Legacy import compatibility only. Native Images never selects a text model.
     pub image_base_model: Option<String>,
-    /// Immutable pricing snapshot used only to rank the automatic image
-    /// bridge model. A missing or empty snapshot never blocks runtime build.
+    /// Legacy API compatibility; native Images routing does not consult pricing.
     pub image_pricing_catalog: Option<Arc<PricingCatalog>>,
     /// Advisory presentation metadata. It only orders model-list responses;
     /// admission and routing remain owned by the runtime registry.
@@ -369,6 +369,7 @@ impl fmt::Debug for GatewayRuntimeOptions {
             .field("hidden_models", &self.hidden_models)
             .field("default_service_tier", &self.default_service_tier)
             .field("quota_stale_after_ms", &self.quota_stale_after_ms)
+            .field("native_codex_images_only", &self.native_codex_images_only)
             .field("image_base_model", &self.image_base_model)
             .field(
                 "image_pricing_catalog",
@@ -395,12 +396,12 @@ impl Default for GatewayRuntimeOptions {
         Self {
             diagnostics_enabled: || false,
             tool_policy: crate::ToolPolicy::default(),
-            request_timezone: crate::RequestTimezonePolicy::default(),
             max_retry_candidates: 3,
             pool_routing: None,
             hidden_models: Vec::new(),
             default_service_tier: DefaultServiceTier::Standard,
             quota_stale_after_ms: crate::QUOTA_STALE_AFTER_MS,
+            native_codex_images_only: false,
             image_base_model: None,
             image_pricing_catalog: None,
             model_metadata_catalog: None,

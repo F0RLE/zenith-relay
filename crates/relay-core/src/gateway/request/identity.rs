@@ -4,6 +4,8 @@
 use axum::http::HeaderMap;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+mod history;
+pub(in crate::gateway) use history::history_affinity_fingerprint;
 
 const SESSION_HEADERS: &[&str] = &[
     "x-codex-session-id",
@@ -66,10 +68,10 @@ pub(in crate::gateway) fn client_request_identity(
         .or_else(|| single_header(headers, "thread-id").and_then(valid_identity))
         .or_else(|| identity_field(request, "thread_id"));
     let fallback = root.or_else(|| header_identity(headers, FALLBACK_HEADERS));
-    let affinity_id = fallback
+    let mut affinity_id = fallback
         .map(|(kind, value)| fingerprint(kind, value))
         .or_else(|| thread.map(|value| fingerprint("thread-id", value)));
-    let context_id = match (root, thread) {
+    let mut context_id = match (root, thread) {
         // Preserve the old session fingerprint for single-thread clients.
         (Some((_, session)), Some(thread)) if session != thread => Some(fingerprint(
             "thread",
@@ -78,6 +80,38 @@ pub(in crate::gateway) fn client_request_identity(
         (None, Some(thread)) => Some(fingerprint("thread-id", thread)),
         _ => affinity_id.clone(),
     };
+    // Observed Claude Code metadata, not an Anthropic account identity. A
+    // child/parent pair is only a soft hint; never replace an explicit Codex root.
+    if logical_field("session_id").is_none()
+        && header_identity(
+            headers,
+            &[
+                "x-codex-session-id",
+                "x-session-id",
+                "session_id",
+                "session-id",
+            ],
+        )
+        .is_none()
+    {
+        if let Some(metadata) = request
+            .pointer("/metadata/user_id")
+            .and_then(Value::as_str)
+            .and_then(turn_metadata)
+        {
+            if let (Some(child), Some(parent)) = (
+                identity_field(&metadata, "session_id"),
+                identity_field(&metadata, "parent_session_id"),
+            ) {
+                let header_child =
+                    single_header(headers, "x-claude-code-session-id").and_then(valid_identity);
+                if child != parent && header_child.is_none_or(|header| header == child) {
+                    context_id = Some(fingerprint("x-claude-code-session-id", child));
+                    affinity_id = Some(fingerprint("x-claude-code-session-id", parent));
+                }
+            }
+        }
+    }
     ClientRequestIdentity {
         context_id,
         affinity_id,

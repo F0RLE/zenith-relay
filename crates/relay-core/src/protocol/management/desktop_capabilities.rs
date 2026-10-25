@@ -5,12 +5,16 @@ use std::collections::BTreeSet;
 #[serde(rename_all = "camelCase")]
 pub struct DesktopCapabilities {
     pub features: BTreeSet<String>,
+    /// Metadata for future connection/pool UI; it never grants execution rights.
+    #[serde(default)]
+    pub account_connectors: Vec<crate::providers::connectors::AccountConnectorDescriptor>,
 }
 
 impl DesktopCapabilities {
     pub fn current() -> Self {
         let features = [
             "accounts",
+            "account_connectors_v1",
             "account_trash_v1",
             "account_batch_import",
             "account_batch_import_creation_status",
@@ -19,6 +23,7 @@ impl DesktopCapabilities {
             "account_identity_reveal",
             "sources",
             "source_protocols_v1",
+            "gemini_interactions_native_v1",
             "quota",
             "models",
             "model_order_reset",
@@ -38,12 +43,14 @@ impl DesktopCapabilities {
             "route_recovery_v1",
             "block_degraded_routes",
             "tool_policy_v1",
-            "request_timezone_v1",
             "images",
         ]
         .into_iter()
         .map(String::from)
         .collect();
-        Self { features }
+        Self {
+            features,
+            account_connectors: crate::providers::connectors::available_account_connectors(),
+        }
     }
 }

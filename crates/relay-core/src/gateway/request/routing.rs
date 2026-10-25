@@ -2,56 +2,6 @@ use super::*;
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub(in crate::gateway) fn claude_desktop_effort_override(
-    runtime: &GatewayRuntime,
-    key: &crate::runtime::AuthenticatedKey,
-    model: &str,
-    client: WireApi,
-    request: &Value,
-) -> Option<String> {
-    const LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
-    if client != WireApi::Messages
-        || !request
-            .get("model")
-            .and_then(Value::as_str)
-            .is_some_and(crate::catalog::is_claude_desktop_reasoning_model_alias)
-        || request
-            .pointer("/thinking/type")
-            .is_some_and(|kind| kind != "adaptive")
-        || request.pointer("/thinking/budget_tokens").is_some()
-    {
-        return None;
-    }
-    let requested = request.pointer("/output_config/effort")?.as_str()?;
-    if !LEVELS.contains(&requested) {
-        return None;
-    }
-    let policy = runtime.model_reasoning_policy_levels(model);
-    let levels = runtime
-        .client_reasoning_levels(key, model, client)
-        .into_iter()
-        .filter(|level| LEVELS.contains(&level.as_str()))
-        .filter(|level| {
-            policy
-                .as_ref()
-                .is_none_or(|allowed| allowed.contains(level))
-        })
-        .collect::<Vec<_>>();
-    // Resolve once across configured routes, so pool order or cooldown cannot
-    // downgrade an exact choice offered by another route.
-    let requested_rank = crate::reasoning_level_rank(requested);
-    let effective = levels
-        .iter()
-        .filter(|level| crate::reasoning_level_rank(level) <= requested_rank)
-        .max_by_key(|level| crate::reasoning_level_rank(level))
-        .or_else(|| {
-            levels
-                .iter()
-                .min_by_key(|level| crate::reasoning_level_rank(level))
-        })?;
-    (effective != requested).then(|| effective.clone())
-}
-
 pub(in crate::gateway) fn requested_reasoning_effort(
     request: &Value,
     wire_api: WireApi,
@@ -61,6 +11,7 @@ pub(in crate::gateway) fn requested_reasoning_effort(
         WireApi::ChatCompletions => request.get("reasoning_effort"),
         WireApi::Messages => request.pointer("/output_config/effort"),
         WireApi::Gemini => request.pointer("/generationConfig/thinkingConfig/thinkingLevel"),
+        WireApi::GeminiInteractions => request.pointer("/generation_config/thinking_level"),
     };
     effort
         .and_then(Value::as_str)
@@ -75,6 +26,7 @@ pub(in crate::gateway) fn candidate_protocols(wire_api: WireApi) -> &'static [Wi
     // All other protocols follow so a model with only a non-native route
     // is still reachable through the appropriate SourceAdapter bridge.
     match wire_api {
+        WireApi::GeminiInteractions => &[WireApi::GeminiInteractions],
         WireApi::Responses => &[
             WireApi::Responses,
             WireApi::Messages,

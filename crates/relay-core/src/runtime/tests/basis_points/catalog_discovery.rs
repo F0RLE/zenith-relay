@@ -2,6 +2,7 @@ use super::*;
 
 mod batch;
 mod identity;
+mod images;
 mod lookup_recovery;
 mod streaming;
 mod text_only;
@@ -142,6 +143,30 @@ async fn catalog_discovery_uses_one_budget_and_preserves_client_tool_roundtrip()
             assert!(events[1].success);
             let sent = crate::poison::mutex(&server.state.generation_bodies);
             for (event, body) in events.iter().zip(sent.iter()) {
+                let payload = event
+                    .routing
+                    .as_ref()
+                    .unwrap()
+                    .transport
+                    .as_ref()
+                    .and_then(|transport| transport.request_payload.as_ref());
+                assert_eq!(payload.is_some(), debug);
+                if let Some(payload) = payload {
+                    assert_eq!(payload.mode, crate::usage::RequestPayloadMode::Full);
+                    assert_eq!(
+                        payload.full_request_reason,
+                        Some(crate::usage::FullRequestReason::BasisPointsTransport)
+                    );
+                    assert_eq!(
+                        payload.json_bytes,
+                        serde_json::to_vec(body).unwrap().len() as u64
+                    );
+                    assert_eq!(payload.body_bytes, payload.json_bytes);
+                    assert_eq!(
+                        payload.content_encoding,
+                        crate::usage::RequestContentEncoding::Identity
+                    );
+                }
                 let context = event.routing.as_ref().unwrap().cache_context.as_ref();
                 assert_eq!(context.is_some(), debug);
                 if let Some(context) = context {

@@ -1,7 +1,7 @@
 //! A complete trusted catalog with a smaller, deterministic model-facing view.
 use super::catalog::{client_tool_call_name, selected_tools, ClientTool};
 use super::prepare::describe_tools;
-use super::schema::{parameter_schema, prompt_schema, PROMPT_SCHEMA_NOTATION};
+use super::schema::{parameter_schema, PROMPT_SCHEMA_NOTATION};
 use crate::protocol::AdapterError;
 use crate::usage::BasisPointsCatalogDiagnostics;
 use serde_json::Value;
@@ -46,7 +46,7 @@ fn discovery_for_refs(tools: &[&ClientTool], request: &Value) -> bool {
         Ok(CatalogMode::Auto) if tools.len() >= DISCOVERY_MIN_TOOLS => {
             let mut catalog_bytes = 0;
             tools.iter().any(|tool| {
-                catalog_bytes += crate::tool_policy::serialized_bytes(&tool.spec);
+                catalog_bytes += tool.serialized_spec.len() as u64;
                 catalog_bytes >= DISCOVERY_MIN_CATALOG_BYTES
             })
         }
@@ -120,6 +120,11 @@ pub(super) fn describe_catalog(tools: &[&ClientTool], request: &Value) -> String
          After lookup, call the real client tool using its original identity. No lookup is needed for a text-only answer. \
          Catalog lookups may share a response with client calls; Relay consumes only the local lookups. Tool index:\n"
     );
+    text.push_str(&catalog_index(tools));
+    text
+}
+
+pub(super) fn catalog_index(tools: &[&ClientTool]) -> String {
     let mut index: BTreeMap<&str, BTreeMap<&str, Vec<&str>>> = BTreeMap::new();
     for tool in tools {
         index
@@ -134,8 +139,7 @@ pub(super) fn describe_catalog(tools: &[&ClientTool], request: &Value) -> String
             names.sort_unstable();
         }
     }
-    text.push_str(&serde_json::json!(index).to_string());
-    text
+    serde_json::json!(index).to_string()
 }
 
 pub(super) fn loaded_contracts(
@@ -174,8 +178,7 @@ pub(super) fn loaded_schema_bytes(tools: &[ClientTool], loaded: &BTreeSet<String
     tools
         .iter()
         .filter(|tool| loaded.contains(&tool.key()))
-        .filter_map(parameter_schema)
-        .map(|schema| prompt_schema(schema).len() as u64)
+        .map(|tool| tool.schema_bytes(false))
         .sum()
 }
 
@@ -195,22 +198,11 @@ pub(super) fn diagnostics(tools: &[ClientTool], request: &Value) -> BasisPointsC
             "compact"
         }
         .to_string(),
-        full_schema_bytes: tools
-            .iter()
-            .filter_map(parameter_schema)
-            .map(crate::tool_policy::serialized_bytes)
-            .sum(),
+        full_schema_bytes: tools.iter().map(|tool| tool.schema_bytes(true)).sum(),
         rendered_schema_bytes: tools
             .iter()
             .filter(|tool| !discovery || loaded.contains(&tool.key()))
-            .filter_map(parameter_schema)
-            .map(|schema| {
-                if full {
-                    crate::tool_policy::serialized_bytes(schema)
-                } else {
-                    prompt_schema(schema).len() as u64
-                }
-            })
+            .map(|tool| tool.schema_bytes(full))
             .sum(),
         catalog_prompt_bytes: describe_catalog(&ordered, request).len() as u64,
         loaded_tool_count: if discovery { loaded.len() } else { tools.len() }.min(u16::MAX as usize)

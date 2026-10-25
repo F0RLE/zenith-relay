@@ -102,7 +102,8 @@ impl RequestToolPolicy {
     fn record(&mut self, policy_result: crate::tool_policy::ToolPolicyResult) {
         // Keep the configured mode visible on every attempt.
         self.diagnostics.policy_mode = Some(self.configured_mode);
-        // Capture the exact post-policy Value that will be serialized. Do not
+        // Capture the post-policy catalog before transport encoding (BPS may
+        // embed only loaded contracts as prompt text). Do not
         // deserialize the entire conversation again just to count its catalog.
         // Usage rows describe one attempt, not the maximum across other routes.
         self.diagnostics.forwarded_tool_count = policy_result.after.count;

@@ -1,3 +1,5 @@
+use super::super::{describe_cache, try_with_cache};
+use crate::gateway::CacheMemoryDiagnostics;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -20,7 +22,39 @@ struct ValidatorCache {
     entries: HashMap<[u8; 32], Entry>,
 }
 
+static CACHE: OnceLock<Mutex<ValidatorCache>> = OnceLock::new();
+
+pub(in crate::gateway::execution::basis_points) fn release_expired_cache_entries() {
+    // Destruction of compiled validators must not hold the request-path lock.
+    drop(try_with_cache(&CACHE, |cache| {
+        cache.take_expired(Instant::now())
+    }));
+}
+
+pub(in crate::gateway::execution::basis_points) fn cache_memory_diagnostics(
+) -> CacheMemoryDiagnostics {
+    describe_cache(
+        &CACHE,
+        "schema_validators",
+        MAX_RETAINED_SCHEMA_BYTES,
+        "schema_input",
+        |cache| {
+            (
+                cache.entries.len(),
+                cache.entries.values().map(|entry| entry.schema_bytes).sum(),
+            )
+        },
+    )
+}
+
 impl ValidatorCache {
+    fn take_expired(&mut self, now: Instant) -> Vec<Entry> {
+        self.entries
+            .extract_if(|_, entry| now.saturating_duration_since(entry.last_used) >= IDLE_TTL)
+            .map(|(_, entry)| entry)
+            .collect()
+    }
+
     fn get(&mut self, key: &[u8; 32], now: Instant) -> Option<Arc<jsonschema::Validator>> {
         let entry = self.entries.get_mut(key)?;
         if now.duration_since(entry.last_used) >= IDLE_TTL {
@@ -56,7 +90,6 @@ impl ValidatorCache {
 pub(in crate::gateway::execution::basis_points) fn validator(
     schema: &Value,
 ) -> Result<Arc<jsonschema::Validator>, jsonschema::ValidationError<'_>> {
-    static CACHE: OnceLock<Mutex<ValidatorCache>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(ValidatorCache::default()));
     let serialized = serde_json::to_vec(schema)
         .ok()

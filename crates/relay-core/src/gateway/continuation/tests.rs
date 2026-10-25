@@ -36,6 +36,55 @@ fn runtime_for(wire_api: WireApi) -> GatewayRuntime {
 }
 
 #[test]
+fn interactions_continuations_require_the_original_key_model_and_exact_route() {
+    let runtime = runtime_for(WireApi::GeminiInteractions);
+    let route = runtime
+        .executor_route(
+            "source",
+            "model",
+            &Default::default(),
+            &[WireApi::GeminiInteractions],
+            false,
+        )
+        .unwrap();
+    let request =
+        json!({"model":"model","previous_interaction_id":"synthetic-interaction","input":"next"});
+    assert!(interactions::prepare(&runtime, "key", &request, 10).is_err());
+    interactions::bind_response(
+        &runtime,
+        "key",
+        &route,
+        &json!({"id":"synthetic-interaction","status":"completed","outputs":[]}),
+        10,
+    );
+    assert!(interactions::prepare(&runtime, "key", &request, 10).is_ok());
+    assert!(interactions::prepare(&runtime, "other-key", &request, 10).is_err());
+    assert!(runtime
+        .validate_continuation_route(&route, "key", &request, 10)
+        .is_ok());
+    let mut changed = route.clone();
+    changed.source_model = "other-model".into();
+    assert!(runtime
+        .validate_continuation_route(&changed, "key", &request, 10)
+        .is_err());
+    let other = runtime
+        .executor_route(
+            "other-source",
+            "model",
+            &Default::default(),
+            &[WireApi::GeminiInteractions],
+            false,
+        )
+        .unwrap();
+    assert!(runtime
+        .validate_continuation_route(&other, "key", &request, 10)
+        .is_err());
+    assert!(runtime
+        .validate_continuation_route(&route, "other-key", &request, 10)
+        .is_err());
+}
+
+#[test]
 fn gemini_continuations_keep_the_original_owner_caller_model_and_contents() {
     let runtime = runtime_for(WireApi::Gemini);
     let original = json!({"model":"model","contents":[{"role":"user","parts":[{"text":"Original prompt"}]}],"continuationToken":"c3ludGhldGlj"});
@@ -88,6 +137,66 @@ fn gemini_continuations_keep_the_original_owner_caller_model_and_contents() {
         assert!(gemini::prepare(&runtime, "key", &changed, 10).is_err());
     }
     assert_eq!(request, original);
+}
+
+#[test]
+fn saved_predecessor_disambiguates_a_reused_tool_call_id() {
+    let runtime = runtime();
+    let route = |id| {
+        runtime
+            .executor_route(
+                id,
+                "model",
+                &Default::default(),
+                &[WireApi::Responses],
+                false,
+            )
+            .unwrap()
+    };
+    let owner = route("source");
+    let other = route("other-source");
+    let response = json!({"id":"resp_owned","status":"completed","output":[{
+        "type":"function_call","call_id":"call_reused","name":"lookup","arguments":"{}"
+    }]});
+    runtime.capture_native_responses_replay(
+        "key",
+        "source",
+        &json!({"input":"Synthetic first turn"}),
+        "model",
+        &response,
+        10,
+    );
+    runtime.bind_response_route_affinity(Some("resp_owned"), &owner, 10);
+    // Another conversation can report the same provider-supplied call ID.
+    // Its global hint must not override this response's validated history.
+    runtime.bind_tool_call_route_affinity("key", "call_reused", &other, 11);
+    let request = json!({
+        "model":"model","previous_response_id":"resp_owned",
+        "input":[{"type":"function_call_output","call_id":"call_reused","output":"Synthetic result"}]
+    });
+    assert!(runtime
+        .validate_continuation_route(&owner, "key", &request, 12)
+        .is_ok());
+    assert!(runtime
+        .validate_continuation_route(&other, "key", &request, 12)
+        .is_err());
+    runtime.bind_tool_call_route_affinity("other-key", "call_reused", &other, 11);
+    assert!(runtime
+        .validate_continuation_route(&owner, "other-key", &request, 12)
+        .is_err());
+
+    let mut orphan = request.clone();
+    orphan["input"][0]["call_id"] = json!("call_foreign");
+    runtime.bind_tool_call_route_affinity("key", "call_foreign", &other, 11);
+    assert!(runtime
+        .validate_continuation_route(&owner, "key", &orphan, 12)
+        .is_err());
+    runtime.bind_response_route_affinity(Some("resp_missing_history"), &owner, 10);
+    let mut missing = request;
+    missing["previous_response_id"] = json!("resp_missing_history");
+    assert!(runtime
+        .validate_continuation_route(&owner, "key", &missing, 12)
+        .is_err());
 }
 
 #[test]

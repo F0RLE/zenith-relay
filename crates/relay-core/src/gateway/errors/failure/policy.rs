@@ -82,6 +82,7 @@ pub(crate) fn failure_category_affects_account_state(category: &str) -> bool {
         && !matches!(
             category,
             error_codes::UPSTREAM_MODEL_NOT_FOUND
+                | error_codes::UPSTREAM_EDGE_CHALLENGE
                 | error_codes::UPSTREAM_MODEL_UNSUPPORTED
                 | error_codes::UPSTREAM_MODEL_UNAVAILABLE
                 | error_codes::UPSTREAM_USAGE_NOT_INCLUDED
@@ -112,6 +113,7 @@ pub(crate) fn failure_category_is_request_terminal(category: &str) -> bool {
             | error_codes::UPSTREAM_PAYLOAD_TOO_LARGE
             | error_codes::UPSTREAM_UNSUPPORTED_REQUEST
             | error_codes::UPSTREAM_WEBSOCKET_UNSUPPORTED
+            | error_codes::UPSTREAM_WEBSOCKET_HANDSHAKE_REJECTED
             | error_codes::UPSTREAM_INVALID_REQUEST
     )
 }

@@ -39,6 +39,8 @@ pub struct RequestBudget {
     admission_stopped: bool,
     retry_started_at: Option<tokio::time::Instant>,
     retry_deadline: Option<tokio::time::Instant>,
+    persistent_retry: bool,
+    rate_limit_deadline: Option<tokio::time::Instant>,
     http_headers_deadline: Option<tokio::time::Instant>,
     retry_window_ms: Option<u64>,
 }
@@ -80,6 +82,8 @@ impl RequestBudget {
             admission_stopped: false,
             retry_started_at: None,
             retry_deadline: None,
+            persistent_retry: false,
+            rate_limit_deadline: None,
             http_headers_deadline: None,
             retry_window_ms: None,
         })
@@ -158,11 +162,16 @@ impl RequestBudget {
     fn retry_window_open(self) -> bool {
         self.retry_deadline
             .is_none_or(|deadline| tokio::time::Instant::now() < deadline)
+            && (self.persistent_retry
+                || self
+                    .rate_limit_deadline
+                    .is_none_or(|deadline| tokio::time::Instant::now() < deadline))
     }
 
     /// Window policy can change explicitly while waiting; its monotonic start
     /// cannot change when a driver, protocol, owner or compatibility path does.
     fn configure_retry_window(&mut self, window_ms: u64, persistent: bool) {
+        self.persistent_retry = persistent;
         self.retry_window_ms = (!persistent).then_some(window_ms);
         self.retry_deadline = self
             .retry_started_at

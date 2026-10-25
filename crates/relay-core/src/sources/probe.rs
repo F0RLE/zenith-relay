@@ -126,6 +126,9 @@ pub async fn probe_source_generation_with_scope(
 fn probe_body(protocol: WireApi, model: &str) -> Value {
     const TEXT: &str = "Reply with OK.";
     match protocol {
+        WireApi::GeminiInteractions => {
+            json!({"model":model,"input":TEXT,"generation_config":{"max_output_tokens":64},"store":false,"stream":false})
+        }
         WireApi::Responses => {
             json!({"model":model,"input":TEXT,"max_output_tokens":64,"store":false,"stream":false})
         }
@@ -154,6 +157,18 @@ fn valid_text_response(protocol: WireApi, response_json: &Value) -> bool {
         return false;
     }
     match protocol {
+        WireApi::GeminiInteractions => {
+            crate::protocol::completion::ResponseCompletion::for_protocol(protocol, response_json)
+                == crate::protocol::completion::ResponseCompletion::Completed
+                && response_json
+                    .get("outputs")
+                    .and_then(Value::as_array)
+                    .is_some_and(|outputs| {
+                        outputs
+                            .iter()
+                            .any(|output| has_nonempty_text(output.get("text")))
+                    })
+        }
         WireApi::Responses => {
             response_json.get("status").and_then(Value::as_str) == Some("completed")
                 && response_json

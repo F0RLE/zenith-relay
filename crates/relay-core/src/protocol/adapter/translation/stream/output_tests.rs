@@ -3,6 +3,7 @@ use serde_json::json;
 
 fn stream(client: WireApi, upstream: WireApi) -> Box<TranslationStream> {
     let request = match client {
+        WireApi::GeminiInteractions => unreachable!("native-only fixture is separate"),
         WireApi::Messages => {
             json!({"model":"test","max_tokens":64,"messages":[{"role":"user","content":"Hello"}]})
         }
@@ -46,6 +47,7 @@ fn completed_streams_move_existing_history_into_their_continuations() {
             text.reserve(64 * 1024);
             let pointer = text.as_ptr();
             let events = match upstream {
+                WireApi::GeminiInteractions => unreachable!("native-only fixture is separate"),
                 WireApi::Responses => vec![
                     json!({"type":"response.completed","response":{"id":"resp_test","status":"completed","output":[]}}),
                 ],

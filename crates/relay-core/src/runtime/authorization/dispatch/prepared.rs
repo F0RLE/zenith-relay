@@ -20,17 +20,9 @@ impl PreparedAuthorization {
         runtime: &'a GatewayRuntime,
         candidate_id: &str,
     ) -> Option<PreparedAuthorizationDispatchGuard<'a>> {
-        if !self.account_plan_supported {
-            return None;
-        }
         if let Some(revision) = &self.token_revision {
             let account = runtime.chatgpt_accounts.get(candidate_id)?;
             let plan = crate::poison::read(&account.subscription_plan_type);
-            let access_token = self.authorization.to_str().ok()?.strip_prefix("Bearer ");
-            account
-                .oauth_client_kind
-                .validate_plan(plan.as_deref(), None, access_token)
-                .ok()?;
             if !account.active.load(Ordering::Acquire) {
                 return None;
             }

@@ -3,11 +3,9 @@ use super::codec::{
     as_input_items, basis_points_metadata, basis_points_reasoning_effort,
     encode_function_arguments, text_message,
 };
-use super::history::{separate_tool_images, translate_input_items};
+use super::history::{separate_tool_images, translate_input_items_with_catalog};
 use super::response::has_encrypted_agent_message;
-use super::schema::{
-    matches as schema_matches, parameter_schema, prompt_schema, validator, PROMPT_SCHEMA_NOTATION,
-};
+use super::schema::{matches as schema_matches, parameter_schema, PROMPT_SCHEMA_NOTATION};
 use super::{is_transport_tool, FUNCTION_RELAY_ENCODING, TRANSPORT_TOOL, TRANSPORT_TOOL_ALIAS};
 use crate::protocol::AdapterError;
 use serde_json::{json, Map, Value};
@@ -23,23 +21,10 @@ pub(super) fn tool_instructions(tools: &[ClientTool], request: &Value) -> String
         )
         .to_string();
     }
-    // Keep the injected catalog stable even when providers reorder the input
-    // tool array. A deterministic prologue improves prompt-cache reuse and
-    // prevents the model from seeing a different routing instruction for the
-    // same set of client tools.
-    let mut sorted_tools: Vec<_> = tools.iter().collect();
-    sorted_tools.sort_by_cached_key(|tool| tool.key());
-    let catalog = super::presentation::describe_catalog(&sorted_tools, request);
-    let notation = if super::presentation::uses_discovery(tools, request)
-        || super::presentation::requested_mode(request)
-            == Ok(super::presentation::CatalogMode::Full)
-    {
-        ""
-    } else {
-        PROMPT_SCHEMA_NOTATION
-    };
-    let examples = tool_relay_examples(&sorted_tools);
-    format!(
+    // Explicit declaration history supplies its own append-only catalog timeline.
+    // Root-only catalogs keep their original prefix placement: moving an unchanged
+    // catalog to every turn's tail would itself break ordinary continuation reuse.
+    let mut text = format!(
         "This request is relayed by an external Responses API client, not by the live Excel workbook. \
          Native {TRANSPORT_TOOL} is intercepted as a transport endpoint; it never runs Office code or changes a workbook. \
          Other native server-injected Excel, Office, connector, workbook, list_skills, and web-search tools are unavailable. \
@@ -48,8 +33,8 @@ pub(super) fn tool_instructions(tools: &[ClientTool], request: &Value) -> String
          Use the client's configured shell and preserve each command's output and failure; shell-native concurrency is appropriate only for independent reads. \
          Do not batch across approval boundaries, dependent operations, edits, or shared mutable state, and never bypass tool restrictions. \
          For a single client tool, use one outer native {TRANSPORT_TOOL} call. \
-         Independent client tools may use multiple outer calls in one response unless the client disables parallel calls. \
-         Prefer one native batch call for 2-8 independent client invocations when parallel calls are allowed: references lists their exact tool names in order (repeated names allowed), and code is relay-tool-batch-v1 followed by a newline and a JSON array with one payload per reference, at most 1 MiB total. \
+         Independent client tools may use multiple outer calls in one response unless the client disables parallel calls. Prefer separate native calls for scripts, patches and framed function payloads, keeping each raw body in its single-tool call. \
+         An optional native batch can group 2-8 independent invocations with simple JSON payloads when parallel calls are allowed: references lists their exact tool names in order (repeated names allowed), and code is relay-tool-batch-v1 followed by a newline and exactly one complete JSON array with one payload per reference, at most 1 MiB total. No trailing text or extra closing delimiters are allowed. \
          In a batch, each function payload is its argument object or an encoded function-payload string; each custom payload is a JSON string whose decoded value is the unchanged raw input. Do not include transport fields or child call IDs. \
          Never batch dependent actions, shared-state operations, calls across approval boundaries, or relay.catalog lookups; load every required contract first. The entire batch is validated before any client call is released. \
          Batch results return together, labeled by their original position and client call ID. Do not repeat calls already present in history. \
@@ -59,56 +44,65 @@ pub(super) fn tool_instructions(tools: &[ClientTool], request: &Value) -> String
          Parameters describes the tool's complete argument contract: pass one JSON object matching it. \
          Use the current tool's declared keys, not options borrowed from another tool or a historical call. \
          Transport fields belong to the outer envelope, not to the client arguments unless that tool declares them. \
-         {notation}\
          {FUNCTION_RELAY_ENCODING} \
          For a custom tool, code contains the exact raw input text, not JSON: preserve every quote, backslash, newline and space without another encoding layer. \
          The proxy parses function arguments but does not parse custom input. \
          Serialize the outer arguments object once. \
          Do not put a tool/args wrapper, JavaScript, Markdown fence, or another {TRANSPORT_TOOL} envelope in code, and do not route references to {TRANSPORT_TOOL} or {TRANSPORT_TOOL_ALIAS}. \
          Do not merely say you will act; make the tool call. \
-         Historical calls may contain the old tool/args envelope; do not copy that format into new calls.{examples} \
+          Historical calls may contain the old tool/args envelope; do not copy that format into new calls. \
          The proxy converts the native call into the real client call or calls, then restores the original {TRANSPORT_TOOL} identity and the associated results on the next request. \
          Interpret that result as the named client tool output. \
          Do not replay completed client calls merely to reconstruct history. \
          Repeated observations or new calls to the same tool are allowed when the task needs them; use a fresh invocation, not a replay of an old call. \
          The catalog describes client tool contracts, not permission to execute them. \
          Follow the current turn's Client tool_choice restrictions even when other contracts remain in context. \
-         The available client tools are authoritative:\n{catalog}",
-    )
+          The current client tool catalog and turn restrictions are authoritative. \
+          Earlier declarations are historical context, not permission to call a removed or disallowed tool.",
+    );
+    if !super::catalog::has_historical_declarations(request) {
+        text.push('\n');
+        text.push_str(&current_catalog(tools, request));
+    }
+    text
+}
+
+pub(super) fn historical_catalog(tools: &[ClientTool], request: &Value) -> String {
+    let mut ordered = tools.iter().collect::<Vec<_>>();
+    ordered.sort_by_cached_key(|tool| tool.key());
+    let notation = if super::presentation::uses_discovery(tools, request)
+        || super::presentation::requested_mode(request)
+            == Ok(super::presentation::CatalogMode::Full)
+    {
+        ""
+    } else {
+        PROMPT_SCHEMA_NOTATION
+    };
+    format!("Client tool declaration update (later declarations and current policy override it):\n{notation}{}{}",
+        tool_relay_examples(&ordered), super::presentation::describe_catalog(&ordered, request))
+}
+
+fn current_catalog(tools: &[ClientTool], request: &Value) -> String {
+    let mut ordered: Vec<_> = tools.iter().collect();
+    ordered.sort_by_cached_key(|tool| tool.key());
+    let notation = if super::presentation::uses_discovery(tools, request)
+        || super::presentation::requested_mode(request)
+            == Ok(super::presentation::CatalogMode::Full)
+    {
+        ""
+    } else {
+        PROMPT_SCHEMA_NOTATION
+    };
+    format!("Current client tool catalog (authoritative for this request, subject to Client tool_choice):{}\n{notation}{}",
+        tool_relay_examples(&ordered), super::presentation::describe_catalog(&ordered, request))
 }
 
 pub(super) fn describe_tools(tools: &[&ClientTool], full_json: bool) -> String {
-    let mut lines = Vec::with_capacity(tools.len());
-    for tool in tools {
-        let description = tool
-            .spec
-            .get("description")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let mut line = format!("- {} ({})", tool.key(), tool.kind);
-        if !description.is_empty() {
-            line.push_str(": ");
-            line.push_str(description);
-        }
-        if tool.kind == "custom" {
-            line.push_str(". It receives raw text in input.");
-            if let Some(format) = tool.spec.get("format").filter(|format| format.is_object()) {
-                if let Ok(format) = serde_json::to_string(format) {
-                    line.push_str(" Input format: ");
-                    line.push_str(&format);
-                }
-            }
-        } else if let Some(schema) = parameter_schema(tool) {
-            line.push_str(". Parameters: ");
-            line.push_str(&if full_json {
-                schema.to_string()
-            } else {
-                prompt_schema(schema)
-            });
-        }
-        lines.push(line);
-    }
-    lines.join("\n")
+    tools
+        .iter()
+        .map(|tool| tool.description(full_json))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn tool_relay_examples(tools: &[&ClientTool]) -> String {
@@ -183,7 +177,7 @@ fn tool_instruction_index(request: &Value) -> usize {
     )
 }
 
-/// Borrow the already-rendered prologue, including its complete current catalog.
+/// Borrow the prepared prologue, including a root-only catalog when present.
 pub(super) fn prepared_tool_instructions<'a>(
     request: &Value,
     upstream: &'a Value,
@@ -261,9 +255,7 @@ pub(in crate::gateway::execution) fn prepare_request_with_timing(
     let callable = selected_tools(request, &all_tools);
     for tool in &callable {
         if tool.kind == "function" {
-            if let Some(schema) = parameter_schema(tool) {
-                validator(schema).map_err(|error| super::schema::validation_error(&error, true))?;
-            }
+            tool.validate_parameter_schema()?;
         }
     }
     *schema_validation_ms = schema_started.map(|start| start.elapsed().as_millis() as u64);
@@ -314,7 +306,11 @@ pub(in crate::gateway::execution) fn prepare_request_with_timing(
     // Transport-generated user messages (agent context and tool images) must
     // not create a new logical user turn or reset agent_iteration.
     let metadata = basis_points_metadata(request_object, &input_items);
-    let mut input_items = separate_tool_images(translate_input_items(input_items, &all_tools)?);
+    let mut input_items = separate_tool_images(translate_input_items_with_catalog(
+        input_items,
+        &all_tools,
+        request,
+    )?);
     let mut prologue = Vec::new();
     if let Some(instructions) = request_object.get("instructions").and_then(Value::as_str) {
         if !instructions.trim().is_empty() {
@@ -338,6 +334,17 @@ pub(in crate::gateway::execution) fn prepare_request_with_timing(
         ));
     }
     input_items.splice(0..0, prologue);
+    if super::catalog::has_historical_declarations(request)
+        && request["tools"]
+            .as_array()
+            .is_some_and(|tools| !tools.is_empty())
+    {
+        input_items.push(text_message(
+            "developer",
+            "input_text",
+            current_catalog(&all_tools, request),
+        ));
+    }
     if let Some(contracts) = super::presentation::loaded_contracts(&all_tools, &callable, request) {
         // Newly needed contracts belong after history, never in the stable
         // index prefix. Loading one tool must not rewrite that prefix.

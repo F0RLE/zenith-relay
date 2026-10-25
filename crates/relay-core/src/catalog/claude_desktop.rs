@@ -14,11 +14,9 @@ pub fn claude_desktop_model_alias(model: &str) -> String {
     model_alias(CLAUDE_DESKTOP_ALIAS_PREFIX, model)
 }
 
-/// A distinct, client-only route that opts into Desktop's built-in Claude
-/// effort control. Like CC Switch's Claude role routes, this is a UI identity,
-/// not upstream metadata. The unique suffix keeps real models separate; the
-/// profile caps the native scale at the highest executable, pool-allowed level.
-/// Only this route opts into Relay's fixed-picker compatibility policy.
+/// A client-only route that opts into Desktop's built-in effort picker.
+/// The alias does not establish support for every value in that picker;
+/// unsupported requests are rejected rather than remapped.
 /// Never infer upstream capabilities, context, prices or effort from this name.
 /// Desktop's Fable effort metadata matches a prefix; suffixed Sonnet/Opus
 /// names do not inherit their exact-ID controls. Keep the opaque suffix here
@@ -31,7 +29,8 @@ pub(crate) fn is_claude_desktop_model_alias(model: &str) -> bool {
     alias_kind(model).is_some()
 }
 
-pub(crate) fn is_claude_desktop_reasoning_model_alias(model: &str) -> bool {
+#[cfg(test)]
+fn is_claude_desktop_reasoning_model_alias(model: &str) -> bool {
     alias_kind(model).is_some_and(|(prefix, _)| {
         matches!(
             prefix,

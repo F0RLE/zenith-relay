@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 mod attempt;
 mod response;
+mod stream;
 
 pub(super) enum ImageAttemptStep {
     Retry(AttemptFailure),
@@ -78,6 +79,7 @@ pub(super) async fn execute_prepared(
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         route.client_context_id = prepared.client_context_id.clone();
+        let lease = Arc::new(lease);
         let route_origin = super::super::response::route_error_origin(&route);
         match run_selected_attempt(SelectedImageRoute {
             runtime: &runtime,

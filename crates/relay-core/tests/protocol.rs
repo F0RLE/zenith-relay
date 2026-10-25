@@ -5,6 +5,8 @@ fn desktop_capabilities_expose_local_features_without_server_negotiation() {
     let capabilities = DesktopCapabilities::current();
     for feature in [
         "accounts",
+        "account_connectors_v1",
+        "gemini_interactions_native_v1",
         "account_import_to_pool",
         "account_identity_reveal",
         "sources",
@@ -23,8 +25,24 @@ fn desktop_capabilities_expose_local_features_without_server_negotiation() {
     let value = serde_json::to_value(capabilities).unwrap();
     assert_eq!(
         value.as_object().unwrap().keys().collect::<Vec<_>>(),
-        ["features"]
+        ["features", "accountConnectors"]
     );
+    let connectors = value["accountConnectors"].as_array().unwrap();
+    assert_eq!(connectors.len(), 3);
+    assert_eq!(
+        connectors
+            .iter()
+            .map(|item| item["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["openai.codex", "openai.siwc", "openai.excel_bps"]
+    );
+    assert!(connectors
+        .iter()
+        .all(|item| item["providerFamily"] == "openai"));
+    let legacy: DesktopCapabilities =
+        serde_json::from_value(serde_json::json!({"features":["accounts"]})).unwrap();
+    assert!(legacy.account_connectors.is_empty());
+    assert!(legacy.features.contains("accounts"));
 }
 
 #[test]

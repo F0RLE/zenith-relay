@@ -349,16 +349,29 @@ impl GatewayRuntime {
     }
 
     pub(crate) fn model_supported_service_tiers(&self, model: &str) -> Vec<DefaultServiceTier> {
+        let tiers = crate::catalog::model_service_tiers(
+            model,
+            &self.model_capabilities(model).service_tiers,
+        );
+        // Standard is unconditional in service_tiers_for_routes. If reference
+        // metadata advertises no optional tier, resolving every executor route
+        // cannot change this result (including for an empty/offline pool).
+        if tiers
+            .iter()
+            .all(|tier| *tier == DefaultServiceTier::Standard)
+        {
+            return tiers;
+        }
         let scope = CandidateScope::default();
         let candidate_ids = self
             .lock_scheduler()
             .candidates()
-            .filter(|candidate| candidate.is_configured(model, &WireApi::ALL, &scope))
+            .filter(|candidate| candidate.is_configured(model, &WireApi::ALL_NATIVE, &scope))
             .map(|candidate| candidate.id.clone())
             .collect::<Vec<_>>();
         let routes = candidate_ids
             .iter()
-            .filter_map(|id| self.executor_route(id, model, &scope, &WireApi::ALL, false))
+            .filter_map(|id| self.executor_route(id, model, &scope, &WireApi::ALL_NATIVE, false))
             .collect::<Vec<_>>();
         self.service_tiers_for_routes(model, &routes)
     }

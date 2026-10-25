@@ -3,6 +3,86 @@ use std::sync::atomic::Ordering;
 
 struct InvalidGrant;
 
+struct RotationRecoveryFailure(std::sync::atomic::AtomicUsize);
+
+impl TokenRefreshAdapter for RotationRecoveryFailure {
+    fn refresh<'a>(
+        &'a self,
+        _account_id: &'a str,
+        _refresh_token: &'a str,
+        _now_ms: u64,
+    ) -> BoxFuture<'a, Result<TokenRefresh, TokenRefreshFailure>> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async {
+            Err(TokenRefreshFailure::new(
+                TokenRefreshFailureKind::RotationRecoveryRequired,
+                "siwc_rotation_outcome_unknown",
+            ))
+        })
+    }
+}
+
+#[tokio::test]
+async fn uncertain_rotation_persists_reauth_and_stops_repeated_refreshes() {
+    let authority = TokenAuthority::new(1).unwrap();
+    let tokens = TokenSet::new("access", Some("refresh".into()), None, Some(1), 0, 0).unwrap();
+    authority
+        .register("local-account", tokens.clone(), AccountAuthState::Active)
+        .await
+        .unwrap();
+    let persistence = CapturePersistence::default();
+    let refresh = RotationRecoveryFailure(std::sync::atomic::AtomicUsize::new(0));
+    for now in [2, 3, 60_000] {
+        assert_eq!(
+            authority
+                .prepare_and_persist("local-account", now, 0, &refresh, &persistence)
+                .await
+                .unwrap_err(),
+            TokenAuthorityError::RequiresReauth(ReauthReason::TokenRotationRecoveryRequired),
+        );
+    }
+    assert_eq!(refresh.0.load(Ordering::SeqCst), 1);
+    assert_eq!(persistence.token_calls.load(Ordering::SeqCst), 0);
+    let saved_state = AccountAuthState::RequiresReauth(ReauthReason::TokenRotationRecoveryRequired);
+    assert_eq!(
+        *persistence.auth_states.lock().unwrap(),
+        vec![("local-account".into(), saved_state)]
+    );
+    let restarted = TokenAuthority::new(1).unwrap();
+    restarted
+        .register("local-account", tokens, saved_state)
+        .await
+        .unwrap();
+    assert!(matches!(
+        restarted
+            .prepare("local-account", 60_001, 0, &refresh)
+            .await,
+        Err(TokenAuthorityError::RequiresReauth(
+            ReauthReason::TokenRotationRecoveryRequired
+        ))
+    ));
+    assert_eq!(refresh.0.load(Ordering::SeqCst), 1);
+    // A genuinely newer sign-in restores the existing authority, not a new retry bypass.
+    let fresh = TokenSet::new(
+        "new-access",
+        Some("new-refresh".into()),
+        None,
+        Some(90_000),
+        60_002,
+        1,
+    )
+    .unwrap();
+    restarted
+        .register("local-account", fresh, AccountAuthState::Active)
+        .await
+        .unwrap();
+    assert!(restarted
+        .prepare("local-account", 60_003, 0, &refresh)
+        .await
+        .is_ok());
+    assert_eq!(refresh.0.load(Ordering::SeqCst), 1);
+}
+
 impl TokenRefreshAdapter for InvalidGrant {
     fn refresh<'a>(
         &'a self,

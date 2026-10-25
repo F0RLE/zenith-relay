@@ -15,6 +15,10 @@ impl CandidateLease {
         self.rotation_started.load(Ordering::Acquire)
     }
 
+    pub(crate) fn limit_rate_limit_recovery(&self, window_ms: u64) {
+        self.rotation_budget.limit_rate_limit_recovery(window_ms);
+    }
+
     /// The final scope/config/availability gate and the generation debit are
     /// one scheduler transaction. A lost race never consumes a generation.
     #[cfg(test)]

@@ -120,19 +120,6 @@ pub(super) fn parse_item(
         profile.organization_id = None;
         profile.account_is_fedramp = false;
     }
-    if use_tokens {
-        oauth_client_kind
-            .unwrap_or_default()
-            .validate_plan(
-                profile.plan.as_deref(),
-                id_token.as_deref(),
-                access_token.as_deref(),
-            )
-            .map_err(|message| {
-                ImportIssue::new(ImportIssueCode::BasisPointsFreeAccountUnsupported, message)
-            })?;
-    }
-
     assemble_parsed_item(AssembleImport {
         ordinal,
         format,

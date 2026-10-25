@@ -189,6 +189,15 @@ pub enum UsageRange {
     Custom,
 }
 
+/// Report scopes use explicit Codex task markers, never model-name heuristics.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageWorkload {
+    Conversation,
+    Memory,
+    Background,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageQuery {
@@ -202,6 +211,9 @@ pub struct UsageQuery {
     pub bucket_ms: Option<u64>,
     pub model_query: Option<String>,
     pub source_or_account_query: Option<String>,
+    /// Omitted includes every workload and preserves the complete usage total.
+    #[serde(default)]
+    pub workload: Option<UsageWorkload>,
     pub wire_api: Option<WireApi>,
     #[serde(default)]
     pub transport: Option<UsageTransport>,

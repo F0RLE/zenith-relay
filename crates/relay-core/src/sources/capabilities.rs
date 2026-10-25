@@ -92,7 +92,9 @@ pub use config::SourceProtocolResolution;
 pub fn endpoint_url_protocol(base_url: &str) -> Option<WireApi> {
     let url = url::Url::parse(base_url).ok()?;
     let path = url.path().trim_end_matches('/');
-    if path.ends_with("/responses") {
+    if path.ends_with("/interactions") {
+        Some(WireApi::GeminiInteractions)
+    } else if path.ends_with("/responses") {
         Some(WireApi::Responses)
     } else if path.ends_with("/chat/completions") {
         Some(WireApi::ChatCompletions)

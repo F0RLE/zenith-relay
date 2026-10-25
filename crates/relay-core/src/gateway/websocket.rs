@@ -178,14 +178,26 @@ async fn handle_connection(
     .await
     {
         Ok(connected) => connected,
-        Err(failure) if failure.category == error_codes::UPSTREAM_WEBSOCKET_UNSUPPORTED => {
+        Err(failure)
+            if matches!(
+                failure.category,
+                error_codes::UPSTREAM_WEBSOCKET_UNSUPPORTED
+                    | error_codes::UPSTREAM_WEBSOCKET_SLOW_HANDSHAKE
+            ) =>
+        {
+            let fallback_reason =
+                if failure.category == error_codes::UPSTREAM_WEBSOCKET_SLOW_HANDSHAKE {
+                    crate::usage::TransportFallbackReason::WebsocketSlowHandshake
+                } else {
+                    crate::usage::TransportFallbackReason::WebsocketUnavailable
+                };
             bridge_http_fallback(
                 downstream,
                 runtime,
                 key,
                 headers,
                 fallback_request,
-                crate::usage::TransportFallbackReason::WebsocketUnavailable,
+                fallback_reason,
             )
             .await;
             return;

@@ -82,6 +82,7 @@ async fn execute_client_request_inner(
         WireApi::ChatCompletions => ClientWireApi::ChatCompletions,
         WireApi::Messages => ClientWireApi::Messages,
         WireApi::Gemini => ClientWireApi::Gemini,
+        WireApi::GeminiInteractions => ClientWireApi::GeminiInteractions,
     };
     if !runtime.allows_client_wire_api(&key, client_api) {
         return client_api_forbidden();
@@ -91,6 +92,15 @@ async fn execute_client_request_inner(
             Ok(request_object) => Value::Object(request_object),
             Err(error_response) => return *error_response,
         };
+    if client_wire_api == WireApi::GeminiInteractions {
+        if let Err(message) = crate::protocol::interactions::validate_request(&request_json) {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                message,
+                error_codes::INVALID_REQUEST,
+            );
+        }
+    }
     runtime.refresh_basis_points_access(&key).await;
     let mut tool_policy = parts
         .extensions
@@ -191,7 +201,16 @@ async fn execute_client_request_inner(
             return blocked_background_response(client_wire_api, stream, &request_id, kind);
         }
     }
-    let client_identity = client_request_identity(&headers, &request_json);
+    let mut client_identity = client_request_identity(&headers, &request_json);
+    if client_identity.affinity_id.is_none()
+        && !request_json
+            .get("prompt_cache_key")
+            .and_then(Value::as_str)
+            .is_some_and(|key| !key.trim().is_empty())
+    {
+        client_identity.affinity_id =
+            crate::gateway::request::history_affinity_fingerprint(&key.id, &request_json);
+    }
     let client_context_id = client_identity.context_id;
     if client_wire_api == WireApi::Responses
         && background_kind.is_none()
@@ -206,6 +225,12 @@ async fn execute_client_request_inner(
         );
     }
     let continuation = match client_wire_api {
+        WireApi::GeminiInteractions => Some(crate::gateway::continuation::interactions::prepare(
+            &runtime,
+            &key.id,
+            &request_json,
+            now_ms(),
+        )),
         WireApi::Responses => Some(prepare_response_continuation(
             &runtime,
             &key.id,
@@ -276,7 +301,9 @@ async fn execute_client_request_inner(
         WireApi::Responses | WireApi::ChatCompletions => {
             forwarded_codex_headers(&headers, &request_id)
         }
-        WireApi::Gemini => super::super::request::forwarded_bridge_gemini_headers(&headers),
+        WireApi::Gemini | WireApi::GeminiInteractions => {
+            super::super::request::forwarded_bridge_gemini_headers(&headers)
+        }
     };
     execute_request(RequestExecution {
         tool_policy,
@@ -349,6 +376,7 @@ fn blocked_background_response(
             WireApi::ChatCompletions => serde_json::json!({"id": response_id, "object": "chat.completion", "choices": [], "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}).to_string(),
             WireApi::Messages => serde_json::json!({"id": response_id, "type": "message", "role": "assistant", "content": [], "stop_reason": "end_turn", "usage": {"input_tokens": 0, "output_tokens": 0}}).to_string(),
             WireApi::Gemini => serde_json::json!({"candidates": [], "usageMetadata": {"promptTokenCount": 0, "candidatesTokenCount": 0, "totalTokenCount": 0}}).to_string(),
+            WireApi::GeminiInteractions => serde_json::json!({"id":response_id,"status":"completed","outputs":[],"usage":{"total_input_tokens":0,"total_output_tokens":0,"total_tokens":0}}).to_string(),
         }
     };
     Response::builder()

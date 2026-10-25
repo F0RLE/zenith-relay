@@ -150,11 +150,26 @@ impl GatewayRuntime {
         let fingerprint = self
             .continuation_route_fingerprint(route)
             .ok_or_else(AdapterError::continuation_mismatch)?;
+        if route.client_wire_api == WireApi::GeminiInteractions {
+            if let Some(previous) = crate::protocol::interactions::previous_id(request)
+                .map_err(|_| AdapterError::continuation_mismatch())?
+            {
+                let reference = crate::protocol::interactions::reference(local_key_id, previous)
+                    .map_err(|_| AdapterError::continuation_mismatch())?;
+                let key = self
+                    .response_affinity_key(Some(&reference))
+                    .ok_or_else(AdapterError::continuation_missing)?;
+                if self.route_affinity(&key, now_ms).as_deref() != Some(fingerprint.as_str()) {
+                    return Err(AdapterError::continuation_mismatch());
+                }
+            }
+        }
         let previous = request
             .get("previous_response_id")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|id| !id.is_empty());
+        let mut predecessor_route_validated = false;
         if route.client_wire_api == WireApi::Responses {
             if let Some(previous) = previous {
                 let key = self
@@ -164,6 +179,7 @@ impl GatewayRuntime {
                     if owner != fingerprint {
                         return Err(AdapterError::continuation_mismatch());
                     }
+                    predecessor_route_validated = true;
                 } else if previous.starts_with("resp_bridge_")
                     || previous.starts_with("gemini_bridge_")
                     || previous.starts_with("chat_bridge_")
@@ -199,6 +215,7 @@ impl GatewayRuntime {
             }
         }
         let paired_tool_results = paired_tool_result_ids(request, route.client_wire_api);
+        let mut restored_pairs: Option<HashSet<String>> = None;
         for call_id in tool_result_ids(request, route.client_wire_api) {
             if let Some(key) = self.tool_call_affinity_key(local_key_id, call_id) {
                 if self
@@ -206,7 +223,40 @@ impl GatewayRuntime {
                     .is_some_and(|owner| owner != fingerprint)
                     && !paired_tool_results.contains(call_id)
                 {
-                    return Err(AdapterError::continuation_mismatch());
+                    // Provider call IDs can collide across conversations. A
+                    // caller-scoped predecessor with this exact route remains
+                    // authoritative only if its retained history proves the
+                    // call/result pair. Recover lazily on a conflicting hint;
+                    // ordinary turns do not clone the saved conversation.
+                    let restored_pairs = restored_pairs.get_or_insert_with(|| {
+                        if !predecessor_route_validated {
+                            return HashSet::new();
+                        }
+                        previous
+                            .and_then(|id| {
+                                self.load_native_responses_replay(
+                                    local_key_id,
+                                    id,
+                                    &route.candidate_id,
+                                    now_ms,
+                                )
+                            })
+                            .and_then(|state| {
+                                state
+                                    .replay_request(request, &route.source_model, false)
+                                    .ok()
+                            })
+                            .map(|replayed| {
+                                paired_tool_result_ids(&replayed, WireApi::Responses)
+                                    .into_iter()
+                                    .map(str::to_owned)
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    });
+                    if !restored_pairs.contains(call_id) {
+                        return Err(AdapterError::continuation_mismatch());
+                    }
                 }
             }
         }
@@ -233,6 +283,14 @@ impl GatewayRuntime {
 
 fn tool_result_ids(request: &Value, client: WireApi) -> Vec<&str> {
     match client {
+        WireApi::GeminiInteractions => request
+            .get("input")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|item| item.get("type").and_then(Value::as_str) == Some("function_result"))
+            .filter_map(|item| item.get("call_id").and_then(Value::as_str))
+            .collect(),
         WireApi::Responses => request
             .get("input")
             .and_then(Value::as_array)
@@ -292,6 +350,8 @@ fn tool_result_ids(request: &Value, client: WireApi) -> Vec<&str> {
 /// separately; orphan results remain bound to the route that created the call.
 fn paired_tool_result_ids(request: &Value, client: WireApi) -> HashSet<&str> {
     match client {
+        // Native state is never synthesized or moved from a text/tool summary.
+        WireApi::GeminiInteractions => HashSet::new(),
         WireApi::Responses => {
             let calls: HashSet<&str> = request
                 .get("input")

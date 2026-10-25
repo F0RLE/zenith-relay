@@ -4,6 +4,16 @@ use crate::gateway::execution::basis_points::{prepare_request, translate_respons
 
 mod identity;
 
+fn catalog_text(prepared: &Value) -> &str {
+    prepared["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item.pointer("/content/0/text").and_then(Value::as_str))
+        .find(|text| text.contains("Current client tool catalog"))
+        .expect("current catalog follows history")
+}
+
 fn request() -> Value {
     json!({"model":"synthetic-model","input":"hello","stream":true,"relay_bps_tool_catalog":"discovery","tools":[
         {"type":"namespace","name":"files","tools":[
@@ -85,7 +95,7 @@ fn index_omits_schemas_and_preserves_all_identities_then_loads_original_contract
     buffered["stream"] = json!(false);
     assert_eq!(prepare_request(&buffered).unwrap()["stream"], false);
     assert!(upstream.get(OPTION).is_none());
-    let text = upstream["input"][0]["content"][0]["text"].as_str().unwrap();
+    let text = catalog_text(&upstream);
     let index: Value = serde_json::from_str(text.split_once("Tool index:\n").unwrap().1).unwrap();
     assert_eq!(index["function"]["files"], json!(["read", "write"]));
     assert_eq!(index["custom"][""], json!(["patch"]));
@@ -580,10 +590,7 @@ fn automatic_discovery_uses_the_full_catalog_but_retains_turn_local_authority() 
     assert!(lookup(&session.tools, &json!({"names":["files.write"]})).is_err());
     let prepared = prepare_request(&request).unwrap();
     assert_eq!(prepared["input"][0], baseline["input"][0]);
-    assert!(prepared["input"][0]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("Tool index:"));
+    assert!(catalog_text(&prepared).contains("Tool index:"));
     let mut diagnostics = ToolUseDiagnostics {
         client_context: Some(Default::default()),
         ..Default::default()
@@ -693,8 +700,8 @@ fn lookup_searches_deferred_descriptions_in_the_original_catalog_language() {
     let found = lookup(&tools, &json!({"query":"чтение документа","limit":1})).unwrap();
     assert_eq!(found[0].key(), "files.opaque_action");
     assert_eq!(
-        found[0].spec,
-        request["tools"][0]["tools"][0].as_object().unwrap().clone()
+        found[0].spec.as_ref(),
+        request["tools"][0]["tools"][0].as_object().unwrap()
     );
     assert_eq!(
         lookup(&tools, &json!({"query":"synthetic","limit":1})).unwrap()[0].key(),
@@ -733,7 +740,7 @@ fn grouped_index_preserves_nested_namespaces_custom_kinds_and_flat_dotted_names(
     }));
     let tools = client_tools(&request).unwrap();
     let prepared = prepare_request(&request).unwrap();
-    let text = prepared["input"][0]["content"][0]["text"].as_str().unwrap();
+    let text = catalog_text(&prepared);
     let index: Value = serde_json::from_str(text.split_once("Tool index:\n").unwrap().1).unwrap();
     let mut indexed = BTreeSet::new();
     for (kind, namespaces) in index.as_object().unwrap() {

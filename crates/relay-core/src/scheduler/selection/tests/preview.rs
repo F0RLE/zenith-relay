@@ -1,3 +1,4 @@
+use super::super::members;
 use super::policy::{dispatch, mixed};
 use super::*;
 use crate::PoolRoutingMode;
@@ -7,6 +8,228 @@ fn next(order: &[CandidateRuntimeSnapshot]) -> Option<&str> {
         .iter()
         .find(|candidate| candidate.next_for_new_request)
         .map(|candidate| candidate.candidate_id.as_str())
+}
+
+// Reference the eager admission strategy, independent of the lazy preview loop.
+fn eager_preview(mut scheduler: PoolScheduler, now_ms: u64) -> Vec<String> {
+    let scope = CandidateScope::default();
+    let models = crate::ModelRules::default();
+    let protocols = WireApi::ALL_NATIVE;
+    scheduler.sync_all_rotation_candidates();
+    let routes = scheduler
+        .candidates
+        .values()
+        .flat_map(|candidate| {
+            candidate.models.iter().filter_map(|model| {
+                (!crate::runtime::is_image_model_id(model)
+                    && models.allows(model)
+                    && candidate.is_configured(model, &protocols, &scope))
+                .then_some((crate::model_id_key(model), candidate.protocol))
+            })
+        })
+        .collect::<BTreeSet<_>>();
+    let mut requests = Vec::new();
+    for (model, protocol) in &routes {
+        let Some(mut request) = scheduler.prepare_rotation_request(
+            &SelectionRequest {
+                model,
+                allowed_protocols: &[*protocol],
+                scope: &scope,
+                tried: &HashSet::new(),
+                response_affinity_key: None,
+                prompt_affinity_key: None,
+                now_ms,
+            },
+            RotationOperation::Text,
+        ) else {
+            return Vec::new();
+        };
+        if let Some(allowed) = &mut request.allowed_candidates {
+            allowed
+                .retain(|id| scheduler.lane_allows(&scheduler.candidates[id], InFlightLane::Text));
+        }
+        requests.push(request);
+    }
+    let mut order = Vec::new();
+    loop {
+        let picks = requests
+            .iter()
+            .map(|request| scheduler.rotation.select(request, now_ms))
+            .collect::<Option<Vec<_>>>();
+        let Some(picks) = picks else { return order };
+        let Some(first) = picks.first() else {
+            return order;
+        };
+        let member = members::member_key(&scheduler.candidates[&first.candidate_id]);
+        if picks
+            .iter()
+            .any(|pick| members::member_key(&scheduler.candidates[&pick.candidate_id]) != member)
+        {
+            return order;
+        }
+        order.push(first.candidate_id.clone());
+        for request in &mut requests {
+            if let Some(allowed) = &mut request.allowed_candidates {
+                allowed.retain(|id| members::member_key(&scheduler.candidates[id]) != member);
+            }
+        }
+    }
+}
+
+#[test]
+fn lazy_preview_matches_eager_admission_across_modes_and_live_state_changes() {
+    for mode in [
+        PoolRoutingMode::Automatic,
+        PoolRoutingMode::InOrder,
+        PoolRoutingMode::RoundRobin,
+        PoolRoutingMode::WeightedRoundRobin,
+        PoolRoutingMode::Failover,
+    ] {
+        for change in 0..7 {
+            let mut scheduler = mixed(mode);
+            for candidate in scheduler.candidates.values_mut() {
+                candidate
+                    .models
+                    .extend(["model-b".into(), "model-c".into()]);
+            }
+            match change {
+                1 => {
+                    scheduler
+                        .candidates
+                        .get_mut("api-b")
+                        .unwrap()
+                        .models
+                        .insert("model-d".into());
+                }
+                2 => {
+                    scheduler
+                        .candidates
+                        .get_mut("api-a")
+                        .unwrap()
+                        .cooldowns
+                        .insert("model-b".into(), 200);
+                }
+                3 => {
+                    scheduler.candidates.get_mut("account").unwrap().draining = true;
+                }
+                4 => {
+                    scheduler.candidates.get_mut("account").unwrap().quota =
+                        CandidateQuota::Exhausted;
+                }
+                5 => {
+                    let mut alias = candidate("api-a::chat");
+                    alias.source_id = "api-a".into();
+                    alias.protocol = WireApi::ChatCompletions;
+                    scheduler.upsert(alias);
+                }
+                6 => {
+                    scheduler.remove("api-b");
+                }
+                _ => {}
+            }
+            for now_ms in [100, 201] {
+                let expected = eager_preview(scheduler.clone(), now_ms);
+                let snapshots = scheduler.runtime_order(now_ms);
+                assert_eq!(
+                    next(&snapshots),
+                    expected.first().map(String::as_str),
+                    "{mode:?} change={change}"
+                );
+                for snapshot in snapshots {
+                    let member = members::member_key(&scheduler.candidates[&snapshot.candidate_id]);
+                    let rank = expected
+                        .iter()
+                        .position(|id| members::member_key(&scheduler.candidates[id]) == member);
+                    assert_eq!(snapshot.selection_rank, rank, "{mode:?} change={change}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "synthetic routing preview timing; no network or real accounts"]
+fn measure_large_routing_preview() {
+    let mut scheduler = PoolScheduler::new();
+    for source in 0..3 {
+        let mut entry = candidate(&format!("synthetic-source-{source}"));
+        entry.models = (0..200)
+            .map(|model| format!("gpt-synthetic-{source}-{model}"))
+            .collect();
+        entry.model_protocols = entry
+            .models
+            .iter()
+            .map(|model| (model.clone(), WireApi::ALL_NATIVE.into_iter().collect()))
+            .collect();
+        scheduler.upsert(entry);
+    }
+    for index in 0..19 {
+        let mut entry = oauth_candidate(&format!("synthetic-account-{index}"));
+        entry.models = (0..7)
+            .map(|model| format!("gpt-synthetic-0-{model}"))
+            .collect();
+        scheduler.upsert(entry);
+    }
+    for phase in ["cold", "warm"] {
+        let started = std::time::Instant::now();
+        let order = scheduler.runtime_order(100);
+        println!(
+            "routing_preview phase={phase} members={} elapsed_ms={:.2}",
+            order.len(),
+            started.elapsed().as_secs_f64() * 1_000.0
+        );
+        assert_eq!(order.len(), 22);
+        assert!(order.iter().all(|member| member.available));
+        assert!(order.iter().all(|member| !member.next_for_new_request));
+    }
+}
+
+#[test]
+fn one_sync_preview_matches_per_route_sync_after_member_changes() {
+    let mut scheduler = mixed(PoolRoutingMode::Failover);
+    for member in scheduler.candidates.values_mut() {
+        member.models.extend(["model-b".into(), "model-c".into()]);
+    }
+    scheduler
+        .candidates
+        .get_mut("api-a")
+        .unwrap()
+        .cooldowns
+        .insert("model-b".into(), 200);
+    scheduler.candidates.get_mut("api-b").unwrap().draining = true;
+    scheduler.candidates.get_mut("account").unwrap().quota = CandidateQuota::Exhausted;
+    let mut synced = scheduler.clone();
+    synced.sync_all_rotation_candidates();
+    for model in ["gpt-5", "model-b", "model-c"] {
+        let scope = CandidateScope::default();
+        let tried = HashSet::new();
+        let request = SelectionRequest {
+            model,
+            allowed_protocols: &[WireApi::Responses],
+            scope: &scope,
+            tried: &tried,
+            response_affinity_key: None,
+            prompt_affinity_key: None,
+            now_ms: 100,
+        };
+        let expected = scheduler
+            .prepare_rotation_request(&request, RotationOperation::Text)
+            .unwrap();
+        let actual = synced
+            .rotation_request_from_synced_state(&request, RotationOperation::Text)
+            .unwrap();
+        assert_eq!(actual.allowed_candidates, expected.allowed_candidates);
+        assert_eq!(
+            synced
+                .rotation
+                .select(&actual, 100)
+                .map(|pick| pick.candidate_id),
+            scheduler
+                .rotation
+                .select(&expected, 100)
+                .map(|pick| pick.candidate_id)
+        );
+    }
 }
 
 #[test]

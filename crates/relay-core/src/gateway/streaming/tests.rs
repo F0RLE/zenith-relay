@@ -3,6 +3,7 @@ use crate::gateway::test_support::test_usage_event;
 use std::convert::Infallible;
 use std::sync::Mutex;
 
+mod scoped_cancellation;
 mod sse_bootstrap;
 mod sse_limits;
 mod terminal_markers;

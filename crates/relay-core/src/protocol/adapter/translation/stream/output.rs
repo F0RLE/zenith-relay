@@ -36,7 +36,7 @@ impl TranslationStream {
             WireApi::Responses => self.event("response.created", json!({"type":"response.created","response":{"id":self.decoded_response.id,"object":"response","model":self.translation_request.model,"status":"in_progress","output":[]}})),
             WireApi::Messages => self.event("message_start", json!({"type":"message_start","message":{"id":self.decoded_response.id,"type":"message","role":"assistant","model":self.translation_request.model,"content":[],"stop_reason":null,"usage":response::usage_value(WireApi::Messages,&self.decoded_response.usage)}})),
             WireApi::ChatCompletions => self.chat_chunk(json!({"role":"assistant"}), None),
-            WireApi::Gemini => {}
+            WireApi::Gemini | WireApi::GeminiInteractions => {}
         }
     }
 
@@ -190,6 +190,11 @@ impl TranslationStream {
 
     fn block_start(&mut self, output_index: usize, block: &Block) -> AdapterResult<()> {
         match self.translation_request.client {
+            WireApi::GeminiInteractions => {
+                return Err(AdapterError::parameter_unsupported_for(
+                    "gemini_interactions.native_only",
+                ))
+            }
             WireApi::Responses => {
                 let output_item = match block {
                     Block::Text(_) | Block::Refusal(_) => {
@@ -333,7 +338,7 @@ impl TranslationStream {
             WireApi::Responses => self.event("response.function_call_arguments.delta", json!({"type":"response.function_call_arguments.delta","output_index":output_index,"item_id":format!("fc_{}_{output_index}",self.decoded_response.id),"delta":arguments})),
             WireApi::Messages => self.event("content_block_delta", json!({"type":"content_block_delta","index":output_index,"delta":{"type":"input_json_delta","partial_json":arguments}})),
             WireApi::ChatCompletions => self.chat_chunk(json!({"tool_calls":[{"index":self.tool_index(output_index),"function":{"arguments":arguments}}]}), None),
-            WireApi::Gemini => {}
+            WireApi::Gemini | WireApi::GeminiInteractions => {}
         }
     }
 
@@ -347,6 +352,11 @@ impl TranslationStream {
 
     pub(super) fn emit_end(&mut self, completed_response: &Value) -> AdapterResult<()> {
         match self.translation_request.client {
+            WireApi::GeminiInteractions => {
+                return Err(AdapterError::parameter_unsupported_for(
+                    "gemini_interactions.native_only",
+                ))
+            }
             WireApi::Responses => {
                 for (output_index, output_item) in completed_response
                     .get("output")

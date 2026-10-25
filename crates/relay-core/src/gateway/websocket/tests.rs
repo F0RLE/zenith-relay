@@ -18,6 +18,10 @@ mod client_requests;
 mod frame_contract;
 
 fn runtime() -> GatewayRuntime {
+    runtime_with_events(Arc::new(|_| {}))
+}
+
+fn runtime_with_events(events: Arc<dyn Fn(crate::UsageEvent) + Send + Sync>) -> GatewayRuntime {
     GatewayRuntime::from_pool(
         vec![RuntimeSource::unrestricted(ProviderSource {
             id: "source".into(),
@@ -43,7 +47,7 @@ fn runtime() -> GatewayRuntime {
             diagnostics_enabled: || true,
             ..Default::default()
         },
-        Arc::new(|_| {}),
+        events,
     )
     .unwrap()
 }

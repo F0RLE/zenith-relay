@@ -4,7 +4,7 @@ use crate::protocol::AdapterError;
 use serde_json::Value;
 
 mod validation;
-pub(super) use validation::validator;
+pub(super) use validation::{cache_memory_diagnostics, release_expired_cache_entries, validator};
 
 pub(super) const PROMPT_SCHEMA_NOTATION: &str = concat!(
     "Parameter notation: object{\"key\":type,\"optional\"?:type} marks required and optional keys; ",

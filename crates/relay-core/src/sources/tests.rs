@@ -26,6 +26,28 @@ fn changing_the_source_proxy_changes_the_transport_identity() {
 }
 
 #[test]
+fn policy_reload_is_order_independent_but_rejects_duplicate_source_ids() {
+    let config = SourceProtocolConfig::default();
+    let source = |id| SourceTransportIdentity {
+        id,
+        base_url: "https://api.example/v1",
+        secret_ref: "synthetic:secret",
+        proxy_id: None,
+        wire_api: WireApi::Responses,
+        protocol_bindings: &[],
+        protocol_config: &config,
+        models: &[],
+    };
+    let a = source("a");
+    let b = source("b");
+    assert!(source_runtime_policy_compatible(&[a, b], &[b, a]));
+    assert!(!source_runtime_policy_compatible(&[a, a], &[a, b]));
+    assert!(!source_runtime_policy_compatible(&[a, b], &[a, a]));
+    assert!(!source_runtime_policy_compatible(&[a, a], &[a, a]));
+    assert!(!source_runtime_policy_compatible(&[a], &[a, b]));
+}
+
+#[test]
 fn url_userinfo_includes_a_username_or_a_password() {
     assert!(!url_has_userinfo(
         &Url::parse("https://api.example/v1").unwrap()

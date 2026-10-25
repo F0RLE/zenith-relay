@@ -28,7 +28,8 @@ pub(super) struct PreparedAccountAttempt {
     pub(super) selected_error_origin: ErrorOrigin,
     pub(super) upstream_url: url::Url,
     pub(super) upstream_body: Value,
-    pub(super) request_body: Vec<u8>,
+    /// BPS is encoded only after catalog preparation and image resolution.
+    pub(super) request_body: Option<Vec<u8>>,
     pub(super) reasoning_effort: ReasoningEffortDiagnostics,
     pub(super) tool_use: ToolUseDiagnostics,
 }
@@ -222,7 +223,10 @@ pub(super) fn prepare_account_attempt(
             crate::WireApi::Responses,
         )
     };
-    let Ok(request_body) = serde_json::to_vec(&upstream_body) else {
+    let Ok(request_body) = (!basis_points_route)
+        .then(|| serde_json::to_vec(&upstream_body))
+        .transpose()
+    else {
         return AccountPrepare::Respond(api_error(
             StatusCode::BAD_REQUEST,
             "request body could not be serialized",

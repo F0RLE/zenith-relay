@@ -13,6 +13,14 @@ type ReplayKey = (String, String);
 macro_rules! bounded_store_constructors {
     ($store:ident) => {
         impl $store {
+            pub(crate) fn memory_usage(&self) -> (usize, usize, usize) {
+                (
+                    self.store.entries.len(),
+                    self.store.total_bytes,
+                    self.store.max_total_bytes,
+                )
+            }
+
             pub const fn new(max_entries: usize, ttl_ms: u64) -> Self {
                 Self::with_limits(
                     max_entries,
@@ -276,7 +284,10 @@ impl Default for NativeResponsesReplayStore {
         Self::with_limits(
             DEFAULT_MAX_ENTRIES,
             60 * 60 * 1_000,
-            DEFAULT_MAX_ENTRY_BYTES,
+            // A native replay contains the complete conversation, not just
+            // one response. Let a long active chat use the existing total
+            // budget rather than silently losing it at the adapter entry cap.
+            DEFAULT_MAX_TOTAL_BYTES,
             DEFAULT_MAX_TOTAL_BYTES,
         )
     }

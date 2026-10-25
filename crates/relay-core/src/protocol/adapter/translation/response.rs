@@ -101,6 +101,16 @@ pub(super) fn usage(protocol: WireApi, response_payload: &Value) -> Usage {
     let counter = |field_name: &str| usage_payload.get(field_name).and_then(Value::as_u64);
     let pointer = |json_pointer: &str| usage_payload.pointer(json_pointer).and_then(Value::as_u64);
     match protocol {
+        WireApi::GeminiInteractions => Usage {
+            input: counter("total_input_tokens"),
+            output: counter("total_output_tokens").and_then(|count| {
+                count.checked_add(counter("total_thought_tokens").unwrap_or_default())
+            }),
+            total: counter("total_tokens"),
+            cached: counter("total_cached_tokens"),
+            reasoning: counter("total_thought_tokens"),
+            ..Usage::default()
+        },
         WireApi::Responses => Usage {
             input: counter("input_tokens"),
             output: counter("output_tokens"),
@@ -162,6 +172,13 @@ pub(super) fn usage(protocol: WireApi, response_payload: &Value) -> Usage {
 pub(super) fn usage_value(protocol: WireApi, usage: &Usage) -> Value {
     let mut usage_payload = Map::new();
     let (input, output, total, cached, reasoning) = match protocol {
+        WireApi::GeminiInteractions => (
+            "total_input_tokens",
+            "total_output_tokens",
+            "total_tokens",
+            "total_cached_tokens",
+            "total_thought_tokens",
+        ),
         WireApi::Responses => (
             "input_tokens",
             "output_tokens",
@@ -353,6 +370,11 @@ pub(super) fn encode(
         }
     }
     Ok(match protocol {
+        WireApi::GeminiInteractions => {
+            return Err(AdapterError::parameter_unsupported_for(
+                "gemini_interactions.native_only",
+            ))
+        }
         WireApi::Responses => {
             let incomplete = matches!(response.finish, Finish::Length | Finish::Filter);
             json!({"id":response.id,"object":"response","model":model,"status":if incomplete { "incomplete" } else { "completed" },
@@ -392,6 +414,7 @@ fn custom_tool_input(arguments: &str) -> AdapterResult<String> {
 
 pub(super) fn finish_value(protocol: WireApi, finish: Finish) -> &'static str {
     match (protocol, finish) {
+        (WireApi::GeminiInteractions, _) => "completed",
         (WireApi::ChatCompletions, Finish::Stop | Finish::Refusal) => "stop",
         (WireApi::ChatCompletions, Finish::Tools) => "tool_calls",
         (WireApi::ChatCompletions, Finish::Length) => "length",

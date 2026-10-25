@@ -20,12 +20,7 @@ pub(in crate::runtime) fn normalize_client_wire_api(wire_api: ClientWireApi) -> 
 }
 
 pub(in crate::runtime) fn all_native_wire_apis() -> Vec<WireApi> {
-    vec![
-        WireApi::Responses,
-        WireApi::ChatCompletions,
-        WireApi::Messages,
-        WireApi::Gemini,
-    ]
+    WireApi::ALL_NATIVE.to_vec()
 }
 
 pub(in crate::runtime) fn client_wire_apis_to_native(
@@ -38,6 +33,7 @@ pub(in crate::runtime) fn client_wire_apis_to_native(
             ClientWireApi::ChatCompletions | ClientWireApi::Images => WireApi::ChatCompletions,
             ClientWireApi::Messages => WireApi::Messages,
             ClientWireApi::Gemini => WireApi::Gemini,
+            ClientWireApi::GeminiInteractions => WireApi::GeminiInteractions,
         })
         .collect::<BTreeSet<_>>()
         .into_iter()

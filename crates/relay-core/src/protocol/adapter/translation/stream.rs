@@ -169,6 +169,11 @@ impl TranslationStream {
             return Err(AdapterError::upstream_stream_invalid());
         }
         let terminal = match self.translation_request.upstream {
+            WireApi::GeminiInteractions => {
+                return Err(AdapterError::parameter_unsupported_for(
+                    "gemini_interactions.native_only",
+                ))
+            }
             WireApi::ChatCompletions => self.chat(&event_payload)?,
             WireApi::Responses => self.responses(&event_payload).map_err(|error| {
                 if error.parameter().is_some() {

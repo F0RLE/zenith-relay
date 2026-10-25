@@ -235,6 +235,20 @@ impl PoolScheduler {
             return None;
         }
         self.sync_all_rotation_candidates();
+        self.rotation_request_from_synced_state(selection_request, operation)
+    }
+
+    /// Build a request from an already synchronized projection. Read-only
+    /// catalog previews can prepare many routes against the same fixed clone;
+    /// dispatch must still synchronize through `prepare_rotation_request`.
+    pub(super) fn rotation_request_from_synced_state(
+        &mut self,
+        selection_request: &SelectionRequest<'_>,
+        operation: RotationOperation,
+    ) -> Option<RotationRequest> {
+        if self.retired {
+            return None;
+        }
         let mut allowed_candidate_ids = BTreeSet::new();
         for candidate in self.candidates.values() {
             if selection_request.tried.contains(&candidate.id)

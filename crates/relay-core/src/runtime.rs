@@ -2,7 +2,6 @@ use crate::accounts::{
     TokenAuthority, TokenDispatchRevision, TokenPersistenceAdapter, TokenRefreshAdapter,
 };
 use crate::model_metadata::ModelMetadataCatalogHandle;
-use crate::pricing::PricingCatalog;
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::{
     basis_points_headers, AgentIdentityCredential, CodexIdentityEnvelope,
@@ -42,10 +41,12 @@ mod attempt;
 mod authentication;
 mod authorization;
 mod basis_points_access;
+mod request_usage;
 pub(crate) use authorization::AuthorizationDispatch;
 mod build;
 pub(crate) mod cache_context;
 mod candidates;
+pub(crate) mod catalog_hints;
 mod clients;
 mod codex_metadata;
 mod config;
@@ -93,8 +94,6 @@ use crate::{
 };
 pub(crate) use images::is_image_model_id;
 pub use images::normalize_image_base_model;
-#[cfg(test)]
-use images::{cheapest_image_main_model, select_image_main_model};
 
 /// Relay's virtual Image API model for OAuth account routes.
 ///
@@ -103,7 +102,7 @@ use images::{cheapest_image_main_model, select_image_main_model};
 /// text model. Keep the public virtual id aligned with the current stable
 /// GPT Image model; provider routes still use the model selected by their own
 /// source catalog.
-pub(crate) const IMAGE_API_MODEL: &str = "gpt-image-2.5-sunburst";
+pub const IMAGE_API_MODEL: &str = "gpt-image-2.5-sunburst";
 const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 256;
 pub(crate) const WEBSOCKET_CAPABILITY_TTL_MS: u64 = 5 * 60 * 1_000;
 const CHATGPT_TEAM_BREAKER_DEDUP_MS: u64 = 60 * 1_000;
@@ -112,7 +111,6 @@ static NEXT_ACTIVITY_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 pub struct GatewayRuntime {
     diagnostics_enabled: fn() -> bool,
     tool_policy: RwLock<crate::ToolPolicy>,
-    request_timezone: RwLock<crate::RequestTimezonePolicy>,
     clients: RuntimeHttpClients,
     discovery_client: reqwest::Client,
     sources: BTreeMap<String, SourceConnector>,
@@ -134,8 +132,6 @@ pub struct GatewayRuntime {
     admission: Mutex<admission::AdmissionQueue>,
     admission_changed: tokio::sync::Notify,
     registry: Mutex<ModelRegistry>,
-    image_base_model: Option<String>,
-    image_pricing_catalog: Option<Arc<PricingCatalog>>,
     codex_responses_lite_models: Mutex<BTreeSet<(String, String)>>,
     official_codex_ultra: Mutex<BTreeMap<String, Value>>,
     websocket_http_only: Mutex<BTreeMap<(String, String), clients::WebsocketCapabilityObservation>>,
@@ -161,6 +157,8 @@ pub struct GatewayRuntime {
     activity_runtime_id: u64,
     activity_revision: Arc<AtomicU64>,
     chatgpt_team_breaker_callback: Arc<Mutex<RuntimeTeamBreakerCallback>>,
+    codex_catalog_hints: Mutex<BTreeMap<String, catalog_hints::CatalogHint>>,
+    codex_catalog_hint_callback: Mutex<catalog_hints::CatalogHintCallback>,
     pub(crate) usage: UsageCallback,
 }
 
@@ -207,6 +205,7 @@ impl AuthenticatedKey {
 }
 
 struct ChatGptAccountExecutor {
+    images_only: bool,
     oauth_client_kind: crate::providers::chatgpt::OAuthClientKind,
     subscription_plan_type: RwLock<Option<String>>,
     id: String,
@@ -214,7 +213,7 @@ struct ChatGptAccountExecutor {
     chatgpt_account_id: String,
     chatgpt_user_id: Option<String>,
     basis_points_headers: Option<crate::providers::chatgpt::BasisPointsCapturedHeaders>,
-    proxy_timezone: RwLock<Option<String>>,
+    proxy_timezone: RwLock<Option<crate::request_timezone::ProxyTimezone>>,
     identity: CodexIdentityEnvelope,
     responses_url: Url,
     basis_points_url: Url,
@@ -252,8 +251,6 @@ pub(crate) struct ExecutorRoute {
     pub(crate) client_wire_api: WireApi,
     pub(crate) adapter: SourceAdapter,
     pub(crate) reasoning_mode: MessagesReasoningMode,
-    /// Explicit client compatibility choice; the original request stays intact for usage.
-    pub(crate) reasoning_effort_override: Option<String>,
     pub(crate) cache_write_ttl: CacheWriteTtl,
     pub(crate) service_tier: DefaultServiceTier,
     pub(crate) upstream_url: Url,
@@ -306,7 +303,6 @@ pub(crate) struct PreparedAuthorization {
     pub(crate) identity: Option<CodexIdentityEnvelope>,
     pub(crate) token_generation: Option<u64>,
     pub(crate) token_revision: Option<TokenDispatchRevision>,
-    pub(crate) account_plan_supported: bool,
     pub(crate) agent_task_id: Option<String>,
     pub(crate) agent_credential_fingerprint: Option<[u8; 32]>,
     pub(crate) agent_identity_revision: Option<u64>,
@@ -344,6 +340,8 @@ pub(crate) enum AuthorizedRequestError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ExecutorPrepareError {
     Authentication,
+    RotationRecoveryRequired,
+    CredentialStoreUnavailable,
     Persistence,
     Transient,
     InvalidCredential,
