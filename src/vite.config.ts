@@ -1,8 +1,9 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { startupChunks } from "./build/startupChunks.ts";
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), startupChunks()],
   clearScreen: false,
   server: {
     port: 1420,

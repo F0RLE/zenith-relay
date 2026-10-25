@@ -4,9 +4,9 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check } from "@tauri-apps/plugin-updater";
-import packageJson from "../../package.json";
+import { version } from "../../package.json";
 
-export const APP_VERSION = packageJson.version;
+export const APP_VERSION = version;
 
 export type AppUpdate = {
   currentVersion: string;
