@@ -7,8 +7,8 @@ use crate::platform;
 use std::{sync::Arc, time::Instant};
 use zenith_relay_core::protocol::{
     apply_model_metadata, apply_pool_model_configuration_with_context, pool_candidate_count,
-    pool_model_summaries_with_pricing, pool_pricing_source_summary, DesktopCapabilities,
-    GatewaySummary, ModelDisplayProjection, PoolModelConfigurationInput, RuntimeStateSnapshot,
+    pool_model_projection_with_pricing, DesktopCapabilities, GatewaySummary,
+    ModelDisplayProjection, PoolModelConfigurationInput, PoolModelProjection, RuntimeStateSnapshot,
 };
 use zenith_relay_core::{unix_time_ms, GatewayRuntime, PricingMetadata};
 
@@ -25,9 +25,8 @@ use members::{
 #[cfg(test)]
 pub(super) use summary::oauth_account_runtime_available;
 
-/// Build the same prepared runtime projection exposed to the UI. Consumers
-/// that generate integrations (for example OpenCode) must use this projection
-/// instead of rebuilding a second model catalog from raw pool records.
+/// Build the prepared runtime projection shared by the UI and integration
+/// generators such as OpenCode.
 pub(crate) async fn build_local_runtime_state(
     state: &DesktopState,
 ) -> Result<RuntimeStateSnapshot, CommandError> {
@@ -111,7 +110,10 @@ fn project_local_runtime_state(
         &routing_order,
         common_proxy_available,
     );
-    let mut models = pool_model_summaries_with_pricing(
+    let PoolModelProjection {
+        mut models,
+        pricing_source,
+    } = pool_model_projection_with_pricing(
         &source_summaries,
         &account_summaries,
         &inputs.gateway.hidden_models,
@@ -154,7 +156,7 @@ fn project_local_runtime_state(
     let pricing_metadata = PricingMetadata::for_catalog_with_status(
         &catalog,
         state.pricing_status(),
-        pool_pricing_source_summary(&source_summaries, &account_summaries, &catalog, &pricing),
+        pricing_source,
         equivalents
             .accounts
             .values()
@@ -164,6 +166,7 @@ fn project_local_runtime_state(
     );
     let response = RuntimeStateSnapshot {
         schema_version: crate::local_pool::models::CURRENT_SCHEMA_VERSION,
+        weekly_capacity_revision: state.telemetry.weekly_capacity_revision(),
         gateway: GatewaySummary {
             tool_policy: inputs.gateway.tool_policy.clone(),
             pool_routing: Some(zenith_relay_core::protocol::pool_routing_summary(

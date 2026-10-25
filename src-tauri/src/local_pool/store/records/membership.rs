@@ -130,34 +130,4 @@ impl LocalPoolStore {
             None,
         )
     }
-
-    pub fn touch_usage(
-        &mut self,
-        key_id: &str,
-        source_id: &str,
-        account_id: Option<&str>,
-        at: String,
-    ) -> Result<()> {
-        let mut sources = self.sources.clone();
-        let mut keys = self.keys.clone();
-        if let Some(source) = sources.iter_mut().find(|source| source.id == source_id) {
-            source.last_used_at = Some(at.clone());
-        }
-        if let Some(key) = keys.iter_mut().find(|key| key.id == key_id) {
-            key.last_used_at = Some(at.clone());
-        }
-        let mut accounts = self.accounts.clone();
-        if let (Some(account_id), Some(last_used_at_ms)) = (
-            account_id,
-            zenith_relay_core::unix_time_ms_from_rfc3339(&at),
-        ) {
-            if let Some(account) = accounts
-                .iter_mut()
-                .find(|account| account.account.id == account_id)
-            {
-                account.account.last_used_at_ms = Some(last_used_at_ms);
-            }
-        }
-        self.replace_all_records(sources, accounts, keys, self.automations.clone())
-    }
 }

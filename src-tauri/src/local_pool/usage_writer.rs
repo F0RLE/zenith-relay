@@ -238,21 +238,12 @@ fn persist_usage_observation(
     store.lock().map_err(|_| ()).and_then(|mut store| {
         let Some(account_id) = account_id else {
             store
-                .touch_usage(
-                    &event.local_key_id,
-                    &event.source_id,
-                    None,
-                    observed_at.to_string(),
-                )
+                .touch_usage(&event.local_key_id, &event.source_id, observed_at)
                 .map_err(|_| ())?;
             return Ok((0, None, false));
         };
 
-        let mut accounts = store.accounts().to_vec();
-        let account = accounts
-            .iter_mut()
-            .find(|account| account.account.id == account_id)
-            .ok_or(())?;
+        let mut account = store.account(account_id).cloned().ok_or(())?;
         let visible_state = (
             account.account.quota.clone(),
             account.account.auth_state,
@@ -260,7 +251,7 @@ fn persist_usage_observation(
             account.account.last_error_code.clone(),
         );
         let refresh_now = apply_account_usage_state(
-            account,
+            &mut account,
             event,
             observed_at_ms,
             access_expiry,
@@ -300,10 +291,6 @@ fn persist_usage_observation(
                 account.account.health,
                 account.account.last_error_code.clone(),
             );
-        let mut keys = store.keys().to_vec();
-        if let Some(key) = keys.iter_mut().find(|key| key.id == event.local_key_id) {
-            key.last_used_at = Some(observed_at.to_string());
-        }
         let mut coordinator = wake.lock().map_err(|_| ())?;
         let mut updated_coordinator = coordinator.clone();
         let mut automations = store.automations().clone();
@@ -314,7 +301,7 @@ fn persist_usage_observation(
         };
         automations.state = updated_coordinator.state().clone();
         store
-            .replace_account_state(accounts, keys, automations)
+            .persist_account_usage(account, &event.local_key_id, observed_at, automations)
             .map_err(|_| ())?;
         *coordinator = updated_coordinator;
         let (_, fence) = store.account_refresh_scope(account_id).map_err(|_| ())?;

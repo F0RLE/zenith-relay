@@ -265,7 +265,10 @@ impl LocalPoolStore {
     }
 }
 
-fn same_account_scope(previous_account: &LocalAccountRecord, account: &LocalAccountRecord) -> bool {
+pub(super) fn same_account_scope(
+    previous_account: &LocalAccountRecord,
+    account: &LocalAccountRecord,
+) -> bool {
     previous_account.account.identity == account.account.identity
         && previous_account.account.auth_mode == account.account.auth_mode
         && previous_account.account.source_id == account.account.source_id

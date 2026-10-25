@@ -62,6 +62,9 @@ fn image_usage_migration_preserves_legacy_rows_and_send_view() {
          CREATE VIEW usage_sends AS SELECT * FROM request_attempts UNION ALL
              SELECT * FROM request_logs WHERE NOT EXISTS (SELECT 1 FROM request_attempts
                  WHERE request_attempts.request_id=request_logs.request_id AND request_attempts.attempt=request_logs.attempt);
+         DROP TABLE app_state_items;
+         DROP TABLE weekly_capacity_anchors;
+         DROP TABLE weekly_capacity_history;
          PRAGMA user_version=37;"
     ).unwrap();
     drop(database);

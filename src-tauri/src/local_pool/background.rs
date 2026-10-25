@@ -8,6 +8,7 @@ use zenith_relay_core::automations::{WakePermit, WakeVerificationOutcome};
 mod loops;
 mod wake_policy;
 mod wake_worker;
+mod weekly_capacity;
 
 pub(crate) use loops::refresh_account_models_in_background;
 use loops::{codex_release_loop, model_metadata_loop, pricing_loop};
@@ -22,6 +23,7 @@ const WAKE_VERIFICATION_DELAY_MS: u64 = 5_000;
 const WAKE_OUTPUT_TOKEN_CAP: u16 = 8;
 
 pub(crate) fn start(app: AppHandle) {
+    weekly_capacity::start(app.clone());
     crate::diagnostics::record_operation("background", "workers_started", &[]);
     if let Err(error) = app.state::<DesktopState>().start_refresh() {
         crate::diagnostics::record_error(

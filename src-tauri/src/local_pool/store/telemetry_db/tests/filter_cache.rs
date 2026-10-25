@@ -163,6 +163,9 @@ fn filter_read_migration_upgrades_existing_history_without_rewriting_it() {
         .execute_batch(
             "DROP INDEX request_attempts_filter_options;
          DROP INDEX request_logs_filter_options;
+         DROP TABLE app_state_items;
+         DROP TABLE weekly_capacity_anchors;
+         DROP TABLE weekly_capacity_history;
          PRAGMA user_version = 38;",
         )
         .unwrap();

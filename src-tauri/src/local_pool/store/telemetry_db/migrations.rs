@@ -5,9 +5,11 @@ mod image_usage;
 mod late;
 mod send_usage;
 mod service_tiers;
+mod state_items;
 mod unknown_tiers;
 mod usage_filter_reads;
 mod usage_reads;
+mod weekly_capacity;
 
 pub(super) use attempts::MIGRATION_033;
 pub(super) use context_bands::migrate_032;
@@ -16,11 +18,13 @@ pub(super) use image_usage::MIGRATION_038;
 pub(super) use late::*;
 pub(super) use send_usage::migrate_036;
 pub(super) use service_tiers::migrate_034;
+pub(super) use state_items::MIGRATION_040;
 pub(super) use unknown_tiers::migrate_035;
 pub(super) use usage_filter_reads::MIGRATION_039;
 pub(super) use usage_reads::MIGRATION_037;
+pub(super) use weekly_capacity::MIGRATION_041;
 
-pub(super) const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 39;
+pub(super) const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 41;
 pub(super) const MAX_RESPONSE_AFFINITY_ROWS: usize = 16_384;
 pub(super) const MAX_STATE_JSON_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const ARCHIVE_USAGE_SQL: &str = concat!(

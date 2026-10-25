@@ -13,10 +13,12 @@ use zenith_relay_core::{
 };
 
 mod filters;
+mod report;
 mod rows;
 mod sends;
 mod totals;
 
+pub(super) use report::scoped_report_summary;
 pub(super) use rows::{rust_u64, sql_u64, usage_log_from_row};
 use rows::{usage_pricing_usage_from_row, usage_totals_from_row};
 pub(super) use sends::{send_projection, LEGACY_SEND_PREDICATE};

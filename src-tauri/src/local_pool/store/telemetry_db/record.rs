@@ -349,11 +349,14 @@ impl TelemetryDb {
     }
 
     pub fn clear(&self) -> Result<()> {
-        self.lock_connection()?
-            .execute_batch("DELETE FROM request_logs; DELETE FROM request_attempts; DELETE FROM usage_candidate_rollups;")
+        let connection = self.lock_connection()?;
+        connection
+            .execute_batch("DELETE FROM request_logs; DELETE FROM request_attempts; DELETE FROM usage_candidate_rollups; DELETE FROM weekly_capacity_anchors; DELETE FROM weekly_capacity_history;")
             .map_err(db_error)?;
         self.clear_cached_usage_totals()?;
         *self.quota_samples.lock().map_err(lock_error)? = Default::default();
+        self.capacity_seen.lock().map_err(lock_error)?.clear();
+        self.capacity_revision.fetch_add(1, Ordering::Release);
         self.invalidate_usage_cache();
         Ok(())
     }

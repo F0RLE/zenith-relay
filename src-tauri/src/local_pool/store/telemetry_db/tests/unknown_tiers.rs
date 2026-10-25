@@ -58,6 +58,9 @@ fn unknown_tier_migration_reclassifies_retained_events_and_preserves_archives() 
             output_tokens = output_tokens + 7, output_samples = output_samples + 1,
             total_tokens = total_tokens + 707, total_samples = total_samples + 1
          WHERE candidate_id = 'source_unknown' AND price_class = 'premium_v2';
+         DROP TABLE app_state_items;
+         DROP TABLE weekly_capacity_anchors;
+         DROP TABLE weekly_capacity_history;
          PRAGMA user_version = 34;",
         )
         .unwrap();

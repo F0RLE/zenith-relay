@@ -12,11 +12,11 @@ impl TelemetryDb {
         let resolver = CatalogPriceResolver::new(catalog, context);
         let (page, page_size) = query.normalized_page();
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
-        let connection = self.lock_connection()?;
+        let connection = self.lock_report_connection()?;
         let (where_sql, parameters) = usage_filter(query);
         let filter_options = query
             .include_filter_options
-            .then(|| self.cached_usage_filter_options(&connection, query))
+            .then(|| self.usage_filter_options_at_revision(&connection, query, connection.revision))
             .transpose()?;
         let mut has_more = false;
         let mut events = if query.includes_events() {

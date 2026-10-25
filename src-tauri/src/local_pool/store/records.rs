@@ -1,5 +1,6 @@
 mod gateway;
 mod membership;
+mod usage;
 
 use std::borrow::Cow;
 
@@ -60,6 +61,7 @@ impl LocalPoolStore {
         )
     }
 
+    #[cfg(test)]
     pub fn replace_account_state(
         &mut self,
         accounts: Vec<LocalAccountRecord>,

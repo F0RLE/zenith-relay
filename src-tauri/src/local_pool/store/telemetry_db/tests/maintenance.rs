@@ -16,7 +16,16 @@ fn memory_diagnostics_report_a_budget_without_waiting_on_the_database() {
     }
     assert_eq!(
         database.memory_cache_budget(),
-        Some(128 * usize::try_from(page_size).unwrap())
+        Some(128 * usize::try_from(page_size).unwrap() + 24 * 1024 * 1024)
+    );
+    {
+        let reader = database.report_connection.as_ref().unwrap().lock().unwrap();
+        assert_eq!(database.memory_cache_budget(), None);
+        reader.pragma_update(None, "cache_size", -1024).unwrap();
+    }
+    assert_eq!(
+        database.memory_cache_budget(),
+        Some(128 * usize::try_from(page_size).unwrap() + 1024 * 1024)
     );
     drop(database);
     std::fs::remove_dir_all(root).unwrap();

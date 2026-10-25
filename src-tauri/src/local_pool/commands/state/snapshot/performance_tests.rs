@@ -1,9 +1,22 @@
 use super::*;
+use crate::local_pool::store::telemetry_db::PerformanceSample;
 use std::sync::Arc;
 use zenith_relay_core::{
     GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, RuntimeLocalKey,
     RuntimeSource, WireApi,
 };
+
+pub(super) fn print_stages(stages: &[PerformanceSample<'_>]) {
+    if std::env::var_os("RELAY_MEASURE_SNAPSHOT_STAGES").is_some() {
+        for sample in stages {
+            println!(
+                "snapshot_stage stage={} elapsed_ms={:.2}",
+                sample.context.unwrap_or_default(),
+                sample.duration_ms
+            );
+        }
+    }
+}
 
 #[tokio::test]
 #[ignore = "synthetic full snapshot timing; no provider requests or real credentials"]
@@ -54,7 +67,7 @@ async fn measure_full_snapshot_projection() {
     // A separate ephemeral loopback listener exercises routing projection too;
     // the fixture never sends requests or touches the user's running gateway.
     state.gateway.start(runtime, 0).await.unwrap();
-    for phase in ["cold", "warm"] {
+    for phase in ["cold", "warm_1", "warm_2", "warm_3"] {
         let started = Instant::now();
         let snapshot = build_local_runtime_state(&state).await.unwrap();
         assert_eq!(snapshot.sources.len(), 3);

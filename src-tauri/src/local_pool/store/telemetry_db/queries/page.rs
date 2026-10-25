@@ -204,11 +204,12 @@ impl TelemetryDb {
         resolver: &CatalogPriceResolver<'_>,
     ) -> Result<LocalUsagePage> {
         let (page, page_size) = query.normalized_page();
-        let connection = self.lock_connection()?;
+        let connection = self.lock_report_connection()?;
+        let usage_revision = connection.revision;
         let (where_sql, query_parameters) = usage_filter(query);
         let filter_options = query
             .include_filter_options
-            .then(|| self.cached_usage_filter_options(&connection, query))
+            .then(|| self.usage_filter_options_at_revision(&connection, query, usage_revision))
             .transpose()?;
         // Pagination does not change period totals. Reuse one bounded summary
         // for the same exact scope, history and pricing revision.
@@ -220,7 +221,6 @@ impl TelemetryDb {
         let query_key = serde_json::to_string(&summary_query).map_err(|_| {
             LocalPoolError::new(ErrorCode::Io, "Usage scope could not be serialized")
         })?;
-        let usage_revision = self.usage_revision.load(Ordering::Acquire);
         let pricing_revision = resolver.revision_key().to_string();
         let cached = self
             .usage_report_cache
@@ -264,66 +264,24 @@ impl TelemetryDb {
         }
         #[cfg(test)]
         self.usage_report_builds.fetch_add(1, Ordering::Relaxed);
-        let use_all_time_rollups = is_unfiltered_all_time(query);
-        let mut totals =
-            self.cached_usage_totals(&connection, query, &where_sql, &query_parameters)?;
-        let mut model_groups = if query.includes_models() {
-            usage_groups(
+        let summary = if is_unfiltered_all_time(query) {
+            self.all_time_report_summary(
                 &connection,
+                query,
                 &where_sql,
                 &query_parameters,
-                "COALESCE(resolved_model, requested_model, '')",
+                resolver,
             )?
         } else {
-            Vec::new()
-        };
-        let equivalents = usage_model_equivalents(
-            &connection,
-            &where_sql,
-            &query_parameters,
-            resolver,
-            use_all_time_rollups,
-        )?;
-        let mut api_equivalents_by_model = equivalents.models;
-        if query.includes_models() {
-            for group in &mut model_groups {
-                group.totals.api_equivalent = api_equivalents_by_model
-                    .remove(&group.key)
-                    .unwrap_or_default();
-                totals.api_equivalent.merge(group.totals.api_equivalent);
-            }
-        }
-        // Include every estimate when groups are omitted, and unmatched rollups
-        // when retained history is no longer present in the request log.
-        for estimate in api_equivalents_by_model.values() {
-            totals.api_equivalent.merge(*estimate);
-        }
-        let mut pool_members = if query.includes_pool_members() {
-            usage_groups(
+            super::super::usage::scoped_report_summary(
                 &connection,
+                query,
                 &where_sql,
                 &query_parameters,
-                "COALESCE(account_id, source_id, '')",
+                resolver,
             )?
-        } else {
-            Vec::new()
         };
-        for group in &mut pool_members {
-            group.totals.api_equivalent = equivalents
-                .members
-                .get(&group.key)
-                .copied()
-                .unwrap_or_default();
-        }
         let buckets = usage_buckets(&connection, &where_sql, &query_parameters, query, resolver)?;
-        let send_count_sql = super::super::usage::send_projection("1", &where_sql);
-        let total_event_count = connection
-            .query_row(
-                &format!("SELECT COUNT(*) FROM ({send_count_sql})"),
-                params_from_iter(query_parameters.iter().chain(query_parameters.iter())),
-                |row| row.get::<_, i64>(0).map(|count| count.max(0) as u64),
-            )
-            .map_err(db_error)?;
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
         let mut events = if query.includes_events() {
             usage_send_page(
@@ -341,21 +299,21 @@ impl TelemetryDb {
         // page below no longer needs to block request recording.
         drop(connection);
         price_events(&mut events, resolver);
-        let total_pages = UsageQuery::page_count(total_event_count, page_size);
+        let total_pages = UsageQuery::page_count(summary.sends, page_size);
         let pricing_metadata =
-            resolver.pricing_metadata(totals.api_equivalent, &equivalents.sources);
+            resolver.pricing_metadata(summary.totals.api_equivalent, &summary.sources);
         let mut result = LocalUsagePage {
             events,
             has_more: None,
             workload: query.workload,
             filter_options,
-            total: total_event_count,
+            total: summary.sends,
             page,
             page_size,
             total_pages,
-            totals,
-            models: model_groups,
-            pool_members,
+            totals: summary.totals,
+            models: summary.models,
+            pool_members: summary.members,
             buckets,
             pricing: pricing_metadata,
         };

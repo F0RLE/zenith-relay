@@ -56,6 +56,7 @@ mod parity_tests {
     fn local_snapshot_omits_retired_fields_and_accepts_legacy_transport_flag() {
         let local = serde_json::to_value(RuntimeStateSnapshot {
             schema_version: 1,
+            weekly_capacity_revision: 0,
             gateway: GatewaySummary {
                 tool_policy: Default::default(),
                 pool_routing: None,

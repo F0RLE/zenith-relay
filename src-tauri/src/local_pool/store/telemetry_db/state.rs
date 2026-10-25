@@ -5,6 +5,8 @@ use rusqlite::OptionalExtension;
 use rusqlite::{params, TransactionBehavior};
 use std::collections::HashMap;
 
+mod items;
+
 impl TelemetryDb {
     pub(crate) fn state_json_entries(&self) -> Result<HashMap<String, String>> {
         let connection = self.connection.lock().map_err(lock_error)?;
@@ -14,22 +16,30 @@ impl TelemetryDb {
         let rows = statement
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(db_error)?;
-        rows.map(|row| row.map_err(db_error))
-            .collect::<std::result::Result<HashMap<_, _>, _>>()
+        let mut entries = rows
+            .map(|row| row.map_err(db_error))
+            .collect::<std::result::Result<HashMap<_, _>, _>>()?;
+        items::overlay(&connection, &mut entries)?;
+        Ok(entries)
     }
 
     pub(crate) fn state_json(&self, key: &str) -> Result<Option<String>> {
         validate_state_key(key)?;
-        self.connection
-            .lock()
-            .map_err(lock_error)?
+        let connection = self.connection.lock().map_err(lock_error)?;
+        let value = connection
             .query_row(
                 "SELECT value_json FROM app_state WHERE key = ?1",
                 [key],
                 |row| row.get(0),
             )
             .optional()
-            .map_err(db_error)
+            .map_err(db_error)?;
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        let mut entries = HashMap::from([(key.to_string(), value)]);
+        items::overlay(&connection, &mut entries)?;
+        Ok(entries.remove(key))
     }
 
     #[cfg(test)]
@@ -46,7 +56,15 @@ impl TelemetryDb {
     }
 
     pub(crate) fn replace_state_json(&self, state_entries: &[(&str, String)]) -> Result<()> {
-        self.replace_state_json_with_account_purge(state_entries, &[])
+        self.replace_state_json_with_account_purge(state_entries, &[], &[])
+    }
+
+    pub(crate) fn replace_state_items(
+        &self,
+        items: &[(&str, usize, String)],
+        state_entries: &[(&str, String)],
+    ) -> Result<()> {
+        self.replace_state_json_with_account_purge(state_entries, &[], items)
     }
 
     pub(crate) fn replace_state_json_and_delete_account_data(
@@ -64,15 +82,16 @@ impl TelemetryDb {
         account_ids: &[String],
     ) -> Result<()> {
         let account_ids = account_ids.iter().map(String::as_str).collect::<Vec<_>>();
-        self.replace_state_json_with_account_purge(state_entries, &account_ids)
+        self.replace_state_json_with_account_purge(state_entries, &account_ids, &[])
     }
 
     fn replace_state_json_with_account_purge(
         &self,
         state_entries: &[(&str, String)],
         account_ids: &[&str],
+        item_entries: &[(&str, usize, String)],
     ) -> Result<()> {
-        if state_entries.is_empty() && account_ids.is_empty() {
+        if state_entries.is_empty() && account_ids.is_empty() && item_entries.is_empty() {
             return Ok(());
         }
         for (key, state_json) in state_entries {
@@ -100,9 +119,24 @@ impl TelemetryDb {
                 statement
                     .execute(params![key, state_json])
                     .map_err(db_error)?;
+                // The supplied full inventory already includes its observations.
+                // Clearing atomically prevents old positional rows resurrecting
+                // a removed account or overwriting reordered/reimported records.
+                transaction
+                    .execute("DELETE FROM app_state_items WHERE state_key = ?1", [key])
+                    .map_err(db_error)?;
             }
         }
+        items::write(&transaction, item_entries)?;
         for account_id in account_ids {
+            // Shared-ledger estimates cannot be decomposed after a member's
+            // underlying usage is deleted. Remove that derived evidence too.
+            for table in ["weekly_capacity_anchors", "weekly_capacity_history"] {
+                transaction.execute(
+                    &format!("DELETE FROM {table} WHERE EXISTS (SELECT 1 FROM json_each(payload_json, '$.account_ids') WHERE value = ?1)"),
+                    [account_id],
+                ).map_err(db_error)?;
+            }
             transaction
                 .execute(
                     "DELETE FROM request_attempts WHERE account_id = ?1",
@@ -130,6 +164,9 @@ impl TelemetryDb {
         }
         transaction.commit().map_err(db_error)?;
         if !account_ids.is_empty() {
+            self.capacity_seen.lock().map_err(lock_error)?.clear();
+            self.capacity_revision
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
             self.clear_cached_usage_totals()?;
             self.invalidate_usage_cache();
         }

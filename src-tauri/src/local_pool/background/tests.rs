@@ -92,7 +92,7 @@ async fn inactive_wake_permit_is_skipped_before_credentials_or_http() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-fn account_record() -> LocalAccountRecord {
+pub(super) fn account_record() -> LocalAccountRecord {
     LocalAccountRecord {
         account: AccountRecord {
             id: "account-1".into(),

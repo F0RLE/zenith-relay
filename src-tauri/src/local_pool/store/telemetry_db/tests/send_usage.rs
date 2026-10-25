@@ -360,6 +360,9 @@ fn migration_backfills_retained_sends_once_and_retention_preserves_their_rollups
          ALTER TABLE request_attempts DROP COLUMN image_usage_json;
          DROP INDEX request_attempts_created_at;
          DROP INDEX request_attempts_account_created;
+         DROP TABLE app_state_items;
+         DROP TABLE weekly_capacity_anchors;
+         DROP TABLE weekly_capacity_history;
          PRAGMA user_version = 35;",
         )
         .unwrap();

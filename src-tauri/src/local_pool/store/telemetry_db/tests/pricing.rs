@@ -87,6 +87,9 @@ fn context_band_migration_reclassifies_retained_usage_and_preserves_archives() {
          DROP TRIGGER request_attempts_retention;
          DELETE FROM request_logs WHERE request_id = 'archived';
          UPDATE usage_candidate_rollups SET context_band = 'base';
+         DROP TABLE app_state_items;
+         DROP TABLE weekly_capacity_anchors;
+         DROP TABLE weekly_capacity_history;
          PRAGMA user_version = 31;",
         )
         .unwrap();
@@ -452,7 +455,7 @@ fn account_purchase_cost_migration_preserves_direct_values_and_removes_legacy_ec
         .connection
         .lock()
         .unwrap()
-        .execute_batch("DROP TABLE request_attempts; DROP TRIGGER request_attempts_retention;")
+        .execute_batch("DROP TABLE request_attempts; DROP TRIGGER request_attempts_retention; DROP TABLE app_state_items; DROP TABLE weekly_capacity_anchors; DROP TABLE weekly_capacity_history;")
         .unwrap();
     drop(database);
 

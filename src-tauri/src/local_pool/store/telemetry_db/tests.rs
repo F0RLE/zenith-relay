@@ -1,3 +1,4 @@
+use super::usage::{usage_groups, usage_model_equivalents};
 use super::*;
 use zenith_relay_core::{
     ErrorOrigin, SelectionReason, TerminalOutputKind, ToolChoiceMode, WireApi,
@@ -11,7 +12,9 @@ mod performance;
 mod performance_samples;
 mod pricing;
 mod quota_cache;
+mod reader;
 mod report_performance;
+mod report_summary;
 mod reporting;
 mod retention_batches;
 mod rollups;

@@ -240,6 +240,7 @@ fn desktop_commands() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send 
         local_pool::commands::gateway::settings::set_local_block_degraded_routes,
         local_pool::commands::gateway::settings::set_local_codex_websockets,
         local_pool::commands::usage::get_local_usage_page,
+        local_pool::commands::usage::get_local_weekly_capacity,
         local_pool::commands::usage::get_local_cache_sessions,
         local_pool::commands::usage::clear_local_usage,
         local_pool::commands::profiles::gateway::update_chatgpt_interface_quota_reserve,

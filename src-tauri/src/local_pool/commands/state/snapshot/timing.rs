@@ -27,6 +27,8 @@ impl SnapshotTiming {
     }
 
     pub(super) fn finish(self, state: &DesktopState, elapsed: Duration) {
+        #[cfg(test)]
+        super::performance_tests::print_stages(&self.stages);
         let samples = self.into_samples(elapsed);
         if let [sample] = samples.as_slice() {
             state.record_performance_async(sample.name, sample.duration_ms, sample.context);

@@ -11,14 +11,23 @@ use std::sync::atomic::Ordering;
 use zenith_relay_core::protocol::UsageQuery;
 
 impl TelemetryDb {
-    /// The caller holds the connection lock through lookup and publication.
-    /// Page/search/tab changes share choices; writes and period changes do not.
+    #[cfg(test)]
     pub(in crate::local_pool::store::telemetry_db) fn cached_usage_filter_options(
         &self,
         connection: &Connection,
         query: &UsageQuery,
     ) -> Result<UsageFilterOptions> {
         let revision = self.usage_revision.load(Ordering::Acquire);
+        self.usage_filter_options_at_revision(connection, query, revision)
+    }
+
+    /// Read filter options at the pinned snapshot's revision.
+    pub(in crate::local_pool::store::telemetry_db) fn usage_filter_options_at_revision(
+        &self,
+        connection: &Connection,
+        query: &UsageQuery,
+        revision: u64,
+    ) -> Result<UsageFilterOptions> {
         {
             let cached = self.usage_filter_options_cache.lock().map_err(lock_error)?;
             if let Some(cached) = cached.as_ref().filter(|cached| {
@@ -35,7 +44,7 @@ impl TelemetryDb {
         let options = usage_filter_options(connection, query)?;
         let mut cached = self.usage_filter_options_cache.lock().map_err(lock_error)?;
         if self.usage_revision.load(Ordering::Acquire) == revision {
-            // Retain only one period, rather than growing a history of filters.
+            // Cache only the latest selected period.
             cached.replace(CachedUsageFilterOptions {
                 usage_revision: revision,
                 from_ms: query.from_ms,

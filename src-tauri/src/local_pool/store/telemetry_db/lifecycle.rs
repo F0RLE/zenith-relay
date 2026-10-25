@@ -1,24 +1,35 @@
 use super::*;
 
+fn connection_cache_budget(connection: &Connection) -> Option<usize> {
+    let cache_size: i64 = connection
+        .query_row("PRAGMA cache_size", [], |row| row.get(0))
+        .ok()?;
+    if cache_size < 0 {
+        usize::try_from(cache_size.unsigned_abs())
+            .ok()?
+            .checked_mul(1024)
+    } else {
+        let page_size: u32 = connection
+            .query_row("PRAGMA page_size", [], |row| row.get(0))
+            .ok()?;
+        usize::try_from(cache_size)
+            .ok()?
+            .checked_mul(usize::try_from(page_size).ok()?)
+    }
+}
+
 impl TelemetryDb {
     /// Configured pager budget, not a claim about currently allocated pages.
     pub(crate) fn memory_cache_budget(&self) -> Option<usize> {
-        let connection = self.connection.try_lock().ok()?;
-        let cache_size: i64 = connection
-            .query_row("PRAGMA cache_size", [], |row| row.get(0))
-            .ok()?;
-        if cache_size < 0 {
-            usize::try_from(cache_size.unsigned_abs())
-                .ok()?
-                .checked_mul(1024)
+        let writer = self.connection.try_lock().ok()?;
+        let writer_budget = connection_cache_budget(&writer)?;
+        let reader_budget = if let Some(reader) = &self.report_connection {
+            let reader = reader.try_lock().ok()?;
+            connection_cache_budget(&reader)?
         } else {
-            let page_size: u32 = connection
-                .query_row("PRAGMA page_size", [], |row| row.get(0))
-                .ok()?;
-            usize::try_from(cache_size)
-                .ok()?
-                .checked_mul(usize::try_from(page_size).ok()?)
-        }
+            0
+        };
+        writer_budget.checked_add(reader_budget)
     }
 
     pub fn open(path: &Path) -> Result<Self> {
@@ -171,6 +182,12 @@ impl TelemetryDb {
         if version <= 38 {
             connection.execute_batch(MIGRATION_039).map_err(db_error)?;
         }
+        if version <= 39 {
+            connection.execute_batch(MIGRATION_040).map_err(db_error)?;
+        }
+        if version <= 40 {
+            connection.execute_batch(MIGRATION_041).map_err(db_error)?;
+        }
         // Retention reads before writing. Acquire the writer reservation first:
         // a finishing background sample on another connection must not turn
         // that read snapshot into an un-upgradable SQLITE_BUSY_SNAPSHOT.
@@ -181,8 +198,18 @@ impl TelemetryDb {
             .execute_batch(ARCHIVE_USAGE_SQL)
             .map_err(db_error)?;
         retention.commit().map_err(db_error)?;
+        let report_connection = connection.path().filter(|path| !path.is_empty()).map(|path| {
+            let reader = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(db_error)?;
+            reader.set_prepared_statement_cache_capacity(0);
+            reader.execute_batch("PRAGMA query_only = ON; PRAGMA cache_size = -24576; PRAGMA temp_store = MEMORY; PRAGMA busy_timeout = 5000;")
+                .map_err(db_error)?;
+            connection.execute_batch("PRAGMA cache_size = -8192;").map_err(db_error)?;
+            Ok::<_, LocalPoolError>(Mutex::new(reader))
+        }).transpose()?;
         Ok(Self {
             connection: Mutex::new(connection),
+            report_connection,
             usage_revision: AtomicU64::new(0),
             api_equivalent_cache: Mutex::new(None),
             quota_equivalent_cache: Mutex::new(None),
@@ -197,33 +224,43 @@ impl TelemetryDb {
             usage_report_builds: AtomicU64::new(0),
             open_duration_ms: started.elapsed().as_secs_f64() * 1_000.0,
             quota_samples: Mutex::new(forecast::QuotaSamples::default()),
+            capacity_seen: Mutex::new(HashMap::new()),
+            capacity_revision: AtomicU64::new(0),
         })
     }
 
     pub(super) fn cached_usage_totals(
         &self,
-        connection: &Connection,
+        connection: &super::reader::ReportRead<'_>,
         query: &UsageQuery,
         where_sql: &str,
         query_parameters: &[SqlValue],
     ) -> Result<UsageTotals> {
         if is_unfiltered_all_time(query) {
-            if let Some(cached) = self
-                .usage_totals_cache
-                .lock()
-                .map_err(lock_error)?
-                .as_ref()
-                .cloned()
-            {
+            if let Some(cached) = connection.totals.clone() {
                 return Ok(cached);
             }
         }
         let totals = usage_totals(connection, where_sql, query_parameters)?;
         if is_unfiltered_all_time(query) {
-            self.usage_totals_cache
-                .lock()
-                .map_err(lock_error)?
-                .replace(totals.clone());
+            // A concurrent writer may already have advanced its incremental
+            // totals. Publication must be fenced with that writer, not just
+            // the cache mutex (the revision advances after its cache update).
+            let _writer = self
+                .report_connection
+                .as_ref()
+                .map(|_| self.lock_connection())
+                .transpose()?;
+            if self
+                .usage_revision
+                .load(std::sync::atomic::Ordering::Acquire)
+                == connection.revision
+            {
+                self.usage_totals_cache
+                    .lock()
+                    .map_err(lock_error)?
+                    .replace(totals.clone());
+            }
         }
         Ok(totals)
     }

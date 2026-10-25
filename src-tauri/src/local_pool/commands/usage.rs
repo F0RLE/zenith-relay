@@ -2,11 +2,27 @@ use super::pricing_context;
 use crate::local_pool::{
     error::{CommandError, ErrorCode, LocalPoolError},
     state::DesktopState,
-    store::telemetry_db::{CacheSession, CacheSessionScope, LocalUsagePage},
+    store::telemetry_db::{
+        CacheSession, CacheSessionScope, LocalUsagePage, WeeklyCapacityQuery, WeeklyCapacityReport,
+    },
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
 use zenith_relay_core::protocol::UsageQuery;
+
+#[tauri::command]
+pub async fn get_local_weekly_capacity(
+    input: Option<WeeklyCapacityQuery>,
+    state: State<'_, DesktopState>,
+) -> Result<WeeklyCapacityReport, CommandError> {
+    let telemetry = state.telemetry.clone();
+    super::run_blocking(move || {
+        let now = zenith_relay_core::unix_time_ms();
+        telemetry.weekly_capacity_report(input.unwrap_or_default(), now)
+    })
+    .await
+    .map_err(Into::into)
+}
 
 #[tauri::command]
 pub async fn get_local_usage_page(
