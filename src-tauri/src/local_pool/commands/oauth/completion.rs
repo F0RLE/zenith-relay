@@ -4,6 +4,7 @@ use crate::local_pool::{
         credentials::{
             credential_local_error as credential_error, CredentialStore, StoredCodexCredentials,
         },
+        oauth_flow::{OAuthFlowFailureReason, OAuthFlowProgress, OAuthFlowStage},
         proxy::{effective_proxy_config, ensure_account_proxy},
         quota_refresh::{
             register_active_authority, sync_account_profile_bindings, AccountQuotaOutcome,
@@ -56,13 +57,48 @@ pub(super) async fn complete_oauth(
     login_id: &str,
     state: &DesktopState,
 ) -> LocalResult<LocalAccountRecord> {
-    let prepared = prepare_oauth_completion(login_id, state).await?;
-    commit_oauth_completion(login_id, state, prepared).await
+    let flow = state.oauth_flow();
+    let mut progress = OAuthFlowProgress::new();
+    flow.report_diagnostic(login_id, progress.diagnostic(None));
+    let result = async {
+        let prepared = prepare_oauth_completion(login_id, state, &mut progress).await?;
+        flow.advance_diagnostic(login_id, &mut progress, OAuthFlowStage::Saving);
+        commit_oauth_completion(login_id, state, prepared, &progress).await
+    }
+    .await;
+    if let Err(error) = &result {
+        let reason = match error.code {
+            ErrorCode::SecretStoreUnavailable => OAuthFlowFailureReason::StorageUnavailable,
+            ErrorCode::Conflict => OAuthFlowFailureReason::Conflict,
+            ErrorCode::RecoveryRequired => OAuthFlowFailureReason::RecoveryRequired,
+            _ => match progress.stage() {
+                OAuthFlowStage::Callback => OAuthFlowFailureReason::CallbackInvalid,
+                OAuthFlowStage::TokenExchange => OAuthFlowFailureReason::TokenExchangeFailed,
+                OAuthFlowStage::IdentityValidation => OAuthFlowFailureReason::IdentityInvalid,
+                OAuthFlowStage::Saving => OAuthFlowFailureReason::SaveFailed,
+            },
+        };
+        let diagnostic = progress.diagnostic(Some(reason));
+        // Record only closed enums and a duration, never LocalPoolError.message.
+        crate::diagnostics::record_operation(
+            "oauth",
+            "stage_failed",
+            &[
+                ("login", crate::diagnostics::hash_identifier(login_id)),
+                ("stage", format!("{:?}", diagnostic.stage)),
+                ("reason", format!("{reason:?}")),
+                ("elapsed_ms", diagnostic.elapsed_ms.to_string()),
+            ],
+        );
+        flow.report_diagnostic(login_id, diagnostic);
+    }
+    result
 }
 
 async fn prepare_oauth_completion(
     login_id: &str,
     state: &DesktopState,
+    progress: &mut OAuthFlowProgress,
 ) -> LocalResult<PreparedOAuthCompletion> {
     let login_hash = crate::diagnostics::hash_identifier(login_id);
     crate::diagnostics::breadcrumb(
@@ -93,7 +129,7 @@ async fn prepare_oauth_completion(
         super::parsed_proxy(proxy_url.as_deref())?
     };
     let (checkpoint, encoded_checkpoint, target_account_id) =
-        completion_checkpoint(&flow, login_id, now_ms, exchange_proxy.as_ref()).await?;
+        completion_checkpoint(&flow, login_id, now_ms, exchange_proxy.as_ref(), progress).await?;
     let old_accounts = current_accounts(state)?;
     let credential_store = CredentialStore::from_backend(NativeSecretBackend);
     let existing = if let Some(target_account_id) = target_account_id.as_deref() {
@@ -155,7 +191,6 @@ async fn prepare_oauth_completion(
         credentials = inherit_session_material(credentials, previous_credentials)?;
     }
     credentials = with_sign_in_proxy(credentials, sign_in_proxy_url.as_deref())?;
-    crate::local_pool::accounts::records::validate_account_plan(&credentials, None)?;
     let proxy = effective_proxy_config(&settings, &credentials)?;
     credentials = register_agent_identity_if_missing(
         credentials,
@@ -204,15 +239,10 @@ async fn prepare_oauth_completion(
             proxy.as_ref(),
             &credentials,
             &checkpoint.provider_account_id,
-            credentials.plan_type(),
             now_ms,
             previous_models,
         ),
     );
-    crate::local_pool::accounts::records::validate_account_plan(
-        &credentials,
-        account_record.account.subscription.plan_type.as_deref(),
-    )?;
     let (models, model_issue) = model_result?;
     crate::diagnostics::breadcrumb(
         "oauth",
@@ -296,7 +326,6 @@ async fn discover_sign_in_models(
     proxy: Option<&ProxyConfig>,
     credentials: &StoredCodexCredentials,
     provider_account_id: &str,
-    plan_type: Option<&str>,
     now_ms: u64,
     previous_models: Vec<String>,
 ) -> LocalResult<(Vec<String>, Option<InitialModelIssue>)> {
@@ -307,23 +336,32 @@ async fn discover_sign_in_models(
         return Ok((Vec::new(), None));
     }
     let client_version = zenith_relay_core::providers::chatgpt::configured_codex_client_version();
-    match AccountModelsClient::new_with_proxy(proxy) {
-        Ok(client) => match client
-            .with_oauth_client_kind(credentials.oauth_client_kind())
-            .with_subscription_plan_type(plan_type.or(credentials.plan_type()))
-            .discover_authorized(
-                credentials
-                    .authorization(now_ms)
-                    .map_err(credential_error)?,
-                provider_account_id,
-                &client_version,
-            )
-            .await
-        {
-            Ok(models) => Ok((models, None)),
-            Err(error) => Ok((previous_models, Some(initial_model_issue(&error)))),
-        },
-        Err(error) => Ok((previous_models, Some(initial_model_issue(&error)))),
+    let result = match AccountModelsClient::new_with_proxy(proxy) {
+        Ok(client) => {
+            client
+                .with_oauth_client_kind(credentials.oauth_client_kind())
+                .discover_authorized(
+                    credentials
+                        .authorization(now_ms)
+                        .map_err(credential_error)?,
+                    provider_account_id,
+                    &client_version,
+                )
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok(models) => Ok((models, None)),
+        Err(error) => {
+            crate::local_pool::accounts::model_probe::record_failure(
+                credentials.local_account_id(),
+                credentials.oauth_client_kind(),
+                proxy.is_some(),
+                &error,
+            );
+            Ok((previous_models, Some(initial_model_issue(&error))))
+        }
     }
 }
 
@@ -382,6 +420,7 @@ async fn commit_oauth_completion(
     login_id: &str,
     state: &DesktopState,
     prepared: PreparedOAuthCompletion,
+    progress: &OAuthFlowProgress,
 ) -> LocalResult<LocalAccountRecord> {
     let PreparedOAuthCompletion {
         now_ms,
@@ -464,10 +503,6 @@ async fn commit_oauth_completion(
     if let Some(previous_account_snapshot) = commit_previous_account.as_ref() {
         preserve_existing_settings(&mut account_record, previous_account_snapshot);
     }
-    crate::local_pool::accounts::records::validate_account_plan(
-        &committed_credentials,
-        account_record.account.subscription.plan_type.as_deref(),
-    )?;
     account_record.account.token_generation = committed_credentials.generation();
     account_record.account.token_updated_at_ms = Some(committed_credentials.issued_at_ms());
     let authority_tokens = committed_credentials
@@ -613,6 +648,7 @@ async fn commit_oauth_completion(
         &local_account_id,
         now_ms.saturating_add(quota_reset_delay.unwrap_or(15 * 60_000)),
     )?;
+    flow.report_diagnostic(login_id, progress.diagnostic(None));
     if let Err(error) = flow.complete(login_id).await.map_err(flow_error) {
         // Keep registrations derived from committed credentials/current state.
         state.store()?.notify_refresh_changed();

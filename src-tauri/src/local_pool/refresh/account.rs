@@ -42,9 +42,9 @@ pub(super) async fn reconcile(state: &DesktopState) -> Result<()> {
         }
     }
     super::sources::reconcile(state, &store, &activity, &mut active_fence_ids)?;
-    state
-        .refresh
-        .retain(|identity, _| active_fence_ids.contains(identity));
+    state.refresh.retain(|identity, _| {
+        active_fence_ids.contains(identity) || super::proxies::is_proxy(identity)
+    });
     Ok(())
 }
 

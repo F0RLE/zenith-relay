@@ -115,6 +115,8 @@ impl StoredCodexCredentials {
                 None => credentials,
             }
         };
+        let mut credentials = credentials;
+        credentials.refresh_retry = wire.refresh_retry;
         let basis_points_headers = wire.basis_points_headers;
         credentials
             .with_oauth_client_kind(wire.oauth_client_kind)

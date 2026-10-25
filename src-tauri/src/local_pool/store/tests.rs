@@ -54,6 +54,85 @@ fn fresh_store_is_versioned_and_restart_safe() {
 }
 
 #[test]
+fn legacy_model_block_is_repaired_durably_without_changing_account_policy() {
+    let root = temp_root();
+    let mut legacy = account_record("legacy-models");
+    legacy.account.health = AccountHealthState::Blocked;
+    legacy.account.last_error_code = Some("models_forbidden".into());
+    legacy.account.enabled = false;
+    legacy.account.in_pool = false;
+    legacy.models.clear();
+    let mut disabled = account_record("provider-disabled");
+    disabled.account.health = AccountHealthState::Blocked;
+    disabled.account.last_error_code = Some("workspace_disabled".into());
+    let mut reauth = legacy.clone();
+    reauth.account.id = "reauth".into();
+    reauth.account.auth_state =
+        AccountAuthState::RequiresReauth(zenith_relay_core::accounts::ReauthReason::InvalidGrant);
+    let mut store = LocalPoolStore::open(root.clone()).unwrap();
+    store
+        .replace_accounts_and_keys(
+            vec![legacy.clone(), disabled.clone(), reauth.clone()],
+            vec![],
+        )
+        .unwrap();
+    drop(store);
+
+    legacy.account.health = AccountHealthState::Degraded;
+    for _ in 0..2 {
+        let store = LocalPoolStore::open(root.clone()).unwrap();
+        assert_eq!(store.account("legacy-models"), Some(&legacy));
+        assert_eq!(store.account("provider-disabled"), Some(&disabled));
+        assert_eq!(store.account("reauth"), Some(&reauth));
+        let persisted: Vec<LocalAccountRecord> = serde_json::from_str(
+            &store
+                .database()
+                .state_json(STATE_ACCOUNTS)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            persisted
+                .iter()
+                .find(|record| record.account.id == "legacy-models"),
+            Some(&legacy)
+        );
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn retired_manual_timezone_settings_are_removed_without_changing_other_controls() {
+    let root = temp_root();
+    let store = LocalPoolStore::open(root.clone()).unwrap();
+    let mut saved = serde_json::to_value(store.gateway()).unwrap();
+    saved["requestTimezone"] = serde_json::json!({
+        "enabled": true, "accountTimezones": { "synthetic": "Invalid/Legacy" },
+        "accountTimezoneBindings": { "synthetic": false }
+    });
+    store
+        .database()
+        .replace_state_json(&[(STATE_GATEWAY, saved.to_string())])
+        .unwrap();
+    let expected = store.gateway().clone();
+    drop(store);
+    let reopened = LocalPoolStore::open(root.clone()).unwrap();
+    assert_eq!(reopened.gateway(), &expected);
+    let persisted: serde_json::Value = serde_json::from_str(
+        &reopened
+            .database()
+            .state_json(STATE_GATEWAY)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(persisted.get("requestTimezone").is_none());
+    drop(reopened);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn quota_and_routing_policy_survive_restart() {
     let root = temp_root();
     let mut store = LocalPoolStore::open(root.clone()).unwrap();
@@ -496,6 +575,7 @@ fn account_record(id: &str) -> LocalAccountRecord {
             last_used_at_ms: None,
             last_error_code: None,
         },
+        image_pool_enabled: false,
         provider_family: Some("openai".into()),
         purchase_cost_micro_usd: None,
         recovery: None,

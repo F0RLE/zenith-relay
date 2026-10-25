@@ -2,19 +2,24 @@ use super::*;
 use zenith_relay_core::protocol::TrashedAccountSummary;
 
 #[tauri::command]
-pub fn list_local_account_trash(
+pub async fn list_local_account_trash(
     state: State<'_, DesktopState>,
 ) -> CommandResult<Vec<TrashedAccountSummary>> {
-    Ok(state
-        .store()?
-        .account_trash()
-        .iter()
-        .map(|entry| TrashedAccountSummary {
-            id: entry.record.account.id.clone(),
-            label: entry.record.account.label.clone(),
-            trashed_at_ms: entry.trashed_at_ms,
-        })
-        .collect())
+    let state = state.inner().clone();
+    crate::local_pool::commands::run_blocking(move || {
+        Ok(state
+            .store()?
+            .account_trash()
+            .iter()
+            .map(|entry| TrashedAccountSummary {
+                id: entry.record.account.id.clone(),
+                label: entry.record.account.label.clone(),
+                trashed_at_ms: entry.trashed_at_ms,
+            })
+            .collect())
+    })
+    .await
+    .map_err(Into::into)
 }
 
 #[tauri::command]

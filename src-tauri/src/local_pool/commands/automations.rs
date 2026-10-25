@@ -46,8 +46,9 @@ pub async fn create_quota_wake_automation(
     )?;
     let mut automation_records = state.store()?.automations().clone();
     validate_automation_targets(&task, &state)?;
-    automation_records.tasks.push(task);
+    automation_records.tasks.push(task.clone());
     state.store()?.replace_automations(automation_records)?;
+    schedule_countdown_refresh(&task, &state)?;
     state.snapshot().await.map_err(Into::into)
 }
 
@@ -91,6 +92,7 @@ pub async fn update_quota_wake_automation(
         state: automation_records.state,
         weekly_reset_fingerprints: automation_records.weekly_reset_fingerprints,
     })?;
+    schedule_countdown_refresh(&updated, &state)?;
     state.snapshot().await.map_err(Into::into)
 }
 
@@ -123,7 +125,9 @@ pub async fn set_quota_wake_automation_enabled(
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "automation not found"))?;
     task.enabled = enabled;
     task.updated_at_ms = current_time_ms();
+    let updated = task.clone();
     state.store()?.replace_automations(automation_records)?;
+    schedule_countdown_refresh(&updated, &state)?;
     state.snapshot().await.map_err(Into::into)
 }
 
@@ -247,6 +251,22 @@ fn selected_automation_accounts(
     };
     selected.retain(|account| account.account.enabled && !account.account.draining);
     Ok(selected)
+}
+
+fn schedule_countdown_refresh(task: &WakeTask, state: &DesktopState) -> Result<(), CommandError> {
+    if !task.enabled || task.trigger != WakeTrigger::QuotaFull {
+        return Ok(());
+    }
+    // Verify current provider evidence through the existing single-flight
+    // owner, instead of waiting for the next routine read or spending quota
+    // from a stale saved snapshot. Provider backoff remains authoritative.
+    let now_ms = current_time_ms();
+    for account in selected_automation_accounts(task, state)? {
+        if account.recovery.is_none() && account.account.is_wake_eligible() {
+            state.sync_account_quota_refresh(&account.account.id, now_ms)?;
+        }
+    }
+    Ok(())
 }
 
 fn trim_model_policy(policy: WakeModelPolicy) -> WakeModelPolicy {

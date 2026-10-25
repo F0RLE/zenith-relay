@@ -4,7 +4,10 @@ use crate::local_pool::{
         import_session::SecretBackend,
         oauth::{CodexOAuthClient, OAuthClientKind, OAuthTokenSet},
         oauth_flow::callback_secret_ref,
-        oauth_flow::{OAuthFlowEventSink, OAuthFlowManager, OAuthFlowStatus},
+        oauth_flow::{
+            OAuthFlowEventSink, OAuthFlowManager, OAuthFlowProgress, OAuthFlowStage,
+            OAuthFlowStatus,
+        },
         records::{self},
         NativeSecretBackend,
     },
@@ -192,6 +195,7 @@ pub(super) async fn completion_checkpoint<E>(
     login_id: &str,
     now_ms: u64,
     proxy: Option<&ProxyConfig>,
+    progress: &mut OAuthFlowProgress,
 ) -> LocalResult<(OAuthCompletionCheckpoint, String, Option<String>)>
 where
     E: OAuthFlowEventSink,
@@ -212,6 +216,7 @@ where
         if checkpoint.client_kind != start.client_kind {
             return Err(invalid_completion_checkpoint());
         }
+        flow.advance_diagnostic(login_id, progress, OAuthFlowStage::IdentityValidation);
         return Ok((checkpoint, stored, start.target_account_id));
     }
     drop(stored);
@@ -221,11 +226,13 @@ where
         .map_err(flow_error)?;
     let (pending, callback) = material.into_parts();
     let client_kind = pending.client_kind();
+    flow.advance_diagnostic(login_id, progress, OAuthFlowStage::TokenExchange);
     let tokens = CodexOAuthClient::new_with_proxy_for_kind(client_kind, proxy)
         .map_err(oauth_error)?
         .exchange_code(&pending, callback, now_ms)
         .await
         .map_err(oauth_error)?;
+    flow.advance_diagnostic(login_id, progress, OAuthFlowStage::IdentityValidation);
     let checkpoint =
         OAuthCompletionCheckpoint::from_tokens(&start.login_id, client_kind, tokens, now_ms)?;
     let encoded = encode_completion_checkpoint(&checkpoint)?;

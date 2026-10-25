@@ -39,18 +39,18 @@ impl<B: SecretBackend> CredentialStore<B> {
                 .map(StoredCodexCredentials::to_secret_json)
                 .transpose()?,
         };
-        let encoded = serde_json::to_string(&checkpoint).map_err(|_| rotation_error())?;
+        let encoded = serde_json::to_string(&checkpoint).map_err(|_| rotation_invalid())?;
         self.backend
             .save(&reference, &encoded)
-            .map_err(|_| rotation_error())?;
+            .map_err(|_| rotation_storage_error())?;
         if self
             .backend
             .load(&reference)
-            .map_err(|_| rotation_error())?
+            .map_err(|_| rotation_storage_error())?
             .as_deref()
             != Some(&encoded)
         {
-            return Err(rotation_error());
+            return Err(rotation_storage_error());
         }
         Ok(())
     }
@@ -60,12 +60,12 @@ impl<B: SecretBackend> CredentialStore<B> {
         if self
             .backend
             .load(&reference)
-            .map_err(|_| rotation_error())?
+            .map_err(|_| rotation_storage_error())?
             .is_some()
         {
             self.backend
                 .delete(&reference)
-                .map_err(|_| rotation_error())?;
+                .map_err(|_| rotation_storage_error())?;
         }
         Ok(())
     }
@@ -81,29 +81,34 @@ impl<B: SecretBackend> CredentialStore<B> {
         let Some(encoded) = self
             .backend
             .load(&reference)
-            .map_err(|_| rotation_error())?
+            .map_err(|_| rotation_storage_error())?
         else {
             return Ok(None);
         };
         if encoded.len() > 2 * super::wire::MAX_SECRET_JSON_BYTES + 4096 {
-            return Err(rotation_error());
+            return Err(rotation_invalid());
         }
         let checkpoint: SiwcRotation =
-            serde_json::from_str(&encoded).map_err(|_| rotation_error())?;
-        let before = StoredCodexCredentials::from_secret_json(&checkpoint.before)?;
+            serde_json::from_str(&encoded).map_err(|_| rotation_invalid())?;
+        let before = StoredCodexCredentials::from_secret_json(&checkpoint.before)
+            .map_err(|_| rotation_invalid())?;
         if current.local_account_id() != before.local_account_id() {
-            return Err(rotation_error());
+            return Err(rotation_invalid());
         }
         if !current.matches_siwc_grant(&before) {
             if current.generation() <= before.generation() {
-                return Err(rotation_error());
+                return Err(rotation_invalid());
             }
             // A newer login or a completed primary write wins over this checkpoint.
             self.clear_siwc_rotation(current.local_account_id())?;
             return Ok(None);
         }
-        let after = checkpoint.after.ok_or_else(rotation_error)?;
-        let after = StoredCodexCredentials::from_secret_json(&after)?;
+        let after = checkpoint.after.ok_or_else(|| CredentialError::new(
+            CredentialErrorCode::RotationOutcomeUnknown,
+            "SIWC token rotation outcome is unknown; sign in again without reusing the old refresh token",
+        ))?;
+        let after =
+            StoredCodexCredentials::from_secret_json(&after).map_err(|_| rotation_invalid())?;
         if after.local_account_id() != current.local_account_id()
             || after.generation() != current.generation().saturating_add(1)
             || after
@@ -113,7 +118,7 @@ impl<B: SecretBackend> CredentialStore<B> {
                     .siwc_registration()
                     .map(|r| (&r.client_id, &r.subject, &r.host_id))
         {
-            return Err(rotation_error());
+            return Err(rotation_invalid());
         }
         // Restore rotated authorization, not stale proxy or account-note settings.
         let after = current
@@ -124,7 +129,7 @@ impl<B: SecretBackend> CredentialStore<B> {
             .require(current.local_account_id())?
             .matches_snapshot(&after)
         {
-            return Err(rotation_error());
+            return Err(rotation_storage_error());
         }
         self.clear_siwc_rotation(current.local_account_id())?;
         Ok(Some(after))
@@ -196,10 +201,17 @@ impl<B: SecretBackend> CredentialStore<B> {
     }
 }
 
-fn rotation_error() -> CredentialError {
+fn rotation_storage_error() -> CredentialError {
     CredentialError::new(
         CredentialErrorCode::SecretStoreUnavailable,
-        "SIWC token rotation needs recovery; the old refresh token was not reused",
+        "SIWC token rotation storage is unavailable; the recovery checkpoint was retained",
+    )
+}
+
+fn rotation_invalid() -> CredentialError {
+    CredentialError::new(
+        CredentialErrorCode::RotationCheckpointInvalid,
+        "SIWC token rotation checkpoint is invalid; sign in again without reusing the old refresh token",
     )
 }
 

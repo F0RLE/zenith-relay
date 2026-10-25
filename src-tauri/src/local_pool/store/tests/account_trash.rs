@@ -4,7 +4,9 @@ use super::*;
 fn trash_survives_restart_and_restore_keeps_the_account_disabled() {
     let root = temp_root();
     let mut store = LocalPoolStore::open(root.clone()).unwrap();
-    let record = account_record("synthetic-trash");
+    let mut record = account_record("synthetic-trash");
+    record.account.in_pool = true;
+    record.image_pool_enabled = true;
     store.upsert_account(record.clone()).unwrap();
     let (_, old_refresh) = store.account_refresh_scope(&record.account.id).unwrap();
     store
@@ -27,6 +29,7 @@ fn trash_survives_restart_and_restore_keeps_the_account_disabled() {
     let restored = reopened.account(&record.account.id).unwrap();
     assert!(!restored.account.enabled);
     assert!(!restored.account.in_pool);
+    assert!(!restored.image_pool_enabled);
     assert_eq!(restored.account.secret_refs, record.account.secret_refs);
     assert_eq!(restored.models, record.models);
     assert!(reopened

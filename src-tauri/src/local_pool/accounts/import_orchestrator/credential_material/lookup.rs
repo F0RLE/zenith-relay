@@ -20,16 +20,6 @@ pub(in crate::local_pool::accounts) async fn resolve_import_account_identity(
     proxy: Option<&ProxyConfig>,
     request_timeout_seconds: u64,
 ) -> ItemResult<ImportedCredentialMaterial> {
-    material
-        .oauth_client_kind
-        .validate_plan(
-            material.plan_type.as_deref(),
-            material.id_token.as_deref(),
-            Some(&material.access_token),
-        )
-        .map_err(|message| {
-            ImportItemError::new(error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED, message)
-        })?;
     if material.access_token.is_empty() {
         return Ok(material);
     }
@@ -47,15 +37,6 @@ pub(in crate::local_pool::accounts) async fn resolve_import_account_identity(
     .await
     {
         Ok((account_id, metadata)) => {
-            material
-                .oauth_client_kind
-                .validate_plan(metadata.plan_type.as_deref(), None, None)
-                .map_err(|message| {
-                    ImportItemError::new(
-                        error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED,
-                        message,
-                    )
-                })?;
             material.provider_account_id = Some(account_id);
             merge_subscription_metadata(
                 &mut material.plan_type,

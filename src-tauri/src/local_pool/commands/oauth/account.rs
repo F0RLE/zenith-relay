@@ -8,8 +8,7 @@ use crate::local_pool::{
 };
 
 use zenith_relay_core::{
-    accounts::{AccountAuthState, AccountHealthState},
-    providers::chatgpt::ModelDiscoveryFailure,
+    accounts::apply_model_discovery_failure, providers::chatgpt::ModelDiscoveryFailure,
     quota::SubscriptionStatus,
 };
 
@@ -17,8 +16,6 @@ use zenith_relay_core::{
 pub(super) struct InitialModelIssue {
     code: &'static str,
     retryable: bool,
-    auth_error: bool,
-    blocked: bool,
 }
 
 pub(super) fn find_existing_account<'a>(
@@ -51,6 +48,8 @@ pub(super) fn preserve_existing_settings(
     account_to_update.account.tags = existing_account.account.tags.clone();
     account_to_update.account.enabled = existing_account.account.enabled;
     account_to_update.account.in_pool = existing_account.account.in_pool;
+    account_to_update.image_pool_enabled =
+        existing_account.image_pool_enabled && existing_account.account.in_pool;
     account_to_update.account.draining = existing_account.account.draining;
     account_to_update.account.created_at_ms = existing_account.account.created_at_ms;
     account_to_update.account.last_used_at_ms = existing_account.account.last_used_at_ms;
@@ -95,8 +94,6 @@ pub(super) fn initial_model_issue(error: &ModelDiscoveryFailure) -> InitialModel
     InitialModelIssue {
         code: error.code.management_code(),
         retryable: error.retryable,
-        auth_error: error.code.is_authentication_failure(),
-        blocked: error.code.blocks_account(),
     }
 }
 
@@ -104,20 +101,12 @@ pub(super) fn apply_initial_model_issue(
     account_record: &mut LocalAccountRecord,
     issue: InitialModelIssue,
 ) {
-    account_record.account.last_error_code = Some(issue.code.to_string());
-    if issue.auth_error {
-        account_record.account.auth_state = AccountAuthState::Error;
-        account_record.account.health = AccountHealthState::Unhealthy;
-    } else if issue.blocked {
-        account_record.account.health = AccountHealthState::Blocked;
-    } else if !matches!(
-        account_record.account.health,
-        AccountHealthState::Blocked | AccountHealthState::Unhealthy
-    ) {
-        account_record.account.health = if issue.retryable {
-            AccountHealthState::Degraded
-        } else {
-            AccountHealthState::Unhealthy
-        };
-    }
+    let account = &mut account_record.account;
+    apply_model_discovery_failure(
+        &mut account.auth_state,
+        &mut account.health,
+        &mut account.last_error_code,
+        issue.code,
+        issue.retryable,
+    );
 }

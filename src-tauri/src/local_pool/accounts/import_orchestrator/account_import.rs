@@ -93,27 +93,11 @@ pub(super) async fn import_account_item(
         provider_account_id,
         identity_is_registered,
     } = reconciled;
-    records::validate_account_plan(&credentials, context.plan.as_deref())
-        .and_then(|_| {
-            records::validate_account_plan(
-                &credentials,
-                existing_account
-                    .as_ref()
-                    .and_then(|account| account.account.subscription.plan_type.as_deref()),
-            )
-        })
-        .map_err(|error| {
-            ImportItemError::new(
-                error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED,
-                &error.message,
-            )
-        })?;
     let is_siwc = credentials.siwc_registration().is_some();
     let discovered_models = if discover_models && identity_is_registered && !is_siwc {
         let client = AccountModelsClient::new_with_proxy(proxy.as_ref())
             .map_err(model_item_error)?
-            .with_oauth_client_kind(credentials.oauth_client_kind())
-            .with_subscription_plan_type(credentials.plan_type());
+            .with_oauth_client_kind(credentials.oauth_client_kind());
         let client_version =
             zenith_relay_core::providers::chatgpt::configured_codex_client_version();
         let models = client
@@ -125,7 +109,15 @@ pub(super) async fn import_account_item(
                 &client_version,
             )
             .await
-            .map_err(model_item_error)?;
+            .map_err(|error| {
+                crate::local_pool::accounts::model_probe::record_failure(
+                    credentials.local_account_id(),
+                    credentials.oauth_client_kind(),
+                    proxy.is_some(),
+                    &error,
+                );
+                model_item_error(error)
+            })?;
         Some(models)
     } else {
         None
@@ -170,9 +162,16 @@ pub(super) async fn import_account_item(
             .and_then(|existing_account| existing_account.discovered_models.clone())
     });
     merge_existing_account(&mut account, existing_account.as_ref());
-    account.account.in_pool = credentials.oauth_client_kind()
-        != zenith_relay_core::providers::chatgpt::OAuthClientKind::Codex
-        && (account.account.in_pool || (add_to_pool && !is_siwc));
+    account.account.in_pool = if credentials.oauth_client_kind()
+        == zenith_relay_core::providers::chatgpt::OAuthClientKind::Codex
+    {
+        // Reauthentication preserves a prior explicit opt-in; importing a
+        // login alone never grants native Images participation.
+        account.account.in_pool && account.image_pool_enabled
+    } else {
+        account.image_pool_enabled = false;
+        account.account.in_pool || (add_to_pool && !is_siwc)
+    };
     if let Some(active_until_ms) = subscription_active_until_ms {
         account.account.subscription = zenith_relay_core::quota::Subscription::normalize(
             zenith_relay_core::quota::SubscriptionInput {
@@ -210,16 +209,6 @@ pub(super) async fn import_account_item(
     } else {
         AccountQuotaOutcome::Skipped
     };
-    records::validate_account_plan(
-        &credentials,
-        account.account.subscription.plan_type.as_deref(),
-    )
-    .map_err(|error| {
-        ImportItemError::new(
-            error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED,
-            &error.message,
-        )
-    })?;
     crate::diagnostics::breadcrumb(
         "account-import",
         "persist_ready",

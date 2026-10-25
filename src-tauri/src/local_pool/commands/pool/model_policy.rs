@@ -34,7 +34,7 @@ pub(super) fn configured_pool_model_ids<'a>(
     let account_models = accounts
         .iter()
         .filter(|account| account.account.in_pool)
-        .flat_map(LocalAccountRecord::effective_models);
+        .flat_map(LocalAccountRecord::pool_models);
     source_models.chain(account_models)
 }
 

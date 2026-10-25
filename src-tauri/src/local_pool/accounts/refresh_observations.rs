@@ -290,7 +290,7 @@ fn quota_refresh_error_kind(code: ErrorCode) -> Option<&'static str> {
         | ErrorCode::SourceTestFailed
         | ErrorCode::ProfileRestoreBlocked
         | ErrorCode::UnsupportedSchema => error_codes::QUOTA_PREPARE,
-        ErrorCode::NotFound => return None,
+        ErrorCode::NotFound | ErrorCode::PoolModelsUnavailable => return None,
     })
 }
 
@@ -306,7 +306,7 @@ pub(in crate::local_pool) fn model_refresh_error_kind(
             (error_codes::MODELS_PREPARE, true)
         }
         ErrorCode::ProfileRestoreBlocked => (error_codes::MODELS_PROFILE_RESTORE, false),
-        ErrorCode::NotFound => return None,
+        ErrorCode::NotFound | ErrorCode::PoolModelsUnavailable => return None,
     })
 }
 

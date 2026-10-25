@@ -35,7 +35,7 @@ pub(in crate::local_pool::accounts) fn apply_account_patch(
         account.excluded_models = normalize_models(models)?;
     }
     if let Some(in_pool) = input.in_pool {
-        account.account.in_pool = in_pool;
+        super::super::records::set_pool_membership(account, in_pool)?;
     }
     if let Some(draining) = input.draining {
         account.account.draining = draining;
@@ -75,15 +75,8 @@ pub(in crate::local_pool::accounts) fn validate_account_record(
     let credentials = CredentialStore::from_backend(NativeSecretBackend)
         .require(&account.account.id)
         .map_err(credential_local_error)?;
-    super::super::records::validate_account_plan(
-        &credentials,
-        account.account.subscription.plan_type.as_deref(),
-    )?;
     if account.account.in_pool {
-        super::super::records::validate_pool_account(
-            &credentials,
-            account.account.subscription.plan_type.as_deref(),
-        )?;
+        super::super::records::validate_pool_account(&credentials, account.image_pool_enabled)?;
     }
     if credentials.provider_account_id().is_none() {
         return Err(LocalPoolError::new(

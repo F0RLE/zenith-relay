@@ -11,15 +11,17 @@ use crate::local_pool::{
     state::DesktopState,
     store::AccountRefreshFence,
 };
-use zenith_relay_core::{automations::WakeTrigger, providers::chatgpt::CodexQuotaClient};
+use zenith_relay_core::{
+    automations::WakeTrigger,
+    providers::chatgpt::CodexQuotaClient,
+    quota::{QuotaTransition, QuotaWindowKind},
+};
 
 pub(super) fn evaluate_updated_transitions(
     state: &DesktopState,
     response: &AccountQuotaRefreshResponse,
 ) -> Result<()> {
-    let AccountQuotaOutcome::Updated { transitions, .. } = &response.quota else {
-        return Ok(());
-    };
+    let transitions = quota_full_candidates(response);
     if transitions.is_empty() {
         return Ok(());
     }
@@ -38,7 +40,7 @@ pub(super) fn evaluate_updated_transitions(
         store.automations().tasks.clone()
     };
     let now_ms = current_time_ms();
-    for transition in transitions {
+    for transition in &transitions {
         for task in &tasks {
             state.evaluate_wake_transition(
                 task,
@@ -50,6 +52,45 @@ pub(super) fn evaluate_updated_transitions(
         }
     }
     Ok(())
+}
+
+fn quota_full_candidates(response: &AccountQuotaRefreshResponse) -> Vec<QuotaTransition> {
+    let AccountQuotaOutcome::Updated { transitions, .. } = &response.quota else {
+        return Vec::new();
+    };
+    let mut transitions = transitions.clone();
+    if !transitions
+        .iter()
+        .any(|transition| transition.window_kind == QuotaWindowKind::Primary)
+    {
+        if let Some(window) = response
+            .account
+            .account
+            .quota
+            .primary
+            .as_ref()
+            .filter(|window| window.kind == QuotaWindowKind::Primary && window.is_fully_available())
+        {
+            // A rule can be enabled after the quota became full, or Relay can
+            // miss the edge while stopped. Reuse the persisted cycle identity:
+            // repeated reads/restarts must never create another wake request.
+            if let Some(fingerprint) = window
+                .full_transition_fingerprint
+                .as_ref()
+                .filter(|fingerprint| !fingerprint.trim().is_empty())
+            {
+                transitions.push(QuotaTransition {
+                    window_kind: QuotaWindowKind::Primary,
+                    fingerprint: fingerprint.clone(),
+                    transitioned_at_ms: window
+                        .window_start_ms
+                        .filter(|start| *start <= window.observed_at_ms)
+                        .unwrap_or(window.observed_at_ms),
+                });
+            }
+        }
+    }
+    transitions
 }
 
 pub(super) async fn evaluate_weekly_exhaustions(
@@ -132,8 +173,141 @@ fn weekly_exhaustion_candidates(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local_pool::refresh::tests::account;
-    use zenith_relay_core::quota::{QuotaWindow, QuotaWindowKind};
+    use crate::local_pool::refresh::tests::{account, cleanup, state};
+    use zenith_relay_core::{
+        automations::{AccountSelector, WakeExecutionPolicy, WakeModelPolicy, WakeTask},
+        quota::{QuotaWindow, QuotaWindowKind},
+    };
+
+    #[tokio::test]
+    async fn countdown_recovers_a_full_primary_window_without_a_new_transition() {
+        let state = state();
+        let mut account = account();
+        account.account.in_pool = true;
+        account.account.quota.primary = Some(QuotaWindow {
+            kind: QuotaWindowKind::Primary,
+            provider_cycle_id: None,
+            window_start_ms: None,
+            available_basis_points: Some(10_000),
+            explicitly_full: Some(true),
+            reset_at_ms: None,
+            window_minutes: Some(300),
+            observed_at_ms: current_time_ms(),
+            full_transition_fingerprint: Some("full-before-automation".into()),
+            exhaustion_transition_fingerprint: None,
+        });
+        state
+            .store()
+            .unwrap()
+            .upsert_account(account.clone())
+            .unwrap();
+        let mut records = state.store().unwrap().automations().clone();
+        records.tasks.push(WakeTask {
+            id: "wake_recovery".into(),
+            name: "Synthetic countdown".into(),
+            enabled: true,
+            account_selector: AccountSelector::AllEligible,
+            window_kinds: [QuotaWindowKind::Primary].into(),
+            model_policy: WakeModelPolicy::Explicit("gpt-test".into()),
+            trigger: WakeTrigger::QuotaFull,
+            fallback_schedule: None,
+            execution_policy: WakeExecutionPolicy::Automatic,
+            jitter_seconds: 0,
+            max_attempts_per_cycle: 1,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        });
+        state.store().unwrap().replace_automations(records).unwrap();
+        let response = AccountQuotaRefreshResponse {
+            account,
+            quota: AccountQuotaOutcome::Updated {
+                transitions: Vec::new(),
+                exhaustion_transitions: Vec::new(),
+            },
+            exhaustion_transitions: Vec::new(),
+        };
+
+        evaluate_updated_transitions(&state, &response).unwrap();
+        assert!(state.next_automatic_wake_due().unwrap().is_some());
+        evaluate_updated_transitions(&state, &response).unwrap();
+        let permits = state
+            .claim_due_automatic_wakes(current_time_ms(), 10)
+            .unwrap();
+        assert_eq!(permits.len(), 1);
+        state
+            .complete_wake(
+                permits.into_iter().next().unwrap(),
+                zenith_relay_core::automations::WakeCompletion {
+                    outcome: zenith_relay_core::automations::WakeCompletionOutcome::Confirmed,
+                    completed_at_ms: current_time_ms(),
+                    latency_ms: None,
+                    input_tokens: None,
+                    output_tokens: None,
+                    error_code: None,
+                },
+            )
+            .unwrap();
+        evaluate_updated_transitions(&state, &response).unwrap();
+        assert!(state.next_automatic_wake_due().unwrap().is_none());
+        cleanup(state).await;
+    }
+
+    #[test]
+    fn countdown_recovery_preserves_cycle_identity_and_requires_successful_full_quota() {
+        let mut response = AccountQuotaRefreshResponse {
+            account: account(),
+            quota: AccountQuotaOutcome::Updated {
+                transitions: Vec::new(),
+                exhaustion_transitions: Vec::new(),
+            },
+            exhaustion_transitions: Vec::new(),
+        };
+        response.account.account.quota.primary = Some(QuotaWindow {
+            kind: QuotaWindowKind::Primary,
+            provider_cycle_id: None,
+            window_start_ms: Some(100),
+            available_basis_points: Some(10_000),
+            explicitly_full: Some(true),
+            reset_at_ms: Some(18_000_100),
+            window_minutes: Some(300),
+            observed_at_ms: 200,
+            full_transition_fingerprint: Some("stable-cycle".into()),
+            exhaustion_transition_fingerprint: None,
+        });
+        let candidates = quota_full_candidates(&response);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].fingerprint, "stable-cycle");
+        assert_eq!(candidates[0].transitioned_at_ms, 100);
+
+        response.quota = AccountQuotaOutcome::Updated {
+            transitions: vec![QuotaTransition {
+                window_kind: QuotaWindowKind::Primary,
+                fingerprint: "provider-edge".into(),
+                transitioned_at_ms: 150,
+            }],
+            exhaustion_transitions: Vec::new(),
+        };
+        assert_eq!(
+            quota_full_candidates(&response)[0].fingerprint,
+            "provider-edge"
+        );
+        response.quota = AccountQuotaOutcome::Failed {
+            code: "quota_transport".into(),
+            retryable: true,
+        };
+        assert!(quota_full_candidates(&response).is_empty());
+        response.quota = AccountQuotaOutcome::Skipped;
+        assert!(quota_full_candidates(&response).is_empty());
+        response.quota = AccountQuotaOutcome::Updated {
+            transitions: Vec::new(),
+            exhaustion_transitions: Vec::new(),
+        };
+        let window = response.account.account.quota.primary.as_mut().unwrap();
+        window.available_basis_points = Some(9_000);
+        window.explicitly_full = Some(false);
+        assert!(quota_full_candidates(&response).is_empty());
+    }
+
     #[test]
     fn weekly_exhaustion_candidates_recover_a_missed_secondary_transition() {
         let mut account = account();

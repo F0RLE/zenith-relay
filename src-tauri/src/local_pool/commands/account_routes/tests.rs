@@ -101,14 +101,18 @@ fn records() -> Vec<LocalAccountRecord> {
 
 #[test]
 fn route_rollback_preserves_new_quota_generation_and_unrelated_accounts() {
-    let previous = records();
+    let mut previous = records();
+    previous[0].account.in_pool = true;
+    previous[0].image_pool_enabled = true;
     let mut current = previous.clone();
+    current[0].image_pool_enabled = false;
     current[0].account.in_pool = !previous[0].account.in_pool;
     current[0].account.quota.limit_reached = true;
     current[0].account.token_generation = 77;
     current[1].weight = 42;
     restore_route_records(&mut current, &previous[..1]).unwrap();
     assert_eq!(current[0].account.in_pool, previous[0].account.in_pool);
+    assert!(current[0].image_pool_enabled);
     assert!(current[0].account.quota.limit_reached);
     assert_eq!(current[0].account.token_generation, 77);
     assert_eq!(current[1].weight, 42);
@@ -355,6 +359,7 @@ fn codex_selection_does_not_retarget_enabled_pool_automations() {
 fn selecting_a_route_preserves_quota_identity_and_one_pool_members_weight() {
     let mut accounts = records();
     accounts[0].account.in_pool = true;
+    accounts[0].image_pool_enabled = true;
     accounts[0].weight = 7;
     accounts[1].account.in_pool = true;
     accounts[1].account.quota.limit_reached = true;
@@ -382,6 +387,7 @@ fn selecting_a_route_preserves_quota_identity_and_one_pool_members_weight() {
     .unwrap();
     assert!(!accounts[0].account.in_pool);
     assert!(accounts[1].account.in_pool);
+    assert!(accounts.iter().all(|account| !account.image_pool_enabled));
     assert!(!settings.account_route_is_selected("account_codex"));
     assert!(settings.account_route_is_selected("account_excel"));
     assert_eq!(accounts[1].weight, 7);
@@ -412,6 +418,7 @@ fn selecting_a_route_preserves_quota_identity_and_one_pool_members_weight() {
     .unwrap();
     assert!(!accounts[0].account.in_pool);
     assert!(!accounts[1].account.in_pool);
+    assert!(accounts.iter().all(|account| !account.image_pool_enabled));
     assert!(settings.pool_routing.as_ref().unwrap().members.is_empty());
     assert_eq!(
         settings.account_routes[0].notes_account_id.as_deref(),

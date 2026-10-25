@@ -1,5 +1,5 @@
 use super::super::{
-    credentials::{CredentialRefresh, CredentialStore},
+    credentials::{CredentialError, CredentialErrorCode, CredentialRefresh, CredentialStore},
     import_session::SecretBackend,
     oauth::{CodexOAuthClient, OAuthClientKind},
 };
@@ -153,12 +153,7 @@ where
             let recovered = self
                 .credentials
                 .recover_siwc_rotation(&stored_credentials)
-                .map_err(|_| {
-                    TokenRefreshFailure::new(
-                        TokenRefreshFailureKind::Transient,
-                        "siwc_rotation_recovery_required",
-                    )
-                })?;
+                .map_err(rotation_refresh_failure)?;
             if let Some(recovered) = recovered {
                 stored_credentials = recovered;
             }
@@ -174,12 +169,19 @@ where
                 )
             });
         }
+        if stored_credentials.refresh_is_paused(now_ms) {
+            return Err(TokenRefreshFailure::new(
+                TokenRefreshFailureKind::Transient,
+                "token_refresh_backoff",
+            ));
+        }
         let refresh_token = stored_credentials.refresh_token().ok_or_else(|| {
             TokenRefreshFailure::new(
                 TokenRefreshFailureKind::ExpiredRefreshToken,
                 error_codes::REFRESH_TOKEN_MISSING,
             )
         })?;
+        let refresh_started = std::time::Instant::now();
         let refresh_result = if let Some(registration) = stored_credentials.siwc_registration() {
             self.credentials
                 .checkpoint_siwc_rotation(&stored_credentials, None)
@@ -242,7 +244,32 @@ where
         if revision.is_some_and(|revision| revision.guard().is_none()) {
             return Err(superseded());
         }
-        let refreshed = refresh_result?;
+        let refreshed = match refresh_result {
+            Ok(refreshed) => refreshed,
+            Err(error) => {
+                if matches!(
+                    error.kind,
+                    TokenRefreshFailureKind::Transient
+                        | TokenRefreshFailureKind::ReusedRefreshToken
+                ) {
+                    let _revision_guard = revision
+                        .map(|revision| revision.guard().ok_or_else(superseded))
+                        .transpose()?;
+                    let failed_at_ms = now_ms.saturating_add(
+                        refresh_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                    );
+                    self.credentials
+                        .save(&current.with_refresh_failure(failed_at_ms))
+                        .map_err(|_| {
+                            TokenRefreshFailure::new(
+                                TokenRefreshFailureKind::Transient,
+                                error_codes::CREDENTIAL_PERSIST_FAILED,
+                            )
+                        })?;
+                }
+                return Err(error);
+            }
+        };
         let stored_credentials = if same_siwc_grant {
             current
         } else {
@@ -302,6 +329,24 @@ where
     }
 }
 
+fn rotation_refresh_failure(error: CredentialError) -> TokenRefreshFailure {
+    let (kind, code) = match error.code {
+        CredentialErrorCode::RotationOutcomeUnknown => (
+            TokenRefreshFailureKind::RotationRecoveryRequired,
+            "siwc_rotation_outcome_unknown",
+        ),
+        CredentialErrorCode::RotationCheckpointInvalid => (
+            TokenRefreshFailureKind::RotationRecoveryRequired,
+            "siwc_rotation_checkpoint_invalid",
+        ),
+        _ => (
+            TokenRefreshFailureKind::Transient,
+            "siwc_rotation_store_unavailable",
+        ),
+    };
+    TokenRefreshFailure::new(kind, code)
+}
+
 fn siwc_refresh_definitely_rejected(code: &str) -> bool {
     matches!(
         code,
@@ -338,6 +383,34 @@ fn siwc_uncertain_rotation_reply_must_keep_the_recovery_checkpoint() {
         "invalid_client",
     ] {
         assert!(siwc_refresh_definitely_rejected(code));
+    }
+}
+
+#[test]
+fn siwc_rotation_recovery_errors_keep_storage_outages_retryable() {
+    for (code, kind, expected) in [
+        (
+            CredentialErrorCode::SecretStoreUnavailable,
+            TokenRefreshFailureKind::Transient,
+            "siwc_rotation_store_unavailable",
+        ),
+        (
+            CredentialErrorCode::RotationOutcomeUnknown,
+            TokenRefreshFailureKind::RotationRecoveryRequired,
+            "siwc_rotation_outcome_unknown",
+        ),
+        (
+            CredentialErrorCode::RotationCheckpointInvalid,
+            TokenRefreshFailureKind::RotationRecoveryRequired,
+            "siwc_rotation_checkpoint_invalid",
+        ),
+    ] {
+        let error = rotation_refresh_failure(CredentialError {
+            code,
+            message: "private diagnostic must not escape".into(),
+        });
+        assert_eq!(error.kind, kind);
+        assert_eq!(error.code, expected);
     }
 }
 

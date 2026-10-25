@@ -51,6 +51,7 @@ fn restore_route_records(
                 )
             })?;
         copy_route_settings(destination, previous);
+        destination.image_pool_enabled = previous.image_pool_enabled;
     }
     Ok(())
 }
@@ -184,10 +185,13 @@ fn select_records(
         return Err(conflict("Recover the account before changing its route"));
     }
     copy_route_settings(destination, &source);
+    // Route switching does not transfer or revive native Images consent.
+    destination.image_pool_enabled = false;
     destination.account.in_pool &= next_kind != OAuthClientKind::Codex;
     for account in accounts.iter_mut() {
         if group.account_ids.contains(&account.account.id) && account.account.id != next {
             account.account.in_pool = false;
+            account.image_pool_enabled = false;
         }
     }
     if let Some(policy) = &mut gateway.pool_routing {

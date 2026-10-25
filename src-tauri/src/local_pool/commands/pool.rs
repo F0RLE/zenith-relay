@@ -97,7 +97,7 @@ pub(crate) fn has_usable_pool_candidate(state: &DesktopState) -> LocalResult<boo
                 .is_some_and(|credential| {
                     crate::local_pool::accounts::records::validate_pool_account(
                         &credential,
-                        account.account.subscription.plan_type.as_deref(),
+                        account.image_pool_enabled,
                     )
                     .is_ok()
                 })

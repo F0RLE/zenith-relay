@@ -16,6 +16,39 @@ use url::Url;
 static TEST_OAUTH_PORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
+async fn diagnostic_events_have_closed_fields_and_stop_after_cancellation() {
+    let root = test_root("safe-stage-diagnostics");
+    let events = Events::default();
+    let manager = OAuthFlowManager::new(root.clone(), MemorySecrets::default(), events.clone());
+    let oauth = CodexOAuthClient::new_with_proxy_for_kind(OAuthClientKind::ExcelBps, None).unwrap();
+    let start = manager.start_for_account(&oauth, None, None).await.unwrap();
+    let mut progress = OAuthFlowProgress::new();
+    manager.advance_diagnostic(
+        &start.login_id,
+        &mut progress,
+        OAuthFlowStage::TokenExchange,
+    );
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    manager.report_diagnostic(
+        &start.login_id,
+        progress.diagnostic(Some(OAuthFlowFailureReason::TokenExchangeFailed)),
+    );
+    let event = lock(&events.0).last().unwrap().clone();
+    assert_eq!(event.status, OAuthFlowStatus::Pending);
+    assert!(event.diagnostic.as_ref().unwrap().elapsed_ms >= 2);
+    let encoded = serde_json::to_value(&event).unwrap();
+    assert_eq!(encoded["diagnostic"]["stage"], "token_exchange");
+    assert_eq!(encoded["diagnostic"]["reason"], "token_exchange_failed");
+    assert_eq!(encoded.as_object().unwrap().len(), 3);
+    assert_eq!(encoded["diagnostic"].as_object().unwrap().len(), 3);
+    manager.cancel(&start.login_id).await.unwrap();
+    let event_count = lock(&events.0).len();
+    manager.report_diagnostic(&start.login_id, progress.diagnostic(None));
+    assert_eq!(lock(&events.0).len(), event_count);
+    remove_root(&root);
+}
+
+#[tokio::test]
 async fn route_notes_context_is_not_a_reauthentication_target_and_survives_resume() {
     let root = test_root("route-notes-context");
     let manager = OAuthFlowManager::new(root.clone(), MemorySecrets::default(), Events::default());

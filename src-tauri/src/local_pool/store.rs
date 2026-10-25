@@ -111,6 +111,10 @@ impl LocalPoolStore {
             if zenith_relay_core::accounts::clear_false_upstream_block(
                 &mut account.account.health,
                 &mut account.account.last_error_code,
+            ) || zenith_relay_core::accounts::repair_model_discovery_block(
+                account.account.auth_state,
+                &mut account.account.health,
+                account.account.last_error_code.as_deref(),
             ) {
                 cleared_false_blocks = true;
             }
@@ -232,7 +236,7 @@ fn upgrade_saved_gateway(
 ) -> Result<()> {
     // A saved current policy can still coexist with obsolete scalar fields from an
     // older build. Remove them on disk without changing any active controls.
-    let remove_v1_scalars = database
+    let remove_legacy_controls = database
         .state_json(STATE_GATEWAY)?
         .and_then(|gateway_state_text| {
             serde_json::from_str::<serde_json::Value>(&gateway_state_text).ok()
@@ -246,6 +250,7 @@ fn upgrade_saved_gateway(
                         "keepLastCandidateAvailable",
                         "routingStrategy",
                         "subscriptionPlanOrder",
+                        "requestTimezone",
                     ]
                     .iter()
                     .any(|key| gateway_state_fields.contains_key(*key))
@@ -262,7 +267,7 @@ fn upgrade_saved_gateway(
             .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
         gateway.pool_routing = Some(policy);
     }
-    if upgrade_policy || remove_v1_scalars {
+    if upgrade_policy || remove_legacy_controls {
         database.replace_state_json(&[(STATE_GATEWAY, serialize_state(gateway)?)])?;
     }
     Ok(())

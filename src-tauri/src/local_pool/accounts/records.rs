@@ -4,7 +4,7 @@ use super::credentials::{
 };
 use super::NativeSecretBackend;
 use crate::local_pool::{
-    error::{ErrorCode, ErrorDiagnostics, LocalPoolError, Result},
+    error::{ErrorCode, LocalPoolError, Result},
     models::LocalAccountRecord,
 };
 use sha2::{Digest, Sha256};
@@ -21,62 +21,54 @@ use zenith_relay_core::{
 pub const CODEX_SOURCE_ID: &str = "openai_codex";
 pub const CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 
-pub(in crate::local_pool) fn validate_account_plan(
-    credentials: &StoredCodexCredentials,
-    plan_type: Option<&str>,
-) -> Result<()> {
-    let kind = credentials.oauth_client_kind();
-    kind.validate_plan(
-        credentials.plan_type(),
-        credentials.id_token(),
-        Some(credentials.access_token()),
-    )
-    .and_then(|_| kind.validate_plan(plan_type, None, None))
-    .map_err(|message| {
-        LocalPoolError::new(ErrorCode::InvalidState, message).with_diagnostic(ErrorDiagnostics {
-            reason: Some(
-                zenith_relay_core::error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED.into(),
-            ),
-            ..Default::default()
-        })
-    })
-}
-
 pub(in crate::local_pool) fn require_pool_account(account: &LocalAccountRecord) -> Result<()> {
     let credentials = CredentialStore::from_backend(NativeSecretBackend)
         .require(&account.account.id)
         .map_err(credential_error)?;
-    validate_pool_account(
-        &credentials,
-        account.account.subscription.plan_type.as_deref(),
-    )
+    validate_pool_account(&credentials, account.image_pool_enabled)
 }
 
 pub(in crate::local_pool) fn can_account_join_pool(account: &LocalAccountRecord) -> Result<bool> {
     let credentials = CredentialStore::from_backend(NativeSecretBackend)
         .require(&account.account.id)
         .map_err(credential_error)?;
-    Ok(validate_pool_account(
-        &credentials,
-        account.account.subscription.plan_type.as_deref(),
-    )
-    .is_ok())
+    Ok(validate_pool_account(&credentials, account.image_pool_enabled).is_ok())
 }
 
 pub(in crate::local_pool) fn validate_pool_account(
     credentials: &StoredCodexCredentials,
-    plan_type: Option<&str>,
+    image_pool_enabled: bool,
 ) -> Result<()> {
     if credentials.oauth_client_kind()
         == zenith_relay_core::providers::chatgpt::OAuthClientKind::Codex
+        && !image_pool_enabled
     {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
-            "Codex connections are for account switching and quota display. Use SIWC or Excel / BPS for the pool.",
+            "Enable this Codex connection explicitly for image generation before adding it to the pool.",
         ));
     }
-    require_plan_permission(credentials)?;
-    validate_account_plan(credentials, plan_type)
+    require_plan_permission(credentials)
+}
+
+/// Only an explicit membership action grants the native Images opt-in.
+pub(in crate::local_pool) fn set_pool_membership(
+    account: &mut LocalAccountRecord,
+    in_pool: bool,
+) -> Result<()> {
+    if in_pool {
+        let credentials = CredentialStore::from_backend(NativeSecretBackend)
+            .require(&account.account.id)
+            .map_err(credential_error)?;
+        let images_only = credentials.oauth_client_kind()
+            == zenith_relay_core::providers::chatgpt::OAuthClientKind::Codex;
+        validate_pool_account(&credentials, images_only)?;
+        account.image_pool_enabled = images_only;
+    } else {
+        account.image_pool_enabled = false;
+    }
+    account.account.in_pool = in_pool;
+    Ok(())
 }
 
 pub(in crate::local_pool) fn require_plan_permission(
@@ -103,7 +95,6 @@ pub fn new_account_record(
     priority: i32,
     now_ms: u64,
 ) -> Result<LocalAccountRecord> {
-    validate_account_plan(credentials, None)?;
     let provider_account_id = credentials.provider_account_id().ok_or_else(|| {
         LocalPoolError::new(
             ErrorCode::InvalidState,
@@ -174,6 +165,7 @@ pub fn new_account_record(
             last_used_at_ms: None,
             last_error_code: None,
         },
+        image_pool_enabled: false,
         provider_family: Some("openai".to_string()),
         purchase_cost_micro_usd: None,
         recovery: None,
@@ -341,7 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn free_plan_is_accepted_for_native_and_rejected_only_for_bps() {
+    fn free_plan_is_accepted_for_native_and_bps() {
         use zenith_relay_core::providers::chatgpt::OAuthClientKind;
         let native = credentials_for_plan("chatgpt_free_tier");
         let account =
@@ -350,14 +342,13 @@ mod tests {
             account.account.subscription.plan_type.as_deref(),
             Some("free")
         );
-        assert!(validate_account_plan(&native, Some("free")).is_ok());
-
         let bps = native.with_oauth_client_kind(OAuthClientKind::ExcelBps);
-        assert!(new_account_record(&bps, AccountAuthMode::OAuth, Vec::new(), 0, 1).is_err());
-        assert!(validate_account_plan(&bps, Some("plus")).is_err());
-        let paid_bps = credentials().with_oauth_client_kind(OAuthClientKind::ExcelBps);
-        assert!(validate_account_plan(&paid_bps, Some("free")).is_err());
-        assert!(validate_account_plan(&paid_bps, Some("plus")).is_ok());
+        let account = new_account_record(&bps, AccountAuthMode::OAuth, Vec::new(), 0, 1).unwrap();
+        assert_eq!(
+            account.account.subscription.plan_type.as_deref(),
+            Some("free")
+        );
+        assert!(validate_pool_account(&bps, false).is_ok());
     }
 
     #[test]
@@ -365,14 +356,14 @@ mod tests {
         use zenith_relay_core::providers::chatgpt::OAuthClientKind;
         for plan in ["free", "plus", "pro"] {
             let native = credentials_for_plan(plan);
-            assert!(validate_pool_account(&native, Some(plan)).is_err());
-            assert!(validate_account_plan(&native, Some(plan)).is_ok());
+            assert!(validate_pool_account(&native, false).is_err());
+            assert!(validate_pool_account(&native, true).is_ok());
             assert!(require_plan_permission(&native).is_ok());
             assert!(new_account_record(&native, AccountAuthMode::OAuth, Vec::new(), 0, 1).is_ok());
+            let bps = native.with_oauth_client_kind(OAuthClientKind::ExcelBps);
+            assert!(validate_pool_account(&bps, false).is_ok());
+            assert!(validate_pool_account(&bps, true).is_ok());
         }
-        let bps = credentials().with_oauth_client_kind(OAuthClientKind::ExcelBps);
-        assert!(validate_pool_account(&bps, Some("plus")).is_ok());
-        assert!(validate_pool_account(&bps, Some("free")).is_err());
     }
 
     #[test]

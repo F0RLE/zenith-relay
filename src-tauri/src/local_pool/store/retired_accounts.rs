@@ -108,6 +108,7 @@ pub(super) fn migrate(database: &TelemetryDb, accounts: &mut [LocalAccountRecord
         if account.recovery.is_some() && (account.account.enabled || account.account.in_pool) {
             account.account.enabled = false;
             account.account.in_pool = false;
+            account.image_pool_enabled = false;
             changed = true;
         }
     }
@@ -155,6 +156,7 @@ impl LocalPoolStore {
         account.recovery = None;
         account.account.enabled = false;
         account.account.in_pool = false;
+        account.image_pool_enabled = false;
         if account.account.last_error_code.as_deref() == Some("remote_missing") {
             account.account.last_error_code = None;
         }

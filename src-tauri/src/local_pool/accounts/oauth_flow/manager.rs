@@ -17,6 +17,33 @@ where
         }
     }
 
+    pub fn report_diagnostic(&self, login_id: &str, diagnostic: OAuthFlowDiagnostic) {
+        let _mutation = lock(&self.inner.mutation);
+        // Progress is advisory; canceled/expired/completed attempts cannot emit it.
+        let Ok(snapshot) = read_snapshot(&self.inner.root, login_id) else {
+            return;
+        };
+        if snapshot.pending.expires_at_ms() <= now_ms() {
+            return;
+        }
+        self.inner.events.emit(OAuthFlowEvent {
+            login_id: login_id.to_string(),
+            status: snapshot.status,
+            diagnostic: Some(diagnostic),
+        });
+    }
+
+    pub fn advance_diagnostic(
+        &self,
+        login_id: &str,
+        progress: &mut OAuthFlowProgress,
+        stage: OAuthFlowStage,
+    ) {
+        self.report_diagnostic(login_id, progress.diagnostic(None));
+        progress.advance(stage);
+        self.report_diagnostic(login_id, progress.diagnostic(None));
+    }
+
     pub async fn start_for_account(
         &self,
         oauth: &CodexOAuthClient,

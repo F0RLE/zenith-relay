@@ -3,6 +3,29 @@ use super::{CredentialRefresh, StoredCodexCredentials};
 use zenith_relay_core::accounts::{TokenRefresh, TokenSet};
 
 impl StoredCodexCredentials {
+    pub(in crate::local_pool::accounts) fn refresh_is_paused(&self, now_ms: u64) -> bool {
+        self.refresh_retry.is_some_and(|retry| {
+            let delay = 5_000_u64
+                .saturating_mul(1_u64 << retry.failures.saturating_sub(1).min(6))
+                .min(300_000);
+            // A backwards wall-clock correction must not lock an account indefinitely.
+            now_ms.saturating_add(300_000) >= retry.failed_at_ms
+                && now_ms < retry.failed_at_ms.saturating_add(delay)
+        })
+    }
+
+    pub(in crate::local_pool::accounts) fn with_refresh_failure(mut self, now_ms: u64) -> Self {
+        let failures = self
+            .refresh_retry
+            .filter(|retry| now_ms >= retry.failed_at_ms)
+            .map_or(1, |retry| retry.failures.saturating_add(1).min(7));
+        self.refresh_retry = Some(super::RefreshRetry {
+            failures,
+            failed_at_ms: now_ms,
+        });
+        self
+    }
+
     pub fn to_token_set(&self) -> Result<TokenSet, CredentialError> {
         TokenSet::new(
             self.access_token.clone(),

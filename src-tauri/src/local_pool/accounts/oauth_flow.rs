@@ -41,6 +41,75 @@ where
 pub struct OAuthFlowEvent {
     pub login_id: String,
     pub status: OAuthFlowStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<OAuthFlowDiagnostic>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthFlowStage {
+    Callback,
+    TokenExchange,
+    IdentityValidation,
+    Saving,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthFlowFailureReason {
+    CallbackInvalid,
+    TokenExchangeFailed,
+    IdentityInvalid,
+    SaveFailed,
+    StorageUnavailable,
+    Conflict,
+    RecoveryRequired,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OAuthFlowDiagnostic {
+    pub stage: OAuthFlowStage,
+    pub elapsed_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<OAuthFlowFailureReason>,
+}
+
+pub struct OAuthFlowProgress {
+    stage: OAuthFlowStage,
+    started: std::time::Instant,
+}
+
+impl OAuthFlowProgress {
+    pub fn new() -> Self {
+        Self {
+            stage: OAuthFlowStage::Callback,
+            started: std::time::Instant::now(),
+        }
+    }
+
+    pub fn stage(&self) -> OAuthFlowStage {
+        self.stage
+    }
+
+    pub fn advance(&mut self, stage: OAuthFlowStage) {
+        self.stage = stage;
+        self.started = std::time::Instant::now();
+    }
+
+    pub fn diagnostic(&self, reason: Option<OAuthFlowFailureReason>) -> OAuthFlowDiagnostic {
+        OAuthFlowDiagnostic {
+            stage: self.stage,
+            elapsed_ms: self.started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+            reason,
+        }
+    }
+}
+
+impl Default for OAuthFlowProgress {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -271,6 +340,7 @@ where
         self.events.emit(OAuthFlowEvent {
             login_id: login_id.to_string(),
             status,
+            diagnostic: None,
         });
     }
 }

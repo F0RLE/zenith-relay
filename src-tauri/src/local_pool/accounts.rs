@@ -5,6 +5,7 @@ pub(crate) mod exports;
 pub(crate) mod import_orchestrator;
 pub(crate) mod import_session;
 pub(crate) mod login;
+pub(crate) mod model_probe;
 pub(crate) mod mutations;
 pub(crate) mod oauth;
 pub(crate) mod oauth_flow;

@@ -89,8 +89,9 @@ fn selected_ids_are_validated_and_deduplicated_in_order() {
 }
 #[test]
 fn account_patch_normalizes_metadata_and_rejects_zero_weight() {
+    let account_id = format!("account_{}", Uuid::new_v4().simple());
     let credentials = StoredCodexCredentials::new(
-        "account_local",
+        &account_id,
         "access-private".into(),
         Some("refresh-private".into()),
         None,
@@ -105,6 +106,8 @@ fn account_patch_normalizes_metadata_and_rejects_zero_weight() {
         false,
     )
     .unwrap();
+    let credential_store = CredentialStore::from_backend(NativeSecretBackend);
+    credential_store.save(&credentials).unwrap();
     let mut account = records::new_account_record(
         &credentials,
         AccountAuthMode::OAuth,
@@ -116,7 +119,7 @@ fn account_patch_normalizes_metadata_and_rejects_zero_weight() {
     apply_account_patch(
         &mut account,
         UpdateAccountInput {
-            account_id: "account_local".into(),
+            account_id: account_id.clone(),
             label: Some("  Personal  ".into()),
             priority: Some(7),
             weight: Some(2),
@@ -134,11 +137,13 @@ fn account_patch_normalizes_metadata_and_rejects_zero_weight() {
     assert_eq!(account.allowed_models, ["gpt-test"]);
     assert_eq!(account.excluded_models, ["gpt-old"]);
     assert_eq!(account.purchase_cost_micro_usd, Some(12_500_000));
+    assert!(account.account.in_pool);
+    assert!(account.image_pool_enabled);
     assert!(account.account.draining);
     assert!(apply_account_patch(
         &mut account,
         UpdateAccountInput {
-            account_id: "account_local".into(),
+            account_id: account_id.clone(),
             label: None,
             priority: None,
             weight: Some(0),
@@ -150,6 +155,31 @@ fn account_patch_normalizes_metadata_and_rejects_zero_weight() {
         },
     )
     .is_err());
+    credential_store.delete(&account_id).unwrap();
+}
+#[test]
+fn account_patch_cannot_join_pool_without_stored_credentials() {
+    let account_id = format!("account_{}", Uuid::new_v4().simple());
+    let mut account = account_record(&account_id);
+    let before = account.clone();
+    let error = apply_account_patch(
+        &mut account,
+        UpdateAccountInput {
+            account_id,
+            label: None,
+            priority: None,
+            weight: None,
+            allowed_models: None,
+            excluded_models: None,
+            in_pool: Some(true),
+            draining: None,
+            purchase_cost_micro_usd: None,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::InvalidState);
+    assert_eq!(error.message, "stored ChatGPT credentials are missing");
+    assert_eq!(account, before);
 }
 #[test]
 fn deleting_account_prunes_explicit_selectors_without_rewriting_wake_state() {

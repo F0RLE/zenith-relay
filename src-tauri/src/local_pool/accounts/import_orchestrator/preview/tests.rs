@@ -113,7 +113,7 @@ async fn siwc_import_round_trip_is_inactive_preserves_registration_and_never_pro
 }
 
 #[tokio::test]
-async fn authenticated_free_plan_rejects_bps_preview_but_keeps_native_import() {
+async fn authenticated_free_plan_keeps_bps_and_native_import_previews_selectable() {
     let root = std::env::temp_dir().join(format!(
         "zenith-relay-import-free-bps-{}",
         Uuid::new_v4().simple()
@@ -123,10 +123,15 @@ async fn authenticated_free_plan_rejects_bps_preview_but_keeps_native_import() {
     let address = listener.local_addr().unwrap();
     let app = Router::new().route(
         "/accounts/check",
-        get(|| async {
+        get(|headers: HeaderMap| async move {
+            let account_id = if headers[AUTHORIZATION] == "Bearer synthetic-bps-paid" {
+                "synthetic-free-known"
+            } else {
+                "synthetic-free"
+            };
             Json(serde_json::json!({
                 "accounts": [{
-                    "account": {"id": "synthetic-free", "plan_type": "free"}
+                    "account": {"id": account_id, "plan_type": "free"}
                 }]
             }))
         }),
@@ -140,7 +145,7 @@ async fn authenticated_free_plan_rejects_bps_preview_but_keeps_native_import() {
         .start(
             r#"[
                 {"oauth_client_kind":"excel_bps","access_token":"synthetic-bps-unknown"},
-                {"oauth_client_kind":"excel_bps","account_id":"synthetic-free","access_token":"synthetic-bps-paid","plan_type":"plus"},
+                {"oauth_client_kind":"excel_bps","account_id":"synthetic-free-known","access_token":"synthetic-bps-paid","plan_type":"plus"},
                 {"oauth_client_kind":"codex","account_id":"synthetic-free","access_token":"synthetic-native","plan_type":"plus"}
             ]"#,
             None,
@@ -153,19 +158,15 @@ async fn authenticated_free_plan_rejects_bps_preview_but_keeps_native_import() {
         .await
         .unwrap();
     assert_eq!(preview.rows.len(), 3);
-    for row in &preview.rows[..2] {
-        assert!(!row.selectable);
-        assert_eq!(
-            row.error.as_ref().map(|error| error.code),
-            Some(ImportIssueCode::BasisPointsFreeAccountUnsupported)
-        );
+    for row in &preview.rows {
+        assert!(row.selectable);
+        assert!(row.error.is_none());
+        assert_eq!(row.plan.as_deref(), Some("free"));
     }
-    assert!(preview.rows[2].selectable);
-    assert_eq!(preview.rows[2].plan.as_deref(), Some("free"));
     let prepared = sessions
         .prepare(&session_id, content.as_deref(), preview, &[])
         .unwrap();
-    assert_eq!(prepared.items.len(), 1);
+    assert_eq!(prepared.items.len(), 3);
     assert!(state.store().unwrap().accounts().is_empty());
     sessions.cancel(&session_id).unwrap();
     server.abort();

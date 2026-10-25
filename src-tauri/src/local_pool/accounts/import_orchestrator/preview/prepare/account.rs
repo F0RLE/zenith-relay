@@ -94,11 +94,7 @@ pub(super) async fn prepare_account_preview_item(
             reject_preview_item(
                 row,
                 PreviewItemFailure {
-                    code: if error.code == error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED {
-                        ImportIssueCode::BasisPointsFreeAccountUnsupported
-                    } else {
-                        ImportIssueCode::RefreshExchangeFailed
-                    },
+                    code: ImportIssueCode::RefreshExchangeFailed,
                     diagnostic_code: &error.code,
                     message: &error.message,
                     session_hash,
@@ -200,26 +196,6 @@ pub(super) async fn prepare_account_preview_item(
             row,
         )
         .await?;
-    }
-    if let Err(message) = material.oauth_client_kind.validate_plan(
-        row.plan.as_deref(),
-        material.id_token.as_deref(),
-        Some(&material.access_token),
-    ) {
-        reject_preview_item(
-            row,
-            PreviewItemFailure {
-                code: ImportIssueCode::BasisPointsFreeAccountUnsupported,
-                diagnostic_code: error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED,
-                message,
-                session_hash,
-                item_hash,
-                index,
-            },
-        );
-        return Ok(AccountPreviewStep::Skipped {
-            credentials_changed,
-        });
     }
     material.plan_type = row.plan.clone();
     let prepared_json = parsed_item_json_with_material(original_json, &material);

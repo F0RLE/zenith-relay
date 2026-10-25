@@ -389,7 +389,17 @@ fn reset_due_uses_reported_future_window_and_bounded_stable_jitter() {
     let delay = reset_due_delay(&response, 90_000).unwrap();
     assert!((15_000..25_000).contains(&delay));
     assert_eq!(reset_due_delay(&response, 90_000), Some(delay));
-    assert_eq!(reset_due_delay(&response, 100_000), None);
+    assert_eq!(reset_due_delay(&response, 100_000), Some(delay - 10_000));
+    assert_eq!(reset_due_delay(&response, 120_000), Some(0));
+    response
+        .account
+        .account
+        .quota
+        .primary
+        .as_mut()
+        .unwrap()
+        .observed_at_ms = 120_000;
+    assert_eq!(reset_due_delay(&response, 120_000), None);
     response.quota = AccountQuotaOutcome::Skipped;
     assert_eq!(reset_due_delay(&response, 90_000), None);
 }

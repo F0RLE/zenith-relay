@@ -76,6 +76,7 @@ impl LocalPoolStore {
             // Restoring inventory must not start requests, monitoring or wake tasks.
             record.account.enabled = false;
             record.account.in_pool = false;
+            record.image_pool_enabled = false;
             record.account.draining = false;
             accounts.push(record);
         }

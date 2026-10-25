@@ -35,6 +35,24 @@ use export::{invalid_export_row, write_export};
 const MAX_EXPORT_ROWS: usize = 500;
 const MAX_EXPORT_TEXT: usize = 512;
 
+#[tauri::command]
+pub async fn export_request_diagnostics(
+    request_id: String,
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> Result<Option<String>, CommandError> {
+    if request_id.trim().is_empty() || export::invalid_text(&request_id) {
+        return Err(LocalPoolError::invalid_state("Invalid request identifier").into());
+    }
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let document = state.telemetry.request_diagnostics(&request_id)?;
+        write_export("relay-request-diagnostics", &document, &app)
+    })
+    .await
+    .map_err(|_| LocalPoolError::new(ErrorCode::Io, "Diagnostic export was interrupted"))?
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RelayFolder {
@@ -102,25 +120,33 @@ pub fn get_relay_storage_info(state: State<'_, DesktopState>) -> RelayStorageInf
 }
 
 #[tauri::command]
-pub fn open_relay_folder(
+pub async fn open_relay_folder(
     folder: RelayFolder,
     app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> Result<(), CommandError> {
-    let folder_path = match folder {
-        RelayFolder::Data => state.data_root(),
-        RelayFolder::Logs => state.logs_root(),
-        RelayFolder::ErrorLogs => state.error_logs_root(),
-        RelayFolder::CrashLogs => state.crash_logs_root(),
-        RelayFolder::OperationLogs => state.operation_logs_root(),
-        RelayFolder::ProfileBackups => state.profile_backup_root(),
-        RelayFolder::ClaudeDesktopBackups => state.claude_desktop_backup_root(),
-        RelayFolder::OpenCodeBackups => state.opencode_backup_root(),
-    };
-    fs::create_dir_all(&folder_path).map_err(io_error)?;
-    app.opener()
-        .open_path(folder_path.to_string_lossy(), None::<&str>)
-        .map_err(|error| io_error(error.to_string()))
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if matches!(folder, RelayFolder::Logs | RelayFolder::OperationLogs) {
+            crate::diagnostics::memory::record_snapshot(&state, "logs_opened");
+        }
+        let folder_path = match folder {
+            RelayFolder::Data => state.data_root(),
+            RelayFolder::Logs => state.logs_root(),
+            RelayFolder::ErrorLogs => state.error_logs_root(),
+            RelayFolder::CrashLogs => state.crash_logs_root(),
+            RelayFolder::OperationLogs => state.operation_logs_root(),
+            RelayFolder::ProfileBackups => state.profile_backup_root(),
+            RelayFolder::ClaudeDesktopBackups => state.claude_desktop_backup_root(),
+            RelayFolder::OpenCodeBackups => state.opencode_backup_root(),
+        };
+        fs::create_dir_all(&folder_path).map_err(io_error)?;
+        app.opener()
+            .open_path(folder_path.to_string_lossy(), None::<&str>)
+            .map_err(|error| io_error(error.to_string()))
+    })
+    .await
+    .map_err(|_| io_error("Opening the folder was interrupted"))?
 }
 
 #[tauri::command]

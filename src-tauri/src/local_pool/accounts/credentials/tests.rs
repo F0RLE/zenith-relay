@@ -64,7 +64,10 @@ fn siwc_rotation_recovers_after_restart_without_reusing_the_old_grant() {
         .unwrap();
     store.save(&before).unwrap();
     store.checkpoint_siwc_rotation(&before, None).unwrap();
-    assert!(store.recover_siwc_rotation(&before).is_err());
+    assert_eq!(
+        store.recover_siwc_rotation(&before).unwrap_err().code,
+        CredentialErrorCode::RotationOutcomeUnknown
+    );
     assert!(store
         .require("siwc_synthetic")
         .unwrap()
@@ -155,6 +158,7 @@ fn siwc_rotation_survives_proxy_changes_without_restoring_old_settings() {
 struct MemorySecrets(
     Mutex<HashMap<String, String>>,
     std::sync::atomic::AtomicBool,
+    std::sync::atomic::AtomicBool,
 );
 
 impl SecretBackend for MemorySecrets {
@@ -167,6 +171,9 @@ impl SecretBackend for MemorySecrets {
     }
 
     fn load(&self, secret_ref: &str) -> Result<Option<String>, SecretBackendError> {
+        if self.2.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(SecretBackendError);
+        }
         Ok(self.0.lock().unwrap().get(secret_ref).cloned())
     }
 
@@ -197,6 +204,68 @@ fn failed_primary_delete_retains_the_siwc_rotation_barrier() {
     store.delete(before.local_account_id()).unwrap();
     assert!(store.load(before.local_account_id()).unwrap().is_none());
     assert!(backend.0.lock().unwrap().is_empty());
+}
+
+#[test]
+fn siwc_rotation_storage_outage_does_not_become_a_reauthentication_error() {
+    use std::sync::atomic::Ordering;
+    let backend = Arc::new(MemorySecrets::default());
+    let store = CredentialStore::new(backend.clone());
+    let before = siwc_fixture();
+    store.save(&before).unwrap();
+    let after = before
+        .with_token_set(
+            &TokenSet::new(
+                "rotated-access",
+                Some("rotated-refresh".into()),
+                Some(ID_TOKEN.into()),
+                Some(1_000_000),
+                10,
+                2,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    store
+        .checkpoint_siwc_rotation(&before, Some(&after))
+        .unwrap();
+    backend.2.store(true, Ordering::SeqCst);
+    assert_eq!(
+        store.recover_siwc_rotation(&before).unwrap_err().code,
+        CredentialErrorCode::SecretStoreUnavailable
+    );
+    backend.2.store(false, Ordering::SeqCst);
+    assert!(store
+        .recover_siwc_rotation(&before)
+        .unwrap()
+        .unwrap()
+        .matches_snapshot(&after));
+}
+
+#[test]
+fn siwc_rotation_invalid_checkpoint_is_distinct_and_never_prints_secrets() {
+    let backend = Arc::new(MemorySecrets::default());
+    let store = CredentialStore::new(backend.clone());
+    let before = siwc_fixture();
+    store.save(&before).unwrap();
+    let reference = format!(
+        "{}:siwc-rotation",
+        credential_secret_ref(before.local_account_id()).unwrap()
+    );
+    for invalid in [
+        "not-json",
+        "{\"before\":\"private-broken-secret\",\"after\":null}",
+    ] {
+        backend.save(&reference, invalid).unwrap();
+        let error = store.recover_siwc_rotation(&before).unwrap_err();
+        assert_eq!(error.code, CredentialErrorCode::RotationCheckpointInvalid);
+        assert!(!error.to_string().contains("private-broken-secret"));
+        assert_eq!(backend.load(&reference).unwrap().as_deref(), Some(invalid));
+        assert!(store
+            .require(before.local_account_id())
+            .unwrap()
+            .matches_snapshot(&before));
+    }
 }
 
 #[test]

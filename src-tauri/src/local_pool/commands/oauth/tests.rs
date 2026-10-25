@@ -315,6 +315,117 @@ fn failed_initial_probe_keeps_account_with_typed_error() {
 }
 
 #[test]
+fn initial_model_catalog_forbidden_degrades_without_blocking_or_inventing_models() {
+    for cached in [false, true] {
+        let mut record = account(
+            "account_forbidden",
+            "synthetic-account",
+            "synthetic-refresh",
+        );
+        record.account.auth_state = AccountAuthState::Active;
+        record.account.health = AccountHealthState::Healthy;
+        record.account.last_error_code = None;
+        if !cached {
+            record.models.clear();
+        }
+        let previous_models = record.models.clone();
+        let previous_discovered = record.discovered_models.clone();
+        let previous_membership = record.account.in_pool;
+        apply_initial_model_issue(
+            &mut record,
+            initial_model_issue(&ModelDiscoveryFailure {
+                code: ModelDiscoveryFailureCode::Forbidden,
+                retryable: false,
+                retry_after_ms: None,
+                http_status: Some(403),
+            }),
+        );
+
+        assert_eq!(record.account.auth_state, AccountAuthState::Active);
+        assert_eq!(record.account.health, AccountHealthState::Degraded);
+        assert_eq!(
+            record.account.last_error_code.as_deref(),
+            Some("models_forbidden")
+        );
+        assert_eq!(record.models, previous_models);
+        assert_eq!(record.discovered_models, previous_discovered);
+        assert_eq!(record.account.in_pool, previous_membership);
+
+        let state = &mut record.account;
+        assert!(zenith_relay_core::accounts::accept_discovered_models(
+            &mut record.models,
+            &mut record.discovered_models,
+            &mut state.auth_state,
+            &mut state.health,
+            &mut state.last_error_code,
+            vec!["synthetic-recovered-model".into()],
+        ));
+        assert_eq!(state.auth_state, AccountAuthState::Active);
+        assert_eq!(state.health, AccountHealthState::Healthy);
+        assert!(state.last_error_code.is_none());
+        assert_eq!(
+            record.discovered_models,
+            Some(vec!["synthetic-recovered-model".into()])
+        );
+    }
+}
+
+#[test]
+fn initial_model_issue_preserves_independent_account_failures() {
+    use zenith_relay_core::accounts::ReauthReason;
+
+    for (auth, health, code) in [
+        (
+            AccountAuthState::Active,
+            AccountHealthState::Blocked,
+            "upstream_account_disabled",
+        ),
+        (
+            AccountAuthState::Error,
+            AccountHealthState::Unhealthy,
+            "quota_unauthorized",
+        ),
+        (
+            AccountAuthState::RequiresReauth(ReauthReason::InvalidGrant),
+            AccountHealthState::Unhealthy,
+            "invalid_grant",
+        ),
+        (
+            AccountAuthState::Active,
+            AccountHealthState::Degraded,
+            "checkpoint",
+        ),
+    ] {
+        for (failure, retryable) in [
+            (ModelDiscoveryFailureCode::Forbidden, false),
+            (ModelDiscoveryFailureCode::Unauthorized, false),
+            (ModelDiscoveryFailureCode::Transport, true),
+        ] {
+            let mut record = account(
+                "account_independent",
+                "synthetic-account",
+                "synthetic-refresh",
+            );
+            record.account.auth_state = auth;
+            record.account.health = health;
+            record.account.last_error_code = Some(code.into());
+            apply_initial_model_issue(
+                &mut record,
+                initial_model_issue(&ModelDiscoveryFailure {
+                    code: failure,
+                    retryable,
+                    retry_after_ms: None,
+                    http_status: None,
+                }),
+            );
+            assert_eq!(record.account.auth_state, auth, "{code}: {failure:?}");
+            assert_eq!(record.account.health, health, "{code}: {failure:?}");
+            assert_eq!(record.account.last_error_code.as_deref(), Some(code));
+        }
+    }
+}
+
+#[test]
 fn initial_model_probe_uses_the_registered_agent_identity() {
     let oauth = StoredCodexCredentials::new(
         "account_models",
@@ -368,6 +479,7 @@ fn duplicate_identity_preserves_local_id_and_user_settings() {
     current.account.tags = BTreeSet::from(["work".into()]);
     current.account.enabled = false;
     current.account.in_pool = true;
+    current.image_pool_enabled = true;
     current.account.draining = true;
     current.account.created_at_ms = 7;
     current.account.last_used_at_ms = Some(8);
@@ -403,6 +515,7 @@ fn duplicate_identity_preserves_local_id_and_user_settings() {
     assert_eq!(updated_account.account.tags, current.account.tags);
     assert!(!updated_account.account.enabled);
     assert!(updated_account.account.in_pool);
+    assert!(updated_account.image_pool_enabled);
     assert!(updated_account.account.draining);
     assert_eq!(updated_account.account.created_at_ms, 7);
     assert_eq!(updated_account.account.last_used_at_ms, Some(8));

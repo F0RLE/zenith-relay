@@ -263,6 +263,7 @@ pub async fn apply_local_configuration_preset(
         }
         account.account.enabled = rule.enabled;
         account.account.in_pool = rule.in_pool;
+        account.image_pool_enabled &= rule.in_pool;
         account.allowed_models = rule.allowed_models.clone();
         account.excluded_models = rule.excluded_models.clone();
         account.priority = rule.priority;

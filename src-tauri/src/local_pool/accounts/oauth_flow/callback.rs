@@ -1,8 +1,8 @@
 use super::super::import_session::SecretBackend;
 use super::super::oauth::{OAuthPendingSession, CODEX_OAUTH_CALLBACK_PORTS};
 use super::{
-    OAuthFlowError, OAuthFlowErrorCode, OAuthFlowEventSink, OAuthFlowInner, OAuthFlowStatus,
-    PendingSnapshot, CALLBACK_PATH,
+    OAuthFlowError, OAuthFlowErrorCode, OAuthFlowEvent, OAuthFlowEventSink, OAuthFlowFailureReason,
+    OAuthFlowInner, OAuthFlowProgress, OAuthFlowStatus, PendingSnapshot, CALLBACK_PATH,
 };
 use std::io;
 use std::sync::Arc;
@@ -82,10 +82,15 @@ pub(super) async fn run_listener<B, E>(
                     inner.emit(&snapshot.login_id, OAuthFlowStatus::Failed);
                     break;
                 };
+                let progress = OAuthFlowProgress::new();
                 match process_request(&inner, &snapshot, stream).await {
                     RequestOutcome::Accepted => break,
                     RequestOutcome::Rejected => {
-                        inner.emit(&snapshot.login_id, OAuthFlowStatus::CallbackRejected);
+                        inner.events.emit(OAuthFlowEvent {
+                            login_id: snapshot.login_id.clone(),
+                            status: OAuthFlowStatus::CallbackRejected,
+                            diagnostic: Some(progress.diagnostic(Some(OAuthFlowFailureReason::CallbackInvalid))),
+                        });
                     }
                     RequestOutcome::Failed => {
                         inner.emit(&snapshot.login_id, OAuthFlowStatus::Failed);

@@ -114,15 +114,6 @@ impl ImportedCredentialMaterial {
         issued_at_ms: u64,
         generation: u64,
     ) -> ItemResult<StoredCodexCredentials> {
-        self.oauth_client_kind
-            .validate_plan(
-                self.plan_type.as_deref(),
-                self.id_token.as_deref(),
-                Some(&self.access_token),
-            )
-            .map_err(|message| {
-                ImportItemError::new(error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED, message)
-            })?;
         if self.oauth_client_kind == OAuthClientKind::ExcelBps
             && (self.agent_identity.is_some() || self.access_token.is_empty())
         {

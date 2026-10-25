@@ -61,12 +61,6 @@ pub(in crate::local_pool::commands) async fn apply_local_pool_membership(
             )
             .into());
         }
-        for account in old_accounts
-            .iter()
-            .filter(|account| account_ids.contains(&account.account.id))
-        {
-            crate::local_pool::accounts::records::require_pool_account(account)?;
-        }
         for source in old_sources
             .iter()
             .filter(|source| source_ids.contains(&source.id))
@@ -100,7 +94,7 @@ pub(in crate::local_pool::commands) async fn apply_local_pool_membership(
     }
     for account in &mut accounts {
         if account_ids.contains(&account.account.id) {
-            account.account.in_pool = input.in_pool;
+            crate::local_pool::accounts::records::set_pool_membership(account, input.in_pool)?;
         }
     }
     if sources == old_sources && accounts == old_accounts {

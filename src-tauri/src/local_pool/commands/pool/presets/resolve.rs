@@ -127,7 +127,7 @@ fn resolve_local_preset_references(
         if rule.in_pool {
             crate::local_pool::accounts::records::validate_pool_account(
                 &credential,
-                account.account.subscription.plan_type.as_deref(),
+                account.image_pool_enabled,
             )?;
         }
         let proxy_id = credential

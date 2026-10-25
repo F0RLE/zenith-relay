@@ -132,35 +132,29 @@ pub(in crate::local_pool::accounts) async fn discover_account_models(
         http_status: None,
         retry_after_ms: None,
     };
-    let account = state
+    state
         .store()
         .map_err(|_| unavailable())?
         .account(account_id)
-        .cloned()
         .ok_or_else(unavailable)?;
-    let credentials = CredentialStore::from_backend(NativeSecretBackend)
-        .require(account_id)
-        .map_err(|_| unavailable())?;
-    super::super::super::records::validate_account_plan(
-        &credentials,
-        account.account.subscription.plan_type.as_deref(),
-    )
-    .map_err(|_| ModelDiscoveryFailure {
-        code: ModelDiscoveryFailureCode::BasisPointsFreeAccountUnsupported,
-        retryable: false,
-        http_status: None,
-        retry_after_ms: None,
-    })?;
     let client = AccountModelsClient::new_with_proxy(prepared.proxy.as_ref())?
         .with_oauth_client_kind(prepared.oauth_client_kind)
-        .with_subscription_plan_type(account.account.subscription.plan_type.as_deref())
         .with_http_scope(http_scope.clone());
     let client_version = zenith_relay_core::providers::chatgpt::configured_codex_client_version();
-    client
+    let result = client
         .discover_authorized(
             prepared.authorization.clone(),
             &prepared.provider_account_id,
             &client_version,
         )
-        .await
+        .await;
+    if let Err(error) = &result {
+        crate::local_pool::accounts::model_probe::record_failure(
+            account_id,
+            prepared.oauth_client_kind,
+            prepared.proxy.is_some(),
+            error,
+        );
+    }
+    result
 }

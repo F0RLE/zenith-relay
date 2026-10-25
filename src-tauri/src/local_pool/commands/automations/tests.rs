@@ -116,6 +116,53 @@ fn explicit_model_must_be_available_for_every_selected_account() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn countdown_changes_request_a_shared_refresh_only_for_selected_pool_accounts() {
+    let root = std::env::temp_dir().join(format!(
+        "zenith-relay-countdown-refresh-{}",
+        Uuid::new_v4().simple()
+    ));
+    let state = DesktopState::open(root.clone()).unwrap();
+    let mut outside_pool = account("outside-pool", &["gpt-test"]);
+    outside_pool.account.in_pool = false;
+    state
+        .store()
+        .unwrap()
+        .replace_accounts_and_keys(
+            vec![account("eligible", &["gpt-test"]), outside_pool],
+            Vec::new(),
+        )
+        .unwrap();
+    let mut changes = state.store().unwrap().refresh_changes();
+    let mut task = build_task(
+        "wake_test".into(),
+        input(WakeModelPolicy::Explicit("gpt-test".into())),
+        10,
+        20,
+    )
+    .unwrap();
+
+    task.enabled = false;
+    schedule_countdown_refresh(&task, &state).unwrap();
+    assert!(!changes.has_changed().unwrap());
+    task.enabled = true;
+    task.account_selector = AccountSelector::AccountIds(["outside-pool".into()].into());
+    schedule_countdown_refresh(&task, &state).unwrap();
+    assert!(!changes.has_changed().unwrap());
+
+    task.account_selector = AccountSelector::AccountIds(["eligible".into()].into());
+    schedule_countdown_refresh(&task, &state).unwrap();
+    assert!(changes.has_changed().unwrap());
+    changes.borrow_and_update();
+
+    task.trigger = WakeTrigger::Weekly;
+    schedule_countdown_refresh(&task, &state).unwrap();
+    assert!(!changes.has_changed().unwrap());
+    drop(changes);
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 fn account(id: &str, models: &[&str]) -> LocalAccountRecord {
     LocalAccountRecord {
         account: AccountRecord {
@@ -147,6 +194,7 @@ fn account(id: &str, models: &[&str]) -> LocalAccountRecord {
             last_used_at_ms: None,
             last_error_code: None,
         },
+        image_pool_enabled: false,
         provider_family: Some("openai".into()),
         purchase_cost_micro_usd: None,
         recovery: None,

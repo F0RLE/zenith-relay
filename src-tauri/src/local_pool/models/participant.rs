@@ -75,6 +75,9 @@ pub struct LocalGatewayKeyRecord {
 #[serde(rename_all = "camelCase")]
 pub struct LocalAccountRecord {
     pub account: AccountRecord,
+    /// Explicit local Images opt-in. Legacy pool membership never grants it.
+    #[serde(default)]
+    pub image_pool_enabled: bool,
     /// Explicit official pricing family. Older ChatGPT accounts default to
     /// `openai` in the resolver without requiring a migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -123,6 +126,16 @@ pub struct TrashedLocalAccount {
 }
 
 impl LocalAccountRecord {
+    pub fn pool_models(&self) -> &[String] {
+        if self.image_pool_enabled {
+            static MODELS: std::sync::LazyLock<[String; 1]> =
+                std::sync::LazyLock::new(|| [zenith_relay_core::IMAGE_API_MODEL.to_string()]);
+            &*MODELS
+        } else {
+            self.effective_models()
+        }
+    }
+
     /// Compares the operational record while ignoring Codex client-login
     /// observations. Those can change during a credential transaction and do
     /// not prove that this record was replaced.
@@ -134,6 +147,7 @@ impl LocalAccountRecord {
     }
 
     pub fn normalize(&mut self) {
+        self.image_pool_enabled &= self.account.in_pool;
         self.account.label = self.account.label.trim().to_string();
         self.models = normalized_values(std::mem::take(&mut self.models));
         self.discovered_models = self.discovered_models.take().map(normalized_values);

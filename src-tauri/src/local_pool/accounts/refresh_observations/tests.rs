@@ -1,6 +1,13 @@
 use super::*;
 
 #[test]
+fn empty_client_catalog_does_not_replace_account_probe_errors() {
+    let code = ErrorCode::PoolModelsUnavailable;
+    assert_eq!(quota_refresh_error_kind(code), None);
+    assert_eq!(model_refresh_error_kind(code), None);
+}
+
+#[test]
 fn account_recovery_conflict_is_a_local_nonretryable_refresh_failure() {
     assert_eq!(
         quota_refresh_error_kind(ErrorCode::Conflict),

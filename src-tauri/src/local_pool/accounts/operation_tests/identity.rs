@@ -1,6 +1,21 @@
 use super::*;
 
 #[test]
+fn reauthentication_preserves_only_existing_explicit_image_membership() {
+    for in_pool in [false, true] {
+        for consent in [false, true] {
+            let mut existing = account_record("account_existing");
+            existing.account.in_pool = in_pool;
+            existing.image_pool_enabled = consent;
+            let mut updated = account_record("account_existing");
+            merge_existing_account(&mut updated, Some(&existing));
+            assert_eq!(updated.image_pool_enabled, in_pool && consent);
+            assert_eq!(updated.account.in_pool, in_pool);
+        }
+    }
+}
+
+#[test]
 fn refresh_only_without_explicit_account_id_updates_after_exchange_identity() {
     let parsed = parse_import(r#"{"refresh_token":"refresh-rotated"}"#, None, &[]).unwrap();
     assert!(parsed.items[0].account_id.is_none());

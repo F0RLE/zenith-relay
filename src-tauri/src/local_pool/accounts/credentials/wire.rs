@@ -25,6 +25,8 @@ pub(super) struct CredentialWire {
     pub(super) expires_at_ms: Option<u64>,
     pub(super) issued_at_ms: u64,
     pub(super) generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) refresh_retry: Option<super::stored::RefreshRetry>,
     pub(super) email: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) phone: Option<String>,

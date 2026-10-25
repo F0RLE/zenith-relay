@@ -6,7 +6,7 @@ use super::wire::{
 };
 use crate::local_pool::accounts::oauth::OAuthClientKind;
 use reqwest::header::HeaderValue;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use zenith_relay_core::accounts::access_token_is_usable;
 use zenith_relay_core::omit_blank;
@@ -18,6 +18,13 @@ mod secret;
 mod tokens;
 
 pub use refresh::CredentialRefresh;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(in crate::local_pool::accounts::credentials) struct RefreshRetry {
+    failures: u8,
+    failed_at_ms: u64,
+}
 
 #[derive(Clone)]
 pub struct StoredCodexCredentials {
@@ -31,6 +38,7 @@ pub struct StoredCodexCredentials {
     expires_at_ms: Option<u64>,
     issued_at_ms: u64,
     generation: u64,
+    refresh_retry: Option<RefreshRetry>,
     email: Option<String>,
     phone: Option<String>,
     password: Option<String>,
@@ -88,6 +96,7 @@ impl StoredCodexCredentials {
             expires_at_ms,
             issued_at_ms,
             generation,
+            refresh_retry: None,
             email: omit_blank(email),
             phone: None,
             password: None,
@@ -134,6 +143,7 @@ impl StoredCodexCredentials {
             expires_at_ms: None,
             issued_at_ms,
             generation,
+            refresh_retry: None,
             email: omit_blank(email),
             phone: None,
             password: None,
@@ -393,6 +403,7 @@ impl From<&StoredCodexCredentials> for CredentialWire {
             expires_at_ms: credentials.expires_at_ms,
             issued_at_ms: credentials.issued_at_ms,
             generation: credentials.generation,
+            refresh_retry: credentials.refresh_retry,
             email: credentials.email.clone(),
             phone: credentials.phone.clone(),
             password: credentials.password.clone(),
@@ -471,6 +482,7 @@ impl StoredCodexCredentials {
             && self.expires_at_ms == other.expires_at_ms
             && self.issued_at_ms == other.issued_at_ms
             && self.generation == other.generation
+            && self.refresh_retry == other.refresh_retry
             && self.email == other.email
             && self.phone == other.phone
             && self.password == other.password

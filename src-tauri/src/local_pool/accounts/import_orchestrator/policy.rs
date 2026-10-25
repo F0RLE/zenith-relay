@@ -51,6 +51,7 @@ pub(in crate::local_pool::accounts) fn merge_existing_account(
     account.account.tags = existing.account.tags.clone();
     account.account.enabled = existing.account.enabled;
     account.account.in_pool = existing.account.in_pool;
+    account.image_pool_enabled = existing.image_pool_enabled && existing.account.in_pool;
     account.account.draining = existing.account.draining;
     account.account.created_at_ms = existing.account.created_at_ms;
     account.account.last_used_at_ms = existing.account.last_used_at_ms;
@@ -84,7 +85,8 @@ pub(in crate::local_pool::accounts) fn preserve_newer_account_state(
 pub(in crate::local_pool::accounts) fn account_model_state_is_valid(
     account: &LocalAccountRecord,
 ) -> bool {
-    account.discovered_models.is_some()
+    account.image_pool_enabled
+        || account.discovered_models.is_some()
         || !account.models.is_empty()
         || (account.account.last_error_code.is_some()
             && account.account.health != AccountHealthState::Healthy)
