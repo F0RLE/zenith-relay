@@ -1055,8 +1055,9 @@ async fn receive_websocket_json_with_timeout(
     loop {
         let message = tokio::time::timeout(timeout_duration, socket.next())
             .await
-            .unwrap();
-        let message = message.unwrap().unwrap();
+            .expect("websocket JSON message timed out")
+            .expect("websocket closed before a JSON message")
+            .expect("websocket message failed");
         if let ClientWsMessage::Text(text) = message {
             return serde_json::from_str(&text).unwrap();
         }
@@ -1076,6 +1077,10 @@ async fn receive_websocket_completion_with_timeout(
         if value["type"] == "response.completed" {
             return value;
         }
+        assert!(
+            !matches!(value["type"].as_str(), Some("error" | "response.failed")),
+            "websocket failed before completion: {value}"
+        );
     }
 }
 

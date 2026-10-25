@@ -1,7 +1,12 @@
 use super::*;
 
+// Each matrix opens hundreds of loopback sockets. Keep the two load generators
+// separate so shared runners measure routing, not competing test runtimes.
+static TRANSPORT_MATRIX_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sse_transport_concurrency_matrix_balances_and_releases_all_leases() {
+    let _guard = TRANSPORT_MATRIX_LOCK.lock().await;
     for requests in [1, 20, 200] {
         assert_sse_concurrency(requests).await;
     }
@@ -85,6 +90,7 @@ async fn assert_sse_concurrency(requests: usize) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn websocket_transport_concurrency_matrix_balances_and_releases_all_leases() {
+    let _guard = TRANSPORT_MATRIX_LOCK.lock().await;
     for requests in [1, 20, 200] {
         assert_websocket_concurrency(requests).await;
     }
