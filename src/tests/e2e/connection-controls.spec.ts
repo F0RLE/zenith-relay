@@ -113,7 +113,7 @@ for (const theme of ["light", "dark"] as const) {
 
 for (const width of [1160, 390]) {
   for (const credits of ["missing", "zero", "finite", "unlimited"] as const) {
-    test(`connection and pool summaries share their layout with ${credits} credits at ${width}px`, async ({ page }) => {
+    test(`connection and pool summaries keep accessible compact metrics with ${credits} credits at ${width}px`, async ({ page }) => {
       await page.setViewportSize({ width, height: 844 });
       await installTauriMock(page, {
         mode: "local", locale: "en", populated: true, accountCount: 2,
@@ -129,20 +129,24 @@ for (const width of [1160, 390]) {
         await expect(summary.locator(":scope > div")).toHaveCount(hasCredits ? 5 : 4);
         const total = summary.locator('[data-summary="provider-credits"]');
         if (hasCredits) {
-          await expect(total).toContainText("Total credits");
+          await expect(total).toHaveAccessibleName("Total credits");
           await expect(total.locator("strong")).toHaveText(credits === "finite" ? "5" : "\u221e");
         } else {
           await expect(total).toHaveCount(0);
         }
         expect(await summary.locator(':scope > div:not([data-summary="provider-credits"])').evaluateAll((items) => items.every((item) => {
+          const bounds = item.getBoundingClientRect();
           const value = item.querySelector("strong")!.getBoundingClientRect();
-          const label = item.querySelector("span")!.getBoundingClientRect();
-          return label.left >= value.right && getComputedStyle(item).borderLeftWidth === "0px";
+          const name = item.getAttribute("aria-label") ?? item.querySelector("span")?.textContent ?? "";
+          const style = getComputedStyle(item);
+          return name.trim().length > 0 && value.left >= bounds.left && value.right <= bounds.right
+            && style.justifyContent === "center" && style.borderLeftWidth === "0px";
         }))).toBe(true);
+        if (tab === "Pool") await expect(summary.locator(":scope > div span")).toHaveCount(0);
         await expect(summary).toHaveCSS("border-bottom-width", "1px");
-        if (hasCredits && width < 640) {
-          const [summaryBox, creditsBox] = await Promise.all([summary.boundingBox(), total.boundingBox()]);
-          expect(creditsBox!.width).toEqual(summaryBox!.width);
+        if (hasCredits && width < 640 && tab === "Connections") {
+          const [innerWidth, creditsBox] = await Promise.all([summary.evaluate(element => element.clientWidth), total.boundingBox()]);
+          expect(Math.abs(creditsBox!.width - innerWidth)).toBeLessThanOrEqual(1);
         }
       }
     });
