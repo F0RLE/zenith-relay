@@ -1,8 +1,9 @@
 use reqwest::Response;
 use serde::{de::DeserializeOwned, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -13,6 +14,39 @@ pub(crate) enum CatalogIoError {
     Io,
     Network,
     InvalidJson,
+}
+
+/// Hash and count the canonical JSON bytes without retaining a serialized copy.
+pub(crate) fn json_fingerprint<T: Serialize + ?Sized>(
+    value: &T,
+) -> Result<(String, usize), CatalogIoError> {
+    struct HashWriter {
+        hash: Sha256,
+        bytes: usize,
+    }
+    impl Write for HashWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.hash.update(bytes);
+            self.bytes += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut output = HashWriter {
+        hash: Sha256::new(),
+        bytes: 0,
+    };
+    {
+        let mut writer = BufWriter::new(&mut output);
+        serde_json::to_writer(&mut writer, value).map_err(|_| CatalogIoError::InvalidJson)?;
+        writer.flush().map_err(|_| CatalogIoError::Io)?;
+    }
+    Ok((
+        format!("sha256:{}", hex::encode(output.hash.finalize())),
+        output.bytes,
+    ))
 }
 
 pub(crate) fn read_json<T: DeserializeOwned>(

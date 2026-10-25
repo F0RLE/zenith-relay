@@ -79,17 +79,18 @@ impl PricingCatalog {
             // id. Build the qualified lookup from the unqualified component so
             // both forms address the same LiteLLM record.
             let qualified = format!("{provider}/{}", super::unqualified(&normalized_model_id));
-            if let Some(pricing_entry) = self.unique.get(&qualified) {
+            if let Some(pricing_entry) = self.unique_entry(&qualified) {
                 if pricing_entry.provider.as_deref() == Some(provider.as_str()) {
                     return Some(pricing_entry);
                 }
             }
-            if let Some(pricing_entry) = self.unique.get(&normalized_model_id) {
+            if let Some(pricing_entry) = self.unique_entry(&normalized_model_id) {
                 if pricing_entry.provider.as_deref() == Some(provider.as_str()) {
                     return Some(pricing_entry);
                 }
             }
-            if let Some(pricing_entry) = self.unique.get(&super::unqualified(&normalized_model_id))
+            if let Some(pricing_entry) =
+                self.unique_entry(&super::unqualified(&normalized_model_id))
             {
                 if pricing_entry.provider.as_deref() == Some(provider.as_str()) {
                     return Some(pricing_entry);
@@ -99,32 +100,18 @@ impl PricingCatalog {
             // similarly named record belonging to another provider.
             return None;
         }
-        self.unique.get(&normalized_model_id)
+        self.unique_entry(&normalized_model_id)
+    }
+
+    fn unique_entry(&self, normalized: &str) -> Option<&CatalogEntry> {
+        self.entries.get(self.unique.get(normalized)?)
     }
 
     fn canonical_entry(&self, model: &str, family: &str) -> Option<&CatalogEntry> {
-        // Canonical matching intentionally ignores the input namespace. The
-        // declared family below is the authority for which namespace is safe.
-        let unqualified_model_id = super::unqualified(model);
-        let normalized_family = super::normalize(family);
-        let candidates = self
-            .entries
-            .values()
-            .filter(|candidate_entry| {
-                candidate_entry.provider.as_deref() == Some(normalized_family.as_str())
-                    && super::unqualified(&candidate_entry.model_id) == unqualified_model_id
-                    && !self
-                        .conflicts
-                        .contains(&super::normalize(&candidate_entry.model_id))
-            })
-            .collect::<Vec<_>>();
-        let first = candidates.first().copied()?;
-        // Qualified and unqualified LiteLLM aliases are equivalent when they
-        // carry the same quote. Conflicting aliases remain unusable.
-        candidates
-            .iter()
-            .all(|candidate| candidate.equivalent_pricing(first))
-            .then_some(first)
+        // The immutable index preserves official-family isolation and rejects
+        // conflicting aliases once, rather than scanning the catalog per model.
+        self.entries
+            .get(self.lookup.canonical_entry_key(model, family)?)
     }
 
     fn resolved(&self, quote: TokenPrice, source: PriceSource) -> ResolvedPrice {

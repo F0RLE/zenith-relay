@@ -23,6 +23,7 @@ const SUBSEQUENT_RETRY_DELAY_MS: u64 = 2 * 60 * 60 * 1_000;
 mod refresh;
 mod store;
 pub use store::PricingCacheStore;
+type RetainedPricingEnvelope = PricingCacheEnvelope<Arc<serde_json::value::RawValue>>;
 
 /// The externally visible state of the local catalog. The state is
 /// deliberately independent from the current snapshot: a stale snapshot is
@@ -80,7 +81,7 @@ pub struct PricingCatalogLoader {
     store: PricingCacheStore,
     client: Client,
     handle: PricingCatalogHandle,
-    envelope: Arc<RwLock<Option<PricingCacheEnvelope>>>,
+    envelope: Arc<RwLock<Option<RetainedPricingEnvelope>>>,
     status: Arc<RwLock<CatalogStatus>>,
     last_error: Arc<RwLock<Option<PricingError>>>,
     retry_state: Arc<RwLock<RefreshRetryState>>,
@@ -107,7 +108,7 @@ impl PricingCatalogLoader {
                 } else {
                     CatalogStatus::Current
                 };
-                (catalog, Some(envelope), None, status)
+                (catalog, Some(envelope.into_compact()?), None, status)
             }
             Ok(None) => (PricingCatalog::empty(), None, None, CatalogStatus::Unloaded),
             Err(error) => (
@@ -140,6 +141,16 @@ impl PricingCatalogLoader {
 
     pub fn snapshot(&self) -> Arc<PricingCatalog> {
         self.handle.snapshot()
+    }
+
+    pub fn source_memory_diagnostics(&self) -> Option<(usize, usize)> {
+        let envelope = self.envelope.try_read().ok()?;
+        Some((
+            self.snapshot().entries.len(),
+            envelope
+                .as_ref()
+                .map_or(0, |value| value.payload.get().len()),
+        ))
     }
 
     pub fn status(&self) -> CatalogStatus {
@@ -257,7 +268,7 @@ fn is_stale(fetched_at_ms: u64, now_ms: u64, max_age_ms: u64) -> bool {
     fetched_at_ms == 0 || now_ms.saturating_sub(fetched_at_ms) >= max_age_ms
 }
 
-fn envelope_is_stale(envelope: &PricingCacheEnvelope, now_ms: u64, max_age_ms: u64) -> bool {
+fn envelope_is_stale<P>(envelope: &PricingCacheEnvelope<P>, now_ms: u64, max_age_ms: u64) -> bool {
     envelope.stale || is_stale(envelope.fetched_at_ms, now_ms, max_age_ms)
 }
 

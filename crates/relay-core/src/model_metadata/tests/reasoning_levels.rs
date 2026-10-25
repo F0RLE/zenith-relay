@@ -212,8 +212,8 @@ fn enriches_models_dev_records_from_nested_api_details() {
         }}
     });
     let merged = reasoning::enrich_reasoning_metadata_with_models_dev_details(
-        &models,
-        Some(&details),
+        models,
+        Some(details),
         None,
         None,
     );
@@ -249,8 +249,8 @@ fn preserves_details_reasoning_levels_when_options_describe_another_control() {
     });
 
     let merged = reasoning::enrich_reasoning_metadata_with_models_dev_details(
-        &models,
-        Some(&details),
+        models,
+        Some(details),
         None,
         None,
     );

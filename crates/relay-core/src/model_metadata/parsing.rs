@@ -6,7 +6,6 @@ use crate::model_metadata::reasoning::{
     normalize_external_levels, parse_effort_flags, parse_reasoning_object, parse_reasoning_options,
 };
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 pub(super) fn parse_metadata(
     source_model_id: &str,
@@ -274,10 +273,32 @@ fn push_catalog_record<'a>(
 pub(super) fn metadata_payload_hash(
     metadata_payload: &Value,
 ) -> Result<String, ModelMetadataError> {
-    let serialized_payload =
-        serde_json::to_vec(metadata_payload).map_err(|_| ModelMetadataError::InvalidCache)?;
-    Ok(format!(
-        "sha256:{}",
-        hex::encode(Sha256::digest(serialized_payload))
-    ))
+    crate::catalog_io::json_fingerprint(metadata_payload)
+        .map(|(hash, _)| hash)
+        .map_err(|_| ModelMetadataError::InvalidCache)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn streamed_catalog_hash_matches_buffered_json_bytes() {
+        for value in [
+            Value::Null,
+            json!({}),
+            json!({"unicode":"Пример ⏱", "escapes":"\"\\\n\t", "empty":[], "off":false}),
+            json!({"integer":u64::MAX, "decimal":1.23456789, "nested":[null,true,{"a":1}]}),
+            // Exercise several flushes and the final partial buffer.
+            json!({"large":"catalog field ".repeat(10_000)}),
+        ] {
+            let expected = format!(
+                "sha256:{}",
+                hex::encode(Sha256::digest(serde_json::to_vec(&value).unwrap()))
+            );
+            assert_eq!(metadata_payload_hash(&value).unwrap(), expected);
+        }
+    }
 }

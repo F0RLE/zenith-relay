@@ -19,7 +19,8 @@ mod cache;
 mod source;
 
 use source::{
-    build_catalog, catalog_from_payload, merge_payloads, CacheBundle, SourceEnvelope, SourceState,
+    catalog_from_payload, merge_payloads, refresh_catalog_status, PreparedCatalog, SourceEnvelope,
+    SourceState,
 };
 
 const REFRESH_INTERVAL_MS: u64 = 60 * 60 * 1_000;
@@ -84,10 +85,9 @@ impl ModelMetadataCatalogLoader {
         let max_age_ms = max_age_ms.max(1);
         let now = crate::unix_time_ms();
         let (states, parsed) = cache::read_states(&path, now, max_age_ms);
-        let merged_catalog_payload = merge_payloads(&parsed);
-        // Validation already parsed these sources. Reuse that work once, then
-        // release the trees before constructing the long-lived catalog.
-        drop(parsed);
+        // Consume the already-validated trees instead of retaining all sources
+        // alongside the merged records. The immutable raw envelopes stay intact.
+        let merged_catalog_payload = merge_payloads(parsed);
         let catalog = catalog_from_payload(
             &states,
             &merged_catalog_payload,
@@ -114,6 +114,19 @@ impl ModelMetadataCatalogLoader {
     }
     pub fn snapshot(&self) -> Arc<ModelMetadataCatalog> {
         self.handle.snapshot()
+    }
+
+    /// Source JSON bytes only: parsed model allocations are deliberately not guessed.
+    pub fn source_memory_diagnostics(&self) -> Option<(usize, usize)> {
+        let states = self.state.try_read().ok()?;
+        Some((
+            self.snapshot().entries.len(),
+            states
+                .iter()
+                .filter_map(|state| state.envelope.as_ref())
+                .map(|envelope| envelope.payload.get().len())
+                .sum(),
+        ))
     }
     pub fn catalog_handle(&self) -> ModelMetadataCatalogHandle {
         self.handle.clone()
@@ -207,11 +220,41 @@ impl ModelMetadataCatalogLoader {
                 None => {}
             }
         }
-        let bundle = match CacheBundle::new(&updated_states) {
-            Ok(bundle) => bundle,
+        let previous = self.snapshot();
+        let unchanged = previous.revision.is_some()
+            && cached_states
+                .iter()
+                .zip(&updated_states)
+                .all(|(before, after)| {
+                    before.envelope.as_ref().map(|value| &value.revision)
+                        == after.envelope.as_ref().map(|value| &value.revision)
+                });
+        if unchanged {
+            let revision = previous.revision.clone().expect("checked catalog revision");
+            if let Err(error) = cache::write_states(&self.path, &updated_states, &revision) {
+                let mut failed = cached_states;
+                for (i, state) in failed.iter_mut().enumerate() {
+                    if due[i] {
+                        state.fail(error, now);
+                    }
+                }
+                self.publish(failed, None);
+                return Err(error);
+            }
+            // Refresh timestamps and health, not immutable model/index trees.
+            self.publish(updated_states, None);
+            if successes == 0 {
+                if let Some(error) = first_error {
+                    return Err(error);
+                }
+            }
+            return Ok(CatalogRefreshOutcome::NotModified { revision });
+        }
+        let prepared = match PreparedCatalog::new(&updated_states) {
+            Ok(prepared) => prepared,
             Err(error) => {
                 // Do not leave sources stuck in Updating if building the
-                // merged cache bundle fails before the write path is reached.
+                // merged catalog fails before the write path is reached.
                 // This is rare (the current JSON value is already validated),
                 // but the state machine must recover from every fallible step.
                 let mut failed = cached_states.clone();
@@ -225,9 +268,7 @@ impl ModelMetadataCatalogLoader {
                 return Err(error);
             }
         };
-        if let Err(error) = catalog_io::write_json_if_changed(&self.path, &bundle, MAX_CACHE_BYTES)
-        {
-            let error = map_io_error(error, true);
+        if let Err(error) = cache::write_states(&self.path, &updated_states, &prepared.revision) {
             updated_states = cached_states;
             for (source_index, source_state) in updated_states.iter_mut().enumerate() {
                 if due[source_index] {
@@ -238,8 +279,8 @@ impl ModelMetadataCatalogLoader {
             return Err(error);
         }
         let previous_revision = self.snapshot().revision.clone();
-        let revision = bundle.merged_revision.clone();
-        self.publish(updated_states, Some(&bundle));
+        let revision = prepared.revision.clone();
+        self.publish(updated_states, Some(&prepared));
         if successes == 0 {
             if let Some(error) = first_error {
                 return Err(error);
@@ -251,17 +292,21 @@ impl ModelMetadataCatalogLoader {
             CatalogRefreshOutcome::Updated { revision }
         })
     }
-    fn publish(&self, states: [SourceState; 4], prepared: Option<&CacheBundle>) {
+    fn publish(&self, states: [SourceState; 4], prepared: Option<&PreparedCatalog>) {
         let now = crate::unix_time_ms();
         let catalog = match prepared {
-            Some(bundle) => catalog_from_payload(
+            Some(prepared) => catalog_from_payload(
                 &states,
-                &bundle.merged_payload,
-                Some(bundle.merged_revision.clone()),
+                &prepared.payload,
+                Some(prepared.revision.clone()),
                 now,
                 self.max_age_ms,
             ),
-            None => build_catalog(&states, now, self.max_age_ms),
+            None => {
+                let mut catalog = (*self.snapshot()).clone();
+                refresh_catalog_status(&mut catalog, &states, now, self.max_age_ms);
+                catalog
+            }
         };
         self.handle.replace(catalog);
         *self.state.write().expect("metadata state lock poisoned") = states;

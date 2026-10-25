@@ -29,6 +29,11 @@ impl PricingContext {
         let Some(model) = crate::omit_blank(model) else {
             return ResolvedPrice::unpriced(catalog.metadata());
         };
+        // Token-only aggregates do not carry the text/image/cache modality
+        // split. Applying a text input rate would invent an image valuation.
+        if crate::runtime::is_image_model_id(model) {
+            return ResolvedPrice::unpriced(catalog.metadata());
+        }
         let context_id = if candidate_kind.eq_ignore_ascii_case("source") {
             source_context_id(candidate_id)
         } else {
@@ -105,8 +110,8 @@ fn source_context_id(candidate_id: &str) -> String {
         return candidate_id.to_string();
     };
     let known_route = suffix == "bridge"
-        || crate::WireApi::ALL.iter().any(|client| {
-            crate::WireApi::ALL.iter().any(|upstream| {
+        || crate::WireApi::ALL_NATIVE.iter().any(|client| {
+            crate::WireApi::ALL_NATIVE.iter().any(|upstream| {
                 crate::SourceAdapter::between(*client, *upstream)
                     .is_some_and(|adapter| adapter.route_suffix(*client) == suffix)
             })

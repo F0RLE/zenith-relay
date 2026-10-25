@@ -1,7 +1,10 @@
 use super::{MetadataFieldProvenance, ModelMetadata};
 use crate::WireApi;
 use serde::Deserialize;
-use std::{collections::BTreeMap, sync::OnceLock};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, OnceLock},
+};
 
 const POLICY_JSON: &str = include_str!("../../../../catalog/protocol-policy.json");
 
@@ -9,7 +12,7 @@ const POLICY_JSON: &str = include_str!("../../../../catalog/protocol-policy.json
 #[serde(rename_all = "camelCase")]
 struct Policy {
     schema_version: u32,
-    revision: String,
+    revision: Arc<str>,
     preferences: BTreeMap<String, Vec<WireApi>>,
 }
 

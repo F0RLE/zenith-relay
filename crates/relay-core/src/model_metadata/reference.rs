@@ -15,20 +15,27 @@ pub(super) fn identity_priority(model_record: &Value) -> u64 {
 /// Fixed reference sources fill missing fields, never participant /models.
 /// Keep primary fields (including false) and supplement partial model records.
 pub(super) fn merge_reference_records(
-    primary: &Value,
-    details: Option<&Value>,
-    openrouter: Option<&Value>,
-    litellm: Option<&Value>,
+    primary: Value,
+    mut details: Option<Value>,
+    mut openrouter: Option<Value>,
+    litellm: Option<Value>,
 ) -> BTreeMap<String, Value> {
     let mut merged_records = BTreeMap::new();
-    for (source_id, source_record) in validate_metadata_payload(primary).unwrap_or_default() {
+    for (source_id, source_record) in validate_metadata_payload(&primary).unwrap_or_default() {
         insert(&mut merged_records, &source_id, source_record.clone(), 0);
     }
-    for (provider_name, provider_record) in details.and_then(Value::as_object).into_iter().flatten()
+    // The primary validator supports several legacy shapes. Preserve that
+    // traversal, but release its tree before merging the auxiliary sources.
+    drop(primary);
+    for (provider_name, provider_record) in details
+        .as_mut()
+        .and_then(Value::as_object_mut)
+        .into_iter()
+        .flatten()
     {
         for (source_id, model_record) in provider_record
-            .get("models")
-            .and_then(Value::as_object)
+            .get_mut("models")
+            .and_then(Value::as_object_mut)
             .into_iter()
             .flatten()
         {
@@ -45,8 +52,9 @@ pub(super) fn merge_reference_records(
             if !model_record.is_object() {
                 continue;
             }
-            let mut projected = model_record.clone();
-            if model_id != source_id {
+            let needs_alias = model_id != source_id;
+            let mut projected = model_record.take();
+            if needs_alias {
                 let alias = if source_id.contains('/') {
                     source_id.clone()
                 } else {
@@ -69,14 +77,20 @@ pub(super) fn merge_reference_records(
             insert(&mut merged_records, &qualified_id, projected, 3);
         }
     }
+    drop(details);
     for route_record in openrouter
-        .and_then(|openrouter_catalog| openrouter_catalog.get("data"))
-        .and_then(Value::as_array)
+        .as_mut()
+        .and_then(|openrouter_catalog| openrouter_catalog.get_mut("data"))
+        .and_then(Value::as_array_mut)
         .into_iter()
         .flatten()
     {
-        if let Some(route_model_id) = route_record.get("id").and_then(Value::as_str) {
-            let mut projected_record = route_record.clone();
+        if let Some(route_model_id) = route_record
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        {
+            let mut projected_record = route_record.take();
             // Normalize the reference's field names before supplementing a
             // primary row. Otherwise an empty modalities/limit field could
             // shadow the useful fallback under architecture/context_length.
@@ -116,10 +130,16 @@ pub(super) fn merge_reference_records(
                     projected_record["modalities"][to] = modalities;
                 }
             }
-            insert(&mut merged_records, route_model_id, projected_record, 1);
+            insert(&mut merged_records, &route_model_id, projected_record, 1);
         }
     }
-    for (model_id, pricing_record) in litellm.and_then(Value::as_object).into_iter().flatten() {
+    drop(openrouter);
+    for (model_id, pricing_record) in litellm
+        .as_ref()
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+    {
         if model_id == "sample_spec" {
             continue;
         }
@@ -275,6 +295,64 @@ fn fill_missing(target: &mut Value, fallback: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn merge_reference_records(
+        primary: &Value,
+        details: Option<&Value>,
+        openrouter: Option<&Value>,
+        litellm: Option<&Value>,
+    ) -> BTreeMap<String, Value> {
+        super::merge_reference_records(
+            primary.clone(),
+            details.cloned(),
+            openrouter.cloned(),
+            litellm.cloned(),
+        )
+    }
+
+    #[test]
+    fn auxiliary_records_move_without_cloning_unknown_payloads() {
+        let details = json!({"vendor":{"models":{"alias":{
+            "id":"vendor/actual", "description":"detail payload ".repeat(1000)
+        }}}});
+        let router = json!({"data":[{
+            "id":"vendor/route", "description":"router payload ".repeat(1000),
+            "context_length":4096, "architecture":{"input_modalities":["text"]}
+        }]});
+        let detail_ptr = details["vendor"]["models"]["alias"]["description"]
+            .as_str()
+            .unwrap()
+            .as_ptr();
+        let router_ptr = router["data"][0]["description"].as_str().unwrap().as_ptr();
+        let records = super::merge_reference_records(
+            json!({"vendor/primary":{"tool_call":false}}),
+            Some(details),
+            Some(router),
+            None,
+        );
+        assert_eq!(records.len(), 3);
+        assert_eq!(records["vendor/actual"]["aliases"], json!(["vendor/alias"]));
+        assert_eq!(
+            records["vendor/actual"]["description"]
+                .as_str()
+                .unwrap()
+                .as_ptr(),
+            detail_ptr
+        );
+        assert_eq!(
+            records["vendor/route"]["description"]
+                .as_str()
+                .unwrap()
+                .as_ptr(),
+            router_ptr
+        );
+        assert_eq!(records["vendor/route"]["limit"]["context"], json!(4096));
+        assert_eq!(
+            records["vendor/route"]["modalities"]["input"],
+            json!(["text"])
+        );
+        assert_eq!(records["vendor/primary"]["tool_call"], json!(false));
+    }
 
     #[test]
     fn reference_sources_fill_all_metadata_and_keep_explicit_primary_values() {

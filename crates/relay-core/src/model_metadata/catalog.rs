@@ -52,11 +52,11 @@ impl ModelMetadataCatalog {
             fetched_at_ms: None,
             stale: false,
             sources: BTreeMap::new(),
-            entries: BTreeMap::new(),
-            leaf_matches: BTreeMap::new(),
-            ambiguous_leaves: BTreeSet::new(),
-            alias_matches: BTreeMap::new(),
-            family_providers: BTreeMap::new(),
+            entries: BTreeMap::new().into(),
+            leaf_matches: BTreeMap::new().into(),
+            ambiguous_leaves: BTreeSet::new().into(),
+            alias_matches: BTreeMap::new().into(),
+            family_providers: BTreeMap::new().into(),
         }
     }
 
@@ -186,11 +186,11 @@ impl ModelMetadataCatalog {
             fetched_at_ms,
             stale,
             sources: BTreeMap::new(),
-            entries: metadata_entries,
-            leaf_matches,
-            ambiguous_leaves,
-            alias_matches,
-            family_providers,
+            entries: metadata_entries.into(),
+            leaf_matches: leaf_matches.into(),
+            ambiguous_leaves: ambiguous_leaves.into(),
+            alias_matches: alias_matches.into(),
+            family_providers: family_providers.into(),
         })
     }
 
@@ -289,14 +289,21 @@ impl ModelMetadataCatalog {
     }
 
     pub(super) fn bind_field_revisions(&mut self) {
-        for metadata in self.entries.values_mut() {
+        // A source revision is shared by thousands of fields. Keep one string
+        // allocation per source rather than cloning its hash into every field.
+        let revisions: BTreeMap<_, Option<std::sync::Arc<str>>> = self
+            .sources
+            .iter()
+            .map(|(source, status)| (source.as_str(), status.revision.as_deref().map(Into::into)))
+            .collect();
+        for metadata in std::sync::Arc::make_mut(&mut self.entries).values_mut() {
             for origin in metadata.field_provenance.values_mut() {
-                if let Some(status) = self.sources.get(&origin.source) {
-                    origin.revision = status.revision.clone();
+                if let Some(revision) = revisions.get(origin.source.as_ref()) {
+                    origin.revision = revision.clone();
                 }
                 for conflict in &mut origin.conflicts {
-                    if let Some(status) = self.sources.get(&conflict.source) {
-                        conflict.revision = status.revision.clone();
+                    if let Some(revision) = revisions.get(conflict.source.as_ref()) {
+                        conflict.revision = revision.clone();
                     }
                 }
             }
@@ -312,7 +319,7 @@ impl ModelMetadataCatalog {
         self.display_order_key(model).identity
     }
 
-    fn display_order_key(&self, model: &str) -> order::ModelOrderKey {
+    pub(super) fn display_order_key(&self, model: &str) -> order::ModelOrderKey {
         let metadata = self.resolve(model);
         order::ModelOrderKey::new(
             metadata

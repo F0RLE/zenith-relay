@@ -17,17 +17,19 @@ impl PricingCatalogLoader {
         }
         self.set_status(CatalogStatus::Updating, None);
         let mut pricing_request = self.client.get(super::super::LITELLM_SOURCE_URL);
-        let current_envelope = self
-            .envelope
-            .read()
-            .expect("pricing envelope lock poisoned")
-            .clone();
-        if let Some(envelope) = current_envelope.as_ref() {
-            if let Some(etag) = envelope.etag.as_deref() {
-                pricing_request = pricing_request.header(header::IF_NONE_MATCH, etag);
-            }
-            if let Some(last_modified) = envelope.last_modified.as_deref() {
-                pricing_request = pricing_request.header(header::IF_MODIFIED_SINCE, last_modified);
+        {
+            let current_envelope = self
+                .envelope
+                .read()
+                .expect("pricing envelope lock poisoned");
+            if let Some(envelope) = current_envelope.as_ref() {
+                if let Some(etag) = envelope.etag.as_deref() {
+                    pricing_request = pricing_request.header(header::IF_NONE_MATCH, etag);
+                }
+                if let Some(last_modified) = envelope.last_modified.as_deref() {
+                    pricing_request =
+                        pricing_request.header(header::IF_MODIFIED_SINCE, last_modified);
+                }
             }
         }
         let (pricing_response, permit) =
@@ -71,34 +73,32 @@ impl PricingCatalogLoader {
         envelope.etag = header_string(&response_headers, header::ETAG);
         envelope.last_modified = header_string(&response_headers, header::LAST_MODIFIED);
         envelope.stale = false;
-        let catalog = match PricingCatalog::from_litellm_payload(
-            &envelope.payload,
-            Some(envelope.revision.clone()),
-            Some(envelope.fetched_at_ms),
-            false,
-        ) {
+        let catalog = match self.catalog_for_envelope(&envelope) {
             Ok(catalog) => catalog,
+            Err(error) => return self.refresh_failed(error),
+        };
+        let envelope = match envelope.into_compact() {
+            Ok(envelope) => envelope,
             Err(error) => return self.refresh_failed(error),
         };
         // Keep validators and freshness metadata current even when the
         // payload itself is unchanged. The serialized envelope is still
         // replaced only after complete parsing and validation.
-        if let Err(error) = self.store.write_if_changed(&envelope) {
+        if let Err(error) = self.store.write_retained(&envelope) {
             return self.refresh_failed(error);
         }
         self.handle.replace(catalog);
+        let revision = envelope.revision.clone();
         *self
             .envelope
             .write()
-            .expect("pricing envelope lock poisoned") = Some(envelope.clone());
+            .expect("pricing envelope lock poisoned") = Some(envelope);
         self.set_status(CatalogStatus::Current, None);
         self.record_refresh_success();
-        Ok(CatalogRefreshOutcome::Updated {
-            revision: envelope.revision,
-        })
+        Ok(CatalogRefreshOutcome::Updated { revision })
     }
 
-    async fn accept_not_modified(
+    pub(super) async fn accept_not_modified(
         &self,
         response: reqwest::Response,
     ) -> Result<CatalogRefreshOutcome, PricingError> {
@@ -126,23 +126,21 @@ impl PricingCatalogLoader {
         }
         refreshed_envelope.fetched_at_ms = now_ms();
         refreshed_envelope.stale = false;
-        let catalog = match refreshed_envelope.catalog() {
-            Ok(catalog) => catalog,
-            Err(error) => return self.refresh_failed(error),
-        };
-        if let Err(error) = self.store.write_if_changed(&refreshed_envelope) {
+        let mut catalog = self.snapshot().as_ref().clone();
+        catalog.fetched_at_ms = Some(refreshed_envelope.fetched_at_ms);
+        catalog.stale = false;
+        if let Err(error) = self.store.write_retained(&refreshed_envelope) {
             return self.refresh_failed(error);
         }
         self.handle.replace(catalog);
+        let revision = refreshed_envelope.revision.clone();
         *self
             .envelope
             .write()
-            .expect("pricing envelope lock poisoned") = Some(refreshed_envelope.clone());
+            .expect("pricing envelope lock poisoned") = Some(refreshed_envelope);
         self.set_status(CatalogStatus::Current, None);
         self.record_refresh_success();
-        Ok(CatalogRefreshOutcome::NotModified {
-            revision: refreshed_envelope.revision,
-        })
+        Ok(CatalogRefreshOutcome::NotModified { revision })
     }
 
     pub(super) fn refresh_failed<T>(&self, error: PricingError) -> Result<T, PricingError> {
@@ -155,14 +153,14 @@ impl PricingCatalogLoader {
         if let Some(envelope) = current_envelope {
             let mut stale = envelope;
             stale.stale = true;
-            if let Ok(catalog) = stale.catalog() {
-                self.handle.replace(catalog);
-            }
+            let mut catalog = self.snapshot().as_ref().clone();
+            catalog.stale = true;
+            self.handle.replace(catalog);
             // Persist the marker so a restart does not mistake a catalog that
             // failed its last refresh for a current snapshot. The refresh
             // error remains the primary diagnostic even if this best-effort
             // write also fails.
-            let _ = self.store.write_if_changed(&stale);
+            let _ = self.store.write_retained(&stale);
             *self
                 .envelope
                 .write()
@@ -177,6 +175,32 @@ impl PricingCatalogLoader {
         // go back to sleep with stale state.
         self.schedule_changed.notify_one();
         Err(error)
+    }
+
+    pub(super) fn catalog_for_envelope(
+        &self,
+        envelope: &PricingCacheEnvelope,
+    ) -> Result<PricingCatalog, PricingError> {
+        let unchanged = self
+            .envelope
+            .read()
+            .expect("pricing envelope lock poisoned")
+            .as_ref()
+            .is_some_and(|current| current.payload_sha256 == envelope.payload_sha256);
+        if unchanged {
+            let mut catalog = self.snapshot().as_ref().clone();
+            catalog.revision = Some(envelope.revision.clone());
+            catalog.fetched_at_ms = Some(envelope.fetched_at_ms);
+            catalog.stale = envelope.stale;
+            Ok(catalog)
+        } else {
+            PricingCatalog::from_litellm_payload(
+                &envelope.payload,
+                Some(envelope.revision.clone()),
+                Some(envelope.fetched_at_ms),
+                envelope.stale,
+            )
+        }
     }
 }
 

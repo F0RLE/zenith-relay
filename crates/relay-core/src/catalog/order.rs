@@ -1,5 +1,8 @@
 use std::collections::{BTreeMap, HashSet};
 
+#[cfg(test)]
+mod saved_order_tests;
+
 const MAX_MODEL_ID_BYTES: usize = 256;
 /// Shared ceiling for a stored model list. Callers count the input length,
 /// including blanks, before trimming and de-duplication.
@@ -148,45 +151,45 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    let source_order = normalize_model_ids(models);
-    let source_keys = source_order
-        .iter()
-        .map(|model| model_id_key(model))
-        .collect::<HashSet<_>>();
-    if !saved_order.iter().any(|model| {
-        let key = model_id_key(model);
-        !key.is_empty() && source_keys.contains(&key)
-    }) {
-        return source_order;
+    let mut catalog = normalize_model_ids(models);
+    if saved_order.is_empty() {
+        return catalog;
     }
-    let catalog = source_order;
     let catalog_positions = catalog
         .iter()
         .enumerate()
         .map(|(position, model)| (model_id_key(model), position))
         .collect::<BTreeMap<_, _>>();
-    let mut saved = HashSet::new();
+    let mut saved = vec![false; catalog.len()];
     let mut ordered = Vec::with_capacity(catalog.len());
     for model in saved_order {
-        let key = model_id_key(model);
-        if !key.is_empty() && saved.insert(key.clone()) && catalog_positions.contains_key(&key) {
-            ordered.push(catalog[catalog_positions[&key]].clone());
+        if let Some(&position) = catalog_positions.get(&model_id_key(model)) {
+            if !saved[position] {
+                saved[position] = true;
+                ordered.push(position);
+            }
         }
     }
-    for model in catalog {
-        let key = model_id_key(&model);
-        if saved.contains(&key) {
+    if ordered.is_empty() {
+        return catalog;
+    }
+    // Insertion compares immutable catalog positions, not freshly normalized
+    // strings. Resolve groups once and move the original IDs only at the end.
+    let model_groups = catalog
+        .iter()
+        .map(|model| groups.get(&model_id_key(model)))
+        .collect::<Vec<_>>();
+    for model_position in 0..catalog.len() {
+        if saved[model_position] {
             continue;
         }
-        let model_position = catalog_positions[&key];
-        let insert_in_group = groups.get(&key).and_then(|group| {
+        let insert_in_group = model_groups[model_position].and_then(|group| {
             let mut after_group = None;
-            for (position, existing) in ordered.iter().enumerate() {
-                let existing_key = model_id_key(existing);
-                if groups.get(&existing_key) != Some(group) {
+            for (position, &existing) in ordered.iter().enumerate() {
+                if model_groups[existing] != Some(group) {
                     continue;
                 }
-                if catalog_positions[&existing_key] > model_position {
+                if existing > model_position {
                     return Some(position);
                 }
                 after_group = Some(position + 1);
@@ -196,15 +199,18 @@ where
         let insert_at = insert_in_group.or_else(|| {
             ordered
                 .iter()
-                .position(|existing| catalog_positions[&model_id_key(existing)] > model_position)
+                .position(|&existing| existing > model_position)
         });
         if let Some(insert_at) = insert_at {
-            ordered.insert(insert_at, model);
+            ordered.insert(insert_at, model_position);
         } else {
-            ordered.push(model);
+            ordered.push(model_position);
         }
     }
     ordered
+        .into_iter()
+        .map(|position| std::mem::take(&mut catalog[position]))
+        .collect()
 }
 
 /// Compare model ids without regard to case or surrounding whitespace.

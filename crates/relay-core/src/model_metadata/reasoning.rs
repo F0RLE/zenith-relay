@@ -63,22 +63,24 @@ pub(crate) fn enrich_reasoning_metadata(
     openrouter: Option<&Value>,
     litellm: Option<&Value>,
 ) -> Value {
-    enrich_reasoning_metadata_with_models_dev_details(models_dev, None, openrouter, litellm)
+    enrich_reasoning_metadata_with_models_dev_details(
+        models_dev.clone(),
+        None,
+        openrouter.cloned(),
+        litellm.cloned(),
+    )
 }
 
 pub(crate) fn enrich_reasoning_metadata_with_models_dev_details(
-    models_dev: &Value,
-    models_dev_details: Option<&Value>,
-    openrouter: Option<&Value>,
-    litellm: Option<&Value>,
+    models_dev: Value,
+    models_dev_details: Option<Value>,
+    openrouter: Option<Value>,
+    litellm: Option<Value>,
 ) -> Value {
-    let mut models = super::reference::merge_reference_records(
-        models_dev,
-        models_dev_details,
-        openrouter,
-        litellm,
-    );
+    // Extract compact reasoning evidence before consuming source records. It
+    // must reflect each original source, not fields filled by the merge.
     let router: BTreeMap<String, ReasoningRecord> = openrouter
+        .as_ref()
         .and_then(|openrouter_catalog| openrouter_catalog.get("data"))
         .and_then(Value::as_array)
         .into_iter()
@@ -91,6 +93,7 @@ pub(crate) fn enrich_reasoning_metadata_with_models_dev_details(
         })
         .collect();
     let lite: BTreeMap<String, ReasoningRecord> = litellm
+        .as_ref()
         .and_then(Value::as_object)
         .into_iter()
         .flatten()
@@ -102,10 +105,18 @@ pub(crate) fn enrich_reasoning_metadata_with_models_dev_details(
         })
         .map(|(id, model_record)| (normalize(id), parse::litellm_record(model_record)))
         .collect();
-    let models_dev_details = models_dev_details.map(parse::models_dev_details_records);
+    let detail_records = models_dev_details
+        .as_ref()
+        .map(parse::models_dev_details_records);
+    let mut models = super::reference::merge_reference_records(
+        models_dev,
+        models_dev_details,
+        openrouter,
+        litellm,
+    );
     let router = RecordIndex::new(&router);
     let lite = RecordIndex::new(&lite);
-    let models_dev_details = models_dev_details.as_ref().map(RecordIndex::new);
+    let models_dev_details = detail_records.as_ref().map(RecordIndex::new);
     for (id, model_metadata) in &mut models {
         let Some(model_object) = model_metadata.as_object_mut() else {
             continue;

@@ -1,7 +1,7 @@
 use super::{
     enrich_reasoning_metadata_with_models_dev_details, metadata_payload_hash,
     validate_metadata_payload, MetadataSourceStatus, ModelMetadataCatalog, ModelMetadataError,
-    CACHE_FORMAT, RETRY_DELAYS_MS, SOURCES, URLS,
+    RETRY_DELAYS_MS, SOURCES, URLS,
 };
 use crate::pricing::{CatalogRefreshDeadline, CatalogRefreshKind, CatalogStatus};
 use reqwest::header;
@@ -165,75 +165,37 @@ impl SourceState {
     }
 }
 
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct CacheBundle {
-    pub(super) format: String,
-    pub(super) schema_version: u32,
-    pub(super) sources: BTreeMap<String, SourceEnvelope>,
-    pub(super) merged_revision: String,
-    pub(super) merged_payload: Value,
+pub(super) struct PreparedCatalog {
+    pub(super) revision: String,
+    pub(super) payload: Value,
 }
-impl CacheBundle {
+impl PreparedCatalog {
     pub(super) fn new(states: &[SourceState; 4]) -> Result<Self, ModelMetadataError> {
-        let merged_payload = build_merged_metadata_payload(states)?;
+        let mut parsed: [Option<Value>; 4] = std::array::from_fn(|_| None);
+        for (slot, state) in parsed.iter_mut().zip(states) {
+            *slot = state
+                .envelope
+                .as_ref()
+                .map(SourceEnvelope::parse_source_payload)
+                .transpose()?;
+        }
+        let payload = merge_payloads(parsed);
         Ok(Self {
-            format: CACHE_FORMAT.into(),
-            schema_version: 2,
-            sources: states
-                .iter()
-                .enumerate()
-                .filter_map(|(source_index, source_state)| {
-                    source_state
-                        .envelope
-                        .clone()
-                        .map(|source_envelope| (SOURCES[source_index].into(), source_envelope))
-                })
-                .collect(),
-            merged_revision: metadata_payload_hash(&merged_payload)?,
-            merged_payload,
+            revision: metadata_payload_hash(&payload)?,
+            payload,
         })
     }
 }
-fn build_merged_metadata_payload(states: &[SourceState; 4]) -> Result<Value, ModelMetadataError> {
-    let mut parsed: [Option<Value>; 4] = std::array::from_fn(|_| None);
-    for (slot, state) in parsed.iter_mut().zip(states) {
-        *slot = state
-            .envelope
-            .as_ref()
-            .map(SourceEnvelope::parse_source_payload)
-            .transpose()?;
-    }
-    Ok(merge_payloads(&parsed))
-}
 
-pub(super) fn merge_payloads(parsed: &[Option<Value>; 4]) -> Value {
-    let empty = serde_json::json!({});
-    let source_payload = |source_index: usize| parsed[source_index].as_ref();
+pub(super) fn merge_payloads(parsed: [Option<Value>; 4]) -> Value {
+    let [models_dev, details, openrouter, litellm] = parsed;
     enrich_reasoning_metadata_with_models_dev_details(
-        source_payload(0).unwrap_or(&empty),
-        source_payload(1),
-        source_payload(2),
-        source_payload(3),
+        models_dev.unwrap_or_else(|| serde_json::json!({})),
+        details,
+        openrouter,
+        litellm,
     )
 }
-pub(super) fn build_catalog(
-    states: &[SourceState; 4],
-    now: u64,
-    max_age: u64,
-) -> ModelMetadataCatalog {
-    let Ok(merged_catalog_payload) = build_merged_metadata_payload(states) else {
-        return ModelMetadataCatalog::empty();
-    };
-    catalog_from_payload(
-        states,
-        &merged_catalog_payload,
-        metadata_payload_hash(&merged_catalog_payload).ok(),
-        now,
-        max_age,
-    )
-}
-
 pub(super) fn catalog_from_payload(
     states: &[SourceState; 4],
     merged_catalog_payload: &Value,
@@ -241,6 +203,20 @@ pub(super) fn catalog_from_payload(
     now: u64,
     max_age: u64,
 ) -> ModelMetadataCatalog {
+    let mut catalog =
+        ModelMetadataCatalog::from_metadata_payload(merged_catalog_payload, revision, None, false)
+            .unwrap_or_else(|_| ModelMetadataCatalog::empty());
+    refresh_catalog_status(&mut catalog, states, now, max_age);
+    catalog.bind_field_revisions();
+    catalog
+}
+
+pub(super) fn refresh_catalog_status(
+    catalog: &mut ModelMetadataCatalog,
+    states: &[SourceState; 4],
+    now: u64,
+    max_age: u64,
+) {
     let statuses: BTreeMap<_, _> = states
         .iter()
         .enumerate()
@@ -267,26 +243,17 @@ pub(super) fn catalog_from_payload(
             )
         })
         .collect();
-    let stale = statuses.values().any(|s| s.stale);
-    let mut catalog = ModelMetadataCatalog::from_metadata_payload(
-        merged_catalog_payload,
-        revision,
-        states
-            .iter()
-            .filter_map(|source_state| {
-                source_state
-                    .envelope
-                    .as_ref()
-                    .map(|source_envelope| source_envelope.fetched_at_ms)
-            })
-            .max(),
-        stale,
-    )
-    .unwrap_or_else(|_| ModelMetadataCatalog::empty());
+    catalog.stale = statuses.values().any(|s| s.stale);
+    catalog.fetched_at_ms = states
+        .iter()
+        .filter_map(|source_state| {
+            source_state
+                .envelope
+                .as_ref()
+                .map(|source_envelope| source_envelope.fetched_at_ms)
+        })
+        .max();
     catalog.sources = statuses;
-    catalog.bind_field_revisions();
-    catalog.stale = stale;
-    catalog
 }
 
 pub(super) fn valid_source_payload(index: usize, source_payload: &Value) -> bool {

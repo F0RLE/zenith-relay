@@ -1,7 +1,9 @@
 mod capabilities;
 mod catalog;
+mod display_projection;
 mod export;
 mod loader;
+mod memory;
 mod order;
 mod parsing;
 mod protocol_policy;
@@ -12,10 +14,12 @@ pub(crate) use reasoning::enrich_reasoning_metadata_with_models_dev_details;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, RwLock},
 };
 
+pub(crate) use display_projection::DisplayProjection;
 pub use export::{PublicModelCatalog, PublicModelCatalogEntry, MODEL_CATALOG_SCHEMA};
 pub use loader::{ModelMetadataCatalogLoader, ModelMetadataError};
 pub use order::{
@@ -119,7 +123,7 @@ pub struct ModelMetadata {
     #[serde(default)]
     pub protocol_preferences: Vec<crate::WireApi>,
     #[serde(default)]
-    pub field_provenance: BTreeMap<String, MetadataFieldProvenance>,
+    pub field_provenance: BTreeMap<Cow<'static, str>, MetadataFieldProvenance>,
     pub family: Option<String>,
     pub name: Option<String>,
     pub release_date: Option<String>,
@@ -132,8 +136,9 @@ pub struct ModelMetadata {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MetadataFieldProvenance {
-    pub source: String,
-    pub revision: Option<String>,
+    #[serde(deserialize_with = "provenance::deserialize_source")]
+    pub source: Cow<'static, str>,
+    pub revision: Option<Arc<str>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conflicts: Vec<MetadataFieldConflict>,
 }
@@ -141,8 +146,9 @@ pub struct MetadataFieldProvenance {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MetadataFieldConflict {
-    pub source: String,
-    pub revision: Option<String>,
+    #[serde(deserialize_with = "provenance::deserialize_source")]
+    pub source: Cow<'static, str>,
+    pub revision: Option<Arc<str>>,
     pub value: Value,
 }
 
@@ -152,12 +158,12 @@ pub struct ModelMetadataCatalog {
     pub fetched_at_ms: Option<u64>,
     pub stale: bool,
     pub sources: BTreeMap<String, MetadataSourceStatus>,
-    entries: BTreeMap<String, ModelMetadata>,
-    leaf_matches: BTreeMap<String, String>,
-    ambiguous_leaves: BTreeSet<String>,
-    alias_matches: BTreeMap<String, Option<String>>,
+    entries: Arc<BTreeMap<String, ModelMetadata>>,
+    leaf_matches: Arc<BTreeMap<String, String>>,
+    ambiguous_leaves: Arc<BTreeSet<String>>,
+    alias_matches: Arc<BTreeMap<String, Option<String>>>,
     /// None marks a family claimed by several primary catalog providers.
-    family_providers: BTreeMap<String, Option<String>>,
+    family_providers: Arc<BTreeMap<String, Option<String>>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

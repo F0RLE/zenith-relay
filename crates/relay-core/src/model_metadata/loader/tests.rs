@@ -132,7 +132,7 @@ impl Server {
 }
 
 #[tokio::test]
-async fn caches_merged_payload_and_revalidates_all_sources_with_304() {
+async fn caches_validated_sources_and_reuses_model_trees_after_304() {
     let cache = CacheDir::new();
     let server = Server::start().await;
     let loader = server.loader(&cache);
@@ -150,20 +150,29 @@ async fn caches_merged_payload_and_revalidates_all_sources_with_304() {
         .unwrap()
         .unwrap();
     assert_eq!(bundle["schemaVersion"], 2);
+    assert_eq!(bundle["format"], CACHE_FORMAT);
+    assert_eq!(bundle["mergedRevision"].as_str(), revision.as_deref());
     assert_eq!(bundle["sources"].as_object().unwrap().len(), 4);
-    assert_eq!(
-        bundle["mergedPayload"]["vendor/model"]["reasoning_effort_levels"],
-        serde_json::json!(["low", "high"])
-    );
+    assert!(bundle.get("mergedPayload").is_none());
     for i in 0..4 {
         server.reply(i, StatusCode::NOT_MODIFIED, "");
     }
     let reopened = server.loader(&cache);
+    let before_refresh = reopened.snapshot();
     assert!(matches!(
         reopened.refresh(false).await.unwrap(),
         CatalogRefreshOutcome::NotModified { .. }
     ));
     assert_eq!(reopened.snapshot().revision, revision);
+    assert!(Arc::ptr_eq(
+        &before_refresh.entries,
+        &reopened.snapshot().entries
+    ));
+    assert!(Arc::ptr_eq(
+        &before_refresh.alias_matches,
+        &reopened.snapshot().alias_matches
+    ));
+    assert_eq!(*reopened.snapshot(), *server.loader(&cache).snapshot());
     for (index, headers) in server.state.lock().unwrap().requests.iter().skip(4) {
         assert_eq!(
             headers.get(header::IF_NONE_MATCH).unwrap(),
@@ -181,6 +190,42 @@ async fn caches_merged_payload_and_revalidates_all_sources_with_304() {
 }
 
 #[tokio::test]
+async fn identical_http_200_and_failed_refresh_share_catalog_trees() {
+    let cache = CacheDir::new();
+    let server = Server::start().await;
+    let loader = server.loader(&cache);
+    loader.refresh(false).await.unwrap();
+    let previous = loader.snapshot();
+    assert!(matches!(
+        loader.refresh(true).await.unwrap(),
+        CatalogRefreshOutcome::NotModified { .. }
+    ));
+    let unchanged = loader.snapshot();
+    assert!(Arc::ptr_eq(&previous.entries, &unchanged.entries));
+    assert!(Arc::ptr_eq(
+        &previous.alias_matches,
+        &unchanged.alias_matches
+    ));
+    assert_eq!(unchanged.sources.len(), 4);
+    for index in 0..4 {
+        server.reply(
+            index,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "synthetic unavailable",
+        );
+    }
+    assert!(loader.refresh(true).await.is_err());
+    let failed = loader.snapshot();
+    assert!(Arc::ptr_eq(&previous.entries, &failed.entries));
+    assert!(failed.stale);
+    assert!(failed.sources.values().all(|source| source.stale));
+    assert_eq!(
+        failed.reasoning_levels_for("vendor/model"),
+        previous.reasoning_levels_for("vendor/model")
+    );
+}
+
+#[tokio::test]
 async fn refresh_shares_unchanged_payloads_and_preserves_previous_snapshots() {
     let cache = CacheDir::new();
     let server = Server::start().await;
@@ -188,13 +233,11 @@ async fn refresh_shares_unchanged_payloads_and_preserves_previous_snapshots() {
     loader.refresh(false).await.unwrap();
     let before = loader.state.read().unwrap().clone();
     let snapshot = loader.snapshot();
-    let bundle = CacheBundle::new(&before).unwrap();
-    for (i, state) in before.iter().enumerate() {
-        assert!(Arc::ptr_eq(
-            &state.envelope.as_ref().unwrap().payload,
-            &bundle.sources[SOURCES[i]].payload
-        ));
-    }
+    let prepared = PreparedCatalog::new(&before).unwrap();
+    assert_eq!(
+        snapshot.revision.as_deref(),
+        Some(prepared.revision.as_str())
+    );
 
     for i in 0..2 {
         server.reply(i, StatusCode::NOT_MODIFIED, "");

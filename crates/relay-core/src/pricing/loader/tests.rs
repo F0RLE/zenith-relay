@@ -3,6 +3,102 @@ use serde_json::json;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[tokio::test]
+async fn unchanged_and_failed_refreshes_share_data_without_changing_old_snapshots() {
+    let directory = std::env::temp_dir().join(format!(
+        "relay-pricing-shared-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let store = PricingCacheStore::new(directory.join("catalog.json"));
+    let envelope = PricingCacheEnvelope::new(json!({"openai/synthetic":{"litellm_provider":"openai","input_cost_per_token":0.000001,"output_cost_per_token":0.000002}}), "revision".into(), 1).unwrap();
+    store.write(&envelope).unwrap();
+    let loader = PricingCatalogLoader::open(store.path()).unwrap();
+    let original = loader.snapshot();
+    let source = loader
+        .envelope
+        .read()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .payload
+        .clone();
+    let same = loader.catalog_for_envelope(&envelope).unwrap();
+    assert!(Arc::ptr_eq(&same.entries, &original.entries));
+    assert_eq!(
+        loader.refresh_failed::<()>(PricingError::Network),
+        Err(PricingError::Network)
+    );
+    assert!(!original.stale);
+    let stale = loader.snapshot();
+    assert!(stale.stale);
+    assert!(Arc::ptr_eq(&stale.entries, &original.entries));
+    assert!(Arc::ptr_eq(
+        &source,
+        &loader.envelope.read().unwrap().as_ref().unwrap().payload
+    ));
+    let response = reqwest::Response::from(
+        axum::http::Response::builder()
+            .status(304)
+            .header("etag", "synthetic-v2")
+            .body("")
+            .unwrap(),
+    );
+    assert!(matches!(
+        loader.accept_not_modified(response).await.unwrap(),
+        CatalogRefreshOutcome::NotModified { .. }
+    ));
+    let refreshed = loader.snapshot();
+    assert!(!refreshed.stale);
+    assert!(stale.stale);
+    assert!(Arc::ptr_eq(&refreshed.entries, &original.entries));
+    assert!(Arc::ptr_eq(&refreshed.unique, &original.unique));
+    assert!(Arc::ptr_eq(&refreshed.lookup, &original.lookup));
+    assert_eq!(
+        store.read().unwrap().unwrap().etag.as_deref(),
+        Some("synthetic-v2")
+    );
+    let mut changed = envelope.clone();
+    changed.payload["openai/synthetic"]["input_cost_per_token"] = json!(0.000003);
+    changed.payload_sha256 = super::super::payload_hash(&changed.payload).unwrap();
+    changed.validate().unwrap();
+    let updated = loader.catalog_for_envelope(&changed).unwrap();
+    assert!(!Arc::ptr_eq(&updated.entries, &original.entries));
+    assert_ne!(
+        updated.resolve_account("synthetic", Some("openai")).quote,
+        original.resolve_account("synthetic", Some("openai")).quote
+    );
+    let invalid = reqwest::Response::from(
+        axum::http::Response::builder()
+            .status(304)
+            .header("etag", "x".repeat(2048))
+            .body("")
+            .unwrap(),
+    );
+    assert_eq!(
+        loader.accept_not_modified(invalid).await,
+        Err(PricingError::InvalidCache)
+    );
+    assert_eq!(
+        store.read().unwrap().unwrap().etag.as_deref(),
+        Some("synthetic-v2")
+    );
+    let cold = PricingCatalogLoader::open(directory.join("missing.json")).unwrap();
+    let response = reqwest::Response::from(
+        axum::http::Response::builder()
+            .status(304)
+            .body("")
+            .unwrap(),
+    );
+    assert_eq!(
+        cold.accept_not_modified(response).await,
+        Err(PricingError::InvalidCache)
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
 #[test]
 fn cache_store_round_trips_and_rejects_corrupt_data() {
     let directory = std::env::temp_dir().join(format!(

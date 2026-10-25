@@ -2,6 +2,7 @@ mod catalog;
 mod decimal;
 mod litellm_parser;
 mod loader;
+mod lookup;
 mod resolver;
 mod schedule;
 
@@ -29,6 +30,7 @@ pub const CACHE_SCHEMA_VERSION: u32 = 1;
 pub const MAX_MODEL_PRICE_MICRO_USD_PER_MILLION: u64 = 1_000_000_000_000;
 
 mod context;
+mod memory;
 mod quote;
 mod snapshot;
 

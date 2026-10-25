@@ -2,6 +2,9 @@ use super::*;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
+mod lookup;
+mod performance;
+
 #[test]
 fn resolves_provider_exact_then_canonical_then_manual() {
     let catalog = PricingCatalog::from_litellm_payload(

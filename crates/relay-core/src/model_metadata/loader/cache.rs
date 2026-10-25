@@ -3,7 +3,7 @@ use super::{
     MAX_AUXILIARY_RESPONSE_BYTES, MAX_CACHE_BYTES, SOURCES,
 };
 use crate::{catalog_io, model_metadata::MetadataCacheEnvelope};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{value::RawValue, Value};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
@@ -16,6 +16,40 @@ struct CacheHeader<'a> {
     schema_version: Value,
     #[serde(default, borrow)]
     sources: Option<&'a RawValue>,
+}
+
+/// Same v2 source envelopes, without the untrusted, rebuildable merged tree.
+pub(super) fn write_states(
+    path: &Path,
+    states: &[SourceState; 4],
+    merged_revision: &str,
+) -> Result<(), ModelMetadataError> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SourceCache<'a> {
+        format: &'static str,
+        schema_version: u32,
+        sources: BTreeMap<&'static str, &'a SourceEnvelope>,
+        merged_revision: &'a str,
+    }
+    let cache = SourceCache {
+        format: CACHE_FORMAT,
+        schema_version: 2,
+        sources: states
+            .iter()
+            .enumerate()
+            .filter_map(|(i, state)| {
+                state
+                    .envelope
+                    .as_ref()
+                    .map(|envelope| (SOURCES[i], envelope))
+            })
+            .collect(),
+        merged_revision,
+    };
+    catalog_io::write_json_if_changed(path, &cache, MAX_CACHE_BYTES)
+        .map(|_| ())
+        .map_err(|error| map_io_error(error, true))
 }
 
 pub(super) fn read_states(

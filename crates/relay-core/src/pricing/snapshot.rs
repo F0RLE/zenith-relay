@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct CatalogEntry {
     pub model_id: String,
     pub provider: Option<String>,
@@ -46,9 +46,10 @@ pub struct PricingCatalog {
     pub revision: Option<String>,
     pub fetched_at_ms: Option<u64>,
     pub stale: bool,
-    pub entries: BTreeMap<String, CatalogEntry>,
-    pub conflicts: BTreeSet<String>,
-    pub(super) unique: BTreeMap<String, CatalogEntry>,
+    pub entries: Arc<BTreeMap<String, CatalogEntry>>,
+    pub conflicts: Arc<BTreeSet<String>>,
+    pub(super) unique: Arc<BTreeMap<String, String>>,
+    pub(super) lookup: Arc<super::lookup::CatalogLookup>,
 }
 
 impl PricingCatalog {
@@ -57,9 +58,10 @@ impl PricingCatalog {
             revision: None,
             fetched_at_ms: None,
             stale: false,
-            entries: BTreeMap::new(),
-            conflicts: BTreeSet::new(),
-            unique: BTreeMap::new(),
+            entries: Arc::default(),
+            conflicts: Arc::default(),
+            unique: Arc::default(),
+            lookup: Default::default(),
         }
     }
 
@@ -76,8 +78,10 @@ impl PricingCatalog {
         stale: bool,
     ) -> Result<Self, PricingError> {
         let pricing_records = validate_litellm_payload(pricing_payload)?;
-        let mut catalog_entries = BTreeMap::<String, CatalogEntry>::new();
-        let mut unique = BTreeMap::<String, CatalogEntry>::new();
+        // Bulk-build the immutable tree so its spare slots do not retain many
+        // large rate schedules. Temporary positions preserve source alias order.
+        let mut catalog_entries = Vec::<(String, CatalogEntry)>::new();
+        let mut unique = BTreeMap::<String, usize>::new();
         let mut conflicts = BTreeSet::<String>::new();
         for (model_id, pricing_value) in pricing_records {
             if model_id.len() > MAX_CACHE_STRING_LENGTH {
@@ -94,23 +98,31 @@ impl PricingCatalog {
                 continue;
             };
             let key = super::normalize(model_id);
-            if let Some(existing) = unique.get(&key) {
+            if let Some(&index) = unique.get(&key) {
+                let existing = &catalog_entries[index].1;
                 if !existing.equivalent_pricing(&pricing_entry) {
                     conflicts.insert(key.clone());
                     unique.remove(&key);
                 }
             } else if !conflicts.contains(&key) {
-                unique.insert(key.clone(), pricing_entry.clone());
+                unique.insert(key.clone(), catalog_entries.len());
             }
-            catalog_entries.insert(model_id.clone(), pricing_entry);
+            catalog_entries.push((model_id.clone(), pricing_entry));
         }
+        let unique = unique
+            .into_iter()
+            .map(|(alias, index)| (alias, catalog_entries[index].0.clone()))
+            .collect();
+        let catalog_entries = catalog_entries.into_iter().collect();
+        let lookup = super::lookup::CatalogLookup::build(&catalog_entries, &conflicts);
         Ok(Self {
             revision,
             fetched_at_ms,
             stale,
-            entries: catalog_entries,
-            conflicts,
-            unique,
+            entries: Arc::new(catalog_entries),
+            conflicts: Arc::new(conflicts),
+            unique: Arc::new(unique),
+            lookup: Arc::new(lookup),
         })
     }
 
@@ -118,22 +130,7 @@ impl PricingCatalog {
     /// publishes one generic image tariff without quality/size dimensions;
     /// those dimensions are represented as `default` rather than guessed.
     pub fn image_request_prices(&self, model: &str) -> Vec<ImageRequestPrice> {
-        let normalized = super::normalize(model);
-        let Some(matching_entry) = self
-            .entries
-            .values()
-            .filter(|candidate_entry| {
-                !self
-                    .conflicts
-                    .contains(&super::normalize(&candidate_entry.model_id))
-                    && (super::normalize(&candidate_entry.model_id) == normalized
-                        || super::unqualified(&candidate_entry.model_id) == normalized)
-            })
-            .find(|candidate_entry| candidate_entry.image.is_some())
-        else {
-            return Vec::new();
-        };
-        let Some(image) = matching_entry.image else {
+        let Some(image) = self.lookup.image(model) else {
             return Vec::new();
         };
         let mut rows = Vec::with_capacity(2);
