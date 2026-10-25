@@ -228,6 +228,12 @@ fn matches_gateway(profile: &[u8], config: &Value) -> bool {
     if config["toolSearchEnabled"] == true && profile.get("toolSearchEnabled").is_none() {
         profile["toolSearchEnabled"] = json!(true);
     }
+    // Older owned profiles inherited Desktop's Auto-mode default without a
+    // configured classifier. Only migrate absence; explicit user settings
+    // still prevent reclaim when the ownership record is missing.
+    if config["autoModeEnabled"] == false && profile.get("autoModeEnabled").is_none() {
+        profile["autoModeEnabled"] = json!(false);
+    }
     profile == *config
 }
 

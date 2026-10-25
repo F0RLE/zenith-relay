@@ -78,6 +78,12 @@ pub(super) fn gateway_config(origin: &str, secret: &str, models: Vec<Value>) -> 
         // Desktop otherwise eagerly loads every MCP schema on custom gateways.
         // Relay bridges client-owned discovery; native Messages stays native.
         "toolSearchEnabled": true,
+        // Auto mode sends separate requests to a Claude safety classifier.
+        // Our client-only aliases do not establish that classifier route:
+        // a Fable alias can make Code fall back to an unavailable Opus model.
+        // Keep manual approvals rather than advertise unsupported Auto mode.
+        // Do not substitute the session model or enable permission bypass.
+        "autoModeEnabled": false,
     })
 }
 
@@ -252,9 +258,29 @@ mod tests {
         assert_eq!(config["inferenceGatewayBaseUrl"], "http://127.0.0.1:14998");
         assert_eq!(config["inferenceModels"], json!([]));
         assert_eq!(config["toolSearchEnabled"], true);
+        assert_eq!(config["autoModeEnabled"], false);
         // Desktop's modelCatalogUrl requires Anthropic-signed bytes; do not
         // configure a local unsigned catalog that the client will ignore.
         assert!(config.get("modelCatalogUrl").is_none());
         assert!(config.get("anthropicFamilyTier").is_none());
+    }
+
+    #[test]
+    fn reasoning_alias_does_not_enable_an_unproven_safety_classifier() {
+        let mut entry = model("vendor/reasoning-model", true, WireApi::Messages);
+        entry.reasoning_allowed_levels = vec!["high".into(), "max".into()];
+        entry.protocol_routes[0].reasoning_efforts = entry.reasoning_allowed_levels.clone();
+        let models = inference_models(&[entry]).unwrap();
+        let config = gateway_config("http://127.0.0.1:14998", "synthetic", models.clone());
+        assert_eq!(config["inferenceModels"], json!(models));
+        assert_eq!(config["inferenceModels"][0]["maxEffort"], "max");
+        assert_eq!(config["autoModeEnabled"], false);
+        for field in [
+            "permissions",
+            "builtinToolPolicy",
+            "disableBypassPermissionsMode",
+        ] {
+            assert!(config.get(field).is_none(), "must not override {field}");
+        }
     }
 }

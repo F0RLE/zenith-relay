@@ -604,6 +604,8 @@ fn lost_recovery_never_reclaims_a_foreign_gateway_or_custom_settings() {
         ("inferenceGatewayApiKey", json!("other-synthetic-key")),
         ("inferenceGatewayBaseUrl", json!("https://foreign.example")),
         ("toolSearchEnabled", json!(false)),
+        ("autoModeEnabled", json!(true)),
+        ("autoModeEnabled", Value::Null),
         ("modelCatalogEnabled", json!(false)),
         (
             "modelCatalogUrl",
@@ -659,6 +661,40 @@ fn old_owned_profile_upgrades_tool_search_without_touching_foreign_settings() {
     );
     restore(&fixture.library, &fixture.recovery).unwrap();
     assert!(!fixture.profile().exists());
+}
+
+#[test]
+fn old_owned_profile_disables_unsupported_auto_mode_with_or_without_recovery() {
+    for keep_recovery in [true, false] {
+        let fixture = Fixture::new();
+        fixture.write_meta(Some("other"));
+        let mut old = config("pool/model");
+        old.as_object_mut().unwrap().remove("autoModeEnabled");
+        apply(&fixture.library, &fixture.recovery, &old, true).unwrap();
+        if !keep_recovery {
+            fs::remove_file(&fixture.recovery).unwrap();
+        }
+        let before = fs::read(fixture.profile()).unwrap();
+        let updated = config("pool/model");
+        check_attach(&fixture.library, &fixture.recovery, &updated).unwrap();
+        assert_eq!(fs::read(fixture.profile()).unwrap(), before);
+        apply(&fixture.library, &fixture.recovery, &updated, true).unwrap();
+        assert_eq!(
+            parse(&fs::read(fixture.profile()).unwrap()).unwrap(),
+            updated
+        );
+        restore(&fixture.library, &fixture.recovery).unwrap();
+        assert!(!fixture.profile().exists());
+        let meta = metadata(Some(&fs::read(fixture.library.join("_meta.json")).unwrap())).unwrap();
+        if keep_recovery {
+            assert_eq!(meta["appliedId"], "other");
+        }
+        assert!(meta["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["id"] == "other"));
+    }
 }
 
 #[test]
