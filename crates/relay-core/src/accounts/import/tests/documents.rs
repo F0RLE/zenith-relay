@@ -1,6 +1,54 @@
 use super::*;
 
 #[test]
+fn rejects_duplicate_json_fields_without_exposing_secrets() {
+    for input in [
+        r#"{"access_token":"at-first-secret","access_token":"at-second-secret"}"#,
+        r#"{"access_token":"at-first-secret","access_\u0074oken":"at-second-secret"}"#,
+        r#"{"tokens":{"access_token":"at-first-secret","access_token":"at-second-secret"}}"#,
+        "[\n{\"access_token\":\"at-first-secret\"},\n{\"access_token\":\"at-first-secret\",\"access_token\":\"at-second-secret\"}\n]",
+        r#"{"private-secret-key":1,"private-secret-key":2}"#,
+    ] {
+        let error = parse_import(input, None, &[]).unwrap_err();
+        assert_eq!(error.code, ImportErrorCode::MalformedJson);
+        assert_eq!(error.message, "import JSON contains duplicate fields");
+        assert!(!format!("{error:?}").contains("secret"));
+    }
+}
+
+#[test]
+fn json_lines_reject_duplicate_fields_without_discarding_other_accounts() {
+    let parsed = parse_import(
+        "{\"access_token\":\"at-valid\"}\n{\"access_token\":\"header.payload.signature\",\"access_\\u0074oken\":\"at-second\"}",
+        None,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(parsed.items.len(), 1);
+    assert_eq!(parsed.items[0].secrets().access_token(), Some("at-valid"));
+    assert_eq!(parsed.preview.rows.len(), 2);
+    assert_eq!(parsed.preview.rows[1].status, ImportPreviewStatus::Invalid);
+    assert_eq!(
+        parsed.preview.rows[1].error.as_ref().unwrap().code,
+        ImportIssueCode::MalformedJson
+    );
+}
+
+#[test]
+fn duplicate_first_json_line_does_not_hide_the_next_valid_account() {
+    let parsed = parse_import("{\"access_token\":\"at-first\",\"access_token\":\"at-second\"}\n{\"access_token\":\"at-valid\"}", None, &[]).unwrap();
+    assert_eq!(parsed.items.len(), 1);
+    assert_eq!(parsed.items[0].secrets().access_token(), Some("at-valid"));
+    assert_eq!(parsed.preview.rows[0].status, ImportPreviewStatus::Invalid);
+}
+
+#[test]
+fn strict_json_validation_preserves_number_precision_and_independent_object_keys() {
+    let parsed = parse_import(r#"[{"access_token":"at-one","metadata":{"value":1.2345678901234567890123456789}},{"access_token":"at-two","metadata":{"value":123456789012345678901234567890}}]"#, None, &[]).unwrap();
+    assert_eq!(parsed.items.len(), 2);
+}
+
+#[test]
 fn import_auth_mode_names_are_stable() {
     assert_eq!(ImportAuthMode::OAuth.as_str(), "oauth");
     assert_eq!(ImportAuthMode::AgentIdentity.as_str(), "agent_identity");

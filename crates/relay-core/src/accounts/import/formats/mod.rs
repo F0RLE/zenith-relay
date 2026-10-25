@@ -2,6 +2,7 @@ use super::*;
 
 mod bundles;
 mod lines;
+mod strict_json;
 
 use bundles::{
     is_portable_bundle, is_zenith_bundle, parse_account_container, parse_portable_bundle,
@@ -23,8 +24,12 @@ pub(super) type ParsedEntries = (
 );
 
 pub(super) fn parse_entries(import_document: &str) -> Result<ParsedEntries, ImportError> {
-    match serde_json::from_str::<Value>(import_document) {
+    match strict_json::parse(import_document) {
         Ok(json_document) => parse_json_document(json_document),
+        Err(strict_json::ParseError::DuplicateField) => Err(ImportError::new(
+            ImportErrorCode::MalformedJson,
+            "import JSON contains duplicate fields",
+        )),
         Err(_) => parse_json_lines(import_document),
     }
 }

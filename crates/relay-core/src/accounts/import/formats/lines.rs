@@ -17,7 +17,12 @@ pub(super) fn parse_json_lines(import_document: &str) -> Result<ParsedEntries, I
     let has_multiple_lines = non_empty_lines.len() > 1;
     let mut parsed_entries = Vec::with_capacity(non_empty_lines.len());
     for (ordinal, line) in non_empty_lines.into_iter().enumerate() {
-        match serde_json::from_str::<Value>(line) {
+        let parsed = super::strict_json::parse(line);
+        let token = match &parsed {
+            Err(super::strict_json::ParseError::Invalid) => raw_access_token(line),
+            _ => None,
+        };
+        match parsed {
             Ok(json_value) => {
                 ensure_depth(&json_value)?;
                 parsed_entries.push(InputEntry {
@@ -26,7 +31,7 @@ pub(super) fn parse_json_lines(import_document: &str) -> Result<ParsedEntries, I
                     issue: None,
                 });
             }
-            Err(_) => match raw_access_token(line) {
+            Err(_) => match token {
                 Some(token) => parsed_entries.push(InputEntry {
                     ordinal,
                     import_value: Some(access_token_value(token)),
