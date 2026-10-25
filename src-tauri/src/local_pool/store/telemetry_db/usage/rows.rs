@@ -89,6 +89,10 @@ pub(in crate::local_pool::store::telemetry_db) fn usage_log_from_row(
             .get::<_, Option<String>>(33)?
             .as_deref()
             .and_then(|error_json| serde_json::from_str(error_json).ok()),
+        image_usage: row
+            .get::<_, Option<String>>(34)?
+            .as_deref()
+            .and_then(|json| serde_json::from_str(json).ok()),
         tool_use: tool_use_json
             .as_deref()
             .and_then(|tool_use_json| serde_json::from_str(tool_use_json).ok()),

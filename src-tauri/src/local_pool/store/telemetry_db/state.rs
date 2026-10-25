@@ -72,6 +72,9 @@ impl TelemetryDb {
         state_entries: &[(&str, String)],
         account_ids: &[&str],
     ) -> Result<()> {
+        if state_entries.is_empty() && account_ids.is_empty() {
+            return Ok(());
+        }
         for (key, state_json) in state_entries {
             validate_state_key(key)?;
             if state_json.len() > MAX_STATE_JSON_BYTES {
@@ -85,14 +88,19 @@ impl TelemetryDb {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
-        for (key, state_json) in state_entries {
-            transaction
-                .execute(
+        if !state_entries.is_empty() {
+            let mut statement = transaction
+                .prepare_cached(
                     "INSERT INTO app_state(key, value_json) VALUES (?1, ?2)
-                     ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
-                    params![key, state_json],
+                     ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json
+                     WHERE app_state.value_json IS NOT excluded.value_json",
                 )
                 .map_err(db_error)?;
+            for (key, state_json) in state_entries {
+                statement
+                    .execute(params![key, state_json])
+                    .map_err(db_error)?;
+            }
         }
         for account_id in account_ids {
             transaction

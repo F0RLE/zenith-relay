@@ -19,18 +19,23 @@ use zenith_relay_core::{
 use zenith_relay_core::{ApiModelPriceOverride, ResponseAffinityBinding};
 
 mod affinity;
+mod forecast;
 mod lifecycle;
+mod maintenance;
 mod migrations;
+mod performance;
 mod queries;
 mod record;
 mod state;
+mod support;
 mod usage;
 
 use migrations::*;
+pub(crate) use performance::PerformanceSample;
 use usage::{
     account_pricing_aggregates, apply_usage_totals_delta, is_unfiltered_all_time, sql_u64,
-    usage_buckets, usage_filter, usage_filter_options, usage_groups, usage_log_from_row,
-    usage_model_equivalents, usage_totals,
+    usage_buckets, usage_filter, usage_groups, usage_log_from_row, usage_model_equivalents,
+    usage_totals,
 };
 
 #[cfg(test)]
@@ -41,8 +46,67 @@ pub struct TelemetryDb {
     usage_revision: AtomicU64,
     api_equivalent_cache: Mutex<Option<CachedUsageEquivalents>>,
     quota_equivalent_cache: Mutex<Option<CachedQuotaEquivalents>>,
+    #[cfg(test)]
+    quota_window_reads: AtomicU64,
+    usage_filter_options_cache: Mutex<Option<CachedUsageFilterOptions>>,
+    #[cfg(test)]
+    usage_filter_option_reads: AtomicU64,
     usage_totals_cache: Mutex<Option<UsageTotals>>,
+    usage_report_cache: Mutex<Option<CachedUsageReport>>,
+    #[cfg(test)]
+    usage_report_builds: AtomicU64,
     open_duration_ms: f64,
+    quota_samples: Mutex<forecast::QuotaSamples>,
+}
+
+#[derive(Clone)]
+struct CachedUsageReport {
+    query_key: String,
+    usage_revision: u64,
+    pricing_revision: String,
+    // Only summary projections; no events, diagnostics or filter inventories.
+    page: LocalUsagePage,
+}
+
+const MAX_USAGE_REPORT_CACHE_BYTES: usize = 2 * 1024 * 1024;
+
+impl CachedUsageReport {
+    fn fits_cache(query_key: &str, pricing_revision: &str, page: &LocalUsagePage) -> bool {
+        // Bound the extra retained copy, not the report returned to the caller.
+        // Cloning these vectors allocates their length, not spare capacity.
+        let mut bytes = std::mem::size_of::<Self>()
+            .saturating_add(query_key.len())
+            .saturating_add(pricing_revision.len())
+            .saturating_add(
+                page.pricing
+                    .catalog_revision
+                    .as_ref()
+                    .map_or(0, String::len),
+            )
+            .saturating_add(
+                page.buckets
+                    .len()
+                    .saturating_mul(std::mem::size_of::<UsageBucket>()),
+            );
+        for group in page.models.iter().chain(&page.pool_members) {
+            bytes = bytes
+                .saturating_add(std::mem::size_of::<UsageGroup>())
+                .saturating_add(group.key.len())
+                .saturating_add(group.label.as_ref().map_or(0, String::len));
+            if bytes > MAX_USAGE_REPORT_CACHE_BYTES {
+                return false;
+            }
+        }
+        bytes <= MAX_USAGE_REPORT_CACHE_BYTES
+    }
+}
+
+#[derive(Clone)]
+struct CachedUsageFilterOptions {
+    usage_revision: u64,
+    from_ms: Option<u64>,
+    to_ms: Option<u64>,
+    options: UsageFilterOptions,
 }
 
 #[derive(Clone)]
@@ -54,9 +118,8 @@ struct CachedUsageEquivalents {
 
 #[derive(Clone)]
 struct CachedQuotaEquivalents {
-    usage_revision: u64,
     pricing_revision: String,
-    windows: Vec<(String, u64, u64)>,
+    windows: HashMap<String, (u64, u64)>,
     equivalents_by_account: HashMap<String, ApiEquivalentSummary>,
 }
 
@@ -85,6 +148,7 @@ pub struct UsageLog {
     pub error_category: Option<String>,
     pub error_origin: Option<ErrorOrigin>,
     pub upstream_error: Option<zenith_relay_core::usage::UpstreamErrorDetails>,
+    pub image_usage: Option<zenith_relay_core::usage::ImageUsage>,
     pub tool_use: Option<ToolUseDiagnostics>,
     pub latency_ms: u64,
     pub ttft_ms: Option<u64>,
@@ -112,6 +176,22 @@ pub struct CacheSession {
     pub cache_write_ttl: Option<String>,
 }
 
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheSessionScope {
+    pub client_context_id: String,
+    pub candidate_kind: CacheSessionCandidateKind,
+    pub candidate_id: String,
+    pub model: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheSessionCandidateKind {
+    Account,
+    Source,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageFilterOptions {
@@ -126,6 +206,12 @@ pub struct UsageFilterOptions {
 #[serde(rename_all = "camelCase")]
 pub struct LocalUsagePage {
     pub events: Vec<UsageLog>,
+    /// Present only for a bounded sends-only read. Summary totals are not
+    /// computed; total/page counts are lower bounds, never exact report counts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_more: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workload: Option<zenith_relay_core::protocol::UsageWorkload>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filter_options: Option<UsageFilterOptions>,
     pub total: u64,
@@ -176,6 +262,7 @@ fn valid_performance_name(metric_name: &str) -> bool {
             | "interactive"
             | "full_snapshot"
             | "full_snapshot_native"
+            | "snapshot_stage"
             | "mode_switch"
             | "page_open"
     )

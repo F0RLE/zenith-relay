@@ -1,6 +1,28 @@
 use super::*;
 
 #[test]
+fn memory_diagnostics_report_a_budget_without_waiting_on_the_database() {
+    let root = std::env::temp_dir().join(format!("relay-memory-budget-{}", uuid::Uuid::new_v4()));
+    let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+    assert_eq!(database.memory_cache_budget(), Some(32 * 1024 * 1024));
+    let page_size: u32;
+    {
+        let connection = database.connection.lock().unwrap();
+        assert_eq!(database.memory_cache_budget(), None);
+        connection.pragma_update(None, "cache_size", 128).unwrap();
+        page_size = connection
+            .query_row("PRAGMA page_size", [], |row| row.get(0))
+            .unwrap();
+    }
+    assert_eq!(
+        database.memory_cache_budget(),
+        Some(128 * usize::try_from(page_size).unwrap())
+    );
+    drop(database);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn telemetry_uses_wal_without_relaxing_durability() {
     let root = std::env::temp_dir().join(format!(
         "zenith-relay-telemetry-pragmas-{}",
@@ -31,6 +53,10 @@ fn deleting_account_data_removes_usage_rollups_and_affinity() {
         uuid::Uuid::new_v4()
     ));
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+    // Unchanged state must not short-circuit the associated account purge.
+    database
+        .replace_state_json(&[("accounts", "[]".into())])
+        .unwrap();
     database
         .connection
         .lock()
@@ -332,6 +358,7 @@ fn usage_retention_prunes_old_rows_on_open_and_periodically() {
             total_tokens: None,
             upstream_error: None,
             quota_snapshot: None,
+            image_usage: None,
         })
         .unwrap();
     assert_eq!(database.list(10).unwrap().len(), 1);

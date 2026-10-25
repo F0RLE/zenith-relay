@@ -41,6 +41,7 @@ fn usage_survives_database_reopen() {
                 .unwrap(),
             ),
             attempt_outcome: Some(zenith_relay_core::AttemptOutcome::Completed),
+            request_timing: None,
             cache_context: Some(
                 serde_json::from_value(serde_json::json!({
                     "baseline": "completed_request", "scope": "client_session",
@@ -110,6 +111,7 @@ fn usage_survives_database_reopen() {
         total_tokens: Some(5),
         upstream_error: None,
         quota_snapshot: None,
+        image_usage: None,
     };
     TelemetryDb::open(&path).unwrap().record(&event).unwrap();
     let database = TelemetryDb::open(&path).unwrap();
@@ -189,6 +191,15 @@ fn usage_survives_database_reopen() {
     database
         .record_performance("first_frame", 12.5, Some("startup"))
         .unwrap();
+    database
+        .record_performance("snapshot_stage", 8.5, Some("routing"))
+        .unwrap();
+    assert!(database
+        .record_performance("snapshot_stage", f64::NAN, Some("routing"))
+        .is_err());
+    assert!(database
+        .record_performance("snapshot_stage", 1.0, Some("invalid\ncontext"))
+        .is_err());
     assert!(database
         .record_performance("unknown_metric", 1.0, None)
         .is_err());
@@ -200,7 +211,7 @@ fn usage_survives_database_reopen() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(performance_samples, 1);
+    assert_eq!(performance_samples, 2);
     database.clear().unwrap();
     assert!(database.list(10).unwrap().is_empty());
     assert_eq!(logs[0].total_tokens, Some(5));

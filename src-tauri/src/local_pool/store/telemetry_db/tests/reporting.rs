@@ -449,7 +449,9 @@ fn cache_sessions_follow_the_latest_cache_touch_and_reported_window() {
         }
     }
 
-    let sessions = database.cache_sessions(&UsageQuery::default()).unwrap();
+    let sessions = database
+        .cache_sessions(&UsageQuery::default(), None)
+        .unwrap();
     assert_eq!(
         sessions,
         vec![
@@ -478,20 +480,53 @@ fn cache_sessions_follow_the_latest_cache_touch_and_reported_window() {
         .unwrap()
         .timestamp_millis() as u64;
     let ranged = database
-        .cache_sessions(&UsageQuery {
-            from_ms: Some(from_ms),
-            ..UsageQuery::default()
-        })
+        .cache_sessions(
+            &UsageQuery {
+                from_ms: Some(from_ms),
+                ..UsageQuery::default()
+            },
+            None,
+        )
         .unwrap();
     assert_eq!(ranged.len(), 2);
     assert_eq!(ranged[1].started_at, "2026-09-27T10:00:00Z");
     assert_eq!(ranged[1].touched_at, "2026-09-27T10:40:00Z");
 
+    let scope = CacheSessionScope {
+        client_context_id: "client_aaaa".into(),
+        candidate_kind: CacheSessionCandidateKind::Source,
+        candidate_id: write.source_id.clone(),
+        model: Some("claude-sonnet".into()),
+    };
+    let scoped = database
+        .cache_sessions(
+            &UsageQuery {
+                from_ms: Some(from_ms),
+                ..UsageQuery::default()
+            },
+            Some(&scope),
+        )
+        .unwrap();
+    assert_eq!(scoped, vec![ranged[1].clone()]);
+    assert!(database
+        .cache_sessions(
+            &UsageQuery::default(),
+            Some(&CacheSessionScope {
+                client_context_id: "missing' OR 1=1 --".into(),
+                ..scope
+            }),
+        )
+        .unwrap()
+        .is_empty());
+
     let account = database
-        .cache_sessions(&UsageQuery {
-            source_or_account_query: Some("account_b".into()),
-            ..UsageQuery::default()
-        })
+        .cache_sessions(
+            &UsageQuery {
+                source_or_account_query: Some("account_b".into()),
+                ..UsageQuery::default()
+            },
+            None,
+        )
         .unwrap();
     assert_eq!(account.len(), 1);
     assert_eq!(account[0].client_context_id, "client_bbbb");
@@ -609,10 +644,13 @@ fn cache_sessions_isolate_routes_and_ignore_misses_and_future_policies() {
         .unwrap()
         .timestamp_millis() as u64;
     let sessions = database
-        .cache_sessions(&UsageQuery {
-            to_ms: Some(to_ms),
-            ..UsageQuery::default()
-        })
+        .cache_sessions(
+            &UsageQuery {
+                to_ms: Some(to_ms),
+                ..UsageQuery::default()
+            },
+            None,
+        )
         .unwrap();
     assert_eq!(sessions.len(), 5);
     for (kind, id, model, expected_ttl, expected_time) in [
@@ -632,7 +670,61 @@ fn cache_sessions_isolate_routes_and_ignore_misses_and_future_policies() {
             .unwrap();
         assert_eq!(session.cache_write_ttl.as_deref(), Some(expected_ttl));
         assert_eq!(session.touched_at, format!("2026-10-18T{expected_time}Z"));
+        let scoped = database
+            .cache_sessions(
+                &UsageQuery {
+                    to_ms: Some(to_ms),
+                    ..UsageQuery::default()
+                },
+                Some(&CacheSessionScope {
+                    client_context_id: "same_chat".into(),
+                    candidate_kind: if kind == "account" {
+                        CacheSessionCandidateKind::Account
+                    } else {
+                        CacheSessionCandidateKind::Source
+                    },
+                    candidate_id: id.into(),
+                    model: Some(model.into()),
+                }),
+            )
+            .unwrap();
+        assert_eq!(scoped, vec![session.clone()]);
     }
+    // A selected old chat must not disappear behind the 100 newest sessions.
+    for index in 0..110 {
+        let mut event = aggregate_test_event(
+            &format!("unrelated-{index}"),
+            1,
+            10,
+            4,
+            Some("5m".into()),
+            1,
+        );
+        event.client_context_id = Some(format!("unrelated-{index}"));
+        database.record(&event).unwrap();
+    }
+    let all = database
+        .cache_sessions(&UsageQuery::default(), None)
+        .unwrap();
+    assert_eq!(all.len(), 100);
+    assert!(all
+        .iter()
+        .all(|session| session.client_context_id != "same_chat"));
+    let scoped = database
+        .cache_sessions(
+            &UsageQuery {
+                to_ms: Some(to_ms),
+                ..UsageQuery::default()
+            },
+            Some(&CacheSessionScope {
+                client_context_id: "same_chat".into(),
+                candidate_kind: CacheSessionCandidateKind::Source,
+                candidate_id: "source-b".into(),
+                model: Some("m1".into()),
+            }),
+        )
+        .unwrap();
+    assert_eq!(scoped, vec![sessions[0].clone()]);
     drop(database);
     std::fs::remove_dir_all(root).unwrap();
 }

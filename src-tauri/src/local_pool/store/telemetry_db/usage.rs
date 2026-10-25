@@ -17,7 +17,6 @@ mod rows;
 mod sends;
 mod totals;
 
-pub(super) use filters::usage_filter_options;
 pub(super) use rows::{rust_u64, sql_u64, usage_log_from_row};
 use rows::{usage_pricing_usage_from_row, usage_totals_from_row};
 pub(super) use sends::{send_projection, LEGACY_SEND_PREDICATE};
@@ -28,6 +27,16 @@ pub(super) use totals::{
 };
 
 const USAGE_TOTAL_COLUMNS: &str = zenith_relay_core::usage_total_columns_sql!();
+
+// Project before the UNION, so SQLite does not carry diagnostic JSON through
+// report GROUP BYs. Filters still run on the original rows in both branches.
+const USAGE_TOTAL_INPUT_COLUMNS: &str =
+    "success, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens,
+     cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens";
+const USAGE_PRICING_INPUT_COLUMNS: &str =
+    "account_id, source_id, requested_model, resolved_model, applied_service_tier,
+     input_tokens, cached_input_tokens, cache_write_input_tokens, cache_write_ttl,
+     output_tokens, total_tokens";
 
 /// Aggregate columns used when only API-equivalent pricing is needed. The
 /// sample counts are important: a cache value is only treated as complete
@@ -47,11 +56,7 @@ pub(super) fn usage_totals(
             |row| usage_totals_from_row(row, 0),
         )
         .map_err(db_error)?;
-    let sends = send_projection(
-        "success, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens,
-         cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens",
-        where_sql,
-    );
+    let sends = send_projection(USAGE_TOTAL_INPUT_COLUMNS, where_sql);
     let consumption = connection
         .query_row(
             &format!("SELECT {USAGE_TOTAL_COLUMNS} FROM ({sends})"),
@@ -107,12 +112,10 @@ pub(super) fn usage_groups(
     query_parameters: &[SqlValue],
     key_sql: &str,
 ) -> Result<Vec<UsageGroup>> {
-    let read = |table| -> Result<Vec<UsageGroup>> {
-        let sql =
-            format!("SELECT {key_sql}, {USAGE_TOTAL_COLUMNS} FROM {table}{where_sql} GROUP BY 1");
-        let mut statement = connection.prepare(&sql).map_err(db_error)?;
+    let read = |sql: &str, parameters: &[SqlValue]| -> Result<Vec<UsageGroup>> {
+        let mut statement = connection.prepare(sql).map_err(db_error)?;
         let rows = statement
-            .query_map(params_from_iter(query_parameters.iter()), |row| {
+            .query_map(params_from_iter(parameters.iter()), |row| {
                 Ok(UsageGroup {
                     key: row.get(0)?,
                     label: None,
@@ -123,11 +126,26 @@ pub(super) fn usage_groups(
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(db_error)
     };
-    let mut requests: HashMap<_, _> = read("request_logs")?
-        .into_iter()
-        .map(|group| (group.key, group.totals))
+    let mut requests: HashMap<_, _> = read(
+        &format!("SELECT {key_sql}, {USAGE_TOTAL_COLUMNS} FROM request_logs{where_sql} GROUP BY 1"),
+        query_parameters,
+    )?
+    .into_iter()
+    .map(|group| (group.key, group.totals))
+    .collect();
+    let sends = send_projection(
+        &format!("{key_sql} AS group_key, {USAGE_TOTAL_INPUT_COLUMNS}"),
+        where_sql,
+    );
+    let send_parameters: Vec<_> = query_parameters
+        .iter()
+        .chain(query_parameters.iter())
+        .cloned()
         .collect();
-    let mut groups = read("usage_sends")?;
+    let mut groups = read(
+        &format!("SELECT group_key, {USAGE_TOTAL_COLUMNS} FROM ({sends}) GROUP BY 1"),
+        &send_parameters,
+    )?;
     for group in &mut groups {
         group.totals = combine_totals(
             requests.remove(&group.key).unwrap_or_default(),
@@ -181,32 +199,36 @@ pub(super) fn usage_model_equivalents(
             context_band = zenith_relay_core::usage::USAGE_CONTEXT_BAND_SQL
         )
     } else {
+        let sends = send_projection(USAGE_PRICING_INPUT_COLUMNS, where_sql);
         format!(
             "SELECT CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
                 COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model, ''),
                 {price_class}, {context_band},
                 {USAGE_PRICING_AGGREGATE_COLUMNS}
-             FROM usage_sends{where_sql} GROUP BY 1, 2, 3, 4, 5",
+             FROM ({sends}) GROUP BY 1, 2, 3, 4, 5",
             price_class = zenith_relay_core::usage::USAGE_PRICE_CLASS_SQL,
             context_band = zenith_relay_core::usage::USAGE_CONTEXT_BAND_SQL
         )
     };
     let mut statement = connection.prepare(&sql).map_err(db_error)?;
     let rows = statement
-        .query_map(params_from_iter(query_parameters.iter()), |row| {
-            let kind = row.get::<_, String>(0)?;
-            let candidate_id = row.get::<_, String>(1)?;
-            let model_id = row.get::<_, String>(2)?;
-            let model_ref = (!model_id.is_empty()).then_some(model_id.as_str());
-            let estimate = resolver.estimate(
-                &kind,
-                &candidate_id,
-                model_ref,
-                usage_pricing_usage_from_row(row, 5)?,
-            );
-            let price_source = resolver.source(&kind, &candidate_id, model_ref);
-            Ok((candidate_id, model_id, estimate, price_source))
-        })
+        .query_map(
+            params_from_iter(query_parameters.iter().chain(query_parameters.iter())),
+            |row| {
+                let kind = row.get::<_, String>(0)?;
+                let candidate_id = row.get::<_, String>(1)?;
+                let model_id = row.get::<_, String>(2)?;
+                let model_ref = (!model_id.is_empty()).then_some(model_id.as_str());
+                let estimate = resolver.estimate(
+                    &kind,
+                    &candidate_id,
+                    model_ref,
+                    usage_pricing_usage_from_row(row, 5)?,
+                );
+                let price_source = resolver.source(&kind, &candidate_id, model_ref);
+                Ok((candidate_id, model_id, estimate, price_source))
+            },
+        )
         .map_err(db_error)?;
     let rows = rows
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -243,8 +265,10 @@ pub(super) fn usage_buckets(
     let bucket_sql = "? + ((CAST(strftime('%s', created_at) AS INTEGER) * 1000 - ?) / ?) * ?";
     let mut parameters = vec![start.clone(), start, bucket.clone(), bucket];
     parameters.extend_from_slice(query_parameters);
-    let read = |table| -> Result<Vec<UsageBucket>> {
-        let sql = format!("SELECT {bucket_sql}, {USAGE_TOTAL_COLUMNS} FROM {table}{where_sql} GROUP BY 1 ORDER BY 1");
+    let read = |from_sql: &str, parameters: &[SqlValue]| -> Result<Vec<UsageBucket>> {
+        let sql = format!(
+            "SELECT {bucket_sql}, {USAGE_TOTAL_COLUMNS} FROM {from_sql} GROUP BY 1 ORDER BY 1"
+        );
         let mut statement = connection.prepare(&sql).map_err(db_error)?;
         let rows = statement
             .query_map(params_from_iter(parameters.iter()), |row| {
@@ -257,23 +281,32 @@ pub(super) fn usage_buckets(
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(db_error)
     };
-    let mut requests: HashMap<_, _> = read("request_logs")?
+    let mut requests: HashMap<_, _> = read(&format!("request_logs{where_sql}"), &parameters)?
         .into_iter()
         .map(|bucket| (bucket.start_ms, bucket.totals))
         .collect();
-    let mut buckets = read("usage_sends")?;
+    let sends = send_projection(
+        &format!("created_at, {USAGE_TOTAL_INPUT_COLUMNS}"),
+        where_sql,
+    );
+    parameters.extend_from_slice(query_parameters);
+    let mut buckets = read(&format!("({sends})"), &parameters)?;
     for bucket in &mut buckets {
         bucket.totals = combine_totals(
             requests.remove(&bucket.start_ms).unwrap_or_default(),
             bucket.totals.clone(),
         );
     }
+    let priced_sends = send_projection(
+        &format!("created_at, {USAGE_PRICING_INPUT_COLUMNS}"),
+        where_sql,
+    );
     let price_sql = format!(
         "SELECT {bucket_sql}, CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END, \
             COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model), \
             {price_class}, {context_band}, \
             {USAGE_PRICING_AGGREGATE_COLUMNS} \
-         FROM usage_sends{where_sql} GROUP BY 1, 2, 3, 4, 5, 6",
+         FROM ({priced_sends}) GROUP BY 1, 2, 3, 4, 5, 6",
         price_class = zenith_relay_core::usage::USAGE_PRICE_CLASS_SQL,
         context_band = zenith_relay_core::usage::USAGE_CONTEXT_BAND_SQL
     );

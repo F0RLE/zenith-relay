@@ -12,9 +12,52 @@ const USAGE_LOG_COLUMNS: &str =
      cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens,
      service_tier, applied_service_tier, routing_json, tool_use_json, error_origin,
      requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl,
-     client_context_id, upstream_error_json";
+     client_context_id, upstream_error_json, image_usage_json";
 
 impl TelemetryDb {
+    pub(crate) fn request_diagnostics(&self, request_id: &str) -> Result<serde_json::Value> {
+        use rusqlite::OptionalExtension;
+        let connection = self.lock_connection()?;
+        let final_request = connection
+            .query_row(
+                &format!("SELECT {USAGE_LOG_COLUMNS} FROM request_logs WHERE request_id = ?1"),
+                [request_id],
+                usage_log_from_row,
+            )
+            .optional()
+            .map_err(db_error)?;
+        let mut statement = connection.prepare(&format!(
+            "SELECT {USAGE_LOG_COLUMNS} FROM request_attempts WHERE request_id = ?1 ORDER BY attempt DESC LIMIT 65"
+        )).map_err(db_error)?;
+        let mut attempts = statement
+            .query_map([request_id], usage_log_from_row)
+            .map_err(db_error)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_error)?;
+        let reasoning_samples =
+            super::super::support::reasoning::read_samples(&connection, final_request.as_ref())?;
+        // Rendering, sorting and hashing the bounded report must not hold up the writer.
+        drop(statement);
+        drop(connection);
+        if final_request.is_none() && attempts.is_empty() {
+            return Err(LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "No retained usage for this request",
+            ));
+        }
+        let truncated = attempts.len() > 64;
+        attempts.truncate(64);
+        attempts.reverse();
+        Ok(super::super::support::document_with_comparison(
+            final_request.as_ref(),
+            &attempts,
+            truncated,
+            Some(super::super::support::reasoning::document(
+                reasoning_samples,
+            )),
+        ))
+    }
+
     #[cfg(test)]
     pub fn list(&self, limit: u16) -> Result<Vec<UsageLog>> {
         let connection = self.lock_connection()?;
@@ -76,32 +119,47 @@ impl TelemetryDb {
         let resolver = CatalogPriceResolver::new(catalog, context);
         let usage_revision = self.usage_revision.load(Ordering::Acquire);
         let pricing_revision = resolver.revision_key().to_string();
-        if let Some(cached) = self
-            .quota_equivalent_cache
-            .lock()
-            .map_err(lock_error)?
-            .as_ref()
-            .filter(|cached| {
-                cached.usage_revision == usage_revision
-                    && cached.pricing_revision == pricing_revision
-                    && cached.windows == windows
-            })
+        // The result has one value per account. Preserve the previous last-
+        // window-wins behavior for duplicate IDs without repeated SQL reads.
+        let requested_windows = windows
+            .iter()
+            .map(|(id, from, to)| (id.clone(), (*from, *to)))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut equivalents = std::collections::HashMap::with_capacity(requested_windows.len());
+        let mut missing = Vec::new();
         {
-            return Ok(cached.equivalents_by_account.clone());
+            let cached = self.quota_equivalent_cache.lock().map_err(lock_error)?;
+            let cached = cached
+                .as_ref()
+                .filter(|cached| cached.pricing_revision == pricing_revision);
+            for (id, bounds) in &requested_windows {
+                let value = cached
+                    .filter(|cached| cached.windows.get(id) == Some(bounds))
+                    .and_then(|cached| cached.equivalents_by_account.get(id));
+                if let Some(value) = value {
+                    equivalents.insert(id.clone(), *value);
+                } else {
+                    missing.push((id, bounds));
+                }
+            }
+        }
+        if missing.is_empty() {
+            return Ok(equivalents);
         }
         let aggregates = {
             let connection = self.lock_connection()?;
-            windows
+            missing
                 .iter()
-                .map(|(account_id, from_ms, to_ms)| {
+                .map(|(account_id, (from_ms, to_ms))| {
+                    #[cfg(test)]
+                    self.quota_window_reads.fetch_add(1, Ordering::Relaxed);
                     Ok((
-                        account_id.clone(),
+                        (*account_id).clone(),
                         account_pricing_aggregates(&connection, account_id, *from_ms, *to_ms)?,
                     ))
                 })
                 .collect::<Result<Vec<_>>>()?
         };
-        let mut equivalents = std::collections::HashMap::with_capacity(windows.len());
         for (account_id, rows) in aggregates {
             let mut total = ApiEquivalentSummary::default();
             for (model, usage) in rows {
@@ -114,18 +172,30 @@ impl TelemetryDb {
             }
             equivalents.insert(account_id, total);
         }
-        if self.usage_revision.load(Ordering::Acquire) == usage_revision {
-            self.quota_equivalent_cache
-                .lock()
-                .map_err(lock_error)?
-                .replace(CachedQuotaEquivalents {
-                    usage_revision,
-                    pricing_revision,
-                    windows: windows.to_vec(),
-                    equivalents_by_account: equivalents.clone(),
-                });
-        }
+        // Check after taking the cache lock: a writer/clear that invalidated
+        // an earlier read must not be followed by publication of stale sums.
+        self.publish_quota_equivalents(
+            usage_revision,
+            CachedQuotaEquivalents {
+                pricing_revision,
+                windows: requested_windows,
+                equivalents_by_account: equivalents.clone(),
+            },
+        )?;
         Ok(equivalents)
+    }
+
+    pub(in crate::local_pool::store::telemetry_db) fn publish_quota_equivalents(
+        &self,
+        expected_revision: u64,
+        values: CachedQuotaEquivalents,
+    ) -> Result<bool> {
+        let mut cached = self.quota_equivalent_cache.lock().map_err(lock_error)?;
+        if self.usage_revision.load(Ordering::Acquire) != expected_revision {
+            return Ok(false);
+        }
+        cached.replace(values);
+        Ok(true)
     }
 
     fn usage_page_with_resolver(
@@ -138,8 +208,62 @@ impl TelemetryDb {
         let (where_sql, query_parameters) = usage_filter(query);
         let filter_options = query
             .include_filter_options
-            .then(|| usage_filter_options(&connection, query))
+            .then(|| self.cached_usage_filter_options(&connection, query))
             .transpose()?;
+        // Pagination does not change period totals. Reuse one bounded summary
+        // for the same exact scope, history and pricing revision.
+        let mut summary_query = query.clone();
+        summary_query.page = 1;
+        summary_query.page_size = 1;
+        summary_query.include_events = Some(false);
+        summary_query.include_filter_options = false;
+        let query_key = serde_json::to_string(&summary_query).map_err(|_| {
+            LocalPoolError::new(ErrorCode::Io, "Usage scope could not be serialized")
+        })?;
+        let usage_revision = self.usage_revision.load(Ordering::Acquire);
+        let pricing_revision = resolver.revision_key().to_string();
+        let cached = self
+            .usage_report_cache
+            .lock()
+            .map_err(lock_error)?
+            .as_ref()
+            .filter(|cached| {
+                cached.query_key == query_key
+                    && cached.usage_revision == usage_revision
+                    && cached.pricing_revision == pricing_revision
+            })
+            .map(|cached| cached.page.clone());
+        if let Some(mut cached) = cached {
+            let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
+            cached.events = if query.includes_events() {
+                usage_send_page(
+                    &connection,
+                    &where_sql,
+                    &query_parameters,
+                    page_size,
+                    offset,
+                    None,
+                )?
+            } else {
+                Vec::new()
+            };
+            cached.filter_options = filter_options;
+            cached.page = page;
+            cached.page_size = page_size;
+            cached.total_pages = UsageQuery::page_count(cached.total, page_size);
+            drop(connection);
+            price_events(&mut cached.events, resolver);
+            // Catalog health/timestamps can change without a price revision.
+            // Preserve the aggregate's price-source classification, not stale
+            // freshness metadata from its first page.
+            cached.pricing = PricingMetadata {
+                price_source: cached.pricing.price_source,
+                ..resolver.pricing_metadata(cached.totals.api_equivalent, &[])
+            };
+            return Ok(cached);
+        }
+        #[cfg(test)]
+        self.usage_report_builds.fetch_add(1, Ordering::Relaxed);
         let use_all_time_rollups = is_unfiltered_all_time(query);
         let mut totals =
             self.cached_usage_totals(&connection, query, &where_sql, &query_parameters)?;
@@ -208,41 +332,22 @@ impl TelemetryDb {
                 &query_parameters,
                 page_size,
                 offset,
+                None,
             )?
         } else {
             Vec::new()
         };
-        for event in &mut events {
-            let candidate_kind = if event.account_id.is_some() {
-                "account"
-            } else {
-                "source"
-            };
-            let candidate_id = event.account_id.as_deref().unwrap_or(&event.source_id);
-            let model_id = event
-                .resolved_model
-                .as_deref()
-                .or(event.requested_model.as_deref());
-            (event.api_equivalent, event.api_equivalent_breakdown) = resolver.estimate_breakdown(
-                candidate_kind,
-                candidate_id,
-                model_id,
-                zenith_relay_core::ApiEquivalentUsage::from_reported_tokens(
-                    event.input_tokens,
-                    event.cached_input_tokens,
-                    event.cache_write_input_tokens,
-                    event.cache_write_ttl.as_deref(),
-                    event.output_tokens,
-                    event.total_tokens,
-                )
-                .with_observed_rates(event.applied_service_tier.as_deref(), event.input_tokens),
-            );
-        }
+        // All report rows belong to the same read snapshot. Pricing the owned
+        // page below no longer needs to block request recording.
+        drop(connection);
+        price_events(&mut events, resolver);
         let total_pages = UsageQuery::page_count(total_event_count, page_size);
         let pricing_metadata =
             resolver.pricing_metadata(totals.api_equivalent, &equivalents.sources);
-        Ok(LocalUsagePage {
+        let mut result = LocalUsagePage {
             events,
+            has_more: None,
+            workload: query.workload,
             filter_options,
             total: total_event_count,
             page,
@@ -253,19 +358,67 @@ impl TelemetryDb {
             pool_members,
             buckets,
             pricing: pricing_metadata,
-        })
+        };
+        // Do not clone the selected page's potentially large diagnostic DTOs.
+        let events = std::mem::take(&mut result.events);
+        let filters = result.filter_options.take();
+        let mut cache = self.usage_report_cache.lock().map_err(lock_error)?;
+        if self.usage_revision.load(Ordering::Acquire) == usage_revision {
+            *cache =
+                CachedUsageReport::fits_cache(&query_key, &pricing_revision, &result).then(|| {
+                    CachedUsageReport {
+                        query_key,
+                        usage_revision,
+                        pricing_revision,
+                        page: result.clone(),
+                    }
+                });
+        }
+        result.events = events;
+        result.filter_options = filters;
+        Ok(result)
+    }
+}
+
+pub(super) fn price_events(events: &mut [UsageLog], resolver: &CatalogPriceResolver<'_>) {
+    for event in events {
+        let kind = if event.account_id.is_some() {
+            "account"
+        } else {
+            "source"
+        };
+        let member = event.account_id.as_deref().unwrap_or(&event.source_id);
+        let model = event
+            .resolved_model
+            .as_deref()
+            .or(event.requested_model.as_deref());
+        (event.api_equivalent, event.api_equivalent_breakdown) = resolver.estimate_breakdown(
+            kind,
+            member,
+            model,
+            zenith_relay_core::ApiEquivalentUsage::from_reported_tokens(
+                event.input_tokens,
+                event.cached_input_tokens,
+                event.cache_write_input_tokens,
+                event.cache_write_ttl.as_deref(),
+                event.output_tokens,
+                event.total_tokens,
+            )
+            .with_observed_rates(event.applied_service_tier.as_deref(), event.input_tokens),
+        );
     }
 }
 
 /// Sort only storage keys, then decode the requested page under the same lock.
 /// Loading full JSON rows before LIMIT makes first entry scale with all retained
 /// diagnostic payloads, even though the screen renders only 50 sends.
-fn usage_send_page(
+pub(super) fn usage_send_page(
     connection: &rusqlite::Connection,
     where_sql: &str,
     parameters: &[SqlValue],
     page_size: u32,
     offset: u64,
+    has_more: Option<&mut bool>,
 ) -> Result<Vec<UsageLog>> {
     let conjunction = if where_sql.is_empty() {
         " WHERE "
@@ -287,15 +440,22 @@ fn usage_send_page(
         .chain(parameters.iter())
         .cloned()
         .collect();
-    page_parameters.push(SqlValue::Integer(i64::from(page_size)));
+    page_parameters.push(SqlValue::Integer(i64::from(
+        page_size + u32::from(has_more.is_some()),
+    )));
     page_parameters.push(SqlValue::Integer(zenith_relay_core::usage::sql_u64(offset)));
-    let keys = statement
+    let mut keys = statement
         .query_map(params_from_iter(page_parameters.iter()), |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?))
         })
         .map_err(db_error)?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(db_error)?;
+    if let Some(has_more) = has_more {
+        *has_more = keys.len() > page_size as usize;
+        // Do not decode even one diagnostic row from the next page.
+        keys.truncate(page_size as usize);
+    }
     let mut attempts = connection
         .prepare(&format!(
             "SELECT {USAGE_LOG_COLUMNS} FROM request_attempts WHERE rowid = ?1"

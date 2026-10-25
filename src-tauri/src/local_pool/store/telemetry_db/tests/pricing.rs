@@ -82,6 +82,7 @@ fn context_band_migration_reclassifies_retained_usage_and_preserves_archives() {
         .unwrap()
         .execute_batch(
             "DROP VIEW usage_sends;
+         ALTER TABLE request_logs DROP COLUMN image_usage_json;
          DROP TABLE request_attempts;
          DROP TRIGGER request_attempts_retention;
          DELETE FROM request_logs WHERE request_id = 'archived';
@@ -186,6 +187,7 @@ fn api_equivalents_group_priced_and_unknown_usage_by_candidate() {
         total_tokens: Some(28),
         upstream_error: None,
         quota_snapshot: None,
+        image_usage: None,
     };
     database.record(&event).unwrap();
     let report = database.usage_page(&UsageQuery::default()).unwrap();
@@ -412,6 +414,9 @@ fn account_purchase_cost_migration_preserves_direct_values_and_removes_legacy_ec
         .unwrap()
         .execute_batch(
             "DROP VIEW usage_sends;
+                 DROP INDEX request_logs_filter_options;
+                 DROP INDEX request_attempts_filter_options;
+                 ALTER TABLE request_logs DROP COLUMN image_usage_json;
                  DROP INDEX request_logs_unaggregated;
                  ALTER TABLE request_logs DROP COLUMN cache_write_ttl;
                  ALTER TABLE request_logs DROP COLUMN usage_aggregate_recorded;

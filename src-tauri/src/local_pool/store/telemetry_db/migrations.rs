@@ -1,26 +1,39 @@
 mod attempts;
 mod context_bands;
 mod early;
+mod image_usage;
 mod late;
 mod send_usage;
 mod service_tiers;
 mod unknown_tiers;
+mod usage_filter_reads;
 mod usage_reads;
 
 pub(super) use attempts::MIGRATION_033;
 pub(super) use context_bands::migrate_032;
 pub(super) use early::*;
+pub(super) use image_usage::MIGRATION_038;
 pub(super) use late::*;
 pub(super) use send_usage::migrate_036;
 pub(super) use service_tiers::migrate_034;
 pub(super) use unknown_tiers::migrate_035;
+pub(super) use usage_filter_reads::MIGRATION_039;
 pub(super) use usage_reads::MIGRATION_037;
 
-pub(super) const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 37;
+pub(super) const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 39;
 pub(super) const MAX_RESPONSE_AFFINITY_ROWS: usize = 16_384;
 pub(super) const MAX_STATE_JSON_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const ARCHIVE_USAGE_SQL: &str = concat!(
     r#"
+-- Capture one stable oldest-first batch. Archiving and deleting must use
+-- exactly these rows, even if the retention boundary advances meanwhile.
+-- The caller owns the transaction; this temporary table never leaves SQLite.
+CREATE TEMP TABLE IF NOT EXISTS usage_retention_batch(request_id TEXT PRIMARY KEY);
+DELETE FROM usage_retention_batch;
+INSERT INTO usage_retention_batch(request_id)
+SELECT request_id FROM request_logs
+WHERE created_at < datetime('now', '-30 days')
+ORDER BY created_at, id LIMIT 256;
 INSERT INTO usage_candidate_rollups(
     candidate_kind, candidate_id, model,
     price_class, context_band,
@@ -46,7 +59,7 @@ SELECT CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
     COALESCE(SUM(output_tokens), 0), COUNT(output_tokens),
     COALESCE(SUM(total_tokens), 0), COUNT(total_tokens)
 FROM usage_sends
-WHERE request_id IN (SELECT request_id FROM request_logs WHERE created_at < datetime('now', '-30 days'))
+WHERE request_id IN (SELECT request_id FROM usage_retention_batch)
     AND usage_aggregate_recorded = 0
 GROUP BY 1, 2, 3, 4, 5
 ON CONFLICT(candidate_kind, candidate_id, model, price_class, context_band) DO UPDATE SET
@@ -63,6 +76,7 @@ ON CONFLICT(candidate_kind, candidate_id, model, price_class, context_band) DO U
     output_samples = output_samples + excluded.output_samples,
     total_tokens = total_tokens + excluded.total_tokens,
     total_samples = total_samples + excluded.total_samples;
-DELETE FROM request_logs WHERE created_at < datetime('now', '-30 days');
+DELETE FROM request_logs WHERE request_id IN (SELECT request_id FROM usage_retention_batch);
+DELETE FROM usage_retention_batch;
 "#
 );

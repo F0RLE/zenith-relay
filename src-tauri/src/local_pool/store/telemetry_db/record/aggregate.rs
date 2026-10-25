@@ -1,6 +1,6 @@
 use super::*;
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub(in crate::local_pool::store::telemetry_db) struct UsageAggregate {
     candidate_kind: String,
     candidate_id: String,
@@ -23,6 +23,10 @@ pub(in crate::local_pool::store::telemetry_db) struct UsageAggregate {
 }
 
 impl UsageAggregate {
+    pub(super) fn account_id(&self) -> Option<&str> {
+        (self.candidate_kind == "account").then_some(self.candidate_id.as_str())
+    }
+
     pub(in crate::local_pool::store::telemetry_db) fn with_context_band(
         mut self,
         band: &str,
@@ -168,7 +172,7 @@ pub(in crate::local_pool::store::telemetry_db) fn apply_aggregate_delta(
     multiplier: i64,
 ) -> Result<()> {
     transaction
-        .execute(
+        .prepare_cached(
             "INSERT INTO usage_candidate_rollups(
                 candidate_kind, candidate_id, model,
                 price_class, context_band,
@@ -191,6 +195,9 @@ pub(in crate::local_pool::store::telemetry_db) fn apply_aggregate_delta(
                 output_samples = output_samples + excluded.output_samples,
                 total_tokens = total_tokens + excluded.total_tokens,
                 total_samples = total_samples + excluded.total_samples",
+        )
+        .map_err(db_error)?
+        .execute(
             params![
                 &aggregate.candidate_kind,
                 &aggregate.candidate_id,

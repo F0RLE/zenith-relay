@@ -1,16 +1,53 @@
 use super::{send_projection, usage_filter};
 use crate::local_pool::{
     error::Result,
-    store::telemetry_db::{db_error, UsageFilterOptions},
+    store::telemetry_db::{
+        db_error, lock_error, CachedUsageFilterOptions, TelemetryDb, UsageFilterOptions,
+    },
 };
 use rusqlite::{params_from_iter, Connection};
 use std::collections::BTreeSet;
+use std::sync::atomic::Ordering;
 use zenith_relay_core::protocol::UsageQuery;
 
-pub(in crate::local_pool::store::telemetry_db) fn usage_filter_options(
-    connection: &Connection,
-    query: &UsageQuery,
-) -> Result<UsageFilterOptions> {
+impl TelemetryDb {
+    /// The caller holds the connection lock through lookup and publication.
+    /// Page/search/tab changes share choices; writes and period changes do not.
+    pub(in crate::local_pool::store::telemetry_db) fn cached_usage_filter_options(
+        &self,
+        connection: &Connection,
+        query: &UsageQuery,
+    ) -> Result<UsageFilterOptions> {
+        let revision = self.usage_revision.load(Ordering::Acquire);
+        {
+            let cached = self.usage_filter_options_cache.lock().map_err(lock_error)?;
+            if let Some(cached) = cached.as_ref().filter(|cached| {
+                cached.usage_revision == revision
+                    && cached.from_ms == query.from_ms
+                    && cached.to_ms == query.to_ms
+            }) {
+                return Ok(cached.options.clone());
+            }
+        }
+        #[cfg(test)]
+        self.usage_filter_option_reads
+            .fetch_add(1, Ordering::Relaxed);
+        let options = usage_filter_options(connection, query)?;
+        let mut cached = self.usage_filter_options_cache.lock().map_err(lock_error)?;
+        if self.usage_revision.load(Ordering::Acquire) == revision {
+            // Retain only one period, rather than growing a history of filters.
+            cached.replace(CachedUsageFilterOptions {
+                usage_revision: revision,
+                from_ms: query.from_ms,
+                to_ms: query.to_ms,
+                options: options.clone(),
+            });
+        }
+        Ok(options)
+    }
+}
+
+fn usage_filter_options(connection: &Connection, query: &UsageQuery) -> Result<UsageFilterOptions> {
     // Keep alternatives available after selecting a filter or changing pages.
     // Only the normalized period bounds constrain the available values.
     let (where_sql, parameters) = usage_filter(&UsageQuery {

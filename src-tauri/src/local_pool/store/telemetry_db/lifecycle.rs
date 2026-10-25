@@ -1,12 +1,35 @@
 use super::*;
 
 impl TelemetryDb {
+    /// Configured pager budget, not a claim about currently allocated pages.
+    pub(crate) fn memory_cache_budget(&self) -> Option<usize> {
+        let connection = self.connection.try_lock().ok()?;
+        let cache_size: i64 = connection
+            .query_row("PRAGMA cache_size", [], |row| row.get(0))
+            .ok()?;
+        if cache_size < 0 {
+            usize::try_from(cache_size.unsigned_abs())
+                .ok()?
+                .checked_mul(1024)
+        } else {
+            let page_size: u32 = connection
+                .query_row("PRAGMA page_size", [], |row| row.get(0))
+                .ok()?;
+            usize::try_from(cache_size)
+                .ok()?
+                .checked_mul(usize::try_from(page_size).ok()?)
+        }
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         let started = Instant::now();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(io_error)?;
         }
         let mut connection = Connection::open(path).map_err(db_error)?;
+        // Six fixed write-path statements fit here. Do not retain dynamically
+        // generated report SQL or grow a cache with the length of the history.
+        connection.set_prepared_statement_cache_capacity(8);
         // This file is read by the usage UI while terminal requests append logs.
         // WAL avoids creating and deleting a rollback journal for every request;
         // FULL keeps the same crash durability for the shared local state.
@@ -142,16 +165,38 @@ impl TelemetryDb {
         if version <= 36 {
             connection.execute_batch(MIGRATION_037).map_err(db_error)?;
         }
-        connection
+        if version <= 37 {
+            connection.execute_batch(MIGRATION_038).map_err(db_error)?;
+        }
+        if version <= 38 {
+            connection.execute_batch(MIGRATION_039).map_err(db_error)?;
+        }
+        // Retention reads before writing. Acquire the writer reservation first:
+        // a finishing background sample on another connection must not turn
+        // that read snapshot into an un-upgradable SQLITE_BUSY_SNAPSHOT.
+        let retention = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        retention
             .execute_batch(ARCHIVE_USAGE_SQL)
             .map_err(db_error)?;
+        retention.commit().map_err(db_error)?;
         Ok(Self {
             connection: Mutex::new(connection),
             usage_revision: AtomicU64::new(0),
             api_equivalent_cache: Mutex::new(None),
             quota_equivalent_cache: Mutex::new(None),
+            #[cfg(test)]
+            quota_window_reads: AtomicU64::new(0),
+            usage_filter_options_cache: Mutex::new(None),
+            #[cfg(test)]
+            usage_filter_option_reads: AtomicU64::new(0),
             usage_totals_cache: Mutex::new(None),
+            usage_report_cache: Mutex::new(None),
+            #[cfg(test)]
+            usage_report_builds: AtomicU64::new(0),
             open_duration_ms: started.elapsed().as_secs_f64() * 1_000.0,
+            quota_samples: Mutex::new(forecast::QuotaSamples::default()),
         })
     }
 
@@ -206,34 +251,5 @@ impl TelemetryDb {
 
     pub fn open_duration_ms(&self) -> f64 {
         self.open_duration_ms
-    }
-
-    pub fn record_performance(
-        &self,
-        name: &str,
-        duration_ms: f64,
-        context: Option<&str>,
-    ) -> Result<()> {
-        if !valid_performance_name(name)
-            || !duration_ms.is_finite()
-            || !(0.0..=600_000.0).contains(&duration_ms)
-            || context.is_some_and(|performance_context| {
-                !zenith_relay_core::is_ascii_ref(performance_context, 64)
-            })
-        {
-            return Err(LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "performance sample is invalid",
-            ));
-        }
-        self.connection
-            .lock()
-            .map_err(lock_error)?
-            .execute(
-                "INSERT INTO performance_samples(name, duration_ms, context) VALUES (?1, ?2, ?3)",
-                params![name, duration_ms, context],
-            )
-            .map_err(db_error)?;
-        Ok(())
     }
 }

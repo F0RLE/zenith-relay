@@ -5,7 +5,11 @@ impl TelemetryDb {
     ///
     /// A pure miss does not move the touch. The chat start and the latest
     /// earlier reported retention stay available outside the selected period.
-    pub fn cache_sessions(&self, query: &UsageQuery) -> Result<Vec<CacheSession>> {
+    pub fn cache_sessions(
+        &self,
+        query: &UsageQuery,
+        scope: Option<&CacheSessionScope>,
+    ) -> Result<Vec<CacheSession>> {
         let connection = self.lock_connection()?;
         let mut clauses = vec![
             "client_context_id IS NOT NULL".to_string(),
@@ -13,6 +17,23 @@ impl TelemetryDb {
                 .to_string(),
         ];
         let mut sql_parameters = Vec::new();
+        // Restrict the history before window functions and the result limit.
+        // Period filters stay outside: earlier starts and TTLs still matter.
+        let history_filter = if let Some(scope) = scope {
+            sql_parameters.push(SqlValue::Text(scope.client_context_id.clone()));
+            sql_parameters.push(SqlValue::Text(scope.candidate_id.clone()));
+            sql_parameters.push(scope.model.clone().map_or(SqlValue::Null, SqlValue::Text));
+            match scope.candidate_kind {
+                CacheSessionCandidateKind::Account => {
+                    "client_context_id = ? AND account_id = ? AND COALESCE(resolved_model, requested_model) IS ?"
+                }
+                CacheSessionCandidateKind::Source => {
+                    "client_context_id = ? AND account_id IS NULL AND source_id = ? AND COALESCE(resolved_model, requested_model) IS ?"
+                }
+            }
+        } else {
+            "client_context_id IS NOT NULL"
+        };
         if let Some(from_timestamp_ms) = query.from_ms {
             clauses.push("created_at >= datetime(? / 1000, 'unixepoch')".to_string());
             sql_parameters.push(SqlValue::Integer(zenith_relay_core::usage::sql_u64(
@@ -44,7 +65,7 @@ impl TelemetryDb {
                             COALESCE(resolved_model, requested_model)
                     ) AS started_at
                 FROM usage_sends
-                WHERE client_context_id IS NOT NULL
+                WHERE {history_filter}
             ), latest AS (
                 SELECT *
                 FROM (

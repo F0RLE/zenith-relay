@@ -49,6 +49,8 @@ fn unknown_tier_migration_reclassifies_retained_events_and_preserves_archives() 
         .unwrap()
         .execute_batch(
             "DROP VIEW usage_sends;
+         ALTER TABLE request_logs DROP COLUMN image_usage_json;
+         ALTER TABLE request_attempts DROP COLUMN image_usage_json;
          DROP INDEX request_attempts_created_at;
          DROP INDEX request_attempts_account_created;
          UPDATE usage_candidate_rollups SET price_class = 'standard',

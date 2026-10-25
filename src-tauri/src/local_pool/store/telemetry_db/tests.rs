@@ -2,16 +2,26 @@ use super::*;
 use zenith_relay_core::{
     ErrorOrigin, SelectionReason, TerminalOutputKind, ToolChoiceMode, WireApi,
 };
+mod filter_cache;
 mod filter_options;
+mod image_usage;
+mod lazy_pages;
 mod maintenance;
 mod performance;
+mod performance_samples;
 mod pricing;
+mod quota_cache;
+mod report_performance;
 mod reporting;
+mod retention_batches;
 mod rollups;
 mod send_usage;
+mod support;
 mod unknown_tiers;
+mod workloads;
+mod write_path;
 
-fn aggregate_test_event(
+pub(super) fn aggregate_test_event(
     request_id: &str,
     attempt: u16,
     input_tokens: u64,
@@ -56,6 +66,7 @@ fn aggregate_test_event(
         total_tokens: Some(input_tokens + output_tokens),
         upstream_error: None,
         quota_snapshot: None,
+        image_usage: None,
     }
 }
 
@@ -113,5 +124,6 @@ fn failed_fallback_test_event(request_id: &str) -> UsageEvent {
         total_tokens: None,
         upstream_error: None,
         quota_snapshot: None,
+        image_usage: None,
     }
 }

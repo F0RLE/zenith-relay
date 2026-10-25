@@ -2,7 +2,7 @@ use super::pricing_context;
 use crate::local_pool::{
     error::{CommandError, ErrorCode, LocalPoolError},
     state::DesktopState,
-    store::telemetry_db::{CacheSession, LocalUsagePage},
+    store::telemetry_db::{CacheSession, CacheSessionScope, LocalUsagePage},
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
@@ -11,17 +11,21 @@ use zenith_relay_core::protocol::UsageQuery;
 #[tauri::command]
 pub async fn get_local_usage_page(
     input: Option<UsageQuery>,
+    include_report: Option<bool>,
     state: State<'_, DesktopState>,
 ) -> Result<LocalUsagePage, CommandError> {
     // SQLite and pricing must not occupy the desktop event-loop thread.
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || load_local_usage_page(input, &state))
-        .await
-        .map_err(|_| LocalPoolError::new(ErrorCode::Io, "Local usage read was interrupted"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        load_local_usage_page(input, include_report.unwrap_or(true), &state)
+    })
+    .await
+    .map_err(|_| LocalPoolError::new(ErrorCode::Io, "Local usage read was interrupted"))?
 }
 
 fn load_local_usage_page(
     usage_query: Option<UsageQuery>,
+    include_report: bool,
     state: &DesktopState,
 ) -> Result<LocalUsagePage, CommandError> {
     let (gateway, sources, accounts) = {
@@ -35,33 +39,49 @@ fn load_local_usage_page(
     let catalog = state.pricing_catalog();
     let reference_catalog = state.model_metadata_catalog();
     let context = pricing_context(&gateway, &sources, &accounts, &reference_catalog);
-    let mut page = state
-        .telemetry
-        .usage_page_with_pricing(
-            &normalize_usage_query(usage_query.unwrap_or_default()),
-            &catalog,
-            &context,
-        )
-        .map_err(CommandError::from)?;
+    let query = normalize_usage_query(usage_query.unwrap_or_default());
+    let mut page = if include_report {
+        state
+            .telemetry
+            .usage_page_with_pricing(&query, &catalog, &context)
+    } else {
+        state
+            .telemetry
+            .usage_send_page_with_pricing(&query, &catalog, &context)
+    }
+    .map_err(CommandError::from)?;
     page.pricing.catalog_status = state.pricing_status();
     Ok(page)
 }
 
 #[tauri::command]
-pub fn clear_local_usage(state: State<'_, DesktopState>) -> Result<(), CommandError> {
-    state.telemetry.clear().map_err(Into::into)
+pub async fn clear_local_usage(state: State<'_, DesktopState>) -> Result<(), CommandError> {
+    let telemetry = state.telemetry.clone();
+    super::run_blocking(move || telemetry.clear())
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]
-pub fn get_local_cache_sessions(
+pub async fn get_local_cache_sessions(
     input: Option<UsageQuery>,
+    scope: Option<CacheSessionScope>,
     state: State<'_, DesktopState>,
 ) -> Result<Vec<CacheSession>, CommandError> {
-    let usage_query = input;
-    state
-        .telemetry
-        .cache_sessions(&normalize_usage_query(usage_query.unwrap_or_default()))
-        .map_err(CommandError::from)
+    // Session history may scan SQLite. Never block the desktop event loop
+    // while opening request details, even when another query owns the DB lock.
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        state
+            .telemetry
+            .cache_sessions(
+                &normalize_usage_query(input.unwrap_or_default()),
+                scope.as_ref(),
+            )
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|_| LocalPoolError::new(ErrorCode::Io, "Cache session read was interrupted"))?
 }
 
 fn normalize_usage_query(mut query: UsageQuery) -> UsageQuery {

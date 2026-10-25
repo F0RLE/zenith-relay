@@ -1,6 +1,6 @@
 use rusqlite::types::Value as SqlValue;
 use zenith_relay_core::{
-    protocol::{UsageQuery, UsageTotals},
+    protocol::{UsageQuery, UsageTotals, UsageWorkload},
     sql_like_contains_pattern, UsageEvent, WireApi,
 };
 
@@ -127,7 +127,8 @@ pub(in crate::local_pool::store::telemetry_db) fn apply_usage_totals_delta(
 }
 
 /// Physical sends contribute consumption; only the logical result contributes
-/// request counts and timings (attempt latency is elapsed from the same start).
+/// request counts and timings. Physical latency excludes waits between sends;
+/// the logical projection uses request timing when the executor recorded it.
 pub(in crate::local_pool::store::telemetry_db) fn consumption_totals(
     totals: UsageTotals,
 ) -> UsageTotals {
@@ -167,6 +168,7 @@ pub(in crate::local_pool::store::telemetry_db) fn is_unfiltered_all_time(
         && query.bucket_ms.is_none()
         && query.model_query.is_none()
         && query.source_or_account_query.is_none()
+        && query.workload.is_none()
         && query.wire_api.is_none()
         && query.transport.is_none()
         && query.success.is_none()
@@ -200,6 +202,27 @@ pub(in crate::local_pool::store::telemetry_db) fn usage_filter(
             SqlValue::Text(sql_like_contains_pattern(source_or_account_query));
         query_parameters.push(source_or_account_pattern.clone());
         query_parameters.push(source_or_account_pattern);
+    }
+    if let Some(workload) = query.workload {
+        // Existing records retain explicit task markers in error_category,
+        // including successful background requests. Unknown/unmarked records
+        // stay in conversation: model names and prompt contents are not evidence.
+        // The same predicate scopes logical outcomes AND every physical send.
+        clauses.push(
+            "CASE WHEN error_category IN ('codex_memory_extraction', 'codex_memory_consolidation', \
+             'codex_background_blocked_memory_extraction', 'codex_background_blocked_memory_consolidation') \
+             THEN 'memory' WHEN error_category IN ('codex_activity_summary', 'codex_task_title', 'codex_wake', \
+             'codex_background_blocked_activity_summary', 'codex_background_blocked_task_title', \
+             'codex_background_blocked_wake') THEN 'background' ELSE 'conversation' END = ?",
+        );
+        query_parameters.push(SqlValue::Text(
+            match workload {
+                UsageWorkload::Conversation => "conversation",
+                UsageWorkload::Memory => "memory",
+                UsageWorkload::Background => "background",
+            }
+            .to_string(),
+        ));
     }
     if let Some(wire_api) = query.wire_api {
         match wire_api {
