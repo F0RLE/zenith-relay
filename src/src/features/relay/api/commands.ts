@@ -50,6 +50,7 @@ import type {
 } from "./types";
 import { sanitizeFeedbackError } from "../state/feedback";
 import { createUsagePageReader } from "./usagePage";
+import type { WeeklyCapacityReport } from "./types/weeklyCapacity";
 
 export type LocalNetworkAccess = {
   enabled: boolean;
@@ -101,6 +102,8 @@ export const relayCommands = {
   localState: () => invoke<RuntimeSnapshot>("get_local_runtime_state"),
   localRuntimeOrder: () => invoke<CandidateRuntimeSnapshot[]>("get_local_runtime_order"),
   localUsagePage: readLocalUsagePage,
+  localWeeklyCapacity: (input: { fromMs: number; toMs: number; bucketMs: number; accountId?: string }) =>
+    invoke<WeeklyCapacityReport>("get_local_weekly_capacity", { input }),
   localCacheSessions: (usageQuery: UsageQuery = {}, scope?: Pick<CacheSessionRecord, "clientContextId" | "candidateKind" | "candidateId" | "model">) => invoke<CacheSessionRecord[]>("get_local_cache_sessions", {
     input: usageQuery, ...(scope ? { scope } : {}),
   }),

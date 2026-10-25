@@ -13,6 +13,7 @@ import { emptyUsageTotals, formatCompactNumber } from "../../usageTotals";
 import { getCachedOverviewAnalytics, isOverviewAnalyticsFresh, loadOverviewAnalytics } from "./overviewAnalyticsCache";
 import { analyticsFromPage, chartWindows, DAY_MS, HOUR_MS, localSamples, type Analytics, type AnalyticsScope, type Range } from "./overviewAnalyticsModel";
 import AnalyticsPanel from "./OverviewAnalytics";
+import WeeklyCapacityChart from "./WeeklyCapacityChart";
 
 export function OverviewPage() {
   const { t, i18n } = useTranslation();
@@ -177,6 +178,8 @@ export function OverviewPage() {
         scope={analyticsScopeSelection}
         setScope={setAnalyticsScope}
         scopeOptions={analyticsScopeOptions}
+        capacity={mode === "local" && runtimeReady && !analyticsScopeSelection.startsWith("source:")
+          ? <WeeklyCapacityChart windows={windows} revision={runtime?.weeklyCapacityRevision ?? 0} {...(analyticsScopeQuery ? { accountId: analyticsScopeQuery } : {})} /> : null}
       />
     {applicationDialog ? (
       <ApplicationPickerDialog

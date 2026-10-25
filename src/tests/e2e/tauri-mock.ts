@@ -4,6 +4,8 @@ import type { ApiModelPriceOverride, ModelSummary, SourceStats, UpstreamErrorDet
 import type { CacheContextDiagnostics, CacheSessionRecord, RoutingDiagnostics, ProxyPoolEntry, RelayMode, UsageQuery, UsageTotals, UsageTransport } from "../../src/features/relay/api/types";
 
 export type MockOptions = {
+  weeklyCapacity?: import("../../src/features/relay/api/types/weeklyCapacity").WeeklyCapacityReport;
+  weeklyCapacityError?: boolean;
   platform?: "windows" | "macos" | "linux";
   fullscreen?: boolean;
   locale?: "en" | "ru";
@@ -810,6 +812,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
               { clientContextId: "client_112233445566", candidateKind: "account", candidateId: usageAccount.id, startedAt: at(5 * 60 * 60_000), touchedAt: at(45 * 60_000), model: "gpt-6-sol", cacheWriteTtl: null },
               { clientContextId: "client_ff00ff00ff00", candidateKind: "account", candidateId: usageAccount.id, startedAt: at(40 * 60_000), touchedAt: at(3 * 60_000), model: "claude-haiku-4-5", cacheWriteTtl: null },
             ];
+          }
+          case "get_local_weekly_capacity": {
+            if (input.weeklyCapacityError) throw { code: "io", message: "Synthetic capacity error" };
+            return structuredClone(input.weeklyCapacity ?? { generatedAtMs: Date.now(), summaries: [], groups: [], events: [] });
           }
           case "get_local_usage_page": {
             const historyQuery = args.input as { requestId?: string; page?: number } | undefined;

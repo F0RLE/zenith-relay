@@ -189,11 +189,13 @@ test("Overview also distinguishes missing analytics from measured zero", async (
   const counters = page.locator(".overview-metrics strong");
   await expect(counters.nth(0)).toHaveText("—");
   await expect(counters.nth(3)).toHaveText("—");
-  await expect(page.locator(".overview-chart-stack")).toHaveCount(0);
+  await expect(page.locator(".overview-chart:not(.weekly-capacity)")).toHaveCount(0);
+  await expect(page.locator(".overview-chart.weekly-capacity")).toBeVisible();
   await releaseUsage(page, true);
   await expect(page.locator(".overview-analytics [role=alert]")).toBeVisible();
   await expect(counters.nth(0)).toHaveText("—");
-  await expect(page.locator(".overview-chart-stack")).toHaveCount(0);
+  await expect(page.locator(".overview-chart:not(.weekly-capacity)")).toHaveCount(0);
+  await expect(page.locator(".overview-chart.weekly-capacity")).toBeVisible();
   await page.getByRole("tab", { name: "Week", exact: true }).click();
   await expect(page.locator(".overview-analytics .data-placeholder")).toHaveCount(0);
   await releaseUsage(page);

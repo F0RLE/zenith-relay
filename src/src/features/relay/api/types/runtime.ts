@@ -19,6 +19,7 @@ export type ModelCatalogIdentity = Pick<ModelSummary, "catalogProvider" | "catal
 
 export type RuntimeSnapshot = {
   schemaVersion: number;
+  weeklyCapacityRevision?: number;
   gateway: {
     toolPolicy?: ToolPolicy;
     poolRouting?: PoolRoutingSnapshot;

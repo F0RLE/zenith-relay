@@ -20,6 +20,7 @@ type AnalyticsPanelProps = {
   scope: string;
   setScope: (scope: string) => void;
   scopeOptions: Array<{ value: string; label: string }>;
+  capacity?: ReactNode;
 };
 
 function AnalyticsPanel({
@@ -32,6 +33,7 @@ function AnalyticsPanel({
   scope,
   setScope,
   scopeOptions,
+  capacity,
 }: AnalyticsPanelProps) {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
@@ -102,7 +104,8 @@ function AnalyticsPanel({
         formatValue={(chartValue) => formatTokenSpeed(chartValue, locale, t("usage.tokensPerSecondUnit"))}
         formatAxis={(axisValue) => formatNumber(axisValue, locale, { maximumFractionDigits: 1 })}
       />
-    </div> : null}
+      {capacity}
+    </div> : capacity ? <div className="overview-chart-stack">{capacity}</div> : null}
   </section>;
 }
 
@@ -194,7 +197,7 @@ function TokenUsageTrend({ buckets, totals, windows }: { buckets: UsageTotals[];
     </div>
   </article>;
 }
-function OverviewChart({
+export function OverviewChart({
   icon,
   title,
   summary,
@@ -204,6 +207,12 @@ function OverviewChart({
   tone,
   formatValue,
   formatAxis,
+  controls,
+  bandValues,
+  details,
+  markers,
+  emptyLabel,
+  summaryHint,
 }: {
   icon: ReactNode;
   title: string;
@@ -214,15 +223,21 @@ function OverviewChart({
   tone: string;
   formatValue: (chartValue: number) => string;
   formatAxis: (axisValue: number) => string;
+  controls?: ReactNode;
+  bandValues?: Array<{ low: number; high: number } | null>;
+  details?: (index: number) => ReactNode;
+  markers?: Array<string | null>;
+  emptyLabel?: string;
+  summaryHint?: string;
 }) {
   const { t } = useTranslation();
   const measured = seriesValues.filter((chartValue): chartValue is number => chartValue != null);
-  const max = Math.max(0, ...measured) || 1;
+  const max = Math.max(0, ...measured, ...(bandValues?.map((value) => value?.high ?? 0) ?? [])) || 1;
   const axisLabels = [formatAxis(max), formatAxis(max / 2), "0"];
   const hasData = measured.some((chartValue) => chartValue > 0);
   const segments = lineSegments(seriesValues, max);
   return <article className={`overview-chart ${tone}`}>
-    <header><div className="overview-chart-title">{icon}<span><strong>{title}</strong></span></div><strong className="overview-chart-summary">{summary}</strong></header>
+    <header><div className="overview-chart-title">{icon}<span><strong>{title}</strong></span></div>{controls}<strong className="overview-chart-summary" data-relay-tooltip={summaryHint} tabIndex={summaryHint ? 0 : undefined} aria-label={summaryHint ? `${summary}: ${summaryHint}` : undefined}>{summary}</strong></header>
     <div className="overview-chart-body">
       <div className="overview-chart-y-axis" aria-hidden>{axisLabels.map((label, index) => <span key={index}>{label}</span>)}</div>
       <div className="overview-chart-plot">
@@ -241,19 +256,23 @@ function OverviewChart({
                 <li key={window.startMs}>
                   {variant === "bars" && chartValue != null ? (
                     <span tabIndex={0} className="overview-chart-bar" style={{ height: `${Math.max(3, ratio * 100)}%` }} aria-label={`${window.fullLabel}: ${label}`}>
-                      <span role="tooltip">{window.fullLabel}<strong>{label}</strong></span>
+                      <span role="tooltip">{window.fullLabel}<strong>{label}</strong>{details?.(index)}</span>
                     </span>
                   ) : null}
                   {variant === "line" && chartValue != null ? (
-                    <span tabIndex={0} className="overview-chart-dot" style={{ top: `${(1 - ratio) * 100}%` }} aria-label={`${window.fullLabel}: ${label}`}>
-                      <span role="tooltip">{window.fullLabel}<strong>{label}</strong></span>
-                    </span>
+                    <>
+                      {bandValues?.[index] ? <span aria-hidden className="overview-capacity-band" style={{ top: `${(1 - bandValues[index]!.high / max) * 100}%`, height: `${Math.max(2, (bandValues[index]!.high - bandValues[index]!.low) / max * 100)}%` }} /> : null}
+                      <span tabIndex={0} className="overview-chart-dot" style={{ top: `${(1 - ratio) * 100}%` }} aria-label={`${window.fullLabel}: ${label}`}>
+                        <span role="tooltip">{window.fullLabel}<strong>{label}</strong>{details?.(index)}</span>
+                      </span>
+                    </>
                   ) : null}
+                  {markers?.[index] ? <span tabIndex={0} className="overview-chart-dot overview-capacity-event" aria-label={markers[index] ?? undefined}><span role="tooltip">{window.fullLabel}<strong>{markers[index]}</strong></span></span> : null}
                 </li>
               );
             })}
           </ol>
-          {!hasData ? <span className="overview-chart-empty">{t("overview.noMeasurements")}</span> : null}
+          {!hasData ? <span className="overview-chart-empty">{emptyLabel ?? t("overview.noMeasurements")}</span> : null}
         </div>
         <div className="overview-chart-x-axis" style={{ gridTemplateColumns: `repeat(${windows.length}, minmax(0, 1fr))` }} aria-hidden>{windows.map((window) => <span key={window.startMs} data-visible={window.showLabel}>{window.label}</span>)}</div>
       </div>

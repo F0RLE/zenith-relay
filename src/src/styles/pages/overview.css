@@ -136,6 +136,69 @@
 .overview-chart.e2e-speed { --chart-color: #7650b1; }
 .overview-chart.cost { --chart-color: #ad4f82; }
 
+.overview-chart.weekly-capacity > header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 12px;
+}
+
+.weekly-capacity .overview-chart-summary {
+  grid-column: 2;
+  grid-row: 1;
+  cursor: help;
+}
+
+.overview-capacity-controls {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.overview-capacity-controls:empty { display: none; }
+.overview-capacity-plan { padding: 0 8px; color: var(--relay-muted); font-size: 11px; white-space: nowrap; }
+.overview-capacity-controls .relay-option-menu { flex: 0 1 auto; width: fit-content; min-width: 0; max-width: 100%; }
+.overview-capacity-controls .relay-option-trigger { width: auto; min-width: 0; max-width: min(240px, 100%); min-height: 28px; gap: 8px; padding-inline: 8px; font-size: 11px; }
+.overview-capacity-controls .relay-option-trigger > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.overview-capacity-band {
+  position: absolute;
+  left: 50%;
+  width: min(45%, 16px);
+  transform: translateX(-50%);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--chart-color) 20%, transparent);
+  pointer-events: none;
+}
+
+.overview-chart-dot.overview-capacity-event {
+  top: 100%;
+  border-color: var(--relay-muted);
+  border-radius: 2px;
+}
+
+.weekly-capacity .overview-chart-dot > [role="tooltip"] {
+  display: none;
+  min-width: 0;
+  width: max-content;
+  max-width: min(300px, 45vw);
+  overflow-wrap: anywhere;
+}
+
+.weekly-capacity .overview-chart-dot:hover > [role="tooltip"],
+.weekly-capacity .overview-chart-dot:focus-visible > [role="tooltip"] { display: flex; }
+
+.weekly-capacity .overview-chart-points li:nth-last-child(-n + 6) > .overview-chart-dot > [role="tooltip"] {
+  left: auto;
+  right: 0;
+  transform: translateY(0);
+}
+
+.weekly-capacity .overview-chart-dot > [role="tooltip"] small { font-size: 10px; }
+.weekly-capacity .overview-chart-empty { pointer-events: none; }
+
 .overview-chart + .overview-chart {
   border-top: 1px solid var(--relay-border);
 }
