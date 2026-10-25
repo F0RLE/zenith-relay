@@ -4,11 +4,6 @@ import { installTauriMock } from "./tauri-mock";
 for (const cancel of [false, true]) {
   test(`first navigation keeps real current content until the chunk is ready${cancel ? " and latest click wins" : ""}`, async ({ page }) => {
     await installTauriMock(page, { locale: "en", populated: true });
-    // Test a genuinely cold click independently of automatic idle warming.
-    await page.addInitScript(() => {
-      window.requestIdleCallback = () => 1;
-      window.cancelIdleCallback = () => undefined;
-    });
     let release!: () => void;
     let requested = false;
     const waiting = new Promise<void>((resolve) => { release = resolve; });
@@ -20,6 +15,7 @@ for (const cancel of [false, true]) {
     try {
       await page.goto("/");
       await expect(page.locator(".overview-chart-stack")).toBeVisible();
+      await expect(page.locator(".overview-metrics strong").first()).toHaveText("1");
       const counters = await page.locator(".overview-metrics").textContent();
       await page.getByRole("button", { name: "Pool", exact: true }).click();
       await expect.poll(() => requested).toBe(true);

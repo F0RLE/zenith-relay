@@ -4,6 +4,23 @@ const DATABASE = "relay.displaySnapshots.v1";
 type StoredSnapshot<T> = { key: string; value: T; savedAt: number };
 let database: Promise<IDBDatabase | null> | undefined;
 
+// DTOs contain JSON values. Compare without serializing another large string;
+// bound work/depth even for malformed data restored from browser storage.
+function sameDisplayValue(left: unknown, right: unknown) {
+  let remaining = 50_000;
+  const equal = (a: unknown, b: unknown, depth: number): boolean => {
+    if (--remaining < 0) return false;
+    if (Object.is(a, b)) return true;
+    if (depth > 32 || !a || !b || typeof a !== "object" || typeof b !== "object") return false;
+    if (Array.isArray(a) !== Array.isArray(b)) return false;
+    if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((value, index) => equal(value, b[index], depth + 1));
+    const keys = Object.keys(a);
+    return keys.length === Object.keys(b).length && keys.every((key) => Object.hasOwn(b, key)
+      && equal((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key], depth + 1));
+  };
+  return equal(left, right, 0);
+}
+
 function openDatabase() {
   return database ??= new Promise<IDBDatabase | null>((resolve) => {
     try {
@@ -44,13 +61,24 @@ export function createDisplaySnapshotCache<T>(
     await new Promise<void>((resolve) => {
       try {
         const store = db.transaction(storeName).objectStore(storeName);
-        const request = key === undefined ? store.index("savedAt").getAll() : store.get(key);
+        // Read the bounded newest records, not every persisted page followed by
+        // a slice. Selected-page restoration always performs a single-key read.
+        const request = key === undefined ? store.index("savedAt").openCursor(null, "prev") : store.get(key);
+        const restored: StoredSnapshot<unknown>[] = [];
         request.onerror = () => resolve();
         request.onsuccess = () => {
+          if (generation !== requestedGeneration) { resolve(); return; }
+          if (key === undefined) {
+            const cursor = request.result as IDBCursorWithValue | null;
+            if (cursor) {
+              restored.unshift(cursor.value as StoredSnapshot<unknown>);
+              if (restored.length < memoryLimit) { cursor.continue(); return; }
+            }
+          }
           if (generation === requestedGeneration) {
             const fresh = key === undefined ? new Map(entries) : [];
             const records = key === undefined
-              ? (request.result as StoredSnapshot<unknown>[]).slice(-memoryLimit)
+              ? restored
               : [request.result as StoredSnapshot<unknown> | undefined];
             for (const record of records) {
               try {
@@ -106,12 +134,17 @@ export function createDisplaySnapshotCache<T>(
     },
     restore: () => hydration ??= restore(),
     remember(key: string, value: T) {
+      const previous = entries.get(key);
+      const unchanged = entries.has(key) && sameDisplayValue(previous, value);
       entries.delete(key);
-      entries.set(key, value);
+      entries.set(key, unchanged ? previous! : value);
       trim();
+      if (unchanged) return;
       pending.set(key, { key, value, savedAt: Date.now() });
       while (pending.size > limit) pending.delete(pending.keys().next().value!);
-      timer ??= setTimeout(() => { void flush(); }, 250);
+      // Only a display preview is delayed; native request/state durability is
+      // independent. Hide/page-exit still flushes the latest pending value.
+      timer ??= setTimeout(() => { void flush(); }, 1_000);
     },
     async clear() {
       generation += 1;

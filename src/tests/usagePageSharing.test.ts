@@ -21,6 +21,23 @@ const usageEvent = (fields: Partial<LocalUsage> = {}): LocalUsage => ({
 });
 
 describe("usage preview memory", () => {
+  test("unchanged IPC copies reuse the preview while changed facts replace it", async () => {
+    const valid = (value: unknown): value is LocalUsagePage => value != null && typeof value === "object";
+    const preview = createDisplaySnapshotCache("usage", 8, valid, 1);
+    const original = report({ events: [usageEvent()] });
+    try {
+      preview.remember("selected", original);
+      preview.remember("selected", structuredClone(original));
+      expect(preview.peek("selected")).toBe(original);
+      const changed = structuredClone(original);
+      changed.events[0].totalTokens = 3;
+      preview.remember("selected", changed);
+      expect(preview.peek("selected")).toBe(changed);
+      preview.remember("selected", { ...changed, events: [] });
+      expect(preview.peek("selected")?.events).toEqual([]);
+    } finally { await preview.clear(); }
+  });
+
   test("keeps one hot preview without changing the default cache limit", async () => {
     const valid = (value: unknown): value is { page: number } => value != null && typeof value === "object" && "page" in value;
     const preview = createDisplaySnapshotCache("usage", 8, valid, 1);

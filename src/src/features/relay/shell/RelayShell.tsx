@@ -11,8 +11,6 @@ import { Button, EmptyState, ErrorDetailsDialog, IconButton } from "../component
 import { useAppUpdates, type UpdateCheckState } from "../hooks/useAppUpdates";
 import { UpdateDialog } from "./UpdateDialog";
 import { HostedDevelopmentPage } from "../pages/hosted/HostedDevelopmentPage";
-import { warmPageModules } from "./warmPageModules";
-import { usagePreview } from "../state/usagePreview";
 
 function lazyNamed<P extends object>(load: () => Promise<ComponentType<P>>) {
   let pending: Promise<{ default: ComponentType<P> }> | undefined;
@@ -71,13 +69,6 @@ export function RelayShell() {
     });
   }, [setPage]);
   useEffect(() => () => { navigationRevision.current += 1; }, [mode, page]);
-  useEffect(() => {
-    if (mode !== "local" || !runtimeReady) return;
-    return warmPageModules([
-      ...Object.values(pageModules).map((module) => module.prepare),
-      () => usagePreview.restore(),
-    ]);
-  }, [mode, runtimeReady]);
   useEffect(() => {
     let secondFrame = 0;
     const firstFrame = requestAnimationFrame(() => {

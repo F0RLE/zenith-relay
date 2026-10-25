@@ -139,7 +139,7 @@ test("migrating a saved legacy mode does not leave a stuck loader", async ({ pag
   await expect(page.locator("#root")).not.toHaveAttribute("inert");
 });
 
-test("secondary code warms after readiness without mounting pages or preloading reports", async ({ page }) => {
+test("secondary pages load only on navigation intent, not idle readiness", async ({ page }) => {
   await page.clock.install();
   const requested: string[] = [];
   page.on("request", (request) => requested.push(request.url()));
@@ -154,8 +154,10 @@ test("secondary code warms after readiness without mounting pages or preloading 
   await page.clock.fastForward(20_000);
   await expect(page.locator('.relay-shell[data-page="pool"] .relay-page')).toBeVisible();
   await page.clock.fastForward(10_000);
-  await expect.poll(() => requested.some((url) => /\/UsagePage-/.test(url))).toBe(true);
+  expect(requested.some((url) => /\/UsagePage-/.test(url))).toBe(false);
   expect(requested.some((url) => /\/ImportDialog-/.test(url))).toBe(false);
+  await page.getByRole("button", { name: "Usage", exact: true }).focus();
+  await expect.poll(() => requested.some((url) => /\/UsagePage-/.test(url))).toBe(true);
   const commands = await page.evaluate(() => (window as unknown as {
     __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { range?: string } } }>;
   }).__TAURI_TEST_INVOKES__);

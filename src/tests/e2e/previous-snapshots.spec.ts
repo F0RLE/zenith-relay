@@ -140,8 +140,19 @@ test("Usage reload hydrates only its selected saved page, not all eight previews
       if (this.objectStore.name === "usage") reads.bulk += 1;
       return getAll.apply(this, args);
     };
+    const openCursor = IDBIndex.prototype.openCursor;
+    IDBIndex.prototype.openCursor = function (...args) {
+      if (this.objectStore.name === "usage") reads.bulk += 1;
+      return openCursor.apply(this, args);
+    };
   });
   await page.reload();
+  await expect(page.locator(".overview-metrics")).toBeVisible();
+  // Allow idle callbacks/cache timers to run: unvisited Usage stays dormant.
+  await page.waitForTimeout(1_500);
+  expect(await page.evaluate(() => (window as unknown as {
+    __USAGE_SNAPSHOT_READS__: { keys: string[]; bulk: number };
+  }).__USAGE_SNAPSHOT_READS__)).toEqual({ keys: [], bulk: 0 });
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await expect(page.locator(".usage-request-table tbody tr")).toHaveText(row!);
   const reads = await page.evaluate(() => (window as unknown as { __USAGE_SNAPSHOT_READS__: { keys: string[]; bulk: number } }).__USAGE_SNAPSHOT_READS__);
