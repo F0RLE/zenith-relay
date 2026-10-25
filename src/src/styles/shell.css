@@ -148,7 +148,7 @@
   max-width: 100%;
   min-height: 24px;
   height: 24px;
-  padding: 0 6px;
+  padding: 0 4px;
   gap: 4px;
   border: 0;
   border-radius: 4px;
@@ -170,7 +170,7 @@
   display: inline-flex;
   align-items: center;
   overflow: hidden;
-  padding: 0 6px;
+  padding: 0 4px;
   border: 0;
   border-radius: 4px;
   background: color-mix(in srgb, var(--plan-accent) 16%, var(--relay-surface));

@@ -8,21 +8,21 @@
 
 .usage-scope-controls {
   display: grid;
-  --usage-scope-columns: 124px 160px repeat(2, minmax(0, 1fr));
+  --usage-scope-columns: 140px 160px repeat(2, minmax(0, 1fr));
   grid-template-columns: var(--usage-scope-columns);
   gap: 8px;
 }
 
 .usage-scope-controls[data-filter-count="3"] {
-  --usage-scope-columns: 124px 160px minmax(0, 1fr);
+  --usage-scope-columns: 140px 160px minmax(0, 1fr);
 }
 
 .usage-scope-controls[data-filter-count="5"] {
-  --usage-scope-columns: 124px 160px 124px repeat(2, minmax(0, 1fr));
+  --usage-scope-columns: 140px 160px 124px repeat(2, minmax(0, 1fr));
 }
 
 .usage-scope-controls[data-filter-count="4"]:has(> .usage-status-menu) {
-  --usage-scope-columns: 124px 160px 124px minmax(0, 1fr);
+  --usage-scope-columns: 140px 160px 124px minmax(0, 1fr);
 }
 
 .usage-scope-controls:has(> .usage-clear-filters) {
@@ -538,7 +538,7 @@
 .usage-request-table col[data-column="model"] { width: 26%; }
 .usage-request-table col[data-column="connection"] { width: 26%; }
 .usage-request-table col[data-column="timing"] { width: 18%; }
-.usage-request-table col[data-column="speed"] { width: 92px; }
+.usage-request-table col[data-column="speed"] { width: 104px; }
 .usage-request-table col[data-column="tokens"] { width: 76px; }
 .usage-request-table col[data-column="equivalent"] { width: 12%; }
 .usage-request-table col[data-column="request"] { width: 110px; }

@@ -167,7 +167,8 @@ for (const mode of ["local"] as const) {
 
     await page.getByRole("button", { name: "Pool", exact: true }).click();
     await expect(page.locator('.pool-member-card .account-transport-badge')).toHaveCount(0);
-    await expect(page.locator(".pool-controls").getByRole("checkbox")).toHaveCount(0);
+    await expect(page.locator(".pool-controls").getByRole("checkbox")).toHaveAccessibleName("Select all pool members");
+    await expect(transport).toHaveCount(0);
     await page.getByRole("radio", { name: "Fast", exact: true }).click();
     await expect(page.getByRole("radio", { name: "Fast", exact: true })).toBeEnabled();
     await page.getByRole("button", { name: "Access", exact: true }).click();
