@@ -1,11 +1,20 @@
 use std::env;
 use std::fs;
 
-use super::persist::{
-    clear_last_stages, ensure_layout, persist_last_stage_at, read_debug_marker, read_latest_stage,
-};
+use super::persist::{clear_last_stages, ensure_layout, read_debug_marker, read_latest_stage};
 use super::*;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+pub(super) fn test_root(label: &str) -> PathBuf {
+    env::temp_dir().join(format!(
+        "zenith-relay-diagnostics-{label}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
 
 #[test]
 fn identifiers_are_stable_but_not_reversible() {
@@ -149,7 +158,7 @@ fn interrupted_stage_marker_survives_and_is_cleared_after_clean_shutdown() {
         stage: "runtime_sync_started".to_string(),
         details: BTreeMap::from([("account".to_string(), "id_synthetic".to_string())]),
     };
-    persist_last_stage_at(&root, &value);
+    persist::Writers::default().stage.write(&root, &value);
     let loaded = read_latest_stage(&root).expect("stage marker");
     assert_eq!(loaded.operation, value.operation);
     assert_eq!(loaded.stage, value.stage);

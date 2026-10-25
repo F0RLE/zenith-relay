@@ -1,20 +1,23 @@
 use crate::local_pool::{
     accounts::proxy::{common_proxy_available, common_proxy_pool_id, ProxyPool},
     error::CommandError,
-    state::DesktopState,
+    state::{DesktopState, SnapshotInputs},
 };
 use crate::platform;
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 use zenith_relay_core::protocol::{
-    apply_model_display_order_with_catalog, apply_model_metadata,
-    apply_pool_model_configuration_with_context, pool_candidate_count,
+    apply_model_metadata, apply_pool_model_configuration_with_context, pool_candidate_count,
     pool_model_summaries_with_pricing, pool_pricing_source_summary, DesktopCapabilities,
-    GatewaySummary, PoolModelConfigurationInput, RuntimeStateSnapshot,
+    GatewaySummary, ModelDisplayProjection, PoolModelConfigurationInput, RuntimeStateSnapshot,
 };
-use zenith_relay_core::{unix_time_ms, PricingMetadata};
+use zenith_relay_core::{unix_time_ms, GatewayRuntime, PricingMetadata};
 
 mod members;
+#[cfg(test)]
+mod performance_tests;
 mod summary;
+mod timing;
+mod worker;
 use members::{
     append_missing_runtime_warnings, project_account_summaries, project_quota_window_usages,
     project_source_summaries, AccountProjectionContext,
@@ -29,15 +32,38 @@ pub(crate) async fn build_local_runtime_state(
     state: &DesktopState,
 ) -> Result<RuntimeStateSnapshot, CommandError> {
     let started = Instant::now();
+    let mut timing = timing::SnapshotTiming::new();
+    // Bound preparation per state before reading inputs. Waiting callers must
+    // project fresh inputs, not queue stale inventories or blocking workers.
+    let permit = state.runtime_snapshot_permit().await?;
+    timing.mark("worker_queue");
     let inputs = state.snapshot_inputs().await?;
-    let running = inputs.running;
+    timing.mark("inputs");
     let runtime = state.gateway.runtime().await;
+    timing.mark("runtime");
+    let state = state.clone();
+    worker::run(permit, move || {
+        timing.mark("worker_dispatch");
+        project_local_runtime_state(&state, inputs, runtime, started, timing)
+    })
+    .await
+}
+
+fn project_local_runtime_state(
+    state: &DesktopState,
+    inputs: SnapshotInputs,
+    runtime: Option<Arc<GatewayRuntime>>,
+    started: Instant,
+    mut timing: timing::SnapshotTiming,
+) -> Result<RuntimeStateSnapshot, CommandError> {
+    let running = inputs.running;
     let routing_order = runtime
         .as_ref()
         .map(|runtime| {
             runtime.candidate_runtime_order_for_key(super::super::pool::SYSTEM_GATEWAY_KEY_ID)
         })
         .unwrap_or_default();
+    timing.mark("routing");
     let common_proxy_available = common_proxy_available(&inputs.gateway);
     let snapshot_at_ms = unix_time_ms();
     let catalog = state.pricing_catalog();
@@ -48,19 +74,24 @@ pub(crate) async fn build_local_runtime_state(
         &inputs.accounts,
         &model_metadata,
     );
+    timing.mark("pricing_context");
     let equivalents = state
         .telemetry
         .api_equivalents_with_pricing(&catalog, &pricing)?;
+    timing.mark("usage_totals");
     let quota_window_usages =
         project_quota_window_usages(&inputs.accounts, &state.telemetry, &catalog, &pricing)?;
+    timing.mark("quota_windows");
     // The pool stores the stable proxy identity separately from account credentials.
     // Use it only for UI provenance; request dispatch still resolves the effective URL.
     let proxy_pool = ProxyPool::load().unwrap_or_default();
     let mut source_summaries =
         project_source_summaries(&inputs, &routing_order, &equivalents, &model_metadata)?;
+    timing.mark("source_summaries");
     for source in &mut source_summaries {
         source.resolve_model_prices(&catalog, &pricing);
     }
+    timing.mark("source_prices");
     let mut account_summaries = project_account_summaries(AccountProjectionContext {
         state,
         inputs: &inputs,
@@ -71,6 +102,7 @@ pub(crate) async fn build_local_runtime_state(
         common_proxy_available,
         snapshot_at_ms,
     })?;
+    timing.mark("account_summaries");
     let mut inputs = inputs;
     let mut warnings = std::mem::take(&mut inputs.warnings);
     append_missing_runtime_warnings(
@@ -86,6 +118,7 @@ pub(crate) async fn build_local_runtime_state(
         &catalog,
         &pricing,
     );
+    timing.mark("pool_models");
     apply_model_metadata(&mut models, &model_metadata);
     apply_pool_model_configuration_with_context(
         &mut models,
@@ -99,16 +132,14 @@ pub(crate) async fn build_local_runtime_state(
             runtime: runtime.as_deref(),
         },
     );
-    apply_model_display_order_with_catalog(
-        &mut models,
-        &inputs.gateway.model_display_order,
-        &model_metadata,
-    );
-    zenith_relay_core::protocol::apply_member_model_display_order(
+    timing.mark("model_configuration");
+    let mut display_projection = ModelDisplayProjection::new(&model_metadata);
+    display_projection.apply_model_order(&mut models, &inputs.gateway.model_display_order);
+    timing.mark("display_order");
+    display_projection.apply_member_order(
         &mut source_summaries,
         &mut account_summaries,
         &inputs.gateway.model_display_order,
-        &model_metadata,
     );
     let visible_model_ids = models
         .iter()
@@ -135,7 +166,6 @@ pub(crate) async fn build_local_runtime_state(
         schema_version: crate::local_pool::models::CURRENT_SCHEMA_VERSION,
         gateway: GatewaySummary {
             tool_policy: inputs.gateway.tool_policy.clone(),
-            request_timezone: inputs.gateway.request_timezone.clone(),
             pool_routing: Some(zenith_relay_core::protocol::pool_routing_summary(
                 inputs.gateway.pool_routing.as_ref(),
                 &source_summaries,
@@ -149,11 +179,10 @@ pub(crate) async fn build_local_runtime_state(
             default_service_tier: inputs.gateway.default_service_tier,
             image_base_model: inputs.gateway.image_base_model.clone(),
             models,
-            model_catalog: zenith_relay_core::protocol::member_model_catalog(
+            model_catalog: display_projection.member_catalog(
                 &source_summaries,
                 &account_summaries,
                 &inputs.gateway.model_display_order,
-                &model_metadata,
             ),
             common_proxy_configured: inputs.gateway.common_proxy_configured,
             common_proxy_available,
@@ -180,10 +209,7 @@ pub(crate) async fn build_local_runtime_state(
         warnings,
         pricing: pricing_metadata,
     };
-    state.record_performance_async(
-        "full_snapshot_native",
-        started.elapsed().as_secs_f64() * 1_000.0,
-        Some("local"),
-    );
+    timing.mark("catalog_projection");
+    timing.finish(state, started.elapsed());
     Ok(response)
 }

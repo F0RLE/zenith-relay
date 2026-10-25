@@ -104,10 +104,13 @@ pub async fn launch_codex_source(
 }
 
 #[tauri::command]
-pub fn list_codex_profile_snapshots(
+pub async fn list_codex_profile_snapshots(
     state: State<'_, DesktopState>,
 ) -> Result<snapshots::ProfileSnapshotList, CommandError> {
-    snapshots::list(&state.profile_backup_root()).map_err(Into::into)
+    let backup_root = state.profile_backup_root();
+    super::super::run_blocking(move || snapshots::list(&backup_root))
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]

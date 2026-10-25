@@ -305,17 +305,23 @@ fn neutral_request_failure_does_not_degrade_the_account() {
     assert_eq!(account.consecutive_failures, 0);
 }
 #[test]
-fn model_entitlement_is_local_but_edge_challenges_degrade_the_account() {
+fn route_failures_preserve_account_health_but_explicit_account_failures_do_not() {
     for (category, expected_health, expected_error) in [
         (
             "upstream_usage_not_included",
             AccountHealthState::Healthy,
             None,
         ),
+        ("upstream_edge_challenge", AccountHealthState::Healthy, None),
         (
-            "upstream_edge_challenge",
+            "upstream_forbidden",
             AccountHealthState::Degraded,
-            Some("upstream_edge_challenge"),
+            Some("upstream_forbidden"),
+        ),
+        (
+            "upstream_account_disabled",
+            AccountHealthState::Blocked,
+            Some("upstream_account_disabled"),
         ),
     ] {
         let mut account = account_record(category);

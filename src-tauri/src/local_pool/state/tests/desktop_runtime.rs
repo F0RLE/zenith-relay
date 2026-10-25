@@ -132,6 +132,78 @@ fn opening_storage_preserves_accounts_without_starting_provider_work() {
     std::fs::remove_dir_all(root).unwrap();
 }
 #[tokio::test]
+async fn model_catalog_hints_require_started_current_automatic_refresh() {
+    let root = temp_root("catalog-hint-lifecycle");
+    let state = DesktopState::open(root.clone()).unwrap();
+    state
+        .store()
+        .unwrap()
+        .upsert_account(account_record("account-1"))
+        .unwrap();
+    let hint = state.runtime_model_catalog_callback();
+    assert!(
+        !hint("account-1".into(), 0),
+        "startup must not start discovery"
+    );
+    state.refresh_started.store(true, Ordering::Release);
+    assert!(
+        !hint("account-1".into(), 0),
+        "unregistered work must not start"
+    );
+    let identity = state
+        .store()
+        .unwrap()
+        .account_refresh_scope("account-1")
+        .unwrap()
+        .1
+        .identity();
+    state
+        .refresh
+        .register(
+            RefreshRegistration {
+                identity,
+                kind: RefreshKind::Models,
+                origin: "https://provider.example.test".into(),
+                active: true,
+                automatic: true,
+                due_now: false,
+            },
+            |_| {
+                Box::pin(async {
+                    RefreshResult {
+                        refresh_value: Err(LocalPoolError::invalid_state("synthetic read")),
+                        outcome: RefreshOutcome::Success,
+                    }
+                })
+            },
+        )
+        .unwrap();
+    assert!(hint("account-1".into(), 0));
+    {
+        let mut store = state.store().unwrap();
+        assert!(
+            !hint("account-1".into(), 0),
+            "a busy store must not block the response"
+        );
+        let mut disabled = store.account("account-1").unwrap().clone();
+        disabled.account.enabled = false;
+        store.upsert_account(disabled).unwrap();
+    }
+    assert!(
+        !hint("account-1".into(), 0),
+        "disabled accounts must not refresh"
+    );
+    assert!(!hint("missing".into(), 0));
+    state.refresh.shutdown().await;
+    drop(state);
+    assert!(
+        !hint("account-1".into(), 0),
+        "callbacks must not retain their host"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn setup_guard_serializes_mutations() {
     let root = std::env::temp_dir().join(format!("zenith-relay-lock-{}", uuid::Uuid::new_v4()));
     let state = Arc::new(DesktopState::open(root.clone()).unwrap());

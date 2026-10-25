@@ -16,6 +16,21 @@ fn model(id: &str, native: WireApi) -> ModelSummary {
 }
 
 #[test]
+fn interactions_only_models_are_not_advertised_to_an_unsupported_sdk() {
+    let mut native = model("native-interactions", WireApi::GeminiInteractions);
+    native.protocol_routes = vec![ModelProtocolRoute {
+        client_wire_api: WireApi::GeminiInteractions,
+        upstream_wire_api: WireApi::GeminiInteractions,
+        features: BTreeMap::new(),
+        reasoning_efforts: Vec::new(),
+    }];
+    let supported = model("supported", WireApi::Gemini);
+    let selected = super::super::models::model_ids(&[native, supported]);
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].id, "supported");
+}
+
+#[test]
 fn groups_new_models_by_native_sdk_and_preserves_existing_selection_and_options() {
     let models = [
         model("open", WireApi::Responses),

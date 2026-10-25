@@ -123,6 +123,7 @@ fn account_record() -> LocalAccountRecord {
             last_used_at_ms: None,
             last_error_code: None,
         },
+        image_pool_enabled: false,
         provider_family: Some("openai".into()),
         purchase_cost_micro_usd: None,
         recovery: None,

@@ -24,13 +24,18 @@ use zenith_relay_core::{
             RefreshIdentity, RefreshKind,
         },
     },
-    UsageCallback, UsageEvent,
+    UsageEvent,
 };
 
 mod account_state;
+mod worker;
+
+pub(super) use worker::offload;
 
 pub(super) use account_state::apply_account_usage_state;
 use account_state::{expire_account_access, persisted_auth_state};
+
+type TimedUsageCallback = Arc<dyn Fn(UsageEvent, chrono::DateTime<chrono::Utc>) + Send + Sync>;
 
 pub(crate) struct DesktopUsageWriter {
     telemetry: Arc<TelemetryDb>,
@@ -85,7 +90,7 @@ impl DesktopUsageWriter {
         }
     }
 
-    pub(crate) fn callback(&self) -> UsageCallback {
+    pub(crate) fn callback(&self) -> TimedUsageCallback {
         let telemetry = self.telemetry.clone();
         let store = self.store.clone();
         let credentials = self.credentials.clone();
@@ -95,20 +100,22 @@ impl DesktopUsageWriter {
         let failed = self.failed.clone();
         let wake_notify = self.wake_notify.clone();
         let state_events = self.state_events.clone();
-        Arc::new(move |event| {
-            if event
-                .routing
-                .as_ref()
-                .and_then(|routing| routing.attempt_outcome)
-                == Some(zenith_relay_core::AttemptOutcome::RetryAuthorization)
+        Arc::new(move |event, observed_at| {
+            if event.is_request_completion()
+                || event
+                    .routing
+                    .as_ref()
+                    .and_then(|routing| routing.attempt_outcome)
+                    == Some(zenith_relay_core::AttemptOutcome::RetryAuthorization)
             {
                 if telemetry.record(&event).is_err() {
                     failed.fetch_add(1, Ordering::Relaxed);
+                } else if event.is_request_completion() {
+                    state_events.emit_usage_recorded();
                 }
                 return;
             }
             // Keep the local write synchronous so the usage callback's state contract remains durable.
-            let observed_at = chrono::Utc::now();
             let observed_at_ms = u64::try_from(observed_at.timestamp_millis()).unwrap_or_default();
             let observed_at = observed_at.to_rfc3339();
             let account_id = event.account_id.clone();

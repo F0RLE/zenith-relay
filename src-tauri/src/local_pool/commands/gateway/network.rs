@@ -51,7 +51,7 @@ fn network_addresses<'a>(
     addresses
 }
 
-fn snapshot(state: &DesktopState) -> Result<NetworkAccess> {
+fn read_snapshot(state: &DesktopState) -> Result<NetworkAccess> {
     let settings = state.store()?.gateway().clone();
     let networks = Networks::new_with_refreshed_list();
     Ok(NetworkAccess {
@@ -69,11 +69,16 @@ fn snapshot(state: &DesktopState) -> Result<NetworkAccess> {
     })
 }
 
+async fn snapshot(state: &DesktopState) -> Result<NetworkAccess> {
+    let state = state.clone();
+    super::super::run_blocking(move || read_snapshot(&state)).await
+}
+
 #[tauri::command]
-pub fn get_local_network_access(
+pub async fn get_local_network_access(
     state: State<'_, DesktopState>,
 ) -> std::result::Result<NetworkAccess, CommandError> {
-    snapshot(&state).map_err(Into::into)
+    snapshot(&state).await.map_err(Into::into)
 }
 
 pub(super) async fn update(
@@ -102,7 +107,7 @@ pub(super) async fn update(
         state.store()?.replace_gateway(settings)?;
         super::super::sync_gateway_or_rollback(state, old).await?;
     }
-    snapshot(state)
+    snapshot(state).await
 }
 
 #[tauri::command]

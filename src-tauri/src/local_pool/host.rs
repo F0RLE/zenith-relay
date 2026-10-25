@@ -162,6 +162,16 @@ impl GatewayManager {
         else {
             return false;
         };
+        // Re-publishing the same snapshot is a no-op, not a replacement. In
+        // particular, never retire the runtime that remains in the listener.
+        if gateway
+            .routes
+            .borrow()
+            .as_ref()
+            .is_some_and(|previous| Arc::ptr_eq(&previous.runtime, &runtime))
+        {
+            return true;
+        }
         let next = GatewayRoutes::new(runtime, scope);
         if let Some(previous) = gateway.routes.borrow().as_ref() {
             previous.runtime.retire_for_replacement();
@@ -421,6 +431,34 @@ mod tests {
             .iter()
             .all(|candidate| !candidate.available));
         drop(stalled_client);
+        manager.stop().await;
+    }
+
+    #[tokio::test]
+    async fn publishing_the_same_runtime_keeps_its_candidates_and_listener_alive() {
+        let manager = GatewayManager::default();
+        let runtime = test_runtime("source_one", "model-one", "key-one");
+        let address = manager.start(runtime.clone(), 0).await.unwrap();
+        let before = runtime.candidate_runtime_order_for_key("local-source_one");
+        assert!(before.iter().any(|candidate| candidate.available));
+        assert!(
+            manager
+                .replace_runtime(runtime.clone(), address.port())
+                .await
+        );
+        assert!(Arc::ptr_eq(&manager.runtime().await.unwrap(), &runtime));
+        assert_eq!(manager.address().await, Some(address));
+        assert!(runtime
+            .candidate_runtime_order_for_key("local-source_one")
+            .iter()
+            .any(|candidate| candidate.available));
+        let body = models_response(
+            &reqwest::Client::new(),
+            &format!("http://{address}/v1/models"),
+            "key-one",
+        )
+        .await;
+        assert!(body.contains("model-one"));
         manager.stop().await;
     }
 

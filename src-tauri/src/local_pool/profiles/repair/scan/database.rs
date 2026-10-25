@@ -4,14 +4,15 @@ pub(in crate::local_pool::profiles::repair) fn collect_history_databases(
     root: &Path,
     seen: &mut HashSet<PathBuf>,
 ) -> Result<Vec<PathBuf>, String> {
-    let sqlite_directory = root.join("sqlite");
-    let mut candidates = vec![
-        root.join("state_5.sqlite"),
-        sqlite_directory.join("state_5.sqlite"),
-    ];
-    if sqlite_directory.is_dir() {
-        let mut discovered = Vec::new();
-        for directory_entry in fs::read_dir(&sqlite_directory).map_err(io_error)? {
+    let mut candidates = Vec::new();
+    // Codex versions and Desktop catalogs use different database filenames.
+    // Discover both supported locations; scan_database checks their schema and
+    // only selects rows associated with this profile's inspected rollouts.
+    for directory in [root.to_path_buf(), root.join("sqlite")] {
+        if !directory.is_dir() {
+            continue;
+        }
+        for directory_entry in fs::read_dir(&directory).map_err(io_error)? {
             let directory_entry = directory_entry.map_err(io_error)?;
             let path = directory_entry.path();
             let metadata = fs::symlink_metadata(&path).map_err(io_error)?;
@@ -19,12 +20,11 @@ pub(in crate::local_pool::profiles::repair) fn collect_history_databases(
                 && !metadata.file_type().is_symlink()
                 && is_sqlite_database_path(&path)
             {
-                discovered.push(path);
+                candidates.push(path);
             }
         }
-        discovered.sort();
-        candidates.extend(discovered);
     }
+    candidates.sort();
 
     let mut databases = Vec::new();
     for path in candidates {

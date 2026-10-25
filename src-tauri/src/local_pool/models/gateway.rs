@@ -24,8 +24,6 @@ pub struct GatewaySettings {
     pub account_routes: Vec<AccountRouteGroup>,
     #[serde(default)]
     pub tool_policy: zenith_relay_core::ToolPolicy,
-    #[serde(default)]
-    pub request_timezone: zenith_relay_core::RequestTimezonePolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_routing: Option<zenith_relay_core::PoolRoutingPolicy>,
     pub enabled: bool,
@@ -87,7 +85,6 @@ impl Default for GatewaySettings {
         Self {
             account_routes: Vec::new(),
             tool_policy: Default::default(),
-            request_timezone: Default::default(),
             enabled: false,
             bind_scope: BindScope::Localhost,
             port: DEFAULT_GATEWAY_PORT,
@@ -182,7 +179,6 @@ impl GatewaySettings {
 
     pub fn validate(&self) -> Result<(), &'static str> {
         zenith_relay_core::accounts::validate_account_route_groups(&self.account_routes)?;
-        self.request_timezone.validate()?;
         if self.port < 1024 {
             return Err("gateway port must be between 1024 and 65535");
         }

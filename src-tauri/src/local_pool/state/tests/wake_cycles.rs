@@ -29,6 +29,10 @@ fn weekly_reset_fingerprint_is_persisted_per_account_and_cycle() {
 fn usage_callback_persists_before_returning() {
     let root = std::env::temp_dir().join(format!("zenith-relay-state-{}", uuid::Uuid::new_v4()));
     let state = DesktopState::open(root.clone()).unwrap();
+    assert!(Arc::ptr_eq(
+        &state.usage_callback(),
+        &state.clone().usage_callback()
+    ));
     state
         .store()
         .unwrap()
@@ -111,6 +115,7 @@ fn usage_callback_persists_before_returning() {
         total_tokens: Some(5),
         upstream_error: None,
         quota_snapshot: None,
+        image_usage: None,
     });
 
     let logs = state.telemetry.list(10).unwrap();

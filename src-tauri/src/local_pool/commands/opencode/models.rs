@@ -11,7 +11,14 @@ use zenith_relay_core::{
 pub(super) fn model_ids(models: &[ModelSummary]) -> Vec<ModelSummary> {
     models
         .iter()
-        .filter(|model| model.enabled && !model.protocol_routes.is_empty())
+        .filter(|model| {
+            model.enabled
+                && model.protocol_routes.iter().any(|route| {
+                    super::protocols::GROUPS
+                        .iter()
+                        .any(|(protocol, _, _)| *protocol == route.client_wire_api)
+                })
+        })
         .cloned()
         .collect()
 }

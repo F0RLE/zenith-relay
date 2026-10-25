@@ -52,7 +52,7 @@ fn network_addresses_preserve_lan_alongside_vpn_and_ignore_unusable_interfaces()
 async fn network_access_is_opt_in_revision_checked_and_keeps_independent_keys() {
     let root = std::env::temp_dir().join(format!("relay-network-{}", uuid::Uuid::new_v4()));
     let state = DesktopState::open(root.clone()).unwrap();
-    assert!(!snapshot(&state).unwrap().enabled);
+    assert!(!snapshot(&state).await.unwrap().enabled);
     let local = pool::ensure_system_gateway_key(&state).unwrap();
     let local_secret = pool::ensure_local_gateway_key_secret(&local).unwrap();
     assert!(update(&state, true, false).await.unwrap().enabled);

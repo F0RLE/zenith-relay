@@ -36,6 +36,50 @@ async fn local_gateway_catalog_bypasses_system_proxy() {
     assert_eq!(catalog["models"][0]["slug"], "synthetic-model");
 }
 
+#[tokio::test]
+async fn local_gateway_catalog_distinguishes_missing_access_from_malformed_payload() {
+    for (payload, expected_code) in [
+        (
+            serde_json::json!({"models": []}),
+            ErrorCode::PoolModelsUnavailable,
+        ),
+        (
+            serde_json::json!({"data": []}),
+            ErrorCode::GatewayUnavailable,
+        ),
+        (
+            serde_json::json!({"models": null}),
+            ErrorCode::GatewayUnavailable,
+        ),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/v1/models",
+            axum::routing::get(move || {
+                let payload = payload.clone();
+                async move { axum::Json(payload) }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let result = fetch_local_codex_model_catalog(
+            &format!("http://{address}/v1"),
+            "synthetic-gateway-key",
+        )
+        .await;
+        server.abort();
+        let _ = server.await;
+        let error = result.unwrap_err();
+        assert_eq!(error.code, expected_code);
+        if expected_code == ErrorCode::PoolModelsUnavailable {
+            let diagnostic = error.diagnostic.unwrap();
+            assert_eq!(diagnostic.reason.as_deref(), Some("empty_model_catalog"));
+            assert_eq!(diagnostic.route.as_deref(), Some("/v1/models"));
+            assert!(diagnostic.status.is_none());
+        }
+    }
+}
+
 fn source_record(id: &str) -> ProviderSourceRecord {
     ProviderSourceRecord {
         id: id.into(),

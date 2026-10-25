@@ -8,7 +8,7 @@ use super::super::*;
 pub(in crate::diagnostics) fn state() -> &'static DiagnosticState {
     STATE.get_or_init(|| DiagnosticState {
         root: Mutex::new(fallback_root()),
-        write_lock: Mutex::new(()),
+        write_lock: Mutex::new(super::Writers::default()),
         breadcrumb: Mutex::new(None),
     })
 }
@@ -85,6 +85,10 @@ pub(in crate::diagnostics) fn ensure_layout(root: &Path) -> bool {
             "errors/      redacted native and renderer error events (JSONL)\n",
             "crashes/     panic reports with the last safe operation breadcrumb\n",
             "operations/  short lifecycle records useful for import/runtime debugging (JSONL)\n",
+            "Memory snapshots are text records in operations/ when debug is enabled.\n",
+            "They are taken at startup, debug enable, and when opening Logs/Operations; no polling.\n",
+            "Memory values are bytes; unavailable is not zero. Cache budgets are not usage.\n",
+            "Process working sets overlap; cache and process figures must not be added.\n",
             "last-stage-* is a bounded marker for the last interrupted operation stage.\n",
             "debug.enabled enables the detailed operation stream and is off by default.\n",
             "session.active is removed on clean exit; its presence marks an interrupted run.\n",
@@ -113,6 +117,17 @@ pub(in crate::diagnostics::persist) fn ensure_real_directory(path: &Path) -> boo
         }
         Err(_) => false,
     }
+}
+
+// Keep checking the path boundary, but do not recreate/check every sibling
+// directory and README for every event. Full layout setup belongs to startup.
+pub(in crate::diagnostics::persist) fn ensure_area(root: &Path, area: &str) -> Option<PathBuf> {
+    let logs = root.join(LOGS_DIRECTORY);
+    let directory = logs.join(area);
+    (ensure_real_directory(root)
+        && ensure_real_directory(&logs)
+        && ensure_real_directory(&directory))
+    .then_some(directory)
 }
 
 pub(in crate::diagnostics::persist) fn prune_files(directory: &Path, prefix: &str, keep: usize) {

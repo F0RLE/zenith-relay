@@ -30,6 +30,31 @@ pub(super) async fn codex_release_loop() {
     }
 }
 
+pub(super) async fn usage_maintenance_loop(app: AppHandle) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        let state = app.state::<DesktopState>().inner().clone();
+        match tauri::async_runtime::spawn_blocking(move || {
+            zenith_relay_core::gateway::release_expired_cache_entries();
+            state.telemetry.maintain_usage()
+        })
+        .await
+        {
+            Ok(Ok(removed)) if removed > 0 => {
+                let _ = app.emit("zenith-usage-recorded", ());
+                let _ = app.emit("zenith-state-changed", ());
+            }
+            Ok(Ok(_)) => {}
+            _ => crate::diagnostics::record_error(
+                "usage-maintenance",
+                Some("retention_failed"),
+                "Usage history maintenance did not complete",
+                &[],
+            ),
+        }
+    }
+}
+
 pub(super) async fn model_metadata_loop(app: AppHandle) {
     let instance_id = app
         .state::<DesktopState>()
@@ -55,6 +80,9 @@ pub(super) async fn model_metadata_loop(app: AppHandle) {
                     &[],
                 );
             }
+            // Reference metadata participates in historical pricing, unlike
+            // ordinary account/quota state changes.
+            let _ = app.emit("zenith-usage-recorded", ());
             let _ = app.emit("zenith-state-changed", ());
         }
     }
@@ -91,6 +119,7 @@ pub(super) async fn pricing_loop(app: AppHandle) {
             // Refresh failures update the catalog status too. Notify the UI
             // for every attempt so snapshot consumers can recalculate derived
             // pricing data without waiting for another background event.
+            let _ = app.emit("zenith-usage-recorded", ());
             let _ = app.emit("zenith-state-changed", ());
         }
     }

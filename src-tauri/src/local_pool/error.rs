@@ -7,6 +7,7 @@ pub enum ErrorCode {
     Io,
     Conflict,
     GatewayUnavailable,
+    PoolModelsUnavailable,
     SourceTestFailed,
     InvalidState,
     NotFound,

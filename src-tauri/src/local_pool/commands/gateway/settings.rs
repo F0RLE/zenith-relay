@@ -14,45 +14,6 @@ use serde::Deserialize;
 use tauri::State;
 use zenith_relay_core::GatewayRuntime;
 
-#[tauri::command]
-pub fn get_request_timezone_catalog() -> Vec<String> {
-    zenith_relay_core::request_timezone::request_timezone_catalog()
-}
-
-#[tauri::command]
-pub async fn set_local_request_timezone(
-    input: zenith_relay_core::RequestTimezoneUpdate,
-    state: State<'_, DesktopState>,
-) -> Result<LocalPoolSnapshot, CommandError> {
-    let _mutation = state.setup_guard().await;
-    input
-        .policy
-        .validate()
-        .map_err(LocalPoolError::invalid_state)?;
-    input
-        .expected_policy
-        .validate()
-        .map_err(LocalPoolError::invalid_state)?;
-    let previous = state.store()?.gateway().clone();
-    if previous.request_timezone != input.expected_policy {
-        return Err(LocalPoolError::new(
-            ErrorCode::Conflict,
-            "request timezone changed; reload before saving",
-        )
-        .into());
-    }
-    let mut gateway = previous.clone();
-    gateway.request_timezone = input.policy.clone();
-    state.store()?.replace_gateway(gateway)?;
-    if let Some(runtime) = state.gateway.runtime().await {
-        if let Err(error) = runtime.set_request_timezone(input.policy) {
-            state.store()?.replace_gateway(previous)?;
-            return Err(LocalPoolError::invalid_state(error.to_string()).into());
-        }
-    }
-    state.snapshot().await.map_err(Into::into)
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetCommonProxyInput {
@@ -111,11 +72,17 @@ pub async fn set_local_codex_memory_enabled(
 }
 
 #[tauri::command]
-pub fn get_local_codex_memory_model(
+pub async fn get_local_codex_memory_model(
     stage: crate::local_pool::profiles::codex::CodexMemoryStage,
 ) -> Result<Option<String>, CommandError> {
-    crate::local_pool::profiles::codex::memory_model(&crate::platform::default_codex_home(), stage)
-        .map_err(Into::into)
+    super::super::run_blocking(move || {
+        crate::local_pool::profiles::codex::memory_model(
+            &crate::platform::default_codex_home(),
+            stage,
+        )
+    })
+    .await
+    .map_err(Into::into)
 }
 
 #[tauri::command]

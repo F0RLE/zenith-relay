@@ -23,14 +23,16 @@ pub async fn get_local_runtime_state(
 }
 
 #[tauri::command]
-pub fn record_local_performance_sample(
+pub async fn record_local_performance_sample(
     name: String,
     duration_ms: f64,
     context: Option<String>,
     state: State<'_, DesktopState>,
 ) -> Result<(), CommandError> {
     state
-        .record_performance(&name, duration_ms, context.as_deref())
+        .telemetry
+        .record_performance_async(name, duration_ms, context)
+        .await
         .map_err(Into::into)
 }
 
@@ -56,7 +58,6 @@ mod parity_tests {
             schema_version: 1,
             gateway: GatewaySummary {
                 tool_policy: Default::default(),
-                request_timezone: Default::default(),
                 pool_routing: None,
                 running: false,
                 base_url: "http://127.0.0.1:14998/v1".into(),
@@ -100,14 +101,18 @@ mod parity_tests {
             let gateway: GatewaySummary = serde_json::from_value(legacy_gateway).unwrap();
             assert_eq!(serde_json::to_value(gateway).unwrap(), local["gateway"]);
         }
-        assert_eq!(
-            local["capabilities"]
-                .as_object()
-                .unwrap()
-                .keys()
-                .collect::<Vec<_>>(),
-            ["features"]
-        );
+        let mut capability_fields = local["capabilities"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        capability_fields.sort_unstable();
+        assert_eq!(capability_fields, ["accountConnectors", "features"]);
+        assert!(!local["capabilities"]["accountConnectors"]
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

@@ -27,6 +27,16 @@ use zenith_relay_core::{
     PricingContext, SourcePricingMetadata, SourceProtocolResolution, TokenPrice,
 };
 
+/// Move owned local I/O off both the window thread and async executor. Await
+/// completion so callers retain the operation's result and error semantics.
+pub(in crate::local_pool) async fn run_blocking<T: Send + 'static>(
+    work: impl FnOnce() -> LocalResult<T> + Send + 'static,
+) -> LocalResult<T> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|_| LocalPoolError::new(ErrorCode::Io, "Local operation was interrupted"))?
+}
+
 pub(super) fn cleanup_created_secret(secret_ref: &str, cause: &LocalPoolError) -> LocalResult<()> {
     secret_store::delete(secret_ref).map_err(|cleanup| {
         LocalPoolError::new(
@@ -112,3 +122,58 @@ pub(in crate::local_pool) use runtime::{
     sync_records_or_rollback, sync_refreshed_account_or_rollback, sync_running_account_states,
     sync_runtime_account_state,
 };
+
+#[cfg(test)]
+mod blocking_command_tests {
+    use super::*;
+    use std::{
+        future::Future,
+        sync::mpsc,
+        task::{Context, Poll, Waker},
+        time::Duration,
+    };
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_io_yields_without_waiting_on_the_calling_thread() {
+        let caller = std::thread::current().id();
+        let (release, wait) = mpsc::channel();
+        let mut operation = Box::pin(run_blocking(move || {
+            // The watchdog prevents a synchronous regression from hanging CI.
+            let released = wait.recv_timeout(Duration::from_secs(2)).is_ok();
+            Ok((std::thread::current().id(), released))
+        }));
+        let first_poll = operation
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()));
+        let yielded = first_poll.is_pending();
+        let _ = release.send(());
+        let result = match first_poll {
+            Poll::Ready(result) => result,
+            Poll::Pending => operation.await,
+        }
+        .unwrap();
+        assert!(
+            yielded,
+            "local I/O must yield while the operation is blocked"
+        );
+        assert_ne!(result.0, caller);
+        assert!(
+            result.1,
+            "the caller must run before the operation finishes"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_io_preserves_structured_errors() {
+        let error = run_blocking(|| {
+            Err::<(), _>(LocalPoolError::new(
+                ErrorCode::Conflict,
+                "synthetic conflict",
+            ))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Conflict);
+        assert_eq!(error.message, "synthetic conflict");
+    }
+}

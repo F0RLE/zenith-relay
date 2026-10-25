@@ -133,6 +133,7 @@ fn account_record(id: &str) -> LocalAccountRecord {
             last_used_at_ms: None,
             last_error_code: None,
         },
+        image_pool_enabled: false,
         provider_family: Some("openai".into()),
         purchase_cost_micro_usd: None,
         recovery: None,
@@ -231,6 +232,7 @@ fn account_usage_event(request_id: &str, success: bool) -> UsageEvent {
         total_tokens: success.then_some(5),
         upstream_error: None,
         quota_snapshot: None,
+        image_usage: None,
     }
 }
 
@@ -278,6 +280,7 @@ fn account_status_event(
         total_tokens: None,
         upstream_error: None,
         quota_snapshot: None,
+        image_usage: None,
     }
 }
 

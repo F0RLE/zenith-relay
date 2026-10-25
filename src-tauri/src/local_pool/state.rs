@@ -27,7 +27,7 @@ use std::{
     path::PathBuf,
     sync::{atomic::AtomicU64, Arc, Mutex, MutexGuard},
 };
-use tokio::sync::{watch, Mutex as AsyncMutex, Notify};
+use tokio::sync::{watch, Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore};
 use url::Url;
 use zenith_relay_core::{
     accounts::TokenAuthority,
@@ -76,6 +76,7 @@ pub struct DesktopStateOwner {
     oauth_flow: OAuthFlowManager<NativeSecretBackend, DesktopOAuthEvents>,
     pub(super) oauth_events: DesktopOAuthEvents,
     failed_usage_writes: Arc<AtomicU64>,
+    usage_writer: std::sync::OnceLock<zenith_relay_core::UsageCallback>,
     failed_affinity_writes: Arc<AtomicU64>,
     catalog_refresh_error: Arc<Mutex<Option<String>>>,
     pub(in crate::local_pool) client_catalog_refresh: catalog_refresh::CatalogRefreshQueue,
@@ -83,11 +84,18 @@ pub struct DesktopStateOwner {
     quota_account_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
     subscription_refresh_lock: AsyncMutex<()>,
     setup_lock: tokio::sync::Mutex<()>,
+    runtime_snapshot_slots: Arc<Semaphore>,
     account_check_url: Url,
     credential_cache: Mutex<snapshot::CredentialCache>,
 }
 
 impl DesktopState {
+    pub(crate) fn continuation_memory_diagnostics(
+        &self,
+    ) -> Vec<zenith_relay_core::gateway::CacheMemoryDiagnostics> {
+        self.continuation_state.memory_diagnostics()
+    }
+
     pub fn open(root: PathBuf) -> Result<Self> {
         let paths = StoragePaths::from_root(&root);
         let transient_root = paths.cache_root();
@@ -132,6 +140,7 @@ impl DesktopState {
                     .is_ok_and(|eligible| !eligible)
             {
                 account.account.in_pool = false;
+                account.image_pool_enabled = false;
                 membership_changed = true;
             }
         }
@@ -191,6 +200,7 @@ impl DesktopState {
                 oauth_flow,
                 oauth_events,
                 failed_usage_writes,
+                usage_writer: std::sync::OnceLock::new(),
                 failed_affinity_writes,
                 catalog_refresh_error,
                 client_catalog_refresh: catalog_refresh::CatalogRefreshQueue::default(),
@@ -198,6 +208,7 @@ impl DesktopState {
                 quota_account_locks: Arc::new(Mutex::new(HashMap::new())),
                 subscription_refresh_lock: AsyncMutex::new(()),
                 setup_lock: tokio::sync::Mutex::new(()),
+                runtime_snapshot_slots: Arc::new(Semaphore::new(1)),
                 account_check_url: Url::parse(DEFAULT_CODEX_ACCOUNT_CHECK_ENDPOINT)
                     .expect("the built-in account-check endpoint must be valid"),
                 credential_cache: Mutex::new(snapshot::CredentialCache::default()),
@@ -261,6 +272,16 @@ impl DesktopState {
 
     pub async fn setup_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.setup_lock.lock().await
+    }
+
+    pub(crate) async fn runtime_snapshot_permit(&self) -> Result<OwnedSemaphorePermit> {
+        self.runtime_snapshot_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| {
+                LocalPoolError::new(ErrorCode::Io, "Runtime snapshot worker is unavailable")
+            })
     }
 
     pub(crate) fn account_check_url(&self) -> &Url {

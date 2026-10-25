@@ -170,6 +170,77 @@ fn history_rewrite_budget_still_rejects_oversized_changes_before_writing() {
 }
 
 #[test]
+fn native_switch_updates_versioned_history_databases_without_losing_the_chat() {
+    for relative_path in [
+        "state_6.sqlite",
+        "state_11.sqlite",
+        "desktop-catalog.sqlite3",
+        "sqlite/state_6.sqlite",
+        "sqlite/catalog.DB",
+    ] {
+        let (root, state, backups, profile, rollout, database) = fixture("versioned-history");
+        synchronize(&state, &backups, &profile, TargetProvider::ZenithRelayLocal)
+            .unwrap()
+            .expect("initial Relay attachment");
+        let versioned_database = profile.join(relative_path);
+        fs::create_dir_all(versioned_database.parent().unwrap()).unwrap();
+        fs::rename(&database, &versioned_database).unwrap();
+
+        let switched = synchronize(&state, &backups, &profile, TargetProvider::Openai)
+            .unwrap()
+            .expect("native account switch");
+
+        assert_eq!(rollout_provider_from_file(&rollout), "openai");
+        assert_eq!(
+            database_provider(&versioned_database),
+            "openai",
+            "the native profile must not leave this chat pointing at the removed Relay provider"
+        );
+        assert!(
+            synchronize(&state, &backups, &profile, TargetProvider::Openai)
+                .unwrap()
+                .is_none()
+        );
+        rollback(&backups, &switched.backup_id).unwrap();
+        assert_eq!(database_provider(&versioned_database), "zenith_relay_local");
+        assert_eq!(rollout_provider_from_file(&rollout), "zenith_relay_local");
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn native_switch_leaves_unrelated_root_database_unchanged() {
+    let (root, state, backups, profile, rollout, database) = fixture("unrelated-root-database");
+    synchronize(&state, &backups, &profile, TargetProvider::ZenithRelayLocal)
+        .unwrap()
+        .expect("initial Relay attachment");
+    let unrelated = profile.join("logs_2.sqlite");
+    let connection = Connection::open(&unrelated).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE logs(message TEXT NOT NULL);\
+             INSERT INTO logs(message) VALUES ('synthetic');\
+             CREATE TABLE threads(id TEXT PRIMARY KEY, model_provider TEXT);\
+             INSERT INTO threads(id, model_provider) VALUES ('thread-test', 'zenith_relay_local');",
+        )
+        .unwrap();
+    drop(connection);
+    let original = fs::read(&unrelated).unwrap();
+
+    let switched = synchronize(&state, &backups, &profile, TargetProvider::Openai)
+        .unwrap()
+        .expect("native account switch");
+
+    assert_eq!(switched.sqlite_rows_changed, 1);
+    assert_eq!(database_provider(&database), "openai");
+    assert_eq!(rollout_provider_from_file(&rollout), "openai");
+    assert_eq!(fs::read(&unrelated).unwrap(), original);
+    rollback(&backups, &switched.backup_id).unwrap();
+    assert_eq!(fs::read(&unrelated).unwrap(), original);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn automatic_sync_from_ready_api_to_chatgpt_repairs_the_latest_session_metadata() {
     let (root, state, backups, profile, rollout, database) = fixture("ready-api-to-chatgpt");
     synchronize(&state, &backups, &profile, TargetProvider::CodexLocalAccess)

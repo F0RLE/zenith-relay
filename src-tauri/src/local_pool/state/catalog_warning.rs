@@ -45,6 +45,7 @@ fn catalog_refresh_error_code(code: ErrorCode) -> &'static str {
         ErrorCode::Io => error_codes::IO,
         ErrorCode::Conflict => error_codes::CONFLICT,
         ErrorCode::GatewayUnavailable => error_codes::GATEWAY_UNAVAILABLE,
+        ErrorCode::PoolModelsUnavailable => error_codes::POOL_MODELS_UNAVAILABLE,
         ErrorCode::SourceTestFailed => error_codes::SOURCE_TEST_FAILED,
         ErrorCode::InvalidState => error_codes::INVALID_STATE,
         ErrorCode::NotFound => error_codes::NOT_FOUND,

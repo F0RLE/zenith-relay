@@ -40,6 +40,10 @@ pub(crate) fn start(app: AppHandle) {
         model_metadata_loop(metadata_app).await;
     });
     let _codex_release_worker = tauri::async_runtime::spawn(codex_release_loop());
+    let maintenance_app = app.clone();
+    let _maintenance_worker = tauri::async_runtime::spawn(async move {
+        loops::usage_maintenance_loop(maintenance_app).await;
+    });
     let _wake_worker = tauri::async_runtime::spawn(async move {
         wake_worker::wake_loop(app).await;
     });

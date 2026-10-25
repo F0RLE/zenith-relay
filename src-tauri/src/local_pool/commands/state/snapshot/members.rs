@@ -36,6 +36,7 @@ pub(super) fn project_quota_window_usages(
         .collect::<Vec<_>>();
     let quota_equivalents =
         telemetry.account_api_equivalents_with_pricing(&quota_windows, catalog, pricing)?;
+    let pricing_revision = pricing.revision_key(catalog);
     Ok(accounts
         .iter()
         .filter_map(|account_record| {
@@ -44,6 +45,16 @@ pub(super) fn project_quota_window_usages(
             )?;
             let window_start_ms = window.window_start_ms.unwrap_or_default();
             let window_minutes = window.window_minutes.unwrap_or_default();
+            let api_equivalent = quota_equivalents
+                .get(&account_record.account.id)
+                .copied()
+                .unwrap_or_default();
+            let recent = telemetry.sample_quota_window(
+                &account_record.account.id,
+                window,
+                api_equivalent,
+                &pricing_revision,
+            );
             Some((
                 account_record.account.id.clone(),
                 QuotaWindowUsage {
@@ -51,10 +62,9 @@ pub(super) fn project_quota_window_usages(
                     window_start_ms,
                     observed_at_ms: window.observed_at_ms,
                     window_minutes,
-                    api_equivalent: quota_equivalents
-                        .get(&account_record.account.id)
-                        .copied()
-                        .unwrap_or_default(),
+                    api_equivalent,
+                    recent_consumed_basis_points: recent.map(|sample| sample.0),
+                    recent_api_equivalent: recent.map(|sample| sample.1),
                 },
             ))
         })

@@ -5,5 +5,6 @@ use crate::local_pool::accounts::{
 use std::fs;
 
 mod gateway_setup;
+mod image_membership;
 mod listener_restart;
 mod startup_state;

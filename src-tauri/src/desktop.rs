@@ -90,6 +90,12 @@ fn setup_desktop(
         let _ = desktop_state.record_performance("window", window_ms, Some("cold"));
     }
     local_pool::background::start(app_handle.clone());
+    if crate::diagnostics::is_debug_enabled() {
+        let state = desktop_state.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            crate::diagnostics::memory::record_snapshot(&state, "startup");
+        });
+    }
     let app_state = app.state::<AppState>();
     build_tray(&app_handle, &app_state)?;
     crate::portable_update::acknowledge_startup();
@@ -178,6 +184,8 @@ fn desktop_commands() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send 
         local_pool::accounts::mutations::edit::set_local_account_proxy,
         local_pool::commands::proxies::get_local_proxy_pool,
         local_pool::commands::proxies::check_local_stored_proxy,
+        local_pool::commands::proxies::test_local_stored_proxy_speed,
+        local_pool::commands::proxies::rename_local_stored_proxy,
         local_pool::commands::proxies::import_local_proxy_pool,
         local_pool::commands::proxies::delete_local_stored_proxy,
         local_pool::commands::proxies::delete_local_stored_proxies,
@@ -228,8 +236,6 @@ fn desktop_commands() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send 
         local_pool::commands::gateway::settings::get_local_codex_memory_model,
         local_pool::commands::gateway::settings::set_local_codex_memory_model,
         local_pool::commands::gateway::settings::set_local_codex_memory_enabled,
-        local_pool::commands::gateway::settings::set_local_request_timezone,
-        local_pool::commands::gateway::settings::get_request_timezone_catalog,
         local_pool::commands::gateway::settings::set_local_chatgpt_retry_until_available,
         local_pool::commands::gateway::settings::set_local_block_degraded_routes,
         local_pool::commands::gateway::settings::set_local_codex_websockets,
@@ -262,6 +268,7 @@ fn desktop_commands() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send 
         local_pool::commands::recovery::open_relay_folder,
         local_pool::commands::recovery::reset_local_pool_data,
         local_pool::commands::recovery::export_usage,
+        local_pool::commands::recovery::export_request_diagnostics,
         crate::diagnostics::record_frontend_diagnostic,
         crate::diagnostics::get_diagnostic_settings,
         crate::diagnostics::set_diagnostic_debug_mode,

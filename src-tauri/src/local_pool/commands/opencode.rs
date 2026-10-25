@@ -77,10 +77,13 @@ fn config_status_for(state: &DesktopState) -> Result<OpenCodeConfigStatus, Local
 }
 
 #[tauri::command]
-pub fn get_opencode_config_status(
+pub async fn get_opencode_config_status(
     state: State<'_, DesktopState>,
 ) -> Result<OpenCodeConfigStatus, CommandError> {
-    config_status_for(&state).map_err(Into::into)
+    let state = state.inner().clone();
+    super::run_blocking(move || config_status_for(&state))
+        .await
+        .map_err(Into::into)
 }
 
 /// Preserve the exact OpenCode file before Relay changes it. The operation is

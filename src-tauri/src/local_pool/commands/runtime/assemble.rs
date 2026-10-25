@@ -80,12 +80,15 @@ pub(in crate::local_pool) async fn runtime_from_store(
             .get(account_id)
             .and_then(Option::as_ref)
             .is_some_and(|credential| {
+                let Some(account) = account_records
+                    .iter()
+                    .find(|account| &account.account.id == account_id)
+                else {
+                    return false;
+                };
                 crate::local_pool::accounts::records::validate_pool_account(
                     credential,
-                    account_records
-                        .iter()
-                        .find(|account| &account.account.id == account_id)
-                        .and_then(|account| account.account.subscription.plan_type.as_deref()),
+                    account.image_pool_enabled,
                 )
                 .is_ok()
             })
@@ -162,12 +165,12 @@ pub(in crate::local_pool) async fn runtime_from_store(
     let options = GatewayRuntimeOptions {
         diagnostics_enabled: crate::diagnostics::is_debug_enabled,
         tool_policy: settings.tool_policy,
-        request_timezone: settings.request_timezone,
         max_retry_candidates: usize::from(settings.max_retry_candidates),
         pool_routing: Some(pool_routing),
         hidden_models: settings.hidden_models,
         default_service_tier: settings.default_service_tier,
         quota_stale_after_ms,
+        native_codex_images_only: true,
         image_base_model: None,
         image_pricing_catalog: Some(state.pricing_catalog()),
         model_metadata_catalog: Some(state.model_metadata_loader().catalog_handle()),
@@ -200,6 +203,7 @@ pub(in crate::local_pool) async fn runtime_from_store(
         local
     })?;
     runtime.set_activity_callback(state.runtime_activity_callback());
+    runtime.set_codex_catalog_hint_callback(state.runtime_model_catalog_callback());
     runtime.set_account_quota_references(quota_references);
     runtime.set_chatgpt_team_breaker_callback(state.runtime_team_breaker_callback());
     runtime.set_codex_background_tasks_enabled(settings.codex_background_tasks_enabled);
@@ -364,7 +368,7 @@ fn admit_runtime_account(
         None
     };
     let proxy_timezone = account_proxy_pool_id(proxy_pool, secret, common_proxy_id.as_deref())
-        .and_then(|proxy_id| proxy_pool.timezone(&proxy_id).ok().flatten());
+        .and_then(|proxy_id| proxy_pool.timezone_observation(&proxy_id).ok().flatten());
     let agent_identity = secret
         .agent_identity()
         .map(|agent| (account_id.clone(), agent.clone()));
@@ -392,7 +396,7 @@ fn admit_runtime_account(
         operational.routing_block_reason,
     ) && crate::local_pool::accounts::records::validate_pool_account(
         secret,
-        account.account.subscription.plan_type.as_deref(),
+        account.image_pool_enabled,
     )
     .is_ok();
     let refresh_proxy = secret

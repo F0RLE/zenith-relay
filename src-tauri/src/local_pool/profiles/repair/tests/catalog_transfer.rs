@@ -2,8 +2,14 @@ use super::*;
 
 #[test]
 fn repair_reconciles_the_current_desktop_catalog_for_the_transferred_chat_only() {
+    for relative_path in ["sqlite/codex-dev.db", "codex.sqlite3"] {
+        assert_catalog_reconciliation(relative_path);
+    }
+}
+
+fn assert_catalog_reconciliation(relative_path: &str) {
     let (root, state, backups, profile, _rollout, database) = fixture("current-catalog");
-    let catalog = profile.join("sqlite").join("codex-dev.db");
+    let catalog = profile.join(relative_path);
     fs::create_dir_all(catalog.parent().unwrap()).unwrap();
     let connection = Connection::open(&catalog).unwrap();
     connection

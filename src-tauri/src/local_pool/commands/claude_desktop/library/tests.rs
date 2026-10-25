@@ -604,6 +604,11 @@ fn lost_recovery_never_reclaims_a_foreign_gateway_or_custom_settings() {
         ("inferenceGatewayApiKey", json!("other-synthetic-key")),
         ("inferenceGatewayBaseUrl", json!("https://foreign.example")),
         ("toolSearchEnabled", json!(false)),
+        ("modelCatalogEnabled", json!(false)),
+        (
+            "modelCatalogUrl",
+            json!("https://foreign.example/catalog.json"),
+        ),
         ("custom", json!(true)),
     ] {
         let fixture = Fixture::new();

@@ -4,9 +4,9 @@ use zenith_relay_core::protocol::ModelSummary;
 
 const MAX_INFERENCE_MODELS: usize = 200;
 
-/// A Desktop cap is not an effort enum: a missing intermediate level must not
-/// hide higher supported choices. Admission maps picker gaps, then validates
-/// the effective choice against the pool and exact route.
+/// A Desktop cap is not an effort enum and cannot remove intermediate holes.
+/// Keep supported higher choices visible; admission rejects unsupported values
+/// without silently replacing the user's selected effort.
 fn native_effort_cap(model: &ModelSummary) -> Option<&'static str> {
     ["low", "medium", "high", "xhigh", "max"]
         .into_iter()
@@ -252,6 +252,9 @@ mod tests {
         assert_eq!(config["inferenceGatewayBaseUrl"], "http://127.0.0.1:14998");
         assert_eq!(config["inferenceModels"], json!([]));
         assert_eq!(config["toolSearchEnabled"], true);
+        // Desktop's modelCatalogUrl requires Anthropic-signed bytes; do not
+        // configure a local unsigned catalog that the client will ignore.
+        assert!(config.get("modelCatalogUrl").is_none());
         assert!(config.get("anthropicFamilyTier").is_none());
     }
 }

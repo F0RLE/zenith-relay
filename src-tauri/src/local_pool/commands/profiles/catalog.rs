@@ -2,7 +2,7 @@ use crate::{
     launcher::is_codex_running,
     local_pool::{
         accounts::{collect_limited, LimitedBodyError},
-        error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
+        error::{CommandError, ErrorCode, ErrorDiagnostics, LocalPoolError, Result as LocalResult},
         models::{LocalGatewayKeyRecord, ProviderSourceRecord},
         profiles::codex,
         state::DesktopState,
@@ -83,15 +83,25 @@ pub(super) async fn fetch_local_codex_model_catalog(
                 "pool returned an invalid model catalog",
             )
         })?;
-    if catalog
+    let models = catalog
         .get("models")
         .and_then(serde_json::Value::as_array)
-        .is_none_or(Vec::is_empty)
-    {
+        .ok_or_else(|| {
+            LocalPoolError::new(
+                ErrorCode::GatewayUnavailable,
+                "pool returned an invalid model catalog",
+            )
+        })?;
+    if models.is_empty() {
         return Err(LocalPoolError::new(
-            ErrorCode::Conflict,
-            "pool has no ChatGPT-compatible models",
+            ErrorCode::PoolModelsUnavailable,
+            "pool has no available ChatGPT-compatible models; refresh model access for enabled pool connections; quota availability alone does not grant model access",
         )
+        .with_diagnostic(ErrorDiagnostics {
+            reason: Some("empty_model_catalog".into()),
+            route: Some("/v1/models".into()),
+            ..Default::default()
+        })
         .into());
     }
     serde_json::to_string(&catalog)

@@ -67,17 +67,57 @@ impl DesktopState {
     }
 
     pub fn usage_callback(&self) -> UsageCallback {
-        DesktopUsageWriter::new(DesktopUsageWriterParts {
-            telemetry: self.telemetry.clone(),
-            store: self.store.clone(),
-            transient_root: self.transient_root(),
-            refresh: self.refresh.clone(),
-            wake: self.wake.clone(),
-            failed: self.failed_usage_writes.clone(),
-            wake_notify: self.wake_notify.clone(),
-            state_events: self.oauth_events.clone(),
-        })
-        .callback()
+        self.usage_writer
+            .get_or_init(|| {
+                let callback = DesktopUsageWriter::new(DesktopUsageWriterParts {
+                    telemetry: self.telemetry.clone(),
+                    store: self.store.clone(),
+                    transient_root: self.transient_root(),
+                    refresh: self.refresh.clone(),
+                    wake: self.wake.clone(),
+                    failed: self.failed_usage_writes.clone(),
+                    wake_notify: self.wake_notify.clone(),
+                    state_events: self.oauth_events.clone(),
+                })
+                .callback();
+                crate::local_pool::usage_writer::offload(callback, self.failed_usage_writes.clone())
+            })
+            .clone()
+    }
+
+    pub(crate) fn runtime_model_catalog_callback(
+        &self,
+    ) -> impl Fn(String, u64) -> bool + Send + Sync + 'static {
+        let weak = Arc::downgrade(&self.owner);
+        move |account_id, delay_ms| {
+            let Some(owner) = weak.upgrade() else {
+                return false;
+            };
+            if !owner
+                .refresh_started
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return false;
+            }
+            // Never wait for inventory persistence in the network handler. A
+            // rejected hint is retried on the next observed response header.
+            let Ok(store) = owner.store.try_lock() else {
+                return false;
+            };
+            let Ok((account, fence)) = store.account_refresh_scope(&account_id) else {
+                return false;
+            };
+            if account.recovery.is_some()
+                || !account.account.is_automatic_quota_monitoring_eligible()
+            {
+                return false;
+            }
+            owner.refresh.schedule_after(
+                &fence.identity(),
+                zenith_relay_core::scheduler::refresh::RefreshKind::Models,
+                delay_ms,
+            )
+        }
     }
 
     pub(crate) fn response_affinity_store(&self) -> Arc<dyn ResponseAffinityStore> {
@@ -113,6 +153,12 @@ impl DesktopOAuthEvents {
     pub(in crate::local_pool) fn emit_state_changed(&self) {
         if let Some(app) = self.app.lock().ok().and_then(|app| app.clone()) {
             let _ = app.emit("zenith-state-changed", ());
+        }
+    }
+
+    pub(in crate::local_pool) fn emit_proxy_pool_changed(&self) {
+        if let Some(app) = self.app.lock().ok().and_then(|app| app.clone()) {
+            let _ = app.emit("zenith-proxy-pool-changed", ());
         }
     }
 
