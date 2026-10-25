@@ -19,7 +19,7 @@
 
 - Combines ChatGPT/SIWC, Excel / Basis Points, and compatible API sources in a local pool; Codex connections support direct account switching.
 - Connects installed ChatGPT, Claude Desktop, and OpenCode, or another client through
-  a compatible API. Relay does not install those applications.
+  a compatible API.
 - Selects an available pool member for each request and shows its status,
   quota, and request history.
 - Supports direct use of one account or API source without pool rotation.
@@ -27,8 +27,7 @@
   shares its API with other devices on a trusted LAN.
 
 Bring your own account or provider API key. Conversations stay in your chosen
-client; Relay manages connections and routing. Usage costs are estimates, not
-a Relay subscription or bill.
+client; Relay manages connections and routing. Usage costs are estimated at API prices.
 
 ## Download
 
@@ -52,8 +51,7 @@ Download a package for your platform from
 Computer mode also launches an application with one saved API source directly,
 without pool rotation, from **Connections → Sources → Launch**.
 
-The retired personal-server mode is removed. Hosted is a separate future service;
-local network access remains part of Computer mode.
+Hosted is a separate future service; local network access is part of Computer mode.
 
 ## Quick start
 

@@ -22,7 +22,7 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
 
 - Permission discovery is token-incarnation-scoped, coalesced, bounded, and
   cached briefly. A changed token or failed access read cannot reuse old access.
-  Restricted models and account policy constrain execution, not just display.
+  Restricted models and account policy are enforced at execution.
 - Before rejecting an unknown WebSocket model, refresh scoped BPS access and
   resolve it again. This applies to initial frames and later turns, including
   HTTP fallback; known routes and malformed frames need no discovery I/O.
@@ -97,7 +97,7 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
   escapes keep their existing meaning; malformed Unicode, escaped control
   characters, quotes, incomplete objects, and schema violations still fail.
   Custom input and explicit frame bodies remain opaque. This compatibility
-  grammar is private to BPS, not a change to client JSON or the public API.
+  grammar is private to BPS; client JSON and the public API remain unchanged.
 - The legacy single-call `name(JSON)` compatibility parser also handles
   referenced function calls. The parsed name must exactly match the one
   reference; normal schemas and tool choice still apply. No code is evaluated,
@@ -115,12 +115,12 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
   final tool validation. After the first native tool item, later indexed output
   waits for the authoritative terminal so batch expansion cannot renumber text
   already sent. Terminal-only or out-of-order tools that would shift emitted
-  indexes fail closed. Transport framing is not a provider latency guarantee.
+  indexes fail closed.
   Discovery and direct streaming share native tool identity/index validation;
   completed terminals with changed or missing calls fail before catalog
   continuation or client release.
-  Discovery preserves canonical upstream failure messages instead of replacing
-  them with generic stream errors. A normalized `upstream_rate_limited` stays a
+  Discovery preserves canonical upstream failure messages. A normalized
+  `upstream_rate_limited` stays a
   rate-limit failure through SSE conversion and usage recording, never a generic
   `upstream_terminal`; output already sent does not authorize replay.
   Untyped SSE error envelopes retain their category. Provider retry delays and
@@ -243,7 +243,7 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
   on every turn. A changed root-only catalog or presentation mode can still
   invalidate that prefix: Relay does not invent a hidden historical snapshot.
   `tool_choice: none`, named function/custom choices, and `allowed_tools`
-  restrict the current turn after history instead of filtering the prologue.
+  restrict the current turn after history; the prologue remains unchanged.
   A visible contract is not permission to call it: schema lookup, preload and
   completed-call validation remain scoped to the permitted tools. With no
   permitted tools, a final text-only guard forbids transport and catalog calls.
@@ -251,8 +251,7 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
   Explicit named/allowed selections preload their small permitted contracts
   under the existing eight-tool/16 KiB eager budget, respecting explicit
   deferral, so stable discovery presentation does not require a lookup just
-  to recover a small selected schema. Checkpoints borrow the exact prepared
-  exact prologue instead of rendering a different filtered catalog a second time.
+  to recover a small selected schema. Checkpoints borrow the exact prepared prologue.
 - Parsed tool definitions, serialized declarations, and lazily rendered full/
   compact descriptions share immutable allocations in a content-addressed cache.
   Namespace, declared name, kind and exact definition bytes determine identity;
@@ -270,7 +269,7 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
   validator. Complex/unknown JSON Schema constructs remain complete JSON.
   Compact property names and annotation keywords have deterministic ordering,
   so reordering those schema keys does not rewrite the rendered catalog prefix.
-  Annotation rendering borrows their values rather than cloning nested schemas;
+  Annotation rendering borrows schema values;
   descriptions, constraints, defaults and examples remain intact.
   Closed objects retain explicit `additionalProperties:false` at every schema
   depth; a missing ellipsis alone is not their model-facing constraint. Tool

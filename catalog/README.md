@@ -3,7 +3,7 @@
 Relay's default display order lives in [model-order.json](model-order.json),
 validated by [model-order.schema.json](model-order.schema.json). It applies to
 account and API inventories, pool lists, editors, and managed client catalogs.
-This is Relay's presentation policy, not an official provider ranking.
+Relay defines this display order.
 
 ## Order
 
@@ -14,9 +14,7 @@ larger sizes precede smaller ones.
 An undated alias precedes dated snapshots; newer snapshots precede older ones.
 The normalized model ID breaks remaining ties.
 
-Provider, family, and class lists live only in the JSON; do not maintain a
-second table here. Positions are a presentation policy, not a quality ranking
-or an automatic reflection of provider traffic.
+The JSON owns the provider, family, and class lists and their display positions.
 
 Provider aliases and inference patterns also live in the JSON. Anchored family
 patterns use Rust regex syntax and optional named captures:

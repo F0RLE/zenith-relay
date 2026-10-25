@@ -1,24 +1,24 @@
 # Hosted Relay roadmap
 
-Planned Hosted implementation and acceptance, not shipped features or a progress
-log. The [Hosted architecture](HOSTED_RELAY_ARCHITECTURE.md) owns target contracts;
+Planned Hosted implementation and acceptance. The
+[Hosted architecture](HOSTED_RELAY_ARCHITECTURE.md) owns target contracts;
 the [Desktop roadmap](../project/ROADMAP.md) owns current-runtime work. Development and
 release checks are in [CONTRIBUTING.md](../../CONTRIBUTING.md).
 
 ## Hosted multi-user Relay
 
 The first public Hosted release is a complete prepaid model-token service backed
-by operator-managed account/API-provider capacity, not an admin-panel MVP. It has
+by operator-managed account/API-provider capacity. It has
 owner-configured Google/Telegram/OIDC customer login, one identity/wallet across
 channels, scoped keys, direct inference and local-pool control parity. Desktop is
 an operator client; the Hosted panel has no local Applications section.
 The [Hosted target contract](HOSTED_RELAY_ARCHITECTURE.md)
-owns product decisions, launch defaults and safety gates; it is not shipped behavior.
+owns product decisions, launch defaults and safety gates.
 
 Use its [recommended first-production stack](HOSTED_RELAY_ARCHITECTURE.md#recommended-first-production-stack)
 and [empty-host acceptance sequence](HOSTED_RELAY_ARCHITECTURE.md#from-an-empty-host-to-paid-service)
-as the baseline. Technology selection does not mean Hosted dependencies or deployment
-artifacts already exist. The retired personal-server runtime is not a Hosted foundation.
+as the baseline. Dependencies and deployment artifacts are part of the planned
+implementation. Use the shared core for the new Hosted runtime.
 
 ### Delivery stages
 
@@ -27,7 +27,7 @@ sequence: H00 specification, H01 core qualification, H02–H12 runtime and accou
 H13–H15 interfaces, H16 operations, H17 paid acceptance. Each package below owns
 its artifacts, failure cases and checks. Complete affected
 [specification gates](HOSTED_RELAY_ARCHITECTURE.md#specification-before-implementation)
-before code; package prerequisites, not a second stage checklist, define ordering.
+before code; package prerequisites define ordering.
 
 Internal stages do not reduce the first-public-release scope. One qualified
 account family is enough initially; additional Claude/other account connectors
@@ -40,8 +40,7 @@ No shared paid route is inferred from a working personal account.
 ### Customer website implementation slices
 
 H13 owns the web shell and typed transport, H14 the customer cabinet, and H17
-end-to-end acceptance; use their [package definitions](#hosted-implementation-work-packages)
-rather than maintaining a second frontend checklist. The
+end-to-end acceptance; use their [package definitions](#hosted-implementation-work-packages). The
 [website contract](HOSTED_RELAY_ARCHITECTURE.md#customer-website) owns routes and
 data meanings; [web design](HOSTED_RELAY_WEB_DESIGN.md) owns presentation.
 
@@ -52,8 +51,8 @@ visual/interaction baselines and the design-review sequence. H00 reviews this
 presentation contract before H13/H14/H15 implement it. Complete screen descriptions
 and mockups do not close runtime, accessibility, security or paid-release gates.
 
-The packages below are planned work, not a completion log. Keep their identifiers
-stable when decomposing them further. Architecture owns target names and semantics;
+Keep package identifiers stable when decomposing them further.
+Architecture owns target names and semantics;
 this plan owns dependencies, implementation order and evidence. Do not create a
 second schema/API definition in task descriptions or treat a planned path as an
 existing implementation.
@@ -103,7 +102,7 @@ Infrastructure/runbook design and web scaffolding can proceed against frozen
 contracts before the runtime is finished. Do not call mocked screens live features
 or interpret parallelizable documentation as authorization to run external services.
 The first internal end-to-end proof is identity → verified funding → key → execution
-→ exact charge → report → failure/recovery. It is not a reduced public release.
+→ exact charge → report → failure/recovery. Public release requires full acceptance.
 
 #### H00 — Specification and decision coverage
 
@@ -466,7 +465,7 @@ merely because a container, login page or model listing works.
 
 For each row, expand test IDs, exact fixtures, injected cut point, expected states,
 money postings, public error and operator signal in the owning package before code.
-This is a minimum review matrix, not a claim that unknown failures cannot occur.
+This matrix defines the minimum review coverage.
 
 #### Scenario evidence checklist
 

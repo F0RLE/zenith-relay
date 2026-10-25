@@ -1,7 +1,7 @@
 # Zenith Relay documentation
 
 Relay's current product is the local-first Desktop application. Hosted documents
-describe future work; the independent web preview is not a running Hosted service.
+describe planned work; the independent web preview demonstrates its interface.
 
 ## Find the right document
 
@@ -21,15 +21,14 @@ describe future work; the independent web preview is not a running Hosted servic
 | Catalog policy and versioned export | [Catalog](../catalog/README.md) |
 | User-visible release history | [Changelog](releases/CHANGELOG.md) |
 
-Update the owner of a subject rather than adding a parallel architecture,
-handoff, or status document. Current code and focused tests define exact behavior;
-roadmaps do not establish that a feature is implemented or accepted.
+Update the owning document for each subject. Current code and focused tests
+define implemented behavior; roadmaps describe planned work and acceptance.
 Legal terms remain in the [license](../LICENSE) and
 [contributor agreement](../CONTRIBUTOR_LICENSE_AGREEMENT.md).
 
 ## Repository tree
 
-This is the source layout, not a listing of generated files in a local checkout.
+Source directories:
 The [architecture ownership map](project/PLANNING.md#scope-and-ownership) describes
 the contracts behind these directories.
 

@@ -13,6 +13,20 @@ recoverable account deletion. Changes below are grouped by area.
 
 ### Changed
 
+- Production builds group the eager workspace graph while keeping the native
+  loader and deferred pages separate. Version lookup excludes development package
+  metadata; obsolete translations are removed. Bundle-size limits stay unchanged.
+
+- Desktop, web preview and Help use concise function and action descriptions.
+  Documentation and code comments remove repetitive comparisons with rejected
+  alternatives while preserving operational and security constraints.
+
+- Overview adds weekly-quota API-equivalent history by subscription/workload,
+  defaulting to all models within one subscription without duplicate ledger votes,
+  with medians, spread and reset markers. Passive measurements deduplicate linked
+  account routes, expire stale forecasts and avoid extra provider requests;
+  subscription cost, routing and billing remain unchanged.
+
 - Pool and Connections reuse an inventory index for linked account lookups,
   instead of rescanning every account per card; quota and routing are unchanged.
 - Request timezone now follows the assigned proxy automatically, without account
@@ -370,6 +384,15 @@ recoverable account deletion. Changes below are grouped by area.
 
 ### Fixed
 
+- Reused tool-call IDs from another conversation no longer reject an exact owned
+  Responses continuation just because full materialized replay is unavailable.
+  Bounded hashed ownership keeps caller/model/route checks and expiry intact;
+  reused response IDs replace, rather than accumulate, call permissions.
+
+- SIWC now applies the shared scoped cache-key fallback to requests without a
+  client key, including the WebSocket-to-HTTP bridge. Explicit cache keys, modes,
+  TTL and reasoning settings remain unchanged; this does not guarantee cache hits.
+
 - BPS guidance uses separate native calls for scripts, patches and framed
   arguments instead of encouraging nested batch JSON. Parallel calls and simple
   batches remain supported; malformed executable payloads still fail closed.
@@ -591,6 +614,19 @@ recoverable account deletion. Changes below are grouped by area.
 преобразования протоколов и корзину аккаунтов. Изменения сгруппированы по темам.
 
 ### Изменения
+
+- Сборка объединяет сразу нужные модули интерфейса, сохраняя отдельный нативный
+  загрузчик и отложенные страницы. Ради номера версии больше не включается весь
+  пакет разработки; удалены неиспользуемые переводы. Лимиты размера сохранены.
+
+- Тексты Desktop, веб-демо и справки описывают функцию и действие короче.
+  Из документации и комментариев убраны повторы и сравнения с отвергнутыми
+  вариантами; рабочие ограничения и предупреждения сохранены.
+
+- В Обзоре появилась история недельной квоты в API-эквиваленте по подпискам и
+  профилям нагрузки: медиана, разброс и отметки сбросов. Фоновый сбор не создаёт
+  запросов к провайдеру, не дублирует связанные аккаунты и убирает устаревшие
+  оценки. Стоимость подписки, маршрутизация и биллинг не изменены.
 
 - Пул и Подключения используют индекс связанных аккаунтов вместо полного поиска
   для каждой карточки; квоты и маршрутизация не меняются.
@@ -960,6 +996,15 @@ recoverable account deletion. Changes below are grouped by area.
   сортировки; обычный ответ без инструментов в автоматическом режиме не вызывает предупреждение.
 
 ### Исправления
+
+- Повторный ID вызова из другого чата больше не блокирует подтверждённое
+  продолжение Responses только из-за отсутствия полной материализованной истории.
+  Ограниченные хешированные данные владения сохраняют проверки ключа, модели,
+  маршрута и срока; повторный ID ответа не накапливает права старых вызовов.
+
+- SIWC теперь применяет общий резервный ключ кэша в рамках клиентского контекста,
+  если ключ не задан, в том числе в мосте WebSocket → HTTP. Явные ключи, режимы,
+  TTL и настройки reasoning сохраняются; это не гарантирует попаданий в кэш.
 
 - BPS рекомендует отдельные нативные вызовы для скриптов, патчей и аргументов
   с raw-frame вместо вложенного batch JSON. Параллельность и простые пакеты

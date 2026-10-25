@@ -18,9 +18,8 @@ Navigation: [design gates](#specification-before-implementation) ·
 
 ## Specification before implementation
 
-Keep one definition per contract, with enough detail to establish ownership,
-failure policy and customer meaning. Link to that definition instead of copying
-rules into parallel plans or adding a report for each task.
+Define each contract once, covering ownership, failure policy and customer
+meaning. Link to its owning section from other documents.
 
 This document owns the target contracts; [the detailed delivery plan](HOSTED_RELAY_ROADMAP.md#hosted-implementation-work-packages)
 owns ordered work packages, dependencies and acceptance. `PLANNING.md` continues to
@@ -62,7 +61,7 @@ restore/provider qualification remain required even after the design is complete
 
 ### Step-by-step scenario map
 
-Use this map as the implementation reading order, not a second set of domain rules.
+Use this map as the implementation reading order.
 Each scenario must connect the screen/action to a named API, server authorization,
 state transition, transaction, external effect, visible result and recovery check.
 
@@ -147,7 +146,7 @@ bundles, and a marketplace are not part of this first offer.
 | Vault/workers | Protected credentials, renewal, bounded jobs/reconciliation |
 
 Inference remains available when website, Telegram, or Desktop is offline.
-These are module boundaries, not a requirement to deploy microservices.
+These modules can share a deployment.
 
 ## Ownership model
 
@@ -196,7 +195,7 @@ Preserve Desktop local application integrations and LAN access.
 | --- | --- |
 | Overview | Existing pool overview and availability, plus active logical requests/physical attempts by model, errors, customer charges and separately evidenced provider expense |
 | Connections / credential inventory | Saved account connections and API providers, labels/notes, auth and refresh state, proxies, quota/models, automations, import/export, reauthentication, trash/recovery; saved does not mean admitted to the pool |
-| Pool | Existing membership, order/rotation, enable/disable, model rules, context/reasoning/service-tier settings, prices, quota, tool and request-timezone policies; reuse shared validation and capability checks |
+| Pool | Existing membership, order/rotation, enable/disable, model rules, context/reasoning/service-tier settings, prices, quota, tool policies and automatic proxy-derived request timezones; reuse shared validation and capability checks |
 | Access | Public API addresses, protocols, key scopes/limits/rotation/revocation; no Applications section in the Hosted panel |
 | Usage | Existing request/attempt, timing, tokens, model, origin and error detail, plus authenticated workspace/user/key attribution, a client User-Agent label, settlement and filtering; Errors tab and request timeline follow the diagnostics contract |
 | Customers and payments | Customer status, limits, balances, top-ups, refunds, receipts and auditable adjustments; no provider secrets or prompt/response bodies |
@@ -281,7 +280,7 @@ revision and its applicable notices before using any additional source.
    and separately identified observed evidence for account-specific transports.
 
 The following checks make the adopted patterns executable requirements. Extend
-existing package tests instead of creating another standalone test framework.
+the existing package tests.
 
 | Required case | Owning packages | Expected proof |
 | --- | --- | --- |
@@ -316,18 +315,16 @@ source license or working connector does not close those decisions.
 
 ## Customer website
 
-This section owns the first-release customer-web specification, not shipped UI
-or a user guide to existing screens. The website is where a customer registers,
+This section specifies the planned first-release customer website. A customer registers,
 funds access, obtains connection credentials, understands usage and manages their
-account without installing Desktop. It is not the operator pool dashboard.
+account without installing Desktop. Operator controls have their own interface.
 Implementation slices are tracked in the [Hosted roadmap](HOSTED_RELAY_ROADMAP.md#customer-website-implementation-slices).
 
 ### Frontend application boundary
 
 Build the default Relay landing page and customer cabinet as the `web/` application
-inside the existing `zenith-relay` repository, against the Hosted API. This is the
-target layout, not a claim that the application is implemented. Do not create a
-separate Git repository for the initial website or replace the Desktop `src/` app.
+inside the existing `zenith-relay` repository, against the Hosted API. Keep the
+Desktop `src/` application independent.
 Reuse transport-independent Relay formatting, i18n, accessible interaction and
 chart utilities where suitable; do not inherit Desktop page layouts/styles or
 import Tauri commands or local account state. The backend must also support an
@@ -337,13 +334,12 @@ operator's own website without deploying the default web application.
 
 The detailed [web design specification](HOSTED_RELAY_WEB_DESIGN.md) owns visual
 tokens, responsive layouts, screen passports and interaction acceptance. This
-architecture remains authoritative for routes, permissions and data semantics;
-the design specification is not a second backend contract or shipped UI.
+architecture owns routes, permissions and data semantics.
 
 Design the Hosted website and operator web surfaces from scratch as Relay's own
 product: page compositions, typography, spacing, colors, icons/illustrations,
 chart presentation, responsive behavior and interface copy. Preserve existing
-local-pool capabilities and meanings, not a requirement to reproduce its pixels.
+local-pool capabilities and meanings.
 Do not redesign the existing Desktop application as part of this web work.
 
 External projects inform functional requirements, failure scenarios and technical
@@ -356,9 +352,8 @@ applicable notices. New styling never transfers third-party copyright to Relay.
 H13 defines the original web design tokens, components and interaction states;
 H14/H15 use them for customer/operator surfaces. Review desktop/mobile, both
 locales/themes, keyboard use and loading/empty/error/pending states before visual
-acceptance. Functional contracts below define information and permitted actions,
-not a fixed external layout. Branding configuration customizes our design rather
-than re-skinning another project's frontend.
+acceptance. Functional contracts below define information and permitted actions.
+Branding configuration customizes Relay's design.
 
 ### One repository and deployment choice
 
@@ -461,7 +456,7 @@ not an arbitrary API URL entered into an untrusted webpage.
 Make `web/` a clear contribution area in the existing repository: app-specific
 README/quick start, local development with synthetic fixtures, configuration
 reference, compatibility information and tests. Reuse the repository's contribution,
-security-reporting and release policies instead of maintaining another project.
+security-reporting and release policies.
 Community pull requests can improve layouts, accessibility, translations, charts
 and client integrations; coupled API changes are reviewed in the same pull request.
 Preserve the existing license and applicable attribution notices. A shared source
@@ -657,8 +652,7 @@ UTC timestamps and usage/settlement completeness; neutralize spreadsheet-formula
 injection in user-controlled labels. Export no credentials or raw content. Older
 aggregate export is labeled as aggregate data, not reconstructed request history.
 
-The model catalog comes from the Hosted authorized projection, not a hardcoded
-frontend list. Show public model identity,
+The model catalog comes from the Hosted authorized projection. Show public model identity,
 supported protocol/capabilities, current price per million tokens and relevant
 context/cache/service-tier bands. Distinguish no grant, temporary capacity trouble,
 disabled model and missing price without leaking pool capacity or account details.
@@ -708,14 +702,14 @@ site; no privileged default-frontend shortcut is allowed.
 If key issuance committed but the response was lost, identify the resulting key
 by the same operation without disclosing its secret; explicitly revoke it and issue
 a replacement only on a new confirmed action. A page reload is not that action.
-Keep the first-request guide in `/app/help` and the empty Overview state, not a new
-navigation section. Explain "available", "reserved", "charged" and "pending" in
+Keep the first-request guide in `/app/help` and the empty Overview state.
+Explain "available", "reserved", "charged" and "pending" in
 RU/EN beside the relevant values, with the [money examples](#money-scenarios-and-worked-checks).
 
 ### Customer notifications and delivery
 
 SC-05 uses a small in-app notice list inside Overview/Settings plus contextual
-banners, not a new chat/helpdesk service. Financial history remains authoritative;
+banners. Financial history remains authoritative;
 a notice or notification-provider acknowledgement never changes money or proves
 that a person read a message. Operator outage alerts continue to use the documented
 monitoring stack and independently reachable destination, not this customer feed.
@@ -874,8 +868,7 @@ never broadens them. Provider keys never authenticate Relay clients.
 
 ### Abuse controls and compromised access
 
-These are Hosted trust-boundary requirements, not a finding that the current local
-product is vulnerable. H05/H06/H09/H16 specify numeric bounds and fixtures before
+H05/H06/H09/H16 specify numeric bounds and fixtures for these Hosted trust boundaries before
 exposure; a generic "rate limited" checkbox is not sufficient.
 
 | Boundary | Required control and visible behavior | Required failure case |
@@ -887,8 +880,7 @@ exposure; a generic "rate limited" checkbox is not sufficient.
 | Owner/session compromise | Revoke affected owner/device authority, stop extended capture, rotate affected credentials through the vault and audit recovery | A revoked device/session cannot continue mutations using cached capabilities or stale fresh proof |
 | External integration addresses | Only owner-configured, reviewed purposes/destinations; credentials bound to the selected destination, redirects and outbound policy | A caller cannot turn a request/model/payment/login field into an arbitrary server-side fetch or forward a secret to another host |
 
-Reuse the bounded core scheduler rather than create a second fairness algorithm in
-the website. H09 qualifies starvation/queue behavior with mixed workspaces and both
+Reuse the bounded core scheduler. H09 qualifies starvation/queue behavior with mixed workspaces and both
 short and long streams. Separate unauthenticated abuse controls from customer money
 and inference counters; an attacker cannot assign charges or sanctions using a
 supplied workspace ID. Do not trust arbitrary forwarded client-address headers.
@@ -916,7 +908,7 @@ through WebAuthn/FIDO2. Google/OIDC login, passwords, email/SMS sign-in, Telegra
 authentication, and wallet signatures cannot authenticate administrators.
 This restriction does not exclude first-release customer federation above.
 A passkey stored in Google Password Manager is not Sign in with Google.
-This is planned behavior, not a replacement for Desktop local authentication.
+Desktop retains its local authentication.
 
 **First owner.** Provision the installation owner through an explicit server-local
 setup operation, not the first public registration. A short-lived, one-use setup
@@ -1300,8 +1292,8 @@ records while removing eligible personal data.
 
 ### Errors and production diagnostics
 
-Diagnostics are a first-release product capability, not a development build or a
-public debug console. A user should understand what happened, whether output or
+Diagnostics ship in the first release through role-scoped interfaces.
+A user should understand what happened, whether output or
 money is affected, what is known versus uncertain, and the next safe action.
 An owner should follow the same request across admission, attempts, execution and
 settlement without reading customer content. No new log-search/incident platform
@@ -1363,8 +1355,8 @@ capturing everything is not the data-collection policy.
 
 For each code/category, H12 fixes a message key, severity rule, evidence predicate,
 customer-safe projection and next action. The emitting component owns the code;
-the UI owns translation, not a separate classification algorithm. An unfamiliar
-code displays "Unclassified error" with a safe reference, not a guessed account fault.
+the UI owns translation. An unfamiliar code displays "Unclassified error" with a
+safe reference.
 
 #### Owner errors list and request detail
 
@@ -1583,7 +1575,7 @@ PostgreSQL owns identities/workspaces, grants/keys, pool/route revisions,
 wallet/journal/reservation/payment records, request/attempt/audit/import records,
 and continuation metadata. Initial migrations include tenant-scoped references,
 deduplication, reservation closure uniqueness, and continuation versions/expiry.
-This is a domain inventory, not a prescribed table-per-noun schema.
+Domain packages define the corresponding table structure.
 The [implementation map](#implementation-contract-map) names planned records and
 their owners; domain packages must still finish the full DDL/constraint dictionary.
 
@@ -1707,8 +1699,7 @@ not optional work after paid customers arrive.
 
 ### From an empty host to paid service
 
-These are implementation/acceptance requirements, not a deployment recipe for
-an already shipped Hosted backend:
+Implementation and acceptance requirements:
 
 1. Qualify the region, upstream commercial permissions, initial model tariffs and
    payment merchant; provision DNS, off-host backup storage and operator recovery.

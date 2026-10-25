@@ -196,8 +196,7 @@ bun run setup:browsers
 
 Use one owner per subject. The [documentation index](docs/README.md#find-the-right-document)
 lists the owning guides; its [repository tree](docs/README.md#repository-tree)
-separates source directories from generated local artifacts. Keep that navigation
-in one place rather than copying a second document inventory here.
+separates source directories from generated local artifacts.
 
 `AGENTS.md` owns repository guidance; legal terms stay in `LICENSE` and the
 Contributor Agreement. Keep screenshots under `docs/screenshots/`.
@@ -213,7 +212,7 @@ unless explicitly requested. Update an existing guide only for a maintained chan
 
 Record every user-visible change in
 [CHANGELOG.md](docs/releases/CHANGELOG.md) under
-`Unreleased`, grouped by behavior rather than by branch. Include the relevant
+`Unreleased`, grouped by behavior. Include the relevant
 PR or commit in the entry when the change is ready for review. When publishing
 a tag, move the shipped entries into a dated version section and leave
 `Unreleased` available for the next cycle.
@@ -243,8 +242,7 @@ Define stable error codes in `crates/relay-core/src/error_codes.rs` and reuse it
 constants in emitters and classifiers. Add causes and recovery steps to both
 localized Help error tables, including public aliases. The catalog test rejects
 undocumented codes; classification and recovery policy remain in their owning
-modules. Preserve unknown external provider codes instead of forcing them into
-a Relay enum.
+modules. Preserve unknown external provider codes as received.
 
 To add a locale, add one sequential guide at
 <code>docs/help/&lt;locale&gt;/README.md</code>, register its translation
@@ -252,8 +250,8 @@ resources, and update the bundled Markdown registry in
 <code>src/src/features/relay/help/HelpCenter.tsx</code>. Keep the guide
 accurate for the UI's current labels and section order.
 
-Screenshots are generated from the mocked desktop shell. Change the scenario
-when the UI changes, then regenerate rather than editing images by hand:
+Screenshots are generated from the mocked desktop shell. Update the scenario
+when the UI changes, then regenerate:
 
 ~~~powershell
 cd src

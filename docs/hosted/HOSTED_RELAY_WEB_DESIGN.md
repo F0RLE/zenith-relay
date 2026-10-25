@@ -1,10 +1,10 @@
 # Hosted Relay Web Design
 
-**Design specification for future implementation, not an implemented website.**
+**Design specification for future implementation.**
 This document owns visuals, screen composition and interaction states.
 [Architecture](HOSTED_RELAY_ARCHITECTURE.md) owns routes, permissions and data/money
 semantics; [roadmap](HOSTED_RELAY_ROADMAP.md#hosted-implementation-work-packages)
-owns delivery and acceptance. Link to those contracts rather than redefining them.
+owns delivery and acceptance. Link to their owning sections.
 
 Navigation: [principles](#design-principles) · [visual system](#visual-system) ·
 [layout](#layout-and-responsive-behavior) · [components](#shared-components) ·
@@ -15,7 +15,7 @@ Navigation: [principles](#design-principles) · [visual system](#visual-system) 
 
 ## Design principles
 
-1. **Our design, not a re-skin.** Author composition, typography, assets, wording,
+1. **Original design.** Author composition, typography, assets, wording,
    chart treatment and interactions. Reference projects contribute functional
    lessons only. Do not copy their screenshots, page components, CSS or branding.
 2. **Clarity before decoration.** The customer can answer: what is available, how
@@ -27,21 +27,20 @@ Navigation: [principles](#design-principles) · [visual system](#visual-system) 
    and passkey-protected owner panel share primitives, not data or authority.
 5. **One obvious next action.** Each screen has a clear primary task. Secondary
    navigation is quiet; destructive and chargeable actions are never defaults.
-6. **Original does not mean custom everything.** Reuse suitable licensed accessible
-   primitives and Relay utilities. Do not build a new chart engine or UI framework
-   simply to get an original appearance. Keep dependency and asset provenance.
+6. **Reuse proven components.** Use suitable licensed accessible primitives,
+   chart libraries and Relay utilities. Keep dependency and asset provenance.
 
 The visual direction follows Relay: warm neutral light surfaces, charcoal dark
-surfaces, a muted green action accent, clear typography and restrained grouping. No
-glass backgrounds, decorative gradients, giant animated numbers, floating chat
-widget or fake live activity. The customer site is not an image studio or chat app.
-Do not redesign Desktop, create a theme marketplace or introduce team switching.
+surfaces, a muted green action accent, clear typography and restrained grouping.
+Use solid surfaces, compact metrics and activity backed by request data. The web
+scope covers public information, the customer cabinet and owner controls; retain
+Relay's existing Desktop design, light/dark themes and single-workspace model.
 
 ## Visual system
 
 ### Color tokens
 
-These are working design values, not scattered component-specific colors. Theme
+Components use these shared semantic tokens. Theme
 configuration may change brand tokens only after the same contrast checks pass.
 
 | Semantic token | Light | Dark | Usage |
@@ -62,10 +61,10 @@ configuration may change brand tokens only after the same contrast checks pass.
 | `danger` | `#A52D2A` | `#FFA8A4` | Confirmed failure or destructive action |
 | `info` | `#246DA8` | `#67B7EE` | Informational state or explanation |
 
-Status text sits on `surface`/`surface-subtle`, not on an unverified tinted fill.
+Status text sits on `surface`/`surface-subtle`.
 A filled destructive button uses light-theme `danger` with white text in both
 themes; verify hover/focus combinations separately. Disabled controls retain a
-readable label and an adjacent reason rather than relying on low opacity alone.
+readable label and an adjacent reason.
 Do not reuse the error color merely because a tariff or balance is expensive.
 Project acceptance requires at least 4.5:1 for ordinary text and 3:1 for necessary
 control boundaries/indicators against their adjacent background. This token table
@@ -79,13 +78,13 @@ is not a certification of every rendered combination.
 - Type sizes/line heights: hero 40/48 desktop, 30/38 mobile; page title 28/36;
   section 20/28; body 16/24; dense data 14/20; secondary caption 12/16. Critical
   amounts, form instructions and action labels never use caption size.
-- Use normal/medium/semibold emphasis, not all-caps navigation. Monetary values,
+- Use sentence-case navigation with normal/medium/semibold emphasis. Monetary values,
   tokens and durations use tabular numerals, right alignment and explicit units.
 - Spacing scale: 4, 8, 12, 16, 24, 32, 48 and 64 CSS pixels. Use 24 between desktop
   page blocks, 16 on mobile, 8 between a label and its field, 4 to field feedback.
 - Controls are 44 pixels high by default; primary touch targets are at least
   44 by 44. Radius: controls 8, panels 12, dialogs 16. Badges may be pill-shaped;
-  every container does not need a border, shadow or rounded background.
+  use borders and backgrounds to group related content.
 - Panels have a subtle border without a default shadow. Menus/dialogs alone get
   restrained elevation; modal backdrop obscures content without blur dependence.
 - Use one coherent icon style with a 20-pixel visual box inside the target area.
@@ -96,16 +95,18 @@ is not a certification of every rendered combination.
 
 ### Language, numbers and time
 
-Ship complete Russian/English variants, not mixed-language navigation. Browser
+Use concise descriptions of the current function, state and next action.
+Keep necessary warnings visible; supporting detail belongs in tooltips or Help.
+Ship complete Russian/English variants. Browser
 locale selects the initial language; an explicit user choice wins. Changing locale
 does not restart a payment/login operation or translate machine model IDs/codes.
 Allow longer Russian labels to wrap; never solve overflow by shrinking everything.
 
 Follow architecture's exact money and UTC report definitions. Wallet headlines
 may be compact, but an adjacent accessible disclosure exposes the exact value;
-small nonzero request charges display six decimals rather than `$0.00`. Never
+small nonzero request charges display six decimals. Never
 recalculate a debit in the browser. Display USD explicitly at first occurrence
-and in every export/confirmation; tokens are counts, not currency.
+and in every export/confirmation; label token counts with their own units.
 
 Reporting controls and chart axes say UTC. Row/detail timestamps are explicit UTC
 in the first release. Local-time equivalents may be supplementary in detail and
@@ -115,7 +116,7 @@ is request start, journal posting, observation or scheduled effective time.
 
 ## Layout and responsive behavior
 
-Pixel dimensions describe the nominal baseline, not fixed clipping boxes. Use
+Pixel dimensions describe the nominal baseline. Use
 scalable typography and let headers/cards/forms grow for zoom, localization and
 wrapped content. A breakpoint cannot override reading order or reachable actions.
 
@@ -126,13 +127,12 @@ Use a centered content column, maximum 1200 pixels, 32-pixel desktop gutters and
 product mark/name left, section navigation center and language/theme/sign-in right.
 At narrow widths, keep brand and sign-in visible; put section links in a labelled
 menu. The header may be sticky but must not cover anchor headings or focused fields.
-Footer groups product/help and operator-provided legal/support links; it is not a
-second long navigation wall. No fixed deployment domain or unverifiable trust logo.
+Footer groups product/help and operator-provided legal/support links compactly.
+No fixed deployment domain or unverifiable trust logo.
 
-Use a restrained Relay wordmark and an original small route/connection motif,
-not a provider logo collage. Final vector artwork needs its own visual/provenance
-review; this description does not replace an asset or require changing Desktop's
-existing brand files. Favicon remains recognizable at small size without text.
+Use a restrained Relay wordmark and an original small route/connection motif.
+Review final vector artwork for appearance and provenance. Keep Desktop's existing
+brand files. Favicon remains recognizable at small size without text.
 
 ### Customer shell
 
@@ -154,7 +154,7 @@ names, visible current-page title and 24-pixel content gutters. At less than 768
 replace the rail with a menu drawer: 56-pixel header, 16-pixel gutters, full-width
 content and no icon-only bottom navigation competing with seven sections. Keep
 menu, title, notifications and account control visible; put wallet summary in page
-content or menu rather than squeezing it into the header. A drawer traps focus,
+content or menu. A drawer traps focus,
 closes on explicit action/Escape and returns focus to its trigger.
 
 ### Owner shell
@@ -178,8 +178,7 @@ that can display another customer's session. Do not show an impersonation button
   table region, never the whole page. No required action is hidden offscreen.
 - Request detail: up to 860 pixels wide on desktop, using Relay's overview,
   parameters, token groups and technical disclosures. On mobile fit the viewport
-  with a visible sticky heading/close control. Long diagnostics use a full page
-  instead of nested drawers.
+  with a visible sticky heading/close control. Long diagnostics use a full page.
 - Dialog: maximum 480 pixels for confirmation, 640 for a short form. Complex tasks
   use a page. On small screens dialogs fit the visual viewport and software keyboard.
   Never stack modal dialogs; complete step-up and return to the pending action.
@@ -193,7 +192,7 @@ that can display another customer's session. Do not show an impersonation button
 | Page header | One H1, concise explanation, one primary task and quiet secondary actions; buttons wrap below title on mobile. |
 | Action button | Verb plus object; default, focus, hover, submitting, disabled-reason and result. Submission locks the same operation, not the entire page indefinitely. |
 | Field group | Persistent label, optional hint, input, inline error; required marker explained once. Never use a placeholder as the only label. |
-| Amount display | Exact server value/currency/basis; distinguish current, held, posted and pending. Copy exposes a safe exact value, not a rounded screenshot number. |
+| Amount display | Exact server value/currency/basis; distinguish current, held, posted and pending. Copy exposes the safe exact value. |
 | Status badge | Icon, text and semantic tone. Execution and accounting get separate badges; unknown is not success or automatic error. |
 | Summary card | Metric name, value/unit, population/period, freshness/coverage and optional drill-down. No zero or percentage until evidence exists. |
 | Filter bar | Labelled UTC period, supported dimensions, active filters, Reset and bounded refresh. Unsupported combinations are explained, not silently ignored. |
@@ -244,7 +243,7 @@ Tabs, sheets and dialogs do not create a new top-level app for each operation.
 ### WS-01 — Landing page
 
 **Entry:** anonymous `/`; signed-in visitors may still read it. The header action
-becomes Open cabinet rather than implying that sign-in is required again. Never
+becomes Open cabinet. Never
 render personalized balances into public/cacheable HTML.
 
 **Top-to-bottom composition:**
@@ -258,8 +257,8 @@ render personalized balances into public/cacheable HTML.
    `Model access. Usage you can understand.` Do not promise unlimited capacity,
    fixed availability, free trials or unqualified providers.
 3. How it works: three numbered steps, Sign in and inspect prices; Fund access
-   and issue a key; Configure a client and track usage. State that a website visit
-   is not a paid request and model execution can incur usage charges.
+   and issue a key; Configure a client and track usage. Explain that model execution
+   can incur usage charges.
 4. Models and prices: short explanation, published-model search, capability filter
    and a table of public model name, supported protocol, input/cached-input/output
    prices per million tokens, relevant band indicator and Details. Public prices
@@ -284,7 +283,7 @@ A maintenance/closed banner is above the hero; do not hide outage/support links.
 
 **Mobile:** hero becomes text then diagram; diagram is decorative to assistive
 technology when its text is already stated. Pricing rows become model cards with
-labelled component prices and Details, not a carousel or a tiny wide table.
+labelled component prices and Details.
 No artificial customer counters, reviews, brand logos or product screenshots.
 
 ### WS-02 — Customer sign-in and return
@@ -353,8 +352,8 @@ filter area. Chart totals are not sums of whatever series happen to be visible.
 today; Today/7 days/30 days/custom use retained coverage. Model/key rows and chart
 selection open Usage with supported matching filters. Recent request opens safe
 detail; pending payment opens its Billing record; a notice opens its authorized
-target. Refresh reads data only. Onboarding completion is based on server evidence,
-not a tick stored in the browser; creating a key and funding may happen in either
+target. Refresh reads data only. Onboarding completion is based on server evidence;
+creating a key and funding may happen in either
 order. Successful first usage is never simulated to finish the checklist.
 
 **States/mobile:** a genuinely new account gets useful steps, not fake chart data.
@@ -415,10 +414,10 @@ mobile uses labelled stacked rows. Never show internal account counts or invento
 **Detail:** supported operations, protocol endpoints, context/service-tier/cache
 bands and exact component prices; effective tariff revision; safe availability
 explanation; placeholder configuration example. Connect opens Help with model/
-protocol preselected, not a paid test. Show unavailable or not-granted information
+protocol preselected. Show unavailable or not-granted information
 only where the server deliberately exposes that public descriptor; no hidden-catalog
 discovery via client guesses. Scheduled revisions show effective time and scope;
-historical request prices stay in Usage rather than being overwritten here.
+historical request prices stay in Usage.
 
 **States:** no authorized models points to support/account policy; temporary
 capacity is different from absent grant, disabled route or missing tariff. A model
@@ -449,7 +448,7 @@ path; never silently issue another key or claim the key is absent.
 checks. For a replacement, explain creation of a new key, client migration and
 explicit revocation of the old key; do not promise revocation until acknowledged.
 Revoke dialog names key/prefix and explains new-use blocking versus in-flight work;
-confirm with an explicit action, not a red toggle. A successful revoke is visible
+confirm with an explicit action. A successful revoke is visible
 in the list; repeated confirmation addresses the same operation.
 
 **States/mobile:** empty list has Create key and Help; expired/revoked entries are
@@ -518,7 +517,7 @@ closure/help. On mobile navigation becomes a labelled section selector, not tiny
   delivery appears only for a qualified channel with verified recipient/consent;
   in-app read status is not acceptance of a tariff or resolution of an incident.
 - Appearance has RU/EN and System/Light/Dark controls. These are the only broadly
-  persistent client preferences, not a store for sensitive page content.
+  persistent client preferences. Sensitive page content stays out of this store.
 - Closure area explains what access ends, which unsettled obligations remain and
   which records must be retained under reviewed policy. Use the documented request/
   support process; no fake instant-delete button before a supported domain contract.
@@ -589,7 +588,7 @@ chooser that implies unsupported authentication. Mobile uses the same native flo
 **Layout:** title, current service mode and blocking-summary banner; left nine-step
 checklist, right selected step; bottom Back/Next navigation plus a separate named
 action for the current step. On mobile use a vertical step list and selected detail.
-The checklist is usable after initial launch; it is not a one-use hidden wizard.
+The checklist remains accessible after initial launch.
 
 Use the canonical steps: Installation; Ownership/recovery; Public entry/sign-in;
 Capacity; Money; Protection; Recovery/signals; Qualification; Public opening.
@@ -682,7 +681,7 @@ settings in detail. No hover-only credential or destructive controls.
 **Layout:** title and explicit pool selector only when more than one supported
 pool exists; active configuration revision and pending-activation banner; tabs
 Participants, Routing/policies, Model rules. Add participant selects saved eligible
-inventory, not a second credential upload form.
+inventory.
 
 Participant rows show order, source label, enabled/draining state, model eligibility,
 observed quota and active work. Reorder with accessible Move up/down controls;
@@ -690,10 +689,9 @@ dragging may be additional, never required. Park/remove membership is not Delete
 connection. Explain stale state and revision conflicts before changing a live pool.
 
 The policy editor covers existing shared controls: order/rotation, model enablement,
-context/reasoning/service-tier settings, quota automation, supported tool/timezone
-rules and other qualified parity items. Use labelled sections with units and
-effective inherited values, not an enormous unlabeled JSON editor. Pricing links
-to the canonical tariff flow instead of duplicating an independent price store.
+context/reasoning/service-tier settings, quota automation, supported tool rules,
+automatic proxy-derived timezones and other qualified parity items. Use labelled sections with units and
+effective inherited values. Pricing links to the canonical tariff flow.
 Unsupported controls show an explanation only when useful; never appear enabled.
 
 Review shows changed fields, affected models/sources, validation and impact on new
@@ -731,7 +729,7 @@ On mobile stack component/band rows, keep units visible and use a full-page revi
 ### WS-17 — Access and paired devices
 
 **Layout:** API connection information followed by separate tabs Customer keys and
-Paired devices; owner security links to Settings rather than duplicating it.
+Paired devices; owner security links to Settings.
 Display public protocol endpoints, compatible instructions and safe copy controls.
 There is no Desktop Applications launcher in this panel.
 
@@ -1157,7 +1155,7 @@ generic Retry labels for actions with different financial consequences.
 
 All evidence below is required future work, not tests executed by writing this
 document. Use existing roadmap test locations where applicable; add a focused
-case when needed, not a parallel frontend testing framework.
+case when needed.
 
 | Design coverage | Owning work | Required evidence |
 | --- | --- | --- |
