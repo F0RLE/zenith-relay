@@ -13,7 +13,7 @@ export function CopyButton({ text, label, compact = false }: { text: string; lab
     <button type="button" className={compact ? "icon-button" : "button"} aria-label={label} onClick={() => { void copy(); }}>
       <Copy aria-hidden="true" />{!compact && label}
     </button>
-    {status !== "idle" && <span className="form-note" role="status">{status === "copied" ? "Скопировано. Ничего не отправлено." : "Копирование недоступно. Выделите текст вручную."}</span>}
+    {status !== "idle" && <span className="form-note" role="status">{status === "copied" ? "Скопировано." : "Копирование недоступно. Выделите текст вручную."}</span>}
     {status === "manual" && <label className="copy-fallback">{label}<textarea readOnly value={text} onFocus={event => event.target.select()} /></label>}
   </span>;
 }

@@ -73,7 +73,7 @@ export function NotificationPanel({ anchor, read, modelName, onRead, onOpenReque
     <article className="notification-entry" data-unread={!read}>
       <span className="notification-event-icon"><Clock3 aria-hidden="true" /></span>
       <div className="notification-entry-content"><div className="notification-entry-heading"><h3>Расчёт ещё уточняется</h3>{!read && <span className="notification-unread-dot" aria-hidden="true" />}</div>
-        <p>Ответ готов. Итоговые токены и сумма ещё уточняются. Повторять запрос не нужно.</p>
+        <p>Ответ готов. Итоговые токены и сумма ещё уточняются. Дождитесь завершения расчёта.</p>
         <div className="notification-entry-meta"><span>{modelName}</span>
           <button type="button" className="notification-open" onClick={() => { anchor.current?.focus({ preventScroll: true }); onOpenRequest(); }}>Открыть запрос<ArrowUpRight aria-hidden="true" /></button>
         </div>

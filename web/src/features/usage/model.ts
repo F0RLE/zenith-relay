@@ -10,7 +10,7 @@ export interface TokenCounters {
   reasoning: number | null;
 }
 
-// Customer-facing view model, not an invented Hosted API DTO.
+// Customer-facing view model for the web preview.
 export interface RequestRecord {
   id: string;
   startedAt: string;

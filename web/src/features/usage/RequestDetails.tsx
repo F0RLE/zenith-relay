@@ -22,8 +22,8 @@ export function RequestDetails({ record, onClose }: { record: RequestRecord; onC
       </dl>
     </section>
     {record.execution === "failed" && <section className="request-notice" data-status="failed"><h3>{record.response.result}</h3><p>{record.response.guidance}</p></section>}
-    {record.execution === "running" && <section className="request-notice"><h3>Запрос выполняется</h3><p>Итоговые токены и стоимость ещё не получены. Удержание не означает списание. Повторять запрос не нужно.</p></section>}
-    {record.execution === "completed" && record.accounting === "pending" && <section className="request-notice"><h3>Ответ завершён, расчёт ожидается</h3><p>Итоговые счётчики пока не получены. Это не нулевое использование и не бесплатный запрос. Повторять запрос ради расчёта не нужно.</p></section>}
+    {record.execution === "running" && <section className="request-notice"><h3>Запрос выполняется</h3><p>Ожидаются итоговые токены и стоимость. Дождитесь завершения текущего запроса.</p></section>}
+    {record.execution === "completed" && record.accounting === "pending" && <section className="request-notice"><h3>Ответ завершён, расчёт ожидается</h3><p>Ожидаются итоговые счётчики и сумма. Дождитесь расчёта текущего запроса.</p></section>}
     <section className="request-section"><div className="section-heading"><h3>Параметры запроса</h3></div><dl className="request-parameters">
       <div><dt>Протокол</dt><dd>{record.protocol}</dd></div><div><dt>Транспорт</dt><dd>{record.transport}</dd></div><div><dt>Скорость запроса</dt><dd>{record.tier}</dd></div><div><dt>Рассуждения</dt><dd>{record.model.reasoningEffort}</dd></div>
     </dl></section>

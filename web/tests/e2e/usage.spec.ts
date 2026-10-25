@@ -45,7 +45,7 @@ test("running and completed-but-pending requests never look free", async ({ page
   await dialog.getByRole("button", { name: "Закрыть", exact: true }).click();
   await page.getByRole("button", { name: "Детали запроса demo_request_0002", exact: true }).click();
   await expect(dialog).toContainText("Ответ завершён, расчёт ожидается");
-  await expect(dialog).toContainText("не бесплатный запрос");
+  await expect(dialog).toContainText("Ожидаются итоговые счётчики и сумма");
   await expect(dialog.getByTestId("request-charge-total")).toHaveText("—");
 });
 

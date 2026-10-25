@@ -82,7 +82,7 @@ export function PreviewApp() {
       <div hidden={page !== "usage"}><UsagePage records={previewRequests} asOf={asOf} onSelectRequest={setSelected} /></div>
       <div hidden={page !== "models"}><ModelsPage models={catalog} onHelp={() => setPanel("help")} /></div>
       <div hidden={page !== "billing"}><BillingPage balance={balance} reserved={180000n} operations={operations} onTopUp={topUp} /></div>
-      {page !== "overview" && <footer className="preview-note"><span>Демо · вымышленные данные и тарифы</span><span>Сервер и платежи не подключены · изменения до перезагрузки</span></footer>}
+      {page !== "overview" && <footer className="preview-note"><span>Демо · вымышленные данные и тарифы</span><span>Изменения сохраняются до перезагрузки</span></footer>}
     </main></div></div>
     {panel && panel !== "notifications" && <Dialog title={panelTitles[panel]} onClose={() => setPanel(null)} className={panel === "signOut" ? "sign-out-dialog" : ""}>
       {panel === "signOut" && <><p>Вы покинете кабинет. Для продолжения работы потребуется снова войти.</p>

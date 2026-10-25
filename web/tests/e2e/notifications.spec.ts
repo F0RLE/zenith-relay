@@ -13,7 +13,7 @@ test("notifications are a compact anchored panel, not a blocking request dialog"
   await expect(panel.getByRole("button", { name: "Закрыть уведомления", exact: true })).toBeFocused();
   await expect(panel.locator(".notification-panel-header")).toContainText("1 новое");
   await expect(panel.getByRole("article")).toHaveCount(1);
-  await expect(panel).toContainText("Повторять запрос не нужно");
+  await expect(panel).toContainText("Дождитесь завершения расчёта");
   expect(await panel.evaluate(element => {
     const bounds = element.getBoundingClientRect();
     return bounds.width <= 400 && bounds.height < 360 && bounds.left >= 12 && bounds.top >= 12

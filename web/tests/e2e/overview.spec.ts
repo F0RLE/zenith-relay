@@ -49,7 +49,7 @@ test("chart scales stay readable and gaps do not invent token observations", asy
   await expect(page.locator(".overview-period")).toHaveText("20.10.2026, 00:00 — 20.10.2026, 14:32 UTC");
   await expect(page.locator(".overview-step")).toContainText("Точка на графике — 1 час");
   const speed = page.getByRole("article", { name: "Скорость генерации", exact: true });
-  await expect(speed.locator(".chart-definition")).toContainText("Паузы между запросами не учитываются");
+  await expect(speed.locator(".chart-definition")).toContainText("Выходные токены / суммарное время генерации");
   await expect(speed.locator(".overview-chart-total small")).toHaveText("Измерено 24 из 28 запросов");
   await expect(speed.locator("circle title").last()).toContainText("14:32 UTC · неполный интервал");
   const costs = page.getByRole("article", { name: "Расходы", exact: true });

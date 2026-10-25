@@ -49,7 +49,7 @@ export function UsagePage({ records, asOf, onSelectRequest }: { records: readonl
   return <>
     <header className="page-heading"><h1>Использование</h1><span>{formatTime(asOf)} UTC</span></header>
     <div className="usage-viewbar"><div className="usage-views" role="group" aria-label="Представление использования">{(Object.keys(viewNames) as View[]).map(id => <button type="button" key={id} aria-pressed={view === id} onClick={() => { setView(id); setPage(1); }}>{viewNames[id]}</button>)}</div>
-      <button type="button" className="icon-button" aria-label="Обновить использование" onClick={() => setNotice("Это локальный снимок. Сервер не подключён; данные не изменились.")}><RefreshCw aria-hidden="true" /></button></div>
+      <button type="button" className="icon-button" aria-label="Обновить использование" onClick={() => setNotice("Локальный демо-снимок.")}><RefreshCw aria-hidden="true" /></button></div>
     <div className="usage-filters">
       <label>Период, UTC<OptionMenu label="Период, UTC" value={filters.range} onChange={value => change("range", value)} options={[{ value: "today", label: "Сегодня" }, { value: "week", label: "Последние 7 дней" }, { value: "month", label: "Последние 30 дней" }, { value: "all", label: "Всё время" }]} /></label>
       <label>Выполнение<OptionMenu label="Выполнение" disabled={view === "errors"} value={view === "errors" ? "failed" : filters.status} onChange={value => change("status", value)} options={[{ value: "all", label: "Все статусы" }, { value: "completed", label: "Завершён" }, { value: "failed", label: "Ошибка" }, { value: "running", label: "В работе" }]} /></label>
