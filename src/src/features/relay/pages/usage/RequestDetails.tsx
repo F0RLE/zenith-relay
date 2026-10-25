@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { CircleAlert, CircleCheck, Clock3, Link2 } from "lucide-react";
+import { Ban, CircleAlert, CircleCheck, Clock3, Download, Link2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import { CopyButton, Dialog } from "../../components/Ui";
+import { Button, CopyButton, Dialog } from "../../components/Ui";
+import { useRelayState } from "../../state/RelayStateProvider";
 import { tokenSpeed } from "../../usageSpeed";
 import { formatFullNumber } from "../../usageTotals";
 import { cacheLifetime, cacheTouchForRow } from "./cacheLifetime";
@@ -22,6 +23,7 @@ export function RequestDetails({ row, local, onClose }: {
 }) {
   const { t, i18n } = useTranslation();
   const { usageRevision } = useRelayUsageContext();
+  const { perform, busy } = useRelayState();
   const [debugEnabled, setDebugEnabled] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [cacheSessions, setCacheSessions] = useState<CacheSessionRecord[]>([]);
@@ -58,7 +60,12 @@ export function RequestDetails({ row, local, onClose }: {
   useEffect(() => {
     if (!local || !row.clientContextId) return;
     let active = true;
-    void relayCommands.localCacheSessions()
+    void relayCommands.localCacheSessions({}, {
+      clientContextId: row.clientContextId,
+      candidateKind: row.candidateKind,
+      candidateId: row.candidateKey,
+      model: row.routedModel ?? row.requestedModel,
+    })
       .then((sessions) => { if (active) setCacheSessions(sessions); })
       // A failed read cannot erase an earlier observation or extend its lifetime.
       .catch(() => undefined);
@@ -83,18 +90,28 @@ export function RequestDetails({ row, local, onClose }: {
     ? new Intl.DateTimeFormat(i18n.resolvedLanguage ?? i18n.language, { dateStyle: "short", timeStyle: "medium" }).format(requestTimestamp)
     : null;
   const requestStatus = requestStatusKind(row);
-  return <Dialog title={t("usage.requestDetails")} onClose={onClose} className="request-details-dialog">
+  return <Dialog title={t("usage.requestDetails")} onClose={onClose} className="request-details-dialog"
+    backdropClassName="request-details-backdrop" restoreFocus="after-paint">
     <div className="request-overview">
       <div className="request-details-header">
         <div className="request-details-identity">
           <div className="request-details-model">
-            <span className="request-details-model-label">{t("common.model")}</span>
             <h3>{row.model ?? t("common.unknown")}</h3>
+            <span className="request-details-status" data-status={requestStatus}
+              role={requestStatus === "success" ? "img" : undefined}
+              aria-label={requestStatus === "success" ? requestStatusLabel(row, t) : undefined}
+              data-relay-tooltip={requestStatus === "success" ? requestStatusLabel(row, t) : undefined}>
+              {requestStatus === "success" ? <CircleCheck aria-hidden /> : requestStatus === "pending" ? <Clock3 aria-hidden /> : requestStatus === "cancelled" ? <Ban aria-hidden /> : <CircleAlert aria-hidden />}
+              {requestStatus !== "success" ? requestStatusLabel(row, t) : null}
+            </span>
           </div>
-          <span className="request-details-status" data-status={requestStatus}>
-            {requestStatus === "success" ? <CircleCheck aria-hidden /> : requestStatus === "pending" ? <Clock3 aria-hidden /> : <CircleAlert aria-hidden />}
-            {requestStatusLabel(row, t)}
-          </span>
+          {local && row.requestId ? <Button className="request-details-export"
+            icon={<Download size={16} aria-hidden />}
+            aria-label={t("usage.exportDiagnostics")}
+            busy={busy === "request-diagnostics"} title={t("usage.exportDiagnosticsHint")}
+            onClick={() => void perform("request-diagnostics", () => relayCommands.exportRequestDiagnostics(row.requestId!), undefined, { skipRefresh: true })}>
+            <span className="request-details-export-label">{t("usage.exportDiagnosticsShort")}</span>
+          </Button> : null}
         </div>
         <dl className="request-details-subtitle">
           <div><dt><Link2 aria-hidden />{t("usage.requestConnection")}</dt><dd>{row.connection}</dd></div>
@@ -104,11 +121,12 @@ export function RequestDetails({ row, local, onClose }: {
       <dl className="request-details-metrics">
         {row.ttft != null ? <RequestDetailMetric label={t("usage.firstResponse")} value={formatDurationMs(row.ttft, i18n.resolvedLanguage ?? i18n.language, t)} /> : null}
         <RequestDetailMetric label={t("usage.responseTime")} value={formatDurationMs(row.duration, i18n.resolvedLanguage ?? i18n.language, t)} />
-        {generationSpeed != null ? <RequestDetailMetric label={t("usage.generationSpeed")} value={<SpeedValue value={generationSpeed} locale={i18n.resolvedLanguage ?? i18n.language} unit={t("usage.tokensPerSecondUnit")} />} /> : null}
+        {generationSpeed != null && !row.imageUsage ? <RequestDetailMetric label={t("usage.generationSpeed")} value={<SpeedValue value={generationSpeed} locale={i18n.resolvedLanguage ?? i18n.language} unit={t("usage.tokensPerSecondUnit")} />} /> : null}
+        {row.imageUsage ? <RequestDetailMetric label={t("usage.imagesCompleted")} value={formatTokens(row.imageUsage.generatedImages)} /> : null}
         {apiEquivalent !== "—" ? <RequestDetailMetric label={t("usage.apiEquivalent")} value={<span className="request-details-cost-value" data-relay-tooltip={equivalentHint}>{apiEquivalent}</span>} /> : null}
       </dl>
     </div>
-    {!row.success && requestStatus !== "pending" ? <section className="request-details-error" aria-label={t("usage.errorDetails")}>
+    {requestStatus === "error" ? <section className="request-details-error" aria-label={t("usage.errorDetails")}>
       <div className="request-outcome-heading">
         <CircleAlert aria-hidden />
         <h3>{row.errorCategory ? formatErrorCategory(row.errorCategory, t) : t("common.failed")}</h3>
@@ -120,7 +138,6 @@ export function RequestDetails({ row, local, onClose }: {
           <pre>{upstreamErrorMessage}</pre>
           <CopyButton value={upstreamErrorMessage} label={t("usage.copyUpstreamError")} />
         </div>
-        {row.upstreamError.redacted ? <p className="form-note">{t("usage.upstreamErrorRedacted")}</p> : null}
         {row.upstreamError.truncated ? <p className="form-note">{t("usage.upstreamErrorTruncated")}</p> : null}
       </div> : null}
     </section> : null}
@@ -132,7 +149,11 @@ export function RequestDetails({ row, local, onClose }: {
         <dl className="request-details-list request-details-token-list">
           <div className="request-details-token-group">
             <div className="request-details-token-group-heading"><dt>{t("usage.inputTokens")}</dt><RequestTokenValue tokens={breakdown.inputTotal} price={prices?.input} /></div>
-            {hasTokenValue(breakdown.uncachedInput) ? <div className="request-details-token-child"><dt>{t("usage.uncachedInputTokens")}</dt><RequestTokenValue tokens={breakdown.uncachedInput} price={prices?.uncachedInput} /></div> : null}
+            {row.imageUsage ? <>
+              <div className="request-details-token-child"><dt>{t("usage.imageTextInput")}</dt><RequestTokenValue tokens={row.imageUsage.inputTextTokens ?? null} included /></div>
+              <div className="request-details-token-child"><dt>{t("usage.imageImageInput")}</dt><RequestTokenValue tokens={row.imageUsage.inputImageTokens ?? null} included /></div>
+            </> : null}
+            {!row.imageUsage && hasTokenValue(breakdown.uncachedInput) ? <div className="request-details-token-child"><dt>{t("usage.uncachedInputTokens")}</dt><RequestTokenValue tokens={breakdown.uncachedInput} price={prices?.uncachedInput} /></div> : null}
             {showCacheCounters ? <>
               <div className="request-details-token-child">
                 <dt>{t("usage.cachedInputTokens")}</dt>

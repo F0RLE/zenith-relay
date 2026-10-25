@@ -1,5 +1,23 @@
 import { expect, test } from "bun:test";
-import { contextWindowTokens, customContextMaximum, knownContextMaximum } from "../src/features/relay/pages/pool/modelContextPolicy";
+import type { ModelContextPolicy } from "../src/features/relay/api/types";
+import { contextWindowTokens, customContextMaximum, knownContextMaximum, sameModelContextPolicy } from "../src/features/relay/pages/pool/modelContextPolicy";
+
+test("compares context policies by mode and custom tokens, independently of property order", () => {
+  const policies: (ModelContextPolicy | undefined)[] = [
+    undefined,
+    { mode: "short" },
+    { mode: "extended" },
+    { mode: "custom", tokens: 128_000 },
+    { mode: "custom", tokens: 256_000 },
+  ];
+  for (const [index, left] of policies.entries()) {
+    for (const [otherIndex, right] of policies.entries()) {
+      expect(sameModelContextPolicy(left, right === undefined ? undefined : { ...right }))
+        .toBe(index === otherIndex);
+    }
+  }
+  expect(sameModelContextPolicy({ mode: "custom", tokens: 128_000 }, { tokens: 128_000, mode: "custom" })).toBeTrue();
+});
 
 test("short is 25 percent of each real model maximum, not a global token cap", () => {
   for (const [maximum, short] of [[1_000_000, 250_000], [1_050_000, 262_500], [200_000, 50_000], [32_000, 8_000], [512, 512]]) {

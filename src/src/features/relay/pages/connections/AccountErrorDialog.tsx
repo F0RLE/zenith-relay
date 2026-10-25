@@ -4,22 +4,19 @@ import type { AccountSummary } from "../../api/types";
 import { currentAccountErrorCode } from "../../accountStatus";
 import { Button, Dialog, accountErrorLabel, copyText } from "../../components/Ui";
 import { useTransientFlag } from "../../hooks/useTransientFlag";
+import { accountErrorContext } from "./accountErrorContext";
 
 export function AccountErrorDialog({ account, onClose }: { account: AccountSummary; onClose: () => void }) {
   const { t } = useTranslation();
   const [copied, showCopied, clearCopied] = useTransientFlag(1_500);
   const code = currentAccountErrorCode(account) ?? "unknown";
   const authState = account.authState.state;
-  const quotaError = account.quota.error;
-  const observedAtMs = quotaError && quotaError.code.trim() === code ? quotaError.occurredAtMs : null;
   const message = accountErrorLabel(code, t);
   const errorDetailsJson = JSON.stringify({
     code,
     message,
-    observed_at: observedAtMs == null ? null : new Date(observedAtMs).toISOString(),
+    ...accountErrorContext(account, code),
     connection_kind: account.oauthClientKind ?? "codex",
-    proxy_mode: account.proxyMode ?? null,
-    proxy_available: account.proxyAvailable ?? null,
     health: account.health,
     auth_state: authState,
     subscription_status: account.subscription.status,
@@ -52,7 +49,6 @@ export function AccountErrorDialog({ account, onClose }: { account: AccountSumma
       <div className="config-preview account-error-json">
         <pre><code>{errorDetailsJson}</code></pre>
       </div>
-      <p className="form-note">{t("accounts.errorDetailsHint")}</p>
     </Dialog>
   );
 }

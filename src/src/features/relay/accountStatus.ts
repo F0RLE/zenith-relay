@@ -19,19 +19,45 @@ export function operationalStatusTone(status: OperationalStatus): "ready" | "war
   return "disabled";
 }
 
-/** Same icon color as the account card, without live pool-runtime hints. */
-export function accountSurfaceTone(account: AccountSummary, recoveryRequired = Boolean(account.recoveryRequired)): "ready" | "warning" | "error" | "info" | "disabled" {
+/** Runtime waits narrow readiness without hiding account-owned blocking states. */
+export function accountDisplayStatus(account: AccountSummary, candidate?: CandidateRuntimeSnapshot): OperationalStatus | "cooldown" | "busy" | "draining" {
+  if (!account.enabled) return "disabled";
+  if (account.draining) return "draining";
+  if (account.operationalStatus === "disabled") return "disabled";
+  if (!account.secretAvailable || account.proxyAvailable === false || account.recoveryRequired
+    || requiresAccountReauthentication(account) || account.authState.state === "error"
+    || account.health === "unhealthy" || account.health === "blocked") return "unavailable";
+  if (account.routingBlockReason && account.routingBlockReason !== "quota_exhausted"
+    && account.routingBlockReason !== "not_in_pool") return "unavailable";
+  if (candidate?.available === false) {
+    if (candidate.quotaWait) return "quotaWait";
+    if (candidate.nextRetryAtMs != null) return "cooldown";
+    if (candidate.capacityWait) return "busy";
+  }
+  return account.operationalStatus;
+}
+
+/** Shared account indicator; monitoring errors never override routing blocks. */
+export function accountSurfaceTone(account: AccountSummary, recoveryRequired = Boolean(account.recoveryRequired), candidate?: CandidateRuntimeSnapshot): "ready" | "warning" | "error" | "info" | "disabled" {
   if (recoveryRequired) return "info";
+  const status = accountDisplayStatus(account, candidate);
+  if (status === "disabled" || status === "draining") return "disabled";
+  if (status === "unavailable") return "error";
+  if (status === "cooldown" || status === "busy") return "warning";
   const quotaStatus = accountQuotaRefreshState(account);
   const displayedError = quotaStatus === "refreshing" ? null : currentAccountErrorCode(account);
-  if (displayedError) return "error";
-  if (account.operationalStatus === "unavailable" || account.operationalStatus === "disabled") {
-    return operationalStatusTone(account.operationalStatus);
+  if (displayedError) {
+    // Monitoring is separate from admission: a failed quota/model read does
+    // not prove the account cannot execute. Actual routing blocks take priority.
+    const monitoringError = displayedError.startsWith("models_")
+      || (quotaStatus === "failed" && displayedError === account.quota.error?.code.trim());
+    return monitoringError ? "warning" : "error";
   }
   if (quotaStatus === "refreshing" || quotaStatus === "pending") return "disabled";
-  if (quotaStatus === "failed" || quotaStatus === "requires_reauth") return "error";
+  if (quotaStatus === "requires_reauth") return "error";
+  if (quotaStatus === "failed") return "warning";
   if (account.clientAuthStatus === "login_required") return "warning";
-  return operationalStatusTone(account.operationalStatus);
+  return operationalStatusTone(status);
 }
 
 export function transientCandidateTone(
@@ -117,6 +143,8 @@ export function currentAccountErrorCode(account: AccountSummary) {
 
 export function accountErrorTranslationKey(code: string) {
   const normalized = code.toLowerCase();
+  if (normalized === "siwc_rotation_store_unavailable" || normalized === "account_credential_store_unavailable") return "accounts.errors.rotationStorageUnavailable";
+  if (/token_rotation_recovery_required|account_rotation_recovery_required|siwc_rotation_(outcome_unknown|checkpoint_invalid|recovery_required)/.test(normalized)) return "accounts.errors.tokenRotationRecovery";
   if (normalized === "siwc_plan_use_disabled") return "accounts.errors.siwcPlanUseDisabled";
   if (normalized === "basis_points_free_account_unsupported") return "accounts.errors.basisPointsFreeUnsupported";
   if (/reused_refresh_token|refresh_token_reused/.test(normalized)) return "accounts.errors.reusedRefreshToken";
@@ -136,6 +164,8 @@ export function accountErrorTranslationKey(code: string) {
   if (/rate.?limit|too_many/.test(normalized)) return "accounts.errors.rateLimited";
   if (normalized === "models_timeout") return "accounts.errors.modelsTimeout";
   if (normalized === "models_transport") return "accounts.errors.modelsConnection";
+  if (normalized === "quota_timeout") return "accounts.errors.quotaTimeout";
+  if (normalized === "quota_transport") return "accounts.errors.quotaConnection";
   if (/timeout/.test(normalized)) return "accounts.errors.connectionTimeout";
   if (/transport|network|connect|proxy/.test(normalized)) return "accounts.errors.connection";
   if (normalized.startsWith("models_")) return "accounts.errors.models";

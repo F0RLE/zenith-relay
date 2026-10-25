@@ -11,17 +11,30 @@ import { usePendingFlag } from "../../state/usePendingFlag";
 
 type SettingsUpdateState = "idle" | "checking" | "current" | "available" | "error" | "skipped";
 
+// Native storage roots are fixed for this process. Reuse only these paths,
+// not mutable diagnostic settings, and never persist them in display storage.
+let cachedStorageInfo: RelayStorageInfo | null = null;
+let pendingStorageInfo: Promise<RelayStorageInfo> | null = null;
+function loadStorageInfo() {
+  if (cachedStorageInfo) return Promise.resolve(cachedStorageInfo);
+  pendingStorageInfo ??= relayCommands.storageInfo().then((info) => {
+    cachedStorageInfo = info;
+    return info;
+  }).finally(() => { pendingStorageInfo = null; });
+  return pendingStorageInfo;
+}
+
 export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }: { updateCheckState: SettingsUpdateState; updateVersion: string | null; onCheckUpdates: () => Promise<SettingsUpdateState> }) {
   const { t, i18n } = useTranslation();
   const { mode, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, launchApplicationAfterConnect, setLaunchApplicationAfterConnect, resetOnboarding, perform, busy } = useRelayState();
   const confirm = useConfirm();
-  const [storageInfo, setStorageInfo] = useState<RelayStorageInfo | null>(null);
+  const [storageInfo, setStorageInfo] = useState(() => cachedStorageInfo);
   const [storageUnavailable, setStorageUnavailable] = useState(false);
   const [diagnosticSettings, setDiagnosticSettings] = useState<DiagnosticSettings | null>(null);
   const [diagnosticsUnavailable, setDiagnosticsUnavailable] = useState(false);
   useEffect(() => {
     let active = true;
-    void relayCommands.storageInfo()
+    void loadStorageInfo()
       .then((storageInfo) => { if (active) setStorageInfo(storageInfo); })
       .catch(() => { if (active) setStorageUnavailable(true); });
     return () => { active = false; };
@@ -97,7 +110,7 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
           icon={<FolderOpen aria-hidden />}
           action={t("settings.openData")}
           busy={busy === "open-data"}
-          onOpen={() => perform("open-data", () => relayCommands.openFolder("data"), "feedback.opened", { backgroundRefresh: true })}
+          onOpen={() => perform("open-data", () => relayCommands.openFolder("data"), "feedback.opened", { skipRefresh: true })}
         />
       </SettingsGroup>
 
@@ -130,7 +143,7 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
           icon={<FolderOpen aria-hidden />}
           action={t("settings.openLogs")}
           busy={busy === "open-logs"}
-          onOpen={() => perform("open-logs", () => relayCommands.openFolder("logs"), "feedback.opened", { backgroundRefresh: true })}
+          onOpen={() => perform("open-logs", () => relayCommands.openFolder("logs"), "feedback.opened", { skipRefresh: true })}
         />
         <SettingsPathRow
           title={t("settings.errorLogs")}
@@ -139,7 +152,7 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
           icon={<FileWarning aria-hidden />}
           action={t("settings.openErrors")}
           busy={busy === "open-error-logs"}
-          onOpen={() => perform("open-error-logs", () => relayCommands.openFolder("error_logs"), "feedback.opened", { backgroundRefresh: true })}
+          onOpen={() => perform("open-error-logs", () => relayCommands.openFolder("error_logs"), "feedback.opened", { skipRefresh: true })}
         />
         <SettingsPathRow
           title={t("settings.crashLogs")}
@@ -148,7 +161,7 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
           icon={<Bug aria-hidden />}
           action={t("settings.openCrashes")}
           busy={busy === "open-crash-logs"}
-          onOpen={() => perform("open-crash-logs", () => relayCommands.openFolder("crash_logs"), "feedback.opened", { backgroundRefresh: true })}
+          onOpen={() => perform("open-crash-logs", () => relayCommands.openFolder("crash_logs"), "feedback.opened", { skipRefresh: true })}
         />
         <SettingsPathRow
           title={t("settings.operationLogs")}
@@ -157,7 +170,7 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
           icon={<FileText aria-hidden />}
           action={t("settings.openOperations")}
           busy={busy === "open-operation-logs"}
-          onOpen={() => perform("open-operation-logs", () => relayCommands.openFolder("operation_logs"), "feedback.opened", { backgroundRefresh: true })}
+          onOpen={() => perform("open-operation-logs", () => relayCommands.openFolder("operation_logs"), "feedback.opened", { skipRefresh: true })}
         />
       </SettingsGroup> : null}
     </div>

@@ -56,6 +56,7 @@ export type UsageRow = {
   errorCategory: string | null;
   errorOrigin: ErrorOrigin | null;
   upstreamError?: UpstreamErrorDetails | null;
+  imageUsage?: LocalUsage["imageUsage"];
   toolUse: ToolUseDiagnostics | null;
   routing: RoutingDiagnostics | null;
   accountId: string | null;
@@ -85,89 +86,64 @@ export function codexRequestOriginFromErrorCategory(category: string | null): Co
   return null;
 }
 
-type UsageEvent = LocalUsage;
-
-type UsageRowLabels = {
+export type LocalUsageRowLabels = {
   backgroundConnection: string;
-  unknownAccount: string;
   removedAccount: string;
   unknownConnection: string;
-};
-
-export type LocalUsageRowLabels = UsageRowLabels & {
   accountLabels: ReadonlyMap<string, string>;
   sourceLabels: ReadonlyMap<string, string>;
 };
 
-function usageRowFromEvent(
-  event: UsageEvent,
-  time: string,
-  connection: string,
-  accountId: string | null,
-  candidateKind: UsageRow["candidateKind"],
-  candidateKey: string,
-  requestOrigin: CodexRequestOrigin,
-): UsageRow {
-  return {
-    id: event.id,
-    attempt: event.attempt,
-    time,
-    success: event.success,
-    model: modelIdForDisplay(event.resolvedModel ?? event.requestedModel),
-    requestedModel: event.requestedModel,
-    routedModel: event.resolvedModel,
-    requestedReasoningEffort: event.requestedReasoningEffort ?? null,
-    effectiveReasoningEffort: event.effectiveReasoningEffort ?? null,
-    connection,
-    wireApi: event.wireApi,
-    transport: event.transport ?? "http",
-    serviceTier: event.serviceTier ?? null,
-    appliedServiceTier: normalizeObservedServiceTier(event.appliedServiceTier),
-    ttft: event.ttftMs ?? null,
-    generationMs: event.generationMs ?? null,
-    duration: event.latencyMs,
-    inputTokens: event.inputTokens,
-    cachedInputTokens: event.cachedInputTokens,
-    cacheWriteInputTokens: event.cacheWriteInputTokens ?? null,
-    cacheWriteTtl: event.cacheWriteTtl ?? null,
-    reasoningTokens: event.reasoningTokens,
-    outputTokens: event.outputTokens,
-    tokens: event.totalTokens,
-    requestId: event.requestId,
-    httpStatus: event.httpStatus,
-    errorCategory: event.errorCategory,
-    errorOrigin: event.errorOrigin ?? null,
-    upstreamError: event.success ? null : event.upstreamError ?? null,
-    toolUse: event.toolUse ?? null,
-    routing: event.routing ?? null,
-    accountId,
-    candidateKind,
-    candidateKey,
-    apiEquivalent: event.apiEquivalent ?? null,
-    apiEquivalentBreakdown: event.apiEquivalentBreakdown,
-    requestOrigin,
-    clientContextId: "clientContextId" in event ? event.clientContextId ?? null : null,
-  };
-}
-
 /** Builds UI rows from persisted local telemetry. */
 export function usageRowsFromLocal(events: readonly LocalUsage[], labels: LocalUsageRowLabels): UsageRow[] {
-  return events.map((event) => {
+  return events.map((event): UsageRow => {
     const requestOrigin = codexRequestOriginFromErrorCategory(event.errorCategory);
     const connection = requestOrigin
       ? labels.backgroundConnection
       : event.accountId
         ? labels.accountLabels.get(event.accountId) ?? labels.removedAccount
         : labels.sourceLabels.get(event.sourceId) ?? labels.unknownConnection;
-    return usageRowFromEvent(
-      event,
-      event.createdAt,
+    return {
+      id: event.id,
+      attempt: event.attempt,
+      time: event.createdAt,
+      success: event.success,
+      model: modelIdForDisplay(event.resolvedModel ?? event.requestedModel),
+      requestedModel: event.requestedModel,
+      routedModel: event.resolvedModel,
+      requestedReasoningEffort: event.requestedReasoningEffort ?? null,
+      effectiveReasoningEffort: event.effectiveReasoningEffort ?? null,
       connection,
-      event.accountId ?? null,
-      event.accountId ? "account" : "source",
-      event.accountId ?? event.sourceId,
+      wireApi: event.wireApi,
+      transport: event.transport ?? "http",
+      serviceTier: event.serviceTier ?? null,
+      appliedServiceTier: normalizeObservedServiceTier(event.appliedServiceTier),
+      ttft: event.ttftMs ?? null,
+      generationMs: event.generationMs ?? null,
+      duration: event.latencyMs,
+      inputTokens: event.inputTokens,
+      cachedInputTokens: event.cachedInputTokens,
+      cacheWriteInputTokens: event.cacheWriteInputTokens ?? null,
+      cacheWriteTtl: event.cacheWriteTtl ?? null,
+      reasoningTokens: event.reasoningTokens,
+      outputTokens: event.outputTokens,
+      tokens: event.totalTokens,
+      requestId: event.requestId,
+      httpStatus: event.httpStatus,
+      errorCategory: event.errorCategory,
+      errorOrigin: event.errorOrigin ?? null,
+      upstreamError: event.success ? null : event.upstreamError ?? null,
+      imageUsage: event.imageUsage ?? null,
+      toolUse: event.toolUse ?? null,
+      routing: event.routing ?? null,
+      accountId: event.accountId ?? null,
+      candidateKind: event.accountId ? "account" : "source",
+      candidateKey: event.accountId ?? event.sourceId,
+      apiEquivalent: event.apiEquivalent ?? null,
+      apiEquivalentBreakdown: event.apiEquivalentBreakdown,
       requestOrigin,
-    );
+      clientContextId: "clientContextId" in event ? event.clientContextId ?? null : null,
+    };
   });
 }
 

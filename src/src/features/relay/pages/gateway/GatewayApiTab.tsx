@@ -39,7 +39,7 @@ export function GatewayApiTab({ running, endpoint, actions }: { running: boolean
   const rotatingApiKey = busy === "gateway-api-key-rotate";
   const copyApiKey = () => perform("gateway-api-key", async () => {
     await copyText(await relayCommands.revealLocalGatewayApiKey());
-  }, "feedback.copied", { backgroundRefresh: true });
+  }, "feedback.copied", { skipRefresh: true });
   const rotateApiKey = async () => {
     if (!await confirm(t("gateway.regenerateApiKeyConfirm"), {
       title: t("gateway.regenerateApiKey"),
@@ -83,7 +83,7 @@ export function GatewayApiTab({ running, endpoint, actions }: { running: boolean
           <div className="gateway-api-field gateway-api-key">
             <h4><KeyRound aria-hidden />{t("gateway.apiKey")}</h4>
             <div className="gateway-api-value">
-              <span className="gateway-api-secret" aria-label={t("gateway.keyHidden")}>•••• •••• ••••</span>
+              <span className="gateway-api-secret" aria-label={t("gateway.keyHidden")}>••••••••••••</span>
               <div className="gateway-api-field-actions">
                 <IconButton label={t("gateway.copyApiKey")} icon={<Copy aria-hidden />} busy={copyingApiKey || rotatingApiKey} disabled={!canCopyApiKey} onClick={() => void copyApiKey()} />
                 <ActionMenu label={t("gateway.apiKeyActions")}>
@@ -93,7 +93,6 @@ export function GatewayApiTab({ running, endpoint, actions }: { running: boolean
                 </ActionMenu>
               </div>
             </div>
-            <p>{t("gateway.apiKeyHint")}</p>
           </div>
         </div>
 

@@ -36,6 +36,13 @@ export type CacheHistoryDiagnostics = {
   sharedPrefixItems: number | null;
   firstChangedItemKind: "developer" | "user" | "assistant" | "tool_result" | "tool_call"
     | "reasoning" | "compaction" | "additional_tools" | "configuration_update" | "other" | null;
+  /** Same-request body alignment only; not evidence of provider cache reuse. */
+  leadingContextAlignment?: {
+    skippedClientItems: number;
+    skippedUpstreamItems: number;
+    sharedPrefixItems: number;
+    comparison: CacheHistoryDiagnostics["comparison"];
+  } | null;
 };
 
 export type RoutingDiagnostics = {
@@ -50,11 +57,25 @@ export type RoutingDiagnostics = {
   transport?: {
     upstream: "http" | "websocket";
     mode: "native" | "protocol_conversion" | "basis_points";
-    fallbackReason?: "basis_points_http" | "protocol_conversion" | "websocket_disabled" | "websocket_unavailable" | "existing_http_bridge" | null;
+    fallbackReason?: "basis_points_http" | "protocol_conversion" | "websocket_disabled" | "websocket_unavailable" | "websocket_slow_handshake" | "existing_http_bridge" | null;
     responseFormat?: "json" | "sse" | "websocket_frames" | null;
     handshakeMs?: number | null;
+    connectionReused?: boolean | null;
     responseHeadersMs?: number | null;
     requestPreparationMs?: number | null;
+    requestPayload?: {
+      mode: "full" | "continuation";
+      fullRequestReason?: "basis_points_transport" | "protocol_conversion" | "no_previous_response_id" | null;
+      jsonBytes: number;
+      /** Encoded body bytes, excluding HTTP/WebSocket framing and TLS. */
+      bodyBytes: number;
+      contentEncoding: "identity" | "zstd";
+      compressionMs?: number | null;
+      /** Wall time including preparation and blocking-pool scheduling. */
+      compressionUs?: number | null;
+      /** HTTP execute to headers, not upload-only time or total TTFT. */
+      httpSendToHeadersMs?: number | null;
+    } | null;
     requestPreparation?: {
       bodyMs?: number | null;
       /** Subset of bodyMs, not an additional duration. */
@@ -65,8 +86,23 @@ export type RoutingDiagnostics = {
     upstreamResponseMs?: number | null;
     clientFirstOutputMs?: number | null;
     clientResponseReadyMs?: number | null;
+    /** Optional native backend measurements; not additive Relay phases. */
+    codexServerTiming?: {
+      overheadMs?: number;
+      inferenceMs?: number;
+      engineIapiTtftMs?: number;
+      engineServiceTtftMs?: number;
+      engineIapiTbtMs?: number;
+      engineServiceTbtMs?: number;
+    } | null;
   } | null;
   cacheContext?: CacheContextDiagnostics | null;
+  requestTiming?: {
+    durationMs: number;
+    ttftMs: number | null;
+    /** Logical finalization only; not another send or usage observation. */
+    projectionOnly: boolean;
+  } | null;
   attemptOutcome?: "completed" | "tool_discovery" | "retry_selection" | "retry_repair" | "retry_authorization" | "returned_failure" | "execution_uncertain" | "client_disconnected" | null;
 };
 
@@ -79,6 +115,7 @@ export type RequestContextSize = {
 
 export type ToolUseDiagnostics = {
   clientToolCount: number;
+  /** Post-policy catalog, before BPS prompt encoding or other transport changes. */
   forwardedToolCount: number;
   clientSchemaBytes?: number;
   forwardedSchemaBytes?: number;
@@ -115,6 +152,7 @@ export type UpstreamErrorDetails = {
   httpStatus: number | null;
   code: string | null;
   errorType: string | null;
+  parameter?: string | null;
   requestId?: string | null;
   message: string | null;
   redacted: boolean;
@@ -132,7 +170,7 @@ type UsageEventRecord = {
   resolvedModel: string | null;
   requestedReasoningEffort?: ReasoningEffort | null;
   effectiveReasoningEffort?: ReasoningEffort | null;
-  wireApi: "responses" | "chat_completions" | "messages" | "gemini";
+  wireApi: "responses" | "chat_completions" | "messages" | "gemini" | "gemini_interactions";
   transport: UsageTransport;
   serviceTier?: DefaultServiceTier;
   appliedServiceTier?: ObservedServiceTier | null;
@@ -141,6 +179,15 @@ type UsageEventRecord = {
   errorCategory: string | null;
   errorOrigin?: ErrorOrigin | null;
   upstreamError?: UpstreamErrorDetails | null;
+  imageUsage?: {
+    inputTextTokens?: number | null;
+    inputImageTokens?: number | null;
+    cachedTextTokens?: number | null;
+    cachedImageTokens?: number | null;
+    outputImageTokens?: number | null;
+    generatedImages: number;
+    inputDetailsConsistent?: boolean | null;
+  } | null;
   toolUse?: ToolUseDiagnostics;
   latencyMs: number;
   ttftMs?: number | null;
@@ -218,6 +265,10 @@ export type UsageFilterOptions = {
 
 export type LocalUsagePage = {
   events: LocalUsage[];
+  /** Present for a bounded sends-only read; totals/counts are not a full report. */
+  hasMore?: boolean;
+  /** Echoed by hosts that actually applied the requested workload filter. */
+  workload?: UsageWorkload;
   /** Older desktop hosts can omit the projection or only provide advanced fields. */
   filterOptions?: Partial<UsageFilterOptions>;
   total: number;
@@ -256,7 +307,12 @@ export type UsageExportRow = {
   appliedServiceTier?: ObservedServiceTier | null;
 };
 
+/** Explicit task markers; unmarked requests remain in the conversation scope. */
+export type UsageWorkload = "conversation" | "memory" | "background";
+
 export type UsageQuery = {
+  /** Desktop-only: false loads a bounded sends page without global statistics. */
+  includeReport?: boolean;
   page?: number;
   pageSize?: number;
   range?: "daily" | "weekly" | "monthly" | "custom";
@@ -265,7 +321,9 @@ export type UsageQuery = {
   bucketMs?: number;
   modelQuery?: string;
   sourceOrAccountQuery?: string;
-  wireApi?: "responses" | "chat_completions" | "messages" | "gemini";
+  /** Omitted includes all usage, including memory and other background work. */
+  workload?: UsageWorkload;
+  wireApi?: "responses" | "chat_completions" | "messages" | "gemini" | "gemini_interactions";
   transport?: UsageTransport;
   success?: boolean;
   errorCategory?: string;

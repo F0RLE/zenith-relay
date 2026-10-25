@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { BrainCircuit, ChevronDown, ChevronRight, GripVertical } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
@@ -27,6 +27,7 @@ import {
 import { useRelayState } from "../../state/RelayStateProvider";
 import { PoolSpeedControl } from "./PoolSpeedControl";
 import { PoolContextControl, type ModelContextPolicy } from "./PoolContextControl";
+import { sameModelContextPolicy } from "./modelContextPolicy";
 import { usePointerDragListeners } from "../../hooks/usePointerDragListeners";
 
 type ModelDragState = {
@@ -44,7 +45,7 @@ export function ModelRulesView() {
   // Model Rules configures the complete pool inventory. Route health and
   // cooldowns are runtime state; they must not make a member's model vanish
   // from the policy editor while the relay can still recover or adapt it.
-  const models = runtime ? currentPoolModelSummaries(runtime) : [];
+  const models = useMemo(() => runtime ? currentPoolModelSummaries(runtime) : [], [runtime]);
   const [orderedModels, setOrderedModels] = useState<ModelSummary[]>(models);
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const [pendingEnabled, setPendingEnabled] = useState<Record<string, boolean>>({});
@@ -55,7 +56,7 @@ export function ModelRulesView() {
   const orderMutation = useRef(false);
   const latestModelsRef = useRef(models);
   latestModelsRef.current = models;
-  const catalogSignature = modelSignature(models);
+  const catalogSignature = useMemo(() => modelSignature(models), [models]);
   useEffect(() => {
     setOrderedModels(models);
   }, [catalogSignature]);
@@ -69,7 +70,7 @@ export function ModelRulesView() {
       for (const model of latestModelsRef.current) {
         if (contextMutations.current.has(model.id)) continue;
         const saved = model.contextPolicy ?? { mode: "short" as const };
-        if (remaining[model.id] !== undefined && JSON.stringify(remaining[model.id]) === JSON.stringify(saved)) {
+        if (remaining[model.id] !== undefined && sameModelContextPolicy(remaining[model.id], saved)) {
           delete remaining[model.id];
           changed = true;
         }
@@ -91,7 +92,10 @@ export function ModelRulesView() {
       return changed ? remainingPendingTiers : previousPendingSpeed;
     });
   }, [catalogSignature]);
-  const modelGroups = groupModelSummaries(orderedModels, runtime?.accounts ?? []);
+  const modelGroups = useMemo(
+    () => groupModelSummaries(orderedModels, runtime?.accounts ?? []),
+    [orderedModels, runtime?.accounts],
+  );
   const toggleModel = (model: ModelSummary) => {
     const enabled = !pendingModelEnabled(pendingEnabled, model);
     setPendingEnabled((previousPendingEnabled) => ({ ...previousPendingEnabled, [model.id]: enabled }));
@@ -158,9 +162,9 @@ export function ModelRulesView() {
         contextMutations.current.delete(model.id);
         if (!lastSaved) setContextReset((previous) => ({ ...previous, [model.id]: (previous[model.id] ?? 0) + 1 }));
         const saved = latestModelsRef.current.find((item) => item.id === model.id)?.contextPolicy ?? { mode: "short" };
-        if (!lastSaved || JSON.stringify(saved) === JSON.stringify(submitted)) {
+        if (!lastSaved || sameModelContextPolicy(saved, submitted)) {
           setPendingContext((previous) => {
-            if (JSON.stringify(previous[model.id]) !== JSON.stringify(submitted)) return previous;
+            if (!sameModelContextPolicy(previous[model.id], submitted)) return previous;
             const remaining = { ...previous };
             delete remaining[model.id];
             return remaining;
@@ -305,7 +309,7 @@ export function ModelRulesView() {
                       defaultTokens={model.contextWindows?.defaultTokens ?? undefined}
                       resetRevision={contextReset[model.id] ?? 0}
                       disabled={false}
-                      saving={pendingContext[model.id] !== undefined && JSON.stringify(pendingContext[model.id]) !== JSON.stringify(model.contextPolicy ?? { mode: "short" })}
+                      saving={pendingContext[model.id] !== undefined && !sameModelContextPolicy(pendingContext[model.id], model.contextPolicy ?? { mode: "short" })}
                       onChange={(nextPolicy) => setModelContext(model, nextPolicy)}
                     /></div> : null}
                     {hasReasoningModes ? <IconButton

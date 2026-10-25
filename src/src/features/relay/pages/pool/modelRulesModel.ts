@@ -65,14 +65,7 @@ export function reorderById<T extends { id: string }>(rows: readonly T[], source
 
 /** Flatten groups after moving a complete provider block to another block. */
 export function reorderModelGroups(groups: readonly ModelRuleGroup[], sourceId: string, targetId: string) {
-  if (sourceId === targetId) return null;
-  const sourceIndex = groups.findIndex((group) => group.id === sourceId);
-  const targetIndex = groups.findIndex((group) => group.id === targetId);
-  if (sourceIndex < 0 || targetIndex < 0) return null;
-  const blocks = groups.map((group) => [...group.models]);
-  const [moved] = blocks.splice(sourceIndex, 1);
-  blocks.splice(targetIndex, 0, moved!);
-  return blocks.flat();
+  return reorderById(groups, sourceId, targetId)?.flatMap((group) => group.models) ?? null;
 }
 
 /** Keep every current pool model in the persisted order. */
@@ -95,10 +88,9 @@ export function completeModelDisplayOrder(
 }
 
 export function supportedReasoningLevels(model: Pick<ModelSummary, "reasoningSupportedLevels" | "reasoningLevels" | "reasoningManualFallback">) {
-  const declaredLevels = model.reasoningSupportedLevels?.length
+  const levels = model.reasoningSupportedLevels?.length
     ? model.reasoningSupportedLevels
     : model.reasoningLevels ?? [];
-  const levels = declaredLevels;
   const seen = new Set<string>();
   return levels
     .map((level) => normalizeReasoningEffort(level))
@@ -157,7 +149,7 @@ const MODEL_SPEED_ORDER = ["standard", "fast", "ultrafast"] as const satisfies r
 export function modelSpeedTiers(model: Pick<ModelSummary, "speedSupported" | "speedTiers">): DefaultServiceTier[] {
   const declared = new Set(model.speedTiers ?? []);
   const ordered = MODEL_SPEED_ORDER.filter((tier) => declared.has(tier));
-  return ordered.length ? [...ordered] : ["standard"];
+  return ordered.length ? ordered : ["standard"];
 }
 
 /** Shown switch state: the pending click wins until the runtime snapshot confirms it. */

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { AccountSummary, CandidateRuntimeSnapshot } from "../src/features/relay/api/types";
+import { accountErrorContext } from "../src/features/relay/pages/connections/accountErrorContext";
 import {
   accountQuotaRefreshState,
   accountErrorTranslationKey,
@@ -52,6 +53,32 @@ function account(overrides: Partial<AccountSummary> = {}): AccountSummary {
   };
 }
 
+test("saved model errors never borrow the current proxy or a quota timestamp", () => {
+  const context = accountErrorContext(account({
+    proxyMode: "account",
+    proxyAvailable: true,
+    lastErrorCode: "models_forbidden",
+    quota: { error: { code: "quota_timeout", occurredAtMs: 123 } },
+    refreshState: { models: "stale", quota: "fresh" },
+  }), "models_forbidden");
+  expect(context).toEqual({
+    observed_at: null,
+    error_scope: "models",
+    failed_request_route: null,
+    current_route: { proxy_mode: "account", configuration_valid: true },
+    model_catalog_status: "stale",
+  });
+});
+
+test("quota errors keep only their matching timestamp and no invented route evidence", () => {
+  const value = account({ quota: { error: { code: "quota_timeout", occurredAtMs: 123 } } });
+  expect(accountErrorContext(value, "quota_timeout").observed_at).toBe("1970-01-01T00:00:00.123Z");
+  expect(accountErrorContext(value, "quota_timeout").failed_request_route).toBeNull();
+  expect(accountErrorContext(value, "models_forbidden").observed_at).toBeNull();
+  value.quota.error!.occurredAtMs = Number.NaN;
+  expect(accountErrorContext(value, "quota_timeout").observed_at).toBeNull();
+});
+
 test("SIWC without quota data is not left waiting and preserves real refresh and auth states", () => {
   const siwc = account({ oauthClientKind: "siwc", quotaRefreshStatus: "pending" });
   expect(accountQuotaRefreshState(siwc)).toBe("not_available");
@@ -70,6 +97,16 @@ test("SIWC without quota data is not left waiting and preserves real refresh and
 });
 
 describe("account status policy", () => {
+  test("rotation recovery requires sign-in without mislabeling temporary storage outages", () => {
+    const recovery = account({ authState: { state: "requires_reauth", reason: "token_rotation_recovery_required" } });
+    expect(accountQuotaRefreshState(recovery)).toBe("requires_reauth");
+    expect(currentAccountErrorCode(recovery)).toBe("auth_token_rotation_recovery_required");
+    for (const code of ["auth_token_rotation_recovery_required", "account_rotation_recovery_required", "siwc_rotation_outcome_unknown", "siwc_rotation_checkpoint_invalid", "siwc_rotation_recovery_required"]) {
+      expect(accountErrorTranslationKey(code)).toBe("accounts.errors.tokenRotationRecovery");
+    }
+    expect(accountErrorTranslationKey("siwc_rotation_store_unavailable")).toBe("accounts.errors.rotationStorageUnavailable");
+    expect(accountErrorTranslationKey("account_credential_store_unavailable")).toBe("accounts.errors.rotationStorageUnavailable");
+  });
   test("SIWC quota wait is a warning without inventing missing quota counters", () => {
     const waiting = account({ oauthClientKind: "siwc", operationalStatus: "quotaWait", quotaRefreshStatus: "pending" });
     expect(accountSurfaceTone(waiting)).toBe("warning");
@@ -85,6 +122,18 @@ describe("account status policy", () => {
     expect(transientCandidateTone({ halfOpen: true } as CandidateRuntimeSnapshot, 100, true)).toBe("info");
     expect(transientCandidateTone({ nextRetryAtMs: 101 } as CandidateRuntimeSnapshot, 100, true)).toBe("warning");
     expect(transientCandidateTone({ nextRetryAtMs: 101 } as CandidateRuntimeSnapshot, 100, false)).toBeNull();
+  });
+
+  test("a connection cooldown is temporary and never hides an account block", () => {
+    const waiting = account({ operationalStatus: "unavailable", lastErrorCode: "upstream_transport_connect" });
+    const candidate = { available: false, nextRetryAtMs: 200 } as CandidateRuntimeSnapshot;
+    expect(accountSurfaceTone(waiting, false, candidate)).toBe("warning");
+    expect(accountSurfaceTone({ ...waiting, proxyAvailable: false }, false, candidate)).toBe("error");
+    expect(accountSurfaceTone({ ...waiting, authState: { state: "requires_reauth", reason: "invalid_grant" } }, false, candidate)).toBe("error");
+    expect(accountSurfaceTone({ ...waiting, health: "blocked" }, false, candidate)).toBe("error");
+    expect(accountSurfaceTone({ ...waiting, health: "unhealthy" }, false, candidate)).toBe("error");
+    expect(accountSurfaceTone({ ...waiting, routingBlockReason: "account_unhealthy" }, false, candidate)).toBe("error");
+    expect(accountSurfaceTone(account(), false, { ...candidate, available: true, nextRetryAtMs: null })).toBe("ready");
   });
 
   test("keeps account eligibility and error precedence explicit", () => {
@@ -143,7 +192,26 @@ describe("account status policy", () => {
       });
       expect(currentAccountErrorCode(unavailable)).toBe(lastErrorCode);
       expect(accountQuotaRefreshState(unavailable)).toBe("failed");
+      expect(accountSurfaceTone(unavailable)).toBe("error");
     }
+  });
+
+  test("monitoring failures warn without presenting a routable account as broken", () => {
+    for (const code of ["quota_timeout", "quota_transport"]) {
+      const failed = account({ quotaRefreshStatus: "failed", quota: { error: { code } } });
+      expect(currentAccountErrorCode(failed)).toBe(code);
+      expect(accountSurfaceTone(failed)).toBe("warning");
+      expect(canLaunchCodexAccount(failed)).toBeTrue();
+      expect(accountSurfaceTone({ ...failed, operationalStatus: "unavailable", routingBlockReason: "proxy_unavailable" })).toBe("error");
+      expect(accountSurfaceTone({ ...failed, authState: { state: "requires_reauth", reason: "invalid_grant" } })).toBe("error");
+      expect(accountSurfaceTone({ ...failed, enabled: false, operationalStatus: "disabled" })).toBe("disabled");
+      expect(accountSurfaceTone({ ...failed, quotaRefreshStatus: "updated", quota: {} })).toBe("ready");
+    }
+    for (const lastErrorCode of ["models_timeout", "models_transport"]) {
+      expect(accountSurfaceTone(account({ lastErrorCode }))).toBe("warning");
+      expect(accountSurfaceTone(account({ lastErrorCode, operationalStatus: "unavailable" }))).toBe("error");
+    }
+    expect(accountSurfaceTone(account({ lastErrorCode: "siwc_plan_use_disabled" }))).toBe("error");
   });
 
   test("maps safe error codes to stable translation keys", () => {
@@ -155,6 +223,8 @@ describe("account status policy", () => {
     expect(accountErrorTranslationKey("models_forbidden")).toBe("accounts.importFailureReasons.modelsForbidden");
     expect(accountErrorTranslationKey("models_prepare")).toBe("accounts.errors.models");
     expect(accountErrorTranslationKey("models_transport")).toBe("accounts.errors.modelsConnection");
+    expect(accountErrorTranslationKey("quota_timeout")).toBe("accounts.errors.quotaTimeout");
+    expect(accountErrorTranslationKey("quota_transport")).toBe("accounts.errors.quotaConnection");
     expect(accountErrorTranslationKey("proxy_unavailable")).toBe("accounts.errors.connection");
     expect(accountErrorTranslationKey("quota_forbidden")).toBe("accounts.errors.quota");
     expect(accountErrorTranslationKey("subscription_forbidden")).toBe("accounts.errors.blocked");
@@ -173,7 +243,7 @@ describe("account status policy", () => {
       operationalStatus: "rotation",
       quotaRefreshStatus: "failed",
       quota: { error: { code: "quota_timeout" } },
-    }))).toBe("error");
+    }))).toBe("warning");
     expect(accountSurfaceTone(account({ inPool: false }), true)).toBe("info");
   });
 });

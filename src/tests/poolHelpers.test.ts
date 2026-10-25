@@ -1,15 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import type { AccountSummary, RuntimeSnapshot, SourceSummary } from "../src/features/relay/api/types";
-import {
-  comparePoolMembers,
-  toggle,
-} from "../src/features/relay/poolHelpers";
+import type { AccountSummary, CandidateRuntimeSnapshot, RuntimeSnapshot, SourceSummary } from "../src/features/relay/api/types";
+import { toggle } from "../src/features/relay/poolHelpers";
+import { orderedPoolMembers } from "../src/features/relay/pages/pool/poolMembersModel";
 import {
   currentPoolModelSummaries,
   groupModelSummaries,
   modelSummaries,
 } from "../src/features/relay/modelSummaries";
-import { applyRuntimeActivities, reconcileRuntimeActivityOverlay, routingOrderPositions, runtimeCandidateForMember, sameRuntimeOrder, upcomingModelRetries } from "../src/features/relay/routingOrder";
+import { activeModelCounts, applyRuntimeActivities, reconcileRuntimeActivityOverlay, routingOrderPositions, runtimeCandidateForMember, sameRuntimeOrder, upcomingModelRetries } from "../src/features/relay/routingOrder";
 
 function source(overrides: Partial<SourceSummary>): SourceSummary {
   return {
@@ -141,6 +139,37 @@ describe("pool helpers", () => {
       reasoningLevels: ["low", "high"],
       reasoningConfigurable: true,
     });
+  });
+
+  test("catalog merging preserves explicit zero and false values without mutating source routes", () => {
+    const snapshot = runtime({});
+    snapshot.gateway.models = [
+      {
+        id: "gpt-test", enabled: true, memberCount: 1, codexVisible: true,
+        codexDisplayName: "Local Model", customPrice: false,
+        catalogName: "", catalogToolCall: false, catalogContextLimit: 0,
+        inputMicroUsdPerMillion: 0, outputMicroUsdPerMillion: null,
+        protocolRoutes: [{ clientWireApi: "responses", upstreamWireApi: "responses", features: { text: "confirmed" }, reasoningEfforts: ["low"] }],
+      },
+      {
+        id: "GPT-TEST", enabled: true, memberCount: 2, codexVisible: true,
+        codexDisplayName: "Discovered Model", customPrice: false,
+        catalogName: "Discovered", catalogToolCall: true, catalogContextLimit: 128000,
+        inputMicroUsdPerMillion: 100, outputMicroUsdPerMillion: 200,
+        protocolRoutes: [{ clientWireApi: "responses", upstreamWireApi: "responses", features: { function_tools: "confirmed" }, reasoningEfforts: ["high", "low"] }],
+      },
+    ];
+    const before = structuredClone(snapshot.gateway.models);
+    expect(modelSummaries(snapshot)[0]).toMatchObject({
+      codexDisplayName: "Local Model", catalogName: "Discovered",
+      catalogToolCall: false, catalogContextLimit: 0,
+      inputMicroUsdPerMillion: 0, outputMicroUsdPerMillion: 200,
+      protocolRoutes: [{
+        clientWireApi: "responses", upstreamWireApi: "responses",
+        features: { text: "confirmed", function_tools: "confirmed" }, reasoningEfforts: ["low", "high"],
+      }],
+    });
+    expect(snapshot.gateway.models).toEqual(before);
   });
 
   test("merges protocol routes, reasoning levels, and both Claude cache write prices", () => {
@@ -288,23 +317,23 @@ describe("pool helpers", () => {
   test("shows ready members before unavailable ones even with an older runtime order", () => {
     const healthy = { ...account({ id: "healthy", label: "Z" }), kind: "account" as const };
     const unavailable = { ...account({ id: "unavailable", label: "A", operationalStatus: "unavailable" }), kind: "account" as const };
-    const order = new Map([["unavailable", 0], ["healthy", 1]]);
-    expect(comparePoolMembers(unavailable, healthy, order)).toBeGreaterThan(0);
+    expect(orderedPoolMembers([unavailable, healthy], [], [unavailable, healthy])
+      .map((member) => member.id)).toEqual(["healthy", "unavailable"]);
   });
 
   test("sorts a multi-protocol source by its first protocol candidate", () => {
-    const order = routingOrderPositions([
+    const candidates: CandidateRuntimeSnapshot[] = [
       { candidateId: "zenith-api::responses", kind: "api_source", available: true, inFlight: 0, lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0 },
       { candidateId: "zenith-api::messages", kind: "api_source", available: true, inFlight: 0, lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0 },
       { candidateId: "gpt-pro", kind: "api_source", available: true, inFlight: 0, lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0 },
-    ]);
+    ];
 
+    const order = routingOrderPositions(candidates);
     expect(order.get("zenith-api")).toBe(0);
-    expect(comparePoolMembers(
+    expect(orderedPoolMembers([
       { ...source({ id: "zenith-api", name: "Zenith API" }), kind: "source" },
       { ...source({ id: "gpt-pro", name: "GPT PRO" }), kind: "source" },
-      order,
-    )).toBeLessThan(0);
+    ], candidates).map((member) => member.id)).toEqual(["zenith-api", "gpt-pro"]);
   });
 
   test("aggregates runtime state for a multi-protocol source card", () => {
@@ -378,6 +407,36 @@ describe("pool helpers", () => {
     expect(next[0]).toMatchObject({ inFlight: 2, activeRequestCount: 2 });
     expect(next[1]).toMatchObject({ inFlight: 0, activeRequestCount: 0 });
     expect(order[0]).toMatchObject({ inFlight: 0, activeRequestCount: 0 });
+  });
+
+  test("activity ordering preserves ties, candidate identities, and the original snapshot", () => {
+    const order: CandidateRuntimeSnapshot[] = ["idle-a", "active-b", "idle-c", "active-d", "idle-e"].map((candidateId) => ({
+      candidateId, kind: "oauth_account", available: true,
+      inFlight: candidateId.startsWith("active") ? 1 : 0,
+      activeRequestCount: candidateId.startsWith("active") ? 1 : 0,
+      lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0,
+    }));
+    const updated = applyRuntimeActivities(order, [{
+      candidateId: "idle-e", revision: 1, inFlight: 2, activeRequestCount: 2, activeModels: [],
+    }]);
+    expect(updated.map((candidate) => candidate.candidateId)).toEqual(["active-b", "active-d", "idle-e", "idle-a", "idle-c"]);
+    expect(updated[0]).toBe(order[1]);
+    expect(updated[1]).toBe(order[3]);
+    expect(order.map((candidate) => candidate.candidateId)).toEqual(["idle-a", "active-b", "idle-c", "active-d", "idle-e"]);
+    expect(order[4]?.activeRequestCount).toBe(0);
+  });
+
+  test("active models aggregate sparse activity records without mutating their counters", () => {
+    const activities = [
+      { activeModels: [{ model: "GPT-test", requestCount: 2 }, { model: "", requestCount: 9 }, { model: "idle", requestCount: 0 }] },
+      { activeModels: [{ model: "gpt-test", requestCount: 1 }, { model: "claude-test", requestCount: 1 }] },
+      {},
+    ];
+    expect(activeModelCounts(activities)).toEqual([
+      { model: "GPT-test", requestCount: 3 },
+      { model: "claude-test", requestCount: 1 },
+    ]);
+    expect(activities[0]?.activeModels?.[0]?.requestCount).toBe(2);
   });
 
   test("drops a stale release tombstone when a fresh snapshot reports activity", () => {

@@ -15,7 +15,7 @@ export function OpenCodeRecoveryHeaderAction() {
       variant="secondary"
       icon={<FolderOpen aria-hidden />}
       busy={busy === "opencode-open-folder"}
-      onClick={() => perform("opencode-open-folder", () => relayCommands.openFolder("opencode_backups"), "feedback.opened", { backgroundRefresh: true })}
+      onClick={() => perform("opencode-open-folder", () => relayCommands.openFolder("opencode_backups"), "feedback.opened", { skipRefresh: true })}
     >
       {t("profiles.openFolder")}
     </Button>

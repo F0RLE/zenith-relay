@@ -38,7 +38,8 @@ import {
 } from "../../components/Ui";
 import { formatNumber } from "../../numberFormatting";
 import { providerCreditsSummary } from "../../providerCredits";
-import { routingOrderPositions, runtimeCandidateForMember } from "../../routingOrder";
+import { routingOrderPositions } from "../../routingOrder";
+import { createRuntimeCandidateLookup } from "../../runtimeCandidateIndex";
 import { canAccountJoinPool, updatePoolMembership } from "../../poolMembership";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { toggleSelectedId } from "../../state/selectionModel";
@@ -104,6 +105,7 @@ export function AccountsTable({
   const [quotaReport, setQuotaReport] = useState<{ succeeded: number; failed: number } | null>(null);
   const allAccounts = useMemo(() => visibleAccounts(runtime?.accounts ?? EMPTY_ACCOUNTS), [runtime?.accounts]);
   const runtimeOrder = runtime?.gateway.routingOrder ?? EMPTY_RUNTIME_ORDER;
+  const runtimeFor = useMemo(() => createRuntimeCandidateLookup(runtimeOrder), [runtimeOrder]);
   const accountTimestamps = useMemo(() => (runtime?.accounts ?? EMPTY_ACCOUNTS).flatMap((account) => [
     accountMetadataObservation(account, "plan").staleAtMs,
     accountMetadataObservation(account, "quota").staleAtMs,
@@ -113,9 +115,9 @@ export function AccountsTable({
     account.quota.secondary?.resetAtMs,
     ...(account.quota.supplemental ?? []).map((quotaWindow) => quotaWindow.window.resetAtMs),
     ...(account.inPool
-      ? (runtimeCandidateForMember(account.id, "oauth_account", runtimeOrder)?.modelRetries ?? []).map((retry) => retry.retryAtMs)
+      ? (runtimeFor(account.id, "oauth_account")?.modelRetries ?? []).map((retry) => retry.retryAtMs)
       : []),
-  ]), [runtime?.accounts, runtimeOrder]);
+  ]), [runtime?.accounts, runtimeFor]);
   const nowMs = useRelativeTimeClock(accountTimestamps);
   const unknownPlanLabel = t("common.unknown");
   const plans = useMemo(() => accountPlanOptions(allAccounts, unknownPlanLabel), [allAccounts, unknownPlanLabel]);
@@ -129,8 +131,8 @@ export function AccountsTable({
   const runtimePosition = useMemo(() => routingOrderPositions(runtimeOrder), [runtimeOrder]);
   const runtimeByAccount = useMemo(() => new Map(allAccounts.map((account) => [
     account.id,
-    account.inPool ? runtimeCandidateForMember(account.id, "oauth_account", runtimeOrder) : undefined,
-  ])), [allAccounts, runtimeOrder]);
+    account.inPool ? runtimeFor(account.id, "oauth_account") : undefined,
+  ])), [allAccounts, runtimeFor]);
   const activePlan = useMemo(() => activeAccountPlan(planFilter, plans, errorCount), [errorCount, planFilter, plans]);
   useEffect(() => setSelected((previousSelectedAccountIds) => previousSelectedAccountIds.filter((accountId) => allAccounts.some((account) => account.id === accountId))), [runtime?.accounts]);
   useEffect(() => { setSelected([]); setPlanFilter("all"); setParticipationFilter("all"); }, [mode]);

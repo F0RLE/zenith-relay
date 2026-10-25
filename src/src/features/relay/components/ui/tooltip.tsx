@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
+import { isTooltipFocusSuppressed } from "./focus";
 
 export function mergeDescribedBy(...values: Array<string | undefined>) {
   const describedByIds = new Set(values.flatMap((describedByValue) => describedByValue?.split(/\s+/).filter(Boolean) ?? []));
@@ -79,6 +80,13 @@ export function useTooltip<T extends HTMLElement>(label: string) {
         hide();
         return;
       }
+      // A passive hint must not make closing a dialog require a second Escape.
+      // Dialogs and inner editors/menus retain their own dismissal ordering.
+      if (anchorRef.current?.closest("[data-relay-dialog]")
+        || event.target instanceof Element && event.target.closest("[data-relay-dialog]")) {
+        hide();
+        return;
+      }
       event.preventDefault();
       event.stopImmediatePropagation();
       hide();
@@ -129,7 +137,7 @@ export function useTooltip<T extends HTMLElement>(label: string) {
     hideAfterHover: () => { if (!anchorRef.current?.matches(":focus-visible")) hide(); },
     show,
     showNow,
-    showAfterFocus: () => { if (anchorRef.current?.matches(":focus-visible")) showNow(); },
+    showAfterFocus: () => { if (!isTooltipFocusSuppressed() && anchorRef.current?.matches(":focus-visible")) showNow(); },
     pointerStart,
     tooltip,
   };

@@ -1,9 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import type { HTMLAttributes, ReactNode } from "react";
 import {
   Check,
   Download,
-  Globe2,
   ListMinus,
   ListPlus,
   Loader2,
@@ -20,7 +19,7 @@ import {
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, CandidateRuntimeSnapshot } from "../../api/types";
-import { accountQuotaRefreshState, canLaunchCodexAccount, currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
+import { accountQuotaRefreshState, accountSurfaceTone, canLaunchCodexAccount, currentAccountErrorCode, transientCandidateTone } from "../../accountStatus";
 import { refreshOneAccountQuota } from "../../accountQuotaRefresh";
 import { accountMetadataHint, accountMetadataIsStale, accountMetadataSources, accountSubscriptionSource } from "../../accountRoutes";
 import {
@@ -47,8 +46,6 @@ import { accountParticipates } from "./accountTableModel";
 import { AccountLoginNotes } from "../../components/AccountLoginNotes";
 import { AccountTokenExpiry } from "../../components/AccountTokenExpiry";
 import { AccountRouteSelector } from "../../components/AccountRouteSelector";
-import { AccountTimezoneDialog } from "../../components/AccountTimezoneDialog";
-import { useRequestTimezone } from "../../hooks/useRequestTimezone";
 import { useConnectionAccountRemoval } from "./accountRemoval";
 
 type AccountCardProps = {
@@ -78,8 +75,6 @@ export function AccountCard({
 }: AccountCardProps) {
   const { t, i18n } = useTranslation();
   const [notesOpen, setNotesOpen] = useState(false);
-  const [timezoneOpen, setTimezoneOpen] = useState(false);
-  const { supported: timezoneSupported } = useRequestTimezone();
   const confirm = useConfirm();
   const membershipPending = useRef(false);
   const { mode, runtime, perform, activateCodexProfile, refresh, busy, accountIdentitiesVisible, accountValueVisible } = useRelayState();
@@ -91,7 +86,6 @@ export function AccountCard({
   const participates = participation.checked;
   const accountEnabled = enabledFlag.checked;
   const recoveryRequired = Boolean(account.recoveryRequired);
-  useEffect(() => setTimezoneOpen(false), [mode, account.id, recoveryRequired]);
   const showNotes = mode === "local" && !recoveryRequired && account.secretAvailable;
   const errorCode = recoveryRequired ? null : currentAccountErrorCode(account);
   const operationalStatus = account.operationalStatus;
@@ -111,24 +105,13 @@ export function AccountCard({
     ? t("pool.recoveryProbe")
     : modelRetryHint;
   const proxyLabel = account.proxyAvailable === false && account.proxyMode === "direct" ? t("proxies.modes.blocked") : t(`proxies.modes.${account.proxyMode ?? "direct"}`);
-  const poolActionLabel = participates ? t("accounts.excludeFromPool") : t("accounts.includeInPool");
+  const poolActionLabel = participates ? t("accounts.excludeFromPool") : t(account.oauthClientKind === "codex" ? "accounts.includeImagesInPool" : "accounts.includeInPool");
   const quotaStatus = accountQuotaRefreshState(account);
   const clientAuthWarning = account.clientAuthStatus === "login_required";
   const displayedErrorCode = quotaStatus === "refreshing" ? null : errorCode;
   const canLaunch = canLaunchCodexAccount(account) && !recoveryRequired;
-  const indicatorTone = recoveryRequired
-    ? "info"
-    : operationalStatus === "unavailable" || operationalStatus === "disabled"
-      ? operationalStatusTone(operationalStatus)
-      : quotaStatus === "refreshing"
-        ? "disabled"
-        : quotaStatus === "failed" || quotaStatus === "requires_reauth"
-          ? "error"
-          : clientAuthWarning
-            ? "warning"
-            : quotaStatus === "pending"
-              ? "disabled"
-              : runtimeTone ?? operationalStatusTone(operationalStatus);
+  const surfaceTone = accountSurfaceTone(account, recoveryRequired, runtimeState);
+  const indicatorTone = surfaceTone === "ready" ? runtimeTone ?? surfaceTone : surfaceTone;
   const statusIndicatorLabel = quotaStatus === "updated" || (operationalStatus === "quotaWait" && quotaStatus === "not_available") ? operationalLabel : `${t(`accounts.quotaRefreshStatus.${quotaStatus}`)} · ${operationalLabel}`;
   const indicatorLabel = `${clientAuthWarning ? `${t("accounts.clientAuthWarning")} · ` : ""}${runtimeHint ? `${statusIndicatorLabel} · ${runtimeHint}` : statusIndicatorLabel}`;
 
@@ -178,7 +161,7 @@ export function AccountCard({
           ? (
             <IconButton
               className="account-kind-icon account-status-button"
-              data-status="error"
+              data-status={indicatorTone}
               label={[accountErrorLabel(displayedErrorCode, t), runtimeHint].filter(Boolean).join(" · ")}
               icon={<UserRound aria-hidden />}
               onClick={() => onShowError(account)}
@@ -198,11 +181,6 @@ export function AccountCard({
             {showNotes ? (
               <ActionMenuItem icon={<StickyNote aria-hidden />} onClick={() => setNotesOpen(true)}>
                 {t("accounts.loginDetails")}
-              </ActionMenuItem>
-            ) : null}
-            {timezoneSupported && !recoveryRequired ? (
-              <ActionMenuItem icon={<Globe2 aria-hidden />} disabled={Boolean(busy)} onClick={() => setTimezoneOpen(true)}>
-                {t("gateway.timezone.accountTitle")}
               </ActionMenuItem>
             ) : null}
             {recoveryRequired ? (
@@ -299,7 +277,6 @@ export function AccountCard({
         {accountValueVisible ? <AccountValueStrip account={account} /> : null}
       </AccountCardLayout>
       {permanentDeleteMenu}
-      {timezoneOpen ? <AccountTimezoneDialog account={account} onClose={() => setTimezoneOpen(false)} /> : null}
       {showNotes && notesOpen ? (
         <Dialog
           className="account-login-dialog"

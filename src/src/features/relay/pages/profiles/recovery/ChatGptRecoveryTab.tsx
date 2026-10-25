@@ -10,7 +10,7 @@ import { RecoveryConfirmationDialog, RecoveryEmptyState, RecoverySnapshotTable, 
 export function ChatGptRecoveryHeaderAction() {
   const { t } = useTranslation();
   const { busy, perform } = useRelayState();
-  return <Button variant="secondary" icon={<FolderOpen aria-hidden />} busy={busy === "profile-open-folder"} onClick={() => perform("profile-open-folder", () => relayCommands.openFolder("profile_backups"), "feedback.opened", { backgroundRefresh: true })}>{t("profiles.openFolder")}</Button>;
+  return <Button variant="secondary" icon={<FolderOpen aria-hidden />} busy={busy === "profile-open-folder"} onClick={() => perform("profile-open-folder", () => relayCommands.openFolder("profile_backups"), "feedback.opened", { skipRefresh: true })}>{t("profiles.openFolder")}</Button>;
 }
 
 export function ChatGptRecoveryTab() {

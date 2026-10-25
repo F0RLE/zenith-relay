@@ -3,7 +3,7 @@ import { Activity, ArrowRight, CircleAlert, Play, Square, Users } from "lucide-r
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { LaunchApplication } from "../../api/types";
-import { Button, EmptyState, PageHeader } from "../../components/Ui";
+import { Button, PageHeader } from "../../components/Ui";
 import { ApplicationPickerDialog } from "../../components/ApplicationPickerDialog";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { useSavedChoice } from "../../state/usePendingFlag";
@@ -16,7 +16,7 @@ import AnalyticsPanel from "./OverviewAnalytics";
 
 export function OverviewPage() {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, setPage, perform, busy } = useRelayState();
+  const { mode, runtime, runtimeReady, perform, busy } = useRelayState();
   const { usageRevision } = useRelayUsageContext();
   const [applicationDialog, setApplicationDialog] = useState(false);
   const [range, setRange] = useState<Range>("today");
@@ -33,12 +33,11 @@ export function OverviewPage() {
     : `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
   const windows = useMemo(() => chartWindows(range, locale), [range, locale, windowRevision]);
   const usageAvailable = mode === "local";
-  const runtimeReady = runtime !== null;
   const windowStartMs = windows[0]?.startMs ?? 0;
   const windowEndMs = windows[windows.length - 1]?.endMs ?? windowStartMs;
   const runtimeIdentity = mode;
   const usageScope = JSON.stringify([runtimeIdentity, range, analyticsScopeSelection, windowStartMs, windowEndMs]);
-  const [overviewData, setOverviewData] = useState<Analytics | null>(() => getCachedOverviewAnalytics(usageScope));
+  const [overviewData, setOverviewData] = useState<{ scope: string; data: Analytics | null }>(() => ({ scope: usageScope, data: getCachedOverviewAnalytics(usageScope) }));
   const analyticsScope = useRef<string | null>(null);
   const appliedUsageRevision = useRef(usageRevision);
   const analyticsScopeQuery = analyticsScopeSelection
@@ -49,7 +48,7 @@ export function OverviewPage() {
     ...(runtime?.sources ?? []).map((apiSource) => ({ value: `source:${apiSource.id}`, label: `${t("overview.scopeApi")} · ${apiSource.name}` })),
     ...(runtime?.accounts ?? []).map((account) => ({ value: `account:${account.id}`, label: `${t("overview.scopeAccount")} · ${account.label}` })),
   ], [runtime?.accounts, runtime?.sources, t]);
-  const analytics = overviewData;
+  const analytics = overviewData.scope === usageScope ? overviewData.data : getCachedOverviewAnalytics(usageScope);
   const gatewayRunning = useSavedChoice(Boolean(runtime?.gateway.running));
   const running = gatewayRunning.value;
   const setAnalyticsScope = useCallback((scopeValue: string) => {
@@ -62,41 +61,42 @@ export function OverviewPage() {
   });
 
   useEffect(() => {
-    if (!runtime) return;
+    if (!runtimeReady) return;
     if (analyticsScopeSelection && !analyticsScopeOptions.some((option) => option.value === analyticsScopeSelection)) {
       setAnalyticsScopeSelection("");
       removeRelayPreference("relay.overviewAnalyticsScope");
     }
-  }, [analyticsScopeOptions, analyticsScopeSelection, runtime]);
+  }, [analyticsScopeOptions, analyticsScopeSelection, runtimeReady]);
 
   useEffect(() => {
-    let active = true;
+    const controller = new AbortController();
+    const { signal } = controller;
     const scopeChanged = analyticsScope.current !== usageScope;
     analyticsScope.current = usageScope;
     if (scopeChanged) {
       // Re-entry can reuse the last complete snapshot immediately. The same
       // scope is refreshed below, so the cached value is only a stale view.
       const cached = getCachedOverviewAnalytics(usageScope);
-      startTransition(() => setOverviewData(cached));
+      startTransition(() => setOverviewData({ scope: usageScope, data: cached }));
     }
     setAnalyticsError(false);
     const stopLoading = () => {
       setAnalyticsLoading(false);
     };
-    if (!runtime) {
+    if (!runtimeReady) {
       stopLoading();
-      return () => { active = false; };
+      return () => controller.abort();
     }
     if (!usageAvailable) {
-      startTransition(() => setOverviewData(null));
+      startTransition(() => setOverviewData({ scope: usageScope, data: null }));
       stopLoading();
-      return () => { active = false; };
+      return () => controller.abort();
     }
     const usageChanged = appliedUsageRevision.current !== usageRevision;
     appliedUsageRevision.current = usageRevision;
     if (!usageChanged && isOverviewAnalyticsFresh(usageScope)) {
       stopLoading();
-      return () => { active = false; };
+      return () => controller.abort();
     }
     setAnalyticsLoading(true);
     const usageQuery = {
@@ -112,20 +112,20 @@ export function OverviewPage() {
       ...(analyticsScopeQuery ? { sourceOrAccountQuery: analyticsScopeQuery } : {}),
     };
     const load = () => relayCommands.localUsagePage(usageQuery).then((page) => analyticsFromPage(page.totals, page.buckets, localSamples(page.events), windows));
-    loadOverviewAnalytics(usageScope, load, usageChanged)
+    loadOverviewAnalytics(usageScope, load, usageChanged, signal)
       .then((analyticsResult) => {
         if (!analyticsResult) {
-          if (active) setAnalyticsError(true);
+          if (!signal.aborted) setAnalyticsError(true);
           return;
         }
-        if (!active) return;
-        startTransition(() => setOverviewData(analyticsResult));
+        if (signal.aborted) return;
+        startTransition(() => setOverviewData({ scope: usageScope, data: analyticsResult }));
       })
-      .catch(() => active && setAnalyticsError(true))
+      .catch(() => !signal.aborted && setAnalyticsError(true))
       .finally(() => {
-        if (active) setAnalyticsLoading(false);
+        if (!signal.aborted) setAnalyticsLoading(false);
       });
-    return () => { active = false; };
+    return () => controller.abort();
   }, [mode, range, runtimeReady, usageRevision, usageAvailable, usageScope, analyticsScopeQuery, windowEndMs, windowStartMs, windows]);
 
   const totals = analytics?.totals ?? emptyUsageTotals();
@@ -160,32 +160,24 @@ export function OverviewPage() {
     </Button>
   </>;
 
-  return <section className="relay-page"><PageHeader title={t("nav.overview")} actions={primary} />
-    {!running && !runtime ? (
-      <EmptyState
-        title={t("overview.emptyTitle")}
-        description={t("overview.emptyDescription")}
-        action={<Button variant="primary" onClick={() => setPage("connections")}>{t("overview.openConnections")}</Button>}
-      />
-    ) : <>
+  return <section className="relay-page"><PageHeader title={t("nav.overview")} actions={runtimeReady ? primary : undefined} />
       <div className="metric-band overview-metrics">
-        <div><Activity aria-hidden /><span>{t("overview.requestsToday")}</span><strong>{formatCompactNumber(requests, locale)}</strong></div>
-        <div><Users aria-hidden /><span>{t("overview.healthy")}</span><strong>{healthy}</strong></div>
-        <div><ArrowRight aria-hidden /><span>{t("overview.models")}</span><strong>{models || "-"}</strong></div>
-        <div><CircleAlert aria-hidden /><span>{t("overview.errors")}</span><strong>{formatCompactNumber(errors, locale)}</strong></div>
+        <div><Activity aria-hidden /><span>{t("overview.requestsToday")}</span><strong>{analytics ? formatCompactNumber(requests, locale) : "—"}</strong></div>
+        <div><Users aria-hidden /><span>{t("overview.healthy")}</span><strong>{runtime ? healthy : "—"}</strong></div>
+        <div><ArrowRight aria-hidden /><span>{t("overview.models")}</span><strong>{runtime ? models || "-" : "—"}</strong></div>
+        <div><CircleAlert aria-hidden /><span>{t("overview.errors")}</span><strong>{analytics ? formatCompactNumber(errors, locale) : "—"}</strong></div>
       </div>
       <AnalyticsPanel
         range={range}
         setRange={setRange}
         windows={windows}
         analytics={analytics}
-        loading={analyticsLoading}
+        loading={analyticsLoading || (!analytics && !analyticsError)}
         error={analyticsError}
         scope={analyticsScopeSelection}
         setScope={setAnalyticsScope}
         scopeOptions={analyticsScopeOptions}
       />
-    </>}
     {applicationDialog ? (
       <ApplicationPickerDialog
         title={t("overview.applicationPickerTitle")}

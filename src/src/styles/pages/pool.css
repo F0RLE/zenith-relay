@@ -426,7 +426,7 @@
 }
 
 .pool-member-meta .account-badges {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
 }
 
 .pool-member-card .pool-member-identity small {

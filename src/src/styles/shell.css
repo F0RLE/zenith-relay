@@ -1614,10 +1614,3 @@ textarea:focus-visible {
   color: var(--relay-muted);
   font-size: 11px;
 }
-
-.relay-loading {
-  height: 100%;
-  display: grid;
-  place-items: center;
-  color: var(--relay-muted);
-}

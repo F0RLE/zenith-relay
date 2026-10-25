@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
-import { Clock3 } from "lucide-react";
-import type { KeyboardEvent, PointerEvent, ReactNode } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
+import { Ban, Clock3 } from "lucide-react";
+import type { KeyboardEvent, PointerEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { EmptyState, StatusIcon } from "../../components/Ui";
 import { loadRequestTableLayout, reorderColumns, REQUEST_COLUMN_IDS, REQUEST_COLUMN_MAX_WIDTH, REQUEST_COLUMN_MIN_WIDTH, REQUEST_TABLE_LAYOUT_KEY, shiftColumn, useColumnDrag } from "./useColumnLayout";
@@ -9,6 +9,7 @@ import type { UsageRow } from "./usageData";
 import { formatUsageApiEquivalent } from "./usageFormatting";
 import { formatErrorCategory, formatRequestOrigin, formatTiming, requestStatusKind, requestStatusLabel } from "./usageReportFormat";
 import { UsageModel, CompactNumber } from "./usageReportParts";
+import { UsageTableRow, type UsageColumns } from "./UsageTableRow";
 
 type RequestsViewProps = {
   rows: UsageRow[];
@@ -16,14 +17,14 @@ type RequestsViewProps = {
   onSelect: (row: UsageRow) => void;
 };
 
-export function RequestsView({
+export const RequestsView = memo(function RequestsView({
   rows,
   formatTime,
   onSelect,
 }: RequestsViewProps) {
   const { t } = useTranslation();
   return rows.length ? <RequestTable rows={rows} formatTime={formatTime} onSelect={onSelect} /> : <EmptyState title={t("common.noResults")} description={t("common.noResultsHint")} />;
-}
+});
 
 function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; formatTime: (value: string) => string; onSelect: (row: UsageRow) => void }) {
   const { t, i18n } = useTranslation();
@@ -33,22 +34,22 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
     try { localStorage.setItem(REQUEST_TABLE_LAYOUT_KEY, JSON.stringify(layout)); } catch { }
   }, [layout]);
 
-  const columns: Record<RequestColumnId, { label: string; cell: (row: UsageRow) => ReactNode }> = {
+  const columns = useMemo<UsageColumns<RequestColumnId>>(() => ({
     time: { label: t("usage.time"), cell: (row) => <time dateTime={row.time}>{formatTime(row.time)}</time> },
     status: {
       label: t("common.status"),
       cell: (row) => {
         const status = requestStatusKind(row);
         const label = requestStatusLabel(row, t);
-        const reason = row.errorCategory
+        const reason = status === "cancelled" ? label : row.errorCategory
           ? formatErrorCategory(row.errorCategory, t)
           : row.requestOrigin ? formatRequestOrigin(row.requestOrigin, t) : label;
         return <span className="usage-request-status">
           <span className="usage-request-result" data-relay-tooltip={reason}>
             <StatusIcon
-              status={status === "success" ? "ready" : status === "pending" ? "info" : status}
+              status={status === "success" ? "ready" : status === "pending" || status === "cancelled" ? "info" : status}
               label={reason}
-            >{status === "pending" ? <Clock3 aria-hidden /> : null}</StatusIcon>
+            >{status === "pending" ? <Clock3 aria-hidden /> : status === "cancelled" ? <Ban aria-hidden /> : null}</StatusIcon>
           </span>
         </span>;
       },
@@ -74,7 +75,7 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
         </button>
       ),
     },
-  };
+  }), [formatTime, i18n.language, i18n.resolvedLanguage, onSelect, t]);
   const resized = REQUEST_COLUMN_IDS.every((columnId) => layout.widths[columnId] != null);
   const totalWidth = resized ? REQUEST_COLUMN_IDS.reduce((total, columnId) => total + (layout.widths[columnId] ?? 0), 0) : 0;
   const captureWidths = (table: HTMLTableElement) => Object.fromEntries(Array.from(table.querySelectorAll<HTMLTableCellElement>("thead th[data-column]")).map((cell) => {
@@ -140,12 +141,7 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
           onKeyDown={(event) => resizeColumnByKeyboard(event, columnId)}
         />
       </th>)}</tr></thead>
-      <tbody>{rows.map((row) => <tr key={row.id}>{layout.order.map((columnId) => <td
-        key={columnId}
-        data-column={columnId}
-        data-label={columns[columnId].label}
-        data-relay-tooltip={columnId === "model" ? row.model ?? undefined : columnId === "connection" ? row.connection : undefined}
-      >{columns[columnId].cell(row)}</td>)}</tr>)}</tbody>
+      <tbody>{rows.map((row) => <UsageTableRow key={row.id} row={row} columns={columns} order={layout.order} />)}</tbody>
     </table>
   </div>;
 }

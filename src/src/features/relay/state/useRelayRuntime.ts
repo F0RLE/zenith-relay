@@ -20,10 +20,12 @@ import {
 import { useRuntimeEvents } from "./useRuntimeEvents";
 import { useRuntimeRouting } from "./useRuntimeRouting";
 import { loadRuntimeSnapshot } from "./snapshotLoader";
+import { rememberRuntimePreview, runtimePreview } from "./runtimePreview";
 
 type RelayRuntimeDependencies = {
   cancelOperations: () => void;
   resetUsage: () => void;
+  invalidateUsageCache: () => void;
   reportErrorFeedback: (cause: unknown, key: string, fallbackCode: string) => void;
 };
 
@@ -33,11 +35,13 @@ type RuntimeRoutingOrder = NonNullable<RuntimeSnapshot["gateway"]["routingOrder"
 export function useRelayRuntime({
   cancelOperations,
   resetUsage,
+  invalidateUsageCache,
   reportErrorFeedback,
 }: RelayRuntimeDependencies) {
   const [mode, setModeState] = useState<RelayMode>(() => readRelayMode());
   const [page, setPageState] = useState<PageId>("overview");
   const [runtime, setRuntime] = useState<RuntimeSnapshot | null>(null);
+  const [runtimeReady, setRuntimeReady] = useState(false);
   const [runtimeRevision, setRuntimeRevision] = useState(0);
   const [usageRevision, setUsageRevision] = useState(0);
   const [runtimeActivity, setRuntimeActivity] = useState<RuntimeActivityState>({
@@ -100,6 +104,7 @@ export function useRelayRuntime({
     setRuntimeActivity({ revision: 0, lastCandidateId: null, candidates: {} });
     writeRelayPreference(RELAY_STORAGE_KEYS.mode, targetMode);
     setRuntime(cached);
+    setRuntimeReady(false);
     setLoading(cached === null);
     resetUsage();
     setModeState(targetMode);
@@ -120,6 +125,7 @@ export function useRelayRuntime({
         return loaded;
       },
       (loaded) => {
+        if (loaded && requestedMode === "local") rememberRuntimePreview(loaded);
         if (requestedMode === "local") {
           runtimeRoutingOrderBase.current = preferNewerRuntimeOrder(runtimeRoutingOrderBase.current, loaded?.gateway.routingOrder ?? []);
           reconcileRuntimeActivityOverlay(runtimeRoutingOrderBase.current, runtimeActivityOverlay.current);
@@ -136,11 +142,24 @@ export function useRelayRuntime({
         runtimeSnapshotRef.current = snapshot;
         if (snapshot) snapshotsByMode.current[requestedMode] = snapshot;
         setRuntime(snapshot);
+        setRuntimeReady(true);
         setInitialized(true);
         refreshedRevision.current = requestedRevision;
         setRuntimeRevision((previousRevision) => previousRevision + 1);
       },
     );
+  }, [mode]);
+
+  useEffect(() => {
+    if (mode !== "local") return;
+    let active = true;
+    void runtimePreview.restore().then(() => {
+      // Never overwrite a newer native snapshot or leak local data into Hosted.
+      if (!active || modeRef.current !== "local" || runtimeSnapshotRef.current) return;
+      const preview = runtimePreview.peek("local");
+      if (preview) setRuntime((current) => current ?? preview);
+    });
+    return () => { active = false; };
   }, [mode]);
 
   const refresh = useCallback(async (force = true) => {
@@ -154,7 +173,8 @@ export function useRelayRuntime({
   const runBackgroundRefresh = useCallback((force = false) => {
     const refreshMode = mode;
     if (
-      !isRuntimeRefreshPage(pageRef.current)
+      document.visibilityState !== "visible"
+      || !isRuntimeRefreshPage(pageRef.current)
       || backgroundRefreshPending.current !== null
       || backgroundRefreshRetryTimer.current !== undefined
       || modeRef.current !== refreshMode
@@ -254,7 +274,7 @@ export function useRelayRuntime({
   const requestRoutingRefresh = useRuntimeRouting({
     mode,
     page,
-    gatewayRunning: runtime?.gateway.running,
+    gatewayRunning: runtimeReady && runtime?.gateway.running,
     runtimeRoutingOrderBase,
     runtimeActivityOverlay,
     setRuntime,
@@ -297,6 +317,7 @@ export function useRelayRuntime({
     setRuntime,
     setRuntimeActivity,
     setUsageRevision,
+    invalidateUsageCache,
     runBackgroundRefresh,
   });
 
@@ -327,6 +348,7 @@ export function useRelayRuntime({
     page,
     setPage,
     runtime,
+    runtimeReady,
     runtimeRevision,
     usageRevision,
     loading,

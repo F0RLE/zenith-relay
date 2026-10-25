@@ -204,10 +204,6 @@
   line-height: 18px;
 }
 
-.request-timezone-default { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px 20px; min-width: 0; }
-.request-timezone-default > div:first-child { flex: 1 1 260px; min-width: 0; }
-.request-timezone-default strong { font-size: 13px; font-weight: 600; }
-.request-timezone-default p { margin: 6px 0 0; color: var(--relay-muted); font-size: 12px; line-height: 18px; }
 
 .integration-chatgpt-settings {
   min-width: 0;

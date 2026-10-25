@@ -391,6 +391,7 @@ test("frequent account actions use full-width zones and secondary actions stay i
   await expect(page.locator(".account-card").first()).toBeVisible();
   const actions = page.locator(".account-card").first().locator(".account-card-actions");
   expect(await actions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.getAttribute("aria-label")))).toEqual([
+    "Remove from pool",
     "Refresh",
     "Launch in ChatGPT",
   ]);
@@ -399,7 +400,7 @@ test("frequent account actions use full-width zones and secondary actions stay i
   await expect(menu.getByRole("menuitem", { name: "Proxy: Common", exact: true })).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: "Export" })).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: "Notes", exact: true })).toBeVisible();
-  await expect(menu.getByRole("menuitem")).toHaveCount(6);
+  await expect(menu.getByRole("menuitem")).toHaveCount(5);
   await expect(menu.getByRole("menuitem", { name: "Disable" })).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: "Delete", exact: true })).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: "Delete permanently", exact: true })).toHaveCount(0);
@@ -719,7 +720,7 @@ test("SIWC account joins the pool directly from Connections without a warning", 
   ]);
 });
 
-test("Free BPS accounts have no pool addition action while paid BPS accounts do", async ({ page }) => {
+test("plan names do not hide BPS pool membership actions", async ({ page }) => {
   await installTauriMock(page, {
     mode: "local", locale: "en", populated: true, accountCount: 3,
     accountOAuthClientKind: "excel_bps", poolMembers: false,
@@ -729,12 +730,12 @@ test("Free BPS accounts have no pool addition action while paid BPS accounts do"
   const paid = page.locator(".account-card").filter({ hasText: "Personal Plus" });
   const free = page.locator(".account-card").filter({ hasText: "Backup account" });
   await expect(paid.getByRole("button", { name: "Add to pool", exact: true })).toBeVisible();
-  await expect(free.getByRole("button", { name: "Add to pool", exact: true })).toHaveCount(0);
+  await expect(free.getByRole("button", { name: "Add to pool", exact: true })).toBeVisible();
   await expect(free.getByRole("button", { name: "Remove from pool", exact: true })).toHaveCount(0);
 });
 
 for (const locale of ["ru", "en"] as const) {
-  test(`Codex keeps account switching but cannot join the pool (${locale})`, async ({ page }, testInfo) => {
+  test(`Codex keeps account switching and explicit image-only pool membership (${locale})`, async ({ page }, testInfo) => {
     await installTauriMock(page, {
       mode: "local", locale, populated: true, accountOAuthClientKind: "codex", poolMembers: false,
     });
@@ -744,9 +745,10 @@ for (const locale of ["ru", "en"] as const) {
     const card = page.locator(".account-card").first();
     await expect(card.getByRole("button", { name: locale === "ru" ? "Запустить в ChatGPT" : "Launch in ChatGPT", exact: true })).toBeEnabled();
     await expect(card.getByRole("button", { name: locale === "ru" ? "Добавить в пул" : "Add to pool", exact: true })).toHaveCount(0);
+    await expect(card.getByRole("button", { name: locale === "ru" ? "Добавить в пул для изображений" : "Add to pool for images", exact: true })).toBeEnabled();
     await expect(card.locator(".account-connection-purpose")).toHaveCount(0);
     await page.getByLabel(locale === "ru" ? "Выбрать все учётные записи" : "Select all accounts").check();
-    await expect(page.getByRole("button", { name: locale === "ru" ? "Добавить выбранные в пул" : "Add selected to pool", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: locale === "ru" ? "Добавить выбранные в пул" : "Add selected to pool", exact: true })).toBeEnabled();
     await page.screenshot({ path: testInfo.outputPath("codex-connections.png") });
   });
   for (const [kind, client] of [["excel_bps", "BPS"], ["siwc", "SIWC"]] as const) {

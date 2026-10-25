@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import type { AccountSummary, CandidateRuntimeSnapshot, PoolRoutingMode } from "../../api/types";
 import { rotationModeName } from "./rotationModes";
 import { poolMemberDisplayStatus } from "./poolMembersModel";
-import { accountQuotaRefreshState, currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
+import { accountQuotaRefreshState, accountSurfaceTone, currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
 import { refreshOneAccountQuota } from "../../accountQuotaRefresh";
 import { accountMetadataHint, accountMetadataIsStale, accountMetadataSources, accountSubscriptionSource } from "../../accountRoutes";
 import { ResetCreditsControl } from "../../components/ResetCreditsControl";
@@ -88,19 +88,12 @@ export function PoolMemberCard({
         ? "warning"
         : transientCandidateTone(runtimeState, nowMs, false)
     : null;
-  const indicatorTone = statusKey === "disabled" || statusKey === "draining" || statusKey === "cooldown" || statusKey === "busy"
+  const surfaceTone = member.kind === "account"
+    ? accountSurfaceTone(member)
+    : visibleMemberErrorCode ? "error" : statusTone;
+  const indicatorTone = statusKey === "disabled" || statusKey === "draining" || statusKey === "cooldown" || statusKey === "busy" || statusKey === "unavailable"
     ? statusTone
-    : visibleMemberErrorCode
-    ? "error"
-    : statusKey === "unavailable"
-    ? statusTone
-    : quotaStatus === "refreshing"
-      ? "disabled"
-      : quotaStatus === "failed" || quotaStatus === "requires_reauth"
-        ? "error"
-        : quotaStatus === "pending"
-          ? "disabled"
-          : runtimeTone ?? statusTone;
+    : surfaceTone === "ready" ? runtimeTone ?? statusTone : surfaceTone;
   const runtimeHint = runtimeState?.halfOpen
     ? t("pool.recoveryProbe")
     : modelRetryHint
@@ -163,7 +156,7 @@ export function PoolMemberCard({
           </strong>
           <div className="pool-member-meta">
             {member.kind === "account"
-              ? <AccountBadges planType={metadata!.plan.subscription.planType} oauthClientKind={member.oauthClientKind} unknown={t("common.unknown")}
+              ? <AccountBadges planType={metadata!.plan.subscription.planType} oauthClientKind={member.oauthClientKind} unknown={t("common.unknown")} poolScope
                 planHint={metadata!.plan.id !== member.id ? accountMetadataHint(metadata!.plan, "plan", nowMs, t, i18n.language) : undefined}
                 planStale={metadata!.plan.id !== member.id && accountMetadataIsStale(metadata!.plan, "plan", nowMs)}
                 routeControl={<AccountRouteSelector account={member} />} />

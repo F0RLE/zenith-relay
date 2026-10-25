@@ -1,7 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { buildProxyBindings, proxyTimezone } from "../src/features/relay/pages/connections/proxyStorageModel";
+import { buildProxyBindings, latestProxyCheck, proxyTimezone } from "../src/features/relay/pages/connections/proxyStorageModel";
 
 describe("proxy storage bindings", () => {
+  test("new background observations replace an older manual check", () => {
+    const manual = { proxyId: "synthetic", checkedAtMs: 1, elapsedMs: 1, ip: "203.0.113.9", countryCode: "NL", errorCode: null };
+    const saved = { ...manual, checkedAtMs: 2, timezone: "Asia/Tokyo" };
+    expect(latestProxyCheck({ lastCheck: saved }, manual)).toBe(saved);
+    expect(latestProxyCheck({ lastCheck: manual }, saved)).toBe(saved);
+    expect(latestProxyCheck({ lastCheck: saved }, { ...saved })).toBe(saved);
+  });
   test("fresh timezone results replace or clear storage without losing old-host compatibility", () => {
     const entry = { timezone: "Europe/Amsterdam" };
     const check = { proxyId: "synthetic", checkedAtMs: 1, elapsedMs: 1, ip: "203.0.113.9", countryCode: "NL", errorCode: null };

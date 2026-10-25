@@ -158,6 +158,12 @@ export type AccountImportProgress = {
 
 export type OAuthFlowStatus = "pending" | "callback_received" | "callback_rejected" | "canceled" | "completed" | "expired" | "failed";
 
+export type OAuthFlowDiagnostic = {
+  stage: "callback" | "token_exchange" | "identity_validation" | "saving";
+  elapsedMs: number;
+  reason?: "callback_invalid" | "token_exchange_failed" | "identity_invalid" | "save_failed" | "storage_unavailable" | "conflict" | "recovery_required";
+};
+
 export type OAuthFlow = {
   /** Renderer-only hint; credentials and automation stay in Rust. */
   automaticLogin?: boolean;
@@ -166,12 +172,13 @@ export type OAuthFlow = {
   redirectUri: string;
   expiresAtMs: number;
   status: OAuthFlowStatus;
+  diagnostic?: OAuthFlowDiagnostic | undefined;
   targetAccountId?: string;
   notesAccountId?: string;
   clientKind?: OAuthClientKind;
 };
 
-export type OAuthFlowEvent = Pick<OAuthFlow, "loginId" | "status" | "automaticLogin">;
+export type OAuthFlowEvent = Pick<OAuthFlow, "loginId" | "status" | "automaticLogin" | "diagnostic">;
 
 export type OAuthCompletion = {
   account: { id: string };

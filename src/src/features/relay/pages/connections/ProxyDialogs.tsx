@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { TFunction } from "i18next";
-import { CircleAlert, CircleCheck, Database, Eye, EyeOff, Globe, Loader2, Network, Plus, RefreshCw, Server, Shuffle, Trash2, Upload, UsersRound, WifiOff, X } from "lucide-react";
+import { CircleAlert, CircleCheck, Database, Eye, EyeOff, Globe, Loader2, Network, Pencil, Plus, RefreshCw, Server, Shuffle, Trash2, Upload, UsersRound, WifiOff, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, ProxyPoolEntry, ProxyPoolImportResult, ProxyPoolSummary, StoredProxyAssignmentResult } from "../../api/types";
@@ -12,20 +12,21 @@ import { captureOperationResult } from "../../state/relayOperationModel";
 import { matchesQuery, NoResults } from "./connectionHelpers";
 import { useProxyPool } from "../../hooks/useProxyPool";
 import type { ProxyChecks, ProxyCheckState } from "./useProxyChecks";
+import { buildProxyBindings, latestProxyCheck, proxyTimezone } from "./proxyStorageModel";
+import { ProxySpeedTest } from "./ProxySpeedTest";
 import { AccountCardLayout } from "./AccountCard";
-import { buildProxyBindings, proxyTimezone } from "./proxyStorageModel";
 
 type AccountProxyChoice = "direct" | "automatic" | "stored" | "custom" | "common";
 
 export function ProxyStorageView({ revision, diagnostics, onImport }: { revision: number; diagnostics: ProxyChecks; onImport: () => void }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { runtime, busy, perform } = useRelayState();
   const confirm = useConfirm();
   const { pool, setPool, failed, load } = useProxyPool(true, revision);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [managedProxyId, setManagedProxyId] = useState<string | null>(null);
-  const automaticChecks = useRef(new Set<string>());
+  const [renamedProxyId, setRenamedProxyId] = useState<string | null>(null);
   const selectAllRef = useRef<HTMLInputElement>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const accountList = (runtime?.accounts ?? []).filter((account) => !account.recoveryRequired);
@@ -39,16 +40,17 @@ export function ProxyStorageView({ revision, diagnostics, onImport }: { revision
   const assignedCount = [...bindings.values()].filter((binding) => binding.accountNames.length || binding.sourceNames.length || binding.isCommon).length;
   const proxyEntries = (pool?.entries ?? []).filter((proxyEntry) => matchesQuery(
     query,
+    proxyEntry.label,
     proxyEntry.endpoint,
     proxyEntry.countryCode,
     proxyEntry.region,
-    (diagnostics.checks[proxyEntry.id]?.result ?? proxyEntry.lastCheck)?.ip,
-    (diagnostics.checks[proxyEntry.id]?.result ?? proxyEntry.lastCheck)?.countryCode,
-    (diagnostics.checks[proxyEntry.id]?.result ?? proxyEntry.lastCheck)?.region,
-    (diagnostics.checks[proxyEntry.id]?.result ?? proxyEntry.lastCheck)?.city,
+    latestProxyCheck(proxyEntry, diagnostics.checks[proxyEntry.id]?.result)?.ip,
+    latestProxyCheck(proxyEntry, diagnostics.checks[proxyEntry.id]?.result)?.countryCode,
+    latestProxyCheck(proxyEntry, diagnostics.checks[proxyEntry.id]?.result)?.region,
+    latestProxyCheck(proxyEntry, diagnostics.checks[proxyEntry.id]?.result)?.city,
     bindings.get(proxyEntry.id)?.accountNames,
     bindings.get(proxyEntry.id)?.sourceNames,
-    proxyTimezone(proxyEntry, diagnostics.checks[proxyEntry.id]?.result),
+    proxyTimezone(proxyEntry, latestProxyCheck(proxyEntry, diagnostics.checks[proxyEntry.id]?.result)),
   ));
   const allSelectableSelected = proxyEntries.length > 0 && proxyEntries.every((proxyEntry) => selected.includes(proxyEntry.id));
   const someVisibleSelected = proxyEntries.some((proxyEntry) => selected.includes(proxyEntry.id));
@@ -57,13 +59,6 @@ export function ProxyStorageView({ revision, diagnostics, onImport }: { revision
   }, [someVisibleSelected, allSelectableSelected, pool]);
   useEffect(() => setSelected((previousSelectedProxyIds) => previousSelectedProxyIds.filter((proxyId) => pool?.entries.some((proxyEntry) => proxyEntry.id === proxyId))), [pool]);
   useEffect(() => setDeleteError(null), [selected]);
-  useEffect(() => {
-    const missing = (pool?.entries ?? []).filter((entry) =>
-      !["cloudflare", "ipwhois"].includes(entry.lastCheck?.locationSource ?? "") && !diagnostics.checks[entry.id] && !automaticChecks.current.has(entry.id),
-    ).map((entry) => entry.id);
-    for (const id of missing) automaticChecks.current.add(id);
-    if (missing.length) void diagnostics.checkMany(missing);
-  }, [pool, diagnostics.checks, diagnostics.checkMany]);
   const clearCommonProxy = async () => {
     if (busy || !await confirm(t("proxies.clearCommonConfirm"), {
       danger: true,
@@ -100,7 +95,7 @@ export function ProxyStorageView({ revision, diagnostics, onImport }: { revision
       setSelected([]);
     }
   };
-  if (failed) {
+  if (failed && !pool) {
     return <EmptyState
       title={t("proxies.storageUnavailable")}
       description={t("proxies.storageUnavailableHint")}
@@ -109,6 +104,7 @@ export function ProxyStorageView({ revision, diagnostics, onImport }: { revision
   }
   if (!pool) return <div className="center-loading" role="status"><Loader2 className="spin" aria-hidden />{t("common.loading")}</div>;
   const managedProxy = pool.entries.find((proxyEntry) => proxyEntry.id === managedProxyId) ?? null;
+  const renamedProxy = pool.entries.find((proxyEntry) => proxyEntry.id === renamedProxyId) ?? null;
   const commonProxyControl = runtime?.gateway.commonProxyConfigured ? <Button
     variant="secondary"
     icon={<WifiOff aria-hidden />}
@@ -117,13 +113,14 @@ export function ProxyStorageView({ revision, diagnostics, onImport }: { revision
     onClick={() => void clearCommonProxy()}
   >{t("proxies.clearCommon")}</Button> : null;
   return <div className="proxy-storage connection-workspace">
+    {failed ? <div role="alert" className="error-text">{t("proxies.storageUnavailable")} <Button variant="secondary" onClick={() => void load()}>{t("common.retry")}</Button></div> : null}
     {pool.total ? <div className="workspace-controls proxy-controls">
       <div className="relay-status-summary proxy-storage-counts" aria-label={t("proxies.storageSummary")}>
         <div><Network aria-hidden /><strong>{pool.total}</strong><span>{t("proxies.total")}</span></div>
         <div data-tone={pool.total > assignedCount ? "ready" : "muted"}><CircleCheck aria-hidden /><strong>{pool.total - assignedCount}</strong><span>{t("proxies.free")}</span></div>
         <div data-tone="muted"><UsersRound aria-hidden /><strong>{assignedCount}</strong><span>{t("proxies.assigned")}</span></div>
       </div>
-      <div className="connection-command-bar proxy-storage-toolbar">
+      <div className={`connection-command-bar proxy-storage-toolbar${selected.length ? " proxy-selection-toolbar" : ""}`} data-selection={selected.length > 0}>
         <div className="connection-command-context">
           <input
             ref={selectAllRef}
@@ -133,21 +130,21 @@ export function ProxyStorageView({ revision, diagnostics, onImport }: { revision
             aria-label={t("proxies.selectAllFree")}
             onChange={(event) => setSelected((selectedIds) => setVisibleIdsSelected(selectedIds, proxyEntries.map((proxyEntry) => proxyEntry.id), event.target.checked))}
           />
-        <label className="search-field">
+        {selected.length ? <span className="proxy-selected-count">{t("proxies.selectedCount", { count: selected.length })}</span> : <label className="search-field">
           <span className="sr-only">{t("common.search")}</span>
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("proxies.search")} />
-        </label>
+        </label>}
         </div>
         <div className="connection-command-actions">
+          {selected.length ? <>
+            <IconButton className="danger" label={t("common.delete")} icon={<Trash2 aria-hidden />} busy={busy === "proxy-delete-selected"} disabled={Boolean(busy)} onClick={() => void remove(selected)} />
+            <IconButton label={t("accounts.clearSelection")} icon={<X aria-hidden />} disabled={Boolean(busy)} onClick={() => { setSelected([]); setDeleteError(null); }} />
+          </> : <>
           {commonProxyControl}
           <IconButton label={t("common.refresh")} icon={<RefreshCw aria-hidden />} disabled={Boolean(busy)} onClick={() => void load()} />
+          </>}
         </div>
       </div>
-      {selected.length ? <div className="proxy-selection-toolbar">
-        <span className="proxy-selected-count">{t("proxies.selectedCount", { count: selected.length })}</span>
-        <Button variant="danger" icon={<Trash2 aria-hidden />} busy={busy === "proxy-delete-selected"} disabled={Boolean(busy)} onClick={() => void remove(selected)}>{t("common.delete")}</Button>
-        <IconButton label={t("accounts.clearSelection")} icon={<X aria-hidden />} disabled={Boolean(busy)} onClick={() => { setSelected([]); setDeleteError(null); }} />
-      </div> : null}
     </div> : commonProxyControl ? <div className="inline-actions">{commonProxyControl}</div> : null}
     {deleteError ? <p className="proxy-storage-error" role="alert"><CircleAlert aria-hidden />{deleteError}</p> : null}
     {!pool.total ? <EmptyState title={t("proxies.emptyTitle")} description={t("proxies.emptyDescription")} action={<Button variant="primary" icon={<Upload aria-hidden />} onClick={onImport}>{t("proxies.import")}</Button>} />
@@ -155,47 +152,87 @@ export function ProxyStorageView({ revision, diagnostics, onImport }: { revision
         : <div className="account-list proxy-storage-list" role="list">{proxyEntries.map((proxyEntry) => {
           const usage = bindings.get(proxyEntry.id)!;
           const checkState = diagnostics.checks[proxyEntry.id];
-          const lastCheck = checkState?.result ?? proxyEntry.lastCheck;
+          const lastCheck = latestProxyCheck(proxyEntry, checkState?.result);
           const success = Boolean(lastCheck?.ip && !lastCheck.errorCode);
           const statusLabel = t(checkState?.pending ? "proxies.checking" : success ? "proxies.checkSuccess" : lastCheck ? "proxies.checkFailed" : "proxies.notChecked");
-          return <AccountCardLayout
-            key={proxyEntry.id}
+          const country = lastCheck?.countryCode ? proxyLocationLabel({ countryCode: lastCheck.countryCode, region: null }, i18n.resolvedLanguage ?? i18n.language, t) : null;
+          const location = [...new Set([country, lastCheck?.city ?? lastCheck?.region].filter(Boolean))].join(" · ");
+          const label = proxyEntry.label || proxyEntry.endpoint;
+          const isSelected = selected.includes(proxyEntry.id);
+          const diagnosticHint = [location, statusLabel,
+            lastCheck ? t("proxies.checkedAt", { time: new Intl.DateTimeFormat(i18n.resolvedLanguage ?? i18n.language, { dateStyle: "short", timeStyle: "short" }).format(lastCheck.checkedAtMs) }) : null,
+            lastCheck?.ipv4 ? `IPv4: ${lastCheck.ipv4}` : lastCheck?.ip,
+            lastCheck?.ipv6 ? `IPv6: ${lastCheck.ipv6}` : null,
+            lastCheck?.timezone,
+            lastCheck?.locationErrorCode ? t(`proxies.locationErrors.${lastCheck.locationErrorCode}`, { defaultValue: t("proxies.geoUnknown") }) : null,
+            lastCheck?.errorCode ? t(`proxies.checkErrors.${lastCheck.errorCode}`, { defaultValue: t("proxies.checkFailed") }) : null,
+          ].filter(Boolean).join("\n");
+          return <ProxySpeedTest key={proxyEntry.id} proxyId={proxyEntry.id} disabled={Boolean(busy)}>{(speedAction, speedValue) => <AccountCardLayout
             className="proxy-storage-row"
-            label={proxyEntry.endpoint}
+            label={label}
             identityVisible
-            selected={selected.includes(proxyEntry.id)}
+            selected={isSelected}
             selectionDisabled={Boolean(busy)}
-            onToggleSelected={() => setSelected((selectedIds) => toggleSelectedId(selectedIds, proxyEntry.id))}
+            onToggleSelected={() => setSelected((ids) => toggleSelectedId(ids, proxyEntry.id))}
             icon={<StatusIcon className="account-kind-icon" status={checkState?.pending ? "info" : success ? "ready" : lastCheck ? "error" : "disabled"} label={statusLabel}><Network aria-hidden /></StatusIcon>}
-            details={null}
+            details={proxyEntry.label && proxyEntry.label !== proxyEntry.endpoint ? <small className="proxy-card-endpoint" data-relay-tooltip={proxyEntry.endpoint}>{proxyEntry.endpoint}</small> : null}
             menu={<ActionMenu className="account-row-menu">
-              <ActionMenuItem danger icon={<Trash2 aria-hidden />} disabled={Boolean(busy)} onClick={() => void remove([proxyEntry.id])}>{t("common.delete")}</ActionMenuItem>
-            </ActionMenu>}
+                <ActionMenuItem icon={<Pencil aria-hidden />} disabled={Boolean(busy)} onClick={() => setRenamedProxyId(proxyEntry.id)}>{t("proxies.rename")}</ActionMenuItem>
+                <ActionMenuItem danger icon={<Trash2 aria-hidden />} disabled={Boolean(busy)} onClick={() => void remove([proxyEntry.id])}>{t("common.delete")}</ActionMenuItem>
+              </ActionMenu>}
             actions={<>
-              <IconButton label={t("proxies.testConnection")} icon={<Globe aria-hidden />} busy={Boolean(checkState?.pending)} onClick={() => void diagnostics.check(proxyEntry.id)} />
+              <IconButton label={t("proxies.testConnection")} icon={<Globe aria-hidden />} disabled={Boolean(busy) || Boolean(checkState?.pending)} onClick={() => void diagnostics.check(proxyEntry.id)} />
+              {speedAction}
               <IconButton label={t("proxies.manageAccounts")} icon={<UsersRound aria-hidden />} disabled={Boolean(busy)} onClick={() => setManagedProxyId(proxyEntry.id)} />
             </>}
           >
-            {lastCheck ? <div className="proxy-storage-meta">
-              <ProxyDiagnostic compact state={{
-                pending: checkState?.pending ?? false,
-                ...(lastCheck ? { result: lastCheck } : {}),
-              }} />
-            </div> : null}
-            {usage.isCommon || usage.accountNames.length || usage.sourceNames.length ? <div className="proxy-storage-bindings">
-              {usage.isCommon ? <span><Network aria-hidden />{t("proxies.useCommon")}</span> : null}
-              {usage.accountNames.length ? <span data-relay-tooltip={usage.accountNames.join(", ")}><UsersRound aria-hidden />{t("proxies.accountCount", { count: usage.accountNames.length })}</span> : null}
-              {usage.sourceNames.length ? <span data-relay-tooltip={usage.sourceNames.join(", ")}><Server aria-hidden />{t("proxies.sourceCount", { count: usage.sourceNames.length })}</span> : null}
-            </div> : null}
-          </AccountCardLayout>;
+            <div className="proxy-card-details">
+              <div className="proxy-card-location" data-relay-tooltip={diagnosticHint} tabIndex={0}
+                data-state={checkState?.pending ? "pending" : success ? "success" : lastCheck ? "failed" : "unknown"}>
+                <span className="proxy-region">{location || (checkState?.pending ? t("proxies.checking") : lastCheck ? t("proxies.geoUnknown") : t("proxies.notChecked"))}</span>
+              </div>
+              <span className="proxy-card-latency" data-relay-tooltip={t("proxies.latencyHint")} tabIndex={0}>{lastCheck && Number.isFinite(lastCheck.elapsedMs) ? t("proxies.latency", { ms: lastCheck.elapsedMs }) : "—"}</span>
+              {speedValue}
+              <span className="proxy-card-accounts" data-relay-tooltip={t("proxies.accounts")} tabIndex={0} aria-label={`${t("proxies.accounts")}: ${usage.accountNames.length}`}><UsersRound aria-hidden />{usage.accountNames.length}</span>
+              {usage.isCommon || usage.sourceNames.length ? <span className="proxy-card-uses">
+                {usage.isCommon ? <span data-relay-tooltip={t("proxies.useCommon")} aria-label={t("proxies.useCommon")} tabIndex={0}><Network aria-hidden /></span> : null}
+                {usage.sourceNames.length ? <span data-relay-tooltip={`${t("proxies.sourceCount", { count: usage.sourceNames.length })}\n${usage.sourceNames.join(", ")}`} tabIndex={0}><Server aria-hidden />{usage.sourceNames.length}</span> : null}
+              </span> : null}
+            </div>
+          </AccountCardLayout>}</ProxySpeedTest>;
         })}</div>}
     {managedProxy ? <ProxyAccountsDialog proxyEntry={managedProxy} accounts={accountList} onSaved={setPool} onClose={() => setManagedProxyId(null)} /> : null}
+    {renamedProxy ? <ProxyRenameDialog key={renamedProxy.id} proxyEntry={renamedProxy} onSaved={setPool} onClose={() => setRenamedProxyId(null)} /> : null}
   </div>;
 }
 
-function ProxyDiagnostic({ state, compact = false }: { state: ProxyCheckState | undefined; compact?: boolean }) {
+function ProxyRenameDialog({ proxyEntry, onSaved, onClose }: { proxyEntry: ProxyPoolEntry; onSaved: (pool: ProxyPoolSummary) => void; onClose: () => void }) {
+  const { t } = useTranslation();
+  const [label, setLabel] = useState(proxyEntry.label ?? "");
+  const [saving, setSaving] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const save = async () => {
+    if (saving) return;
+    setSaving(true);
+    setFailed(false);
+    try {
+      const pool = await relayCommands.renameStoredProxy(proxyEntry.id, label.trim());
+      onSaved(pool);
+      onClose();
+    } catch { setFailed(true); setSaving(false); }
+  };
+  return <Dialog title={t("proxies.rename")} onClose={onClose}>
+    <form className="proxy-rename-form" onSubmit={(event) => { event.preventDefault(); void save(); }}>
+      <label className="relay-field"><span>{t("proxies.name")}</span><input autoFocus value={label} maxLength={80} placeholder={t("proxies.namePlaceholder")} disabled={saving} onChange={(event) => setLabel(event.target.value)} /></label>
+      {failed ? <p className="error-text" role="alert">{t("proxies.renameFailed")}</p> : null}
+      <div className="dialog-actions"><Button type="button" variant="secondary" disabled={saving} onClick={onClose}>{t("common.cancel")}</Button><Button type="submit" variant="primary" busy={saving}>{t("common.save")}</Button></div>
+    </form>
+  </Dialog>;
+}
+
+function ProxyDiagnostic({ state, saved, compact = false }: { state: ProxyCheckState | undefined; saved?: ProxyPoolEntry["lastCheck"]; compact?: boolean }) {
   const { t, i18n } = useTranslation();
-  const proxyCheckResult = state?.result;
+  const proxyCheckResult = latestProxyCheck({ lastCheck: saved ?? null }, state?.result);
   const pending = state?.pending;
   const success = Boolean(proxyCheckResult?.ip && !proxyCheckResult.errorCode);
   const Icon = pending ? Loader2 : success ? CircleCheck : proxyCheckResult ? CircleAlert : Globe;
@@ -207,6 +244,8 @@ function ProxyDiagnostic({ state, compact = false }: { state: ProxyCheckState | 
   const details = [
     checkedAt ? t("proxies.checkedAt", { time: checkedAt }) : null,
     t("proxies.latencyHint"),
+    proxyCheckResult?.ipv4 ? `IPv4: ${proxyCheckResult.ipv4}` : null,
+    proxyCheckResult?.ipv6 ? `IPv6: ${proxyCheckResult.ipv6}` : null,
     proxyCheckResult?.timezone,
     proxyCheckResult?.region,
     proxyCheckResult?.locationErrorCode ? t(`proxies.locationErrors.${proxyCheckResult.locationErrorCode}`, { defaultValue: t("proxies.geoUnknown") }) : null,
@@ -291,6 +330,7 @@ export function ProxyImportDialog({ diagnostics, onImported, onClose }: { diagno
   const [content, setContent] = useState("");
   const [revealed, setRevealed] = useState(false);
   const [importResult, setImportResult] = useState<ProxyPoolImportResult | null>(null);
+  const { pool: observedPool } = useProxyPool(importResult !== null);
   const proxyUrls = content.split(/\r?\n/).map((proxyLine) => proxyLine.trim()).filter(Boolean);
   const importProxies = async () => {
     const captured = await captureOperationResult(
@@ -302,9 +342,12 @@ export function ProxyImportDialog({ diagnostics, onImported, onClose }: { diagno
     setImportResult(importResult);
     setContent("");
     onImported();
-    void diagnostics.checkMany(importResult.addedProxyIds);
   };
-  const importedProxyEntries = importResult?.pool.entries.filter((proxyEntry) => importResult.addedProxyIds.includes(proxyEntry.id)) ?? [];
+  const addedIds = new Set(importResult?.addedProxyIds);
+  const observedEntries = new Map(observedPool?.entries.map((entry) => [entry.id, entry]));
+  const importedProxyEntries = importResult?.pool.entries
+    .filter((entry) => addedIds.has(entry.id))
+    .map((entry) => observedEntries.get(entry.id) ?? entry) ?? [];
   return <Dialog
     className="connection-dialog proxy-import-dialog"
     title={t("proxies.importTitle")}
@@ -322,7 +365,7 @@ export function ProxyImportDialog({ diagnostics, onImported, onClose }: { diagno
         <p className="connection-success" role="status"><CircleCheck aria-hidden />{t("proxies.importResult", importResult)}</p>
         <div className="proxy-import-results">{importedProxyEntries.map((proxyEntry) => <div key={proxyEntry.id}>
           <strong>{proxyEntry.endpoint}</strong>
-          <ProxyDiagnostic state={diagnostics.checks[proxyEntry.id]} />
+          <ProxyDiagnostic state={diagnostics.checks[proxyEntry.id]} saved={proxyEntry.lastCheck} />
           <IconButton label={t("proxies.testConnection")} icon={<Globe aria-hidden />} busy={Boolean(diagnostics.checks[proxyEntry.id]?.pending)} onClick={() => void diagnostics.check(proxyEntry.id)} />
         </div>)}</div>
       </> : <>
@@ -341,10 +384,6 @@ export function ProxyImportDialog({ diagnostics, onImported, onClose }: { diagno
 }
 
 export function AccountProxyDialog({ account, onClose }: { account: AccountSummary; onClose: () => void }) {
-  return <LocalAccountProxyDialog account={account} onClose={onClose} />;
-}
-
-function LocalAccountProxyDialog({ account, onClose }: { account: AccountSummary; onClose: () => void }) {
   const { t } = useTranslation();
   const { busy, perform, runtime } = useRelayState();
   const { pool } = useProxyPool();
@@ -409,7 +448,7 @@ function LocalAccountProxyDialog({ account, onClose }: { account: AccountSummary
       </>}
     >
       <div className="relay-form proxy-route-form">
-        {!pool ? <div className="center-loading"><Loader2 className="spin" aria-hidden />{t("common.loading")}</div> : <>
+        {!pool ? null : <>
           <p className="proxy-account-context">{account.label}</p>
           <div className="proxy-route-options" role="radiogroup" aria-label={t("proxies.accountRoute")}>
             <ProxyRouteOption
@@ -496,10 +535,6 @@ function ProxyRouteOption({
 }
 
 export function BulkProxyDialog({ accountIds, onClose }: { accountIds: string[]; onClose: () => void }) {
-  return <LocalBulkProxyDialog accountIds={accountIds} onClose={onClose} />;
-}
-
-function LocalBulkProxyDialog({ accountIds, onClose }: { accountIds: string[]; onClose: () => void }) {
   const { t } = useTranslation();
   const { runtime, busy, perform } = useRelayState();
   const { pool, setPool } = useProxyPool();

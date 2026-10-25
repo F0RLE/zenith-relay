@@ -5,6 +5,12 @@ export const SHORT_CONTEXT_PERCENT = 25;
 export const MIN_CUSTOM_CONTEXT = 1_024;
 export const MAX_CUSTOM_CONTEXT = 2_000_000;
 
+export function sameModelContextPolicy(left: ModelContextPolicy | undefined, right: ModelContextPolicy | undefined): boolean {
+  if (!left || !right) return left === right;
+  return left.mode === right.mode
+    && (left.mode !== "custom" || (right.mode === "custom" && left.tokens === right.tokens));
+}
+
 export function knownContextMaximum(tokens: number | null | undefined): number | undefined {
   return tokens != null && Number.isSafeInteger(tokens) && tokens > 0 ? tokens : undefined;
 }

@@ -20,7 +20,7 @@ export function RequestParameters({ row }: { row: UsageRow }) {
       <div className="request-parameter-wide"><dt>{t("usage.requestedModel")}</dt><dd><code>{requestedModel}</code></dd></div>
       <div className="request-parameter-wide"><dt>{t("usage.routedModel")}</dt><dd><code>{routedModel}</code></dd></div>
     </> : null}
-    {row.wireApi ? <div><dt>{t("usage.protocol")}</dt><dd>{formatWireApi(row.wireApi, t)}</dd></div> : null}
+    {row.wireApi ? <div><dt>{t("usage.protocol")}</dt><dd>{row.imageUsage ? "Images API" : formatWireApi(row.wireApi, t)}</dd></div> : null}
     {row.transport ? <div><dt>{t("usage.transport")}</dt><dd>{formatTransport(row.transport, t)}</dd></div> : null}
     {row.serviceTier ? <div><dt>{t("usage.serviceTier")}</dt><dd>{formatServiceTier(row, t)}</dd></div> : null}
     {requestedEffort || effectiveEffort ? <div>

@@ -10,7 +10,7 @@ import { RecoveryConfirmationDialog, RecoveryEmptyState, RecoverySnapshotTable, 
 export function ClaudeDesktopRecoveryHeaderAction() {
   const { t } = useTranslation();
   const { busy, perform } = useRelayState();
-  return <Button variant="secondary" icon={<FolderOpen aria-hidden />} busy={busy === "claude-desktop-open-folder"} onClick={() => perform("claude-desktop-open-folder", () => relayCommands.openFolder("claude_desktop_backups"), "feedback.opened", { backgroundRefresh: true })}>{t("profiles.openFolder")}</Button>;
+  return <Button variant="secondary" icon={<FolderOpen aria-hidden />} busy={busy === "claude-desktop-open-folder"} onClick={() => perform("claude-desktop-open-folder", () => relayCommands.openFolder("claude_desktop_backups"), "feedback.opened", { skipRefresh: true })}>{t("profiles.openFolder")}</Button>;
 }
 
 export function ClaudeDesktopRecoveryTab() {
@@ -63,7 +63,6 @@ export function ClaudeDesktopRecoveryTab() {
         {t("profiles.createSnapshot")}
       </Button>
     </form>}>
-      {!status && !loadFailed ? <p role="status">{t("common.loading")}</p> : null}
       {rows.length ? <RecoverySnapshotTable rows={rows} /> : status ? <RecoveryEmptyState title={t("profiles.noSnapshots")} /> : null}
     </RecoverySurface>
     {restoreRequested ? <RecoveryConfirmationDialog

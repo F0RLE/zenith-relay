@@ -4,14 +4,42 @@ import { accountQuotaRefreshState } from "./accountStatus";
 import { accountPlanOption } from "./accountPlans";
 import { isFastSupplementalQuota } from "./quotaFormatting";
 
+type AccountRouteIndex = {
+  byId: ReadonlyMap<string, AccountSummary>;
+  byGroup: ReadonlyMap<string, readonly AccountSummary[]>;
+};
+
+const routeIndexes = new WeakMap<readonly AccountSummary[], AccountRouteIndex>();
+
+// Runtime inventories are immutable snapshots. Release the index with its
+// snapshot; cache grouping only, never derived quota/auth decisions.
+function accountRouteIndex(accounts: readonly AccountSummary[]): AccountRouteIndex {
+  const cached = routeIndexes.get(accounts);
+  if (cached) return cached;
+  const byId = new Map<string, AccountSummary>();
+  const byGroup = new Map<string, AccountSummary[]>();
+  for (const account of accounts) {
+    if (!byId.has(account.id)) byId.set(account.id, account);
+    const groupId = account.routeGroupId;
+    if (!groupId) continue;
+    const group = byGroup.get(groupId);
+    if (group) group.push(account);
+    else byGroup.set(groupId, [account]);
+  }
+  const index = { byId, byGroup };
+  routeIndexes.set(accounts, index);
+  return index;
+}
+
 export function visibleAccounts(accounts: AccountSummary[]): AccountSummary[] {
   return accounts.filter((account) => !account.routeInactive);
 }
 
 export function accountRouteConnections(account: AccountSummary, accounts: readonly AccountSummary[]): AccountSummary[] {
-  return account.routeGroupId
-    ? accounts.filter((candidate) => candidate.routeGroupId === account.routeGroupId)
-    : [account];
+  const groupId = account.routeGroupId;
+  // Preserve the caller-owned result array; sorting/removing a result cannot
+  // mutate the index used by the other cards.
+  return groupId ? accountRouteIndex(accounts).byGroup.get(groupId)?.slice() ?? [] : [account];
 }
 
 // Display freshness only; mirrors the core's default QUOTA_STALE_AFTER_MS, not admission.
@@ -96,8 +124,15 @@ export function accountSubscriptionSource(account: AccountSummary, accounts: rea
 }
 
 export function expandAccountRouteIds(ids: string[], accounts: AccountSummary[]): string[] {
-  return [...new Set(ids.flatMap((id) => {
-    const account = accounts.find((candidate) => candidate.id === id);
-    return account ? accountRouteConnections(account, accounts).map((connection) => connection.id) : [id];
-  }))];
+  if (!ids.length) return [];
+  const index = accountRouteIndex(accounts);
+  const expanded = new Set<string>();
+  for (const id of ids) {
+    const account = index.byId.get(id);
+    const connections = account?.routeGroupId ? index.byGroup.get(account.routeGroupId) : undefined;
+    if (connections) {
+      for (const connection of connections) expanded.add(connection.id);
+    } else expanded.add(id);
+  }
+  return [...expanded];
 }

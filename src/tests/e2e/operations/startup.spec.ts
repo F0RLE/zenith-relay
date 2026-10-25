@@ -39,14 +39,15 @@ test("slow runtime loading does not block navigation, settings or help", async (
   await installTauriMock(page, { locale: "ru", theme: "dark", runtimeStateDelayMs: 20_000 });
   await page.goto("/");
   await expect(page.locator("#splash-screen")).toHaveCount(0);
-  await expect(page.locator(".relay-content .relay-loading")).toBeVisible();
+  await expect(page.locator(".relay-content .data-placeholder")).toHaveCount(0);
+  await expect(page.locator(".relay-content")).not.toContainText("Загрузка");
   expect(await page.evaluate(() => performance.getEntriesByName("zenith:interactive", "measure"))).toEqual([]);
   await page.getByRole("button", { name: "Настройки", exact: true }).click();
   await expect(page.locator(".settings-page")).toBeVisible();
   await page.getByRole("button", { name: "Помощь", exact: true }).click();
   await expect(page.locator('.relay-shell[data-page="help"] .relay-page')).toBeVisible();
   await page.getByRole("button", { name: "Пул", exact: true }).click();
-  await expect(page.locator(".relay-content .relay-loading")).toBeVisible();
+  await expect(page.locator(".relay-content .data-placeholder")).toHaveCount(0);
   await expect(page.locator(".pool-controls")).toHaveCount(0);
   await page.screenshot({ path: "output/playwright/startup-runtime-pending-ru-dark.png" });
   await page.locator(".window-controls .minimize").click();
@@ -138,10 +139,11 @@ test("migrating a saved legacy mode does not leave a stuck loader", async ({ pag
   await expect(page.locator("#root")).not.toHaveAttribute("inert");
 });
 
-test("secondary pages are loaded on navigation intent, not during startup", async ({ page }) => {
+test("secondary code warms after readiness without mounting pages or preloading reports", async ({ page }) => {
+  await page.clock.install();
   const requested: string[] = [];
   page.on("request", (request) => requested.push(request.url()));
-  await installTauriMock(page, { locale: "en" });
+  await installTauriMock(page, { locale: "en", runtimeStateDelayMs: 20_000 });
   await page.goto("/");
   await expect(page.locator("#splash-screen")).toHaveCount(0);
   const secondaryPage = /\/(?:ConnectionsPage|ImportDialog|PoolPage|IntegrationsPage|UsagePage|ProfilesPage|SettingsPage|HelpCenter)-/;
@@ -149,7 +151,16 @@ test("secondary pages are loaded on navigation intent, not during startup", asyn
   await page.getByRole("button", { name: "Pool", exact: true }).focus();
   await expect.poll(() => requested.some((url) => /\/PoolPage-/.test(url))).toBe(true);
   await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await page.clock.fastForward(20_000);
   await expect(page.locator('.relay-shell[data-page="pool"] .relay-page')).toBeVisible();
+  await page.clock.fastForward(10_000);
+  await expect.poll(() => requested.some((url) => /\/UsagePage-/.test(url))).toBe(true);
+  expect(requested.some((url) => /\/ImportDialog-/.test(url))).toBe(false);
+  const commands = await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { range?: string } } }>;
+  }).__TAURI_TEST_INVOKES__);
+  expect(commands.some(({ command }) => command === "get_local_proxy_pool")).toBe(false);
+  expect(commands.some(({ command, args }) => command === "get_local_usage_page" && args.input?.range !== "custom")).toBe(false);
 });
 
 test("first-run setup becomes usable after startup", async ({ page }) => {

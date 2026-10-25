@@ -207,8 +207,9 @@ test("stale local usage and proxy references never expose internal account IDs",
 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("tab", { name: "Proxies" }).click();
-  await page.locator(".proxy-storage-bindings").first().getByText("Accounts: 1", { exact: true }).hover();
-  await expect(page.getByRole("tooltip")).toHaveText("Unknown account");
+  await expect(page.locator(".proxy-card-accounts").first()).toHaveText("1");
+  await page.locator(".proxy-card-accounts").first().hover();
+  await expect(page.getByRole("tooltip")).toHaveText("Accounts");
   await expect(page.getByText("account_deleted_internal", { exact: true })).toHaveCount(0);
 });
 

@@ -32,7 +32,11 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const {
     loadLocalUsage,
     localUsagePage,
+    localUsageQueryKey,
+    getCachedLocalUsage,
     resetUsage,
+    invalidateLocalUsage,
+    invalidateUsageCache,
   } = useRelayUsage(relayCommands);
   const {
     mode,
@@ -40,6 +44,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     page,
     setPage,
     runtime,
+    runtimeReady,
     runtimeActivity,
     runtimeRevision,
     usageRevision,
@@ -48,6 +53,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   } = useRelayRuntime({
     cancelOperations,
     resetUsage,
+    invalidateUsageCache,
     reportErrorFeedback,
   });
   const {
@@ -71,7 +77,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setPage,
     setRevealedAccountIdentities,
   });
-  const canRevealAccountIdentities = mode === "local";
+  const canRevealAccountIdentities = mode === "local" && runtimeReady;
   const accountIdentitiesBusy = useAccountIdentityReveal({
     accounts: runtime?.accounts ?? [],
     canReveal: canRevealAccountIdentities,
@@ -183,6 +189,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     page,
     setPage,
     runtime: displayRuntime,
+    runtimeReady,
     runtimeRevision,
     accountIdentitiesVisible,
     accountIdentitiesBusy,
@@ -223,6 +230,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     page,
     setPage,
     displayRuntime,
+    runtimeReady,
     runtimeRevision,
     accountIdentitiesVisible,
     accountIdentitiesBusy,
@@ -257,9 +265,12 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
 
   const usage = useMemo<RelayUsageContextValue>(() => ({
     localUsagePage,
+    localUsageQueryKey,
+    getCachedLocalUsage,
     loadLocalUsage,
+    invalidateLocalUsage,
     usageRevision,
-  }), [loadLocalUsage, localUsagePage, usageRevision]);
+  }), [getCachedLocalUsage, invalidateLocalUsage, loadLocalUsage, localUsagePage, localUsageQueryKey, usageRevision]);
 
   useEffect(() => {
     document.documentElement.lang = i18n.language.startsWith("ru") ? "ru" : "en";

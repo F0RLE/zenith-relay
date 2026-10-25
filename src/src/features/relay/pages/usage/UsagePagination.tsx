@@ -6,11 +6,12 @@ import { Button, IconButton } from "../../components/Ui";
 type UsagePaginationProps = {
   page: number;
   totalPages: number;
+  hasMore?: boolean | undefined;
   loading: boolean;
   onPageChange: (page: number) => void;
 };
 
-export function UsagePagination({ page, totalPages, loading, onPageChange }: UsagePaginationProps) {
+export function UsagePagination({ page, totalPages, hasMore, loading, onPageChange }: UsagePaginationProps) {
   const { t } = useTranslation();
   const inputId = useId();
   const errorId = useId();
@@ -20,7 +21,9 @@ export function UsagePagination({ page, totalPages, loading, onPageChange }: Usa
   const navigation = useRef<HTMLElement>(null);
   const returnFocus = useRef(false);
 
-  const visiblePages = totalPages <= 5
+  const visiblePages = hasMore !== undefined
+    ? [...new Set([1, Math.max(1, page - 1), page, ...(hasMore ? [page + 1] : [])])]
+    : totalPages <= 5
     ? Array.from({ length: totalPages }, (_, index) => index + 1)
     : page <= 3 ? [1, 2, 3, totalPages]
       : page >= totalPages - 2 ? [1, totalPages - 2, totalPages - 1, totalPages]
@@ -70,10 +73,10 @@ export function UsagePagination({ page, totalPages, loading, onPageChange }: Usa
       </form> : <>
         <IconButton label={t("common.back")} icon={<ChevronLeft aria-hidden />} disabled={page <= 1 || loading} onClick={() => onPageChange(page - 1)} />
         {visiblePages.map((pageNumber, index) => <Fragment key={pageNumber}>
-          {index > 0 && pageNumber - visiblePages[index - 1]! > 1 ? <Button className="usage-pagination-gap" variant="ghost" aria-label={t("usage.jumpToPage")} title={t("usage.jumpToPage")} disabled={loading} onClick={() => setEditing(true)}>…</Button> : null}
-          <Button className="usage-pagination-page" variant="ghost" aria-label={t("usage.pageLabel", { page: pageNumber })} aria-current={pageNumber === page ? "page" : undefined} title={pageNumber === page ? t("usage.jumpToPage") : undefined} disabled={loading} onClick={() => pageNumber === page ? setEditing(true) : onPageChange(pageNumber)}>{pageNumber}</Button>
+          {index > 0 && pageNumber - visiblePages[index - 1]! > 1 ? hasMore !== undefined ? <span className="usage-pagination-gap" aria-hidden>…</span> : <Button className="usage-pagination-gap" variant="ghost" aria-label={t("usage.jumpToPage")} title={t("usage.jumpToPage")} disabled={loading} onClick={() => setEditing(true)}>…</Button> : null}
+          <Button className="usage-pagination-page" variant="ghost" aria-label={t("usage.pageLabel", { page: pageNumber })} aria-current={pageNumber === page ? "page" : undefined} title={hasMore === undefined && pageNumber === page ? t("usage.jumpToPage") : undefined} disabled={loading} onClick={() => { if (pageNumber !== page) onPageChange(pageNumber); else if (hasMore === undefined) setEditing(true); }}>{pageNumber}</Button>
         </Fragment>)}
-        <IconButton label={t("common.continue")} icon={<ChevronRight aria-hidden />} disabled={page >= totalPages || loading} onClick={() => onPageChange(page + 1)} />
+        <IconButton label={t("common.continue")} icon={<ChevronRight aria-hidden />} disabled={(hasMore === undefined ? page >= totalPages : !hasMore) || loading} onClick={() => onPageChange(page + 1)} />
       </>}
     </div>
     {invalid ? <span id={errorId} role="alert" className="usage-pagination-error">{t("usage.invalidPage", { total: totalPages })}</span> : null}

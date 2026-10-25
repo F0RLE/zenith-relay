@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Copy, KeyRound, Link2, Network, RefreshCw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands, type LocalNetworkAccess } from "../../api/commands";
@@ -12,20 +12,22 @@ export function NetworkAccessControl({ port, running }: { port: string; running:
   const controlId = useId();
   const [access, setAccess] = useState<LocalNetworkAccess | null>(null);
   const [failed, setFailed] = useState(false);
+  const accessRevision = useRef(0);
+  const sharingWritePending = useRef(false);
   useEffect(() => setAccess(null), [port]);
   useEffect(() => {
-    if (busy) return;
     const controller = new AbortController();
     const { signal } = controller;
     let pending = false;
     const refresh = async () => {
-      if (signal.aborted || pending || document.hidden) return;
+      if (signal.aborted || pending || sharingWritePending.current || document.hidden) return;
       pending = true;
+      const revision = accessRevision.current;
       try {
         const next = await relayCommands.localNetworkAccess();
-        if (!signal.aborted) { setAccess(next); setFailed(false); }
+        if (!signal.aborted && revision === accessRevision.current) { setAccess(next); setFailed(false); }
       } catch {
-        if (!signal.aborted) { setAccess(null); setFailed(true); }
+        if (!signal.aborted && revision === accessRevision.current) { setAccess(null); setFailed(true); }
       } finally { pending = false; }
     };
     void refresh();
@@ -37,7 +39,7 @@ export function NetworkAccessControl({ port, running }: { port: string; running:
       controller.abort();
       window.clearInterval(interval);
     };
-  }, [port, busy]);
+  }, [port, running]);
 
   const update = async (enabled: boolean) => {
     if (!access || busy) return;
@@ -45,8 +47,16 @@ export function NetworkAccessControl({ port, running }: { port: string; running:
       title: t("network.title"), confirmLabel: t(enabled ? "common.enable" : "common.disable"),
     })) return;
     await perform("network-access", async () => {
-      const next = await relayCommands.setLocalNetworkAccess(enabled, access.enabled);
-      setAccess(next);
+      // Pause only this setting's transaction, not unrelated interface actions.
+      sharingWritePending.current = true;
+      accessRevision.current += 1;
+      try {
+        const next = await relayCommands.setLocalNetworkAccess(enabled, access.enabled);
+        setAccess(next);
+        setFailed(false);
+      } finally {
+        sharingWritePending.current = false;
+      }
     }, "feedback.saved", { backgroundRefresh: true });
   };
   const copyKey = async (rotate = false) => {
@@ -62,7 +72,7 @@ export function NetworkAccessControl({ port, running }: { port: string; running:
       <div className="relay-toggle-setting">
         <label htmlFor={controlId}>
           <strong>{t("network.title")}</strong>
-          <span id={`${controlId}-description`}>{t(failed ? "network.loadFailed" : !access ? "common.loading" : access.enabled ? "network.sharedHint" : "network.localHint")}</span>
+          <span id={`${controlId}-description`} aria-busy={!access && !failed}>{failed ? t("network.loadFailed") : access ? t(access.enabled ? "network.sharedHint" : "network.localHint") : null}</span>
         </label>
         <ToggleSwitch id={controlId} label={t("network.title")} aria-describedby={`${controlId}-description`}
           checked={access?.enabled ?? false} disabled={!access || Boolean(busy)} onChange={(enabled) => void update(enabled)} />
@@ -80,7 +90,7 @@ export function NetworkAccessControl({ port, running }: { port: string; running:
         <div className="gateway-api-field">
           <h4><KeyRound aria-hidden />{t("network.key")}</h4>
           <div className="gateway-api-value">
-            <span className="gateway-api-secret" aria-label={t("gateway.keyHidden")}>•••• •••• ••••</span>
+            <span className="gateway-api-secret" aria-label={t("gateway.keyHidden")}>••••••••••••</span>
             <div className="gateway-api-field-actions">
               <IconButton label={t("network.copyKey")} icon={<Copy aria-hidden />} disabled={Boolean(busy)} onClick={() => void copyKey()} />
               <ActionMenu label={t("gateway.apiKeyActions")}>

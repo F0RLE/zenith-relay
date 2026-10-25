@@ -61,6 +61,30 @@ const row = (overrides: Partial<UsageRow> = {}): UsageRow => ({
 });
 
 describe("usage data", () => {
+  test("client cancellation is distinct from provider failure, including legacy 502 rows", async () => {
+    const cancelled = row({ success: false, httpStatus: 502, errorCategory: "client_cancelled" });
+    expect(requestStatusKind(cancelled)).toBe("cancelled");
+    expect(requestStatusKind({ ...cancelled, success: true })).toBe("success");
+    expect(requestStatusKind({ ...cancelled, errorCategory: "upstream_rate_limited" })).toBe("error");
+    expect(requestStatusKind({ ...cancelled, errorCategory: null, routing: {
+      reason: "quota_headroom", eligibleCandidates: 1, quotaRemainingBasisPoints: null,
+      inFlightBefore: 0, dispatchesBefore: 0, attemptOutcome: "client_disconnected",
+    } })).toBe("cancelled");
+    for (const [locale, translation, expected] of [["ru", ru, "Клиент отменил запрос"], ["en", en, "Client cancelled the request"]] as const) {
+      const i18n = createInstance();
+      await i18n.init({ lng: locale, resources: { [locale]: { translation } }, initImmediate: false });
+      expect(requestStatusLabel(cancelled, i18n.t.bind(i18n))).toBe(expected);
+    }
+    expect(totalsFromRows([cancelled]).totalTokens).toBe(cancelled.tokens!);
+  });
+  test("image modality counters are included subsets, not additional tokens", () => {
+    const image = row({ inputTokens: 10, outputTokens: 5, tokens: 15, reasoningTokens: null,
+      imageUsage: { inputTextTokens: 3, inputImageTokens: 7, outputImageTokens: 5, generatedImages: 1 } });
+    const totals = totalsFromRows([image, image]);
+    expect(totals.inputTokens).toBe(10);
+    expect(totals.outputTokens).toBe(5);
+    expect(totals.totalTokens).toBe(15);
+  });
   test("catalog discovery is pending, not a failed or successful logical request", async () => {
     const pending = row({ success: false, routing: {
       reason: "quota_headroom", eligibleCandidates: 1, quotaRemainingBasisPoints: null,
@@ -115,7 +139,7 @@ describe("usage data", () => {
       `claude-fable-5-zenith-${legacySuffix}`,
     ];
     const labels = {
-      backgroundConnection: "ChatGPT", unknownAccount: "Unknown", removedAccount: "Removed",
+      backgroundConnection: "ChatGPT", removedAccount: "Removed",
       unknownConnection: "Unknown", accountLabels: new Map<string, string>(), sourceLabels: new Map<string, string>(),
       accountDisplayName: (label: string) => label,
     };
@@ -300,7 +324,6 @@ describe("usage data", () => {
     };
     const labels = {
       backgroundConnection: "ChatGPT",
-      unknownAccount: "Unknown account",
       removedAccount: "Removed account",
       unknownConnection: "Unknown connection",
     };
@@ -341,7 +364,7 @@ describe("usage data", () => {
       reasoningTokens: null, outputTokens: null, totalTokens: null,
     };
     const local = usageRowsFromLocal([{ ...base, createdAt: "2026-08-23T00:00:00Z", sourceId: "source" }], {
-      backgroundConnection: "ChatGPT", unknownAccount: "Unknown", removedAccount: "Removed",
+      backgroundConnection: "ChatGPT", removedAccount: "Removed",
       unknownConnection: "Unknown", accountLabels: new Map(), sourceLabels: new Map(),
     });
     expect(local[0]).toMatchObject({ model: "vendor/model", requestedModel: "public-alias", routedModel: "vendor/model" });
@@ -350,7 +373,6 @@ describe("usage data", () => {
   test("labels deleted account history without collapsing it into an unknown account", () => {
     const labels = {
       backgroundConnection: "ChatGPT",
-      unknownAccount: "Unknown account",
       removedAccount: "Removed account",
       unknownConnection: "Unknown connection",
     };

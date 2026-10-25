@@ -11,14 +11,24 @@ import { Button, EmptyState, ErrorDetailsDialog, IconButton } from "../component
 import { useAppUpdates, type UpdateCheckState } from "../hooks/useAppUpdates";
 import { UpdateDialog } from "./UpdateDialog";
 import { HostedDevelopmentPage } from "../pages/hosted/HostedDevelopmentPage";
+import { warmPageModules } from "./warmPageModules";
+import { usagePreview } from "../state/usagePreview";
 
-function lazyNamed<P>(load: () => Promise<ComponentType<P>>) {
+function lazyNamed<P extends object>(load: () => Promise<ComponentType<P>>) {
   let pending: Promise<{ default: ComponentType<P> }> | undefined;
-  const run = () => (pending ??= load().then((component) => ({ default: component })));
+  let ready: ComponentType<P> | undefined;
+  const run = () => (pending ??= load().then((component) => {
+    ready = component;
+    return { default: component };
+  }).catch((error: unknown) => { pending = undefined; throw error; }));
+  const Lazy = lazy(run);
   return {
-    Component: lazy(run),
+    // React.lazy suspends even on its first read of an already-resolved promise.
+    // Render a prepared module directly so the first click has no empty frame.
+    Component: (props: P) => { const Component = ready ?? Lazy; return <Component {...props} />; },
+    prepare: run,
     preload: () => {
-      void run().catch(() => { pending = undefined; });
+      void run().catch(() => undefined);
     },
   };
 }
@@ -31,6 +41,7 @@ const usagePage = lazyNamed(async () => (await import("../pages/usage/UsagePage"
 const profilesPage = lazyNamed(async () => (await import("../pages/profiles/ProfilesPage")).ProfilesPage);
 const settingsPage = lazyNamed(async () => (await import("../pages/settings/SettingsPage")).SettingsPage);
 const helpCenter = lazyNamed(async () => (await import("../help/HelpCenter")).HelpCenter);
+const pageModules = { connections: connectionsPage, pool: poolPage, usage: usagePage, integrations: integrationsPage, profiles: profilesPage, settings: settingsPage, help: helpCenter };
 
 const pages: Array<{ id: PageId; icon: typeof LayoutDashboard; preload?: () => void }> = [
   { id: "overview", icon: LayoutDashboard },
@@ -44,8 +55,29 @@ const pages: Array<{ id: PageId; icon: typeof LayoutDashboard; preload?: () => v
 
 export function RelayShell() {
   const { t } = useTranslation();
-  const { mode, setMode, page, setPage, feedback, clearFeedback, loading, runtime } = useRelayState();
+  const { mode, setMode, page, setPage, feedback, clearFeedback, loading, runtime, runtimeReady } = useRelayState();
   const pageNeedsRuntime = mode === "local" && page !== "settings" && page !== "help";
+  const navigationRevision = useRef(0);
+  const [navigationFailure, setNavigationFailure] = useState<PageId | null>(null);
+  const navigate = useCallback((target: PageId) => {
+    const revision = ++navigationRevision.current;
+    setNavigationFailure(null);
+    if (target === "overview") { setPage(target); return; }
+    // Keep the actual current screen until both the target JS and CSS are ready.
+    void pageModules[target].prepare().then(() => {
+      if (navigationRevision.current === revision) setPage(target);
+    }).catch(() => {
+      if (navigationRevision.current === revision) setNavigationFailure(target);
+    });
+  }, [setPage]);
+  useEffect(() => () => { navigationRevision.current += 1; }, [mode, page]);
+  useEffect(() => {
+    if (mode !== "local" || !runtimeReady) return;
+    return warmPageModules([
+      ...Object.values(pageModules).map((module) => module.prepare),
+      () => usagePreview.restore(),
+    ]);
+  }, [mode, runtimeReady]);
   useEffect(() => {
     let secondFrame = 0;
     const firstFrame = requestAnimationFrame(() => {
@@ -93,7 +125,7 @@ export function RelayShell() {
       aria-label={t(`nav.${pageId}`)}
       aria-current={page === pageId ? "page" : undefined}
       data-relay-tooltip={collapsed ? t(`nav.${pageId}`) : undefined}
-      onClick={() => setPage(pageId)}
+      onClick={() => navigate(pageId)}
       onPointerEnter={preload}
       onFocus={preload}
     >
@@ -106,10 +138,11 @@ export function RelayShell() {
   }, []);
   const openImport = useCallback((paths?: string[]) => {
     if (mode === "hosted") return;
+    navigationRevision.current += 1;
     importDialog.preload();
-    setPage("connections");
+    navigate("connections");
     setImportRequest({ id: ++nextImportRequest.current, ...(paths ? { paths } : {}) });
-  }, [mode, setPage]);
+  }, [mode, navigate]);
 
   useEffect(() => {
     if (contentRef.current) {
@@ -191,6 +224,8 @@ export function RelayShell() {
                   key={modeOption}
                   type="button"
                   onClick={() => {
+                    navigationRevision.current += 1;
+                    setNavigationFailure(null);
                     setMode(modeOption);
                     setImportRequest(null);
                     setImportDragActive(false);
@@ -235,7 +270,7 @@ export function RelayShell() {
               aria-label={t("common.help")}
               aria-current={page === "help" ? "page" : undefined}
               data-relay-tooltip={collapsed ? t("common.help") : undefined}
-              onClick={() => setPage("help")}
+              onClick={() => navigate("help")}
               onPointerEnter={helpCenter.preload}
               onFocus={helpCenter.preload}
             >
@@ -257,14 +292,18 @@ export function RelayShell() {
         </div>
       </aside>
       <div className="relay-content" ref={contentRef}>
+        {navigationFailure ? <div className="form-note error-text" role="alert">
+          {t("feedback.refreshFailed")} <Button variant="secondary" onClick={() => navigate(navigationFailure)}>{t("common.retry")}</Button>
+        </div> : null}
         {/* Remount the boundary per page: a retained boundary keeps the
             previous page hidden in the DOM while the next lazy chunk loads,
             so automation and assistive tech would still resolve the old
             page's nodes after navigation. */}
-        {pageNeedsRuntime && !runtime ? (
-          loading ? <div className="relay-loading" role="status">{t("common.loading")}</div> : <RuntimeUnavailable />
+        {pageNeedsRuntime && !runtime && page !== "overview" ? (
+          loading ? null : <RuntimeUnavailable />
         ) : (
-          <Suspense key={page} fallback={<div className="relay-loading">{t("common.loading")}</div>}>
+          <div inert={pageNeedsRuntime && !runtimeReady} style={{ display: "contents" }}>
+          <Suspense key={page} fallback={null}>
             <Page
               page={page}
               onImport={() => openImport()}
@@ -273,7 +312,9 @@ export function RelayShell() {
               onCheckUpdates={() => checkUpdates({ openWhenAvailable: true, includeSkipped: true })}
             />
           </Suspense>
+          </div>
         )}
+        {pageNeedsRuntime && (runtime || page === "overview") && !runtimeReady && !loading ? <RuntimeUnavailable /> : null}
       </div>
       {importDragActive ? (
         <div className="import-drop-overlay" role="status">

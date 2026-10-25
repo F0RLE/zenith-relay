@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ModelSummary } from "../src/features/relay/api/types";
+import { orderModelIdsBySnapshot } from "../src/features/relay/modelGroups";
 import {
   completeModelDisplayOrder,
   modelSignature,
@@ -31,6 +32,35 @@ const model = (id: string, overrides: Partial<ModelSummary> = {}): ModelSummary 
 });
 
 describe("model rules model", () => {
+  test("catalog order consumes duplicate IDs once and preserves first spelling and unknown inventory order", () => {
+    const models = ["unknown-B", " GPT-TEST ", "unknown-a", "gpt-test", "", "claude-test", "UNKNOWN-A", "extra"];
+    const summaries = [model("unknown-a"), model("absent"), model("gpt-test"), model("UNKNOWN-A")];
+    const identity = (catalogOrder: number) => ({ catalogProvider: null, catalogFamily: null, catalogOrder });
+    const catalog = {
+      "claude-test": identity(0),
+      missing: identity(1),
+      "gpt-test": identity(4),
+      "CLAUDE-TEST": identity(7),
+      extra: identity(1.5),
+      "unknown-B": identity(-1),
+    };
+    const before = structuredClone({ models, summaries, catalog });
+    expect(orderModelIdsBySnapshot(models, summaries, catalog)).toEqual([
+      "claude-test", " GPT-TEST ", "unknown-a", "unknown-B", "extra",
+    ]);
+    expect({ models, summaries, catalog }).toEqual(before);
+  });
+
+  test("catalog ordering keeps tied backend positions stable and accepts empty inventories", () => {
+    const catalog = {
+      b: { catalogProvider: null, catalogFamily: null, catalogOrder: 2 },
+      a: { catalogProvider: null, catalogFamily: null, catalogOrder: 2 },
+    };
+    expect(orderModelIdsBySnapshot(["a", "b", "c"], [model("c")], catalog)).toEqual(["b", "a", "c"]);
+    expect(orderModelIdsBySnapshot([], [model("a")], catalog)).toEqual([]);
+    expect(orderModelIdsBySnapshot(["b", "B", "a"], [])).toEqual(["b", "a"]);
+  });
+
   test("builds a stable signature from render-affecting model metadata", () => {
     const current = [model("a", { reasoningLevels: ["low"] })];
     expect(modelSignature(current)).toBe(modelSignature(current));
@@ -61,6 +91,16 @@ describe("model rules model", () => {
     expect(modelSpeedTiers(model("gpt", { speedSupported: true, speedTiers: ["fast", "standard"] }))).toEqual(["standard", "fast"]);
     expect(modelSpeedTiers(model("gpt", { speedSupported: true }))).toEqual(["standard"]);
     expect(modelSpeedTiers(model("other", { speedSupported: false }))).toEqual(["standard"]);
+  });
+
+  test("returns independent speed selections without mutating runtime tiers", () => {
+    const current = model("gpt", { speedTiers: ["ultrafast", "fast", "standard", "fast"] });
+    Object.freeze(current.speedTiers);
+    const tiers = modelSpeedTiers(current);
+    expect(tiers).toEqual(["standard", "fast", "ultrafast"]);
+    tiers.pop();
+    expect(modelSpeedTiers(current)).toEqual(["standard", "fast", "ultrafast"]);
+    expect(current.speedTiers).toEqual(["ultrafast", "fast", "standard", "fast"]);
   });
 
   test("hides reasoning when a model has no levels and never offers it for image generation", () => {
@@ -107,9 +147,33 @@ describe("model rules model", () => {
       { id: "two", label: "Two", models: [model("c")] },
       { id: "three", label: "Three", models: [model("d"), model("e")] },
     ];
+    for (const group of groups) {
+      for (const item of group.models) Object.freeze(item);
+      Object.freeze(group.models);
+      Object.freeze(group);
+    }
+    Object.freeze(groups);
     const next = reorderModelGroups(groups, "one", "three");
     expect(next?.map((item) => item.id)).toEqual(["c", "d", "e", "a", "b"]);
-    expect(groups[0]?.models.map((item) => item.id)).toEqual(["a", "b"]);
+    expect(next?.[0]).toBe(groups[1]?.models[0]);
+    expect(next?.[3]).toBe(groups[0]?.models[0]);
+    expect(reorderModelGroups(groups, "three", "one")?.map((item) => item.id))
+      .toEqual(["d", "e", "a", "b", "c"]);
+    expect(groups.map((group) => group.models.map((item) => item.id)))
+      .toEqual([["a", "b"], ["c"], ["d", "e"]]);
+  });
+
+  test("rejects invalid group moves and accepts empty groups", () => {
+    const groups: ModelRuleGroup[] = [
+      { id: "one", label: "One", models: [model("a")] },
+      { id: "empty", label: "Empty", models: [] },
+      { id: "two", label: "Two", models: [model("b")] },
+    ];
+    expect(reorderModelGroups(groups, "one", "one")).toBeNull();
+    expect(reorderModelGroups(groups, "missing", "one")).toBeNull();
+    expect(reorderModelGroups(groups, "one", "missing")).toBeNull();
+    expect(reorderModelGroups([], "one", "two")).toBeNull();
+    expect(reorderModelGroups(groups, "two", "empty")?.map((item) => item.id)).toEqual(["a", "b"]);
   });
 
   test("keeps unavailable catalog models when saving a reordered visible group", () => {

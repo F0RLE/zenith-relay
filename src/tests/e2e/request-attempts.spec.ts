@@ -16,7 +16,7 @@ for (const locale of ["en", "ru"] as const) {
       const status = page.locator('.usage-request-table tbody td[data-column="status"]');
       await expect(status).toHaveText("");
       const icon = status.getByRole("img", { name: reason, exact: true });
-      await expect(icon).toHaveAttribute("data-status", "error");
+      await expect(icon).toHaveAttribute("data-status", category === "client_cancelled" ? "info" : "error");
       await expect(status.locator("small")).toHaveCount(0);
       if (category) {
         await status.locator(".usage-request-result").hover();
@@ -49,6 +49,33 @@ for (const locale of ["en", "ru"] as const) {
 
 for (const mode of ["local"] as const) {
   for (const locale of ["en", "ru"] as const) {
+    test(`${mode} ${locale} client cancellation is not displayed as an HTTP 502 provider failure`, async ({ page }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await installTauriMock(page, {
+        mode, locale, theme: locale === "ru" ? "dark" : "light", populated: true,
+        usageFailure: true, usageAttemptOutcome: "client_disconnected",
+      });
+      await page.goto("/");
+      await setUsageEventOverrides(page, {
+        errorCategory: "client_cancelled", httpStatus: 502,
+        upstreamError: { httpStatus: 429, code: "rate_limit_exceeded", errorType: "tokens", message: "synthetic previous rejection", redacted: false, truncated: false },
+      });
+      await page.getByRole("button", { name: locale === "en" ? "Usage" : "Использование", exact: true }).click();
+      const label = locale === "en" ? "Client cancelled the request" : "Клиент отменил запрос";
+      const detailsLabel = locale === "en" ? "Request details" : "Сведения о запросе";
+      await expect(page.locator(".usage-request-table").getByRole("img", { name: label })).toHaveAttribute("data-status", "info");
+      await page.getByRole("button", { name: `${detailsLabel}: req_synthetic_${mode}` }).click();
+      const details = page.getByRole("dialog", { name: detailsLabel });
+      await expect(details.locator(".request-details-status")).toHaveAttribute("data-status", "cancelled");
+      await expect(details.locator(".request-details-status")).toHaveText(label);
+      await expect(details.locator(".request-details-error")).toHaveCount(0);
+      await expect(details.locator(".request-outcome-note")).toHaveCount(0);
+      await expect(details).not.toContainText("HTTP 502");
+      await expect(details).not.toContainText("synthetic previous rejection");
+      await expect.poll(() => details.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      await details.screenshot({ path: `output/playwright/usage-cancelled-${locale}.png` });
+    });
+
     test(`${mode} ${locale} catalog discovery never displays an HTTP 200 failure`, async ({ page }) => {
       const pendingLabel = locale === "en" ? "Tool lookup" : "Поиск инструментов";
       const detailsLabel = locale === "en" ? "Request details" : "Сведения о запросе";
@@ -90,7 +117,7 @@ for (const mode of ["local"] as const) {
     const details = page.getByRole("dialog", { name: "Request details" });
     await expect(details.getByRole("tab", { name: "Attempts", exact: true })).toHaveCount(0);
     await expect(details.locator(".request-execution")).toHaveCount(0);
-    await expect(details.locator(".request-details-identity")).toContainText("Success");
+    await expect(details.locator('.request-details-status[data-status="success"]')).toHaveAccessibleName("Success");
     await expect(details.locator(".request-details-error")).toHaveCount(0);
     const queries = await page.evaluate(() =>
       (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ args: { input?: Record<string, unknown> } }> })
@@ -124,7 +151,7 @@ test("send details no longer depend on a second history request", async ({ page 
   const details = page.getByRole("dialog", { name: "Request details" });
   await expect(details.locator(".request-execution")).toHaveCount(0);
   await expect(details.getByText("No attempts found.", { exact: false })).toHaveCount(0);
-  await expect(details.locator(".request-details-identity")).toContainText("Success");
+  await expect(details.locator('.request-details-status[data-status="success"]')).toHaveAccessibleName("Success");
   await expect(details.getByRole("button", { name: "Refresh", exact: true })).toHaveCount(0);
 });
 
@@ -175,13 +202,19 @@ for (const outcome of ["execution_uncertain", "client_disconnected", null] as co
     await page.getByRole("button", { name: "Request details: req_synthetic_local" }).first().click();
     const details = page.getByRole("dialog", { name: "Request details" });
     await expect(details.locator(".request-execution-list > li")).toHaveCount(0);
-    if (outcome) await expect(details.locator(".request-outcome-note")).toHaveText(outcome === "execution_uncertain"
-      ? "Retry stopped: the previous send may have executed. Sending again could duplicate the request."
-      : "Retry stopped: the client disconnected.");
+    if (outcome === "execution_uncertain") await expect(details.locator(".request-outcome-note")).toHaveText(
+      "Retry stopped: the previous send may have executed. Sending again could duplicate the request.");
     else await expect(details.locator(".request-outcome-note")).toHaveCount(0);
-    await expect(details.locator(".request-details-error")).toContainText("Synthetic provider failure");
-    await expect(details.locator(".request-details-identity")).toContainText("Failed");
-    await expect(details.locator(".request-details-error")).toContainText("502");
+    if (outcome === "client_disconnected") {
+      await expect(details.locator(".request-details-error")).toHaveCount(0);
+      await expect(details.locator(".request-details-status")).toHaveAttribute("data-status", "cancelled");
+      await expect(details.locator(".request-details-identity")).toContainText("Client cancelled the request");
+      await expect(details).not.toContainText("Synthetic provider failure");
+    } else {
+      await expect(details.locator(".request-details-error")).toContainText("Synthetic provider failure");
+      await expect(details.locator(".request-details-identity")).toContainText("Failed");
+      await expect(details.locator(".request-details-error")).toContainText("502");
+    }
   });
 }
 
@@ -194,7 +227,7 @@ test("partial history does not invent missing sends", async ({ page }) => {
   await expect(page.locator(".usage-request-table tbody tr")).toHaveCount(1);
   await expect(details.locator(".request-execution")).toHaveCount(0);
   await expect(details.locator(".request-execution-list > li")).toHaveCount(0);
-  await expect(details.locator(".request-details-identity")).toContainText("Success");
+  await expect(details.locator('.request-details-status[data-status="success"]')).toHaveAccessibleName("Success");
 });
 
 test("different client request IDs stay separate and have distinguishable labels", async ({ page }) => {

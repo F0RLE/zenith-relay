@@ -8,13 +8,21 @@
 
 .usage-scope-controls {
   display: grid;
-  --usage-scope-columns: 136px 150px minmax(0, 1fr) minmax(0, 1fr);
+  --usage-scope-columns: 124px 160px repeat(2, minmax(0, 1fr));
   grid-template-columns: var(--usage-scope-columns);
   gap: 8px;
 }
 
 .usage-scope-controls[data-filter-count="3"] {
-  --usage-scope-columns: 136px repeat(2, minmax(0, 1fr));
+  --usage-scope-columns: 124px 160px minmax(0, 1fr);
+}
+
+.usage-scope-controls[data-filter-count="5"] {
+  --usage-scope-columns: 124px 160px 124px repeat(2, minmax(0, 1fr));
+}
+
+.usage-scope-controls[data-filter-count="4"]:has(> .usage-status-menu) {
+  --usage-scope-columns: 124px 160px 124px minmax(0, 1fr);
 }
 
 .usage-scope-controls:has(> .usage-clear-filters) {
@@ -731,6 +739,11 @@
   font-size: 10px;
 }
 
+.relay-modal-backdrop.request-details-backdrop {
+  /* Frequent request inspection should not rasterize/blur the whole live table. */
+  backdrop-filter: none;
+}
+
 .relay-dialog.request-details-dialog {
   width: min(960px, 100%);
   border: 1px solid var(--relay-border);
@@ -848,119 +861,6 @@
   font-size: 14px;
 }
 
-.request-send-heading {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 4px 12px;
-}
-
-.request-send-heading > span,
-.request-send-index {
-  color: var(--relay-muted);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-
-.request-execution-list {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.request-execution-list > li {
-  display: grid;
-  grid-template-columns: 20px minmax(0, 1fr);
-  gap: 12px;
-  padding-bottom: 18px;
-  scroll-margin-block: 12px;
-}
-
-.request-execution-list > li:last-child {
-  padding-bottom: 0;
-}
-
-.request-send-marker {
-  position: relative;
-  display: flex;
-  justify-content: center;
-  padding-top: 2px;
-}
-
-.request-execution-list > li:not(:last-child) .request-send-marker::after {
-  content: "";
-  position: absolute;
-  top: 24px;
-  bottom: -10px;
-  width: 1px;
-  background: var(--relay-border);
-}
-
-.request-send-content {
-  min-width: 0;
-  font-size: 12px;
-  overflow-wrap: anywhere;
-}
-
-.request-send-content p {
-  margin: 5px 0 0;
-  line-height: 1.5;
-}
-
-.request-send-error {
-  color: var(--relay-danger);
-}
-
-.request-send-success {
-  color: var(--relay-accent);
-}
-
-.request-send-decision {
-  color: var(--relay-muted);
-}
-
-.request-send-details {
-  margin-top: 8px;
-  padding: 8px 10px;
-  border-radius: 7px;
-  background: var(--relay-surface);
-}
-
-.request-send-details > summary {
-  color: var(--relay-muted);
-  cursor: pointer;
-}
-
-.request-stop-reason {
-  margin: 0 0 16px;
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.request-history-notice {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px 12px;
-  margin: 0 0 12px;
-  color: var(--relay-muted);
-  font-size: 12px;
-}
-
-.request-history-notice .relay-button {
-  min-height: 30px;
-  padding: 5px 10px;
-  font-size: 12px;
-}
-
-.request-execution {
-  margin-top: 20px;
-  padding: 16px;
-  border-radius: 12px;
-  background: var(--relay-subtle);
-}
-
 .relay-dialog.request-details-dialog > header {
   min-height: 56px;
   padding: 16px 68px 16px 28px;
@@ -1007,35 +907,49 @@
   min-width: 0;
   display: grid;
   grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
-  align-items: start;
+  align-items: center;
   gap: 20px 24px;
 }
 
 .request-details-identity {
   min-width: 0;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 10px 14px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
 }
 
 .request-details-model {
   min-width: 0;
-  max-width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
-.request-details-model-label {
-  display: block;
-  margin-bottom: 5px;
-  color: var(--relay-muted);
-  font-size: 11px;
-  line-height: 1.5;
+.request-details-model:has(.request-details-status:not([data-status="success"])) {
+  flex-wrap: wrap;
+}
+
+.request-details-header .request-details-export {
+  max-width: 100%;
+  min-height: 32px;
+  justify-self: end;
+  padding: 6px 10px;
+  gap: 6px;
+  border-color: color-mix(in srgb, var(--relay-border) 65%, transparent);
+  border-radius: 6px;
+  color: var(--relay-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+  white-space: nowrap;
 }
 
 .request-details-model > h3 {
+  min-width: 0;
   margin: 0;
-  font-size: 24px;
-  line-height: 1.35;
+  font-size: 22px;
+  line-height: 1.4;
   font-weight: 600;
   letter-spacing: -0.02em;
   overflow-wrap: anywhere;
@@ -1109,12 +1023,23 @@
   background: color-mix(in srgb, var(--relay-danger) 10%, transparent);
 }
 
+.request-details-status[data-status="success"] {
+  padding: 0;
+  background: transparent;
+}
+
+.request-details-status[data-status="success"] > svg {
+  width: 16px;
+  height: 16px;
+}
+
 .request-details-status[data-status="warning"] {
   color: var(--relay-warning);
   background: color-mix(in srgb, var(--relay-warning) 10%, transparent);
 }
 
-.request-details-status[data-status="pending"] {
+.request-details-status[data-status="pending"],
+.request-details-status[data-status="cancelled"] {
   color: var(--relay-muted);
   background: color-mix(in srgb, var(--relay-muted) 10%, transparent);
 }
@@ -1230,6 +1155,15 @@
   font-weight: 600;
   font-size: 13px;
   overflow-wrap: anywhere;
+}
+
+.request-details-parameters > div:not(.request-parameter-wide) {
+  align-items: center;
+  text-align: center;
+}
+
+.request-details-parameters > div:not(.request-parameter-wide) > dd {
+  justify-content: center;
 }
 
 .request-details-parameters code {
@@ -1817,8 +1751,9 @@
   .relay-dialog.request-details-dialog > header { padding-left: 18px; }
   .request-details-dialog .relay-dialog-body { padding: 16px 18px; }
   .request-overview { grid-template-columns: minmax(0, 1fr); gap: 12px; margin-bottom: 18px; }
-  .request-details-model-label { display: none; }
   .request-details-model > h3 { font-size: 20px; }
+  .request-details-identity .request-details-export { width: 32px; padding: 6px; }
+  .request-details-export > span { display: none; }
   .request-details-subtitle { gap: 12px; }
   .request-details-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 0; padding: 14px 0; }
   .request-details-metric { padding-inline: 12px; }

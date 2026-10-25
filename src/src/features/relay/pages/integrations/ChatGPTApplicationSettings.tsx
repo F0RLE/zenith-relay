@@ -54,7 +54,7 @@ function ChatGPTSetup() {
   return <section className="gateway-account-panel client-setup codex-client-setup client-oauth-binding">
     <header>
       <span className="gateway-config-icon"><UserRound aria-hidden /></span>
-      <div><h2>{t("gateway.oauthBinding")}</h2></div>
+      <div><h2>{t("gateway.oauthBinding")}</h2><p>{t("gateway.oauthBindingDescription")}</p></div>
     </header>
     <div className="oauth-binding-settings">
       <div className="relay-field oauth-binding-account-control">

@@ -89,7 +89,7 @@ export function runtimeCandidateForMember(
   memberKind: "api_source" | "oauth_account",
   runtimeCandidates: CandidateRuntimeSnapshot[],
   protocolFilter: "responses" | "all" = "all",
-  sourceWireApi?: "responses" | "chat_completions" | "messages" | "gemini",
+  sourceWireApi?: "responses" | "chat_completions" | "messages" | "gemini" | "gemini_interactions",
 ): CandidateRuntimeSnapshot | undefined {
   const memberCandidates = runtimeCandidates.filter((candidate) => candidate.kind === memberKind && (
     memberKind === "oauth_account"
@@ -125,7 +125,7 @@ export function runtimeCandidateForMember(
   };
 }
 
-function isResponsesCandidate(candidateId: string, sourceWireApi?: "responses" | "chat_completions" | "messages" | "gemini") {
+function isResponsesCandidate(candidateId: string, sourceWireApi?: "responses" | "chat_completions" | "messages" | "gemini" | "gemini_interactions") {
   const separator = candidateId.indexOf("::");
   if (separator < 0) return sourceWireApi == null || sourceWireApi === "responses";
   const suffix = candidateId.slice(separator + 2);
@@ -227,16 +227,10 @@ export function applyRuntimeActivities(
   if (!orderChanged) return order;
 
   // `PoolScheduler::runtime_order` puts leased candidates first. Apply the
-  // whole burst before sorting once; this keeps activity updates linear in the
-  // number of candidates instead of sorting the complete order per event.
+  // whole burst before one stable sort, preserving order within each group
+  // without allocating a wrapper object for every candidate.
   return updatedOrder
-    .map((candidate, index) => ({ candidate, originalIndex: index }))
-    .sort((left, right) => {
-      const leftActive = activeRequestCount(left.candidate) > 0;
-      const rightActive = activeRequestCount(right.candidate) > 0;
-      return Number(rightActive) - Number(leftActive) || left.originalIndex - right.originalIndex;
-    })
-    .map(({ candidate }) => candidate);
+    .sort((left, right) => Number(activeRequestCount(right) > 0) - Number(activeRequestCount(left) > 0));
 }
 
 /**
@@ -268,7 +262,7 @@ export function reconcileRuntimeActivityOverlay(
   }
 }
 
-export function activeModelCounts(candidates: Iterable<CandidateRuntimeSnapshot>) {
+export function activeModelCounts(candidates: Iterable<Pick<CandidateRuntimeSnapshot, "activeModels">>) {
   const requestCountsByModel = new Map<string, { model: string; requestCount: number }>();
   for (const candidate of candidates) {
     for (const activeModel of candidate.activeModels ?? []) {

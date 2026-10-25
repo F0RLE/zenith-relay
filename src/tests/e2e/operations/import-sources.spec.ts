@@ -148,6 +148,10 @@ test("BPS callback replaces sign-in controls with one saving status and dismisse
   await expect(saving.getByRole("timer")).toHaveCount(0);
   await expectSavingStatusCentered(saving);
   await page.screenshot({ path: testInfo.outputPath("oauth-saving-en.png") });
+  await emitTauriEvent(page, "relay-oauth-status", { loginId: "oauth_synthetic", status: "callback_received", diagnostic: { stage: "token_exchange", elapsedMs: 0 } });
+  await expect(saving.getByRole("status")).toHaveText("Exchanging tokens…");
+  await emitTauriEvent(page, "relay-oauth-status", { loginId: "oauth_synthetic", status: "callback_received", diagnostic: { stage: "saving", elapsedMs: 0 } });
+  await expect(saving.getByRole("status")).toHaveText("Saving account…");
   await page.keyboard.press("Escape");
   await expect(saving).toBeVisible();
 
@@ -179,6 +183,10 @@ test("Russian saving status fits a compact dark window and closes before a slow 
   expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(400);
   await expectSavingStatusCentered(saving);
   await page.screenshot({ path: testInfo.outputPath("oauth-saving-ru-dark.png") });
+  await emitTauriEvent(page, "relay-oauth-status", { loginId: "oauth_synthetic", status: "callback_received", diagnostic: { stage: "token_exchange", elapsedMs: 0 } });
+  await expect(saving.getByRole("status")).toHaveText("Получаем токены…");
+  await expectSavingStatusCentered(saving);
+  await page.screenshot({ path: testInfo.outputPath("oauth-token-exchange-ru-dark.png") });
 
   await page.evaluate(() => {
     const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
@@ -197,7 +205,7 @@ test("Russian saving status fits a compact dark window and closes before a slow 
   await expect(page.locator(".account-card")).toBeVisible();
 });
 
-test("failed OAuth completion leaves a closable failure instead of an endless saving state", async ({ page }) => {
+test("failed OAuth completion leaves a closable failure instead of an endless saving state", async ({ page }, testInfo) => {
   await installTauriMock(page, { locale: "en", mode: "local", populated: false, oauthCompletionDeferred: true, oauthCompletionError: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
@@ -205,10 +213,15 @@ test("failed OAuth completion leaves a closable failure instead of an endless sa
   await expect(page.getByRole("dialog", { name: "Sign in" })).toBeVisible();
   await emitTauriEvent(page, "relay-oauth-status", { loginId: "oauth_synthetic", status: "callback_received" });
   await expect(page.getByRole("dialog", { name: "Saving account…" })).toBeVisible();
+  await emitTauriEvent(page, "relay-oauth-status", { loginId: "oauth_synthetic", status: "callback_received", diagnostic: { stage: "identity_validation", elapsedMs: 123, reason: "identity_invalid" } });
   await page.evaluate(() => window.dispatchEvent(new Event("relay-test-finish-oauth")));
 
   const failed = page.getByRole("dialog", { name: "Sign in" });
   await expect(failed.getByRole("alert")).toBeVisible();
+  await expect(failed.getByText("Validating account… · identity_invalid · 123 ms", { exact: true })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("oauth-failure-diagnostic-en.png") });
+  await emitTauriEvent(page, "relay-oauth-status", { loginId: "oauth_synthetic", status: "callback_received", diagnostic: { stage: "saving", elapsedMs: 0 } });
+  await expect(failed.getByText("Validating account… · identity_invalid · 123 ms", { exact: true })).toBeVisible();
   await expect(page.locator(".global-feedback.error")).toBeVisible();
   await expect(page.locator(".account-card")).toHaveCount(0);
   await page.keyboard.press("Escape");
@@ -240,7 +253,7 @@ test("local proxy storage confirms assigned deletion and sends one atomic batch 
   await expect(summary.locator("strong")).toHaveText(["3", "2", "1"]);
   await expect(page.locator(".proxy-storage-list")).not.toContainText("secret");
   await expect(page.locator(".proxy-storage-row").first().getByRole("img", { name: "Connection works" })).toBeVisible();
-  await page.locator(".proxy-storage-row .proxy-diagnostic").first().hover();
+  await page.locator(".proxy-storage-row .proxy-card-location").first().hover();
   await expect(page.getByRole("tooltip")).toContainText("Europe/Amsterdam");
 
   await page.getByRole("button", { name: "Manage assigned accounts" }).first().click();
@@ -248,10 +261,10 @@ test("local proxy storage confirms assigned deletion and sends one atomic batch 
   await expect(manager.getByText("Business Workspace", { exact: true })).toBeVisible();
   await manager.getByText("Personal Plus", { exact: true }).click();
   await manager.getByRole("button", { name: "Save" }).click();
-  const assignedAccounts = page.locator(".proxy-storage-bindings").first().locator("span").filter({ hasText: "Accounts: 2" });
-  await expect(assignedAccounts).toHaveText("Accounts: 2");
+  const assignedAccounts = page.locator(".proxy-card-accounts").first();
+  await expect(assignedAccounts).toHaveText("2");
   await assignedAccounts.hover();
-  await expect(page.getByRole("tooltip")).toHaveText("Business Workspace, Personal Plus");
+  await expect(page.getByRole("tooltip")).toHaveText("Accounts");
   await expect(assignedAccounts).not.toHaveAttribute("title");
 
   await page.getByRole("button", { name: "Import", exact: true }).click();
@@ -309,15 +322,15 @@ for (const staleReadOutcome of ["resolve", "reject"] as const) {
     const manager = page.getByRole("dialog", { name: "Proxy accounts" });
     await manager.getByText("Personal Plus", { exact: true }).click();
     await manager.getByRole("button", { name: "Save" }).click();
-    const assignedAccounts = page.locator(".proxy-storage-bindings").first().getByText("Accounts: 2", { exact: true });
-    await expect(assignedAccounts).toBeVisible();
+    const assignedAccounts = page.locator(".proxy-card-accounts").first();
+    await expect(assignedAccounts).toHaveText("2");
 
     await page.evaluate(async () => {
       window.dispatchEvent(new Event("relay-test-release-proxy-read"));
       // Let the stale promise and its React state updates finish before checking.
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
     });
-    await expect(assignedAccounts).toBeVisible();
+    await expect(assignedAccounts).toHaveText("2");
     await expect(page.locator(".proxy-storage-counts strong").first()).toHaveText("3");
   });
 }
@@ -486,7 +499,8 @@ test("failed-only retry sends only the failed account", async ({ page }) => {
 for (const scenario of [
   { mode: "local", locale: "en", code: "provider_account_id_missing", nav: "Connections", action: "Import", title: "Import accounts", input: "Account data or tokens", preview: "Preview import", confirm: "Import 2 account(s)", heading: "Some accounts were not imported", reason: "The imported record and its token claims do not contain a ChatGPT account ID.", close: "Close" },
   { mode: "local", locale: "ru", code: "models_http_status", nav: "Подключения", action: "Импорт", title: "Импортировать учётные записи", input: "Данные аккаунтов или токены", preview: "Проверить импорт", confirm: "Импортировать: 2", heading: "Часть учётных записей не импортирована", reason: "При проверке доступных моделей провайдер вернул неожиданный ответ.", close: "Закрыть" },
-  { mode: "local", locale: "en", code: "models_forbidden", nav: "Connections", action: "Import", title: "Import accounts", input: "Account data or tokens", preview: "Preview import", confirm: "Import 2 account(s)", heading: "Some accounts were not imported", reason: "The provider denied access to the model list. Check this account's access and proxy region.", close: "Close" },
+  { mode: "local", locale: "en", code: "models_forbidden", nav: "Connections", action: "Import", title: "Import accounts", input: "Account data or tokens", preview: "Preview import", confirm: "Import 2 account(s)", heading: "Some accounts were not imported", reason: "The model-list request was rejected (HTTP 403). This response alone does not confirm that the account is blocked.", close: "Close" },
+  { mode: "local", locale: "ru", code: "models_forbidden", nav: "Подключения", action: "Импорт", title: "Импортировать учётные записи", input: "Данные аккаунтов или токены", preview: "Проверить импорт", confirm: "Импортировать: 2", heading: "Часть учётных записей не импортирована", reason: "Запрос списка моделей отклонён (HTTP 403). Сам по себе этот ответ не подтверждает блокировку аккаунта.", close: "Закрыть" },
   { mode: "local", locale: "ru", code: "item_not_found", nav: "Подключения", action: "Импорт", title: "Импортировать учётные записи", input: "Данные аккаунтов или токены", preview: "Проверить импорт", confirm: "Импортировать: 2", heading: "Часть учётных записей не импортирована", reason: "Не пройдена финальная проверка аккаунта. Обновите его данные или прокси и повторите импорт.", close: "Закрыть" },
 ] as const) {
   test(`${scenario.mode} ${scenario.locale} ${scenario.code} import failures identify the safe account and explain the cause`, async ({ page }) => {

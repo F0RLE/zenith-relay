@@ -2,6 +2,45 @@ import { expect, test } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
 import { completedUsage, setUsageEventOverrides } from "./request-details-fixture";
 
+for (const continuation of [false, true]) {
+  test(`technical payload details show ${continuation ? "response continuation" : "compression"}`, async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 900 });
+    await installTauriMock(page, { mode: "local", locale: "en", populated: true, diagnosticDebug: true });
+    await page.goto("/");
+    await setUsageEventOverrides(page, {
+      ...completedUsage,
+      routing: {
+        reason: "only_eligible", eligibleCandidates: 1, inFlightBefore: 0, dispatchesBefore: 0,
+        transport: {
+          upstream: continuation ? "websocket" : "http", mode: "native",
+          ...(continuation ? { connectionReused: true } : {}),
+          requestPayload: {
+            mode: continuation ? "continuation" : "full",
+            ...(!continuation ? { fullRequestReason: "no_previous_response_id", compressionMs: 0, compressionUs: 420, httpSendToHeadersMs: 12 } : {}),
+            jsonBytes: 100000, bodyBytes: continuation ? 100000 : 2000,
+            contentEncoding: continuation ? "identity" : "zstd",
+          },
+        },
+      },
+    });
+    await page.getByRole("button", { name: "Usage", exact: true }).click();
+    await page.getByRole("button", { name: "Request details: req_synthetic_local", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.locator(".request-technical-details > summary").click();
+    const route = dialog.locator(".request-route-section");
+    await expect(route.getByText(continuation ? "Response ID continuation" : "Full request", { exact: true })).toBeVisible();
+    await expect(route.getByText("Why a full request", { exact: true })).toHaveCount(continuation ? 0 : 1);
+    await expect(route.getByText(continuation ? "Reused" : "Zstd", { exact: true })).toBeVisible();
+    if (!continuation) await expect(route.getByText("0 ms", { exact: true })).toBeVisible();
+    await expect(route.getByText("HTTP send → headers", { exact: true })).toHaveCount(continuation ? 0 : 1);
+    if (!continuation) await expect(route.getByText("12 ms", { exact: true })).toBeVisible();
+    expect(await route.locator("dd").evaluateAll((fields) => fields.every((field) => field.scrollWidth <= field.clientWidth + 1))).toBe(true);
+    await route.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `output/playwright/technical-payload-${continuation ? "continuation" : "compressed"}.png` });
+    await page.keyboard.press("Escape");
+  });
+}
+
 for (const locale of ["ru", "en"] as const) {
   for (const theme of ["light", "dark"] as const) {
     for (const width of [390, 1160]) {
@@ -19,6 +58,8 @@ for (const locale of ["ru", "en"] as const) {
             transport: {
               upstream: "http", mode: "basis_points", fallbackReason: "basis_points_http", responseFormat: "sse",
               responseHeadersMs: 240, requestPreparationMs: 125,
+              requestPayload: { mode: "full", fullRequestReason: "basis_points_transport",
+                jsonBytes: 59000, bodyBytes: 59000, contentEncoding: "identity", httpSendToHeadersMs: 200 },
               requestPreparation: { bodyMs: 65, schemaValidationMs: 0, catalogMs: 25, attachmentsMs: 30 },
               upstreamResponseMs: 7040, clientFirstOutputMs: 640, clientResponseReadyMs: 7200,
             },
@@ -56,6 +97,9 @@ for (const locale of ["ru", "en"] as const) {
           locale === "ru" ? ["65 мс", "0 мс", "25 мс", "30 мс"] : ["65 ms", "0 ms", "25 ms", "30 ms"],
         );
         await expect(technical.locator(".request-route-section .request-timing-metrics")).toHaveCount(0);
+        await expect(technical.getByText(locale === "ru" ? "Полный запрос" : "Full request", { exact: true })).toBeVisible();
+        await expect(technical.getByText(locale === "ru" ? "Транспорт BPS требует полный контекст" : "BPS transport requires full context", { exact: true })).toBeVisible();
+        await expect(technical.getByText(locale === "ru" ? "Отправка HTTP → заголовки" : "HTTP send → headers", { exact: true })).toBeVisible();
         const preparation = await timings.locator(".request-preparation-details").boundingBox();
         const response = await timings.locator(".request-response-timings").boundingBox();
         expect(preparation!.y + preparation!.height).toBeLessThan(response!.y);

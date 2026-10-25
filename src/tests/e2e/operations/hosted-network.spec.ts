@@ -7,6 +7,22 @@ const calls = (page: Page) => page.evaluate(() => (window as unknown as {
 }).__TAURI_TEST_INVOKES__);
 
 for (const locale of ["en", "ru"] as const) {
+  test(`${locale} API key presentation stays ungrouped and copies the original key`, async ({ page }) => {
+    await installTauriMock(page, { mode: "local", locale, populated: true, gatewayRunning: true });
+    await page.goto("/");
+    await page.getByRole("button", { name: locale === "ru" ? "Доступ" : "Access", exact: true }).click();
+    await page.getByRole("tab", { name: locale === "ru" ? "Локальный API" : "Local API", exact: true }).click();
+    const local = page.locator(".gateway-api-local");
+    await expect(local.locator(".gateway-api-secret")).toHaveText("••••••••••••");
+    await expect(local.locator(".gateway-api-key > p")).toHaveCount(0);
+    await local.getByRole("button", { name: locale === "ru" ? "Копировать ключ" : "Copy key", exact: true }).click();
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("zlr_synthetic_local_gateway_key");
+    await local.screenshot({ path: `output/playwright/api-key-${locale}-desktop.png` });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await local.screenshot({ path: `output/playwright/api-key-${locale}-mobile.png` });
+    await expect.poll(() => local.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+  });
+
   test(`${locale} mode picker separates Hosted from the computer without stopping its API`, async ({ page }) => {
     await installTauriMock(page, { mode: "local", locale, populated: true, gatewayRunning: true });
     await page.goto("/");
@@ -50,6 +66,7 @@ test("network sharing is opt-in, confirmed, and has a separate key", async ({ pa
   const localAddress = await page.locator(".gateway-api-endpoint code").innerText();
   await page.getByRole("button", { name: "Copy key", exact: true }).click();
   const localKey = await page.evaluate(() => navigator.clipboard.readText());
+  expect(localKey).toMatch(/^\S+$/);
   await sharing.click();
   const dialog = page.getByRole("dialog", { name: "Allow local network access", exact: true });
   await expect(dialog).toContainText("HTTP traffic is not encrypted");
@@ -61,9 +78,11 @@ test("network sharing is opt-in, confirmed, and has a separate key", async ({ pa
   await dialog.getByRole("button", { name: "Enable", exact: true }).click();
   await expect(sharing).toBeChecked();
   await expect(page.locator(".gateway-network-details code")).toHaveText("http://192.168.1.10:14998/v1");
+  await expect(page.locator(".gateway-api-secret")).toHaveText(["••••••••••••", "••••••••••••"]);
   await expect(page.locator(".gateway-api-endpoint code")).toHaveText(localAddress);
   await page.getByRole("button", { name: "Copy network API key", exact: true }).click();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).not.toBe(localKey);
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toMatch(/^\S+$/);
   await page.locator(".gateway-network-details summary").click();
   await page.getByRole("menuitem", { name: "Reissue API key", exact: true }).click();
   await page.getByRole("dialog", { name: "Network API key", exact: true }).getByRole("button", { name: "Reissue API key", exact: true }).click();

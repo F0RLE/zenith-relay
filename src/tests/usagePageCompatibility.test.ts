@@ -16,6 +16,18 @@ const history = () => page({
 });
 
 describe("usage filter compatibility", () => {
+  test("does not mislabel an old host's unfiltered totals as memory usage", async () => {
+    const load = createUsagePageReader(async () => page());
+    await expect(load({ workload: "memory" })).rejects.toThrow("workload-scoped");
+    await expect(load({})).resolves.toEqual(page());
+  });
+
+  test("accepts a workload only when the host confirms the applied scope", async () => {
+    const load = createUsagePageReader(async (query) => page({ workload: query.workload }));
+    const result = await load({ workload: "conversation", includeEvents: false });
+    expect(result.workload).toBe("conversation");
+  });
+
   test("does not confuse a complete empty projection with an unsupported one", async () => {
     const current = page({ filterOptions: { models: [], poolMembers: [], wireApis: [], transports: [], errorCategories: [] } });
     let reads = 0;

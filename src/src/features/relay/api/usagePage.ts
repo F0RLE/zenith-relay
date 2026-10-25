@@ -8,6 +8,11 @@ export function createUsagePageReader(read: UsagePageReader) {
 
   return async (query: UsageQuery = {}) => {
     const page = await read(query);
+    // An older desktop can silently ignore unknown input fields. Never label
+    // an unfiltered total as conversation or memory usage.
+    if (query.workload && page.workload !== query.workload) {
+      throw new Error("This desktop version does not support workload-scoped usage reports");
+    }
     const models = page.filterOptions?.models;
     const poolMembers = page.filterOptions?.poolMembers;
     if (!query.includeFilterOptions || (Array.isArray(models) && Array.isArray(poolMembers))) return page;

@@ -237,7 +237,7 @@ for (const viewport of viewports) {
     await page.locator(".account-card .account-row-menu summary").click();
     const menu = page.locator(".account-card .account-row-menu [role=menu]");
     await expect(menu).toBeVisible();
-    await expect(menu.getByRole("menuitem")).toHaveText(["Notes", "Account timezone", "Proxy: Common", "Export", "Disable", "Delete"]);
+    await expect(menu.getByRole("menuitem")).toHaveText(["Notes", "Proxy: Common", "Export", "Disable", "Delete"]);
     await page.screenshot({ path: `output/playwright/account-actions-${viewport.width}x${viewport.height}.png` });
     expect(await menu.evaluate((element) => {
       const rect = element.getBoundingClientRect();
@@ -259,6 +259,9 @@ for (const viewport of viewports) {
     await page.locator(".account-card").filter({ hasText: "Personal Plus" }).locator(".account-status-button").click();
     const dialog = page.getByRole("dialog", { name: "Технические детали ошибки" });
     await expect(dialog.locator("pre")).toContainText('"code": "auth_invalid_grant"');
+    await expect(dialog.locator(".form-note")).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: "Копировать", exact: true })).toBeVisible();
+    await expect(dialog.locator("footer").getByRole("button", { name: "Закрыть", exact: true })).toBeVisible();
     await page.screenshot({ path: `output/playwright/account-error-details-${viewport.width}x${viewport.height}.png` });
     expect(await dialog.evaluate((element) => {
       const rect = element.getBoundingClientRect();
@@ -362,7 +365,7 @@ for (const viewport of viewports) {
     await expect(business.locator(".quota-meter")).toHaveCount(1);
     await expect(backup.locator(".quota-meter")).toHaveCount(1);
     await expect(backup.locator(".account-status-button")).toHaveCount(1);
-    await expect(backup.locator(".account-kind-icon")).toHaveAttribute("aria-label", "Ошибка подключения");
+    await expect(backup.locator(".account-kind-icon")).toHaveAttribute("aria-label", "Не удалось подключиться для обновления квоты");
     await expect(backup).not.toContainText("quota_transport");
     await expect(business.locator(".account-subscription-line")).toContainText(/\d{2}\.\d{2}\.\d{4}, \d{2}:\d{2}/);
     await expect(business.locator(".account-subscription-countdown")).toHaveText(/^\d+ дн\. \d+ ч \d+ мин$/);
@@ -373,9 +376,10 @@ for (const viewport of viewports) {
     expect(await page.locator(".account-filter-stack").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     expect(await page.locator(".account-subscription-line").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
     await expect(cards.locator(".account-card-actions")).toHaveCount(3);
-    await expect(cards.locator(".account-card-actions > .relay-icon-button")).toHaveCount(6);
-    // Codex switches app accounts; it never exposes pool membership actions.
-    await expect(cards.getByRole('button', { name: /^(Убрать из пула|Добавить в пул)$/ })).toHaveCount(0);
+    await expect(cards.locator(".account-card-actions > .relay-icon-button")).toHaveCount(9);
+    // Codex accounts can participate in the image-only pool and still launch the app.
+    await expect(cards.getByRole("button", { name: "Убрать из пула", exact: true })).toHaveCount(3);
+    await expect(cards.getByRole("button", { name: "Запустить в ChatGPT", exact: true })).toHaveCount(3);
 
     await expect(page.getByRole("button", { name: "Список" })).toHaveCount(0);
     expect(await cards.locator(".account-card-main").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
@@ -530,8 +534,8 @@ for (const viewport of viewports) {
     await page.getByRole("button", { name: "Usage", exact: true }).click();
     await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
     dialog = page.getByRole("dialog", { name: "Request details" });
-    await expect(dialog).toContainText("req_synthetic_local");
     await dialog.locator(".request-technical-details > summary").click();
+    await expect(dialog).toContainText("req_synthetic_local");
     await expect(dialog).toContainText("Selection reasonFresh quota headroom band");
     await expect(dialog).toContainText("Eligible participants4");
     await expect(dialog).toContainText("Quota at selection63.00%");

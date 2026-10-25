@@ -38,11 +38,12 @@ for (const locale of ["ru", "en"] as const) {
       const dialog = page.getByRole("dialog");
       const close = dialog.getByRole("button", { name: locale === "ru" ? "Закрыть" : "Close", exact: true });
       const contextSummary = dialog.locator(".request-context-details > summary");
-      await expect(contextSummary).toBeAttached();
+      await expect(contextSummary).toHaveCount(0);
       await close.focus();
       await page.keyboard.press("Shift+Tab");
       await expect(dialog.locator(".request-technical-details > summary")).toBeFocused();
       await page.keyboard.press("Enter");
+      await expect(contextSummary).toBeAttached();
       await close.focus();
       await page.keyboard.press("Shift+Tab");
       await expect(contextSummary).toBeFocused();

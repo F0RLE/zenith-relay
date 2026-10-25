@@ -52,11 +52,11 @@ export function PoolPage() {
     ...(launchApplicationAfterConnect ? { afterWork: claudeDesktop.launch } : {}),
   });
   const running = Boolean(runtime?.gateway.running);
-  const exportConfiguration = () => perform("configuration-preset-export", relayCommands.exportLocalConfigurationPreset, undefined, { backgroundRefresh: true });
+  const exportConfiguration = () => perform("configuration-preset-export", relayCommands.exportLocalConfigurationPreset, undefined, { skipRefresh: true });
   const previewConfiguration = () => perform("configuration-preset-preview", async () => {
     const preview = await relayCommands.previewLocalConfigurationPreset();
     if (preview) setConfigurationPreview(preview);
-  }, undefined, { backgroundRefresh: true });
+  }, undefined, { skipRefresh: true });
   const action = <div className="pool-header-actions">
     {view === "members" ? (
       <Button

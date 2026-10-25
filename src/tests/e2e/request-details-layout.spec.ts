@@ -41,6 +41,16 @@ for (const locale of ["ru", "en"] as const) {
         await expect(parameterSection.locator("dd")).toHaveText(locale === "ru"
           ? ["Responses", "HTTP", "Обычная", "Максимальное"]
           : ["Responses", "HTTP", "Standard", "Max"]);
+        expect(await parameterSection.locator(".request-details-parameters > div:not(.request-parameter-wide)").evaluateAll((cells) => cells.every((cell) => {
+          const bounds = cell.getBoundingClientRect();
+          const center = bounds.x + bounds.width / 2;
+          return getComputedStyle(cell).textAlign === "center"
+            && getComputedStyle(cell.querySelector("dd")!).justifyContent === "center"
+            && Array.from(cell.querySelectorAll(":scope > dt, :scope > dd")).every((element) => {
+              const bounds = element.getBoundingClientRect();
+              return Math.abs(bounds.x + bounds.width / 2 - center) < 1;
+            });
+        }))).toBe(true);
 
         const tokens = await dialog.locator(".request-token-details").boundingBox();
         await expect(dialog.getByRole("region", { name: locale === "ru" ? "Токены" : "Tokens", exact: true })).toBeVisible();
@@ -74,14 +84,20 @@ for (const locale of ["ru", "en"] as const) {
           expect(Math.max(...values) - Math.min(...values)).toBeLessThan(1);
         }
         const status = await dialog.locator(".request-details-status").boundingBox();
-        const model = await dialog.locator(".request-details-model").boundingBox();
+        const model = await dialog.locator(".request-details-model > h3").boundingBox();
         expect(status!.x >= model!.x + model!.width || status!.y >= model!.y + model!.height).toBe(true);
+        const exportButton = await dialog.getByRole("button", { name: locale === "ru" ? "Сохранить диагностику" : "Save diagnostics", exact: true }).boundingBox();
+        const identity = await dialog.locator(".request-details-identity").boundingBox();
+        expect(exportButton!.x).toBeGreaterThanOrEqual(status!.x + status!.width);
+        expect(exportButton!.x + exportButton!.width).toBeCloseTo(identity!.x + identity!.width, 0);
+        expect(status!.x - model!.x - model!.width).toBeLessThanOrEqual(8);
         expect(await dialog.locator(".relay-dialog-body, .request-details-content, section, dl, dt, dd").evaluateAll((elements) =>
           elements.every((element) => element.scrollWidth <= element.clientWidth + 1))).toBe(true);
 
         if (locale === "ru" && theme === "dark" && width === 360) {
           await dialog.locator(".request-token-details").screenshot({ path: "output/playwright/request-details-token-panel-mobile.png" });
         }
+        await parameterSection.screenshot({ path: `output/playwright/request-parameters-centered-${locale}-${theme}-${width}.png` });
 
         await dialog.locator(".request-technical-details > summary").click();
         await expect(dialog.locator(".request-identifiers-section")).toBeVisible();
@@ -188,6 +204,7 @@ test("separate token cards and parameters fit a short desktop window", async ({ 
   await expect(dialog.locator(".request-token-total dd")).toHaveText("266 088");
   await dialog.locator(".request-token-details").screenshot({ path: "output/playwright/request-details-token-panel.png" });
   await dialog.screenshot({ path: "output/playwright/request-details-token-panel-dialog.png" });
+  await dialog.locator(".request-details-parameters").screenshot({ path: "output/playwright/request-parameters-centered-reasoning-change.png" });
   await dialog.locator(".request-technical-details > summary").click();
   await expect(dialog.locator(".request-identifiers-section")).toBeVisible();
 });

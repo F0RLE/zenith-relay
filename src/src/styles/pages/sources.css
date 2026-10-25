@@ -18,6 +18,10 @@
   grid-template-areas: "context sort refresh";
 }
 
+.source-command-bar[data-selection="true"] {
+  grid-template-areas: "context actions";
+}
+
 .source-command-bar .connection-command-context {
   grid-area: context;
 }
@@ -47,23 +51,15 @@
 }
 
 .sources-selection-toolbar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--relay-border);
   color: var(--relay-secondary);
   font-size: 12px;
 }
 
 .sources-selection-actions {
+  grid-area: actions;
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
   gap: 6px;
-  margin-left: auto;
 }
 
 .sources-controls:has(.relay-action-menu[open]) {
@@ -88,7 +84,7 @@
 }
 
 @container (max-width: 780px) {
-  .source-command-bar {
+  .source-command-bar:not([data-selection="true"]) {
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas: "context refresh" "sort sort";
     gap: 10px 12px;

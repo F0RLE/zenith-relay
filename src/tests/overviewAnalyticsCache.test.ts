@@ -79,4 +79,24 @@ describe("overview analytics cache", () => {
     expect(getCachedOverviewAnalytics(scope)).toBe(analytics);
     expect(isOverviewAnalyticsFresh(scope)).toBe(true);
   });
+
+  for (const fail of [false, true]) {
+    test(`leaving Overview cancels queued work after a pending read ${fail ? "fails" : "succeeds"}`, async () => {
+      const scope = `cache-navigation-test:${fail}:${Date.now()}`;
+      const analytics = { totals: emptyUsageTotals(), buckets: [] };
+      let finish!: () => void;
+      const first = loadOverviewAnalytics(scope, () => new Promise<typeof analytics>((resolve, reject) => {
+        finish = () => fail ? reject(new Error("Synthetic read failure")) : resolve(analytics);
+      })).catch(() => null);
+      const controller = new AbortController();
+      let refreshes = 0;
+      const next = loadOverviewAnalytics(scope, () => { refreshes += 1; return Promise.resolve(analytics); }, true, controller.signal)
+        .catch((error: unknown) => error);
+      controller.abort();
+      finish();
+      await first;
+      expect(await next).toMatchObject({ name: "AbortError" });
+      expect(refreshes).toBe(0);
+    });
+  }
 });

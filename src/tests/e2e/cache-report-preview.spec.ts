@@ -12,6 +12,13 @@ for (const theme of ["dark", "light"] as const) {
     const dialog = page.getByRole("dialog");
     await expect(dialog.getByRole("tab")).toHaveCount(0);
     await expect(dialog.getByText("ещё ≈ 18 мин")).toBeVisible();
+    expect(await page.evaluate(() => (window as unknown as {
+      __TAURI_TEST_INVOKES__: Array<{ command: string; args?: { scope?: unknown } }>;
+    }).__TAURI_TEST_INVOKES__.filter(({ command }) => command === "get_local_cache_sessions")
+      .map(({ args }) => args?.scope))).toEqual([{
+        clientContextId: "client_a1b2c3d4e5f6", candidateKind: "account",
+        candidateId: "account_synthetic", model: "gpt-6-astra",
+      }]);
     await expect(dialog.locator(".request-details-token-group").first().locator(".request-cache-retention")).toContainText("Хранение кэша (оценка)");
     await expect(dialog.locator(".request-details-token-group").last().locator(".request-cache-retention")).toHaveCount(0);
     await expect(dialog.locator(".request-details-token-child dd > small")).toHaveCount(0);

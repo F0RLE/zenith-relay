@@ -11,6 +11,7 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
   const { t, i18n } = useTranslation();
   const routing = row.routing;
   const transport = routing?.transport;
+  const payload = transport?.requestPayload;
   // Schema validation is included in bodyMs, so preparation parts are not additive.
   const preparationTimings = [
     ["preparationBodyTime", transport?.requestPreparation?.bodyMs],
@@ -31,7 +32,7 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
   const hasPreparationTimings = preparationTimings.some(([, milliseconds]) => milliseconds != null);
   const hasPreparation = transport?.requestPreparationMs != null || hasPreparationTimings;
   const hasTimings = hasPreparation || responseTimings.length > 0;
-  const requestFailed = !row.success && requestStatusKind(row) !== "pending";
+  const requestFailed = requestStatusKind(row) === "error";
   const toolUse = row.toolUse;
   const hasTools = toolUse && (toolUse.clientToolCount > 0 || toolUse.forwardedToolCount > 0 || toolUse.toolCallCount > 0
     || toolUse.requestedParallelToolCalls != null || toolUse.upstreamToolCallCount != null);
@@ -55,6 +56,7 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
   const hasDiagnostics = debugEnabled && (routing || hasTools || hasContext);
   if (!row.requestId && !row.upstreamError?.requestId && !modelAlias && !upstreamModel && !hasErrorMetadata && !separateEndpoint && !observedTier && !hasDiagnostics && !toolWarning) return null;
   return <RequestDisclosure title={t("usage.technicalDetails")} icon={<Braces />} className="request-technical-details">
+    {() => <>
     <div className="request-technical-grid">
       {hasErrorMetadata || separateEndpoint || observedTier ? <RequestSection title={t(hasErrorMetadata ? "usage.requestSections.failure" : "usage.requestSections.response")} className="request-response-section">
         <dl className="request-details-list request-technical-fields">
@@ -84,6 +86,15 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
             {transport.fallbackReason ? <div><dt>{t("usage.transportFallback")}</dt><dd>{t(`usage.transportFallbackReasons.${transport.fallbackReason}`)}</dd></div> : null}
             {transport.responseFormat ? <div><dt>{t("usage.upstreamResponseFormat")}</dt><dd>{t(`usage.transportResponseFormats.${transport.responseFormat}`)}</dd></div> : null}
             {transport.handshakeMs != null ? <div><dt>{t("usage.handshakeMs")}</dt><dd>{formatDurationMs(transport.handshakeMs, i18n.language, t)}</dd></div> : null}
+            {transport.connectionReused != null ? <div><dt>{t("usage.connectionReuse")}</dt><dd>{t(transport.connectionReused ? "usage.connectionReused" : "usage.connectionOpened")}</dd></div> : null}
+            {payload ? <>
+              <div><dt>{t("usage.requestPayloadMode")}</dt><dd>{t(`usage.requestPayloadModes.${payload.mode}`)}</dd></div>
+              {payload.fullRequestReason ? <div><dt>{t("usage.fullRequestReason")}</dt><dd>{t(`usage.fullRequestReasons.${payload.fullRequestReason}`)}</dd></div> : null}
+              <div><dt>{t("usage.requestPayloadBytes")}</dt><dd>{contextBytes(payload.jsonBytes, payload.bodyBytes)}</dd></div>
+              <div><dt>{t("usage.requestEncoding")}</dt><dd>{payload.contentEncoding === "zstd" ? "Zstd" : t("usage.requestUncompressed")}</dd></div>
+              {payload.compressionMs != null ? <div><dt>{t("usage.requestCompressionTime")}</dt><dd>{formatDurationMs(payload.compressionMs, i18n.language, t)}</dd></div> : null}
+              {payload.httpSendToHeadersMs != null ? <div><dt>{t("usage.requestHttpSendTime")}</dt><dd>{formatDurationMs(payload.httpSendToHeadersMs, i18n.language, t)}</dd></div> : null}
+            </> : null}
           </> : null}
           {row.candidateKind === "account" && routing.quotaRemainingBasisPoints != null
             ? <div><dt>{t("usage.quotaAtSelection")}</dt><dd>{(routing.quotaRemainingBasisPoints / 100).toFixed(2)}%</dd></div> : null}
@@ -175,7 +186,8 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
     </div>
     {debugEnabled && routing?.cacheContext
       ? <RequestDisclosure title={t("usage.cacheContext.title")} className="request-context-details">
-        <CacheContextDetails diagnostics={routing.cacheContext} />
+        {() => <CacheContextDetails diagnostics={routing.cacheContext!} />}
       </RequestDisclosure> : null}
+    </>}
   </RequestDisclosure>;
 }

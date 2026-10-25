@@ -144,7 +144,7 @@ function ConnectionStep({
       async () => {
         const snapshot = await relayCommands.localState();
         const account = snapshot.accounts.find((candidate) => candidate.id === oauthResult.account.id);
-        if (!account || !canAccountJoinPool(account)) return false;
+        if (!account || account.oauthClientKind === "codex" || !canAccountJoinPool(account)) return false;
         await relayCommands.setPoolMembership([oauthResult.account.id], [], true);
         return true;
       },
@@ -166,10 +166,11 @@ function ConnectionStep({
     {flow ? <section className="setup-oauth-pending" aria-live="polite">
       <div className="setup-oauth-pending-mark"><Loader2 className="spin" aria-hidden /></div>
       <div className="setup-oauth-pending-copy">
-        <strong>{t(flow.status === "callback_received" || busy === "oauth-complete" ? "accounts.completingSignIn" : "onboarding.signInWaiting")}</strong>
+        <strong>{t(flow.status === "callback_received" || busy === "oauth-complete" ? flow.diagnostic ? `accounts.oauthStage.${flow.diagnostic.stage}` : "accounts.completingSignIn" : "onboarding.signInWaiting")}</strong>
         {flow.status === "pending" ? <small>{t("accounts.waitingForSignInHint")}</small> : null}
       </div>
       {flowFailed ? <p role="alert" className="form-note error-text">{t(`accounts.oauthStatus.${flow.status}`)}</p> : null}
+      {flowFailed && flow.diagnostic?.reason ? <small role="status">{t("accounts.oauthDiagnostic", { stage: t(`accounts.oauthStage.${flow.diagnostic.stage}`), reason: flow.diagnostic.reason, elapsed: flow.diagnostic.elapsedMs })}</small> : null}
       <div className="setup-oauth-pending-actions">
         <button
           type="button"

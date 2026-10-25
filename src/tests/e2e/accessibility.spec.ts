@@ -42,10 +42,8 @@ test("interactive controls have names and dialogs trap focus", async ({ page }) 
   await page.keyboard.press("Tab");
   await expect(dialog.getByRole("button", { name: "Sign-in and Basis Points", exact: true })).toBeFocused();
   await expect(page.getByRole("tooltip")).toBeVisible();
-  // Escape dismisses the focused control's tooltip before its parent dialog.
+  // Passive tooltips must not require a second Escape to close a dialog.
   await page.keyboard.press("Escape");
   await expect(page.getByRole("tooltip")).toHaveCount(0);
-  await expect(dialog).toBeVisible();
-  await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
 });

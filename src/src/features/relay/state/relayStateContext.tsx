@@ -19,6 +19,8 @@ export type RelayContextValue = {
   page: PageId;
   setPage: (page: PageId) => void;
   runtime: RuntimeSnapshot | null;
+  /** True only after an authoritative read, never after display-cache restore. */
+  runtimeReady: boolean;
   runtimeRevision: number;
   accountIdentitiesVisible: boolean;
   accountIdentitiesBusy: boolean;
@@ -57,7 +59,10 @@ export type RelayContextValue = {
 
 export type RelayUsageContextValue = {
   localUsagePage: LocalUsagePage | null;
+  localUsageQueryKey: string | null;
+  getCachedLocalUsage: (query: UsageQuery) => LocalUsagePage | null;
   loadLocalUsage: (query: UsageQuery, options?: UsageLoadOptions) => Promise<LocalUsagePage>;
+  invalidateLocalUsage: () => Promise<void>;
   usageRevision: number;
 };
 

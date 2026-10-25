@@ -100,7 +100,7 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
     const updatedFlow = applyOAuthFlowEvent(activeFlow, event);
     flowRef.current = updatedFlow;
     setFlow(updatedFlow);
-    if (event.automaticLogin === undefined && event.status === "callback_received") void finishRef.current(event.loginId).catch(() => undefined);
+    if (event.automaticLogin === undefined && event.diagnostic === undefined && event.status === "callback_received") void finishRef.current(event.loginId).catch(() => undefined);
   };
 
   const start = useCallback(async (openBrowser = true, accountId?: string, proxyId?: string, clientKind?: OAuthClientKind, automaticLogin = false, notesAccountId?: string) => {

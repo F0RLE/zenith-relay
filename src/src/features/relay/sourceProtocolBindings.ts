@@ -12,6 +12,7 @@ const sourceWireApis = [
   "chat_completions",
   "messages",
   "gemini",
+  "gemini_interactions",
 ] as const satisfies readonly SourceWireApi[];
 
 function isSourceWireApi(wireApiValue: string): wireApiValue is SourceWireApi {
@@ -24,7 +25,8 @@ function normalizedCacheWriteTtl(binding: SourceProtocolBinding): CacheWriteTtl 
     : "provider";
 }
 
-function adapterBetween(client: SourceWireApi, upstream: SourceWireApi): SourceAdapter {
+function adapterBetween(client: SourceWireApi, upstream: SourceWireApi): SourceAdapter | undefined {
+  if (client !== upstream && (client === "gemini_interactions" || upstream === "gemini_interactions")) return undefined;
   return client === upstream ? "native" : `${client}_to_${upstream}` as SourceAdapter;
 }
 

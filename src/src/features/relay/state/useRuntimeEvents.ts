@@ -22,6 +22,7 @@ export function useRuntimeEvents({
   setRuntime,
   setRuntimeActivity,
   setUsageRevision,
+  invalidateUsageCache,
   runBackgroundRefresh,
 }: {
   requestRoutingRefresh: () => void;
@@ -34,6 +35,7 @@ export function useRuntimeEvents({
   setRuntime: Dispatch<SetStateAction<RuntimeSnapshot | null>>;
   setRuntimeActivity: Dispatch<SetStateAction<RuntimeActivityState>>;
   setUsageRevision: Dispatch<SetStateAction<number>>;
+  invalidateUsageCache: () => void;
   runBackgroundRefresh: (force?: boolean) => void;
 }) {
   useEffect(() => {
@@ -41,6 +43,7 @@ export function useRuntimeEvents({
     let runtimeRefreshQueued = false;
     let runtimeRefreshTimer: number | undefined;
     let usageRefreshTimer: number | undefined;
+    let usageDirty = false;
     let unlisten: (() => void) | undefined;
     let unlistenUsage: (() => void) | undefined;
     let unlistenRuntimeActivity: (() => void) | undefined;
@@ -94,24 +97,30 @@ export function useRuntimeEvents({
       // Events still update the latest per-candidate overlay while hidden.
       // Publish it once on return instead of cloning/rendering every 16 ms.
       if (pendingRuntimeActivity) scheduleRuntimeActivityFlush();
+      if (usageDirty) scheduleUsageRefresh();
     };
     document.addEventListener("visibilitychange", handleActivityVisibilityChange);
     const scheduleUsageRefresh = () => {
+      if (!active) return;
+      invalidateUsageCache();
+      usageDirty = true;
       const targetPage = pageRef.current;
       if (!active || document.visibilityState !== "visible" || !isUsageRefreshPage(targetPage) || usageRefreshTimer !== undefined) return;
       usageRefreshTimer = window.setTimeout(() => {
         usageRefreshTimer = undefined;
         if (!active || document.visibilityState !== "visible" || !isUsageRefreshPage(pageRef.current)) return;
         setUsageRevision((previousRevision) => previousRevision + 1);
+        usageDirty = false;
       }, usageRefreshDebounceMs(targetPage));
     };
     void relayCommands.onStateChanged(() => {
+      if (!active) return;
       stateRevision.current += 1;
-      if (!active || document.visibilityState !== "visible") return;
-      if (isUsageRefreshPage(pageRef.current)) {
-        scheduleUsageRefresh();
-        if (pageRef.current === "usage") return;
-      }
+      // Settings can change labels/pricing on the next visit, but quota,
+      // discovery and account health events are not history writes. Only a
+      // usage notification should reload an already displayed report.
+      invalidateUsageCache();
+      if (document.visibilityState !== "visible") return;
       if (runtimeRefreshQueued || !isRuntimeRefreshPage(pageRef.current)) return;
       runtimeRefreshQueued = true;
       runtimeRefreshTimer = window.setTimeout(() => {
@@ -156,7 +165,7 @@ export function useRuntimeEvents({
       // The short routing poll remains the fallback when activity events are unavailable.
     });
     void relayCommands.onUsageRecorded(() => {
-      if (modeRef.current === "local" && isUsageRefreshPage(pageRef.current)) scheduleUsageRefresh();
+      if (modeRef.current === "local") scheduleUsageRefresh();
     }).then((stop) => {
       if (active) unlistenUsage = stop;
       else stop();
@@ -174,5 +183,5 @@ export function useRuntimeEvents({
       unlistenUsage?.();
       unlistenRuntimeActivity?.();
     };
-  }, [requestRoutingRefresh, runBackgroundRefresh]);
+  }, [requestRoutingRefresh, runBackgroundRefresh, invalidateUsageCache]);
 }

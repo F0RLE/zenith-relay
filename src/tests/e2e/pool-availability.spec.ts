@@ -72,6 +72,67 @@ async function setPoolState(
   await expect(page.locator('.pool-member-card[data-member-label="Fixture 1"]')).toBeVisible();
 }
 
+for (const locale of ["ru", "en"] as const) {
+  test(`${locale} account indicators separate monitoring, connection recovery and terminal blocks`, async ({ page }) => {
+    await installTauriMock(page, { mode: "local", locale, accountCount: 1, quotaAvailable: true, usagePresent: false });
+    await page.goto("/");
+    const poolName = locale === "ru" ? "Пул" : "Pool";
+    const connectionsName = locale === "ru" ? "Подключения" : "Connections";
+    await page.getByRole("button", { name: poolName, exact: true }).click();
+    await setPoolState(page, ["rotation"]);
+
+    const phases = [
+      { state: "monitoring", tone: "warning" },
+      { state: "cooldown", tone: "warning" },
+      { state: "recovering", tone: "info" },
+      { state: "healthy", tone: "ready" },
+      { state: "blocked", tone: "error" },
+    ] as const;
+    for (const { state, tone } of phases) {
+      await page.getByRole("button", { name: poolName, exact: true }).click();
+      await page.evaluate(async (state) => {
+        const scope = window as unknown as {
+          __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> };
+        };
+        const invoke = scope.__TAURI_INTERNALS__.invoke.bind(scope.__TAURI_INTERNALS__);
+        const runtime = await invoke("get_local_runtime_state") as RuntimeSnapshot;
+        const account = runtime.accounts[0]!;
+        account.operationalStatus = state === "cooldown" || state === "blocked" ? "unavailable" : "rotation";
+        account.proxyAvailable = state !== "blocked";
+        account.routingBlockReason = state === "blocked" ? "proxy_unavailable" : null;
+        account.lastErrorCode = state === "cooldown" || state === "blocked" ? "upstream_transport_connect" : null;
+        account.quotaRefreshStatus = state === "monitoring" ? "failed" : "updated";
+        account.quota.error = state === "monitoring" ? { code: "quota_timeout", observedAtMs: Date.now() } : null;
+        runtime.gateway.candidateCount = account.operationalStatus === "rotation" ? 1 : 0;
+        runtime.gateway.routingOrder = runtime.gateway.routingOrder!.map((candidate) => ({
+          ...candidate,
+          available: account.operationalStatus === "rotation",
+          halfOpen: state === "recovering",
+          nextForNewRequest: account.operationalStatus === "rotation",
+          nextRetryAtMs: state === "cooldown" ? Date.now() + 60_000 : null,
+        }));
+        scope.__TAURI_INTERNALS__.invoke = async (command, args, options) => {
+          if (command === "get_local_runtime_state") return structuredClone(runtime);
+          if (command === "get_local_runtime_order") return structuredClone(runtime.gateway.routingOrder);
+          return invoke(command, args, options);
+        };
+      }, state);
+      await emitTauriEvent(page, "zenith-state-changed", null);
+      const poolIcon = page.locator('.pool-member-card[data-member-label="Fixture 1"] .pool-member-kind-icon');
+      await expect(poolIcon).toHaveAttribute("data-status", tone);
+      const monitoringLabel = locale === "ru" ? "Время ожидания обновления квоты истекло" : "Quota refresh timed out";
+      if (state === "monitoring") {
+        await expect(poolIcon).toHaveAttribute("aria-label", monitoringLabel);
+        await expect(page.locator(".pool-routing-alert")).toHaveCount(0);
+      }
+      await page.getByRole("button", { name: connectionsName, exact: true }).click();
+      const connectionIcon = page.locator(".account-card").filter({ hasText: "Fixture 1" }).locator(".account-kind-icon");
+      await expect(connectionIcon).toHaveAttribute("data-status", tone);
+      if (state === "monitoring") await expect(connectionIcon).toHaveAttribute("aria-label", monitoringLabel);
+    }
+  });
+}
+
 for (const mode of ["local"] as const) {
   for (const preview of ["empty", "partial", "stale"] as const) {
     test(`${mode} mixed pool stays usable with ${preview} route telemetry`, async ({ page }) => {

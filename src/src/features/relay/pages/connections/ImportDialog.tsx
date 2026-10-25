@@ -67,7 +67,7 @@ export function ImportDialog({
   const closing = useRef(false);
   const supportsImportToPool = relayMode === "local";
   const poolItemIds = new Set(session?.preview.rows
-    .filter((row) => selected.includes(row.itemId) && row.status !== "invalid" && row.oauthClientKind !== "siwc" && (row.authMode === "api_key" || canAccountJoinPool(row)))
+    .filter((row) => selected.includes(row.itemId) && row.status !== "invalid" && row.oauthClientKind !== "siwc" && row.oauthClientKind !== "codex" && (row.authMode === "api_key" || canAccountJoinPool(row)))
     .map((row) => row.itemId));
   const canImportToPool = supportsImportToPool && poolItemIds.size > 0;
   const importOperationBusy = busy?.startsWith("import-") ?? false;
@@ -196,7 +196,7 @@ export function ImportDialog({
         return;
       }
       const eligibleItemIds = new Set(session.preview.rows
-        .filter((row) => selectedIds.includes(row.itemId) && row.status !== "invalid" && row.oauthClientKind !== "siwc" && (row.authMode === "api_key" || canAccountJoinPool(row)))
+        .filter((row) => selectedIds.includes(row.itemId) && row.status !== "invalid" && row.oauthClientKind !== "siwc" && row.oauthClientKind !== "codex" && (row.authMode === "api_key" || canAccountJoinPool(row)))
         .map((row) => row.itemId));
       const includeInPool = addToPool && supportsImportToPool && eligibleItemIds.size > 0;
       const acceptImportedSelection = async (result: ConfirmAccountImportResponse) => {
@@ -324,7 +324,7 @@ export function ImportDialog({
         assignProxy={assignProxy}
         onAssignProxy={setAssignProxy}
         proxyDisabled={!proxyPool || proxyPool.total === 0 || selectedAccountCount === 0}
-        proxyDescription={proxyPool ? t(proxyPool.total ? "proxies.importAssignmentHint" : "proxies.noStored", { total: proxyPool.total, selected: selectedAccountCount, count: proxyPool.total }) : t("common.loading")}
+        proxyDescription={proxyPool ? t(proxyPool.total ? "proxies.importAssignmentHint" : "proxies.noStored", { total: proxyPool.total, selected: selectedAccountCount, count: proxyPool.total }) : ""}
       />
     );
   } else if (fileLoading || busy === "import-preview") {

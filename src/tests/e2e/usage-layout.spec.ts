@@ -53,6 +53,7 @@ for (const theme of ["light", "dark"] as const) {
       await expect(status.getByRole("img", { name: "Ошибка провайдера", exact: true })).toHaveAttribute("data-status", "error");
       await expect(status.locator(".usage-request-result")).toHaveAttribute("data-relay-tooltip", "Ошибка провайдера");
       await expect(page.locator('.usage-request-table td[data-column="connection"]')).toHaveText("Personal Plus");
+      await expect(page.getByRole("button", { name: "Статистика за период", exact: true })).toHaveCount(0);
       await expect(page.locator(".usage-metrics > .usage-metric")).toHaveCount(4);
       await expect(page.locator(".usage-secondary-metrics .usage-metric")).toHaveCount(2);
       if (width <= 390) {
@@ -233,6 +234,7 @@ for (const locale of ["ru", "en"] as const) {
       });
       await page.goto("/");
       await page.getByRole("button", { name: locale === "ru" ? "Использование" : "Usage", exact: true }).click();
+      await page.mouse.move(0, 0);
       const equivalent = page.locator(".usage-metrics > .usage-metric").last();
       await expect(equivalent.locator("small")).toHaveCount(0);
       await expect(page.getByRole("tooltip")).toHaveCount(0);

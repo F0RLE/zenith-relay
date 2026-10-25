@@ -1,7 +1,4 @@
 export type {
-  RequestTimezonePolicy,
-  RequestTimezoneUpdate,
-  AccountTimezoneSource,
   CodexMemoryStage,
   ModelCatalogIdentity,
 } from "./types/runtime";
@@ -96,6 +93,7 @@ export type {
   ProxyPoolSummary,
   ProxyPoolImportResult,
   ProxyCheckResult,
+  ProxySpeedTestResult,
   StoredProxyAssignmentResult,
 } from "./types/proxy";
 

@@ -58,6 +58,24 @@ describe("pool members model", () => {
     }
   });
 
+  test("next-member projection stops at the first eligible preview without reading later routes", () => {
+    const members = [
+      member("account", "blocked", { enabled: false, models: ["gpt"] }),
+      member("account", "first", { models: ["gpt"] }),
+      member("account", "later", { models: ["gpt"] }),
+    ];
+    const order = ["removed", "blocked", "first", "later"].map((id) => candidate(id, { nextForNewRequest: true }));
+    const byMember = poolMemberRuntimeStates(members, order);
+    let laterReads = 0;
+    Object.defineProperty(order[3]!, "available", {
+      get() { laterReads += 1; return true; },
+    });
+    const state = poolActivityState(members, byMember, order, undefined, ["gpt"]);
+    expect(state.nextMember).toBe(members[1]!);
+    expect(laterReads).toBe(0);
+    expect(order.map((item) => item.candidateId)).toEqual(["removed", "blocked", "first", "later"]);
+  });
+
   test("invalidates an old preview after activity and accepts a newer backend snapshot", () => {
     const members = [member("account", "account"), member("source", "source-a")];
     const order = [candidate("account", { nextForNewRequest: true, activityRevision: 3 }), candidate("source-a", { activityRevision: 3 })];

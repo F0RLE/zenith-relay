@@ -202,7 +202,8 @@ for (const theme of ["dark", "light"] as const) {
     test(`successful request shows tokens and keeps tools in technical details in ${theme} ${width}`, async ({ page }) => {
       await page.setViewportSize({ width, height: 1000 });
       const dialog = await openRequest(page, theme, false);
-      await expect(dialog.locator(".request-details-identity")).toContainText("Успешно");
+      await expect(dialog.locator('.request-details-status[data-status="success"]')).toHaveAccessibleName("Успешно");
+      await expect(dialog.locator('.request-details-status[data-status="success"]')).toHaveText("");
       await expect(dialog.locator(".request-details-error")).toHaveCount(0);
       await expect(dialog.locator(".request-execution")).toHaveCount(0);
       await expect(dialog.getByText("640 мс", { exact: true })).toBeVisible();
@@ -248,12 +249,15 @@ test("request disclosures are keyboard accessible and keep focus inside the dial
   await expect(technicalSummary).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(dialog.locator(".request-technical-details")).toHaveAttribute("open");
+  await expect(dialog.getByRole("button", { name: "Копировать ID запроса", exact: true })).toBeVisible();
   await page.keyboard.press("Tab");
   await expect(dialog.getByRole("button", { name: "Копировать ID запроса", exact: true })).toBeFocused();
   await page.keyboard.press("Tab");
   await expect(dialog.getByRole("button", { name: "Копировать ID запроса провайдера", exact: true })).toBeFocused();
   await page.keyboard.press("Tab");
   await expect(close).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(dialog.getByRole("button", { name: "Сохранить диагностику", exact: true })).toBeFocused();
   await page.keyboard.press("Tab");
   await expect(dialog.getByRole("button", { name: "Копировать сообщение провайдера", exact: true })).toBeFocused();
   await page.keyboard.press("Tab");

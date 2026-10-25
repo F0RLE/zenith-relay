@@ -51,7 +51,7 @@ test("pool account avatar opens the shared error details", async ({ page }) => {
   await page.getByRole("button", { name: "Pool", exact: true }).click();
 
   const member = page.locator('[data-member-label="Backup account"]');
-  await member.getByRole("button", { name: "Connection error" }).click();
+  await member.getByRole("button", { name: "Could not connect to refresh quota", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Technical error details" });
   await expect(dialog).toBeVisible();
   await expect(dialog.locator("pre")).toContainText('"code": "quota_transport"');
@@ -589,6 +589,10 @@ test("local configuration presets require preview before an explicit apply", asy
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
+  const snapshotReads = () => page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string }>;
+  }).__TAURI_TEST_INVOKES__.filter(({ command }) => command === "get_local_runtime_state").length);
+  const before = await snapshotReads();
 
   await page.locator(".pool-preset-menu summary").click();
   await page.getByRole("menuitem", { name: "Save preset", exact: true }).click();
@@ -597,8 +601,10 @@ test("local configuration presets require preview before an explicit apply", asy
 
   const dialog = page.getByRole("dialog", { name: "Configuration preset" });
   await expect(dialog.getByText("Changes: 1", { exact: true })).toBeVisible();
+  expect(await snapshotReads()).toBe(before);
   await dialog.getByRole("button", { name: "Apply changes" }).click();
   await expect(dialog).toBeHidden();
+  await expect.poll(snapshotReads).toBeGreaterThan(before);
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.some((call) => call.command === "export_local_configuration_preset")).toBe(true);

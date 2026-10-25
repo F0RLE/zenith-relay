@@ -5,6 +5,7 @@ import { openGatewayApi } from "./helpers";
 
 type NetworkWindow = Window & {
   __NETWORK_TEST__: { next: LocalNetworkAccess; fail: boolean; hold: boolean; reads: number; release?: () => void };
+  __RELEASE_NETWORK_WRITE__?: () => void;
   __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> };
 };
 
@@ -120,3 +121,38 @@ test("stale network read cannot overwrite a successful sharing change", async ({
   await expect(sharing).toBeChecked();
   await expect(page.locator(".gateway-network-details code")).toHaveText("http://192.168.1.10:14998/v1");
 });
+
+for (const fails of [false, true]) {
+  test(`network observation does not expose an unfinished sharing write (${fails ? "rollback" : "success"})`, async ({ page }) => {
+    await openNetwork(page);
+    await page.evaluate((fails) => {
+      const target = window as NetworkWindow;
+      const invoke = target.__TAURI_INTERNALS__.invoke.bind(target.__TAURI_INTERNALS__);
+      target.__TAURI_INTERNALS__.invoke = async (name, args, options) => {
+        const previous = structuredClone(target.__NETWORK_TEST__.next);
+        const result = await invoke(name, args, options);
+        if (name !== "update_local_network_access") return result;
+        // The native transaction may expose new settings before restart succeeds.
+        return new Promise((resolve, reject) => {
+          target.__RELEASE_NETWORK_WRITE__ = () => {
+            if (fails) {
+              target.__NETWORK_TEST__.next = previous;
+              reject(new Error("Synthetic sharing rollback"));
+            } else resolve(result);
+          };
+        });
+      };
+    }, fails);
+    const sharing = page.locator(".gateway-network-access").getByRole("checkbox");
+    await sharing.click();
+    await page.getByRole("dialog").getByRole("button", { name: "Enable", exact: true }).click();
+    await expect.poll(() => page.evaluate(() => Boolean((window as NetworkWindow).__RELEASE_NETWORK_WRITE__))).toBe(true);
+    const before = await page.evaluate(() => (window as NetworkWindow).__NETWORK_TEST__.reads);
+    await page.clock.fastForward(30_000);
+    expect(await page.evaluate(() => (window as NetworkWindow).__NETWORK_TEST__.reads)).toBe(before);
+    await expect(sharing).not.toBeChecked();
+    await page.evaluate(() => (window as NetworkWindow).__RELEASE_NETWORK_WRITE__!());
+    await expect(sharing).toBeEnabled();
+    await expect(sharing).toBeChecked({ checked: !fails });
+  });
+}

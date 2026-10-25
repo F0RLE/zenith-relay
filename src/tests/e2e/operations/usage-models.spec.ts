@@ -1,5 +1,5 @@
 import { expect, test } from "../../bun-playwright";
-import { installTauriMock } from "../tauri-mock";
+import { emitTauriEvent, installTauriMock } from "../tauri-mock";
 import { chooseOption } from "./helpers";
 
 for (const narrow of [false, true]) {
@@ -65,9 +65,9 @@ for (const mode of ["local"] as const) {
     await page.getByRole("button", { name: "Clear filters", exact: true }).click();
     await expect(page.getByRole("button", { name: "Range: All time", exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "Clear filters", exact: true })).toHaveCount(0);
-    // The all-period report may already be cached. Refresh checks the reset
-    // query without requiring a duplicate request just to display that cache.
-    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    // Cached results display immediately; the next history event revalidates
+    // the reset query without requiring manual refresh.
+    await emitTauriEvent(page, "zenith-usage-recorded", null);
     await expect.poll(selectedRange).toBeNull();
   });
 }
@@ -266,6 +266,9 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await expect(page.locator(".account-card .account-token-speed")).toHaveCount(0);
   await page.getByRole("button", { name: "Pool", exact: true }).click();
+  // Hiding optional card estimates must not hide the account's Usage totals.
+  await expect(page.locator('[data-member-label="Personal Plus"] .account-value-strip')).toBeVisible();
+  await page.getByRole("button", { name: "Hide account calculation", exact: true }).click();
   await expect(page.locator('[data-member-label="Personal Plus"] .account-value-strip')).toHaveCount(0);
   await expect(page.locator('[data-member-label="Personal Plus"] .quota-meter').first()).toBeVisible();
   await page.getByRole("button", { name: "Usage", exact: true }).click();

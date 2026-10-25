@@ -196,6 +196,16 @@
   gap: 8px;
 }
 
+.connection-command-bar[data-selection="true"] {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.connection-command-context > span {
+  color: var(--relay-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .connection-command-context > input {
   flex: 0 0 auto;
 }
@@ -401,8 +411,8 @@
   display: flex;
   flex-direction: column;
   justify-content: center;
-  gap: 2px;
-  padding: 7px 4px;
+  gap: 4px;
+  padding: 7px 10px;
 }
 
 .account-identity > strong {
@@ -410,7 +420,7 @@
   overflow: hidden;
   color: var(--relay-text);
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 700;
   line-height: 18px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -419,7 +429,7 @@
 .account-identity > strong.revealed {
   overflow: visible;
   overflow-wrap: anywhere;
-  line-height: 16px;
+  line-height: 18px;
   text-overflow: clip;
   white-space: normal;
 }
@@ -463,7 +473,7 @@
   display: flex;
   align-self: center;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
   margin-right: 8px;
 }
 
@@ -648,10 +658,6 @@
   line-height: 16px;
 }
 
-.account-card-quota .quota-meter-heading > strong {
-  font-weight: 600;
-}
-
 .account-card-quota .quota-meter-heading small {
   grid-area: reset;
   overflow: hidden;
@@ -748,6 +754,7 @@
 }
 
 .compact-quota-layout .quota-track {
+  height: 4px;
   margin-top: 5px;
 }
 

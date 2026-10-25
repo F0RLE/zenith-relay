@@ -56,8 +56,8 @@ function AnalyticsPanel({
       </div>
     </header>
     {error ? <p className="overview-analytics-message error-text" role="alert">{t("overview.analyticsUnavailable")}</p> : null}
-    <div className="overview-chart-stack">
-      <TokenUsageTrend buckets={buckets} totals={totals} windows={windows} loading={loading && !hasAnalytics} />
+    {hasAnalytics ? <div className="overview-chart-stack">
+      <TokenUsageTrend buckets={buckets} totals={totals} windows={windows} />
       <OverviewChart
         icon={<CreditCard aria-hidden />}
         title={t("usage.apiEquivalent")}
@@ -68,7 +68,6 @@ function AnalyticsPanel({
         tone="cost"
         formatValue={(chartValue) => formatApproximateUsd(chartValue, locale)}
         formatAxis={(axisValue) => formatScaledUsd(axisValue, locale)}
-        loading={loading && !hasAnalytics}
       />
       <OverviewChart
         icon={<Activity aria-hidden />}
@@ -80,7 +79,6 @@ function AnalyticsPanel({
         tone="requests"
         formatValue={(chartValue) => formatFullNumber(chartValue, locale)}
         formatAxis={(axisValue) => formatFullNumber(axisValue, locale)}
-        loading={loading && !hasAnalytics}
       />
       <OverviewChart
         icon={<Gauge aria-hidden />}
@@ -92,7 +90,6 @@ function AnalyticsPanel({
         tone="speed"
         formatValue={(chartValue) => formatTokenSpeed(chartValue, locale, t("usage.tokensPerSecondUnit"))}
         formatAxis={(axisValue) => formatNumber(axisValue, locale, { maximumFractionDigits: 1 })}
-        loading={loading && !hasAnalytics}
       />
       <OverviewChart
         icon={<Timer aria-hidden />}
@@ -104,14 +101,13 @@ function AnalyticsPanel({
         tone="e2e-speed"
         formatValue={(chartValue) => formatTokenSpeed(chartValue, locale, t("usage.tokensPerSecondUnit"))}
         formatAxis={(axisValue) => formatNumber(axisValue, locale, { maximumFractionDigits: 1 })}
-        loading={loading && !hasAnalytics}
       />
-    </div>
+    </div> : null}
   </section>;
 }
 
 export default memo(AnalyticsPanel);
-function TokenUsageTrend({ buckets, totals, windows, loading }: { buckets: UsageTotals[]; totals: UsageTotals; windows: WindowBucket[]; loading: boolean }) {
+function TokenUsageTrend({ buckets, totals, windows }: { buckets: UsageTotals[]; totals: UsageTotals; windows: WindowBucket[] }) {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const tokenSeries = [
@@ -136,7 +132,7 @@ function TokenUsageTrend({ buckets, totals, windows, loading }: { buckets: Usage
   return <article className="overview-chart tokens overview-token-trend">
     <header className="overview-token-trend-header">
       <div className="overview-chart-title"><Database aria-hidden /><span><strong>{t("overview.tokenUsage")}</strong></span></div>
-      <div className="overview-token-trend-summary"><strong className="overview-chart-summary">{loading ? "—" : formatCompactNumber(totals.totalTokens, locale)}</strong><small>{loading || averageCacheRate == null ? "—" : `${averageCacheRate.toFixed(0)}% ${t("overview.tokenTrend.cacheRateShort")}`}</small></div>
+      <div className="overview-token-trend-summary"><strong className="overview-chart-summary">{formatCompactNumber(totals.totalTokens, locale)}</strong><small>{averageCacheRate == null ? "—" : `${averageCacheRate.toFixed(0)}% ${t("overview.tokenTrend.cacheRateShort")}`}</small></div>
     </header>
     <div className="overview-token-trend-legend" aria-label={t("overview.tokenTrend.legend")}>
       {tokenSeries.map((series) => <span key={series.key} className={`is-${series.color}`}><i aria-hidden />{series.label}</span>)}
@@ -190,7 +186,7 @@ function TokenUsageTrend({ buckets, totals, windows, loading }: { buckets: Usage
               );
             })}
           </ol>
-          {!loading && !hasData ? <span className="overview-chart-empty">{t("overview.noMeasurements")}</span> : null}
+          {!hasData ? <span className="overview-chart-empty">{t("overview.noMeasurements")}</span> : null}
         </div>
         <div className="overview-chart-x-axis" style={{ gridTemplateColumns: `repeat(${windows.length}, minmax(0, 1fr))` }} aria-hidden>{windows.map((window) => <span key={window.startMs} data-visible={window.showLabel}>{window.label}</span>)}</div>
       </div>
@@ -208,7 +204,6 @@ function OverviewChart({
   tone,
   formatValue,
   formatAxis,
-  loading,
 }: {
   icon: ReactNode;
   title: string;
@@ -219,17 +214,17 @@ function OverviewChart({
   tone: string;
   formatValue: (chartValue: number) => string;
   formatAxis: (axisValue: number) => string;
-  loading: boolean;
 }) {
   const { t } = useTranslation();
   const measured = seriesValues.filter((chartValue): chartValue is number => chartValue != null);
   const max = Math.max(0, ...measured) || 1;
+  const axisLabels = [formatAxis(max), formatAxis(max / 2), "0"];
   const hasData = measured.some((chartValue) => chartValue > 0);
   const segments = lineSegments(seriesValues, max);
   return <article className={`overview-chart ${tone}`}>
-    <header><div className="overview-chart-title">{icon}<span><strong>{title}</strong></span></div><strong className="overview-chart-summary">{loading ? "—" : summary}</strong></header>
+    <header><div className="overview-chart-title">{icon}<span><strong>{title}</strong></span></div><strong className="overview-chart-summary">{summary}</strong></header>
     <div className="overview-chart-body">
-      <div className="overview-chart-y-axis" aria-hidden><span>{formatAxis(max)}</span><span>{formatAxis(max / 2)}</span><span>0</span></div>
+      <div className="overview-chart-y-axis" aria-hidden>{axisLabels.map((label, index) => <span key={index}>{label}</span>)}</div>
       <div className="overview-chart-plot">
         <div className="overview-chart-canvas">
           <svg aria-hidden viewBox="0 0 100 100" preserveAspectRatio="none">
@@ -258,10 +253,11 @@ function OverviewChart({
               );
             })}
           </ol>
-          {!loading && !hasData ? <span className="overview-chart-empty">{t("overview.noMeasurements")}</span> : null}
+          {!hasData ? <span className="overview-chart-empty">{t("overview.noMeasurements")}</span> : null}
         </div>
         <div className="overview-chart-x-axis" style={{ gridTemplateColumns: `repeat(${windows.length}, minmax(0, 1fr))` }} aria-hidden>{windows.map((window) => <span key={window.startMs} data-visible={window.showLabel}>{window.label}</span>)}</div>
       </div>
+      <div className="overview-chart-y-axis overview-chart-y-axis-right" aria-hidden>{axisLabels.map((label, index) => <span key={index}>{label}</span>)}</div>
     </div>
   </article>;
 }

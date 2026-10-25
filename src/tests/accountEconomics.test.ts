@@ -103,4 +103,28 @@ describe("account value projection", () => {
       windowMinutes: null,
     });
   });
+
+  test("prefers paired recent consumption instead of averaging the whole window", () => {
+    expect(estimateRemainingApiEquivalent(quota, {
+      ...evidence,
+      recentConsumedBasisPoints: 1_000,
+      recentApiEquivalent: { microUsd: 500_000, pricedTokens: 100, unpricedTokens: 0 },
+    })?.microUsd).toBe(2_900_000);
+  });
+
+  test("does not disguise incomplete recent evidence with an older good average", () => {
+    for (const recentConsumedBasisPoints of [null, 0, 499, 9_000, Number.NaN]) {
+      expect(estimateRemainingApiEquivalent(quota, {
+        ...evidence, recentConsumedBasisPoints,
+        recentApiEquivalent: { microUsd: 500_000, pricedTokens: 100, unpricedTokens: 0 },
+      })).toBeNull();
+    }
+    expect(estimateRemainingApiEquivalent(quota, {
+      ...evidence, recentConsumedBasisPoints: 1_000,
+      recentApiEquivalent: { microUsd: 500_000, pricedTokens: 5, unpricedTokens: 100 },
+    })).toBeNull();
+    expect(estimateRemainingApiEquivalent(quota, {
+      ...evidence, recentConsumedBasisPoints: 1_000,
+    })).toBeNull();
+  });
 });

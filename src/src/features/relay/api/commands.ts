@@ -1,4 +1,4 @@
-import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { Channel, invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
   TrashedAccountSummary,
@@ -16,7 +16,6 @@ import type {
   DefaultServiceTier,
   CodexMemoryStage,
   ModelContextPolicy,
-  RequestTimezoneUpdate,
   DiagnosticSettings,
   ImportSession,
   CacheSessionRecord,
@@ -35,6 +34,7 @@ import type {
   ProfileActivation,
   ProxyPoolImportResult,
   ProxyCheckResult,
+  ProxySpeedTestResult,
   ProxyPoolSummary,
   RelayStorageInfo,
   RevealedAccountIdentity,
@@ -78,8 +78,13 @@ function invoke<T>(command: string, commandArgs?: Record<string, unknown>): Prom
   });
 }
 
-const readLocalUsagePage = createUsagePageReader((query) =>
-  invoke<LocalUsagePage>("get_local_usage_page", { input: query }));
+const readLocalUsagePage = createUsagePageReader((query) => {
+  const { includeReport, ...input } = query;
+  return invoke<LocalUsagePage>("get_local_usage_page", {
+    input,
+    ...(includeReport !== undefined ? { includeReport } : {}),
+  });
+});
 
 export const relayCommands = {
   localNetworkAccess: () => invoke<LocalNetworkAccess>("get_local_network_access"),
@@ -90,12 +95,15 @@ export const relayCommands = {
   setApplicationLaunchPath: (application: LaunchApplication, path: string | null) => invoke<LaunchPathSetting>("set_application_launch_path", { application, path }),
   pickApplicationLaunchPath: (application: LaunchApplication, path: string | null) => invoke<string | null>("pick_application_launch_path", { application, path }),
   onStateChanged: (callback: () => void) => listen("zenith-state-changed", callback),
+  onProxyPoolChanged: (callback: () => void) => listen("zenith-proxy-pool-changed", callback),
   onRuntimeActivity: (callback: (activity: RuntimeActivitySnapshot) => void) => listen<RuntimeActivitySnapshot>("zenith-runtime-activity", (event) => callback(event.payload)),
   onUsageRecorded: (callback: () => void) => listen("zenith-usage-recorded", callback),
   localState: () => invoke<RuntimeSnapshot>("get_local_runtime_state"),
   localRuntimeOrder: () => invoke<CandidateRuntimeSnapshot[]>("get_local_runtime_order"),
   localUsagePage: readLocalUsagePage,
-  localCacheSessions: (usageQuery: UsageQuery = {}) => invoke<CacheSessionRecord[]>("get_local_cache_sessions", { input: usageQuery }),
+  localCacheSessions: (usageQuery: UsageQuery = {}, scope?: Pick<CacheSessionRecord, "clientContextId" | "candidateKind" | "candidateId" | "model">) => invoke<CacheSessionRecord[]>("get_local_cache_sessions", {
+    input: usageQuery, ...(scope ? { scope } : {}),
+  }),
   clearLocalUsage: () => invoke("clear_local_usage"),
 
   createSource: (sourceInput: Record<string, unknown>) => invoke("create_local_source", { input: sourceInput }),
@@ -131,6 +139,11 @@ export const relayCommands = {
   getProxyPool: () => invoke<ProxyPoolSummary>("get_local_proxy_pool"),
   clearCommonProxy: () => invoke("set_local_common_proxy", { input: { proxyUrl: null } }),
   checkStoredProxy: (proxyId: string) => invoke<ProxyCheckResult>("check_local_stored_proxy", { proxyId }),
+  testStoredProxySpeed: (proxyId: string, onStarted?: () => void) => invoke<ProxySpeedTestResult>("test_local_stored_proxy_speed", {
+    proxyId,
+    onStarted: new Channel<null>(onStarted),
+  }),
+  renameStoredProxy: (proxyId: string, label: string) => invoke<ProxyPoolSummary>("rename_local_stored_proxy", { proxyId, label }),
   importProxyPool: (proxyUrls: string[]) => invoke<ProxyPoolImportResult>("import_local_proxy_pool", { input: { proxyUrls } }),
   deleteStoredProxy: (proxyId: string) => invoke<ProxyPoolSummary>("delete_local_stored_proxy", { proxyId }),
   deleteStoredProxies: (proxyIds: string[]) => invoke<ProxyPoolSummary>("delete_local_stored_proxies", { input: { proxyIds } }),
@@ -166,8 +179,6 @@ export const relayCommands = {
   stopGateway: () => invoke("stop_local_gateway"),
   restartGateway: () => invoke("restart_local_gateway"),
   updateGatewayPort: (port: number) => invoke("update_local_gateway_port", { port }),
-  setRequestTimezone: (input: RequestTimezoneUpdate) => invoke("set_local_request_timezone", { input }),
-  requestTimezoneCatalog: () => invoke<string[]>("get_request_timezone_catalog"),
   revealLocalGatewayApiKey: (network = false) => invoke<string>("reveal_local_gateway_api_key", network ? { network: true } : undefined),
   rotateLocalGatewayApiKey: (network = false) => invoke<string>("rotate_local_gateway_api_key", network ? { network: true } : undefined),
   updateChatgptQuotaReserve: (reserveBasisPoints: number) => invoke("update_chatgpt_interface_quota_reserve", { input: { reserveBasisPoints } }),
@@ -219,6 +230,7 @@ export const relayCommands = {
     invoke("open_relay_folder", { folder }),
   resetLocalData: () => invoke("reset_local_pool_data"),
   exportUsage: (rows: UsageExportRow[]) => invoke<string | null>("export_usage", { rows }),
+  exportRequestDiagnostics: (requestId: string) => invoke<string | null>("export_request_diagnostics", { requestId }),
 
 };
 

@@ -61,6 +61,7 @@ type RequestStatusRow = Pick<UsageRow, "success" | "requestOrigin">
 export function requestStatusKind(row: RequestStatusRow) {
   if (row.requestOrigin?.startsWith("blocked_")) return "warning";
   if (row.requestOrigin || row.success) return "success";
+  if (row.errorCategory === "client_cancelled" || row.routing?.attemptOutcome === "client_disconnected") return "cancelled";
   if (row.routing?.attemptOutcome === "tool_discovery" && !row.errorCategory
     && row.httpStatus != null && row.httpStatus >= 200 && row.httpStatus < 300) return "pending";
   return "error";
@@ -70,6 +71,7 @@ export function requestStatusLabel(row: RequestStatusRow, t: TFunction): string 
   const status = requestStatusKind(row);
   if (status === "warning") return t("codex.backgroundBlocked");
   if (status === "pending") return t("usage.execution.decisions.tool_discovery");
+  if (status === "cancelled") return t("usage.errorCategories.client_cancelled");
   return status === "success" ? t("common.success") : t("common.failed");
 }
 

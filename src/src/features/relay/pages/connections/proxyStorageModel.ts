@@ -1,5 +1,10 @@
 import type { AccountSummary, ProxyCheckResult, ProxyPoolEntry, SourceSummary } from "../../api/types";
 
+export function latestProxyCheck(entry: Pick<ProxyPoolEntry, "lastCheck">, manual?: ProxyCheckResult) {
+  const saved = entry.lastCheck;
+  return manual && (!saved || manual.checkedAtMs > saved.checkedAtMs) ? manual : saved ?? undefined;
+}
+
 /** A fresh check can explicitly clear a stale zone after an exit-IP change. */
 export function proxyTimezone(entry: Pick<ProxyPoolEntry, "timezone">, result?: ProxyCheckResult): string | null {
   return result?.timezone === undefined ? entry.timezone ?? null : result.timezone;

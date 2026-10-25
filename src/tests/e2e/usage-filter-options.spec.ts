@@ -1,5 +1,53 @@
 import { expect, test, type Page } from "../bun-playwright";
-import { installTauriMock } from "./tauri-mock";
+import { emitTauriEvent, installTauriMock } from "./tauri-mock";
+
+for (const staleOutcome of ["success", "failure"] as const) {
+  test(`late filter ${staleOutcome} cannot replace newer history choices`, async ({ page }) => {
+    await page.clock.install();
+    await installTauriMock(page, { locale: "en" });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Usage", exact: true }).click();
+    await expect(page.locator(".usage-page")).toHaveAttribute("aria-busy", "false");
+    await page.clock.pauseAt(new Date(Date.now() + 1_000));
+    await page.evaluate((staleOutcome) => {
+      const target = window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> };
+        __RELEASE_OLD_CHOICES__?: () => void;
+        __CHOICE_READS__: number;
+      };
+      const invoke = target.__TAURI_INTERNALS__.invoke.bind(target.__TAURI_INTERNALS__);
+      target.__CHOICE_READS__ = 0;
+      target.__TAURI_INTERNALS__.invoke = async (command, args, options) => {
+        const result = await invoke(command, args, options);
+        if (command !== "get_local_usage_page" || !(args as { input?: { includeFilterOptions?: boolean } })?.input?.includeFilterOptions) return result;
+        target.__CHOICE_READS__ += 1;
+        const updated = structuredClone(result) as { filterOptions: { models: string[]; poolMembers: string[] } };
+        updated.filterOptions.models = [target.__CHOICE_READS__ === 1 ? "stale-model" : "current-model"];
+        if (target.__CHOICE_READS__ !== 1) return updated;
+        return new Promise((resolve, reject) => {
+          target.__RELEASE_OLD_CHOICES__ = () => staleOutcome === "failure"
+            ? reject(new Error("Synthetic stale filter failure")) : resolve(updated);
+        });
+      };
+    }, staleOutcome);
+    const models = page.locator(".usage-model-menu > button");
+    await models.click();
+    await expect.poll(() => page.evaluate(() => typeof (window as unknown as { __RELEASE_OLD_CHOICES__?: () => void }).__RELEASE_OLD_CHOICES__)).toBe("function");
+    await page.keyboard.press("Escape");
+    await emitTauriEvent(page, "zenith-usage-recorded", null);
+    await page.clock.fastForward(500);
+    await models.click();
+    await expect(page.getByRole("option", { name: "current-model", exact: true })).toBeVisible();
+    await page.evaluate(() => (window as unknown as { __RELEASE_OLD_CHOICES__: () => void }).__RELEASE_OLD_CHOICES__());
+    await page.clock.fastForward(100);
+    await expect(page.getByRole("option", { name: "current-model", exact: true })).toBeVisible();
+    await expect(page.getByRole("option", { name: "stale-model", exact: true })).toHaveCount(0);
+    await expect(page.locator(".usage-page").getByRole("alert")).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await models.click();
+    expect(await page.evaluate(() => (window as unknown as { __CHOICE_READS__: number }).__CHOICE_READS__)).toBe(2);
+  });
+}
 
 async function expectOptions(page: Page, label: string, values: string[]) {
   await page.getByRole("button", { name: new RegExp(`^${label}:`) }).click();

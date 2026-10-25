@@ -1,7 +1,7 @@
 import type { DefaultServiceTier, OperationalStatus } from "./common";
 import type { ApiEquivalentSummary, ApiModelPriceOverride, ResolvedModelPrice } from "./pricing";
 
-export type SourceWireApi = "responses" | "chat_completions" | "messages" | "gemini";
+export type SourceWireApi = "responses" | "chat_completions" | "messages" | "gemini" | "gemini_interactions";
 
 export type SourceAdapter = "native" | "responses_to_messages" | "responses_to_gemini"
   | "responses_to_chat_completions" | "chat_completions_to_responses" | "chat_completions_to_messages"

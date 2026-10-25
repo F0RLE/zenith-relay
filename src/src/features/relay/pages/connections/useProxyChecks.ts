@@ -10,17 +10,15 @@ export function useProxyChecks(resetKey: string) {
   const [checks, setChecks] = useState<Record<string, ProxyCheckState>>({});
   const generation = useRef(0);
   const inFlight = useRef(new Set<string>());
-  const scheduled = useRef(new Set<string>());
   useEffect(() => {
     generation.current += 1;
     inFlight.current.clear();
-    scheduled.current.clear();
     setChecks({});
     return () => { generation.current += 1; };
   }, [resetKey]);
 
   const check = useCallback(async (proxyId: string) => {
-    if (inFlight.current.has(proxyId) || scheduled.current.has(proxyId)) return;
+    if (inFlight.current.has(proxyId)) return;
     const generationAtStart = generation.current;
     inFlight.current.add(proxyId);
     setChecks((previousChecks) => ({ ...previousChecks, [proxyId]: { ...previousChecks[proxyId], pending: true } }));
@@ -35,23 +33,5 @@ export function useProxyChecks(resetKey: string) {
     setChecks((previousChecks) => ({ ...previousChecks, [proxyId]: { pending: false, result: proxyCheckResult } }));
   }, []);
 
-  const checkMany = useCallback(async (proxyIds: string[]) => {
-    const generationAtStart = generation.current;
-    const queue = [...new Set(proxyIds)].filter((id) => !inFlight.current.has(id) && !scheduled.current.has(id));
-    for (const id of queue) scheduled.current.add(id);
-    setChecks((previous) => {
-      const next = { ...previous };
-      for (const id of queue) next[id] = { ...next[id], pending: true };
-      return next;
-    });
-    await Promise.all(Array.from({ length: Math.min(3, queue.length) }, async () => {
-      while (generationAtStart === generation.current) {
-        const queuedProxyId = queue.shift();
-        if (!queuedProxyId) break;
-        scheduled.current.delete(queuedProxyId);
-        await check(queuedProxyId);
-      }
-    }));
-  }, [check]);
-  return { checks, check, checkMany };
+  return { checks, check };
 }

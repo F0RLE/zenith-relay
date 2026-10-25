@@ -19,19 +19,16 @@ describe("pool membership operation", () => {
     expect(canAccountJoinPool({ oauthClientKind: "codex", recoveryRequired: true })).toBe(false);
     expect(canAccountJoinPool({ oauthClientKind: "excel_bps", plan: "plus", recoveryRequired: true })).toBe(false);
   });
-  test("keeps native and legacy Codex accounts out of the pool regardless of plan", () => {
+  test("offers explicit image-only membership for known Codex connections, not unknown legacy clients", () => {
     for (const planType of ["free", "chatgpt_free_tier", "plus", null]) {
-      expect(canAccountJoinPool({ oauthClientKind: "codex", subscription: { planType } })).toBe(false);
+      expect(canAccountJoinPool({ oauthClientKind: "codex", subscription: { planType } })).toBe(true);
       expect(canAccountJoinPool({ subscription: { planType } })).toBe(false);
     }
   });
 
-  test("rejects only known Free BPS plans in account and import previews", () => {
-    for (const plan of ["free", "Free plan", " chatgpt_free_tier "]) {
-      expect(canAccountJoinPool({ oauthClientKind: "excel_bps", subscription: { planType: plan } })).toBe(false);
-      expect(canAccountJoinPool({ oauthClientKind: "excel_bps", plan })).toBe(false);
-    }
-    for (const plan of ["plus", "pro", "business", "enterprise", "unknown", null]) {
+  test("allows BPS membership regardless of the subscription plan", () => {
+    for (const plan of ["free", "Free plan", " chatgpt_free_tier ", "plus", "pro", "business", "enterprise", "unknown", null]) {
+      expect(canAccountJoinPool({ oauthClientKind: "excel_bps", subscription: { planType: plan } })).toBe(true);
       expect(canAccountJoinPool({ oauthClientKind: "excel_bps", plan })).toBe(true);
     }
   });

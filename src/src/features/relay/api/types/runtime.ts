@@ -10,22 +10,7 @@ import type {
 } from "./activity";
 import type { PoolRoutingSnapshot } from "./pool";
 
-export type AccountTimezoneSource = "account" | "proxy";
 export type CodexMemoryStage = "extraction" | "consolidation";
-
-export type RequestTimezonePolicy = {
-  enabled: boolean;
-  accountTimezones: Record<string, string>;
-  /** Missing entries inherit the global setting. */
-  accountTimezoneBindings: Record<string, boolean>;
-  /** Missing entries preserve legacy account timezone behavior. */
-  accountTimezoneSources: Record<string, AccountTimezoneSource>;
-};
-
-export type RequestTimezoneUpdate = {
-  policy: RequestTimezonePolicy;
-  expectedPolicy: RequestTimezonePolicy;
-};
 
 export type ModelCatalogIdentity = Pick<ModelSummary, "catalogProvider" | "catalogFamily"> & {
   /** Position across complete member inventories, including saved rules and prices. */
@@ -36,7 +21,6 @@ export type RuntimeSnapshot = {
   schemaVersion: number;
   gateway: {
     toolPolicy?: ToolPolicy;
-    requestTimezone?: RequestTimezonePolicy;
     poolRouting?: PoolRoutingSnapshot;
     running: boolean;
     baseUrl: string;
@@ -64,6 +48,12 @@ export type RuntimeSnapshot = {
   platform: string;
   capabilities: {
     features: string[];
+    accountConnectors?: Array<{
+      id: string;
+      providerFamily: "openai" | "anthropic" | "google" | "moonshot" | "xai" | "meta" | "cognition";
+      oauthClientKind?: "codex" | "siwc" | "excel_bps";
+      signInFlow: "authorization_code_pkce" | "dynamic_client_pkce" | "device_authorization";
+    }>;
   };
   sources: SourceSummary[];
   accounts: AccountSummary[];

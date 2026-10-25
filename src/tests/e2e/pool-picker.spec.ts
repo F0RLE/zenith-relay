@@ -10,9 +10,9 @@ for (const mode of ["local"] as const) {
     const dialog = page.getByRole("dialog", { name: "Add connections to pool" });
     const search = dialog.getByRole("searchbox", { name: "Find a connection" });
     const status = dialog.getByRole("group", { name: "Status" });
-    await status.getByRole("button", { name: /^Unavailable/ }).click();
+    await status.getByRole("button", { name: /^Cooldown/ }).click();
     await expect(dialog.getByText("Backup account", { exact: true })).toBeVisible();
-    await expect(dialog.getByText("Personal Plus", { exact: true })).toHaveCount(0);
+    await expect(dialog.getByText("Personal Plus", { exact: true })).toBeVisible();
     await expect(dialog.getByText("Example compatible API", { exact: true })).toHaveCount(0);
     await status.getByRole("button", { name: /^Working/ }).click();
     await expect(dialog.getByText("Example compatible API", { exact: true })).toBeVisible();

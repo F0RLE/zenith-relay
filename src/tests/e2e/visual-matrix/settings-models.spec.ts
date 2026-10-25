@@ -1,6 +1,38 @@
 import { expect, test } from "../../bun-playwright";
 import { installTauriMock } from "../tauri-mock";
 
+for (const appearance of [
+  { locale: "ru", theme: "dark", width: 1160 },
+  { locale: "en", theme: "light", width: 1160 },
+  { locale: "ru", theme: "light", width: 360 },
+  { locale: "en", theme: "dark", width: 360 },
+] as const) {
+  test(`diagnostics are log-only: ${appearance.locale}/${appearance.theme}/${appearance.width}`, async ({ page }) => {
+    await page.clock.install();
+    await installTauriMock(page, { ...appearance, mode: "local", populated: true, diagnosticDebug: true });
+    await page.setViewportSize({ width: appearance.width, height: 760 });
+    await page.goto("/");
+    const ru = appearance.locale === "ru";
+    await page.getByRole("button", { name: ru ? "Настройки" : "Settings", exact: true }).click();
+    const reads = () => page.evaluate(() => (window as unknown as {
+      __TAURI_TEST_INVOKES__: Array<{ command: string }>;
+    }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "get_memory_diagnostics").length);
+    expect(await reads()).toBe(0);
+    const diagnostics = page.locator(".settings-group").filter({ has: page.getByRole("heading", { name: ru ? "Диагностика" : "Diagnostics", exact: true }) });
+    await expect(diagnostics.getByRole("heading", { name: ru ? "Мониторинг" : "Monitoring", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: ru ? "Измерить" : "Measure", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(diagnostics.getByRole("button")).toHaveCount(4);
+    await page.clock.fastForward(60_000);
+    expect(await reads()).toBe(0);
+    const operations = diagnostics.getByRole("button", { name: ru ? "Открыть операции" : "Open operations", exact: true });
+    await operations.click();
+    await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: unknown }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "open_relay_folder").at(-1)?.args)).toEqual({ folder: "operation_logs" });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await diagnostics.screenshot({ path: `output/playwright/diagnostics-logs-${appearance.locale}-${appearance.theme}-${appearance.width}.png` });
+  });
+}
+
 for (const theme of ["light", "dark"] as const) {
   for (const viewport of [{ width: 1344, height: 900 }, { width: 1160, height: 760 }, { width: 840, height: 560 }] as const) {
     test(`settings layout ${theme} ${viewport.width}x${viewport.height}`, async ({ page }) => {
@@ -19,6 +51,7 @@ for (const theme of ["light", "dark"] as const) {
       await expect(debugToggle).not.toBeChecked();
       const diagnostics = groups.filter({ hasText: "Диагностика" });
       await expect(diagnostics).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Измерить", exact: true })).toHaveCount(0);
       const poolData = groups.filter({ hasText: "Данные пула" });
       await expect(poolData.locator(".settings-debug-section")).toHaveCount(1);
       await expect(poolData.locator(".settings-control-row").last()).toHaveClass(/settings-danger-row/);
@@ -55,10 +88,18 @@ for (const theme of ["light", "dark"] as const) {
       await expect(diagnostics.getByText("C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs\\operations", { exact: true })).toBeVisible();
       await expect(groups).toHaveCount(4);
       await expect(groups.last()).toContainText("Диагностика");
+      await expect(poolData.getByText("Память приложения", { exact: true })).toHaveCount(0);
+      await expect(diagnostics.getByRole("heading", { name: "Мониторинг", exact: true })).toHaveCount(0);
+      await expect(diagnostics.getByRole("button", { name: "Измерить", exact: true })).toHaveCount(0);
+      expect(await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "get_memory_diagnostics"))).toHaveLength(0);
+      await diagnostics.screenshot({ path: `output/playwright/settings-logs-ru-${theme}-${viewport.width}x${viewport.height}.png` });
       await debugToggle.scrollIntoViewIfNeeded();
       const debugLayout = await poolData.evaluate((item) => ({ overflow: item.scrollWidth - item.clientWidth }));
       expect(debugLayout.overflow).toBe(0);
       await poolData.screenshot({ path: `output/playwright/settings-debug-ru-${theme}-${viewport.width}x${viewport.height}.png` });
+      await debugToggle.uncheck();
+      await expect(diagnostics).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Измерить", exact: true })).toHaveCount(0);
     });
   }
 }

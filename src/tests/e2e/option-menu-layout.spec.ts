@@ -38,7 +38,7 @@ for (const locale of ["ru", "en"] as const) {
         await page.getByRole("button", { name: russian ? "Использование" : "Usage", exact: true }).click();
         await page.getByRole("button", { name: russian ? "Другие фильтры" : "More filters", exact: true }).click();
         const controls = page.locator(".usage-scope-controls .relay-option-trigger, .usage-filters .relay-option-trigger");
-        await expect(controls).toHaveCount(7);
+        await expect(controls).toHaveCount(8);
         for (const trigger of await controls.all()) {
           await expectFieldWidth(page, trigger);
           if ((await trigger.getAttribute("aria-label"))?.startsWith(russian ? "Модель:" : "Model:")) {
@@ -65,6 +65,38 @@ for (const locale of ["ru", "en"] as const) {
         await expect(page.locator(".usage-request-table tbody tr")).toHaveCount(24);
       });
     }
+  }
+}
+
+for (const locale of ["ru", "en"] as const) {
+  for (const width of [1160, 390, 360]) {
+    test(`usage period labels stay on one line: ${locale} ${width}`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await installTauriMock(page, { locale, theme: locale === "ru" ? "dark" : "light", populated: true });
+      await page.goto("/");
+      await page.getByRole("button", { name: locale === "ru" ? "Использование" : "Usage", exact: true }).click();
+      const trigger = page.locator(".usage-range-menu .relay-option-trigger");
+      const periods = ["daily", "weekly", "monthly", "all"];
+      const labels = locale === "ru"
+        ? ["24 часа", "7 дней", "30 дней", "Всё время"]
+        : ["24 hours", "7 days", "30 days", "All time"];
+      for (const [index, period] of periods.entries()) {
+        const list = await expectFieldWidth(page, trigger);
+        await expect(list.getByRole("option")).toHaveText(labels);
+        await expect.poll(() => list.locator("button > span").evaluateAll((options) => options.every((option) => {
+          const text = document.createRange();
+          text.selectNodeContents(option);
+          return new Set(Array.from(text.getClientRects(), (rect) => Math.round(rect.top))).size === 1;
+        }))).toBe(true);
+        if (index === 0) {
+          await list.screenshot({ path: test.info().outputPath(`usage-periods-${locale}-${width}.png`) });
+        }
+        await list.locator(`[data-value="${period}"]`).click();
+        await expect(trigger).toHaveAttribute("data-value", period);
+        await expect(trigger.locator("span")).toHaveText(labels[index]);
+        await expect.poll(() => trigger.locator("span").evaluate((label) => label.scrollWidth <= label.clientWidth + 1)).toBe(true);
+      }
+    });
   }
 }
 

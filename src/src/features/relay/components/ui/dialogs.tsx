@@ -6,6 +6,9 @@ import type { FeedbackError } from "../../state/feedback";
 import { useTransientFlag } from "../../hooks/useTransientFlag";
 import { Button, IconButton } from "./buttons";
 import { copyText } from "./secret";
+import { focusWithoutTooltip } from "./focus";
+
+let focusRestoreGeneration = 0;
 
 export function Dialog({
   title,
@@ -16,6 +19,8 @@ export function Dialog({
   headerActions,
   wide = false,
   className = "",
+  backdropClassName = "",
+  restoreFocus = "immediate",
   layer = "default",
 }: {
   title: string;
@@ -26,6 +31,8 @@ export function Dialog({
   headerActions?: ReactNode;
   wide?: boolean;
   className?: string;
+  backdropClassName?: string;
+  restoreFocus?: "immediate" | "after-paint";
   layer?: "default" | "top";
 }) {
   const { t } = useTranslation();
@@ -41,6 +48,7 @@ export function Dialog({
     returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   }
   useEffect(() => {
+    focusRestoreGeneration += 1;
     const previouslyFocused = returnFocusRef.current;
     const focusable = () => {
       const dialog = dialogRef.current;
@@ -109,20 +117,39 @@ export function Dialog({
     document.addEventListener("keydown", onKey);
     return () => {
       document.removeEventListener("keydown", onKey);
-      if (
-        previouslyFocused?.isConnected
-        && !previouslyFocused.hidden
-        && !previouslyFocused.closest("[aria-hidden=\"true\"]")
-      ) {
-        previouslyFocused.focus({ preventScroll: true });
-      }
+      const generation = ++focusRestoreGeneration;
+      const restore = () => {
+        if (generation !== focusRestoreGeneration || !previouslyFocused?.isConnected
+          || previouslyFocused.hidden || previouslyFocused.closest("[aria-hidden=\"true\"]")) return;
+        if (restoreFocus === "after-paint") {
+          // A newer dialog, navigation or a user's new focus must always win.
+          const active = document.activeElement;
+          if (active !== document.body && active !== document.documentElement) return;
+          focusWithoutTooltip(previouslyFocused);
+        } else {
+          previouslyFocused.focus({ preventScroll: true });
+        }
+      };
+      if (restoreFocus === "after-paint") {
+        if (document.visibilityState === "visible") {
+          // Removing the overlay gets a paint opportunity before focus can
+          // force layout of the table or mount a delegated tooltip.
+          requestAnimationFrame(() => requestAnimationFrame(restore));
+        }
+      } else restore();
     };
   }, []);
   return (
     <div
-      className={`relay-modal-backdrop${layer === "top" ? " relay-modal-backdrop-top" : ""}`}
+      className={`relay-modal-backdrop${layer === "top" ? " relay-modal-backdrop-top" : ""}${backdropClassName ? ` ${backdropClassName}` : ""}`}
       role="presentation"
-      onPointerDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
+      onPointerDown={(event) => {
+        if (event.target !== event.currentTarget) return;
+        // Do not let the default mouse focus overwrite the restored opener
+        // after this backdrop disappears during pointerdown.
+        event.preventDefault();
+        onClose();
+      }}
     >
       <section
         ref={dialogRef}

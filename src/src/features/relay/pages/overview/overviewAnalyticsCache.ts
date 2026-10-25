@@ -10,6 +10,7 @@ type AnalyticsCacheEntry = { analytics: Analytics; updatedAt: number };
 const analyticsCache = new Map<string, AnalyticsCacheEntry>();
 const analyticsInFlight = new Map<string, Promise<Analytics | null>>();
 let cacheHydrated = false;
+let cacheGeneration = 0;
 const persistence = createAnalyticsPersistence(persistCache, (work) => {
   const timer = globalThis.setTimeout(work, 250);
   return () => globalThis.clearTimeout(timer);
@@ -93,6 +94,15 @@ export function rememberOverviewAnalytics(scope: string, analytics: Analytics) {
   persistence.request();
 }
 
+export function clearOverviewAnalytics() {
+  cacheGeneration += 1;
+  cacheHydrated = true;
+  analyticsCache.clear();
+  analyticsInFlight.clear();
+  persistence.request();
+  persistence.flush();
+}
+
 export function isOverviewAnalyticsFresh(scope: string, now = Date.now()) {
   hydrateCache();
   const cacheEntry = analyticsCache.get(scope);
@@ -101,15 +111,20 @@ export function isOverviewAnalyticsFresh(scope: string, now = Date.now()) {
 }
 
 /** Deduplicates concurrent refreshes for the same report scope. */
-export function loadOverviewAnalytics(scope: string, loader: () => Promise<Analytics | null>, force = false): Promise<Analytics | null> {
+export function loadOverviewAnalytics(scope: string, loader: () => Promise<Analytics | null>, force = false, signal?: AbortSignal): Promise<Analytics | null> {
+  if (signal?.aborted) return Promise.reject(signal.reason);
   const existing = analyticsInFlight.get(scope);
   if (existing) {
     if (!force) return existing;
-    const reload = () => loadOverviewAnalytics(scope, loader);
+    // An event may queue revalidation behind a slow read. Navigation cancels
+    // that intent, not the shared native read another visitor can still use.
+    const reload = () => loadOverviewAnalytics(scope, loader, false, signal);
     return existing.then(reload, reload);
   }
+  const generation = cacheGeneration;
   const analyticsRequest = loader()
     .then((loadedAnalytics) => {
+      if (generation !== cacheGeneration) return null;
       if (loadedAnalytics) rememberOverviewAnalytics(scope, loadedAnalytics);
       return loadedAnalytics;
     })

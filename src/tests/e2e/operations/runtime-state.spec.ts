@@ -84,21 +84,21 @@ test("background snapshots and analytics stay dormant on inactive pages", async 
   await expect.poll(stateReads).toBeGreaterThan(stateReadsBefore);
 });
 
-test("runtime snapshots stay off Usage while active Usage reloads its own data", async ({ page }) => {
+test("runtime snapshots stay off Usage while history events reload its own data", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   const stateReads = () => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "get_local_runtime_state").length);
   const usageReads = () => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "get_local_usage_page").length);
   await expect.poll(usageReads).toBeGreaterThan(0);
   const overviewReads = await usageReads();
-  await emitTauriEvent(page, "zenith-state-changed", null);
+  await emitTauriEvent(page, "zenith-usage-recorded", null);
   await expect.poll(usageReads).toBeGreaterThan(overviewReads);
 
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await expect.poll(usageReads).toBeGreaterThan(overviewReads + 1);
   const usagePageReads = await usageReads();
   const usagePageStateReads = await stateReads();
-  await emitTauriEvent(page, "zenith-state-changed", null);
+  await emitTauriEvent(page, "zenith-usage-recorded", null);
   await expect.poll(usageReads).toBeGreaterThan(usagePageReads);
   expect(await stateReads()).toBe(usagePageStateReads);
 });
@@ -136,6 +136,9 @@ test("Usage renders the cached report while a return navigation refresh is pendi
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await expect(usageRow).toBeVisible();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
+  // Unchanged all-time pages are cached; a history write makes this return
+  // require revalidation without discarding the last rendered report.
+  await emitTauriEvent(page, "zenith-usage-recorded", null);
 
   await page.evaluate(() => {
     const testWindow = window as unknown as {
@@ -189,7 +192,7 @@ test("Overview keeps rendered analytics while a background refresh is pending or
       });
     };
   });
-  await emitTauriEvent(page, "zenith-state-changed", null);
+  await emitTauriEvent(page, "zenith-usage-recorded", null);
   await expect.poll(() => page.evaluate(() => Boolean((window as unknown as { __OVERVIEW_USAGE_REFRESH_PENDING__?: boolean }).__OVERVIEW_USAGE_REFRESH_PENDING__))).toBe(true);
   await expect(analytics).toHaveAttribute("aria-busy", "true");
   await expect(tokenSummary).toHaveText("28");
@@ -210,7 +213,7 @@ test("Overview keeps rendered analytics while a background refresh is pending or
       return Promise.reject(new Error("Synthetic overview usage error"));
     };
   });
-  await emitTauriEvent(page, "zenith-state-changed", null);
+  await emitTauriEvent(page, "zenith-usage-recorded", null);
   await expect(analytics.getByRole("alert")).toBeVisible();
   await expect(tokenSummary).toHaveText("28");
 });
@@ -275,7 +278,7 @@ test("open send details never adopt a later physical send of the same request", 
       return usage;
     };
   });
-  await emitTauriEvent(page, "zenith-state-changed", null);
+  await emitTauriEvent(page, "zenith-usage-recorded", null);
 
   // The refreshed page contains send 2. The open dialog still belongs to
   // send 1, even though both sends share the same client request ID.
@@ -285,7 +288,7 @@ test("open send details never adopt a later physical send of the same request", 
   await expect(dialog.getByText("428 ms", { exact: true })).toBeVisible();
   await dialog.getByRole("button", { name: "Close", exact: true }).click();
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
-  await expect(dialog.getByText("Success", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("img", { name: "Success", exact: true })).toBeVisible();
   await expect(dialog.locator(".request-details-error")).toHaveCount(0);
   await expect(dialog.getByText("16.2 s", { exact: true })).toBeVisible();
 });

@@ -109,45 +109,6 @@ function normalizeModelSummary(model: ModelSummary): ModelSummary {
 
 function mergeModelSummary(existingSummary: ModelSummary, incomingSummary: ModelSummary): ModelSummary {
   const merged = { ...existingSummary };
-  const preferIncoming = <T>(existingValue: T | null | undefined, incomingValue: T | null | undefined) =>
-    existingValue == null || existingValue === "" ? incomingValue : existingValue;
-  const unionArray = <T>(existingValues: readonly T[] | undefined, incomingValues: readonly T[] | undefined) =>
-    [...new Set([...(existingValues ?? []), ...(incomingValues ?? [])])];
-  const unionReasoningLevels = (existingLevels: readonly string[] | undefined, incomingLevels: readonly string[] | undefined) =>
-    sortReasoningEfforts([...(existingLevels ?? []), ...(incomingLevels ?? [])]);
-  const unionImagePrices = (existingPrices: ModelSummary["imageRequestPrices"], incomingPrices: ModelSummary["imageRequestPrices"]) => {
-    const prices = new Map<string, NonNullable<ModelSummary["imageRequestPrices"]>[number]>();
-    for (const price of [...(existingPrices ?? []), ...(incomingPrices ?? [])]) {
-      const key = `${price.operation}:${price.quality}:${price.size}:${price.microUsd}`;
-      if (!prices.has(key)) prices.set(key, price);
-    }
-    return [...prices.values()];
-  };
-  const mergeProtocolRoutes = (
-    existingRoutes: ModelSummary["protocolRoutes"],
-    incomingRoutes: ModelSummary["protocolRoutes"],
-  ): NonNullable<ModelSummary["protocolRoutes"]> => {
-    const routes = new Map<string, NonNullable<ModelSummary["protocolRoutes"]>[number]>();
-    for (const route of [...(existingRoutes ?? []), ...(incomingRoutes ?? [])]) {
-      const key = `${route.clientWireApi}:${route.upstreamWireApi}`;
-      const existingRoute = routes.get(key);
-      if (!existingRoute) {
-        routes.set(key, {
-          ...route,
-          features: { ...route.features },
-          reasoningEfforts: [...route.reasoningEfforts],
-        });
-        continue;
-      }
-      routes.set(key, {
-        ...existingRoute,
-        features: { ...existingRoute.features, ...route.features },
-        reasoningEfforts: unionReasoningLevels(existingRoute.reasoningEfforts, route.reasoningEfforts),
-      });
-    }
-    return [...routes.values()];
-  };
-
   merged.memberCount = Math.max(existingSummary.memberCount, incomingSummary.memberCount);
   merged.protocolRoutes = mergeProtocolRoutes(existingSummary.protocolRoutes, incomingSummary.protocolRoutes);
   merged.codexDisplayName = existingSummary.codexDisplayName === existingSummary.id
@@ -192,6 +153,52 @@ function mergeModelSummary(existingSummary: ModelSummary, incomingSummary: Model
   merged.speedTier = existingSummary.speedTier ?? incomingSummary.speedTier ?? "standard";
   merged.speedConfigurable = (existingSummary.speedConfigurable ?? false) || (incomingSummary.speedConfigurable ?? false);
   return merged;
+}
+
+function preferIncoming<T>(existingValue: T | null | undefined, incomingValue: T | null | undefined) {
+  return existingValue == null || existingValue === "" ? incomingValue : existingValue;
+}
+
+function unionArray<T>(existingValues: readonly T[] | undefined, incomingValues: readonly T[] | undefined) {
+  return [...new Set([...(existingValues ?? []), ...(incomingValues ?? [])])];
+}
+
+function unionReasoningLevels(existingLevels: readonly string[] | undefined, incomingLevels: readonly string[] | undefined) {
+  return sortReasoningEfforts([...(existingLevels ?? []), ...(incomingLevels ?? [])]);
+}
+
+function unionImagePrices(existingPrices: ModelSummary["imageRequestPrices"], incomingPrices: ModelSummary["imageRequestPrices"]) {
+  const prices = new Map<string, NonNullable<ModelSummary["imageRequestPrices"]>[number]>();
+  for (const price of [...(existingPrices ?? []), ...(incomingPrices ?? [])]) {
+    const key = `${price.operation}:${price.quality}:${price.size}:${price.microUsd}`;
+    if (!prices.has(key)) prices.set(key, price);
+  }
+  return [...prices.values()];
+}
+
+function mergeProtocolRoutes(
+  existingRoutes: ModelSummary["protocolRoutes"],
+  incomingRoutes: ModelSummary["protocolRoutes"],
+): NonNullable<ModelSummary["protocolRoutes"]> {
+  const routes = new Map<string, NonNullable<ModelSummary["protocolRoutes"]>[number]>();
+  for (const route of [...(existingRoutes ?? []), ...(incomingRoutes ?? [])]) {
+    const key = `${route.clientWireApi}:${route.upstreamWireApi}`;
+    const existingRoute = routes.get(key);
+    if (!existingRoute) {
+      routes.set(key, {
+        ...route,
+        features: { ...route.features },
+        reasoningEfforts: [...route.reasoningEfforts],
+      });
+      continue;
+    }
+    routes.set(key, {
+      ...existingRoute,
+      features: { ...existingRoute.features, ...route.features },
+      reasoningEfforts: unionReasoningLevels(existingRoute.reasoningEfforts, route.reasoningEfforts),
+    });
+  }
+  return [...routes.values()];
 }
 
 function fallbackModelSummary(modelId: string): ModelSummary {

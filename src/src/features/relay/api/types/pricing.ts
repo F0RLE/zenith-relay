@@ -78,6 +78,8 @@ export type PricingMetadata = {
 };
 
 export type QuotaWindowUsage = {
+  recentConsumedBasisPoints?: number | null;
+  recentApiEquivalent?: ApiEquivalentSummary | null;
   kind: "primary" | "secondary";
   windowStartMs: number;
   observedAtMs: number;

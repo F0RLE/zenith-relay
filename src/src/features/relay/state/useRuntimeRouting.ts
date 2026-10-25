@@ -24,25 +24,39 @@ export function useRuntimeRouting({
 }) {
   const scheduleRefreshRef = useRef<() => void>(() => {});
   const requestRoutingRefresh = useCallback(() => scheduleRefreshRef.current(), []);
+  // Both pages consume the same scheduler state. Keep its pending read and
+  // fallback deadline when moving between them instead of starting a duplicate.
+  const observing = mode === "local" && (page === "pool" || page === "connections") && Boolean(gatewayRunning);
   useEffect(() => {
-    if (mode !== "local" || (page !== "pool" && page !== "connections") || !gatewayRunning) return;
+    if (!observing) return;
     let active = true;
     let pending = false;
     let refreshQueued = false;
     let refreshTimer: number | undefined;
+    let fallbackTimer: number | undefined;
+    const clearTimers = () => {
+      window.clearTimeout(refreshTimer);
+      window.clearTimeout(fallbackTimer);
+      refreshTimer = undefined;
+      fallbackTimer = undefined;
+    };
     const scheduleRefresh = () => {
-      if (!active || refreshTimer !== undefined || document.visibilityState !== "visible") return;
+      if (!active || document.visibilityState !== "visible") return;
+      if (pending) {
+        // Only a real event, not an elapsed polling interval, dirties a read.
+        refreshQueued = true;
+        return;
+      }
+      if (refreshTimer !== undefined) return;
       refreshTimer = window.setTimeout(() => {
         refreshTimer = undefined;
         void refreshRouting();
       }, RUNTIME_EVENT_REFRESH_DEBOUNCE_MS);
     };
     const refreshRouting = async () => {
-      if (!active || document.visibilityState !== "visible") return;
-      if (pending) {
-        refreshQueued = true;
-        return;
-      }
+      if (!active || pending || document.visibilityState !== "visible") return;
+      clearTimers();
+      refreshQueued = false;
       pending = true;
       try {
         const routingOrder = await relayCommands.localRuntimeOrder();
@@ -61,21 +75,31 @@ export function useRuntimeRouting({
         // The full refresh keeps the last known order if the lightweight probe fails.
       } finally {
         pending = false;
-        if (refreshQueued) {
-          refreshQueued = false;
-          scheduleRefresh();
+        if (active && document.visibilityState === "visible") {
+          if (refreshQueued) {
+            refreshQueued = false;
+            scheduleRefresh();
+          } else {
+            // Preserve recovery/cooldown polling without racing a fresh event read
+            // or piling up work behind a slow native response.
+            fallbackTimer = window.setTimeout(() => void refreshRouting(), ROUTING_REFRESH_INTERVAL_MS);
+          }
         }
       }
     };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") scheduleRefresh();
+      else clearTimers();
+    };
     scheduleRefreshRef.current = scheduleRefresh;
     void refreshRouting();
-    const interval = window.setInterval(() => void refreshRouting(), ROUTING_REFRESH_INTERVAL_MS);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       active = false;
       scheduleRefreshRef.current = () => {};
-      if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
-      window.clearInterval(interval);
+      clearTimers();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [mode, page, gatewayRunning]);
+  }, [observing]);
   return requestRoutingRefresh;
 }

@@ -53,7 +53,7 @@ export function ApplicationLaunchPath({ application }: { application: LaunchAppl
         onChange={(event) => { setDraft(event.target.value); setSaved(false); setFailure(null); }}
         placeholder={setting?.detectedPath?.startsWith("shell:AppsFolder\\")
           ? t("integrations.launchPathWindowsApp")
-          : setting?.detectedPath ?? t(setting ? "integrations.launchPathNotDetected" : "common.loading")}
+          : setting?.detectedPath ?? (setting ? t("integrations.launchPathNotDetected") : "")}
         disabled={disabled}
         autoComplete="off"
         spellCheck={false}

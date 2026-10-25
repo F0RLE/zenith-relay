@@ -8,6 +8,13 @@ import {
 import type { SourceSummary } from "../src/features/relay/api/types";
 
 describe("source protocol bindings", () => {
+  test("Interactions is native-only and never supplies a Responses or Messages bridge", () => {
+    const source = { wireApi:"gemini_interactions", models:["synthetic"], protocolBindings:[{wireApi:"gemini_interactions",adapter:"native",modelIds:["synthetic"]}] } satisfies Pick<SourceSummary,"wireApi"|"models"|"protocolBindings">;
+    expect(effectiveSourceProtocolBindings(source)).toHaveLength(1);
+    expect(sourceSupportsNativeProtocol(source,"gemini_interactions")).toBe(true);
+    expect(sourceSupportsNativeResponses(source)).toBe(false);
+    expect(sourceModelsWithCacheWritePricing(source)).toEqual([]);
+  });
   test("cache-write pricing follows Messages upstream routes", () => {
     const source = {
       wireApi: "responses",

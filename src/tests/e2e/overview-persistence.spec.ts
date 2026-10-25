@@ -3,6 +3,74 @@ import { emitTauriEvent, installTauriMock } from "./tauri-mock";
 
 const CACHE_KEY = "relay.overviewAnalyticsCache.v1";
 
+test("leaving Overview discards history refreshes queued behind a slow read", async ({ page }) => {
+  await page.clock.install();
+  await installTauriMock(page, { locale: "en" });
+  await page.goto("/");
+  await expect(page.locator(".overview-analytics")).toHaveAttribute("aria-busy", "false");
+  await page.clock.pauseAt(new Date(Date.now() + 1_000));
+  await page.evaluate(() => {
+    const target = window as unknown as {
+      __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> };
+      __OVERVIEW_READS__: number;
+      __RELEASE_OVERVIEW__?: () => void;
+    };
+    target.__OVERVIEW_READS__ = 0;
+    const invoke = target.__TAURI_INTERNALS__.invoke.bind(target.__TAURI_INTERNALS__);
+    target.__TAURI_INTERNALS__.invoke = async (command, args, options) => {
+      const result = await invoke(command, args, options);
+      if (command !== "get_local_usage_page") return result;
+      target.__OVERVIEW_READS__ += 1;
+      if (target.__OVERVIEW_READS__ > 1) return result;
+      return new Promise((resolve) => { target.__RELEASE_OVERVIEW__ = () => resolve(result); });
+    };
+  });
+  const reads = () => page.evaluate(() => (window as unknown as { __OVERVIEW_READS__: number }).__OVERVIEW_READS__);
+  await emitTauriEvent(page, "zenith-usage-recorded", null);
+  await page.clock.fastForward(2_000);
+  await expect.poll(reads).toBe(1);
+  await emitTauriEvent(page, "zenith-usage-recorded", null);
+  await page.clock.fastForward(2_000);
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+  await page.evaluate(() => (window as unknown as { __RELEASE_OVERVIEW__: () => void }).__RELEASE_OVERVIEW__());
+  await page.clock.runFor(2_000);
+  expect(await reads()).toBe(1);
+});
+
+test("saved Overview is visible before the first native snapshot after reload", async ({ page }) => {
+  await installTauriMock(page, { locale: "en" });
+  await page.goto("/");
+  await expect(page.locator(".overview-analytics")).toHaveAttribute("aria-busy", "false");
+  const requests = await page.locator(".overview-metrics strong").first().textContent();
+  await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
+  await page.addInitScript(() => {
+    const scope = window as unknown as {
+      __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> };
+      __RELEASE_STARTUP_SNAPSHOT__?: () => void;
+    };
+    const invoke = scope.__TAURI_INTERNALS__.invoke.bind(scope.__TAURI_INTERNALS__);
+    scope.__TAURI_INTERNALS__.invoke = (command, args, options) => {
+      if (command !== "get_local_runtime_state") return invoke(command, args, options);
+      return new Promise((resolve, reject) => {
+        scope.__RELEASE_STARTUP_SNAPSHOT__ = () => { void invoke(command, args, options).then(resolve, reject); };
+      });
+    };
+  });
+  await page.reload();
+  await expect(page.locator("#splash-screen")).toHaveCount(0);
+  await expect(page.locator(".overview-chart-stack")).toBeVisible();
+  await expect(page.locator(".overview-metrics strong").first()).toHaveText(requests!);
+  await expect(page.locator(".relay-content .data-placeholder")).toHaveCount(0);
+  await expect(page.locator(".relay-content")).not.toContainText("Loading");
+  await expect(page.getByRole("button", { name: "Start API", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Stop API", exact: true })).toHaveCount(0);
+  expect(await page.evaluate(() => performance.getEntriesByName("zenith:interactive", "measure"))).toEqual([]);
+  await page.screenshot({ path: "output/playwright/overview-cached-startup.png" });
+  await page.evaluate(() => (window as unknown as { __RELEASE_STARTUP_SNAPSHOT__: () => void }).__RELEASE_STARTUP_SNAPSHOT__());
+  await expect(page.getByRole("button", { name: "Stop API", exact: true })).toBeVisible();
+});
+
 test("page hide flushes the latest Overview cache without a duplicate delayed write", async ({ page }) => {
   await page.clock.install();
   await installTauriMock(page, { locale: "en" });

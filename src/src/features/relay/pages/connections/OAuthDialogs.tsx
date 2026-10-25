@@ -34,6 +34,7 @@ export function OAuthDialog({ flow, notesAccountId, onCancel, onUseProxy, onUseC
   const secondsRemaining = secondsUntil(flow.expiresAtMs, now);
   const reopenIn = secondsUntil(reopenAt, now);
   const callbackReceived = flow.status === "callback_received" || busy === "oauth-complete";
+  const completionLabel = flow.diagnostic ? t(`accounts.oauthStage.${flow.diagnostic.stage}`) : t("accounts.completingSignIn");
   const failureStatus = starting ? null : flow.status === "callback_rejected" || flow.status === "expired" || flow.status === "failed"
     ? flow.status
     : secondsRemaining === 0 && !callbackReceived ? "expired" : null;
@@ -94,7 +95,7 @@ export function OAuthDialog({ flow, notesAccountId, onCancel, onUseProxy, onUseC
   >
     <div className="oauth-completing-status" role="status">
       <Loader2 className="spin" aria-hidden />
-      <span>{t("accounts.completingSignIn")}</span>
+      <span>{completionLabel}</span>
     </div>
   </Dialog>;
   return <>
@@ -133,6 +134,9 @@ export function OAuthDialog({ flow, notesAccountId, onCancel, onUseProxy, onUseC
           <CircleAlert aria-hidden />
           <strong>{t(`accounts.oauthStatus.${failureStatus}`)}</strong>
         </div> : null}
+        {failureStatus && flow.diagnostic?.reason ? <small role="status">
+          {t("accounts.oauthDiagnostic", { stage: t(`accounts.oauthStage.${flow.diagnostic.stage}`), reason: flow.diagnostic.reason, elapsed: flow.diagnostic.elapsedMs })}
+        </small> : null}
         <div className="oauth-expiry" role={starting || callbackReceived ? "status" : "timer"}>
           <Clock3 aria-hidden />
           <span>{t(starting ? "accounts.preparingSignIn" : callbackReceived ? "accounts.completingSignIn" : "accounts.oauthRemaining")}</span>
@@ -242,7 +246,6 @@ export function SignInProxyDialog({
       }
     >
       <div className="relay-form proxy-route-form">
-        {loading ? <div className="center-loading"><Loader2 className="spin" aria-hidden />{t("common.loading")}</div> : null}
         {!loading && failed ? <p role="alert" className="form-note error-text">{t("accounts.signInProxyUnavailable")}</p> : null}
         {!loading && !failed && proxyEntries.length === 0 ? <p className="form-note">{t("accounts.signInProxyEmpty")}</p> : null}
         {!loading && !failed && proxyEntries.length > 0 ? (

@@ -12,7 +12,8 @@ import type { FeedbackError } from "../../state/feedback";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { setVisibleIdsSelected, toggleSelectedId } from "../../state/selectionModel";
 import { NoResults } from "./connectionHelpers";
-import { routingOrderPositions, runtimeCandidateForMember, upcomingModelRetries } from "../../routingOrder";
+import { routingOrderPositions, upcomingModelRetries } from "../../routingOrder";
+import { createRuntimeCandidateLookup } from "../../runtimeCandidateIndex";
 import { updatePoolMembership } from "../../poolMembership";
 import { useRelativeTimeClock } from "../../hooks/useRelativeTimeClock";
 import type { SourceStatsState } from "../../sourceStatsModel";
@@ -62,6 +63,10 @@ export function SourcesList({ query, onQuery, sourceStats, refreshReport, onEdit
     setPendingEnabled((previousPendingEnabled) => dropConfirmedFlags(previousPendingEnabled, savedEnabled));
   }, [membershipSignature]);
   const runtimeOrder = runtime?.gateway.routingOrder ?? EMPTY_RUNTIME_ORDER;
+  const runtimeBySource = useMemo(() => {
+    const runtimeFor = createRuntimeCandidateLookup(runtimeOrder);
+    return new Map(sourcesSnapshot.map((source) => [source.id, runtimeFor(source.id, "api_source", "all", source.wireApi)]));
+  }, [runtimeOrder, sourcesSnapshot]);
   const retryTimestamps = useMemo(() => runtimeOrder
     .flatMap((candidate) => candidate.kind === "api_source" ? [candidate.nextRetryAtMs] : []), [runtimeOrder]);
   const nowMs = useRelativeTimeClock(retryTimestamps);
@@ -84,7 +89,7 @@ export function SourcesList({ query, onQuery, sourceStats, refreshReport, onEdit
   const disabledCount = sourcesSnapshot.filter((source) => !(pendingEnabled[source.id] ?? source.enabled)).length;
   const errorCount = sourcesSnapshot.filter((source) => sourceStatus(
     source,
-    (pendingPool[source.id] ?? source.inPool) ? runtimeCandidateForMember(source.id, "api_source", runtimeOrder, "all", source.wireApi) : undefined,
+    (pendingPool[source.id] ?? source.inPool) ? runtimeBySource.get(source.id) : undefined,
     nowMs,
     pendingEnabled[source.id] ?? source.enabled,
   ).tone === "error").length;
@@ -190,7 +195,7 @@ export function SourcesList({ query, onQuery, sourceStats, refreshReport, onEdit
           <div data-tone={errorCount ? "error" : "muted"}><CircleAlert aria-hidden /><strong>{errorCount}</strong><span>{t("accounts.summary.errors")}</span></div>
           <div data-tone="muted"><CirclePause aria-hidden /><strong>{disabledCount}</strong><span>{t("accounts.summary.disabled")}</span></div>
         </div>
-        <div className="connection-command-bar source-command-bar">
+        <div className={`connection-command-bar source-command-bar${selectedSources.length ? " sources-selection-toolbar" : ""}`} data-selection={selectedSources.length > 0}>
           <div className="connection-command-context">
             <input
               ref={selectAllRef}
@@ -202,12 +207,12 @@ export function SourcesList({ query, onQuery, sourceStats, refreshReport, onEdit
                 selectedIds, sources.map((source) => source.id), event.target.checked,
               ))}
             />
-            <label className="search-field">
+            {selectedSources.length ? <span>{t("sources.selectedCount", { count: selectedSources.length })}</span> : <label className="search-field">
               <span className="sr-only">{t("common.search")}</span>
               <input value={query} onChange={(event) => onQuery(event.target.value)} placeholder={t("common.search")} />
-            </label>
+            </label>}
           </div>
-          <div className="sources-sort-controls">
+          {!selectedSources.length ? <><div className="sources-sort-controls">
           <OptionMenu
             label={t("sources.sortLabel")}
             value={sort.key}
@@ -229,10 +234,7 @@ export function SourcesList({ query, onQuery, sourceStats, refreshReport, onEdit
           ) : null}
           </div>
           <IconButton label={t("sources.refreshData")} icon={<RefreshCw aria-hidden />} busy={busy === "sources-refresh-all"} disabled={Boolean(busy)} onClick={onRefreshAll} />
-        </div>
-        {selectedSources.length ? <div className="sources-selection-toolbar">
-          <span>{t("sources.selectedCount", { count: selectedSources.length })}</span>
-          <div className="sources-selection-actions">
+          </> : <div className="sources-selection-actions">
             <IconButton label={t("sources.addToPoolAction")} icon={<ListPlus aria-hidden />} disabled={Boolean(busy) || selectedSources.every((source) => pendingPool[source.id] ?? source.inPool)} onClick={() => void updateSelectedParticipation(true)} />
             <IconButton label={t("sources.removeFromPoolAction")} icon={<ListMinus aria-hidden />} disabled={Boolean(busy) || selectedSources.every((source) => !(pendingPool[source.id] ?? source.inPool))} onClick={() => void updateSelectedParticipation(false)} />
             <ActionMenu label={t("common.actions")}>
@@ -241,9 +243,9 @@ export function SourcesList({ query, onQuery, sourceStats, refreshReport, onEdit
               <ActionMenuItem icon={<Power aria-hidden />} disabled={Boolean(busy) || selectedSources.every((source) => !(pendingEnabled[source.id] ?? source.enabled))} onClick={() => updateSelectedEnabled(false)}>{t("common.disable")}</ActionMenuItem>
               <ActionMenuItem danger icon={<Trash2 aria-hidden />} disabled={Boolean(busy)} onClick={() => void deleteSelected()}>{t("common.delete")}</ActionMenuItem>
             </ActionMenu>
-          </div>
           <IconButton label={t("accounts.clearSelection")} icon={<X aria-hidden />} disabled={Boolean(busy)} onClick={() => setSelected([])} />
-        </div> : null}
+          </div>}
+        </div>
       </div>
         {refreshReport ? <div className="connection-toolbar-result" role="status">{refreshReport}</div> : null}
         {!sources.length ? <NoResults /> : null}
@@ -261,7 +263,7 @@ export function SourcesList({ query, onQuery, sourceStats, refreshReport, onEdit
                 ? t("sources.launchUnavailable")
                 : t("sources.launch");
           const runtimeState = inPool
-             ? runtimeCandidateForMember(source.id, "api_source", runtimeOrder, "all", source.wireApi)
+             ? runtimeBySource.get(source.id)
             : undefined;
           const status = sourceStatus(source, runtimeState, nowMs, enabled);
           const modelRetries = upcomingModelRetries(runtimeState, nowMs);

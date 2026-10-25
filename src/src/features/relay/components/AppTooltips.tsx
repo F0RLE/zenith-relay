@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useState } from "react";
 import { useTooltip } from "./Ui";
+import { isTooltipFocusSuppressed } from "./ui/focus";
 
 const hintSelector = "[data-relay-tooltip]";
 const controlSelector = "button, input, select, textarea, a, summary, [tabindex]";
@@ -32,9 +33,16 @@ export function AppTooltips() {
 
   useEffect(() => {
     const activate = (event: Event, keyboard: boolean) => {
+      // Check intent before hintLabel: that function may read layout to detect
+      // clipping, which must not run during passive focus restoration.
+      if (keyboard && (isTooltipFocusSuppressed()
+        || !(event.target instanceof Element && event.target.matches(":focus-visible")))) {
+        hide();
+        return;
+      }
       const anchor = hintTarget(event.target);
       const text = anchor ? hintLabel(anchor) : "";
-      if (!anchor || !text || (keyboard && !(event.target instanceof Element && event.target.matches(":focus-visible")))) {
+      if (!anchor || !text) {
         hide();
         return;
       }

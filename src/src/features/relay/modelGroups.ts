@@ -77,18 +77,20 @@ export function orderModelIdsBySnapshot(
   summaries: readonly ModelSummary[],
   catalog: RuntimeSnapshot["gateway"]["modelCatalog"] = undefined,
 ) {
-  const unique = uniqueModelIds(models);
-  const byId = new Map(unique.map((model) => [modelIdKey(model), model]));
+  const remaining = new Map(uniqueModelIds(models).map((model) => [modelIdKey(model), model]));
   const catalogIds = Object.entries(catalog ?? {})
     .filter(([, identity]) => Number.isSafeInteger(identity.catalogOrder) && identity.catalogOrder! >= 0)
     .sort(([, left], [, right]) => left.catalogOrder! - right.catalogOrder!)
     .map(([modelId]) => modelId);
-  const ordered = uniqueModelIds([...catalogIds, ...summaries.map((model) => model.id)])
-    .map((modelId) => byId.get(modelIdKey(modelId)))
-    .filter((model): model is string => model !== undefined);
-  const knownModelIds = new Set(ordered.map((model) => modelIdKey(model)));
-  const unknownModels = unique.filter((model) => !knownModelIds.has(modelIdKey(model)));
-  return [...ordered, ...unknownModels];
+  const ordered: string[] = [];
+  for (const modelId of [...catalogIds, ...summaries.map((model) => model.id)]) {
+    const key = modelIdKey(modelId);
+    const model = remaining.get(key);
+    if (model === undefined) continue;
+    ordered.push(model);
+    remaining.delete(key);
+  }
+  return [...ordered, ...remaining.values()];
 }
 
 function normalizeCatalogValue(catalogValue: string | null | undefined) {

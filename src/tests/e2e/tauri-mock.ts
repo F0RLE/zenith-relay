@@ -1,6 +1,6 @@
 import type { Page } from "../bun-playwright";
 import type { ResolvedModelPrice } from "../../src/features/relay/api/types/pricing";
-import type { ApiModelPriceOverride, ModelSummary, SourceStats, UpstreamErrorDetails, SourceProtocolBinding, SourceProtocolConfig, WakeTask, ToolPolicy, RequestTimezonePolicy, RequestTimezoneUpdate, AccountSummary } from "../../src/features/relay/api/types";
+import type { ApiModelPriceOverride, ModelSummary, SourceStats, UpstreamErrorDetails, SourceProtocolBinding, SourceProtocolConfig, WakeTask, ToolPolicy, AccountSummary } from "../../src/features/relay/api/types";
 import type { CacheContextDiagnostics, CacheSessionRecord, RoutingDiagnostics, ProxyPoolEntry, RelayMode, UsageQuery, UsageTotals, UsageTransport } from "../../src/features/relay/api/types";
 
 export type MockOptions = {
@@ -75,6 +75,10 @@ export type MockOptions = {
     resolvedModel?: string;
     accountId?: string | null;
     sourceId?: string;
+    success?: boolean;
+    inputTokens?: number;
+    cachedInputTokens?: number | null;
+    outputTokens?: number;
   }>;
   usageSummaryTotals?: Partial<UsageTotals>;
   usageAttempts?: boolean;
@@ -114,8 +118,6 @@ export type MockOptions = {
   basisPointsEnabled?: boolean;
   chatgptRetryUntilAvailable?: boolean;
   blockDegradedRoutesEnabled?: boolean;
-  requestTimezone?: RequestTimezonePolicy;
-  timezoneCatalog?: string[];
   poolMembers?: boolean;
   proxyCount?: number;
   commonProxyConfigured?: boolean;
@@ -125,6 +127,8 @@ export type MockOptions = {
   proxyLocationError?: string;
   proxyCountryUnknown?: boolean;
   proxyCheckDelayMs?: number;
+  proxySpeedDelayMs?: number;
+  proxySpeedError?: string;
   importResult?: "success" | "item_failure" | "not_found";
   importFailureCode?: string;
   importPreviewError?: boolean;
@@ -195,7 +199,6 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     };
     const locale = input.locale ?? "en";
     const rotationVersion = input.rotationVersion ?? 3;
-    const timezoneCatalog = input.timezoneCatalog ?? ["Etc/GMT+8", "Etc/GMT-3", "America/New_York", "UTC"];
     const populated = input.populated ?? true;
     const usagePresent = populated && input.usagePresent !== false;
     let sourceStatsIndex = 0;
@@ -447,13 +450,6 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     const defaultToolPolicy: ToolPolicy = { mode: "pass_through" };
 
 
-    function saveRequestTimezone(current: RequestTimezonePolicy | undefined, update: RequestTimezoneUpdate): RequestTimezonePolicy {
-      const normalize = (policy: Partial<RequestTimezonePolicy> | undefined) => JSON.stringify({ enabled: policy?.enabled ?? false, accountTimezones: policy?.accountTimezones ?? {}, accountTimezoneBindings: policy?.accountTimezoneBindings ?? {}, accountTimezoneSources: policy?.accountTimezoneSources ?? {} });
-      if (normalize(current) !== normalize(update.expectedPolicy)) {
-        throw { code: "configuration_revision_stale", message: "request timezone changed" };
-      }
-      return structuredClone(update.policy);
-    }
     if (input.accountRouteKinds) {
       accounts.splice(0, accounts.length, ...input.accountRouteKinds.map((kind, index) => {
         const connection = structuredClone(account);
@@ -476,9 +472,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         } : {});
       }));
     }
+    const savedAccountModels = new Map(accounts.map((account) => [account.id, [...account.models]]));
     const localRuntime = {
       schemaVersion: 14,
-      gateway: { toolPolicy: defaultToolPolicy, requestTimezone: input.requestTimezone ?? { enabled: false, accountTimezones: {}, accountTimezoneBindings: {} } as RequestTimezonePolicy, modelCatalog: modelMetadata, poolRouting: { version: rotationVersion, mode: rotationVersion === 1 ? "smart" : "automatic", members: [] } as import("../../src/features/relay/api/types").PoolRoutingSnapshot, running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, defaultServiceTier: "standard" as "standard" | "fast" | "ultrafast", models: [] as MockModelSummary[], commonProxyConfigured: input.commonProxyConfigured ?? true, commonProxyAvailable: input.commonProxyConfigured ?? true, commonProxyId: input.commonProxyId ?? null, accountProxyRequired: false, quotaRequestTimeoutSeconds: 20, chatgptInterfaceQuotaReserveBasisPoints: 100, codexBackgroundTasksEnabled: input.codexBackgroundTasksEnabled ?? true, codexMemoryExtractionEnabled: input.codexMemoryExtractionEnabled ?? true, codexMemoryConsolidationEnabled: input.codexMemoryConsolidationEnabled ?? true, codexWebsocketsEnabled: input.codexWebsocketsEnabled ?? true, chatgptRetryUntilAvailable: input.chatgptRetryUntilAvailable ?? false, blockDegradedRoutesEnabled: input.blockDegradedRoutesEnabled ?? true, routingOrder: [] as MockCandidateRuntime[] },
+      gateway: { toolPolicy: defaultToolPolicy, modelCatalog: modelMetadata, poolRouting: { version: rotationVersion, mode: rotationVersion === 1 ? "smart" : "automatic", members: [] } as import("../../src/features/relay/api/types").PoolRoutingSnapshot, running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, defaultServiceTier: "standard" as "standard" | "fast" | "ultrafast", models: [] as MockModelSummary[], commonProxyConfigured: input.commonProxyConfigured ?? true, commonProxyAvailable: input.commonProxyConfigured ?? true, commonProxyId: input.commonProxyId ?? null, accountProxyRequired: false, quotaRequestTimeoutSeconds: 20, chatgptInterfaceQuotaReserveBasisPoints: 100, codexBackgroundTasksEnabled: input.codexBackgroundTasksEnabled ?? true, codexMemoryExtractionEnabled: input.codexMemoryExtractionEnabled ?? true, codexMemoryConsolidationEnabled: input.codexMemoryConsolidationEnabled ?? true, codexWebsocketsEnabled: input.codexWebsocketsEnabled ?? true, chatgptRetryUntilAvailable: input.chatgptRetryUntilAvailable ?? false, blockDegradedRoutesEnabled: input.blockDegradedRoutesEnabled ?? true, routingOrder: [] as MockCandidateRuntime[] },
       platform: input.platform ?? "windows",
       capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies", "account_export", "account_identity_reveal", "runtime_routing", rotationVersion === 3 ? "rotation_v3" : "rotation_v2", "source_protocols_v1"] },
       sources: populated ? sources : [],
@@ -560,6 +557,18 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       region: index === 0 ? "Virginia" : null,
       createdAtMs: Date.now() - index * 60_000,
     }));
+    function observeProxy(proxyId: string) {
+      const errorCode = input.proxyCheckError ?? null;
+      const entry = proxyEntries.find((entry) => entry.id === proxyId);
+      const located = !errorCode && !input.proxyLocationError && !input.proxyCountryUnknown;
+      const conflict = input.proxyLocationError === "proxy_location_conflict";
+      const countryCode = errorCode || input.proxyCountryUnknown || conflict ? null : "NL";
+      const result = { proxyId, checkedAtMs: Date.now(), elapsedMs: 184, ip: errorCode ? null : "203.0.113.42", ipv4: errorCode ? null : "203.0.113.42", ipv6: !errorCode && conflict ? "2001:db8::42" : null, countryCode, region: located ? "North Holland" : null, city: located ? "Amsterdam" : null, timezone: conflict ? null : located ? "Europe/Amsterdam" : null, locationSource: countryCode ? located ? "ipwhois" as const : "cloudflare" as const : null, locationErrorCode: errorCode || located ? null : input.proxyLocationError ?? "proxy_location_unavailable", errorCode };
+      if (entry) { entry.lastCheck = result; entry.timezone = result.timezone; }
+      return result;
+    }
+    // The host discovers proxies independently of whether Proxies is mounted.
+    for (const entry of proxyEntries) observeProxy(entry.id);
     const proxyPool = () => ({
       entries: structuredClone(proxyEntries),
       total: proxyEntries.length,
@@ -677,7 +686,12 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         resolvedModel: record.resolvedModel ?? base.resolvedModel,
         accountId: record.accountId === undefined ? base.accountId : record.accountId,
         sourceId: record.sourceId ?? base.sourceId,
-        success: record.errorCategory === null, httpStatus: record.errorCategory === null ? 200 : 502,
+        success: record.success ?? record.errorCategory === null,
+        httpStatus: (record.success ?? record.errorCategory === null) ? 200 : 502,
+        inputTokens: record.inputTokens ?? base.inputTokens,
+        cachedInputTokens: record.cachedInputTokens === undefined ? base.cachedInputTokens : record.cachedInputTokens,
+        outputTokens: record.outputTokens ?? base.outputTokens,
+        totalTokens: (record.inputTokens ?? base.inputTokens ?? 0) + (record.outputTokens ?? base.outputTokens ?? 0),
       }));
     }
     function syntheticAttemptPage<T extends { requestId: string; success: boolean; routing: object }>(
@@ -733,6 +747,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       const id = Number((channel as { id?: number } | null)?.id);
       if (Number.isFinite(id)) callbacks.get(id)?.({ index, message });
     };
+    let proxySpeedQueue = Promise.resolve();
 
     let claudeDesktopConfigured = input.claudeDesktopConfigured ?? false;
     let claudeDesktopHasRecovery = claudeDesktopConfigured;
@@ -757,7 +772,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       unregisterCallback(id: number) { callbacks.delete(id); },
       convertFileSrc(path: string) { return path; },
       async invoke(command: string, args: Record<string, unknown> = {}) {
-        const recordedArgs = command === "plugin:updater|download_and_install" || command === "install_portable_update"
+        const recordedArgs = command === "plugin:updater|download_and_install" || command === "install_portable_update" || command === "test_local_stored_proxy_speed"
           ? JSON.parse(JSON.stringify(args)) as Record<string, unknown>
           : structuredClone(args);
         invocations.push({ command, args: recordedArgs });
@@ -803,11 +818,17 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
               return syntheticAttemptPage(localUsage, historyQuery);
             }
             const query = (args.input ?? {}) as UsageQuery;
+            const workloadFor = (category: string | null) => {
+              if (["codex_memory_extraction", "codex_memory_consolidation", "codex_background_blocked_memory_extraction", "codex_background_blocked_memory_consolidation"].includes(category ?? "")) return "memory";
+              if (["codex_activity_summary", "codex_task_title", "codex_wake", "codex_background_blocked_activity_summary", "codex_background_blocked_task_title", "codex_background_blocked_wake"].includes(category ?? "")) return "background";
+              return "conversation";
+            };
             const rangeDays = query.range === "daily" ? 1 : query.range === "weekly" ? 7 : query.range === "monthly" ? 30 : null;
             const fromMs = rangeDays === null ? query.fromMs : Date.now() - rangeDays * 86_400_000;
             const periodEvents = localUsage.filter((item) => (fromMs === undefined || Date.parse(item.createdAt) >= fromMs) && (query.toMs === undefined || Date.parse(item.createdAt) <= query.toMs));
             const events = periodEvents.filter((item) => (query.success === undefined || item.success === query.success) && (!query.modelQuery || item.resolvedModel.includes(query.modelQuery) || item.requestedModel.includes(query.modelQuery)) && (!query.sourceOrAccountQuery || item.accountId?.includes(query.sourceOrAccountQuery) || item.sourceId.includes(query.sourceOrAccountQuery)) && (!query.wireApi || item.wireApi === query.wireApi) && (!query.transport || item.transport === query.transport) && (!query.errorCategory || item.errorCategory === query.errorCategory) && (!query.requestIdQuery || item.requestId.includes(query.requestIdQuery)))
-              .filter((item) => query.success !== false || !(item.routing?.attemptOutcome === "tool_discovery" && !item.errorCategory && item.httpStatus >= 200 && item.httpStatus < 300));
+              .filter((item) => query.success !== false || !(item.routing?.attemptOutcome === "tool_discovery" && !item.errorCategory && item.httpStatus >= 200 && item.httpStatus < 300))
+              .filter((item) => !query.workload || workloadFor(item.errorCategory) === query.workload);
             const filterOptions = query.includeFilterOptions && input.usageFilterOptionsVersion !== "missing" ? {
               ...(input.usageFilterOptionsVersion === "advanced" ? {} : {
                 models: [...new Set(periodEvents.flatMap((event) => [event.requestedModel, event.resolvedModel]))].filter(Boolean).sort(),
@@ -820,6 +841,16 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             const page = Math.max(1, query.page ?? 1);
             const pageSize = query.pageSize ?? 50;
             const pageEvents = events.slice((page - 1) * pageSize, page * pageSize);
+            if (args.includeReport === false) {
+              const hasMore = query.includeEvents !== false && page < (input.usageTotalPages ?? Math.ceil(events.length / pageSize));
+              return {
+                events: query.includeEvents === false ? [] : structuredClone(pageEvents),
+                workload: query.workload, filterOptions, hasMore, page, pageSize,
+                total: pageEvents.length ? (page - 1) * pageSize + pageEvents.length + Number(hasMore) : 0,
+                totalPages: pageEvents.length ? page + Number(hasMore) : 0,
+                totals: usageTotals([]), models: [], poolMembers: [], buckets: [],
+              };
+            }
             const totals = { ...usageTotals(events), ...input.usageSummaryTotals };
             const createdAtMs = events[0] ? Date.parse(events[0].createdAt) : 0;
             const bucketStart = query.bucketMs && query.fromMs != null ? query.fromMs + Math.floor((createdAtMs - query.fromMs) / query.bucketMs) * query.bucketMs : null;
@@ -830,7 +861,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             const poolMembers = query.includePoolMembers === false ? [] : groups((event) => event.accountId ?? event.sourceId)
               .map((group) => ({ ...group, label: localRuntime.accounts.find((item) => item.id === group.key)?.label
                 ?? localRuntime.sources.find((item) => item.id === group.key)?.name ?? group.key }));
-            return { events: query.includeEvents === false ? [] : structuredClone(pageEvents), filterOptions, total: events.length, page, pageSize, totalPages: events.length ? input.usageTotalPages ?? Math.ceil(events.length / pageSize) : 0, totals, buckets, models, poolMembers };
+            return { events: query.includeEvents === false ? [] : structuredClone(pageEvents), workload: query.workload, filterOptions, total: events.length, page, pageSize, totalPages: events.length ? input.usageTotalPages ?? Math.ceil(events.length / pageSize) : 0, totals, buckets, models, poolMembers };
           }
           case "create_local_source": {
             if (input.sourceCreateError) throw { code: input.sourceCreateError, message: "Synthetic upstream model discovery failed" };
@@ -972,7 +1003,12 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
               throw { code: "conflict", message: "Synthetic membership conflict after source creation" };
             }
             const request = args.input as { accountIds: string[]; sourceIds: string[]; inPool: boolean };
-            for (const item of localRuntime.accounts) if (request.accountIds.includes(item.id)) item.inPool = request.inPool;
+            for (const item of localRuntime.accounts) if (request.accountIds.includes(item.id)) {
+              item.inPool = request.inPool;
+              if (item.oauthClientKind === "codex") {
+                item.models = request.inPool ? ["gpt-image-2.5-sunburst"] : [...(savedAccountModels.get(item.id) ?? [])];
+              }
+            }
             for (const item of localRuntime.sources) if (request.sourceIds.includes(item.id)) item.inPool = request.inPool;
             refreshGatewayModels(localRuntime);
             return structuredClone(localRuntime);
@@ -1023,11 +1059,6 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "update_chatgpt_interface_quota_reserve": {
             const request = args.input as { reserveBasisPoints: number };
             localRuntime.gateway.chatgptInterfaceQuotaReserveBasisPoints = request.reserveBasisPoints;
-            return structuredClone(localRuntime);
-          }
-          case "get_request_timezone_catalog": return timezoneCatalog;
-          case "set_local_request_timezone": {
-            localRuntime.gateway.requestTimezone = saveRequestTimezone(localRuntime.gateway.requestTimezone, args.input as RequestTimezoneUpdate);
             return structuredClone(localRuntime);
           }
           case "set_local_codex_background_tasks": {
@@ -1131,15 +1162,31 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             return structuredClone(localRuntime);
           }
           case "get_local_proxy_pool": return proxyPool();
+          case "rename_local_stored_proxy": {
+            const entry = proxyEntries.find((entry) => entry.id === args.proxyId);
+            if (!entry) throw new Error("Synthetic stored proxy not found");
+            entry.label = String(args.label ?? "").trim() || null;
+            return proxyPool();
+          }
           case "check_local_stored_proxy": {
             if (input.proxyCheckDelayMs) await new Promise((resolve) => setTimeout(resolve, input.proxyCheckDelayMs));
-            const errorCode = input.proxyCheckError ?? null;
-            const entry = proxyEntries.find((entry) => entry.id === args.proxyId);
-            const located = !errorCode && !input.proxyLocationError && !input.proxyCountryUnknown;
-            const countryCode = errorCode || input.proxyCountryUnknown ? null : "NL";
-            const result = { proxyId: String(args.proxyId), checkedAtMs: Date.now(), elapsedMs: 184, ip: errorCode ? null : "203.0.113.42", countryCode, region: located ? "North Holland" : null, city: located ? "Amsterdam" : null, timezone: located ? "Europe/Amsterdam" : entry?.timezone ?? null, locationSource: countryCode ? located ? "ipwhois" as const : "cloudflare" as const : null, locationErrorCode: errorCode || located ? null : input.proxyLocationError ?? "proxy_location_unavailable", errorCode };
-            if (entry) { entry.lastCheck = result; entry.timezone = result.timezone; }
-            return result;
+            return observeProxy(String(args.proxyId));
+          }
+          case "test_local_stored_proxy_speed": {
+            const previous = proxySpeedQueue;
+            let release!: () => void;
+            proxySpeedQueue = new Promise<void>((resolve) => { release = resolve; });
+            await previous;
+            try {
+              sendChannel(args.onStarted, null);
+              if (input.proxySpeedDelayMs) await new Promise((resolve) => setTimeout(resolve, input.proxySpeedDelayMs));
+              const errorCode = input.proxySpeedError ?? null;
+              return { proxyId: String(args.proxyId), downloadedBytes: errorCode ? 0 : 5_242_880, elapsedMs: errorCode ? 0 : 1651, downloadMbps: errorCode ? null : 25.4, errorCode };
+            } finally {
+              const id = Number((args.onStarted as { id?: number } | null)?.id);
+              if (Number.isFinite(id)) callbacks.get(id)?.({ end: true, index: 1 });
+              release();
+            }
           }
           case "import_local_proxy_pool": {
             const values = (args.input as { proxyUrls?: string[] })?.proxyUrls ?? [];
@@ -1157,6 +1204,12 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
               proxyEntries.push({ id: `proxy_synthetic_${proxyEntries.length + 1}`, endpoint, assignedAccountIds: [], countryCode, region: null, createdAtMs: Date.now() });
               addedProxyIds.push(proxyEntries[proxyEntries.length - 1]!.id);
               added += 1;
+            }
+            for (const id of addedProxyIds) {
+              setTimeout(() => {
+                observeProxy(id);
+                emitEvent("zenith-proxy-pool-changed", null);
+              }, input.proxyCheckDelayMs ?? 0);
             }
             return { added, duplicates, addedProxyIds, pool: proxyPool() };
           }
@@ -1353,6 +1406,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "reset_local_pool_data": localRuntime.sources = []; localRuntime.accounts = []; localRuntime.automations = []; localUsage = []; return null;
           case "clear_local_usage": localUsage = []; return null;
           case "export_usage": return "C:\\Temp\\usage.json";
+          case "export_request_diagnostics": return "C:\\Temp\\relay-request-diagnostics.json";
           case "plugin:window|is_fullscreen": return fullscreen;
           case "plugin:window|close":
           case "plugin:window|minimize":

@@ -70,7 +70,10 @@ export function estimateRemainingApiEquivalent(
 
   const window = quota[evidence.kind];
   const available = window?.availableBasisPoints;
-  const totalTokens = evidence.apiEquivalent.pricedTokens + evidence.apiEquivalent.unpricedTokens;
+  const recent = evidence.recentConsumedBasisPoints != null || evidence.recentApiEquivalent != null;
+  const equivalent = recent ? evidence.recentApiEquivalent : evidence.apiEquivalent;
+  if (!equivalent) return null;
+  const totalTokens = equivalent.pricedTokens + equivalent.unpricedTokens;
   if (
     window?.windowStartMs !== evidence.windowStartMs
     || window?.observedAtMs !== evidence.observedAtMs
@@ -81,15 +84,18 @@ export function estimateRemainingApiEquivalent(
     || available > 10_000
     || evidence.windowMinutes < MIN_WEEKLY_WINDOW_MINUTES
     || evidence.windowMinutes > MAX_WEEKLY_WINDOW_MINUTES
-    || evidence.apiEquivalent.microUsd <= 0
+    || !Number.isSafeInteger(equivalent.microUsd) || equivalent.microUsd <= 0
+    || !Number.isSafeInteger(equivalent.pricedTokens) || equivalent.pricedTokens < 0
+    || !Number.isSafeInteger(equivalent.unpricedTokens) || equivalent.unpricedTokens < 0
     || totalTokens <= 0
-    || evidence.apiEquivalent.pricedTokens * 10_000
+    || equivalent.pricedTokens * 10_000
       < totalTokens * MIN_PRICING_COVERAGE_BASIS_POINTS
   ) return null;
 
-  const consumed = 10_000 - available;
-  if (consumed < MIN_OBSERVED_USAGE_BASIS_POINTS) return null;
-  const microUsd = Math.round(evidence.apiEquivalent.microUsd * available / consumed);
+  const consumed = recent ? evidence.recentConsumedBasisPoints : 10_000 - available;
+  if (consumed == null || !Number.isSafeInteger(consumed) || consumed < MIN_OBSERVED_USAGE_BASIS_POINTS
+    || consumed > 10_000 - available) return null;
+  const microUsd = Math.round(equivalent.microUsd * available / consumed);
   if (!Number.isFinite(microUsd) || microUsd < 0) return null;
   return {
     microUsd,

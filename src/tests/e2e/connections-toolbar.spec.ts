@@ -48,17 +48,26 @@ for (const locale of ["ru", "en"] as const) {
           await page.mouse.move(1, 1);
           await page.screenshot({ path: `output/playwright/toolbar-${view}-${locale}-${theme}-${width}.png`, animations: "disabled" });
           const cards = page.locator(source ? ".source-card" : ".proxy-storage-row");
+          const before = (await controls.boundingBox())!;
+          const cardTop = (await cards.first().boundingBox())!.y;
           await cards.first().locator(".account-select-button").click();
           await expect(controls.getByRole("checkbox")).toHaveJSProperty("indeterminate", true);
           await expect(counts).toHaveText(source ? ["3", "3", "0", "0"] : ["3", "2", "1"]);
+          await expect(controls.getByRole("textbox", { name: russian ? "Поиск" : "Search", exact: true })).toHaveCount(0);
+          await expect(controls.locator('.connection-command-bar[data-selection="true"]')).toHaveCount(1);
+          expect((await controls.boundingBox())!.height).toBeLessThanOrEqual(before.height + 1);
+          expect((await cards.first().boundingBox())!.y).toBeLessThanOrEqual(cardTop + 1);
           await expectControlsFit(controls);
-          if (width === 390) {
-            await page.mouse.move(1, 1);
-            await page.screenshot({ path: `output/playwright/toolbar-${view}-selected-${locale}-${theme}-${width}.png`, animations: "disabled" });
-          }
+          await controls.getByRole("checkbox").check();
+          await expect(controls).toContainText(russian ? "Выбрано: 3" : "Selected: 3");
+          expect((await cards.first().boundingBox())!.y).toBeLessThanOrEqual(cardTop + 1);
+          await page.mouse.move(1, 1);
+          await page.screenshot({ path: `output/playwright/toolbar-${view}-selected-${locale}-${theme}-${width}.png`, animations: "disabled" });
           await controls.getByRole("button", { name: russian ? "Снять выделение" : "Clear selection", exact: true }).click();
           await expect(controls.getByRole("checkbox")).not.toBeChecked();
           await expect(controls.getByRole("checkbox")).toHaveJSProperty("indeterminate", false);
+          await expect(controls.getByRole("textbox", { name: russian ? "Поиск" : "Search", exact: true })).toBeVisible();
+          expect(Math.abs((await controls.boundingBox())!.height - before.height)).toBeLessThanOrEqual(1);
         }
       });
     }
@@ -113,7 +122,7 @@ test("source toolbar searches, sorts, updates pool counts and refreshes the comp
   await expect(cards).toHaveCount(3);
 });
 
-test("proxy toolbar preserves hidden selections, refreshes and deletes only selected proxies", async ({ page }) => {
+test("proxy toolbar keeps its filter on selection changes, refreshes and deletes only selected proxies", async ({ page }) => {
   await installTauriMock(page, { populated: true, proxyCount: 3, accountCount: 1, commonProxyConfigured: false });
   await openConnections(page);
   await page.getByRole("tab", { name: "Proxies", exact: true }).click();
@@ -121,21 +130,28 @@ test("proxy toolbar preserves hidden selections, refreshes and deletes only sele
   const cards = page.locator(".proxy-storage-row");
   const search = controls.getByRole("textbox", { name: "Search", exact: true });
   await expect(controls.locator(".relay-status-summary strong")).toHaveText(["3", "3", "0"]);
-  await cards.first().locator(".account-select-button").click();
   await search.fill("proxy-2.");
   await expect(cards).toHaveCount(1);
   await controls.getByRole("checkbox").check();
-  await expect(controls).toContainText("Selected: 2");
-  await controls.getByRole("checkbox").uncheck();
   await expect(controls).toContainText("Selected: 1");
+  await expect(search).toHaveCount(0);
+  await controls.getByRole("checkbox").uncheck();
+  await expect(search).toHaveValue("proxy-2.");
   await search.fill("no-synthetic-match");
   await expect(controls.getByRole("checkbox")).toBeDisabled();
   await expect(controls.locator(".relay-status-summary strong")).toHaveText(["3", "3", "0"]);
   await search.fill("");
+  await cards.nth(0).locator(".account-select-button").click();
+  await cards.nth(1).locator(".account-select-button").click();
+  await expect(controls).toContainText("Selected: 2");
+  await cards.nth(1).locator(".account-select-button").click();
+  await expect(controls).toContainText("Selected: 1");
   await expect(controls.getByRole("checkbox")).toHaveJSProperty("indeterminate", true);
+  await controls.getByRole("button", { name: "Clear selection", exact: true }).click();
   const before = (await calls(page, "get_local_proxy_pool")).length;
   await controls.getByRole("button", { name: "Refresh", exact: true }).click();
   await expect.poll(async () => (await calls(page, "get_local_proxy_pool")).length).toBeGreaterThan(before);
+  await cards.first().locator(".account-select-button").click();
   await expect(controls).toContainText("Selected: 1");
   await controls.getByRole("button", { name: "Delete", exact: true }).click();
   await page.getByRole("dialog", { name: "Confirm action" }).getByRole("button", { name: "Confirm", exact: true }).click();

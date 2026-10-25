@@ -8,12 +8,10 @@ export function canAccountJoinPool(account: {
   recoveryRequired?: boolean;
   lastErrorCode?: string | null;
 }) {
-  if (account.oauthClientKind !== "excel_bps" && account.oauthClientKind !== "siwc") return false;
+  if (account.oauthClientKind !== "codex" && account.oauthClientKind !== "excel_bps" && account.oauthClientKind !== "siwc") return false;
   if (account.recoveryRequired) return false;
   if (account.lastErrorCode === "siwc_plan_use_disabled") return false;
-  const plan = (account.subscription?.planType ?? account.plan)?.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
-  return account.oauthClientKind !== "excel_bps"
-    || !["free", "freeplan", "freetier", "chatgptfree", "chatgptfreeplan", "chatgptfreetier"].includes(plan ?? "");
+  return true;
 }
 
 export type PoolMembershipInput = {

@@ -1,5 +1,5 @@
 import type { AccountSummary, CandidateRuntimeSnapshot, OperationalStatus, PoolRoutingMode, RuntimeActivitySnapshot, RuntimeActivityState, RuntimeSnapshot } from "../../api/types";
-import { currentAccountErrorCode } from "../../accountStatus";
+import { accountDisplayStatus, currentAccountErrorCode } from "../../accountStatus";
 import { providerCreditsSummary, type ProviderCreditsSummary } from "../../providerCredits";
 import {
   activeModelCounts,
@@ -7,9 +7,9 @@ import {
   applyRuntimeActivities,
   currentRuntimeActivities,
   routingOrderPositions,
-  runtimeCandidateForMember,
   compareRoutingOrder,
 } from "../../routingOrder";
+import { createRuntimeCandidateLookup, indexCandidatesByMember } from "../../runtimeCandidateIndex";
 import { compareStableText, memberName, type PoolMember } from "../../poolHelpers";
 import { modelIdKey } from "../../modelGroups";
 
@@ -56,28 +56,31 @@ export function poolMemberRuntimeStates(
   runtimeOrder: CandidateRuntimeSnapshot[],
   activity?: RuntimeActivityState,
 ) {
+  const activities = Object.values(activity?.candidates ?? {});
   const activityOrder = activity
-    ? applyRuntimeActivities(runtimeOrder, Object.values(activity.candidates))
+    ? applyRuntimeActivities(runtimeOrder, activities)
     : runtimeOrder;
+  const runtimeFor = createRuntimeCandidateLookup(activityOrder);
+  const activityFor = indexCandidatesByMember(currentRuntimeActivities(activityOrder, activities));
   return new Map(members.map((member) => [
     member.id,
     runtimeStateForMember(
       member,
-      activityOrder,
-      activity,
+      runtimeFor,
+      activityFor,
     ),
   ]));
 }
 
 function runtimeStateForMember(
   member: PoolMember,
-  runtimeOrder: CandidateRuntimeSnapshot[],
-  activity?: RuntimeActivityState,
+  runtimeFor: ReturnType<typeof createRuntimeCandidateLookup>,
+  activityFor: (id: string, kind: CandidateRuntimeSnapshot["kind"]) => RuntimeActivitySnapshot[],
 ) {
-  const runtimeState = runtimeCandidateForMember(
+  const kind = member.kind === "source" ? "api_source" : "oauth_account";
+  const runtimeState = runtimeFor(
       member.id,
-      member.kind === "source" ? "api_source" : "oauth_account",
-      runtimeOrder,
+      kind,
       "all",
       member.kind === "source" ? member.wireApi : undefined,
   );
@@ -86,8 +89,7 @@ function runtimeStateForMember(
   // The reserve event can be delivered before an old runtime snapshot lists a
   // newly active candidate. Do not hide real in-flight work merely because
   // that snapshot is behind; create the smallest display state from the event.
-  const activities = currentRuntimeActivities(runtimeOrder, Object.values(activity?.candidates ?? {}))
-    .filter((candidate) => memberBelongsToCandidateId(member, candidate.candidateId));
+  const activities = activityFor(member.id, kind);
   if (!activities.some((candidate) => candidate.activeRequestCount > 0)) return undefined;
 
   return activityRuntimeState(member, activities);
@@ -97,15 +99,7 @@ function activityRuntimeState(
   member: PoolMember,
   activities: readonly RuntimeActivitySnapshot[],
 ): CandidateRuntimeSnapshot {
-  const activeModels = activeModelCounts(activities.map((activity) => ({
-    ...activity,
-    kind: member.kind === "source" ? "api_source" as const : "oauth_account" as const,
-    available: true,
-    lastUsedAtMs: null,
-    nextRetryAtMs: null,
-    halfOpen: false,
-    dispatches: 0,
-  })));
+  const activeModels = activeModelCounts(activities);
   const activeRequestCount = activities.reduce((total, activity) => total + activity.activeRequestCount, 0);
   return {
     candidateId: member.id,
@@ -170,13 +164,11 @@ function compareDisplayedPoolMembers(
 
 /** Explicit live waits narrow readiness; a bare unavailable preview can be stale. */
 export function poolMemberDisplayStatus(member: PoolMember, candidate?: CandidateRuntimeSnapshot): PoolMemberDisplayStatus {
+  if (member.kind === "account") return accountDisplayStatus(member, candidate);
   if (!member.enabled) return "disabled";
   if (member.draining) return "draining";
   if (member.operationalStatus === "disabled") return "disabled";
-  if (!member.secretAvailable || (member.kind === "account" && (member.proxyAvailable === false
-    || member.recoveryRequired || member.authState.state === "requires_reauth"))) return "unavailable";
-  if (member.kind === "account" && member.routingBlockReason
-    && member.routingBlockReason !== "quota_exhausted" && member.routingBlockReason !== "not_in_pool") return "unavailable";
+  if (!member.secretAvailable) return "unavailable";
   if (candidate?.available === false) {
     if (candidate.quotaWait) return "quotaWait";
     if (candidate.nextRetryAtMs != null) return "cooldown";
@@ -262,13 +254,14 @@ export function poolActivityState(
 ): PoolActivityState {
   const effectiveOrder = activityRuntimeOrder(runtimeOrder, activity, members);
   const activeMembers = members.filter((member) => activeRequestCount(runtimeByMember.get(member.id)) > 0);
-  const nextMember = effectiveOrder
-    .filter((candidate) => candidate.available && candidate.nextForNewRequest === true)
-    .map((candidate) => members.find((member) =>
+  let nextMember: PoolMember | null = null;
+  for (const candidate of effectiveOrder) {
+    if (!candidate.available || candidate.nextForNewRequest !== true) continue;
+    nextMember = members.find((member) =>
       candidateBelongsToMember(member, candidate)
-      && memberCanRoute(member, visibleModelIds),
-    ))
-    .find((member): member is PoolMember => member != null) ?? null;
+      && memberCanRoute(member, visibleModelIds)) ?? null;
+    if (nextMember) break;
+  }
   const activeRuntime = activeMembers.flatMap((member) => {
     const candidate = runtimeByMember.get(member.id);
     return candidate ? [candidate] : [];

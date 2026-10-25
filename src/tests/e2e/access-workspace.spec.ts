@@ -222,6 +222,11 @@ for (const locale of ["ru", "en"] as const) {
           }))).toBe(true);
           await page.screenshot({ path: `output/playwright/access-${id}-${locale}-${theme}-${viewport.width}.png` });
           if (id === "applications") {
+            const accountDescription = page.locator(".client-oauth-binding > header p");
+            await expect(accountDescription).toBeVisible();
+            await expect(accountDescription).toHaveText(russian
+              ? "Вход в Codex для управления с телефона. Запросы идут через пул."
+              : "Sign in to Codex to control it from your phone. Requests go through the pool.");
             const applications = page.locator(".application-workspace .integration-picker");
             await expect(applications.getByRole("tab")).toHaveText(["ChatGPT", "Claude Desktop", "OpenCode"]);
             expect(await applications.getByRole("tab").evaluateAll((elements) => elements.every((element, index) => {

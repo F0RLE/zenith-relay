@@ -58,20 +58,25 @@
 .proxy-storage { display: grid; gap: 16px; }
 .proxy-storage > .proxy-controls { margin: 0; }
 .proxy-storage-toolbar { grid-template-columns: minmax(140px, 1fr) auto; }
-.proxy-selection-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--relay-border); }
-.proxy-selection-toolbar .proxy-selected-count { margin-right: auto; }
 .proxy-selected-count { color: var(--relay-muted); font-size: 12px; }
 .proxy-storage-row .account-identity > strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .proxy-storage-row > .account-card-footer { margin-top: auto; border-top: 1px solid var(--relay-border); }
-.proxy-storage-meta { min-width: 0; flex: 1; display: grid; align-content: start; gap: 12px; padding: 14px; }
+.proxy-card-details { min-width: 0; flex: 1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(48px, auto)); }
+.proxy-card-location, .proxy-card-latency, .proxy-speed-value, .proxy-card-accounts { min-width: 0; display: flex; align-items: center; justify-content: center; padding: 9px 12px; text-align: center; font-size: 12px; line-height: 1.4; }
+.proxy-card-location { color: var(--relay-secondary); font-size: 11px; }
+.proxy-card-location[data-state="failed"] { color: var(--relay-error); }
+.proxy-card-latency { border-left: 1px solid var(--relay-border); color: var(--relay-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.proxy-card-endpoint { min-width: 0; display: block; color: var(--relay-muted); font-size: 11px; line-height: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.proxy-speed-value { border-top: 1px solid var(--relay-border); overflow-wrap: anywhere; color: var(--relay-muted); font-variant-numeric: tabular-nums; }
+.proxy-card-accounts { border-top: 1px solid var(--relay-border); border-left: 1px solid var(--relay-border); gap: 5px; color: var(--relay-secondary); font-variant-numeric: tabular-nums; }
+.proxy-card-accounts > svg { width: 14px; height: 14px; }
+.proxy-card-uses { min-width: 0; min-height: 28px; grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 5px 12px; border-top: 1px solid var(--relay-border); color: var(--relay-muted); font-size: 11px; }
+.proxy-card-uses > span { display: inline-flex; align-items: center; gap: 4px; }
+.proxy-card-uses svg { width: 13px; height: 13px; }
+.proxy-rename-form { display: grid; gap: 16px; }
+.proxy-speed-test[data-state="error"], .proxy-speed-value[data-state="error"] { color: var(--relay-error); }
+.proxy-speed-test[data-state="success"], .proxy-speed-value[data-state="success"] { color: var(--relay-accent); }
 .proxy-region { color: var(--relay-text); overflow-wrap: anywhere; }
-.proxy-storage-timezone { min-width: 0; display: inline-flex; align-items: center; gap: 7px; color: var(--relay-secondary); font-size: 11px; line-height: 16px; overflow-wrap: anywhere; }
-.proxy-storage-timezone svg { width: 14px; height: 14px; flex: 0 0 auto; color: var(--relay-muted); }
-.proxy-storage-meta .proxy-diagnostic-details { flex-wrap: wrap; row-gap: 3px; }
-.proxy-storage-meta .proxy-diagnostic-error { margin-left: 0; color: var(--relay-error); }
-.proxy-storage-bindings { min-width: 0; min-height: 40px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 10px 14px; border-top: 1px solid var(--relay-border); }
-.proxy-storage-bindings > span { display: inline-flex; align-items: center; gap: 6px; color: var(--relay-secondary); font-size: 11px; }
-.proxy-storage-bindings svg { width: 13px; height: 13px; flex: 0 0 auto; }
 .proxy-diagnostic { min-width: 0; display: grid; gap: 4px; }
 .proxy-diagnostic-status, .proxy-diagnostic-details { min-width: 0; display: flex; align-items: center; gap: 6px; }
 .proxy-diagnostic svg { width: 15px; height: 15px; flex: 0 0 auto; }

@@ -9,14 +9,15 @@ const pageIds = ["overview", "connections", "pool", "integrations", "usage", "pr
 
 async function expectPageFits(page: Page) {
   await expect.poll(() => page.locator(".relay-page").evaluate((element) => {
-    const content = element.closest<HTMLElement>(".relay-content")!;
+    const content = element.closest<HTMLElement>(".relay-content");
+    if (!content) return null;
     const bounds = element.getBoundingClientRect();
     const parent = content.getBoundingClientRect();
-    const header = element.querySelector(".relay-page-header")!.getBoundingClientRect();
+    const header = element.querySelector(".relay-page-header")?.getBoundingClientRect();
     return {
       fillsWorkspace: Math.abs(bounds.width - content.clientWidth) <= 1,
       leftAligned: Math.abs(bounds.left - parent.left) <= 1,
-      headerFits: header.left >= bounds.left && header.right <= bounds.right,
+      headerFits: Boolean(header && header.left >= bounds.left && header.right <= bounds.right),
       contentFits: content.scrollWidth <= content.clientWidth,
     };
   })).toEqual({ fillsWorkspace: true, leftAligned: true, headerFits: true, contentFits: true });

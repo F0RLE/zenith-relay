@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { ChevronDown } from "lucide-react";
 
 export function RequestDisclosure({ title, icon, badge, className = "", children }: {
@@ -6,15 +6,16 @@ export function RequestDisclosure({ title, icon, badge, className = "", children
   icon?: ReactNode;
   badge?: ReactNode;
   className?: string;
-  children: ReactNode;
+  children: ReactNode | (() => ReactNode);
 }) {
-  return <details className={`request-disclosure ${className}`}>
+  const [open, setOpen] = useState(false);
+  return <details className={`request-disclosure ${className}`} onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary>
       {icon ? <span className="request-disclosure-icon" aria-hidden>{icon}</span> : null}
       <span className="request-disclosure-title">{title}</span>
       {badge != null ? <span className="request-disclosure-badge">{badge}</span> : null}
       <ChevronDown className="request-disclosure-chevron" aria-hidden />
     </summary>
-    <div className="request-disclosure-body">{children}</div>
+    {open ? <div className="request-disclosure-body">{typeof children === "function" ? children() : children}</div> : null}
   </details>;
 }
