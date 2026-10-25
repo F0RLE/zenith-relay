@@ -36,11 +36,12 @@
     "@tauri-apps/plugin-updater": "^2.13.1",
     "i18next": "^26.4.2",
     "lucide-react": "^1.52.0",
+    "mdast-util-gfm": "3.1.0",
+    "micromark-extension-gfm": "3.0.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "react-i18next": "^17.0.15",
-    "react-markdown": "10.1.0",
-    "remark-gfm": "4.0.1"
+    "react-markdown": "10.1.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.1",
@@ -48,6 +49,7 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
+    "remark-gfm": "4.0.1",
     "remark-parse": "11.0.0",
     "typescript": "^7.0.2",
     "unified": "11.0.5",
