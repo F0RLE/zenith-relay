@@ -260,12 +260,16 @@ fn client_context_fingerprint_is_stable_and_ignores_untrusted_headers() {
         client_context_fingerprint(&first),
         client_context_fingerprint(&different_window)
     );
-    assert!(serde_json::to_string(&client_context_fingerprint(&first))
-        .unwrap()
-        .contains("client_"));
-    assert!(!serde_json::to_string(&client_context_fingerprint(&first))
-        .unwrap()
-        .contains("thread-42"));
+    assert!(
+        serde_json::to_string(&client_context_fingerprint(&first))
+            .unwrap()
+            .contains("client_")
+    );
+    assert!(
+        !serde_json::to_string(&client_context_fingerprint(&first))
+            .unwrap()
+            .contains("thread-42")
+    );
 }
 
 #[test]

@@ -1,15 +1,15 @@
 use super::super::{
-    credential_item_error, find_existing_account, proxy_item_error, ImportItemError,
-    ImportedCredentialMaterial, ItemResult,
+    ImportItemError, ImportedCredentialMaterial, ItemResult, credential_item_error,
+    find_existing_account, proxy_item_error,
 };
+use crate::local_pool::accounts::NativeSecretBackend;
 use crate::local_pool::accounts::credentials::{CredentialStore, StoredCodexCredentials};
 use crate::local_pool::accounts::proxy::effective_proxy_config;
-use crate::local_pool::accounts::NativeSecretBackend;
 use crate::local_pool::models::{GatewaySettings, LocalAccountRecord};
 use crate::local_pool::state::DesktopState;
 use uuid::Uuid;
-use zenith_relay_core::error_codes;
 use zenith_relay_core::ProxyConfig;
+use zenith_relay_core::error_codes;
 
 pub(super) struct ReconciledImportCredentials {
     pub(super) credentials: StoredCodexCredentials,
@@ -50,7 +50,10 @@ pub(super) fn reconcile_imported_credentials(
         .map(|account| account.account.id.clone())
         .unwrap_or_else(|| format!("account_{}", Uuid::new_v4().simple()));
     if existing_account.is_some() && material.siwc_registration.is_some() {
-        return Err(ImportItemError::new(error_codes::DUPLICATE_ITEM, "SIWC registration already exists; sign in again on the existing connection instead of replacing its tokens"));
+        return Err(ImportItemError::new(
+            error_codes::DUPLICATE_ITEM,
+            "SIWC registration already exists; sign in again on the existing connection instead of replacing its tokens",
+        ));
     }
     let old_credential = credential_store
         .load(&local_account_id)

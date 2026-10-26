@@ -151,9 +151,11 @@ async fn streaming_relayed_subscription_limit_does_not_pause_the_api_key_globall
         Some("upstream_quota_exhausted")
     );
     assert_eq!(events[0].cooldown_scope.as_deref(), Some(MODEL));
-    assert!(events[0]
-        .retry_at_ms
-        .is_some_and(|retry_at| retry_at < now_ms + 10_000));
+    assert!(
+        events[0]
+            .retry_at_ms
+            .is_some_and(|retry_at| retry_at < now_ms + 10_000)
+    );
     assert!(events[1].success);
 }
 

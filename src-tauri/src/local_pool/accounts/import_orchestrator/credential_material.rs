@@ -1,16 +1,16 @@
-use crate::local_pool::accounts::credentials::{bearer_authorization, StoredCodexCredentials};
+use crate::local_pool::accounts::credentials::{StoredCodexCredentials, bearer_authorization};
 use crate::local_pool::accounts::import_orchestrator::{
-    credential_item_error, ImportItemError, ItemResult,
+    ImportItemError, ItemResult, credential_item_error,
 };
 use crate::local_pool::accounts::oauth::{CodexOAuthClient, OAuthClientKind};
 use reqwest::header::HeaderValue;
 use url::Url;
+use zenith_relay_core::ProxyConfig;
 use zenith_relay_core::accounts::{ImportSecretMaterial, ParsedImportItem};
 use zenith_relay_core::error_codes;
 use zenith_relay_core::providers::chatgpt::{
-    push_account_id_hint, AgentIdentityCredential, BasisPointsCapturedHeaders,
+    AgentIdentityCredential, BasisPointsCapturedHeaders, push_account_id_hint,
 };
-use zenith_relay_core::ProxyConfig;
 use zenith_relay_core::{is_http_endpoint, url_has_userinfo};
 
 mod lookup;

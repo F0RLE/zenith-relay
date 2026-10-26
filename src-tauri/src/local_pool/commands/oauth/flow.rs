@@ -1,6 +1,6 @@
 use crate::local_pool::{
     accounts::{
-        oauth::{validate_authorization_url, OAuthError},
+        oauth::{OAuthError, validate_authorization_url},
         oauth_flow::{OAuthFlowError, OAuthFlowErrorCode, OAuthFlowStart},
         records::CODEX_SOURCE_ID,
     },

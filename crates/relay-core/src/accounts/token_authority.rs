@@ -16,7 +16,7 @@ pub use failure::{
 use revision::DispatchRevisionState;
 pub use revision::{TokenDispatchRevision, TokenDispatchRevisionGuard};
 
-pub use set::{access_token_is_usable, TokenRefresh, TokenSet, TOKEN_REFRESH_SKEW_MS};
+pub use set::{TOKEN_REFRESH_SKEW_MS, TokenRefresh, TokenSet, access_token_is_usable};
 
 pub trait TokenRefreshAdapter: Send + Sync {
     fn refresh<'a>(

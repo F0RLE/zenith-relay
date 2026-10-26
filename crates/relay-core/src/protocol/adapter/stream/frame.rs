@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub(crate) fn merge_usage(usage_snapshot: &mut Option<Value>, next_usage: &Value) {
     if !next_usage.is_object() {

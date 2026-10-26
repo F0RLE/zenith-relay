@@ -11,13 +11,15 @@ fn chat_participant_names_cannot_be_silently_discarded_by_conversion() {
         }
         let error = decode::request(WireApi::ChatCompletions, &request).unwrap_err();
         assert_eq!(error.parameter(), Some("messages[].name"), "role={role}");
-        assert!(prepare(
-            WireApi::ChatCompletions,
-            WireApi::ChatCompletions,
-            &request,
-            false
-        )
-        .is_passthrough());
+        assert!(
+            prepare(
+                WireApi::ChatCompletions,
+                WireApi::ChatCompletions,
+                &request,
+                false
+            )
+            .is_passthrough()
+        );
     }
 }
 
@@ -179,13 +181,15 @@ fn converted_chat_requests_do_not_discard_invalid_tool_fields() {
             decode::request(WireApi::ChatCompletions, &request).is_err(),
             "{fields}"
         );
-        assert!(prepare(
-            WireApi::ChatCompletions,
-            WireApi::ChatCompletions,
-            &request,
-            false
-        )
-        .is_passthrough());
+        assert!(
+            prepare(
+                WireApi::ChatCompletions,
+                WireApi::ChatCompletions,
+                &request,
+                false
+            )
+            .is_passthrough()
+        );
     }
     for calls in [Value::Null, json!([])] {
         let request = json!({"messages":[{"role":"user","content":"Hi","tool_calls":calls}]});

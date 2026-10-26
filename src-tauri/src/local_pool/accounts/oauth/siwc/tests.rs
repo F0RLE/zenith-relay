@@ -1,7 +1,7 @@
 use super::*;
 use crate::local_pool::accounts::oauth::{CodexOAuthClient, OAuthClientKind};
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-use serde_json::{json, Value};
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use serde_json::{Value, json};
 
 // Synthetic RSA key generated only for these tests; never used by an account.
 const KEY: &[u8] = include_bytes!("test-key.pem");
@@ -36,14 +36,16 @@ fn registration() -> SiwcRegistration {
 fn verifies_signature_issuer_audience_expiry_subject_and_nonce() {
     let now = now_ms();
     let claims = json!({"iss":ISSUER,"aud":"oaiapp_synthetic","sub":"synthetic-subject","exp":now / 1000 + 300,"nonce":"synthetic-nonce","email":"test@example.invalid"});
-    assert!(verify_id_token(
-        &sign(&claims),
-        &jwks(),
-        "oaiapp_synthetic",
-        Some("synthetic-nonce"),
-        now
-    )
-    .is_ok());
+    assert!(
+        verify_id_token(
+            &sign(&claims),
+            &jwks(),
+            "oaiapp_synthetic",
+            Some("synthetic-nonce"),
+            now
+        )
+        .is_ok()
+    );
     for (field, value) in [
         ("iss", json!("https://invalid.example")),
         ("aud", json!("other-client")),
@@ -70,45 +72,53 @@ fn verifies_signature_issuer_audience_expiry_subject_and_nonce() {
     let mut parts: Vec<_> = signed.split('.').map(str::to_string).collect();
     let replacement = if parts[2].starts_with('A') { "B" } else { "A" };
     parts[2].replace_range(..1, replacement);
-    assert!(verify_id_token(
-        &parts.join("."),
-        &jwks(),
-        "oaiapp_synthetic",
-        Some("synthetic-nonce"),
-        now
-    )
-    .is_err());
+    assert!(
+        verify_id_token(
+            &parts.join("."),
+            &jwks(),
+            "oaiapp_synthetic",
+            Some("synthetic-nonce"),
+            now
+        )
+        .is_err()
+    );
     let mut multiple = claims.clone();
     multiple["aud"] = json!(["oaiapp_synthetic", "other-client"]);
     for azp in [Value::Null, json!("other-client")] {
         multiple["azp"] = azp;
-        assert!(verify_id_token(
+        assert!(
+            verify_id_token(
+                &sign(&multiple),
+                &jwks(),
+                "oaiapp_synthetic",
+                Some("synthetic-nonce"),
+                now
+            )
+            .is_err()
+        );
+    }
+    multiple["azp"] = json!("oaiapp_synthetic");
+    assert!(
+        verify_id_token(
             &sign(&multiple),
             &jwks(),
             "oaiapp_synthetic",
             Some("synthetic-nonce"),
             now
         )
-        .is_err());
-    }
-    multiple["azp"] = json!("oaiapp_synthetic");
-    assert!(verify_id_token(
-        &sign(&multiple),
-        &jwks(),
-        "oaiapp_synthetic",
-        Some("synthetic-nonce"),
-        now
-    )
-    .is_ok());
+        .is_ok()
+    );
 }
 
 #[test]
 fn imported_registration_can_reauthorize_on_a_new_host_without_enabling_old_tokens() {
     let mut registration = registration();
-    assert!(super::super::CodexOAuthClient::new()
-        .unwrap()
-        .with_siwc_registration("urn:uuid:new-host".into(), Some(&registration))
-        .is_err());
+    assert!(
+        super::super::CodexOAuthClient::new()
+            .unwrap()
+            .with_siwc_registration("urn:uuid:new-host".into(), Some(&registration))
+            .is_err()
+    );
     registration.requires_reauthentication = true;
     assert!(!registration.plan_use_enabled());
     let client = super::super::CodexOAuthClient::new()
@@ -220,20 +230,24 @@ fn initial_registration_binds_loopback_pkce_nonce_and_issued_client() {
         "&client_id=oaiapp_one&client_id=oaiapp_two",
         "&client_id=oaiapp_one&state=wrong",
     ] {
-        assert!(pending
-            .parse_callback(&format!("{base}{suffix}"), 1001)
-            .is_err());
+        assert!(
+            pending
+                .parse_callback(&format!("{base}{suffix}"), 1001)
+                .is_err()
+        );
     }
     let callback = pending
         .parse_callback(&format!("{base}&client_id=oaiapp_synthetic"), 1001)
         .unwrap();
     assert_eq!(callback.client_id.as_deref(), Some("oaiapp_synthetic"));
-    assert!(pending
-        .parse_callback(
-            &format!("{base}&client_id=oaiapp_synthetic").replace("127.0.0.1", "localhost"),
-            1001
-        )
-        .is_err());
+    assert!(
+        pending
+            .parse_callback(
+                &format!("{base}&client_id=oaiapp_synthetic").replace("127.0.0.1", "localhost"),
+                1001
+            )
+            .is_err()
+    );
 }
 
 #[test]
@@ -263,10 +277,12 @@ fn returning_registration_cannot_be_rebound_and_consent_is_explicit() {
         query["state"]
     );
     assert!(start.pending().parse_callback(&callback, 1001).is_ok());
-    assert!(start
-        .pending()
-        .parse_callback(&format!("{callback}&client_id=oaiapp_foreign"), 1001)
-        .is_err());
+    assert!(
+        start
+            .pending()
+            .parse_callback(&format!("{callback}&client_id=oaiapp_foreign"), 1001)
+            .is_err()
+    );
     let denied = format!(
         "{}?error=access_denied&state={}",
         start.pending().redirect_uri(),

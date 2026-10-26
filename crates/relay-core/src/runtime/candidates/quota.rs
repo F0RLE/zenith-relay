@@ -2,7 +2,7 @@ use super::super::GatewayRuntime;
 use crate::error_codes;
 use crate::quota::QuotaSnapshot;
 use crate::{CandidateHealth, CandidateQuota, CandidateQuotaState, UsageEvent};
-use reqwest::{header::HeaderMap, StatusCode};
+use reqwest::{StatusCode, header::HeaderMap};
 
 const PASSIVE_QUOTA_PERSIST_DEBOUNCE_MS: u64 = 5_000;
 

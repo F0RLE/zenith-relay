@@ -1,6 +1,6 @@
 //! SIWC preview contract: preserve options or reject before network dispatch.
 use crate::protocol::AdapterError;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 pub(crate) fn sanitize_siwc_headers(headers: &mut reqwest::header::HeaderMap) {

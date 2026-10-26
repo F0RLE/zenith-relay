@@ -207,9 +207,10 @@ fn multipart_names_the_detected_file_and_contains_only_the_image() {
     assert!(text.contains("filename=\"image.png\""));
     assert!(text.contains("Content-Type: image/png"));
     assert!(text.contains(boundary));
-    assert!(body
-        .windows(png_bytes().len())
-        .any(|window| window == png_bytes()));
+    assert!(
+        body.windows(png_bytes().len())
+            .any(|window| window == png_bytes())
+    );
     assert!(!text.contains("Bearer"));
 }
 
@@ -257,9 +258,11 @@ async fn concurrent_uploads_share_success_and_failure_without_caching_failures()
         assert_eq!(results.len(), 8);
         assert!(results.iter().all(|result| result.is_ok() == succeeds));
         if succeeds {
-            assert!(results
-                .iter()
-                .all(|result| result.as_ref().is_ok_and(|id| id == "file-shared")));
+            assert!(
+                results
+                    .iter()
+                    .all(|result| result.as_ref().is_ok_and(|id| id == "file-shared"))
+            );
         }
         let retried = cached_upload(key, || async {
             uploads.fetch_add(1, Ordering::SeqCst);

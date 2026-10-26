@@ -8,9 +8,11 @@ fn account_health_failures_remain_isolated_by_model_and_protocol_route() {
     let mut engine = engine(&["b"]);
     engine.upsert(candidate).unwrap();
     fail(&mut engine, "a", 1, 0);
-    assert!(engine
-        .health
-        .contains_key(&("a".into(), "responses:text".into())));
+    assert!(
+        engine
+            .health
+            .contains_key(&("a".into(), "responses:text".into()))
+    );
     for (id, route, model) in [
         ("a", "messages:text", "text-model"),
         ("a", "responses:other", "other-model"),
@@ -125,13 +127,15 @@ fn exact_route_binding_does_not_cross_product_model_or_operation() {
     let invalid = RotationRequest::new(RequestId(1), "responses:text", "image-model")
         .with_operation(RotationOperation::Image);
     assert_eq!(engine.select(&invalid, 0), None);
-    assert!(engine
-        .select(
-            &RotationRequest::new(RequestId(2), "images:image", "image-model")
-                .with_operation(RotationOperation::Image),
-            0
-        )
-        .is_some());
+    assert!(
+        engine
+            .select(
+                &RotationRequest::new(RequestId(2), "images:image", "image-model")
+                    .with_operation(RotationOperation::Image),
+                0
+            )
+            .is_some()
+    );
     assert_eq!(
         engine.select(&request(3).with_operation(RotationOperation::Metadata), 0),
         None

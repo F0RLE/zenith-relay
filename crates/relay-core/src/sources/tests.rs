@@ -311,9 +311,11 @@ fn bridge_binding_is_responses_only_and_reasoning_is_bridge_only() {
         &["claude-test".to_string()],
     )
     .unwrap_err();
-    assert!(invalid_protocol
-        .to_string()
-        .contains("cannot serve this client protocol"));
+    assert!(
+        invalid_protocol
+            .to_string()
+            .contains("cannot serve this client protocol")
+    );
 
     let legacy_reasoning = normalize_source_protocol_bindings(
         vec![SourceProtocolBinding {
@@ -460,13 +462,15 @@ fn source_protocol_helpers_preserve_canonical_models_and_loopback_rules() {
             .unwrap(),
         ["gpt-test", "claude-test"]
     );
-    assert!(runtime_source_supports_wire_api(
-        &bindings,
-        WireApi::Responses,
-        &source_models,
-        WireApi::Responses,
-    )
-    .unwrap());
+    assert!(
+        runtime_source_supports_wire_api(
+            &bindings,
+            WireApi::Responses,
+            &source_models,
+            WireApi::Responses,
+        )
+        .unwrap()
+    );
     assert!(
         runtime_source_supports_any_wire_api(&bindings, WireApi::Responses, &source_models,)
             .unwrap()

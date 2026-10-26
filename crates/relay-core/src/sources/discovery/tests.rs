@@ -3,7 +3,7 @@ use super::*;
 use crate::UpstreamProtocol;
 use crate::WireApi;
 use crate::{CapabilityOrigin, CapabilityStatus};
-use axum::{routing::get, Json, Router};
+use axum::{Json, Router, routing::get};
 use tokio::net::TcpListener;
 
 #[test]
@@ -22,14 +22,16 @@ fn merges_generic_and_messages_prices_for_one_model() {
         ..generic
     };
     assert_eq!(merge_route_model_price(generic, messages), Some(messages));
-    assert!(merge_route_model_price(
-        generic,
-        ApiModelPriceOverride {
-            input_micro_usd_per_million: 99,
-            ..messages
-        }
-    )
-    .is_none());
+    assert!(
+        merge_route_model_price(
+            generic,
+            ApiModelPriceOverride {
+                input_micro_usd_per_million: 99,
+                ..messages
+            }
+        )
+        .is_none()
+    );
 }
 
 #[test]

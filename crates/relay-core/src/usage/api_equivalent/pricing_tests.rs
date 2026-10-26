@@ -1,6 +1,6 @@
 use super::*;
 use crate::pricing::{
-    PriceSource, PricingCatalog, PricingContext, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
+    MAX_MODEL_PRICE_MICRO_USD_PER_MILLION, PriceSource, PricingCatalog, PricingContext,
 };
 
 fn fixture_catalog() -> PricingCatalog {
@@ -687,14 +687,16 @@ fn price_override_input_is_normalized_and_validated_once() {
     .unwrap()
     .unwrap();
     assert_eq!(price.cached_input_micro_usd_per_million, None);
-    assert!(ApiModelPriceOverride::from_optional_fields(
-        Some(MAX_MODEL_PRICE_MICRO_USD_PER_MILLION + 1),
-        None,
-        None,
-        None,
-        Some(1),
-    )
-    .is_err());
+    assert!(
+        ApiModelPriceOverride::from_optional_fields(
+            Some(MAX_MODEL_PRICE_MICRO_USD_PER_MILLION + 1),
+            None,
+            None,
+            None,
+            Some(1),
+        )
+        .is_err()
+    );
 
     let normalized =
         normalize_model_price_overrides(BTreeMap::from([(" Claude-Opus-4-8 ".to_string(), price)]))
@@ -874,9 +876,11 @@ fn every_context_boundary_roundtrips_and_uses_the_highest_published_schedule() {
     raw["above512k"]["priority"] = serde_json::json!({
         "input": crate::pricing::MAX_MODEL_PRICE_MICRO_USD_PER_MILLION + 1
     });
-    assert!(!serde_json::from_value::<ApiModelPriceOverride>(raw)
-        .unwrap()
-        .is_valid());
+    assert!(
+        !serde_json::from_value::<ApiModelPriceOverride>(raw)
+            .unwrap()
+            .is_valid()
+    );
 }
 
 #[test]

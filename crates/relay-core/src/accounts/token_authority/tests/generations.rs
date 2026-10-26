@@ -6,12 +6,16 @@ async fn register_if_absent_never_overwrites_newer_tokens() {
     let first = TokenSet::new("new-access", Some("new-refresh".into()), None, None, 2, 2).unwrap();
     let stale = TokenSet::new("old-access", Some("old-refresh".into()), None, None, 1, 1).unwrap();
 
-    assert!(authority
-        .register_if_absent("account", first, AccountAuthState::Active)
-        .unwrap());
-    assert!(!authority
-        .register_if_absent("account", stale, AccountAuthState::Active)
-        .unwrap());
+    assert!(
+        authority
+            .register_if_absent("account", first, AccountAuthState::Active)
+            .unwrap()
+    );
+    assert!(
+        !authority
+            .register_if_absent("account", stale, AccountAuthState::Active)
+            .unwrap()
+    );
 
     let stored = authority.tokens("account").await.unwrap();
     assert_eq!(stored.generation(), 2);
@@ -30,18 +34,22 @@ async fn register_if_absent_does_not_wait_for_an_owned_slot() {
         2,
     )
     .unwrap();
-    assert!(authority
-        .register_if_absent("account", current.clone(), AccountAuthState::Active)
-        .unwrap());
+    assert!(
+        authority
+            .register_if_absent("account", current.clone(), AccountAuthState::Active)
+            .unwrap()
+    );
     let slot = { lock(&authority.slots).get("account").cloned().unwrap() };
     // An OAuth refresh holds this guard while waiting on the provider. A
     // runtime rebuild must finish without waiting for that unrelated I/O.
     let refresh_guard = slot.lock().await;
     let snapshot =
         TokenSet::new("disk-access", Some("disk-refresh".into()), None, None, 3, 3).unwrap();
-    assert!(!authority
-        .register_if_absent("account", snapshot, AccountAuthState::Active)
-        .unwrap());
+    assert!(
+        !authority
+            .register_if_absent("account", snapshot, AccountAuthState::Active)
+            .unwrap()
+    );
     assert_eq!(refresh_guard.tokens, current);
 }
 
@@ -58,10 +66,12 @@ async fn conditional_registration_never_replaces_a_newer_refresh_generation() {
         .unwrap();
 
     let stale = TokenSet::new("old-access", Some("old-refresh".into()), None, None, 1, 1).unwrap();
-    assert!(!authority
-        .register_if_not_stale("account", stale, AccountAuthState::Active)
-        .await
-        .unwrap());
+    assert!(
+        !authority
+            .register_if_not_stale("account", stale, AccountAuthState::Active)
+            .await
+            .unwrap()
+    );
     assert_eq!(
         authority.tokens("account").await.unwrap().access_token(),
         "new-access"
@@ -76,10 +86,12 @@ async fn conditional_registration_never_replaces_a_newer_refresh_generation() {
         3,
     )
     .unwrap();
-    assert!(authority
-        .register_if_not_stale("account", newest, AccountAuthState::Active)
-        .await
-        .unwrap());
+    assert!(
+        authority
+            .register_if_not_stale("account", newest, AccountAuthState::Active)
+            .await
+            .unwrap()
+    );
     assert_eq!(
         authority.tokens("account").await.unwrap().access_token(),
         "newest-access"
@@ -121,16 +133,18 @@ async fn conditional_rollback_never_replaces_a_newer_token_generation() {
         .await
         .unwrap();
 
-    assert!(!authority
-        .replace_if_current(
-            "account",
-            &attempted,
-            AccountAuthState::Active,
-            previous,
-            AccountAuthState::Active,
-        )
-        .await
-        .unwrap());
+    assert!(
+        !authority
+            .replace_if_current(
+                "account",
+                &attempted,
+                AccountAuthState::Active,
+                previous,
+                AccountAuthState::Active,
+            )
+            .await
+            .unwrap()
+    );
     assert_eq!(
         authority.tokens("account").await.unwrap().access_token(),
         "newer-access"
@@ -163,10 +177,12 @@ async fn conditional_remove_never_evicts_a_reused_account_slot() {
         .await
         .unwrap();
 
-    assert!(!authority
-        .remove_if_current("account", &attempted, AccountAuthState::Active)
-        .await
-        .unwrap());
+    assert!(
+        !authority
+            .remove_if_current("account", &attempted, AccountAuthState::Active)
+            .await
+            .unwrap()
+    );
     assert_eq!(authority.len(), 1);
     assert_eq!(
         authority.tokens("account").await.unwrap().access_token(),
@@ -195,10 +211,12 @@ async fn newer_only_registration_preserves_equal_generation_auth_state() {
         .await
         .unwrap();
 
-    assert!(!authority
-        .register_if_newer("account", current, AccountAuthState::Active)
-        .await
-        .unwrap());
+    assert!(
+        !authority
+            .register_if_newer("account", current, AccountAuthState::Active)
+            .await
+            .unwrap()
+    );
     assert_eq!(
         authority.auth_state("account").await,
         Some(AccountAuthState::RequiresReauth(ReauthReason::InvalidGrant))
@@ -213,10 +231,12 @@ async fn newer_only_registration_preserves_equal_generation_auth_state() {
         3,
     )
     .unwrap();
-    assert!(authority
-        .register_if_newer("account", newer, AccountAuthState::Active)
-        .await
-        .unwrap());
+    assert!(
+        authority
+            .register_if_newer("account", newer, AccountAuthState::Active)
+            .await
+            .unwrap()
+    );
     assert_eq!(
         authority.auth_state("account").await,
         Some(AccountAuthState::Active)

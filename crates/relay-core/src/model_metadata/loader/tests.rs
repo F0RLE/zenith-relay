@@ -3,16 +3,16 @@ use super::*;
 use crate::model_metadata::MetadataCacheEnvelope;
 use crate::pricing::CatalogRefreshKind;
 use axum::{
+    Router,
     extract::{Path as AxumPath, State},
     http::HeaderMap,
     response::IntoResponse,
     routing::get,
-    Router,
 };
-use serde_json::{value::RawValue, Value};
+use serde_json::{Value, value::RawValue};
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Mutex,
+    atomic::{AtomicU64, Ordering},
 };
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
@@ -319,10 +319,12 @@ async fn malformed_compact_source_does_not_discard_other_cached_models() {
         reopened.snapshot().reasoning_levels_for("vendor/model"),
         expected
     );
-    assert!(reopened
-        .snapshot()
-        .resolve("untrusted/injected-only")
-        .is_none());
+    assert!(
+        reopened
+            .snapshot()
+            .resolve("untrusted/injected-only")
+            .is_none()
+    );
 }
 
 #[tokio::test]

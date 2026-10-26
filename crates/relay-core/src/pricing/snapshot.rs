@@ -1,5 +1,5 @@
 use super::catalog::validate_litellm_payload;
-use super::{ImageModelPrice, ImageRequestPrice, TokenPrice, MAX_CACHE_STRING_LENGTH};
+use super::{ImageModelPrice, ImageRequestPrice, MAX_CACHE_STRING_LENGTH, TokenPrice};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -217,7 +217,7 @@ impl std::fmt::Display for PricingError {
             Self::Io => "pricing cache I/O failed",
             Self::Network => "pricing catalog refresh failed",
             Self::HttpStatus(status) => {
-                return write!(formatter, "pricing catalog returned HTTP {status}")
+                return write!(formatter, "pricing catalog returned HTTP {status}");
             }
         })
     }

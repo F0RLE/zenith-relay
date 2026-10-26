@@ -1,6 +1,6 @@
 use crate::local_pool::models::LocalAccountRecord;
 use zenith_relay_core::{
-    accounts::{reduce_account_quota, AccountQuotaOutcome, AccountQuotaUpdate},
+    accounts::{AccountQuotaOutcome, AccountQuotaUpdate, reduce_account_quota},
     quota::{QuotaRefreshFailure, QuotaRefreshResult, QuotaTransition},
 };
 
@@ -144,10 +144,12 @@ mod tests {
             SubscriptionStatus::Active
         );
         assert_eq!(account.account.subscription.active_until_ms, Some(2_000));
-        assert!(apply_quota_success(&mut account, refresh(100.0, 30))
-            .unwrap()
-            .transitions
-            .is_empty());
+        assert!(
+            apply_quota_success(&mut account, refresh(100.0, 30))
+                .unwrap()
+                .transitions
+                .is_empty()
+        );
     }
 
     #[test]

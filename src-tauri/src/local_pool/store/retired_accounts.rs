@@ -1,4 +1,4 @@
-use super::{persistence, LocalPoolStore, TelemetryDb, STATE_ACCOUNTS};
+use super::{LocalPoolStore, STATE_ACCOUNTS, TelemetryDb, persistence};
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError, Result},
     models::LocalAccountRecord,

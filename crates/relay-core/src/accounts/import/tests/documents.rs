@@ -164,9 +164,11 @@ fn parses_nested_account_subscription_metadata_for_opaque_tokens() {
         Some("2026-10-19T14:17:45Z")
     );
     assert_eq!(parsed.items[0].account_id.as_deref(), Some("account-team"));
-    assert!(!serde_json::to_string(&parsed.preview)
-        .unwrap()
-        .contains("at-private-token"));
+    assert!(
+        !serde_json::to_string(&parsed.preview)
+            .unwrap()
+            .contains("at-private-token")
+    );
 }
 
 #[test]
@@ -184,7 +186,7 @@ fn token_expiry_is_retained_for_the_credential_not_only_the_preview() {
 
 #[test]
 fn id_token_expiry_never_becomes_the_access_token_expiry() {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     let token = |expires| {
         format!(
             "header.{}.signature",
@@ -249,10 +251,12 @@ fn parses_codex_auth_json_token_and_api_key_shapes() {
     assert_eq!(oauth.items[0].secrets().api_key(), None);
     assert_eq!(oauth.items[0].email(), Some(EMAIL));
     assert_ne!(oauth.preview.rows[0].identity, EMAIL);
-    assert!(oauth.preview.rows[0]
-        .warnings
-        .iter()
-        .any(|warning| { warning.code == ImportWarningCode::UnusedCredentialsIgnored }));
+    assert!(
+        oauth.preview.rows[0]
+            .warnings
+            .iter()
+            .any(|warning| { warning.code == ImportWarningCode::UnusedCredentialsIgnored })
+    );
 
     let api_key = parse_import(
         &format!(r#"{{"auth_mode":"apikey","OPENAI_API_KEY":"{API_KEY}"}}"#),
@@ -284,10 +288,12 @@ fn parses_top_level_nested_and_degraded_token_shapes() {
     )
     .unwrap();
     assert_eq!(nested.items[0].secrets().access_token(), Some(ACCESS));
-    assert!(nested.preview.rows[0]
-        .warnings
-        .iter()
-        .any(|warning| warning.code == ImportWarningCode::AccessTokenOnly));
+    assert!(
+        nested.preview.rows[0]
+            .warnings
+            .iter()
+            .any(|warning| warning.code == ImportWarningCode::AccessTokenOnly)
+    );
 
     let refresh_only =
         parse_import(&format!(r#"{{"refresh_token":"{REFRESH}"}}"#), None, &[]).unwrap();
@@ -295,10 +301,12 @@ fn parses_top_level_nested_and_degraded_token_shapes() {
         refresh_only.items[0].secrets().refresh_token(),
         Some(REFRESH)
     );
-    assert!(refresh_only.preview.rows[0]
-        .warnings
-        .iter()
-        .any(|warning| warning.code == ImportWarningCode::RefreshExchangeRequired));
+    assert!(
+        refresh_only.preview.rows[0]
+            .warnings
+            .iter()
+            .any(|warning| warning.code == ImportWarningCode::RefreshExchangeRequired)
+    );
 }
 
 #[test]

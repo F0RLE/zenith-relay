@@ -5,14 +5,14 @@ mod usage;
 use std::borrow::Cow;
 
 use super::{
-    persistence, LocalPoolStore, STATE_ACCOUNTS, STATE_AUTOMATIONS, STATE_GATEWAY, STATE_KEYS,
-    STATE_REFRESH_REVISIONS, STATE_SOURCES, STATE_SOURCE_REVISIONS,
+    LocalPoolStore, STATE_ACCOUNTS, STATE_AUTOMATIONS, STATE_GATEWAY, STATE_KEYS,
+    STATE_REFRESH_REVISIONS, STATE_SOURCE_REVISIONS, STATE_SOURCES, persistence,
 };
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError, Result},
     models::{
         AutomationRecords, GatewaySettings, LocalAccountRecord, LocalGatewayKeyRecord,
-        ProviderSourceRecord, MAX_LOCAL_ACCOUNTS,
+        MAX_LOCAL_ACCOUNTS, ProviderSourceRecord,
     },
 };
 

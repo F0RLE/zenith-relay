@@ -246,9 +246,11 @@ async fn completed_lookup_is_preloaded_on_explicit_retry_after_failed_answer() {
         assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 3);
         let bodies = crate::poison::mutex(&server.state.generation_bodies);
         assert_eq!(bodies.len(), 3);
-        assert!(!bodies[0]
-            .to_string()
-            .contains("Synthetic lookup contract must be preloaded"));
+        assert!(
+            !bodies[0]
+                .to_string()
+                .contains("Synthetic lookup contract must be preloaded")
+        );
         let retry_body = bodies[2].to_string();
         assert!(retry_body.contains("Current lookup contract must be preloaded"));
         assert!(retry_body.contains("maxLength"));

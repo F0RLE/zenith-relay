@@ -89,7 +89,9 @@ fn conflicting_legacy_lookup_identity_cannot_load_contracts_or_hide_client_calls
     session.finish(&mut reply);
     assert_eq!(reply["output"].as_array().unwrap().len(), 1);
     let error = translate_response(&serde_json::to_vec(&reply).unwrap(), &request).unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("tool_identity_reason=conflicting_names"));
+    assert!(
+        error
+            .to_string()
+            .contains("tool_identity_reason=conflicting_names")
+    );
 }

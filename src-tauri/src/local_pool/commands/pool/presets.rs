@@ -5,7 +5,7 @@ use crate::{
     files::atomic_write,
     local_pool::{
         accounts::{
-            credentials::CredentialStore, proxy::COMMON_PROXY_SECRET_REF, NativeSecretBackend,
+            NativeSecretBackend, credentials::CredentialStore, proxy::COMMON_PROXY_SECRET_REF,
         },
         error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
         models::ProviderSourceRecord,
@@ -16,10 +16,10 @@ use crate::{
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 use zenith_relay_core::protocol::{
-    AccountPresetRule, ConfigurationPreset, ConfigurationPresetApplyInput,
-    ConfigurationPresetApplyResult, ConfigurationPresetPreview, ConfigurationPresetSettings,
-    PresetQuotaPolicy, PresetRoutingPolicy, SourcePresetRule, CONFIGURATION_PRESET_FORMAT,
-    CONFIGURATION_PRESET_SCHEMA_VERSION,
+    AccountPresetRule, CONFIGURATION_PRESET_FORMAT, CONFIGURATION_PRESET_SCHEMA_VERSION,
+    ConfigurationPreset, ConfigurationPresetApplyInput, ConfigurationPresetApplyResult,
+    ConfigurationPresetPreview, ConfigurationPresetSettings, PresetQuotaPolicy,
+    PresetRoutingPolicy, SourcePresetRule,
 };
 
 type CommandResult<T> = std::result::Result<T, CommandError>;

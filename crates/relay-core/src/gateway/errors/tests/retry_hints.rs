@@ -329,13 +329,17 @@ async fn disabled_degraded_route_policy_does_not_pause_the_account() {
     let key = runtime
         .authenticate(Some(&HeaderValue::from_static("Bearer test-local-key")))
         .unwrap();
-    assert!(runtime
-        .resolve_model(&key, "gpt-6-astra-degrade2-luna-1p")
-        .is_some());
+    assert!(
+        runtime
+            .resolve_model(&key, "gpt-6-astra-degrade2-luna-1p")
+            .is_some()
+    );
     runtime.set_block_degraded_routes_enabled(true);
-    assert!(runtime
-        .resolve_model(&key, "gpt-6-astra-degrade2-luna-1p")
-        .is_none());
+    assert!(
+        runtime
+            .resolve_model(&key, "gpt-6-astra-degrade2-luna-1p")
+            .is_none()
+    );
     runtime.set_block_degraded_routes_enabled(false);
 
     let lease = reserve(&runtime).await;

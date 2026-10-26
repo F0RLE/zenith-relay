@@ -492,9 +492,11 @@ mod tests {
             .unwrap();
         assert_eq!(completion.outcome(), ResponseCompletion::Completed);
         assert!(completion.observe(&end).is_err());
-        assert!(completion
-            .observe(&json!({"candidates":[{"content":{"parts":[{"text":"late"}]}}]}))
-            .is_err());
+        assert!(
+            completion
+                .observe(&json!({"candidates":[{"content":{"parts":[{"text":"late"}]}}]}))
+                .is_err()
+        );
     }
 
     #[test]
@@ -505,9 +507,11 @@ mod tests {
             .observe(&json!({"type":"message_start","message":{"id":"synthetic-message"}}))
             .unwrap();
         completion.observe(&json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}})).unwrap();
-        assert!(completion
-            .observe(&json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}))
-            .is_err());
+        assert!(
+            completion
+                .observe(&json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}))
+                .is_err()
+        );
         completion
             .observe(&json!({"type":"content_block_stop","index":0}))
             .unwrap();

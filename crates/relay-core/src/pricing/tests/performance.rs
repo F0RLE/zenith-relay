@@ -35,14 +35,18 @@ fn bulk_catalog_build_keeps_aliases_and_skipped_rows_aligned() {
     );
     assert!(catalog.conflicts.contains("sample/conflict"));
     assert!(!catalog.unique.contains_key("sample/conflict"));
-    assert!(catalog
-        .resolve_source("sample/conflict", None, None, None, None)
-        .quote
-        .is_none());
-    assert!(catalog
-        .entries
-        .iter()
-        .all(|(key, entry)| *key == entry.model_id));
+    assert!(
+        catalog
+            .resolve_source("sample/conflict", None, None, None, None)
+            .quote
+            .is_none()
+    );
+    assert!(
+        catalog
+            .entries
+            .iter()
+            .all(|(key, entry)| *key == entry.model_id)
+    );
 }
 
 #[test]

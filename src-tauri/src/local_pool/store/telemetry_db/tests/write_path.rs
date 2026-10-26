@@ -122,9 +122,11 @@ fn failed_state_statement_rolls_back_batch_and_cached_statement_is_reusable() {
          WHEN NEW.key = 'fail' BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END;",
         )
         .unwrap();
-    assert!(database
-        .replace_state_json(&[("first", "1".into()), ("fail", "2".into())])
-        .is_err());
+    assert!(
+        database
+            .replace_state_json(&[("first", "1".into()), ("fail", "2".into())])
+            .is_err()
+    );
     assert_eq!(database.state_json("first").unwrap().as_deref(), Some("0"));
     assert_eq!(database.state_json("fail").unwrap(), None);
     database
@@ -154,12 +156,14 @@ fn failed_purge_rolls_back_state_and_attempt_deletion() {
          BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END;",
         )
         .unwrap();
-    assert!(database
-        .replace_state_json_and_delete_account_data(
-            &[("accounts", "[]".into())],
-            "synthetic-account",
-        )
-        .is_err());
+    assert!(
+        database
+            .replace_state_json_and_delete_account_data(
+                &[("accounts", "[]".into())],
+                "synthetic-account",
+            )
+            .is_err()
+    );
     assert_eq!(
         database.state_json("accounts").unwrap().as_deref(),
         Some("[1]")

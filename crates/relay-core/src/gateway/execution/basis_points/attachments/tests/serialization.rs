@@ -13,11 +13,13 @@ fn synthetic_request(images: usize, image_bytes: usize) -> Value {
 
 async fn rewrite(request: &mut Value) {
     let jobs = expect_jobs(stage_input_images(request));
-    assert!(resolve_input_images(request, jobs, |_| async {
-        Ok("file-synthetic".to_string())
-    })
-    .await
-    .is_ok());
+    assert!(
+        resolve_input_images(request, jobs, |_| async {
+            Ok("file-synthetic".to_string())
+        })
+        .await
+        .is_ok()
+    );
 }
 
 // Mirror the removed JSON work, not provider/upload time. Preparation encoded
@@ -110,6 +112,9 @@ async fn measure_bps_attachment_json_roundtrips() {
         }
         legacy.sort_unstable();
         direct.sort_unstable();
-        eprintln!("bps-attachment-json images={images} input_bytes={encoded_bytes} trials=8 legacy_median_us={} direct_median_us={}", legacy[4], direct[4]);
+        eprintln!(
+            "bps-attachment-json images={images} input_bytes={encoded_bytes} trials=8 legacy_median_us={} direct_median_us={}",
+            legacy[4], direct[4]
+        );
     }
 }

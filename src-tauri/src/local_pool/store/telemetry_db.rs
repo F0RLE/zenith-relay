@@ -1,19 +1,19 @@
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
-use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection};
+use rusqlite::{Connection, params, params_from_iter, types::Value as SqlValue};
 use serde::Serialize;
 #[cfg(test)]
 use std::collections::BTreeMap;
 use std::{
     collections::HashMap,
     path::Path,
-    sync::{atomic::AtomicU64, Mutex},
+    sync::{Mutex, atomic::AtomicU64},
     time::Instant,
 };
 use zenith_relay_core::{
-    pricing::PricingMetadata,
-    protocol::{UsageBucket, UsageGroup, UsageQuery, UsageTotals},
     ApiEquivalentSummary, DefaultServiceTier, ErrorOrigin, ObservedServiceTier, RoutingDiagnostics,
     ToolUseDiagnostics, UsageEvent,
+    pricing::PricingMetadata,
+    protocol::{UsageBucket, UsageGroup, UsageQuery, UsageTotals},
 };
 #[cfg(test)]
 use zenith_relay_core::{ApiModelPriceOverride, ResponseAffinityBinding};
@@ -226,8 +226,8 @@ pub struct UsageEquivalents {
     pub sources: HashMap<String, ApiEquivalentSummary>,
 }
 
-pub(crate) use zenith_relay_core::pricing::{PricingCatalog, PricingContext};
 pub(crate) use zenith_relay_core::CatalogPriceResolver;
+pub(crate) use zenith_relay_core::pricing::{PricingCatalog, PricingContext};
 
 #[cfg(test)]
 fn test_pricing_catalog() -> PricingCatalog {

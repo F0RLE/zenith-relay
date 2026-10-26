@@ -1,19 +1,19 @@
 use super::super::super::errors::{
-    api_error, apply_failure_state, current_failure_state, settle_attempt_failure, AttemptFailure,
+    AttemptFailure, api_error, apply_failure_state, current_failure_state, settle_attempt_failure,
 };
 use super::super::super::now_ms;
 use super::super::super::response::emit_usage;
 use super::super::account::{
-    direct_account_request_body, direct_request_body, image_endpoint_url, ImageAttempt,
+    ImageAttempt, direct_account_request_body, direct_request_body, image_endpoint_url,
 };
 use super::super::{ImageEndpoint, PreparedImageRequest};
-use super::response::handle_collected_image;
 use super::ImageAttemptStep;
+use super::response::handle_collected_image;
+use crate::GatewayRuntime;
 use crate::runtime::{
     AccountTransport, AuthenticatedKey, AuthorizationIdentityPolicy, CandidateLease, ExecutorRoute,
 };
 use crate::scheduler::rotation::SharedRequestBudget;
-use crate::GatewayRuntime;
 use axum::http::header::{ACCEPT, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use std::sync::Arc;
@@ -62,7 +62,7 @@ pub(super) async fn run_selected_attempt(
                     StatusCode::BAD_REQUEST,
                     "multipart image upload is invalid",
                     crate::error_codes::INVALID_REQUEST,
-                ))
+                ));
             }
         }
     } else {

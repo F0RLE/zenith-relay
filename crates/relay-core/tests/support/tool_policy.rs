@@ -407,15 +407,17 @@ async fn tool_policy_forwards_the_complete_catalog_across_http_sse_and_websocket
     // A hot update to the retired automatic mode does not rewrite the catalog
     // or require restarting the listener.
     runtime.set_tool_policy(automatic_policy());
-    assert!(client
-        .post(format!("{}/v1/responses", gateway.base_url))
-        .bearer_auth(LOCAL_KEY)
-        .json(&request())
-        .send()
-        .await
-        .unwrap()
-        .status()
-        .is_success());
+    assert!(
+        client
+            .post(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .json(&request())
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
     {
         let captured = bodies.lock().unwrap();
         let body = captured.last().unwrap();
@@ -423,15 +425,17 @@ async fn tool_policy_forwards_the_complete_catalog_across_http_sse_and_websocket
         assert_eq!(body["tools"].as_array().unwrap().len(), 73);
     }
     runtime.set_tool_policy(ToolPolicy::default());
-    assert!(client
-        .post(format!("{}/v1/responses", gateway.base_url))
-        .bearer_auth(LOCAL_KEY)
-        .json(&request())
-        .send()
-        .await
-        .unwrap()
-        .status()
-        .is_success());
+    assert!(
+        client
+            .post(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .json(&request())
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
     assert_eq!(
         bodies.lock().unwrap().last().unwrap()["tools"]
             .as_array()

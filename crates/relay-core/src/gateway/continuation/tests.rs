@@ -59,14 +59,18 @@ fn interactions_continuations_require_the_original_key_model_and_exact_route() {
     );
     assert!(interactions::prepare(&runtime, "key", &request, 10).is_ok());
     assert!(interactions::prepare(&runtime, "other-key", &request, 10).is_err());
-    assert!(runtime
-        .validate_continuation_route(&route, "key", &request, 10)
-        .is_ok());
+    assert!(
+        runtime
+            .validate_continuation_route(&route, "key", &request, 10)
+            .is_ok()
+    );
     let mut changed = route.clone();
     changed.source_model = "other-model".into();
-    assert!(runtime
-        .validate_continuation_route(&changed, "key", &request, 10)
-        .is_err());
+    assert!(
+        runtime
+            .validate_continuation_route(&changed, "key", &request, 10)
+            .is_err()
+    );
     let other = runtime
         .executor_route(
             "other-source",
@@ -76,12 +80,16 @@ fn interactions_continuations_require_the_original_key_model_and_exact_route() {
             false,
         )
         .unwrap();
-    assert!(runtime
-        .validate_continuation_route(&other, "key", &request, 10)
-        .is_err());
-    assert!(runtime
-        .validate_continuation_route(&route, "other-key", &request, 10)
-        .is_err());
+    assert!(
+        runtime
+            .validate_continuation_route(&other, "key", &request, 10)
+            .is_err()
+    );
+    assert!(
+        runtime
+            .validate_continuation_route(&route, "other-key", &request, 10)
+            .is_err()
+    );
 }
 
 #[test]
@@ -176,25 +184,35 @@ fn owned_predecessor_disambiguates_reused_call_ids_without_materialized_replay()
     runtime.bind_tool_call_route_affinity("other-key", "call_reused", &other, 11);
     let mut request = json!({"model":"model","previous_response_id":"resp_encrypted_owner",
         "input":[{"type":"function_call_output","call_id":"call_reused","output":"Synthetic result"}]});
-    assert!(runtime
-        .validate_continuation_route(&owner, "key", &request, 12)
-        .is_ok());
-    assert!(runtime
-        .validate_continuation_route(&other, "key", &request, 12)
-        .is_err());
-    assert!(runtime
-        .validate_continuation_route(&owner, "other-key", &request, 12)
-        .is_err());
+    assert!(
+        runtime
+            .validate_continuation_route(&owner, "key", &request, 12)
+            .is_ok()
+    );
+    assert!(
+        runtime
+            .validate_continuation_route(&other, "key", &request, 12)
+            .is_err()
+    );
+    assert!(
+        runtime
+            .validate_continuation_route(&owner, "other-key", &request, 12)
+            .is_err()
+    );
     let mut other_model = owner.clone();
     other_model.source_model = "other-model".into();
-    assert!(runtime
-        .validate_continuation_route(&other_model, "key", &request, 12)
-        .is_err());
+    assert!(
+        runtime
+            .validate_continuation_route(&other_model, "key", &request, 12)
+            .is_err()
+    );
     request["input"][0]["call_id"] = json!("call_foreign");
     runtime.bind_tool_call_route_affinity("key", "call_foreign", &other, 11);
-    assert!(runtime
-        .validate_continuation_route(&owner, "key", &request, 12)
-        .is_err());
+    assert!(
+        runtime
+            .validate_continuation_route(&owner, "key", &request, 12)
+            .is_err()
+    );
 
     request["input"][0]["call_id"] = json!("call_reused");
     let mut replacement = response.clone();
@@ -207,17 +225,21 @@ fn owned_predecessor_disambiguates_reused_call_ids_without_materialized_replay()
         "a reused response ID must not accumulate tool-call permissions"
     );
     runtime.capture_native_responses_replay("key", "source", &initial, "model", &response, 15);
-    assert!(runtime
-        .validate_continuation_route(&owner, "key", &request, 16)
-        .is_ok());
+    assert!(
+        runtime
+            .validate_continuation_route(&owner, "key", &request, 16)
+            .is_ok()
+    );
 
     // Renewing route hints must not revive expired call-ownership evidence.
     let expired = crate::RESPONSE_AFFINITY_TTL_MS + 16;
     runtime.bind_response_route_affinity(Some("resp_encrypted_owner"), &owner, expired);
     runtime.bind_tool_call_route_affinity("key", "call_reused", &other, expired);
-    assert!(runtime
-        .validate_continuation_route(&owner, "key", &request, expired)
-        .is_err());
+    assert!(
+        runtime
+            .validate_continuation_route(&owner, "key", &request, expired)
+            .is_err()
+    );
 }
 
 #[test]
@@ -255,29 +277,39 @@ fn saved_predecessor_disambiguates_a_reused_tool_call_id() {
         "model":"model","previous_response_id":"resp_owned",
         "input":[{"type":"function_call_output","call_id":"call_reused","output":"Synthetic result"}]
     });
-    assert!(runtime
-        .validate_continuation_route(&owner, "key", &request, 12)
-        .is_ok());
-    assert!(runtime
-        .validate_continuation_route(&other, "key", &request, 12)
-        .is_err());
+    assert!(
+        runtime
+            .validate_continuation_route(&owner, "key", &request, 12)
+            .is_ok()
+    );
+    assert!(
+        runtime
+            .validate_continuation_route(&other, "key", &request, 12)
+            .is_err()
+    );
     runtime.bind_tool_call_route_affinity("other-key", "call_reused", &other, 11);
-    assert!(runtime
-        .validate_continuation_route(&owner, "other-key", &request, 12)
-        .is_err());
+    assert!(
+        runtime
+            .validate_continuation_route(&owner, "other-key", &request, 12)
+            .is_err()
+    );
 
     let mut orphan = request.clone();
     orphan["input"][0]["call_id"] = json!("call_foreign");
     runtime.bind_tool_call_route_affinity("key", "call_foreign", &other, 11);
-    assert!(runtime
-        .validate_continuation_route(&owner, "key", &orphan, 12)
-        .is_err());
+    assert!(
+        runtime
+            .validate_continuation_route(&owner, "key", &orphan, 12)
+            .is_err()
+    );
     runtime.bind_response_route_affinity(Some("resp_missing_history"), &owner, 10);
     let mut missing = request;
     missing["previous_response_id"] = json!("resp_missing_history");
-    assert!(runtime
-        .validate_continuation_route(&owner, "key", &missing, 12)
-        .is_err());
+    assert!(
+        runtime
+            .validate_continuation_route(&owner, "key", &missing, 12)
+            .is_err()
+    );
 }
 
 #[test]

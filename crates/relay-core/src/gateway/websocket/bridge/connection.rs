@@ -1,4 +1,4 @@
-use super::super::upstream::{connect_upstream_while_client_connected, Connected};
+use super::super::upstream::{Connected, connect_upstream_while_client_connected};
 use super::super::*;
 use super::events::handle_initial_messages;
 use super::terminal::clear_transient_response_affinity;

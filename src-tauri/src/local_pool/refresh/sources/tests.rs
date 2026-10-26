@@ -1,13 +1,13 @@
 use super::super::tests::{cleanup, state};
 use super::*;
 use crate::local_pool::store::secret_store;
-use axum::{http::StatusCode, routing::get, Json, Router};
+use axum::{Json, Router, http::StatusCode, routing::get};
 use serde_json::json;
 use std::{sync::atomic::AtomicUsize, time::Duration};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{Notify, mpsc};
 use zenith_relay_core::{
-    protocol::RefreshStatus, scheduler::refresh::RefreshFreshness,
-    scheduler::refresh::SourceStatsObservation, SourceStatsStatus,
+    SourceStatsStatus, protocol::RefreshStatus, scheduler::refresh::RefreshFreshness,
+    scheduler::refresh::SourceStatsObservation,
 };
 
 fn source(base_url: &str) -> ProviderSourceRecord {

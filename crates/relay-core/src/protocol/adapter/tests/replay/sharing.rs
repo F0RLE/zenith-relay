@@ -20,18 +20,26 @@ fn native_replay_shared_snapshot_preserves_history_and_byte_limits() {
     let held = store.get("key", "synthetic-response", "route", 10).unwrap();
     let another = store.get("key", "synthetic-response", "route", 10).unwrap();
     assert_eq!(store.memory_usage(), (1, bytes, bytes));
-    assert!(store
-        .get("other-key", "synthetic-response", "route", 10)
-        .is_none());
-    assert!(store
-        .get("key", "synthetic-response", "other-route", 10)
-        .is_none());
-    assert!(store
-        .get("key", "synthetic-response", "route", 110)
-        .is_some());
-    assert!(store
-        .get("key", "synthetic-response", "route", 111)
-        .is_none());
+    assert!(
+        store
+            .get("other-key", "synthetic-response", "route", 10)
+            .is_none()
+    );
+    assert!(
+        store
+            .get("key", "synthetic-response", "other-route", 10)
+            .is_none()
+    );
+    assert!(
+        store
+            .get("key", "synthetic-response", "route", 110)
+            .is_some()
+    );
+    assert!(
+        store
+            .get("key", "synthetic-response", "route", 111)
+            .is_none()
+    );
     assert_eq!(store.memory_usage(), (0, 0, bytes));
 
     // Callers could already hold an owned snapshot after expiry. Sharing must
@@ -67,16 +75,19 @@ fn native_replay_shared_snapshot_preserves_history_and_byte_limits() {
             .unwrap(),
         replayed
     );
-    assert!(held
-        .replay_request(&continuation, "other-model", true)
-        .is_err());
+    assert!(
+        held.replay_request(&continuation, "other-model", true)
+            .is_err()
+    );
 
     let mut too_small = NativeResponsesReplayStore::with_limits(1, 100, bytes - 1, bytes);
     too_small.insert("key", "synthetic-response", "route", state, 10);
     assert_eq!(too_small.memory_usage(), (0, 0, bytes));
-    assert!(too_small
-        .get("key", "synthetic-response", "route", 10)
-        .is_none());
+    assert!(
+        too_small
+            .get("key", "synthetic-response", "route", 10)
+            .is_none()
+    );
 }
 
 #[test]

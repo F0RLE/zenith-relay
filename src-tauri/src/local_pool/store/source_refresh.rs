@@ -1,6 +1,6 @@
 //! Source incarnations are independent from account/proxy revisions. Neither
 //! credentials nor credential hashes are persisted as refresh identity.
-use super::{serialize_state, LocalPoolStore, STATE_SOURCES};
+use super::{LocalPoolStore, STATE_SOURCES, serialize_state};
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError, Result},
     models::ProviderSourceRecord,

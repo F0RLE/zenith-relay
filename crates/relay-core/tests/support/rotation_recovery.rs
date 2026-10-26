@@ -1,5 +1,5 @@
 use super::*;
-use zenith_relay_core::{resolve_pool_routing, PoolMemberKind, PoolRoutingMode};
+use zenith_relay_core::{PoolMemberKind, PoolRoutingMode, resolve_pool_routing};
 
 fn options(ids: &[&str]) -> GatewayRuntimeOptions {
     let mut policy = resolve_pool_routing(
@@ -90,16 +90,20 @@ async fn bounded_requests_reach_the_ninth_candidate_without_hiding_it_from_the_p
     let response = request(&gateway, false).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.json::<Value>().await.unwrap()["id"], "resp_ninth");
-    assert!(states
-        .iter()
-        .all(|state| state.requests.lock().unwrap().len() == 1));
+    assert!(
+        states
+            .iter()
+            .all(|state| state.requests.lock().unwrap().len() == 1)
+    );
     assert_eq!(success.requests.lock().unwrap().len(), 1);
     let events = events.lock().unwrap();
     let events = usage_observations::physical_attempts(&events);
     assert_eq!(events.len(), 9);
-    assert!(events[..8]
-        .iter()
-        .all(|event| event.cooldown_scope.is_some()));
+    assert!(
+        events[..8]
+            .iter()
+            .all(|event| event.cooldown_scope.is_some())
+    );
     assert!(events[8].success);
 }
 
@@ -161,9 +165,11 @@ async fn repeated_rejection_stops_at_the_shared_request_budget_without_multiple_
     let events = events.lock().unwrap();
     let events = usage_observations::physical_attempts(&events);
     assert_eq!(events.len(), 3);
-    assert!(events
-        .iter()
-        .all(|event| event.consecutive_failures == Some(1)));
+    assert!(
+        events
+            .iter()
+            .all(|event| event.consecutive_failures == Some(1))
+    );
     for (index, event) in events.iter().enumerate() {
         assert_eq!(usize::from(event.attempt), index + 1);
         assert_eq!(event.request_id, events[0].request_id);

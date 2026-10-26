@@ -179,7 +179,7 @@ impl<B: SecretBackend> ImportSessionStore<B> {
                 return Err(ImportSessionError::new(
                     ImportSessionErrorCode::SnapshotIo,
                     "failed to inspect import session directory",
-                ))
+                ));
             }
         };
         let mut stale = Vec::new();

@@ -8,9 +8,11 @@ fn interactions_is_an_explicit_native_contract_not_a_generate_content_alias() {
     let generate = SourceProtocolConfig::automatic(generate_url)
         .resolve(generate_url, &models, &[], WireApi::Gemini)
         .unwrap();
-    assert!(generate
-        .iter()
-        .all(|route| route.wire_api != WireApi::GeminiInteractions));
+    assert!(
+        generate
+            .iter()
+            .all(|route| route.wire_api != WireApi::GeminiInteractions)
+    );
     let interactions_url = "https://example.test/v1beta/interactions";
     let interactions = SourceProtocolConfig::automatic(interactions_url)
         .resolve(interactions_url, &models, &[], WireApi::GeminiInteractions)
@@ -33,11 +35,13 @@ fn catalog_models_are_routable_without_generation_probes() {
         .unwrap();
     assert_eq!(routes.len(), 4);
     assert!(routes.iter().all(|route| route.model_ids == models));
-    assert!(catalog_capabilities(
-        &json!({"data":[{"id":"gpt-test","pricing":{"input":1}}]}),
-        1
-    )
-    .is_empty());
+    assert!(
+        catalog_capabilities(
+            &json!({"data":[{"id":"gpt-test","pricing":{"input":1}}]}),
+            1
+        )
+        .is_empty()
+    );
 }
 
 #[test]
@@ -141,9 +145,11 @@ fn endpoint_metadata_and_gemini_methods_are_scoped_declarations() {
         42,
     );
     assert_eq!(observations.len(), 4);
-    assert!(observations
-        .iter()
-        .all(|observation| observation.model_id == "mixed"));
+    assert!(
+        observations
+            .iter()
+            .all(|observation| observation.model_id == "mixed")
+    );
     assert_eq!(
         observations
             .iter()
@@ -160,9 +166,11 @@ fn endpoint_metadata_and_gemini_methods_are_scoped_declarations() {
     );
     assert_eq!(gemini.len(), 2);
     assert_eq!(gemini[0].upstream_wire_api, WireApi::Gemini);
-    assert!(!gemini[0]
-        .features
-        .contains_key(&ProtocolFeature::FunctionTools));
+    assert!(
+        !gemini[0]
+            .features
+            .contains_key(&ProtocolFeature::FunctionTools)
+    );
     let mut config =
         SourceProtocolConfig::automatic("https://generativelanguage.googleapis.com/v1beta");
     config.merge_catalog(gemini);
@@ -275,9 +283,11 @@ fn failed_generation_probe_does_not_remove_catalog_models() {
         .unwrap();
     assert_eq!(resolved.len(), 4);
     assert!(resolved.iter().all(|route| route.model_ids == ["test"]));
-    assert!(resolved
-        .iter()
-        .any(|route| route.wire_api == WireApi::Responses));
+    assert!(
+        resolved
+            .iter()
+            .any(|route| route.wire_api == WireApi::Responses)
+    );
     let capabilities = config.effective_capabilities("https://example.test/v1", &models);
     let responses = capabilities
         .iter()
@@ -318,10 +328,12 @@ fn successful_generation_probe_does_not_override_catalog_routes() {
     assert!(routes.iter().all(|route| {
         route.adapter.upstream_protocol(route.wire_api).wire_api() == WireApi::Responses
     }));
-    assert!(config
-        .effective_capabilities("https://example.test/v1", &models)
-        .iter()
-        .all(|capability| capability.origin != CapabilityOrigin::GenerationProbe));
+    assert!(
+        config
+            .effective_capabilities("https://example.test/v1", &models)
+            .iter()
+            .all(|capability| capability.origin != CapabilityOrigin::GenerationProbe)
+    );
 }
 
 #[test]

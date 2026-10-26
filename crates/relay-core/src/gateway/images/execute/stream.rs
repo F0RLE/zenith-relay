@@ -1,10 +1,10 @@
-use super::super::{native::ImageEnvelope, ImageEndpoint, MAX_IMAGE_EVENT_BYTES};
+use super::super::{ImageEndpoint, MAX_IMAGE_EVENT_BYTES, native::ImageEnvelope};
 use crate::gateway::{
     now_ms,
     response::{emit_usage, proxy_sse_response},
 };
 use crate::runtime::CandidateLease;
-use crate::{error_codes, GatewayRuntime, UsageEvent};
+use crate::{GatewayRuntime, UsageEvent, error_codes};
 use axum::{
     body::{Body, Bytes},
     http::Response,
@@ -75,7 +75,9 @@ impl ImageStream {
     fn fail(&mut self, category: &'static str) -> Bytes {
         self.finished = true;
         self.completion.finish(Some(category));
-        Bytes::from(format!("event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"upstream_error\",\"code\":\"{category}\",\"message\":\"Image stream did not complete\"}}}}\n\n"))
+        Bytes::from(format!(
+            "event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"upstream_error\",\"code\":\"{category}\",\"message\":\"Image stream did not complete\"}}}}\n\n"
+        ))
     }
 
     async fn next(&mut self) -> Option<Bytes> {

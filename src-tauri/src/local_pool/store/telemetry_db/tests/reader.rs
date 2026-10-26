@@ -1,6 +1,6 @@
 use super::*;
 use std::{
-    sync::{mpsc, Arc},
+    sync::{Arc, mpsc},
     time::Duration,
 };
 
@@ -62,9 +62,10 @@ fn failed_report_releases_read_transaction() {
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     {
         let read = database.lock_report_connection().unwrap();
-        assert!(read
-            .prepare("SELECT * FROM synthetic_missing_table")
-            .is_err());
+        assert!(
+            read.prepare("SELECT * FROM synthetic_missing_table")
+                .is_err()
+        );
     }
     database
         .record(&aggregate_test_event("after-error", 1, 10, 0, None, 1))

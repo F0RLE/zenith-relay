@@ -37,9 +37,11 @@ impl Fixture {
 }
 
 fn assert_pending(future: Pin<&mut impl Future>) {
-    assert!(future
-        .poll(&mut Context::from_waker(Waker::noop()))
-        .is_pending());
+    assert!(
+        future
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
 }
 
 #[tokio::test]

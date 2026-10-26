@@ -1,4 +1,4 @@
-use super::super::{upstream_error_text, MAX_RATE_LIMIT_RETRY_HINT_MS};
+use super::super::{MAX_RATE_LIMIT_RETRY_HINT_MS, upstream_error_text};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};

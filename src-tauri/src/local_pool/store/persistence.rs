@@ -1,9 +1,9 @@
 use super::refresh::RefreshRevisions;
 use super::source_refresh::SourceRefreshRevisions;
 use super::{
-    telemetry_db::TelemetryDb, LEGACY_STATE_FILES, MAX_LEGACY_JSON_BYTES, SQLITE_SIDECAR_SUFFIXES,
-    STATE_ACCOUNTS, STATE_ACCOUNT_TRASH, STATE_AUTOMATIONS, STATE_GATEWAY, STATE_KEYS,
-    STATE_REFRESH_REVISIONS, STATE_SOURCES, STATE_SOURCE_REVISIONS,
+    LEGACY_STATE_FILES, MAX_LEGACY_JSON_BYTES, SQLITE_SIDECAR_SUFFIXES, STATE_ACCOUNT_TRASH,
+    STATE_ACCOUNTS, STATE_AUTOMATIONS, STATE_GATEWAY, STATE_KEYS, STATE_REFRESH_REVISIONS,
+    STATE_SOURCE_REVISIONS, STATE_SOURCES, telemetry_db::TelemetryDb,
 };
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
 use crate::local_pool::models::{
@@ -11,7 +11,7 @@ use crate::local_pool::models::{
     ProviderSourceRecord, TrashedLocalAccount,
 };
 use crate::storage_paths::StoragePaths;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::path::Path;
 
 mod layout;

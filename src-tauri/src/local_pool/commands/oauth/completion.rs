@@ -1,18 +1,18 @@
 use crate::local_pool::{
     accounts::{
+        NativeSecretBackend,
         authority::{ProcessAccountLocks, ProcessLockConfig},
         credentials::{
-            credential_local_error as credential_error, CredentialStore, StoredCodexCredentials,
+            CredentialStore, StoredCodexCredentials, credential_local_error as credential_error,
         },
         oauth_flow::{OAuthFlowFailureReason, OAuthFlowProgress, OAuthFlowStage},
         proxy::{effective_proxy_config, ensure_account_proxy},
         quota_refresh::{
-            register_active_authority, sync_account_profile_bindings, AccountQuotaOutcome,
-            AccountQuotaRefreshResponse,
+            AccountQuotaOutcome, AccountQuotaRefreshResponse, register_active_authority,
+            sync_account_profile_bindings,
         },
         quota_service::{apply_quota_failure, apply_quota_success},
         records::new_account_record,
-        NativeSecretBackend,
     },
     error::{ErrorCode, LocalPoolError, Result as LocalResult},
     models::LocalAccountRecord,
@@ -23,20 +23,20 @@ use reqwest::redirect::Policy;
 use uuid::Uuid;
 use zenith_relay_core::error_codes;
 use zenith_relay_core::{
+    ProxyConfig,
     accounts::AccountAuthMode,
     providers::chatgpt::{
         AccountModelsClient, AgentIdentityCredential, CodexQuotaClient, OAuthClientKind,
     },
     quota::QuotaRefreshFailure,
-    ProxyConfig,
 };
 
 use super::account::{
-    apply_initial_model_issue, find_existing_account, initial_model_issue,
-    preserve_existing_settings, InitialModelIssue,
+    InitialModelIssue, apply_initial_model_issue, find_existing_account, initial_model_issue,
+    preserve_existing_settings,
 };
 use super::checkpoint::{
-    completion_checkpoint, restore_completion_checkpoint, OAuthCompletionCheckpoint,
+    OAuthCompletionCheckpoint, completion_checkpoint, restore_completion_checkpoint,
 };
 use super::flow::flow_error;
 

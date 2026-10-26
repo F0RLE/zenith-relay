@@ -113,20 +113,28 @@ async fn desktop_tool_cycle(protocol: WireApi) {
         "/v1/responses"
     };
     assert!(requests.iter().all(|request| request.path == expected_path));
-    assert!(requests
-        .iter()
-        .all(|request| request.body["model"] == MODEL));
-    assert!(requests
-        .iter()
-        .all(|request| request.body["metadata"]["user_id"] == "synthetic-user"));
-    assert!(requests
-        .iter()
-        .all(|request| request.body.get("cache_control").is_some()
-            == (protocol == WireApi::Messages)));
-    if protocol == WireApi::Responses {
-        assert!(requests
+    assert!(
+        requests
             .iter()
-            .all(|request| !request.body.to_string().contains("cache_control")));
+            .all(|request| request.body["model"] == MODEL)
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.body["metadata"]["user_id"] == "synthetic-user")
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.body.get("cache_control").is_some()
+                == (protocol == WireApi::Messages))
+    );
+    if protocol == WireApi::Responses {
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.body.to_string().contains("cache_control"))
+        );
     }
     if protocol == WireApi::Messages {
         assert_eq!(

@@ -7,7 +7,7 @@ use zenith_relay_core::accounts::{
     AccountAuthMode, AccountHealthState, ImportAuthMode, ParsedImportItem,
 };
 use zenith_relay_core::error_codes;
-use zenith_relay_core::{normalize_bounded_model_ids, ModelIdListError};
+use zenith_relay_core::{ModelIdListError, normalize_bounded_model_ids};
 
 pub(in crate::local_pool::accounts) fn ensure_account_import_item(
     import_item: &ParsedImportItem,

@@ -1,21 +1,21 @@
 use super::super::super::errors::{
-    api_error, apply_failure_state, retryable_route_failure, route_forbids_fallback,
-    settle_image_capability_failure, settle_status_failure, AttemptFailure, TRANSIENT_COOLDOWN_MS,
+    AttemptFailure, TRANSIENT_COOLDOWN_MS, api_error, apply_failure_state, retryable_route_failure,
+    route_forbids_fallback, settle_image_capability_failure, settle_status_failure,
 };
 use super::super::super::now_ms;
 use super::super::super::response::{
     emit_usage, populate_tokens, proxy_json_response, route_error_origin,
 };
-use super::super::account::{image_capability_unavailable, ImageAttempt};
+use super::super::account::{ImageAttempt, image_capability_unavailable};
 use super::super::{
-    native::{normalize_response, ImageEnvelope},
     PreparedImageRequest,
+    native::{ImageEnvelope, normalize_response},
 };
 use super::ImageAttemptStep;
-use crate::error_codes;
-use crate::runtime::{CandidateLease, ExecutorRoute};
 use crate::GatewayRuntime;
 use crate::UsageEvent;
+use crate::error_codes;
+use crate::runtime::{CandidateLease, ExecutorRoute};
 use axum::body::Body;
 use axum::http::{HeaderMap, StatusCode};
 

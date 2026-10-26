@@ -114,15 +114,17 @@ fn missing_native_protocol_cannot_fall_back_to_the_harness_protocol() {
         ["sol-test"]
     );
     for client in WireApi::ALL {
-        assert!(runtime
-            .executor_routes(
-                "responses-only",
-                "sonnet-test",
-                &CandidateScope::default(),
-                &[client],
-                false,
-            )
-            .is_empty());
+        assert!(
+            runtime
+                .executor_routes(
+                    "responses-only",
+                    "sonnet-test",
+                    &CandidateScope::default(),
+                    &[client],
+                    false,
+                )
+                .is_empty()
+        );
     }
 }
 
@@ -152,13 +154,15 @@ fn explicit_native_exclusion_cannot_be_recreated_by_the_service_profile() {
         runtime.visible_models_for_secret("synthetic-key", &WireApi::ALL, 1),
         ["sol-test"]
     );
-    assert!(runtime
-        .executor_routes(
-            "native-source",
-            "sonnet-test",
-            &CandidateScope::default(),
-            &[WireApi::Responses],
-            false,
-        )
-        .is_empty());
+    assert!(
+        runtime
+            .executor_routes(
+                "native-source",
+                "sonnet-test",
+                &CandidateScope::default(),
+                &[WireApi::Responses],
+                false,
+            )
+            .is_empty()
+    );
 }

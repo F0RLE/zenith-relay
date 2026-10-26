@@ -1,4 +1,4 @@
-use super::{timestamp_from_ms, ImportedCredentialMaterial};
+use super::{ImportedCredentialMaterial, timestamp_from_ms};
 use zenith_relay_core::accounts::{ImportAuthMode, ParsedImportItem};
 
 pub(super) fn parsed_item_json(

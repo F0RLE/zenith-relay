@@ -1,4 +1,4 @@
-use super::{UsageExportRow, MAX_EXPORT_TEXT};
+use super::{MAX_EXPORT_TEXT, UsageExportRow};
 use crate::files::atomic_write;
 use crate::local_pool::error::{CommandError, ErrorCode, LocalPoolError};
 use serde::Serialize;

@@ -1,7 +1,7 @@
 use super::admission::AdmissionRequest;
 use super::*;
 use crate::scheduler::rotation::{RotationOperation, SharedRequestBudget};
-use crate::{scheduler::CooldownReason, Selection, SelectionRequest};
+use crate::{Selection, SelectionRequest, scheduler::CooldownReason};
 
 mod capacity;
 mod route;

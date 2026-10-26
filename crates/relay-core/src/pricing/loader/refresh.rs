@@ -1,10 +1,10 @@
 use super::super::payload_hash;
 use super::{
-    now_ms, CatalogRefreshOutcome, CatalogStatus, PricingCacheEnvelope, PricingCatalog,
-    PricingCatalogLoader, PricingError, MAX_CATALOG_RESPONSE_BYTES,
+    CatalogRefreshOutcome, CatalogStatus, MAX_CATALOG_RESPONSE_BYTES, PricingCacheEnvelope,
+    PricingCatalog, PricingCatalogLoader, PricingError, now_ms,
 };
 use crate::catalog_io::{self, CatalogIoError};
-use reqwest::{header, StatusCode};
+use reqwest::{StatusCode, header};
 
 impl PricingCatalogLoader {
     pub async fn refresh(&self, force: bool) -> Result<CatalogRefreshOutcome, PricingError> {

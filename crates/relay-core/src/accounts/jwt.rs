@@ -1,4 +1,4 @@
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Deserialize;
 
 const MAX_UNVERIFIED_JWT_BYTES: usize = 64 * 1024;
@@ -31,7 +31,7 @@ pub fn decode_unverified_jwt_payload<T: for<'de> Deserialize<'de>>(token: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     fn token(payload: Value) -> String {
         format!(
@@ -53,9 +53,11 @@ mod tests {
             decode_unverified_jwt_payload::<Value>(&"x".repeat(MAX_UNVERIFIED_JWT_BYTES + 1))
                 .is_none()
         );
-        assert!(decode_unverified_jwt_payload::<Value>(&token(json!({
-            "padding": "x".repeat(MAX_UNVERIFIED_JWT_PAYLOAD_BYTES + 1)
-        })))
-        .is_none());
+        assert!(
+            decode_unverified_jwt_payload::<Value>(&token(json!({
+                "padding": "x".repeat(MAX_UNVERIFIED_JWT_PAYLOAD_BYTES + 1)
+            })))
+            .is_none()
+        );
     }
 }

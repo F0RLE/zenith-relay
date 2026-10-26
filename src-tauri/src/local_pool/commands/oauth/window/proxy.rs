@@ -1,5 +1,5 @@
 use crate::local_pool::error::{ErrorCode, LocalPoolError};
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use std::{fmt, io, net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},

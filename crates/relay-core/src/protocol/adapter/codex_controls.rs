@@ -1,6 +1,6 @@
 use super::*;
 use crate::WireApi;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn prepare(adapter: SourceAdapter, request: &Value) -> AdapterResult<PreparedAdapterRequest> {
     adapter.prepare_request(AdapterRequestContext {
@@ -40,9 +40,11 @@ fn codex_transport_controls_do_not_block_inference_or_leak_to_upstream() {
         for field in ["include", "prompt_cache_key", "client_metadata"] {
             assert!(upstream_body.get(field).is_none(), "{adapter:?}: {field}");
         }
-        assert!(upstream_body
-            .to_string()
-            .contains("Synthetic compacted summary"));
+        assert!(
+            upstream_body
+                .to_string()
+                .contains("Synthetic compacted summary")
+        );
         assert!(!upstream_body.to_string().contains("encrypted_content"));
     }
     let native = prepare(SourceAdapter::Native, &request).unwrap();
@@ -180,9 +182,11 @@ fn codex_item_trace_metadata_does_not_block_messages_before_dispatch() {
             json!(["input"])
         );
         assert!(!body.to_string().contains("synthetic-turn"));
-        assert!(!body
-            .to_string()
-            .contains("internal_chat_message_metadata_passthrough"));
+        assert!(
+            !body
+                .to_string()
+                .contains("internal_chat_message_metadata_passthrough")
+        );
         assert_eq!(request, original);
         assert_eq!(
             prepare(SourceAdapter::Native, &request)
@@ -270,10 +274,12 @@ fn responses_named_function_results_keep_their_call_identity() {
                     &capabilities,
                 )
                 .unwrap();
-            assert!(prepared
-                .upstream_body()
-                .to_string()
-                .contains("Synthetic result"));
+            assert!(
+                prepared
+                    .upstream_body()
+                    .to_string()
+                    .contains("Synthetic result")
+            );
         }
         for invalid_name in [json!("other"), json!(42), json!("")] {
             request["input"][2]["name"] = invalid_name;

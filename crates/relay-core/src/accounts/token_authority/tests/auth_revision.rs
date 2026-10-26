@@ -102,15 +102,17 @@ async fn old_401_cannot_invalidate_a_readded_identical_bearer_and_generation() {
         .await
         .unwrap();
     let persistence = CapturePersistence::default();
-    assert!(!authority
-        .invalidate_access_revision_and_persist(
-            "account",
-            &prepared.dispatch_revision,
-            11,
-            &persistence,
-        )
-        .await
-        .unwrap());
+    assert!(
+        !authority
+            .invalidate_access_revision_and_persist(
+                "account",
+                &prepared.dispatch_revision,
+                11,
+                &persistence,
+            )
+            .await
+            .unwrap()
+    );
     let current = authority.tokens("account").await.unwrap();
     assert_eq!(current.access_token(), tokens.access_token());
     assert_eq!(current.expires_at_ms(), tokens.expires_at_ms());

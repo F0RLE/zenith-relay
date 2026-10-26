@@ -1,7 +1,7 @@
 use super::super::errors::{
-    classify_upstream_error, is_deactivated_workspace_value, previous_response_not_found_value,
-    rate_limit_body_hint_value, upstream_event_failure_category, upstream_failure_status,
-    upstream_status_from_value, RateLimitBodyHint,
+    RateLimitBodyHint, classify_upstream_error, is_deactivated_workspace_value,
+    previous_response_not_found_value, rate_limit_body_hint_value, upstream_event_failure_category,
+    upstream_failure_status, upstream_status_from_value,
 };
 use super::super::now_ms;
 use crate::error_codes;

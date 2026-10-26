@@ -1,6 +1,6 @@
 use super::*;
-use crate::scheduler::rotation::{AttemptObservation, ExecutionObservation, HealthObservation};
 use crate::scheduler::CooldownReason;
+use crate::scheduler::rotation::{AttemptObservation, ExecutionObservation, HealthObservation};
 use crate::{
     CandidateHealth, CandidateQuota, PoolMemberKind, PoolRoutingMember, PoolRoutingMode,
     PoolRoutingPolicy,

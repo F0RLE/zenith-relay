@@ -38,12 +38,16 @@ openai_base_url = "https://profile.example.com/v1"
     assert!(root_openai_base_url(&attached).is_none());
     assert!(attached["profiles"]["work"].get("model").is_none());
     assert!(attached["profiles"]["work"].get("model_provider").is_none());
-    assert!(attached["profiles"]["work"]
-        .get("model_catalog_json")
-        .is_none());
-    assert!(attached["profiles"]["work"]
-        .get("openai_base_url")
-        .is_none());
+    assert!(
+        attached["profiles"]["work"]
+            .get("model_catalog_json")
+            .is_none()
+    );
+    assert!(
+        attached["profiles"]["work"]
+            .get("openai_base_url")
+            .is_none()
+    );
     let providers = attached["model_providers"].as_table_like().unwrap();
     assert_eq!(providers.len(), 1);
     assert!(providers.get(PROVIDER_ID).is_some());
@@ -465,13 +469,15 @@ fn active_managed_catalog_refreshes_without_replacing_the_profile() {
         attached["profiles"]["short"]["model_auto_compact_token_limit"].as_integer(),
         Some(110_000)
     );
-    assert!(refresh_managed_model_catalog(
-        &home,
-        &backups,
-        r#"{"models":[{"slug":"new-model","use_responses_lite":true}]}"#,
-        None
-    )
-    .unwrap());
+    assert!(
+        refresh_managed_model_catalog(
+            &home,
+            &backups,
+            r#"{"models":[{"slug":"new-model","use_responses_lite":true}]}"#,
+            None
+        )
+        .unwrap()
+    );
     assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), attached_config);
     assert_eq!(fs::read(home.join(AUTH_FILE)).unwrap(), attached_auth);
     let catalog_path = managed_model_catalog_path(&backups).unwrap();
@@ -485,13 +491,15 @@ fn active_managed_catalog_refreshes_without_replacing_the_profile() {
         .unwrap();
     assert_eq!(refreshed["use_responses_lite"], false);
     assert!(!cache_path.exists());
-    assert!(!refresh_managed_model_catalog(
-        &home,
-        &backups,
-        r#"{"models":[{"slug":"new-model","use_responses_lite":true}]}"#,
-        None,
-    )
-    .unwrap());
+    assert!(
+        !refresh_managed_model_catalog(
+            &home,
+            &backups,
+            r#"{"models":[{"slug":"new-model","use_responses_lite":true}]}"#,
+            None,
+        )
+        .unwrap()
+    );
     restore_with(&home, &backups, &secrets).unwrap();
     assert_eq!(
         fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
@@ -526,22 +534,26 @@ fn stale_catalog_refresh_cannot_replace_a_different_profile_binding() {
         } else {
             stale.credential_id = "synthetic-previous-key".into();
         }
-        assert!(!refresh_managed_model_catalog(
-            &home,
-            &backups,
-            r#"{"models":[{"slug":"stale-model"}]}"#,
-            Some(&stale)
-        )
-        .unwrap());
+        assert!(
+            !refresh_managed_model_catalog(
+                &home,
+                &backups,
+                r#"{"models":[{"slug":"stale-model"}]}"#,
+                Some(&stale)
+            )
+            .unwrap()
+        );
         assert_eq!(fs::read(&catalog_path).unwrap(), before);
     }
-    assert!(refresh_managed_model_catalog(
-        &home,
-        &backups,
-        r#"{"models":[{"slug":"new-model"}]}"#,
-        Some(&current)
-    )
-    .unwrap());
+    assert!(
+        refresh_managed_model_catalog(
+            &home,
+            &backups,
+            r#"{"models":[{"slug":"new-model"}]}"#,
+            Some(&current)
+        )
+        .unwrap()
+    );
     fs::remove_dir_all(root).unwrap();
 }
 #[test]
@@ -941,9 +953,11 @@ fn changed_catalog_and_newer_login_survive_restore() {
     let fresh_auth = r#"{"auth_mode":"chatgpt","tokens":{"access_token":"fresh"}}"#;
     fs::write(home.join(AUTH_FILE), fresh_auth).unwrap();
     restore_with(&home, &backups, &secrets).unwrap();
-    assert!(!fs::read_to_string(home.join(CONFIG_FILE))
-        .unwrap_or_default()
-        .contains(PROVIDER_ID));
+    assert!(
+        !fs::read_to_string(home.join(CONFIG_FILE))
+            .unwrap_or_default()
+            .contains(PROVIDER_ID)
+    );
     assert_eq!(
         fs::read_to_string(home.join(AUTH_FILE)).unwrap(),
         fresh_auth
@@ -1061,9 +1075,11 @@ fn direct_source_catalog_publishes_known_limits_without_client_context_policy() 
     assert!(value["models"][0].get("context_window").is_none());
     assert_eq!(value["models"][0]["max_context_window"], 64_000);
     assert!(value["models"][0].get("auto_compact_token_limit").is_none());
-    assert!(value["models"][0]
-        .get("effective_context_window_percent")
-        .is_none());
+    assert!(
+        value["models"][0]
+            .get("effective_context_window_percent")
+            .is_none()
+    );
     assert_eq!(value["models"][1]["input_modalities"], json!(["text"]));
     assert_eq!(value["models"][1]["supported_reasoning_levels"], json!([]));
     assert!(value["models"][1].get("context_window").is_none());

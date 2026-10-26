@@ -1,5 +1,5 @@
 use super::is_valid_model_id;
-use serde::{de::Error as _, Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, de::Error as _};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 

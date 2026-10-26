@@ -1,9 +1,9 @@
 use super::{
-    catalog_capabilities, detected_model_price, normalized_model_ids, SourceConnector,
-    SourceDiscovery, SourceProtocolBinding, SourceProtocolBindingKey, SourceReadHints,
+    SourceConnector, SourceDiscovery, SourceProtocolBinding, SourceProtocolBindingKey,
+    SourceReadHints, catalog_capabilities, detected_model_price, normalized_model_ids,
 };
 use crate::scheduler::refresh::http::{HttpClass, ManagementHttpScope};
-use crate::transport::{collect_limited, MAX_MODEL_CATALOG_BODY_BYTES};
+use crate::transport::{MAX_MODEL_CATALOG_BODY_BYTES, collect_limited};
 use crate::{ApiModelPriceOverride, Error, Result, UpstreamProtocol};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashSet};

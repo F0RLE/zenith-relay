@@ -156,7 +156,7 @@ impl ProxyPool {
                 return Err(LocalPoolError::new(
                     ErrorCode::InvalidState,
                     "proxy pool limit of 1000 entries is reached",
-                ))
+                ));
             }
         };
         Ok(self

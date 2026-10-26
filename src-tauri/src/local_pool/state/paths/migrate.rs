@@ -154,7 +154,7 @@ fn move_directory_if_destination_absent(source: &Path, destination: &Path) -> Re
             return Err(LocalPoolError::new(
                 ErrorCode::RecoveryRequired,
                 format!("legacy storage path is unsafe: {}", source.display()),
-            ))
+            ));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(io_error(error)),
@@ -165,7 +165,7 @@ fn move_directory_if_destination_absent(source: &Path, destination: &Path) -> Re
             return Err(LocalPoolError::new(
                 ErrorCode::RecoveryRequired,
                 format!("storage destination is unsafe: {}", destination.display()),
-            ))
+            ));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(io_error(error)),
@@ -195,7 +195,7 @@ fn migrate_regular_file(source: &Path, destination: &Path) -> Result<()> {
                     source.display(),
                     destination.display()
                 ),
-            ))
+            ));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(io_error(error)),
@@ -221,7 +221,7 @@ fn ensure_real_directory(path: &Path, description: &str) -> Result<()> {
             return Err(LocalPoolError::new(
                 ErrorCode::RecoveryRequired,
                 format!("{description} must be a real directory: {}", path.display()),
-            ))
+            ));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(io_error(error)),
@@ -322,9 +322,10 @@ mod tests {
         assert!(!root.join("data/.legacy-keyring-migrated-v1").exists());
         assert!(root.join("cache/webview/profile").exists());
         assert!(!root.join("cache/com.zenith.codex").exists());
-        assert!(root
-            .join("exports/deployments/deployment-a/compose.yaml")
-            .exists());
+        assert!(
+            root.join("exports/deployments/deployment-a/compose.yaml")
+                .exists()
+        );
         assert!(!root.join("cache/deployments").exists());
 
         migrate_storage_layout(&root).unwrap();

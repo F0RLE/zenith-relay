@@ -1,5 +1,5 @@
 use super::super::io_error_message;
-use super::{atomic_write, ErrorCode, LocalPoolError, Result};
+use super::{ErrorCode, LocalPoolError, Result, atomic_write};
 use std::{fs, path::Path};
 
 pub(super) fn read_optional_bytes(path: &Path) -> Result<Option<Vec<u8>>> {

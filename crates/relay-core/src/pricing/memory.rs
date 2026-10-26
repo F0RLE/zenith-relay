@@ -68,8 +68,10 @@ mod tests {
             )
         );
         assert!(measured.iter().all(|region| region.bytes.unwrap() > 0));
-        assert!(!serde_json::to_string(&measured)
-            .unwrap()
-            .contains("synthetic-private-label"));
+        assert!(
+            !serde_json::to_string(&measured)
+                .unwrap()
+                .contains("synthetic-private-label")
+        );
     }
 }

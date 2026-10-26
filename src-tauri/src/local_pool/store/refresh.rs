@@ -1,7 +1,7 @@
 //! Desktop observation fences. Revisions are durable, monotonic and secret-free;
 //! restoring a previous record never restores permission for an older read.
 
-use super::{serialize_state, LocalPoolStore};
+use super::{LocalPoolStore, serialize_state};
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError, Result},
     models::{GatewaySettings, LocalAccountRecord},

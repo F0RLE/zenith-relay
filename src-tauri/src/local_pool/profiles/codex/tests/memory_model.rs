@@ -21,14 +21,18 @@ fn memory_policy_defaults_and_stage_input_preserve_the_contract() {
     assert!(restored.codex_memory_consolidation_enabled);
 
     for stage in ["extraction", "consolidation"] {
-        assert!(serde_json::from_value::<SetCodexMemoryModelInput>(json!({
-            "stage":stage, "model":"synthetic-model", "expectedModel":null
-        }))
-        .is_ok());
-        assert!(serde_json::from_value::<SetCodexMemoryEnabledInput>(json!({
-            "stage":stage, "enabled":false
-        }))
-        .is_ok());
+        assert!(
+            serde_json::from_value::<SetCodexMemoryModelInput>(json!({
+                "stage":stage, "model":"synthetic-model", "expectedModel":null
+            }))
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<SetCodexMemoryEnabledInput>(json!({
+                "stage":stage, "enabled":false
+            }))
+            .is_ok()
+        );
     }
     for invalid in [
         json!({"stage":"other", "enabled":false}),
@@ -110,25 +114,29 @@ fn memory_model_updates_the_official_key_without_changing_other_settings() {
 #[test]
 fn memory_model_does_not_modify_a_missing_or_native_profile() {
     let (root, home, backups) = profile_dirs("memory-model-unmanaged");
-    assert!(set_memory_model(
-        &home,
-        &backups,
-        CodexMemoryStage::Consolidation,
-        Some("synthetic"),
-        None
-    )
-    .is_err());
+    assert!(
+        set_memory_model(
+            &home,
+            &backups,
+            CodexMemoryStage::Consolidation,
+            Some("synthetic"),
+            None
+        )
+        .is_err()
+    );
     assert!(!home.join(CONFIG_FILE).exists());
     let original = "model_provider = 'openai'\nmodel = 'synthetic-chat'\n";
     fs::write(home.join(CONFIG_FILE), original).unwrap();
-    assert!(set_memory_model(
-        &home,
-        &backups,
-        CodexMemoryStage::Extraction,
-        Some("synthetic"),
-        None
-    )
-    .is_err());
+    assert!(
+        set_memory_model(
+            &home,
+            &backups,
+            CodexMemoryStage::Extraction,
+            Some("synthetic"),
+            None
+        )
+        .is_err()
+    );
     assert_eq!(
         fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
         original

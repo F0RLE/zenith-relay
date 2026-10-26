@@ -23,16 +23,20 @@ fn messages_client_metadata_and_cache_hints_do_not_block_openai_routes() {
         );
         assert!(!body.to_string().contains("cache_control"));
         let decoded = decode::request(upstream, body).unwrap();
-        assert!(decoded
-            .messages
-            .iter()
-            .any(|message| message.role == Role::System
-                && message.blocks == vec![Block::Text("Use the supplied tools.".into())]));
-        assert!(decoded
-            .messages
-            .iter()
-            .any(|message| message.role == Role::User
-                && message.blocks == vec![Block::Text("Hello.".into())]));
+        assert!(
+            decoded
+                .messages
+                .iter()
+                .any(|message| message.role == Role::System
+                    && message.blocks == vec![Block::Text("Use the supplied tools.".into())])
+        );
+        assert!(
+            decoded
+                .messages
+                .iter()
+                .any(|message| message.role == Role::User
+                    && message.blocks == vec![Block::Text("Hello.".into())])
+        );
     }
 }
 
@@ -158,9 +162,11 @@ fn messages_user_attribution_uses_gemini_safety_labels_without_prompt_content() 
                 assert_eq!(identifier, "");
             } else {
                 assert_eq!(identifier.len(), 63);
-                assert!(identifier
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
+                assert!(
+                    identifier
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                );
                 assert!(!body.to_string().contains(&user_id));
                 if user_id == "synthetic-user" {
                     assert_eq!(
@@ -178,12 +184,14 @@ fn messages_user_attribution_uses_gemini_safety_labels_without_prompt_content() 
                 bridge.finish();
                 assert!(bridge.completed().is_some());
             } else {
-                assert!(prepared
-                    .translate_response_bytes(
-                        &serde_json::to_vec(&output(WireApi::Gemini)).unwrap()
-                    )
-                    .unwrap()
-                    .is_some());
+                assert!(
+                    prepared
+                        .translate_response_bytes(
+                            &serde_json::to_vec(&output(WireApi::Gemini)).unwrap()
+                        )
+                        .unwrap()
+                        .is_some()
+                );
             }
         }
     }

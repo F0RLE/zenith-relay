@@ -5,7 +5,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
 };
-use tokio::time::{sleep, Duration, Instant};
+use tokio::time::{Duration, Instant, sleep};
 use uuid::Uuid;
 use zenith_relay_core::accounts::{TokenRefreshFailure, TokenRefreshFailureKind};
 use zenith_relay_core::error_codes;

@@ -4,7 +4,7 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use tauri::AppHandle;
 use tauri_plugin_dialog::DialogExt;
-use zenith_relay_core::accounts::{combine_import_documents, MAX_IMPORT_BYTES, MAX_IMPORT_ITEMS};
+use zenith_relay_core::accounts::{MAX_IMPORT_BYTES, MAX_IMPORT_ITEMS, combine_import_documents};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

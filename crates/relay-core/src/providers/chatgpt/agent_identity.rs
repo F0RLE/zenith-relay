@@ -1,7 +1,7 @@
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 use chrono::{SecondsFormat, TimeZone, Utc};
 use crypto_box::SecretKey as Curve25519SecretKey;
-use ed25519_dalek::{pkcs8::DecodePrivateKey, Signer, SigningKey};
+use ed25519_dalek::{Signer, SigningKey, pkcs8::DecodePrivateKey};
 use reqwest::header::HeaderValue;
 use serde::Serialize;
 use sha2::{Digest, Sha512};

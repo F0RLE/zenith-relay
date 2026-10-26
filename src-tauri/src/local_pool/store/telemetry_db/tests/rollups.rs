@@ -194,15 +194,21 @@ fn usage_survives_database_reopen() {
     database
         .record_performance("snapshot_stage", 8.5, Some("routing"))
         .unwrap();
-    assert!(database
-        .record_performance("snapshot_stage", f64::NAN, Some("routing"))
-        .is_err());
-    assert!(database
-        .record_performance("snapshot_stage", 1.0, Some("invalid\ncontext"))
-        .is_err());
-    assert!(database
-        .record_performance("unknown_metric", 1.0, None)
-        .is_err());
+    assert!(
+        database
+            .record_performance("snapshot_stage", f64::NAN, Some("routing"))
+            .is_err()
+    );
+    assert!(
+        database
+            .record_performance("snapshot_stage", 1.0, Some("invalid\ncontext"))
+            .is_err()
+    );
+    assert!(
+        database
+            .record_performance("unknown_metric", 1.0, None)
+            .is_err()
+    );
     let performance_samples: i64 = database
         .connection
         .lock()

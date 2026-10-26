@@ -16,8 +16,8 @@ use io::SnapshotSecrets;
 
 mod record;
 use record::{
-    load_payload, normalize_name, read_record, summary, validate_profile_content, validate_record,
-    SnapshotPayload, SnapshotRecord,
+    SnapshotPayload, SnapshotRecord, load_payload, normalize_name, read_record, summary,
+    validate_profile_content, validate_record,
 };
 
 pub(super) const MAX_NAME_CHARS: usize = 80;

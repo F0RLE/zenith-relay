@@ -1,4 +1,4 @@
-use super::{ImportSessionError, ImportSessionErrorCode, SessionSnapshot, MAX_SNAPSHOT_BYTES};
+use super::{ImportSessionError, ImportSessionErrorCode, MAX_SNAPSHOT_BYTES, SessionSnapshot};
 use std::{
     fs,
     io::Write,

@@ -1,6 +1,6 @@
 use super::super::oauth::{OAuthClientKind, OAuthPendingSession};
 use super::{
-    OAuthFlowError, OAuthFlowErrorCode, OAuthFlowStatus, PendingSnapshot, CALLBACK_PATH,
+    CALLBACK_PATH, OAuthFlowError, OAuthFlowErrorCode, OAuthFlowStatus, PendingSnapshot,
     SNAPSHOT_VERSION,
 };
 use std::fs;

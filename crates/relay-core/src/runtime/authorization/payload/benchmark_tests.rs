@@ -1,13 +1,13 @@
 //! Explicit local probe, never a provider request or a CI speed threshold.
 use super::*;
 use axum::{
+    Router,
     body::Bytes,
     extract::{Request as ServerRequest, State},
-    response::{sse::Event, IntoResponse, Sse},
+    response::{IntoResponse, Sse, sse::Event},
     routing::post,
-    Router,
 };
-use futures_util::{stream, StreamExt};
+use futures_util::{StreamExt, stream};
 use std::{convert::Infallible, time::Duration};
 
 const WARMUPS: usize = 2;
@@ -228,9 +228,21 @@ async fn measure_request_compression_latency() {
                 }
             }
             for (index, sample) in samples.iter().enumerate() {
-                println!("compression_probe kind={} json_bytes={} encoding={} body_bytes={} link_mbps={} encode_p50_ms={:.3} encode_p95_ms={:.3} upload_p50_ms={:.3} decode_p50_ms={:.3} send_headers_p50_ms={:.3} first_output_p50_ms={:.3} first_output_p95_ms={:.3}",
-                    if opaque { "opaque" } else { "text" }, payload.len(), if index == 0 { "identity" } else { "zstd" }, sample.body_bytes, mbps,
-                    percentile(&sample.encode_us, 50), percentile(&sample.encode_us, 95), percentile(&sample.upload_us, 50), percentile(&sample.decode_us, 50), percentile(&sample.headers_us, 50), percentile(&sample.first_output_us, 50), percentile(&sample.first_output_us, 95));
+                println!(
+                    "compression_probe kind={} json_bytes={} encoding={} body_bytes={} link_mbps={} encode_p50_ms={:.3} encode_p95_ms={:.3} upload_p50_ms={:.3} decode_p50_ms={:.3} send_headers_p50_ms={:.3} first_output_p50_ms={:.3} first_output_p95_ms={:.3}",
+                    if opaque { "opaque" } else { "text" },
+                    payload.len(),
+                    if index == 0 { "identity" } else { "zstd" },
+                    sample.body_bytes,
+                    mbps,
+                    percentile(&sample.encode_us, 50),
+                    percentile(&sample.encode_us, 95),
+                    percentile(&sample.upload_us, 50),
+                    percentile(&sample.decode_us, 50),
+                    percentile(&sample.headers_us, 50),
+                    percentile(&sample.first_output_us, 50),
+                    percentile(&sample.first_output_us, 95)
+                );
             }
             server.abort();
             let _ = server.await;

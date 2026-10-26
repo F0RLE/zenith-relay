@@ -408,16 +408,18 @@ fn cache_sessions_follow_the_latest_cache_touch_and_reported_window() {
         )
         .unwrap();
     assert_eq!(scoped, vec![ranged[1].clone()]);
-    assert!(database
-        .cache_sessions(
-            &UsageQuery::default(),
-            Some(&CacheSessionScope {
-                client_context_id: "missing' OR 1=1 --".into(),
-                ..scope
-            }),
-        )
-        .unwrap()
-        .is_empty());
+    assert!(
+        database
+            .cache_sessions(
+                &UsageQuery::default(),
+                Some(&CacheSessionScope {
+                    client_context_id: "missing' OR 1=1 --".into(),
+                    ..scope
+                }),
+            )
+            .unwrap()
+            .is_empty()
+    );
 
     let account = database
         .cache_sessions(
@@ -607,9 +609,10 @@ fn cache_sessions_isolate_routes_and_ignore_misses_and_future_policies() {
         .cache_sessions(&UsageQuery::default(), None)
         .unwrap();
     assert_eq!(all.len(), 100);
-    assert!(all
-        .iter()
-        .all(|session| session.client_context_id != "same_chat"));
+    assert!(
+        all.iter()
+            .all(|session| session.client_context_id != "same_chat")
+    );
     let scoped = database
         .cache_sessions(
             &UsageQuery {

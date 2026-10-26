@@ -1,7 +1,7 @@
 use super::persist;
 use super::{
-    breadcrumb, record_error, record_operation, DEBUG_ENABLED, LOGS_DIRECTORY,
-    PANIC_HOOK_INSTALLED, SESSION_ACTIVE, SESSION_MARKER_FILE,
+    DEBUG_ENABLED, LOGS_DIRECTORY, PANIC_HOOK_INSTALLED, SESSION_ACTIVE, SESSION_MARKER_FILE,
+    breadcrumb, record_error, record_operation,
 };
 use std::fs;
 use std::panic;

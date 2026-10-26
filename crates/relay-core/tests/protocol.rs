@@ -36,9 +36,11 @@ fn desktop_capabilities_expose_local_features_without_server_negotiation() {
             .collect::<Vec<_>>(),
         ["openai.codex", "openai.siwc", "openai.excel_bps"]
     );
-    assert!(connectors
-        .iter()
-        .all(|item| item["providerFamily"] == "openai"));
+    assert!(
+        connectors
+            .iter()
+            .all(|item| item["providerFamily"] == "openai")
+    );
     let legacy: DesktopCapabilities =
         serde_json::from_value(serde_json::json!({"features":["accounts"]})).unwrap();
     assert!(legacy.account_connectors.is_empty());

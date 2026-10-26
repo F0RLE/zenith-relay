@@ -1,11 +1,11 @@
 use super::super::credentials::StoredCodexCredentials;
-use super::{ProxyPool, COMMON_PROXY_SECRET_REF};
+use super::{COMMON_PROXY_SECRET_REF, ProxyPool};
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError, Result},
     models::GatewaySettings,
     store::secret_store,
 };
-use zenith_relay_core::{protocol::ProxyMode, ProxyConfig};
+use zenith_relay_core::{ProxyConfig, protocol::ProxyMode};
 
 pub fn effective_proxy_url(
     settings: &GatewaySettings,

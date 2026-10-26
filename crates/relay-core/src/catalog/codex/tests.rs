@@ -269,9 +269,11 @@ fn native_models_do_not_synthesize_missing_context_fields() {
     assert_eq!(catalog_entry["context_window"], 128_000);
     assert!(catalog_entry.get("max_context_window").is_none());
     assert!(catalog_entry.get("auto_compact_token_limit").is_none());
-    assert!(catalog_entry
-        .get("effective_context_window_percent")
-        .is_none());
+    assert!(
+        catalog_entry
+            .get("effective_context_window_percent")
+            .is_none()
+    );
 }
 
 #[test]
@@ -291,10 +293,12 @@ fn native_models_keep_an_arbitrary_upstream_slug_over_the_routing_name() {
 
     assert_eq!(catalog_entry["slug"], "vendor/future-model-2026-08");
     assert_eq!(catalog_entry["display_name"], "Future upstream name");
-    assert!(!catalog_entry["slug"]
-        .as_str()
-        .unwrap()
-        .starts_with("zenith/"));
+    assert!(
+        !catalog_entry["slug"]
+            .as_str()
+            .unwrap()
+            .starts_with("zenith/")
+    );
 }
 
 #[test]

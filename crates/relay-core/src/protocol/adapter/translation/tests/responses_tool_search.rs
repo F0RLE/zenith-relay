@@ -135,14 +135,18 @@ fn client_tool_search_completes_discovery_call_result_and_next_answer_across_jso
             for by_id in [false, true] {
                 let original = catalog();
                 let first = prepare_search(upstream, &original, streaming, None, "search");
-                assert!(!first
-                    .upstream_body()
-                    .to_string()
-                    .contains("synthetic-original-schema"));
-                assert!(!first
-                    .upstream_body()
-                    .to_string()
-                    .contains("synthetic-never-loaded"));
+                assert!(
+                    !first
+                        .upstream_body()
+                        .to_string()
+                        .contains("synthetic-original-schema")
+                );
+                assert!(
+                    !first
+                        .upstream_body()
+                        .to_string()
+                        .contains("synthetic-never-loaded")
+                );
                 let name = callable(first.upstream_body(), upstream);
                 let first = complete_call(
                     first,
@@ -323,11 +327,13 @@ fn client_tool_search_rejects_wrong_result_kinds_and_unpaired_results() {
         assert!(try_convert(WireApi::Responses, upstream, &request, false).is_err());
     }
     request["input"] = json!([{ "type":"tool_search_output","execution":"client","call_id":"orphan","status":"completed","tools":[] }]);
-    assert!(try_convert(
-        WireApi::Responses,
-        WireApi::ChatCompletions,
-        &request,
-        false
-    )
-    .is_err());
+    assert!(
+        try_convert(
+            WireApi::Responses,
+            WireApi::ChatCompletions,
+            &request,
+            false
+        )
+        .is_err()
+    );
 }

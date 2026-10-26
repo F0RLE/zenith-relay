@@ -29,9 +29,11 @@ fn native_account_catalog_uses_reference_capabilities_despite_conflicting_accoun
         .authenticate(Some(&axum::http::HeaderValue::from_static("Bearer secret")))
         .unwrap();
     let visible = runtime.visible_models(&key, &[WireApi::Responses], 0);
-    assert!(!runtime
-        .codex_model_native_responses_account_ids(&key, "gpt-native")
-        .is_empty());
+    assert!(
+        !runtime
+            .codex_model_native_responses_account_ids(&key, "gpt-native")
+            .is_empty()
+    );
     let mut native_entry = routed_codex_catalog_entry(None, "gpt-native", 1_000, None)
         .as_object()
         .unwrap()
@@ -55,13 +57,15 @@ fn native_account_catalog_uses_reference_capabilities_despite_conflicting_accoun
         ("effective_context_window_percent".into(), json!(90)),
     ]);
     let upstream = json!({"models": [Value::Object(native_entry)]});
-    assert!(normalize_native_codex_catalog_entry(
-        upstream["models"][0].as_object().unwrap(),
-        "gpt-native",
-        1_000,
-        None,
-    )
-    .is_some());
+    assert!(
+        normalize_native_codex_catalog_entry(
+            upstream["models"][0].as_object().unwrap(),
+            "gpt-native",
+            1_000,
+            None,
+        )
+        .is_some()
+    );
 
     let response = build_codex_models_response(&runtime, &key, &visible, Some(&upstream))
         .expect("native catalog");
@@ -109,9 +113,11 @@ fn native_account_catalog_uses_reference_capabilities_despite_conflicting_accoun
     assert_eq!(fallback["models"][0]["default_reasoning_level"], "low");
     assert!(fallback["models"][0].get("context_window").is_none());
     assert!(fallback["models"][0].get("max_context_window").is_none());
-    assert!(fallback["models"][0]
-        .get("auto_compact_token_limit")
-        .is_none());
+    assert!(
+        fallback["models"][0]
+            .get("auto_compact_token_limit")
+            .is_none()
+    );
 
     // A partial native card can supply capabilities without a title.
     // The normalizer's generated title must not hide a real catalog name.
@@ -143,9 +149,11 @@ fn native_account_catalog_uses_reference_capabilities_despite_conflicting_accoun
     let response =
         build_codex_models_response(&runtime, &key, &visible, Some(&missing_context)).unwrap();
     assert!(response["models"][0].get("context_window").is_none());
-    assert!(response["models"][0]
-        .get("auto_compact_token_limit")
-        .is_none());
+    assert!(
+        response["models"][0]
+            .get("auto_compact_token_limit")
+            .is_none()
+    );
 
     let explicit = build_codex_models_response(&runtime, &key, &visible, Some(&upstream)).unwrap();
     // Default is the native Short window, with compaction at 90%.

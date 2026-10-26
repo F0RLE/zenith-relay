@@ -692,9 +692,11 @@ fn success_latency_uses_the_lease_route_and_does_not_update_sibling_operations()
         engine.health[&("a".to_owned(), "image:gpt".to_owned())].first_output_latency_ms,
         Some(100)
     );
-    assert!(!engine
-        .health
-        .contains_key(&("a".to_owned(), "responses:gpt".to_owned())));
+    assert!(
+        !engine
+            .health
+            .contains_key(&("a".to_owned(), "responses:gpt".to_owned()))
+    );
     assert_eq!(
         engine.settle_with_latency(lease.lease_id, observation, &budget, 20, Some(500)),
         Err(SettlementError::UnknownLease)
@@ -769,9 +771,11 @@ fn removed_candidates_do_not_transfer_soft_health_to_readded_ids() {
     assert!(engine.remove("a").is_some());
     engine.upsert(candidate("a", 0, 1)).unwrap();
 
-    assert!(!engine
-        .health
-        .contains_key(&("a".to_owned(), "responses:gpt".to_owned())));
+    assert!(
+        !engine
+            .health
+            .contains_key(&("a".to_owned(), "responses:gpt".to_owned()))
+    );
 }
 
 #[test]
@@ -801,9 +805,11 @@ fn allowed_healthy_reserve_is_not_blocked_by_primary_priority() {
         engine.circuit("primary", "responses:gpt").state,
         CircuitState::Degraded
     );
-    assert!(engine
-        .select(&request(2), 251)
-        .is_some_and(|selected| { selected.candidate_id == "primary" }));
+    assert!(
+        engine
+            .select(&request(2), 251)
+            .is_some_and(|selected| { selected.candidate_id == "primary" })
+    );
     assert_eq!(
         engine.select(&request(3), 0).unwrap().candidate_id,
         "reserve"

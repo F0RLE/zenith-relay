@@ -72,20 +72,26 @@ fn native_catalog_recovers_bad_lookups_but_bounds_rounds_and_bytes() {
     for round in 0..8 {
         let reply = lookup_response(round, json!({"names":["not_available"]}));
         assert!(session.advance(&reply, &mut body).unwrap());
-        assert!(body["input"].as_array().unwrap().last().unwrap()["output"]
-            .as_str()
-            .unwrap()
-            .contains("invalid_catalog_lookup"));
+        assert!(
+            body["input"].as_array().unwrap().last().unwrap()["output"]
+                .as_str()
+                .unwrap()
+                .contains("invalid_catalog_lookup")
+        );
     }
-    assert!(session
-        .advance(&lookup_response(8, json!({"names":["tool_0"]})), &mut body)
-        .is_err());
+    assert!(
+        session
+            .advance(&lookup_response(8, json!({"names":["tool_0"]})), &mut body)
+            .is_err()
+    );
     let (mut body, session) = prepare(&request(), 16);
     let mut session = session.unwrap();
     session.continuation_bytes = MAX_CONTINUATION_BYTES;
-    assert!(session
-        .advance(&lookup_response(0, json!({"names":["tool_0"]})), &mut body)
-        .is_err());
+    assert!(
+        session
+            .advance(&lookup_response(0, json!({"names":["tool_0"]})), &mut body)
+            .is_err()
+    );
 }
 
 #[test]

@@ -1,14 +1,14 @@
 use super::MODELS_CACHE_FILE;
 use crate::local_pool::error::{LocalPoolError, Result};
+use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
-use serde_json::Value;
 use std::{collections::HashSet, fs, path::Path};
 use zenith_relay_core::model_metadata::ModelMetadataCatalog;
 use zenith_relay_core::{
-    codex_catalog_entry_is_compatible, codex_model_display_name, codex_model_is_picker_eligible,
-    decode_codex_model_alias, normalize_upstream_codex_catalog_entry, routed_codex_catalog_entry,
-    CODEX_RELAY_CATALOG_HASH,
+    CODEX_RELAY_CATALOG_HASH, codex_catalog_entry_is_compatible, codex_model_display_name,
+    codex_model_is_picker_eligible, decode_codex_model_alias,
+    normalize_upstream_codex_catalog_entry, routed_codex_catalog_entry,
 };
 
 // Keep the desktop catalog bound aligned with the shared model-discovery
@@ -168,11 +168,13 @@ mod ultra_tests {
         assert_eq!(sol["multi_agent_version"], "v2");
         assert!(sol.get("multi_agent_reasoning_effort").is_none());
         assert_ne!(sol["base_instructions"], "not a Relay instruction");
-        assert!(managed["models"][1]["supported_reasoning_levels"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|level| level["effort"] != "ultra"));
+        assert!(
+            managed["models"][1]["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|level| level["effort"] != "ultra")
+        );
     }
 
     #[test]

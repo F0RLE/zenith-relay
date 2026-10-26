@@ -1,7 +1,6 @@
 use super::super::{
-    db_error,
-    record::{apply_aggregate_delta, UsageAggregate},
-    Result,
+    Result, db_error,
+    record::{UsageAggregate, apply_aggregate_delta},
 };
 use rusqlite::{Connection, TransactionBehavior};
 

@@ -7,8 +7,8 @@ use zenith_relay_core::error_codes;
 use zenith_relay_core::model_metadata::ModelMetadataCatalog;
 use zenith_relay_core::protocol::ProxyMode;
 use zenith_relay_core::protocol::{
-    account_operational_state, AccountOperationalInput, AccountSummary, QuotaWindowUsage,
-    SourceSummary,
+    AccountOperationalInput, AccountSummary, QuotaWindowUsage, SourceSummary,
+    account_operational_state,
 };
 use zenith_relay_core::{
     ApiEquivalentSummary, CandidateKind, CandidateRuntimeSnapshot, QUOTA_STALE_AFTER_MS,

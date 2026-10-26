@@ -1,12 +1,12 @@
 use crate::local_pool::{
     accounts::{
+        NativeSecretBackend,
         credentials::{
-            credential_local_error as credential_error, CredentialStore, StoredCodexCredentials,
+            CredentialStore, StoredCodexCredentials, credential_local_error as credential_error,
         },
         oauth::CodexOAuthClient,
         oauth_flow::{OAuthFlowStart, OAuthFlowStatus},
         records::{self, new_account_record},
-        NativeSecretBackend,
     },
     error::ErrorCode,
     models::LocalAccountRecord,
@@ -113,8 +113,8 @@ use super::account::{
     preserve_existing_settings,
 };
 use super::checkpoint::{
-    decode_completion_checkpoint, encode_completion_checkpoint, OAuthCompletionCheckpoint,
-    COMPLETION_CHECKPOINT_VERSION,
+    COMPLETION_CHECKPOINT_VERSION, OAuthCompletionCheckpoint, decode_completion_checkpoint,
+    encode_completion_checkpoint,
 };
 use super::completion::{
     completion_rollback_owns_state, next_completion_generation,
@@ -271,12 +271,14 @@ fn exchanged_token_checkpoint_is_recoverable_and_fully_redacted() {
         .unwrap()
         .unwrap();
     assert_eq!(recovered.access_token, "checkpoint-access-secret");
-    assert!(decode_completion_checkpoint(
-        "http://localhost:1455/auth/callback?code=callback-secret",
-        &login_id
-    )
-    .unwrap()
-    .is_none());
+    assert!(
+        decode_completion_checkpoint(
+            "http://localhost:1455/auth/callback?code=callback-secret",
+            &login_id
+        )
+        .unwrap()
+        .is_none()
+    );
     let rendered = format!("{recovered:?}");
     for secret in [
         "checkpoint-access-secret",
@@ -462,10 +464,12 @@ fn initial_model_probe_uses_the_registered_agent_identity() {
         .unwrap(),
     );
     let authorization = registered.authorization(1_785_000_000_000).unwrap();
-    assert!(authorization
-        .to_str()
-        .unwrap()
-        .starts_with("AgentAssertion "));
+    assert!(
+        authorization
+            .to_str()
+            .unwrap()
+            .starts_with("AgentAssertion ")
+    );
     assert_ne!(
         authorization.to_str().unwrap(),
         "Bearer oauth-access-secret"
@@ -736,30 +740,38 @@ fn completion_credential_compensation_never_overwrites_a_newer_snapshot() {
     .unwrap();
 
     credential_store.save(&previous).unwrap();
-    assert!(restore_attempted_completion_credentials_if_current(
-        &credential_store,
-        &account_id,
-        Some(&previous),
-        &attempted,
-    )
-    .unwrap());
-    assert!(credential_store
-        .require(&account_id)
+    assert!(
+        restore_attempted_completion_credentials_if_current(
+            &credential_store,
+            &account_id,
+            Some(&previous),
+            &attempted,
+        )
         .unwrap()
-        .matches_snapshot(&attempted));
+    );
+    assert!(
+        credential_store
+            .require(&account_id)
+            .unwrap()
+            .matches_snapshot(&attempted)
+    );
 
     credential_store.save(&newer).unwrap();
-    assert!(!restore_attempted_completion_credentials_if_current(
-        &credential_store,
-        &account_id,
-        Some(&previous),
-        &attempted,
-    )
-    .unwrap());
-    assert!(credential_store
-        .require(&account_id)
+    assert!(
+        !restore_attempted_completion_credentials_if_current(
+            &credential_store,
+            &account_id,
+            Some(&previous),
+            &attempted,
+        )
         .unwrap()
-        .matches_snapshot(&newer));
+    );
+    assert!(
+        credential_store
+            .require(&account_id)
+            .unwrap()
+            .matches_snapshot(&newer)
+    );
 
     credential_store.delete(&account_id).unwrap();
 }

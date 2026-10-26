@@ -1,8 +1,8 @@
 use super::{
-    normalized_base_url, ProviderSource, SourceProtocolBinding, SourceProtocolBindingKey, WireApi,
+    ProviderSource, SourceProtocolBinding, SourceProtocolBindingKey, WireApi, normalized_base_url,
 };
 use crate::{Error, Result, UpstreamProtocol};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use std::fmt;
 use url::Url;
 
@@ -306,10 +306,12 @@ mod tests {
         ];
         let connector = SourceConnector::new(&source(), &bindings).unwrap();
 
-        assert!(connector
-            .protocol_headers(bindings[0].key())
-            .unwrap()
-            .is_empty());
+        assert!(
+            connector
+                .protocol_headers(bindings[0].key())
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             connector
                 .protocol_headers(bindings[1].key())
@@ -347,9 +349,11 @@ mod tests {
                 .as_str(),
             "https://api.example.test/v1/models/gemini-test:streamGenerateContent?alt=sse"
         );
-        assert!(connector
-            .endpoint(bindings[0].key(), "../not-a-model", false)
-            .is_none());
+        assert!(
+            connector
+                .endpoint(bindings[0].key(), "../not-a-model", false)
+                .is_none()
+        );
     }
 
     #[test]

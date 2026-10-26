@@ -6,18 +6,18 @@ use sha2::{Digest, Sha256};
 #[cfg(not(target_os = "macos"))]
 use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 use tauri::{
-    webview::NewWindowResponse, AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+    AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent, webview::NewWindowResponse,
 };
 use url::Url;
 
 pub(super) mod automatic_login;
 mod proxy;
 
-use proxy::{webview_proxy, ProxyBridge};
+use proxy::{ProxyBridge, webview_proxy};
 
 const SIGN_IN_WINDOW: &str = "codex-sign-in";
 struct SignInSession {

@@ -117,14 +117,16 @@ fn failed_usage_item_commit_preserves_memory_and_all_persisted_items() {
     connection.execute_batch("CREATE TRIGGER fail_usage_key BEFORE INSERT ON app_state_items WHEN NEW.state_key='keys' BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END;").unwrap();
     let mut next = original.clone();
     next.account.last_used_at_ms = Some(123);
-    assert!(store
-        .persist_account_usage(
-            next,
-            "key",
-            "2026-10-25T00:00:01Z",
-            store.automations().clone()
-        )
-        .is_err());
+    assert!(
+        store
+            .persist_account_usage(
+                next,
+                "key",
+                "2026-10-25T00:00:01Z",
+                store.automations().clone()
+            )
+            .is_err()
+    );
     assert_eq!(store.account("a"), Some(&original));
     assert_eq!(store.keys()[0].last_used_at, None);
     assert_eq!(
@@ -139,14 +141,16 @@ fn failed_usage_item_commit_preserves_memory_and_all_persisted_items() {
         .unwrap();
     let mut next = original.clone();
     next.account.enabled = !next.account.enabled;
-    assert!(store
-        .persist_account_usage(
-            next,
-            "key",
-            "2026-10-25T00:00:01Z",
-            store.automations().clone()
-        )
-        .is_err());
+    assert!(
+        store
+            .persist_account_usage(
+                next,
+                "key",
+                "2026-10-25T00:00:01Z",
+                store.automations().clone()
+            )
+            .is_err()
+    );
     let mut next = original;
     next.account.auth_state =
         AccountAuthState::RequiresReauth(zenith_relay_core::accounts::ReauthReason::InvalidGrant);
@@ -246,6 +250,9 @@ fn measure_usage_inventory_writes() {
             fs::remove_dir_all(root).unwrap();
         }
         samples.sort_by(f64::total_cmp);
-        println!("usage_inventory mode={mode} accounts=64 models_per_account=200 writes=64 median_ms={:.2}", samples[1]);
+        println!(
+            "usage_inventory mode={mode} accounts=64 models_per_account=200 writes=64 median_ms={:.2}",
+            samples[1]
+        );
     }
 }

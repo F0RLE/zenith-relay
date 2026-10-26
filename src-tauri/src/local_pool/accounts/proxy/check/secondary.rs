@@ -1,4 +1,4 @@
-use super::{lookup, proxy_check_body, Duration, Instant, IpAddr, ProxyCheckResult, ProxyConfig};
+use super::{Duration, Instant, IpAddr, ProxyCheckResult, ProxyConfig, lookup, proxy_check_body};
 
 /// Supplemental probing shares the selected proxy and never retries directly.
 /// Its total budget includes geolocation and cannot inflate the displayed ping.

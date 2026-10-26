@@ -161,7 +161,10 @@ fn measure_argument_normalization_scan() {
             let variant = if variant == 0 { "current" } else { "scalar" };
             eprintln!(
                 "argument scan variant={variant} workload={name} bytes={} trials=7 median_ns={} min_ns={} max_ns={}",
-                input.len(), samples[3], samples[0], samples[6]
+                input.len(),
+                samples[3],
+                samples[0],
+                samples[6]
             );
         }
     }

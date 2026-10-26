@@ -33,12 +33,12 @@ pub use refresh::ProxyRefreshClient;
 use selection::choose_proxy_url;
 #[cfg(test)]
 pub use selection::proxy_status;
-pub(crate) use selection::{account_proxy_pool_id, common_proxy_pool_id};
 pub use selection::{
-    common_proxy_available, common_proxy_config, common_proxy_url, effective_proxy_config,
-    effective_proxy_url, ensure_account_proxy, proxy_route_is_usable, proxy_route_status,
-    ProxyRoute,
+    ProxyRoute, common_proxy_available, common_proxy_config, common_proxy_url,
+    effective_proxy_config, effective_proxy_url, ensure_account_proxy, proxy_route_is_usable,
+    proxy_route_status,
 };
+pub(crate) use selection::{account_proxy_pool_id, common_proxy_pool_id};
 
 #[cfg(test)]
 mod tests {
@@ -251,11 +251,13 @@ mod tests {
 
         let mut document = document;
         document["entries"][0]["timezone"] = serde_json::json!(" ");
-        assert!(ProxyPool::from_json(&document.to_string())
-            .unwrap()
-            .timezone_observation("proxy_test")
-            .unwrap()
-            .is_none());
+        assert!(
+            ProxyPool::from_json(&document.to_string())
+                .unwrap()
+                .timezone_observation("proxy_test")
+                .unwrap()
+                .is_none()
+        );
         document["entries"][0]["timezone"] = serde_json::json!("Invalid/Timezone");
         assert!(ProxyPool::from_json(&document.to_string()).is_err());
     }

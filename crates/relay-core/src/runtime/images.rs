@@ -1,4 +1,4 @@
-use crate::{is_valid_model_id, Error, Result};
+use crate::{Error, Result, is_valid_model_id};
 
 pub(crate) fn is_image_model_id(model: &str) -> bool {
     let model_id = crate::model_id_key(model);

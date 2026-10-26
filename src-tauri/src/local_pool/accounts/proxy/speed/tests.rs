@@ -1,13 +1,13 @@
 use super::*;
 use axum::{
+    Router,
     body::Body,
     http::{HeaderMap, Response, StatusCode},
     routing::get,
-    Router,
 };
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 
 #[test]

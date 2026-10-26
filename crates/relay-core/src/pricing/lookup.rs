@@ -1,5 +1,5 @@
 use super::{CatalogEntry, ImageModelPrice};
-use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 
 /// Immutable catalog indexes retaining canonical entry keys and image quotes.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

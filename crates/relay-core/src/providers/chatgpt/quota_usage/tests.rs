@@ -1,11 +1,11 @@
 use super::*;
-use crate::quota::{QuotaSnapshot, SubscriptionStatus};
 use crate::DefaultServiceTier;
+use crate::quota::{QuotaSnapshot, SubscriptionStatus};
 use axum::{
+    Json, Router,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::get,
-    Json, Router,
 };
 use serde_json::json;
 
@@ -37,10 +37,12 @@ fn chatgpt_adapter_implements_the_shared_quota_contract() {
     .unwrap();
     let adapter: &dyn QuotaAdapter = &client;
     assert!(adapter.capabilities().supports_quota);
-    assert!(adapter
-        .capabilities()
-        .supported_windows
-        .contains(&QuotaWindowKind::Primary));
+    assert!(
+        adapter
+            .capabilities()
+            .supported_windows
+            .contains(&QuotaWindowKind::Primary)
+    );
 }
 
 #[test]

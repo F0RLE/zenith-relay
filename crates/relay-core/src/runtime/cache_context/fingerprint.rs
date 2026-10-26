@@ -355,14 +355,18 @@ mod tests {
                 Err(serde::ser::Error::custom("synthetic serialization failure"))
             }
         }
-        assert!(JsonFingerprinter::new(&salt)
-            .fingerprint(&Invalid)
-            .is_none());
-        assert!(RequestFingerprint::capture(
-            &json!({"input":vec![Value::Null; MAX_INPUT_ITEMS + 1]}),
-            &salt
-        )
-        .is_none());
+        assert!(
+            JsonFingerprinter::new(&salt)
+                .fingerprint(&Invalid)
+                .is_none()
+        );
+        assert!(
+            RequestFingerprint::capture(
+                &json!({"input":vec![Value::Null; MAX_INPUT_ITEMS + 1]}),
+                &salt
+            )
+            .is_none()
+        );
     }
 
     mod measurements;

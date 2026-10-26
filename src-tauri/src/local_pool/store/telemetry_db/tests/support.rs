@@ -104,10 +104,12 @@ fn native_backend_timing_survives_storage_and_export_without_raw_identifiers() {
         &serde_json::json!({"overheadMs": 0, "inferenceMs": 12.75})
     );
     assert!(!serde_json::to_string(&report).unwrap().contains("PRIVATE_"));
-    assert!(report["semantics"]["codexServerTiming"]
-        .as_str()
-        .unwrap()
-        .contains("not additive"));
+    assert!(
+        report["semantics"]["codexServerTiming"]
+            .as_str()
+            .unwrap()
+            .contains("not additive")
+    );
 
     event.request_id = "synthetic-no-timing".into();
     event
@@ -120,9 +122,11 @@ fn native_backend_timing_survives_storage_and_export_without_raw_identifiers() {
         .codex_server_timing = None;
     db.record(&event).unwrap();
     let report = db.request_diagnostics("synthetic-no-timing").unwrap();
-    assert!(report["finalRequest"]["routing"]["transport"]
-        .get("codexServerTiming")
-        .is_none());
+    assert!(
+        report["finalRequest"]["routing"]["transport"]
+            .get("codexServerTiming")
+            .is_none()
+    );
     drop(db);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -189,10 +193,12 @@ fn diagnostic_report_distinguishes_discovery_from_failure_and_counts_every_send_
     );
     assert_eq!(report["summary"]["reportedTiming"]["durationMs"], 500);
     assert_eq!(report["summary"]["finalSendAddedFromProjection"], false);
-    assert!(report["attempts"][0]["observedAt"]
-        .as_str()
-        .unwrap()
-        .ends_with("+00:00"));
+    assert!(
+        report["attempts"][0]["observedAt"]
+            .as_str()
+            .unwrap()
+            .ends_with("+00:00")
+    );
     assert_eq!(report["attempts"][1]["protocol"]["wireApi"], "responses");
 }
 
@@ -262,9 +268,11 @@ fn diagnostic_report_exports_known_error_codes_but_not_arbitrary_provider_text()
         "message": "PRIVATE_MESSAGE", "requestId": "PRIVATE_ID", "redacted": false, "truncated": false
     })).unwrap());
     let private = super::super::support::document(Some(&row), std::slice::from_ref(&row), false);
-    assert!(!serde_json::to_string(&private)
-        .unwrap()
-        .contains("PRIVATE_"));
+    assert!(
+        !serde_json::to_string(&private)
+            .unwrap()
+            .contains("PRIVATE_")
+    );
     assert!(private["finalRequest"]["errorCode"].is_null());
     assert!(private["finalRequest"]["protocol"]["appliedServiceTier"].is_null());
     assert!(private["finalRequest"]["protocol"]["appliedServiceTierRef"].is_string());
@@ -314,9 +322,11 @@ fn diagnostic_report_preserves_context_and_distinguishes_native_from_client_tool
         .unwrap()
         .mode = "PRIVATE_MODE".into();
     let private = super::super::support::document(Some(&row), std::slice::from_ref(&row), false);
-    assert!(!serde_json::to_string(&private)
-        .unwrap()
-        .contains("PRIVATE_"));
+    assert!(
+        !serde_json::to_string(&private)
+            .unwrap()
+            .contains("PRIVATE_")
+    );
 }
 
 #[test]

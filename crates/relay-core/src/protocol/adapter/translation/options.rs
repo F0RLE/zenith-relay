@@ -1,5 +1,5 @@
 //! Non-generation request options. Native forwarding never normalizes these.
-use super::{checked, AdapterError, AdapterResult, BTreeMap, Value, WireApi};
+use super::{AdapterError, AdapterResult, BTreeMap, Value, WireApi, checked};
 use sha2::{Digest, Sha256};
 
 pub(super) fn metadata(

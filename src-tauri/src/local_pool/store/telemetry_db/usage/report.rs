@@ -1,5 +1,5 @@
 use super::*;
-use crate::local_pool::store::telemetry_db::{reader::ReportRead, TelemetryDb};
+use crate::local_pool::store::telemetry_db::{TelemetryDb, reader::ReportRead};
 
 pub(in crate::local_pool::store::telemetry_db) struct ReportSummary {
     pub totals: UsageTotals,

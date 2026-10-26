@@ -465,10 +465,12 @@ fn cache_comparison_response_id_is_excluded_but_actual_controls_are_compared() {
     let first = RequestFingerprint::capture(&payload(), &salt).unwrap();
     let mut next = payload();
     next["prompt_cache_options"] = json!({"comparison_response_id": "resp_synthetic"});
-    assert!(RequestFingerprint::capture(&next, &salt)
-        .unwrap()
-        .changes_from(&first)
-        .is_empty());
+    assert!(
+        RequestFingerprint::capture(&next, &salt)
+            .unwrap()
+            .changes_from(&first)
+            .is_empty()
+    );
     next["prompt_cache_options"]["ttl"] = json!("30m");
     assert_eq!(
         RequestFingerprint::capture(&next, &salt)
@@ -535,8 +537,10 @@ fn routing_json_accepts_legacy_rows_and_round_trips_safe_comparisons() {
     encoded.as_object_mut().unwrap().remove("cacheContext");
     let legacy = serde_json::from_value::<RoutingDiagnostics>(encoded).unwrap();
     assert!(legacy.cache_context.is_none());
-    assert!(serde_json::to_value(legacy)
-        .unwrap()
-        .get("cacheContext")
-        .is_none());
+    assert!(
+        serde_json::to_value(legacy)
+            .unwrap()
+            .get("cacheContext")
+            .is_none()
+    );
 }

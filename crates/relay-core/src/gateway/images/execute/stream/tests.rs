@@ -118,9 +118,14 @@ async fn native_image_unpolled_body_drop_settles_its_lease() {
 
 #[tokio::test]
 async fn native_image_truncated_invalid_and_error_streams_never_succeed_or_retry() {
-    for chunks in [vec![PARTIAL], vec!["data: invalid\n\n"], vec![
-        "data: {\"type\":\"error\",\"error\":{\"code\":\"synthetic_error\"},\"usage\":{\"output_tokens\":4}}\n\n"
-    ], vec!["data: {\"type\":\"image_generation.completed\"}\n\n"]] {
+    for chunks in [
+        vec![PARTIAL],
+        vec!["data: invalid\n\n"],
+        vec![
+            "data: {\"type\":\"error\",\"error\":{\"code\":\"synthetic_error\"},\"usage\":{\"output_tokens\":4}}\n\n",
+        ],
+        vec!["data: {\"type\":\"image_generation.completed\"}\n\n"],
+    ] {
         let (mut state, events, budget) = image_state(chunks).await;
         while state.next().await.is_some() {}
         drop(state);

@@ -32,12 +32,14 @@ async fn hybrid_agent_import_preserves_oauth_for_subscription_metadata() {
     .await
     .unwrap();
 
-    assert!(material
-        .authorization(1_700_000_000_000)
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .starts_with("AgentAssertion "));
+    assert!(
+        material
+            .authorization(1_700_000_000_000)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("AgentAssertion ")
+    );
     assert_eq!(
         material
             .subscription_authorization()
@@ -175,10 +177,12 @@ async fn batch_confirm_persists_every_selected_account_and_credential() {
     .unwrap();
 
     assert_eq!(response.results.len(), 3);
-    assert!(response
-        .results
-        .iter()
-        .all(|result| result.status == ImportItemStatus::Succeeded));
+    assert!(
+        response
+            .results
+            .iter()
+            .all(|result| result.status == ImportItemStatus::Succeeded)
+    );
     let accounts = state.store().unwrap().accounts().to_vec();
     assert_eq!(accounts.len(), 3);
     assert_eq!(
@@ -198,16 +202,20 @@ async fn batch_confirm_persists_every_selected_account_and_credential() {
         credential_store.delete(&account.account.id).unwrap();
     }
     assert_eq!(provider_ids.len(), 3);
-    assert!(accounts
-        .iter()
-        .all(|account| account.account.subscription.active_until_ms.is_some()));
+    assert!(
+        accounts
+            .iter()
+            .all(|account| account.account.subscription.active_until_ms.is_some())
+    );
     assert!(accounts.iter().all(|account| !account.account.in_pool));
-    assert!(state
-        .store()
-        .unwrap()
-        .accounts()
-        .iter()
-        .any(|record| record.account.is_automatic_quota_monitoring_eligible()));
+    assert!(
+        state
+            .store()
+            .unwrap()
+            .accounts()
+            .iter()
+            .any(|record| record.account.is_automatic_quota_monitoring_eligible())
+    );
 
     account_check_server.abort();
     drop(state);
@@ -343,12 +351,14 @@ async fn import_outside_pool_is_scheduled_for_quota_monitoring() {
     assert_eq!(response.results[0].status, ImportItemStatus::Succeeded);
     let account = response.results[0].account.as_ref().unwrap();
     assert!(account.models.is_empty());
-    assert!(state
-        .store()
-        .unwrap()
-        .accounts()
-        .iter()
-        .any(|record| record.account.is_automatic_quota_monitoring_eligible()));
+    assert!(
+        state
+            .store()
+            .unwrap()
+            .accounts()
+            .iter()
+            .any(|record| record.account.is_automatic_quota_monitoring_eligible())
+    );
     assert!(sessions.resume(&session_id, &[]).is_err());
     account_check_server.abort();
     CredentialStore::from_backend(NativeSecretBackend)
@@ -393,10 +403,12 @@ async fn cockpit_api_keys_do_not_require_oauth_quota_preview() {
     .unwrap();
 
     assert_eq!(response.results.len(), 2);
-    assert!(response
-        .results
-        .iter()
-        .all(|result| result.status == ImportItemStatus::Succeeded));
+    assert!(
+        response
+            .results
+            .iter()
+            .all(|result| result.status == ImportItemStatus::Succeeded)
+    );
     let sources = state.store().unwrap().sources().to_vec();
     assert_eq!(sources.len(), 2);
     assert!(sources.iter().all(|source| source.in_pool));
@@ -611,7 +623,9 @@ fn missing_import_secret_requires_recovery() {
         session_id: None,
         import_code: None,
     });
-    assert!(serde_json::to_string(&error)
-        .unwrap()
-        .contains("recovery_required"));
+    assert!(
+        serde_json::to_string(&error)
+            .unwrap()
+            .contains("recovery_required")
+    );
 }

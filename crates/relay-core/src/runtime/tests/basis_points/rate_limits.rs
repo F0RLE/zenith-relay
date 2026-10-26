@@ -245,11 +245,13 @@ async fn bps_allowance_limit_still_blocks_all_models() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-    assert!(runtime
-        .lock_scheduler()
-        .candidate("account-1")
-        .unwrap()
-        .cooldowns
-        .contains_key("*"));
+    assert!(
+        runtime
+            .lock_scheduler()
+            .candidate("account-1")
+            .unwrap()
+            .cooldowns
+            .contains_key("*")
+    );
     task.abort();
 }

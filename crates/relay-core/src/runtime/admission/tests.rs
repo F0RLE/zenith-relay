@@ -1,6 +1,6 @@
 use super::*;
 use futures_util::poll;
-use tokio::time::{advance, Instant};
+use tokio::time::{Instant, advance};
 
 mod gateway;
 mod load;
@@ -233,10 +233,12 @@ async fn incompatible_head_and_full_queue_do_not_block_free_independent_capacity
     drop(blocked);
     assert_eq!(queued(&runtime), (0, 0));
     drop((held, free));
-    assert!(runtime
-        .candidate_runtime_order()
-        .iter()
-        .all(|candidate| candidate.active_request_count == 0));
+    assert!(
+        runtime
+            .candidate_runtime_order()
+            .iter()
+            .all(|candidate| candidate.active_request_count == 0)
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -274,10 +276,12 @@ async fn principal_limits_and_retained_bytes_are_released_synchronously_on_cance
     let mut first = Box::pin(runtime.admit(one.clone(), now));
     assert!(poll!(&mut first).is_pending());
     assert_eq!(queued(&runtime), (1, charge));
-    assert!(runtime
-        .admit(request(&runtime, 0, "model-a"), now)
-        .await
-        .is_none());
+    assert!(
+        runtime
+            .admit(request(&runtime, 0, "model-a"), now)
+            .await
+            .is_none()
+    );
     let mut other = Box::pin(runtime.admit(request(&runtime, 1, "model-a"), now));
     assert!(poll!(&mut other).is_pending());
     drop(first);

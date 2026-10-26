@@ -71,16 +71,31 @@ fn native_gemini_test_stream() -> (EmptyGeminiUsageStream, Arc<Mutex<Vec<UsageEv
 
 #[tokio::test]
 async fn interactions_interruptions_keep_partial_usage_and_emit_native_errors() {
-    for ending in ["", "data: [DONE]\n\n", "data: {\"event_type\":\"interaction.completed\",\"interaction\":{\"status\":\"requires_action\"}}\n\n", "data: {\"event_type\":\"interaction.completed\",\"interaction\":{\"status\":\"requires_action\",\"outputs\":[]}}\n\n"] {
-        let frames = format!("data: {{\"event_type\":\"interaction.created\",\"interaction\":{{\"id\":\"synthetic\",\"status\":\"in_progress\",\"usage\":{{\"total_input_tokens\":7,\"total_output_tokens\":2}}}}}}\n\ndata: {{\"event_type\":\"content.delta\",\"delta\":{{\"type\":\"text\",\"text\":\"partial\"}}}}\n\n{ending}");
+    for ending in [
+        "",
+        "data: [DONE]\n\n",
+        "data: {\"event_type\":\"interaction.completed\",\"interaction\":{\"status\":\"requires_action\"}}\n\n",
+        "data: {\"event_type\":\"interaction.completed\",\"interaction\":{\"status\":\"requires_action\",\"outputs\":[]}}\n\n",
+    ] {
+        let frames = format!(
+            "data: {{\"event_type\":\"interaction.created\",\"interaction\":{{\"id\":\"synthetic\",\"status\":\"in_progress\",\"usage\":{{\"total_input_tokens\":7,\"total_output_tokens\":2}}}}}}\n\ndata: {{\"event_type\":\"content.delta\",\"delta\":{{\"type\":\"text\",\"text\":\"partial\"}}}}\n\n{ending}"
+        );
         let events = Arc::new(Mutex::new(Vec::new()));
         let capture = events.clone();
         let mut event = test_usage_event();
         event.wire_api = WireApi::GeminiInteractions;
         let input = stream::iter([Ok::<_, Infallible>(Bytes::from(frames))]);
-        let mut stream = UsageStream::new(input, Arc::new(move |event| capture.lock().unwrap().push(event)), event, Instant::now(), Arc::new(|_, _, _| {}));
+        let mut stream = UsageStream::new(
+            input,
+            Arc::new(move |event| capture.lock().unwrap().push(event)),
+            event,
+            Instant::now(),
+            Arc::new(|_, _, _| {}),
+        );
         let mut output = Vec::new();
-        while let Some(chunk) = stream.next().await { output.extend_from_slice(&chunk.unwrap()); }
+        while let Some(chunk) = stream.next().await {
+            output.extend_from_slice(&chunk.unwrap());
+        }
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("\"event_type\":\"error\""), "{output}");
         assert!(!output.contains("response.failed"));

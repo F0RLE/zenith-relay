@@ -4,24 +4,32 @@ use super::*;
 fn weekly_reset_fingerprint_is_persisted_per_account_and_cycle() {
     let root = temp_root("weekly-reset-fingerprint");
     let state = DesktopState::open(root.clone()).unwrap();
-    assert!(!state
-        .weekly_reset_was_applied("account-1", "cycle-1")
-        .unwrap());
+    assert!(
+        !state
+            .weekly_reset_was_applied("account-1", "cycle-1")
+            .unwrap()
+    );
     state
         .mark_weekly_reset_applied("account-1", "cycle-1")
         .unwrap();
-    assert!(state
-        .weekly_reset_was_applied("account-1", "cycle-1")
-        .unwrap());
-    assert!(!state
-        .weekly_reset_was_applied("account-1", "cycle-2")
-        .unwrap());
+    assert!(
+        state
+            .weekly_reset_was_applied("account-1", "cycle-1")
+            .unwrap()
+    );
+    assert!(
+        !state
+            .weekly_reset_was_applied("account-1", "cycle-2")
+            .unwrap()
+    );
     drop(state);
 
     let reopened = DesktopState::open(root.clone()).unwrap();
-    assert!(reopened
-        .weekly_reset_was_applied("account-1", "cycle-1")
-        .unwrap());
+    assert!(
+        reopened
+            .weekly_reset_was_applied("account-1", "cycle-1")
+            .unwrap()
+    );
     drop(reopened);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -313,43 +321,51 @@ fn account_usage_persists_natural_wake_completion_across_restart() {
     (state.usage_callback())(account_usage_event("req-failed", false));
     {
         let store = state.store().unwrap();
-        assert!(store
-            .account("account-1")
-            .unwrap()
-            .account
-            .last_used_at_ms
-            .is_none());
-        assert!(wake_coordinator(store.automations())
-            .unwrap()
-            .pending()
-            .is_empty());
+        assert!(
+            store
+                .account("account-1")
+                .unwrap()
+                .account
+                .last_used_at_ms
+                .is_none()
+        );
+        assert!(
+            wake_coordinator(store.automations())
+                .unwrap()
+                .pending()
+                .is_empty()
+        );
     }
     assert!(state.is_wake_permit_active(&permit).unwrap());
     (state.usage_callback())(account_usage_event("req-natural-use", true));
     assert!(!state.is_wake_permit_active(&permit).unwrap());
-    assert!(!state
-        .complete_wake(
-            permit,
-            WakeCompletion {
-                outcome: zenith_relay_core::automations::WakeCompletionOutcome::Unconfirmed,
-                completed_at_ms: now_ms(),
-                latency_ms: Some(1),
-                input_tokens: Some(1),
-                output_tokens: Some(1),
-                error_code: None,
-            },
-        )
-        .unwrap());
+    assert!(
+        !state
+            .complete_wake(
+                permit,
+                WakeCompletion {
+                    outcome: zenith_relay_core::automations::WakeCompletionOutcome::Unconfirmed,
+                    completed_at_ms: now_ms(),
+                    latency_ms: Some(1),
+                    input_tokens: Some(1),
+                    output_tokens: Some(1),
+                    error_code: None,
+                },
+            )
+            .unwrap()
+    );
     drop(state);
 
     let reopened = DesktopState::open(root.clone()).unwrap();
     let store = reopened.store().unwrap();
-    assert!(store
-        .account("account-1")
-        .unwrap()
-        .account
-        .last_used_at_ms
-        .is_some());
+    assert!(
+        store
+            .account("account-1")
+            .unwrap()
+            .account
+            .last_used_at_ms
+            .is_some()
+    );
     assert!(store.key("key-1").unwrap().last_used_at.is_some());
     let coordinator = wake_coordinator(store.automations()).unwrap();
     assert!(coordinator.pending().is_empty());
@@ -415,10 +431,12 @@ fn reopening_migrates_manual_rules_and_their_pending_cycles_to_automatic() {
     assert_eq!(permits.len(), 1);
     assert_eq!(permits[0].task_id, task.id);
     assert!(!permits[0].requires_confirmation);
-    assert!(reopened
-        .claim_due_automatic_wakes(110, 2)
-        .unwrap()
-        .is_empty());
+    assert!(
+        reopened
+            .claim_due_automatic_wakes(110, 2)
+            .unwrap()
+            .is_empty()
+    );
     drop(reopened);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -468,19 +486,21 @@ fn automatic_wake_claim_does_not_claim_confirmation_cycle() {
     assert_eq!(state.next_automatic_wake_due().unwrap(), None);
     let pending = state.wake_snapshot().unwrap().pending();
     assert_eq!(pending.len(), 1);
-    assert!(state
-        .complete_wake(
-            permits.remove(0),
-            WakeCompletion {
-                outcome: zenith_relay_core::automations::WakeCompletionOutcome::Confirmed,
-                completed_at_ms: 120,
-                latency_ms: Some(10),
-                input_tokens: Some(1),
-                output_tokens: Some(1),
-                error_code: None,
-            },
-        )
-        .unwrap());
+    assert!(
+        state
+            .complete_wake(
+                permits.remove(0),
+                WakeCompletion {
+                    outcome: zenith_relay_core::automations::WakeCompletionOutcome::Confirmed,
+                    completed_at_ms: 120,
+                    latency_ms: Some(10),
+                    input_tokens: Some(1),
+                    output_tokens: Some(1),
+                    error_code: None,
+                },
+            )
+            .unwrap()
+    );
     assert_eq!(
         state
             .remove_pending_wakes_for_account("missing-account")

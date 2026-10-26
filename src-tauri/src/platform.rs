@@ -42,11 +42,7 @@ pub fn system_language_is_russian() -> bool {
 }
 
 pub fn ui_text(en: &'static str, ru: &'static str) -> &'static str {
-    if system_language_is_russian() {
-        ru
-    } else {
-        en
-    }
+    if system_language_is_russian() { ru } else { en }
 }
 
 pub fn default_codex_home() -> PathBuf {

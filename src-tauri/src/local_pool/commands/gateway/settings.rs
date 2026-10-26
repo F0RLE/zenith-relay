@@ -1,9 +1,9 @@
 use super::super::{fence_runtime_candidates, restart_or_rollback};
 use crate::local_pool::{
     accounts::{
-        credentials::{credential_invalid_state_error, CredentialStore},
-        proxy::COMMON_PROXY_SECRET_REF,
         NativeSecretBackend,
+        credentials::{CredentialStore, credential_invalid_state_error},
+        proxy::COMMON_PROXY_SECRET_REF,
     },
     error::{CommandError, ErrorCode, LocalPoolError},
     models::{GatewaySettings, LocalPoolSnapshot},

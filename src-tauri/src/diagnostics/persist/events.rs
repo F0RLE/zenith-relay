@@ -352,9 +352,11 @@ mod tests {
         let day = Utc::now().format("%Y-%m-%d");
         let target = directory.join(format!("errors-{day}.jsonl"));
         fs::create_dir(&target).unwrap();
-        assert!(LogCursor::default()
-            .append(&directory, "errors", b"event\n", 14, 1024)
-            .is_err());
+        assert!(
+            LogCursor::default()
+                .append(&directory, "errors", b"event\n", 14, 1024)
+                .is_err()
+        );
         assert!(target.is_dir());
         fs::remove_dir_all(root).unwrap();
     }

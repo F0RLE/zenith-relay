@@ -1,6 +1,6 @@
 use super::super::super::support::document;
 use super::diagnostic_rows;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[test]
 fn diagnostic_report_separates_post_policy_catalog_from_prompt_embedded_contracts() {
@@ -49,10 +49,12 @@ fn diagnostic_report_preserves_final_encoded_payload_without_private_content() {
     assert_eq!(payload["httpSendToHeadersMs"], 12);
     assert_eq!(payload["contentEncoding"], "zstd");
     assert_eq!(payload["fullRequestReason"], "no_previous_response_id");
-    assert!(report["semantics"]["payload"]
-        .as_str()
-        .unwrap()
-        .contains("not an acknowledgement"));
+    assert!(
+        report["semantics"]["payload"]
+            .as_str()
+            .unwrap()
+            .contains("not an acknowledgement")
+    );
 }
 
 fn preparation_report(total: Option<u64>, phases: Value) -> Value {

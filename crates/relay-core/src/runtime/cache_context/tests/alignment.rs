@@ -68,10 +68,12 @@ fn relay_alignment_does_not_hide_body_rewrites_or_continuation_materialization()
     client["previous_response_id"] = json!("synthetic_predecessor");
     let observed = begin(&store, &client, "continuation", 20);
     let diagnostics = store.prepare(&observed, &upstream, "candidate-a", 21);
-    assert!(diagnostics
-        .relay_history
-        .leading_context_alignment
-        .is_none());
+    assert!(
+        diagnostics
+            .relay_history
+            .leading_context_alignment
+            .is_none()
+    );
     assert_eq!(diagnostics.relay_history.shared_prefix_items, Some(0));
 }
 
@@ -95,17 +97,21 @@ fn relay_alignment_handles_removed_system_prefix_and_leaves_ordinary_changes_lit
 
     let observed = begin(&store, &client, "unchanged", 20);
     let diagnostics = store.prepare(&observed, &client, "candidate-a", 21);
-    assert!(diagnostics
-        .relay_history
-        .leading_context_alignment
-        .is_none());
+    assert!(
+        diagnostics
+            .relay_history
+            .leading_context_alignment
+            .is_none()
+    );
     let mut changed = client.clone();
     changed["input"][1]["content"] = json!("Changed body without a prefix shift.");
     let observed = begin(&store, &client, "body", 30);
     let diagnostics = store.prepare(&observed, &changed, "candidate-a", 31);
-    assert!(diagnostics
-        .relay_history
-        .leading_context_alignment
-        .is_none());
+    assert!(
+        diagnostics
+            .relay_history
+            .leading_context_alignment
+            .is_none()
+    );
     assert_eq!(diagnostics.relay_history.shared_prefix_items, Some(1));
 }

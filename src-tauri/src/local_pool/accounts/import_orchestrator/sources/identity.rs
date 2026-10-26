@@ -1,12 +1,12 @@
-use super::super::{ImportItemError, ItemResult, DEFAULT_OPENAI_SOURCE_URL};
+use super::super::{DEFAULT_OPENAI_SOURCE_URL, ImportItemError, ItemResult};
 use crate::local_pool::models::ProviderSourceRecord;
 use crate::local_pool::state::DesktopState;
 use crate::local_pool::store::secret_store;
 use sha2::{Digest, Sha256};
 use url::Url;
+use zenith_relay_core::WireApi;
 use zenith_relay_core::accounts::ParsedImportItem;
 use zenith_relay_core::error_codes;
-use zenith_relay_core::WireApi;
 
 pub(crate) fn imported_source_base_url(import_item: &ParsedImportItem) -> ItemResult<String> {
     if import_item.base_url_supplied && import_item.base_url.is_none() {

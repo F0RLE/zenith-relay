@@ -53,9 +53,11 @@ fn api_sources_generate_strict_codex_models_without_hidden_or_media_rows() {
     assert_eq!(claude["supported_reasoning_levels"], json!([]));
     assert!(claude.get("default_reasoning_level").is_none());
     assert_eq!(claude["input_modalities"], json!(["text"]));
-    assert!(models
-        .iter()
-        .any(|model| { model["slug"] == crate::codex_model_alias("disabled-code") }));
+    assert!(
+        models
+            .iter()
+            .any(|model| { model["slug"] == crate::codex_model_alias("disabled-code") })
+    );
 }
 #[test]
 fn api_gpt_picker_ids_stay_native_without_account_cards_or_extra_models() {
@@ -99,9 +101,11 @@ fn api_gpt_picker_ids_stay_native_without_account_cards_or_extra_models() {
         assert_eq!(model["use_responses_lite"], false);
     }
     for id in ["provider/gpt-6-astra", "claude-future"] {
-        assert!(models
-            .iter()
-            .any(|model| model["slug"] == crate::codex_model_alias(id)));
+        assert!(
+            models
+                .iter()
+                .any(|model| model["slug"] == crate::codex_model_alias(id))
+        );
     }
 }
 #[test]
@@ -461,9 +465,11 @@ fn codex_catalog_uses_unique_priorities_and_shared_capability_defaults() {
         .find(|model| model["display_name"] == "GLM 5.3")
         .expect("external model must be published to the Codex catalog");
     assert_eq!(glm["slug"], crate::codex_model_alias("vendor/glm-5.3"));
-    assert!(glm["base_instructions"].as_str().is_some_and(
-        |instructions| instructions.contains("inspect the current Relay model catalog")
-    ));
+    assert!(
+        glm["base_instructions"].as_str().is_some_and(
+            |instructions| instructions.contains("inspect the current Relay model catalog")
+        )
+    );
     // A generic Responses source can reuse an OpenAI-looking model ID
     // without supporting Codex's native tool contract. Only account
     // manifests are authoritative for this capability.

@@ -13,7 +13,9 @@ fn scan_reads_and_fingerprints_history_in_one_pass() {
             Ok(count)
         }
     }
-    let mut body = String::from("{\"type\":\"session_meta\",\"payload\":{\"id\":\"first\",\"model_provider\":\"openai\"}}\r\n");
+    let mut body = String::from(
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"first\",\"model_provider\":\"openai\"}}\r\n",
+    );
     for _ in 0..5_000 {
         body.push_str("{\"type\":\"event_msg\",\"payload\":{\"type\":\"session_meta\",\"text\":\"synthetic\"}}\n");
     }
@@ -54,18 +56,22 @@ fn preview_apply_and_rollback_repair_only_provider_metadata() {
     assert_eq!(preview.rollout_record_count, 1);
     assert_eq!(preview.sqlite_row_count, 1);
     assert!(preview.codex_running);
-    assert!(!serde_json::to_string(&preview)
-        .unwrap()
-        .contains("synthetic-private-prompt"));
+    assert!(
+        !serde_json::to_string(&preview)
+            .unwrap()
+            .contains("synthetic-private-prompt")
+    );
 
     let applied = apply(&state, &backups, &preview.session_id).unwrap();
     assert_eq!(applied.rollout_records_changed, 1);
     assert_eq!(applied.sqlite_rows_changed, 1);
     assert_eq!(rollout_provider_from_file(&rollout), "zenith_relay_local");
     assert_eq!(database_provider(&database), "zenith_relay_local");
-    assert!(fs::read_to_string(&rollout)
-        .unwrap()
-        .contains("synthetic-private-prompt"));
+    assert!(
+        fs::read_to_string(&rollout)
+            .unwrap()
+            .contains("synthetic-private-prompt")
+    );
 
     let rolled_back = rollback(&backups, &applied.backup_id).unwrap();
     assert_eq!(rolled_back.files_restored, 2);
@@ -265,9 +271,11 @@ fn automatic_sync_from_ready_api_to_chatgpt_repairs_the_latest_session_metadata(
         rollout_providers_from_file(&rollout),
         vec!["openai".to_string(), "openai".to_string()]
     );
-    assert!(fs::read_to_string(&rollout)
-        .unwrap()
-        .contains("\"cwd\":\"C:/latest\""));
+    assert!(
+        fs::read_to_string(&rollout)
+            .unwrap()
+            .contains("\"cwd\":\"C:/latest\"")
+    );
     fs::remove_dir_all(root).unwrap();
 }
 

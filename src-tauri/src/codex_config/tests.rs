@@ -7,11 +7,13 @@ fn local_pool_key_is_not_a_zenith_customer_key() {
     assert!(!is_zenith_customer_key("zlr_local_generated_key"));
     assert!(!is_zenith_customer_key("zrk_retired_reseller_key"));
     assert!(is_zenith_customer_key("znt_customer_key"));
-    assert!(zenith_auth_key_if_configured(
-        "model_provider = \"zenith_relay_local\"",
-        Some("zlr_local_generated_key".into())
-    )
-    .is_none());
+    assert!(
+        zenith_auth_key_if_configured(
+            "model_provider = \"zenith_relay_local\"",
+            Some("zlr_local_generated_key".into())
+        )
+        .is_none()
+    );
 }
 
 #[test]

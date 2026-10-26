@@ -9,7 +9,8 @@ async fn response_from_sse_event(
     let address = listener.local_addr().unwrap();
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        event.len(), event
+        event.len(),
+        event
     );
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();

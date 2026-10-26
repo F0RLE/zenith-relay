@@ -1,10 +1,10 @@
 use super::super::errors::{
+    AttemptFailure, PreservedUpstreamError,
     responses_function_call_output_has_invalid_call_id_value,
-    responses_tool_call_links_rejected_value, upstream_failure_status, AttemptFailure,
-    PreservedUpstreamError,
+    responses_tool_call_links_rejected_value, upstream_failure_status,
 };
-use super::events::{is_empty_responses_terminal, parse_sse_event, TerminalOutcome};
 use super::UpstreamStream;
+use super::events::{TerminalOutcome, is_empty_responses_terminal, parse_sse_event};
 use crate::error_codes;
 use crate::protocol::completion::{GeminiStreamCompletion, ResponseCompletion};
 use crate::protocol::sse_event_end;
@@ -263,13 +263,13 @@ pub(super) async fn bootstrap_stream_impl(
                 return Err(Box::new(StreamBootstrapFailure {
                     partial_body: buffered,
                     ..AttemptFailure::transport(&error).into()
-                }))
+                }));
             }
             None => {
                 return Err(Box::new(StreamBootstrapFailure {
                     partial_body: buffered,
                     ..AttemptFailure::stream(error_codes::STREAM_INCOMPLETE).into()
-                }))
+                }));
             }
         }
     }

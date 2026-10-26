@@ -73,22 +73,26 @@ fn siwc_export_rejects_lossy_formats_and_incomplete_registrations() {
     }
     let mut incomplete = siwc_fixture();
     incomplete.siwc_registration = None;
-    assert!(build_account_export(
-        AccountExportFormat::Zenith,
-        &[incomplete],
-        1_788_000_000_000,
-        None
-    )
-    .is_err());
+    assert!(
+        build_account_export(
+            AccountExportFormat::Zenith,
+            &[incomplete],
+            1_788_000_000_000,
+            None
+        )
+        .is_err()
+    );
     let mut wrong_client = siwc_fixture();
     wrong_client.oauth_client_kind = crate::providers::chatgpt::OAuthClientKind::Codex;
-    assert!(build_account_export(
-        AccountExportFormat::Zenith,
-        &[wrong_client],
-        1_788_000_000_000,
-        None
-    )
-    .is_err());
+    assert!(
+        build_account_export(
+            AccountExportFormat::Zenith,
+            &[wrong_client],
+            1_788_000_000_000,
+            None
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -196,12 +200,16 @@ fn single_exports_are_objects_and_bulk_exports_are_arrays() {
         let single = build_account_export(format, &[fixture()], 1_788_000_000_000, None).unwrap();
         let bulk =
             build_account_export(format, &[fixture(), fixture()], 1_788_000_000_000, None).unwrap();
-        assert!(serde_json::from_str::<Value>(&single.content)
-            .unwrap()
-            .is_object());
-        assert!(serde_json::from_str::<Value>(&bulk.content)
-            .unwrap()
-            .is_array());
+        assert!(
+            serde_json::from_str::<Value>(&single.content)
+                .unwrap()
+                .is_object()
+        );
+        assert!(
+            serde_json::from_str::<Value>(&bulk.content)
+                .unwrap()
+                .is_array()
+        );
     }
 }
 
@@ -323,32 +331,38 @@ fn request_rejects_duplicates_and_unsafe_account_ids() {
         description: None,
     };
     assert!(valid.validate().is_ok());
-    assert!(AccountExportRequest {
-        account_ids: vec!["account_safe".into()],
-        format: AccountExportFormat::Zenith,
-        description: Some("Seller description".into()),
-    }
-    .validate()
-    .is_ok());
-    assert!(AccountExportRequest {
-        account_ids: vec!["account_safe".into()],
-        format: AccountExportFormat::Sub2api,
-        description: Some("Not supported here".into()),
-    }
-    .validate()
-    .is_err());
+    assert!(
+        AccountExportRequest {
+            account_ids: vec!["account_safe".into()],
+            format: AccountExportFormat::Zenith,
+            description: Some("Seller description".into()),
+        }
+        .validate()
+        .is_ok()
+    );
+    assert!(
+        AccountExportRequest {
+            account_ids: vec!["account_safe".into()],
+            format: AccountExportFormat::Sub2api,
+            description: Some("Not supported here".into()),
+        }
+        .validate()
+        .is_err()
+    );
     for account_ids in [
         Vec::new(),
         vec!["account_safe".into(), "account_safe".into()],
         vec!["../account".into()],
     ] {
-        assert!(AccountExportRequest {
-            account_ids,
-            format: AccountExportFormat::Sub2api,
-            description: None,
-        }
-        .validate()
-        .is_err());
+        assert!(
+            AccountExportRequest {
+                account_ids,
+                format: AccountExportFormat::Sub2api,
+                description: None,
+            }
+            .validate()
+            .is_err()
+        );
     }
 }
 
@@ -393,9 +407,11 @@ fn export_carries_login_notes_only_when_present() {
     )
     .unwrap();
     assert!(document.content.contains("\"phone\": \"950000000\""));
-    assert!(document
-        .content
-        .contains("\"password\": \"synthetic-password\""));
+    assert!(
+        document
+            .content
+            .contains("\"password\": \"synthetic-password\"")
+    );
     assert!(document.content.contains("\"2fa\": \"GEZDGNBVGY3TQOJQ\""));
     let debug = format!("{account:?}");
     assert!(!debug.contains("synthetic-password"));

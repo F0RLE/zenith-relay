@@ -281,9 +281,10 @@ mod tests {
         assert_eq!(rows[2].1["bytes"], "unavailable");
         assert_eq!(rows[2].1["limit_bytes"], "1024");
         assert_eq!(rows[2].1["basis"], "budget_only");
-        assert!(rows
-            .iter()
-            .all(|(_, details)| details["sampled_at_ms"] == "123"));
+        assert!(
+            rows.iter()
+                .all(|(_, details)| details["sampled_at_ms"] == "123")
+        );
     }
 
     #[test]

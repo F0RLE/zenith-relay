@@ -16,11 +16,11 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 use zenith_relay_core::{
+    WireApi,
     accounts::{
         AccountAuthMode, AccountAuthState, AccountHealthState, AccountIdentity, AccountRecord,
     },
     quota::{QuotaSnapshot, Subscription},
-    WireApi,
 };
 
 static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
@@ -482,9 +482,11 @@ fn failed_transaction_preserves_all_state_and_memory() {
     let mut changed_key = key;
     changed_key.label = "x".repeat(17 * 1024 * 1024);
 
-    assert!(store
-        .replace_records(vec![changed_source], vec![changed_key])
-        .is_err());
+    assert!(
+        store
+            .replace_records(vec![changed_source], vec![changed_key])
+            .is_err()
+    );
     assert_eq!(store.sources()[0].name, "Before");
     drop(store);
     assert_eq!(
@@ -602,20 +604,24 @@ fn client_auth_observation_is_durable_and_does_not_change_account_policy() {
     account.account.in_pool = true;
     store.upsert_account(account).unwrap();
 
-    assert!(store
-        .update_client_auth_observation(
-            "observed-account",
-            Some("login_required".into()),
-            Some(123),
-        )
-        .unwrap());
-    assert!(!store
-        .update_client_auth_observation(
-            "observed-account",
-            Some("login_required".into()),
-            Some(123),
-        )
-        .unwrap());
+    assert!(
+        store
+            .update_client_auth_observation(
+                "observed-account",
+                Some("login_required".into()),
+                Some(123),
+            )
+            .unwrap()
+    );
+    assert!(
+        !store
+            .update_client_auth_observation(
+                "observed-account",
+                Some("login_required".into()),
+                Some(123),
+            )
+            .unwrap()
+    );
     let observed = store.account("observed-account").unwrap();
     assert_eq!(
         observed.client_auth_status.as_deref(),
@@ -653,9 +659,11 @@ fn conditional_account_rollback_keeps_other_account_changes_and_watchdog_state()
         .update_client_auth_observation("rollback-target", Some("login_required".into()), Some(123))
         .unwrap();
 
-    assert!(store
-        .restore_account_if_current(&previous, &attempted)
-        .unwrap());
+    assert!(
+        store
+            .restore_account_if_current(&previous, &attempted)
+            .unwrap()
+    );
     let restored = store.account("rollback-target").unwrap();
     assert_eq!(restored.account.label, previous.account.label);
     assert_eq!(
@@ -668,9 +676,11 @@ fn conditional_account_rollback_keeps_other_account_changes_and_watchdog_state()
     let mut newer = attempted.clone();
     newer.account.token_generation = newer.account.token_generation.saturating_add(1);
     store.upsert_account(newer.clone()).unwrap();
-    assert!(!store
-        .restore_account_if_current(&previous, &attempted)
-        .unwrap());
+    assert!(
+        !store
+            .restore_account_if_current(&previous, &attempted)
+            .unwrap()
+    );
     assert_eq!(store.account("rollback-target"), Some(&newer));
 
     drop(store);

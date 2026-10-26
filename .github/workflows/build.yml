@@ -23,21 +23,21 @@ jobs:
     name: Check runtime
     runs-on: ubuntu-latest
     env:
-      RUSTFLAGS: "-Dwarnings"
+      RUSTFLAGS: "-Dwarnings --cfg reqwest_unstable"
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.3
+          bun-version: 1.4.4
       - run: bun install --frozen-lockfile
         working-directory: src
       - name: Test development scripts
         run: bun test ./scripts/check ./scripts/lib ./scripts/maintenance ./scripts/build
       - name: Check documentation links
         run: bun ./scripts/check/check-docs.mjs
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -98,7 +98,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.3
+          bun-version: 1.4.4
       - run: bun install --frozen-lockfile
       - name: Use canonical Ubuntu archive
         run: sudo sed -i -E 's|https?://azure[.]archive[.]ubuntu[.]com/ubuntu/?|https://archive.ubuntu.com/ubuntu/|g; s|mirror[+]file:/etc/apt/apt-mirrors[.]txt|https://archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources
@@ -136,10 +136,10 @@ jobs:
     name: Check Windows
     runs-on: windows-latest
     env:
-      RUSTFLAGS: "-Dwarnings"
+      RUSTFLAGS: "-Dwarnings --cfg reqwest_unstable"
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
@@ -157,7 +157,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.3
+          bun-version: 1.4.4
       - run: bun install --frozen-lockfile
       - run: bun run test
       - run: bun run build
@@ -173,7 +173,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
     runs-on: ${{ matrix.os }}
     env:
-      RUSTFLAGS: "-Dwarnings"
+      RUSTFLAGS: "-Dwarnings --cfg reqwest_unstable"
     strategy:
       fail-fast: false
       matrix:
@@ -195,8 +195,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.3
-      - uses: dtolnay/rust-toolchain@1.98.1
+          bun-version: 1.4.4
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target

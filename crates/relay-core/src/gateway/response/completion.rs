@@ -1,7 +1,7 @@
-use super::super::errors::{upstream_failure_status, AttemptFailure};
+use super::super::errors::{AttemptFailure, upstream_failure_status};
 use super::super::streaming::{
-    has_generation_evidence, parse_sse_event, StreamBootstrapFailure, TerminalEvent,
-    TerminalOutcome,
+    StreamBootstrapFailure, TerminalEvent, TerminalOutcome, has_generation_evidence,
+    parse_sse_event,
 };
 use crate::error_codes;
 use crate::protocol::sse_event_end;

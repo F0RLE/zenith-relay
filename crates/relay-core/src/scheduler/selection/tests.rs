@@ -11,8 +11,8 @@ mod rate_limits;
 mod recovery;
 mod rotation;
 mod warm_fallback;
-use crate::scheduler::{CandidateKind, CandidateQuota};
 use crate::ModelRules;
+use crate::scheduler::{CandidateKind, CandidateQuota};
 use std::collections::{BTreeSet, HashSet};
 
 fn candidate(id: &str) -> RuntimeCandidate {

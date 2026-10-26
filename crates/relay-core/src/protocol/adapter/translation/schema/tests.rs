@@ -90,9 +90,11 @@ fn schema_annotations_never_rewrite_property_names_or_literals() {
     }});
     let converted = to_gemini(&schema).unwrap();
     assert!(converted.get("encrypted").is_none());
-    assert!(converted["properties"]["encrypted"]
-        .get("encrypted")
-        .is_none());
+    assert!(
+        converted["properties"]["encrypted"]
+            .get("encrypted")
+            .is_none()
+    );
     assert_eq!(converted["properties"]["encrypted"]["default"], literal);
     assert_eq!(converted["properties"]["type"]["enum"], json!(["OBJECT"]));
     assert_eq!(schema["encrypted"], true);

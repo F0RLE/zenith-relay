@@ -1,9 +1,9 @@
 mod chunks;
 
 use chunks::{
-    chunk_user, decode_manifest, delete_manifest_chunks, delete_manifest_chunks_result,
-    encode_manifest, sha256_hex, split_secret, SecretManifest, CHUNK_UTF16_UNITS, MANIFEST_PREFIX,
-    MANIFEST_VERSION, MAX_CHUNKS,
+    CHUNK_UTF16_UNITS, MANIFEST_PREFIX, MANIFEST_VERSION, MAX_CHUNKS, SecretManifest, chunk_user,
+    decode_manifest, delete_manifest_chunks, delete_manifest_chunks_result, encode_manifest,
+    sha256_hex, split_secret,
 };
 use std::{
     sync::{Mutex, MutexGuard, OnceLock},
@@ -265,9 +265,11 @@ mod tests {
         let chunks = split_secret(&secret_value);
 
         assert_eq!(chunks.concat(), secret_value);
-        assert!(chunks
-            .iter()
-            .all(|chunk| chunk.encode_utf16().count() <= CHUNK_UTF16_UNITS));
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.encode_utf16().count() <= CHUNK_UTF16_UNITS)
+        );
     }
 
     #[test]

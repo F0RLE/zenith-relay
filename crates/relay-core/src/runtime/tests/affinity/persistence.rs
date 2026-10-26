@@ -308,9 +308,11 @@ fn prompt_affinity_persists_the_monotonic_scheduler_expiry() {
     );
     let upserts = crate::poison::mutex(&store.upserts);
     assert_eq!(upserts.len(), 2);
-    assert!(upserts
-        .iter()
-        .all(|binding| binding.expires_at_ms == expected));
+    assert!(
+        upserts
+            .iter()
+            .all(|binding| binding.expires_at_ms == expected)
+    );
 }
 
 #[test]

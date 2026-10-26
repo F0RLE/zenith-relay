@@ -279,11 +279,13 @@ fn responses_direct_tools_restore_native_items_and_reasoning_after_results() {
             } else {
                 "Файл найден".into()
             };
-            assert!(history
-                .iter()
-                .any(|item| item["type"] == "function_call_output"
-                    && item["call_id"] == call["call_id"]
-                    && item["output"] == expected_output));
+            assert!(
+                history
+                    .iter()
+                    .any(|item| item["type"] == "function_call_output"
+                        && item["call_id"] == call["call_id"]
+                        && item["output"] == expected_output)
+            );
             continued
                 .translate_response_bytes(&serde_json::to_vec(&output(WireApi::Responses)).unwrap())
                 .unwrap()

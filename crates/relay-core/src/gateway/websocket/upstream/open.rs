@@ -4,7 +4,7 @@ use std::time::Instant;
 use super::super::super::execution::AttemptRepairs;
 use super::super::bridge::send_request;
 use super::super::*;
-use super::initial_terminal::{handle_initial_terminal, TerminalAction};
+use super::initial_terminal::{TerminalAction, handle_initial_terminal};
 use super::messages::{initial_application_messages, initial_messages_are_empty_incomplete};
 use super::telemetry::record_connect_failure;
 use super::{ConnectProgress, ConnectScope, ConnectTrace, Connected};

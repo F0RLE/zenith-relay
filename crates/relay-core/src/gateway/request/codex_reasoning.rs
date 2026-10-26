@@ -57,9 +57,9 @@ pub(in crate::gateway) fn normalize_codex_reasoning_placeholder(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::GatewayRuntimeOptions;
     use crate::gateway::request::tests::capability_test_runtime;
     use crate::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
-    use crate::GatewayRuntimeOptions;
     use axum::http::HeaderValue;
     use serde_json::json;
 

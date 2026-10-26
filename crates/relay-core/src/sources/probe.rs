@@ -3,9 +3,9 @@ use super::{
     SourceConnector, SourceProtocolBinding, WireApi,
 };
 use crate::scheduler::refresh::http::{HttpClass, ManagementHttpScope};
-use crate::{error_codes, transport::collect_limited, Error, Result};
+use crate::{Error, Result, error_codes, transport::collect_limited};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{collections::BTreeMap, time::Duration};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -231,7 +231,7 @@ fn valid_text_response(protocol: WireApi, response_json: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{routing::post, Json, Router};
+    use axum::{Json, Router, routing::post};
 
     #[tokio::test]
     async fn confirms_only_text_and_keeps_auth_and_transient_failures_unknown() {
@@ -269,10 +269,12 @@ mod tests {
                     _ => CapabilityStatus::Unknown,
                 }
             );
-            assert!(!probe_result
-                .capability
-                .features
-                .contains_key(&ProtocolFeature::Streaming));
+            assert!(
+                !probe_result
+                    .capability
+                    .features
+                    .contains_key(&ProtocolFeature::Streaming)
+            );
             assert_eq!(probe_result.revision, 3);
             server.abort();
         }

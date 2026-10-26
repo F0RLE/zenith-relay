@@ -1,4 +1,4 @@
-use super::super::{runtime_now_ms, GatewayRuntime};
+use super::super::{GatewayRuntime, runtime_now_ms};
 use crate::{CandidateHealth, CandidateKind, CandidateScope};
 use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;

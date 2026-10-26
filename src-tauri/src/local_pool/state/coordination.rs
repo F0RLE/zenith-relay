@@ -1,4 +1,4 @@
-use super::{now_ms, DesktopState};
+use super::{DesktopState, now_ms};
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError, Result},
     models::AutomationRecords,

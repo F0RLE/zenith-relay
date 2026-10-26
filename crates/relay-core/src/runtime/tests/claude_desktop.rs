@@ -190,14 +190,16 @@ fn claude_desktop_aliases_keep_configured_routes_during_temporary_health_outage(
         .unwrap();
     assert!(runtime.set_candidate_health("source", CandidateHealth::Unhealthy));
     for alias in desktop_aliases("gpt-test") {
-        assert!(runtime
-            .resolve_visible_model(
-                &authenticated,
-                &alias,
-                &[WireApi::Messages],
-                current_time_ms(),
-            )
-            .is_none());
+        assert!(
+            runtime
+                .resolve_visible_model(
+                    &authenticated,
+                    &alias,
+                    &[WireApi::Messages],
+                    current_time_ms(),
+                )
+                .is_none()
+        );
         assert_eq!(
             runtime
                 .resolve_configured_model(&authenticated, &alias, &[WireApi::Messages])
@@ -229,8 +231,10 @@ fn claude_desktop_aliases_resolve_account_routes_without_changing_account_scope(
         },
     );
     for alias in desktop_aliases("gpt-test") {
-        assert!(runtime
-            .resolve_configured_account_model(&authenticated, &alias)
-            .is_none());
+        assert!(
+            runtime
+                .resolve_configured_account_model(&authenticated, &alias)
+                .is_none()
+        );
     }
 }

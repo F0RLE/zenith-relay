@@ -1,12 +1,12 @@
-use super::db_error;
 use super::CatalogPriceResolver;
+use super::db_error;
 use crate::local_pool::error::Result;
-use rusqlite::{params_from_iter, types::Value as SqlValue, Connection};
+use rusqlite::{Connection, params_from_iter, types::Value as SqlValue};
 use std::collections::HashMap;
 use zenith_relay_core::{
-    pricing::PriceSource,
-    protocol::{merge_model_equivalents, UsageGroup, UsageQuery, UsageTotals},
     ApiEquivalentSummary,
+    pricing::PriceSource,
+    protocol::{UsageGroup, UsageQuery, UsageTotals, merge_model_equivalents},
 };
 
 mod buckets;
@@ -20,11 +20,11 @@ pub(super) use buckets::usage_buckets;
 pub(super) use report::scoped_report_summary;
 pub(super) use rows::{rust_u64, sql_u64, usage_log_from_row};
 use rows::{usage_pricing_usage_from_row, usage_totals_from_row};
-pub(super) use sends::{send_projection, LEGACY_SEND_PREDICATE};
+pub(super) use sends::{LEGACY_SEND_PREDICATE, send_projection};
 use totals::combine_totals;
 pub(super) use totals::{
-    apply_usage_totals_delta, consumption_totals, is_unfiltered_all_time, request_totals,
-    usage_filter, usage_totals_from_event, usage_totals_from_sample, UsageTotalsSample,
+    UsageTotalsSample, apply_usage_totals_delta, consumption_totals, is_unfiltered_all_time,
+    request_totals, usage_filter, usage_totals_from_event, usage_totals_from_sample,
 };
 
 const USAGE_REQUEST_COLUMNS: &str = zenith_relay_core::usage_total_columns_sql!(logical);

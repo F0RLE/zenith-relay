@@ -109,10 +109,12 @@ fn replacing_catalog_replaces_both_indexes_without_mutating_old_snapshots() {
         20_000_000_000
     );
     handle.replace(PricingCatalog::empty());
-    assert!(handle
-        .snapshot()
-        .image_request_prices("image-test")
-        .is_empty());
+    assert!(
+        handle
+            .snapshot()
+            .image_request_prices("image-test")
+            .is_empty()
+    );
     assert_eq!(
         handle
             .snapshot()

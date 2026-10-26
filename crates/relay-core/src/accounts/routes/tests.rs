@@ -37,26 +37,32 @@ fn siwc_requires_original_identity_and_cannot_bridge_other_workspaces() {
     siwc.original_login_email = Some(" OWNER@example.test ".into());
     let native = identity(OAuthClientKind::Codex, "workspace", "user");
     assert!(siwc.same_owner(&native));
-    assert!(validate_account_route_connection(
-        [siwc],
-        &identity(OAuthClientKind::ExcelBps, "other", "user"),
-    )
-    .is_ok());
-    assert!(validate_account_route_connection(
-        [identity(OAuthClientKind::Siwc, "siwc", "user"), native],
-        &identity(OAuthClientKind::ExcelBps, "other", "user"),
-    )
-    .is_err());
+    assert!(
+        validate_account_route_connection(
+            [siwc],
+            &identity(OAuthClientKind::ExcelBps, "other", "user"),
+        )
+        .is_ok()
+    );
+    assert!(
+        validate_account_route_connection(
+            [identity(OAuthClientKind::Siwc, "siwc", "user"), native],
+            &identity(OAuthClientKind::ExcelBps, "other", "user"),
+        )
+        .is_err()
+    );
     for email in [None, Some(" ".into()), Some("other@example.test".into())] {
         let mut siwc = identity(OAuthClientKind::Siwc, "workspace", "user");
         siwc.original_login_email = email;
         assert!(!siwc.same_owner(&identity(OAuthClientKind::Codex, "workspace", "user")));
     }
-    assert!(validate_account_route_connection(
-        [identity(OAuthClientKind::Siwc, "workspace", "user")],
-        &identity(OAuthClientKind::Siwc, "workspace", "user"),
-    )
-    .is_err());
+    assert!(
+        validate_account_route_connection(
+            [identity(OAuthClientKind::Siwc, "workspace", "user")],
+            &identity(OAuthClientKind::Siwc, "workspace", "user"),
+        )
+        .is_err()
+    );
 }
 
 #[test]

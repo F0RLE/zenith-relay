@@ -236,10 +236,12 @@ mod tests {
         assert_eq!(identity.client_version(), CODEX_CLIENT_VERSION);
         assert_eq!(headers["originator"], CODEX_ORIGINATOR);
         assert_eq!(headers["version"], CODEX_CLIENT_VERSION);
-        assert!(headers[USER_AGENT]
-            .to_str()
-            .unwrap()
-            .starts_with(&format!("{CODEX_ORIGINATOR}/{CODEX_CLIENT_VERSION} (")));
+        assert!(
+            headers[USER_AGENT]
+                .to_str()
+                .unwrap()
+                .starts_with(&format!("{CODEX_ORIGINATOR}/{CODEX_CLIENT_VERSION} ("))
+        );
         assert_eq!(headers["chatgpt-account-id"], "account-1");
     }
 
@@ -335,10 +337,12 @@ mod tests {
 
         identity.insert(&mut headers);
 
-        assert!(headers[USER_AGENT]
-            .to_str()
-            .unwrap()
-            .starts_with("codex_cli_rs/0.155.0 ("));
+        assert!(
+            headers[USER_AGENT]
+                .to_str()
+                .unwrap()
+                .starts_with("codex_cli_rs/0.155.0 (")
+        );
         assert_eq!(headers["originator"], CODEX_ORIGINATOR);
         assert_eq!(headers["version"], "0.155.0");
         assert_eq!(headers["chatgpt-account-id"], "selected-account");

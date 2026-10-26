@@ -1,5 +1,5 @@
 use super::order::normalize;
-use super::{ReasoningMethod, MAX_STRING_LENGTH};
+use super::{MAX_STRING_LENGTH, ReasoningMethod};
 use serde_json::Value;
 use std::collections::BTreeMap;
 

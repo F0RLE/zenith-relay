@@ -234,10 +234,12 @@ impl SourceProtocolConfig {
         }
         let legacy_fallback_protocols = if legacy_bindings.len() == 1 {
             let binding = &legacy_bindings[0];
-            vec![binding
-                .adapter
-                .upstream_protocol(binding.wire_api)
-                .wire_api()]
+            vec![
+                binding
+                    .adapter
+                    .upstream_protocol(binding.wire_api)
+                    .wire_api(),
+            ]
         } else {
             Vec::new()
         };

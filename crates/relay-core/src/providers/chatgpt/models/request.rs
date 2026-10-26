@@ -1,11 +1,11 @@
 use super::{
-    AccountModelsClient, ModelDiscoveryFailure, ModelDiscoveryFailureCode,
-    MAX_BASIS_POINTS_ACCESS_BYTES, MAX_MODELS_RESPONSE_BYTES,
+    AccountModelsClient, MAX_BASIS_POINTS_ACCESS_BYTES, MAX_MODELS_RESPONSE_BYTES,
+    ModelDiscoveryFailure, ModelDiscoveryFailureCode,
 };
 use crate::{
+    Error,
     scheduler::refresh::http::{HttpClass, HttpSendError},
     transport::collect_limited,
-    Error,
 };
 use std::time::{Duration, SystemTime};
 

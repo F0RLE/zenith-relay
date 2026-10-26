@@ -1,5 +1,5 @@
-use super::super::order::normalize;
 use super::super::ReasoningMethod;
+use super::super::order::normalize;
 use super::ReasoningRecord;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;

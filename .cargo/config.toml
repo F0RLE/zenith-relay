@@ -1,0 +1,3 @@
+[build]
+# reqwest's HTTP/3 API requires this cfg on stable Rust as well.
+rustflags = ["--cfg", "reqwest_unstable"]

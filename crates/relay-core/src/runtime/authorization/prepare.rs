@@ -2,12 +2,12 @@ use super::super::{
     AuthorizedRequestError, ChatGptAccountExecutor, ExecutorPrepareError, GatewayRuntime,
     PreparedAuthorization,
 };
+use crate::CandidateHealth;
 use crate::accounts::TokenAuthorityError;
 use crate::providers::chatgpt::{
-    is_agent_identity_task_invalid_response, AgentIdentityCredential, AgentIdentityError,
+    AgentIdentityCredential, AgentIdentityError, is_agent_identity_task_invalid_response,
 };
-use crate::CandidateHealth;
-use reqwest::header::{HeaderValue, AUTHORIZATION};
+use reqwest::header::{AUTHORIZATION, HeaderValue};
 use std::sync::atomic::Ordering;
 
 impl GatewayRuntime {

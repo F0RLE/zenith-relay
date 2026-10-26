@@ -1,9 +1,9 @@
-use super::super::{MAX_ACCOUNT_TAGS, MAX_ACCOUNT_TAG_BYTES, MAX_ACCOUNT_TAG_CHARS};
+use super::super::{MAX_ACCOUNT_TAG_BYTES, MAX_ACCOUNT_TAG_CHARS, MAX_ACCOUNT_TAGS};
 use super::build::{object, optional_timestamp, strip_nulls, timestamp};
 use super::{AccountExportCredential, AccountExportFormat};
-use crate::error_codes;
 use crate::Result;
-use serde_json::{json, Map, Value};
+use crate::error_codes;
+use serde_json::{Map, Value, json};
 struct AccountExportContext<'a> {
     account: &'a AccountExportCredential,
     exported_at: &'a str,
@@ -48,7 +48,9 @@ pub(super) fn build_account_export(
     if account.oauth_client_kind == crate::providers::chatgpt::OAuthClientKind::Siwc
         && format != AccountExportFormat::Zenith
     {
-        return Err(super::build::validation("SIWC credentials require a Zenith export; Codex formats cannot retain the registration"));
+        return Err(super::build::validation(
+            "SIWC credentials require a Zenith export; Codex formats cannot retain the registration",
+        ));
     }
     if account.oauth_client_kind == crate::providers::chatgpt::OAuthClientKind::ExcelBps
         && !matches!(

@@ -1,4 +1,4 @@
-use super::{CatalogStatus, PricingCatalog, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION};
+use super::{CatalogStatus, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION, PricingCatalog};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 

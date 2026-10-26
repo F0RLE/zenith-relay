@@ -108,7 +108,10 @@ pub(super) fn prepare(request: &Value) -> Result<Option<StructuredOutput>, Adapt
 
 impl StructuredOutput {
     pub(super) fn instructions(&self) -> String {
-        format!("Return exactly one JSON value without fences or surrounding prose as the final answer. Relay validates the answer against the unchanged client format before release. Tool calls and refusals remain separate protocol items. This is not native constrained decoding. Required format: {}", self.format)
+        format!(
+            "Return exactly one JSON value without fences or surrounding prose as the final answer. Relay validates the answer against the unchanged client format before release. Tool calls and refusals remain separate protocol items. This is not native constrained decoding. Required format: {}",
+            self.format
+        )
     }
 
     pub(super) fn validate(&self, response: &Value) -> Result<(), AdapterError> {
@@ -198,12 +201,16 @@ mod tests {
             json!({"type":"function_call"}),
             json!({"type":"message","content":[{"type":"refusal","refusal":"No"}]}),
         ] {
-            assert!(format
-                .validate(&json!({"status":"completed","output":[item]}))
-                .is_ok());
+            assert!(
+                format
+                    .validate(&json!({"status":"completed","output":[item]}))
+                    .is_ok()
+            );
         }
-        assert!(format
-            .validate(&json!({"status":"incomplete","output":[]}))
-            .is_err());
+        assert!(
+            format
+                .validate(&json!({"status":"incomplete","output":[]}))
+                .is_err()
+        );
     }
 }

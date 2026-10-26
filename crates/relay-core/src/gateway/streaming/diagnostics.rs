@@ -66,7 +66,11 @@ pub(super) fn invalid_event(
     // Persist only fixed labels, counts and positions, never payload fragments.
     let message = format!(
         "Relay SSE parser: invalid JSON; category={:?}; line={}; column={}; frame_bytes={}; data_bytes={}; data_lines={data_lines}; event_field={event_field}; utf8={}; kind={data_kind}; event_fields={event_fields}; cr_only={cr_only}",
-        error.classify(), error.line(), error.column(), frame.len(), sse_data.len(),
+        error.classify(),
+        error.line(),
+        error.column(),
+        frame.len(),
+        sse_data.len(),
         std::str::from_utf8(sse_data).is_ok(),
     );
     UpstreamErrorDetails::from_value(
@@ -98,14 +102,18 @@ mod tests {
                 details.error_type.as_deref(),
                 Some("relay_stream_transport")
             );
-            assert!(details
-                .message
-                .as_ref()
-                .unwrap()
-                .contains(&format!("io={label}")));
-            assert!(!serde_json::to_string(&details)
-                .unwrap()
-                .contains("synthetic-private"));
+            assert!(
+                details
+                    .message
+                    .as_ref()
+                    .unwrap()
+                    .contains(&format!("io={label}"))
+            );
+            assert!(
+                !serde_json::to_string(&details)
+                    .unwrap()
+                    .contains("synthetic-private")
+            );
         }
     }
 
@@ -140,12 +148,14 @@ mod tests {
         assert!(message.contains("category=Syntax; line=2; column=1"));
         assert!(message.contains("data_lines=2; event_field=false"));
         let event = parse_sse_event(b"data: {\"text\":\"\xff\"}\n\n");
-        assert!(event
-            .upstream_error
-            .unwrap()
-            .message
-            .unwrap()
-            .contains("utf8=false"));
+        assert!(
+            event
+                .upstream_error
+                .unwrap()
+                .message
+                .unwrap()
+                .contains("utf8=false")
+        );
     }
 
     #[test]

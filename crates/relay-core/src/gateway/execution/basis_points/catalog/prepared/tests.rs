@@ -14,9 +14,11 @@ fn memory_diagnostics_expose_only_cache_accounting_not_declarations() {
     assert_eq!(snapshot.key, "tool_presentations");
     assert_eq!(snapshot.basis, "allocation_estimate");
     assert_eq!(snapshot.limit_bytes, Some(MAX_RETAINED_BYTES));
-    assert!(!serde_json::to_string(&snapshot)
-        .unwrap()
-        .contains("synthetic-private-description"));
+    assert!(
+        !serde_json::to_string(&snapshot)
+            .unwrap()
+            .contains("synthetic-private-description")
+    );
 }
 
 fn declaration(description: &str) -> Map<String, Value> {
@@ -65,9 +67,11 @@ fn repeated_declarations_share_parsed_and_rendered_state() {
         second.description(false)
     ));
     assert!(first.description(false).contains("\"minimum\":1"));
-    assert!(first
-        .description(true)
-        .contains("\"additionalProperties\":false"));
+    assert!(
+        first
+            .description(true)
+            .contains("\"additionalProperties\":false")
+    );
 }
 
 #[test]
@@ -85,9 +89,11 @@ fn schemas_namespaces_and_current_policy_never_leak_through_reuse() {
     let request = json!({"tools":[spec],"tool_choice":"none"});
     let catalog = super::super::client_tools(&request).unwrap();
     assert!(super::super::selected_tools(&request, &catalog).is_empty());
-    assert!(super::super::client_tools(&json!({"tools":[]}))
-        .unwrap()
-        .is_empty());
+    assert!(
+        super::super::client_tools(&json!({"tools":[]}))
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]

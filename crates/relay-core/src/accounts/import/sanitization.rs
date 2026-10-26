@@ -1,5 +1,5 @@
 use super::*;
-use crate::accounts::{MAX_ACCOUNT_TAGS, MAX_ACCOUNT_TAG_BYTES, MAX_ACCOUNT_TAG_CHARS};
+use crate::accounts::{MAX_ACCOUNT_TAG_BYTES, MAX_ACCOUNT_TAG_CHARS, MAX_ACCOUNT_TAGS};
 use crate::{is_http_endpoint, url_has_userinfo};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;

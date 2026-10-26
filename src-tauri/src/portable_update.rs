@@ -1,5 +1,5 @@
 use serde::Serialize;
-use tauri::{ipc::Channel, AppHandle};
+use tauri::{AppHandle, ipc::Channel};
 use zenith_relay_core::error_codes;
 
 #[cfg(target_os = "windows")]

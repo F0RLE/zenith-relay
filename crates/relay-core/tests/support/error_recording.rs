@@ -50,9 +50,11 @@ async fn adapter_preparation_rejections_are_recorded_without_a_provider_attempt(
         assert!(event.output_tokens.is_none());
         assert!(event.cooldown_scope.is_none());
         assert!(event.consecutive_failures.is_none());
-        assert!(!serde_json::to_string(event)
-            .unwrap()
-            .contains("private-preparation-sentinel"));
+        assert!(
+            !serde_json::to_string(event)
+                .unwrap()
+                .contains("private-preparation-sentinel")
+        );
     }
 }
 

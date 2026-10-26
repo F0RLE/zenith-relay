@@ -253,8 +253,7 @@ fn truncated_tool_json_requires_a_limit_and_a_client_with_string_arguments() {
                             if client == WireApi::Responses {
                                 &body["output"][0]["arguments"]
                             } else {
-                                &body["choices"][0]["message"]["tool_calls"][0]["function"]
-                                    ["arguments"]
+                                &body["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
                             },
                             arguments
                         );

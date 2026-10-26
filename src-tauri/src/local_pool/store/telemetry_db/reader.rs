@@ -1,5 +1,5 @@
 use super::*;
-use std::{ops::Deref, sync::atomic::Ordering, sync::MutexGuard};
+use std::{ops::Deref, sync::MutexGuard, sync::atomic::Ordering};
 
 /// One bounded reader; WAL lets request recording continue during a report.
 /// Keep every query in the report on the same SQLite snapshot and revision.

@@ -1,14 +1,14 @@
 //! Stateless fan-out/fan-in for one native BPS call. Never executes client tools.
-use super::catalog::{client_tool_call_name, history_tool, tool_spec, ClientTool};
+use super::catalog::{ClientTool, client_tool_call_name, history_tool, tool_spec};
 use super::codec::{
     json_argument_error, json_text, parse_function_arguments, parse_json_object, parse_payload_json,
 };
 use super::history::fit_item_id;
 use super::response::invalid_tool_output;
-use super::{is_transport_tool, TRANSPORT_TOOL};
+use super::{TRANSPORT_TOOL, is_transport_tool};
 use crate::protocol::AdapterError;
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use serde_json::{json, Value};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 
 pub(super) const PREFIX: &str = "relay-tool-batch-v1\n";
@@ -165,7 +165,7 @@ pub(super) fn expand_output(
             Value::Array(payloads) => payloads,
             value => {
                 return Err(invalid_tool_output("output.run_officejs.batch.array")
-                    .with_shape_diagnostic(&value, None))
+                    .with_shape_diagnostic(&value, None));
             }
         };
         if payloads.len() != references.len() {
@@ -188,7 +188,7 @@ pub(super) fn expand_output(
                 Value::Object(_) if tool.kind != "custom" => json_text(&payload)?,
                 value => {
                     return Err(invalid_tool_output("output.run_officejs.batch.payload")
-                        .with_shape_diagnostic(&value, None))
+                        .with_shape_diagnostic(&value, None));
                 }
             };
             let alias = Alias {

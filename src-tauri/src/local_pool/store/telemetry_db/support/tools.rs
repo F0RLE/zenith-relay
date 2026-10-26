@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use zenith_relay_core::ToolUseDiagnostics;
 
 pub(super) fn document(tools: &ToolUseDiagnostics) -> Value {

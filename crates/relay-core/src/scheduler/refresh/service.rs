@@ -10,8 +10,8 @@ use futures_util::future::BoxFuture;
 use std::{
     collections::BTreeMap,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
     },
 };
 use tokio::{sync::watch, time::Instant};

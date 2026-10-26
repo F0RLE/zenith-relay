@@ -2,8 +2,8 @@ use crate::model_metadata::ModelMetadataCatalogHandle;
 use crate::pricing::PricingCatalog;
 use crate::protocol::ClientWireApi;
 use crate::{
-    is_valid_model_id, model_id_key, LocalGatewayKey, ProviderSource, SourceProtocolBinding,
-    WireApi,
+    LocalGatewayKey, ProviderSource, SourceProtocolBinding, WireApi, is_valid_model_id,
+    model_id_key,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -309,10 +309,8 @@ impl ResponseAffinityBinding {
 
 pub const RESPONSE_AFFINITY_DELETE_EXPIRED_SQL: &str =
     "DELETE FROM response_affinity WHERE expires_at_ms <= ?1";
-pub const RESPONSE_AFFINITY_FIND_SQL: &str =
-    "SELECT response_key, candidate_id, expires_at_ms FROM response_affinity WHERE response_key = ?1 AND expires_at_ms > ?2";
-pub const RESPONSE_AFFINITY_UPSERT_SQL: &str =
-    "INSERT INTO response_affinity(response_key, candidate_id, expires_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(response_key) DO UPDATE SET candidate_id = excluded.candidate_id, expires_at_ms = excluded.expires_at_ms, updated_at_ms = excluded.updated_at_ms";
+pub const RESPONSE_AFFINITY_FIND_SQL: &str = "SELECT response_key, candidate_id, expires_at_ms FROM response_affinity WHERE response_key = ?1 AND expires_at_ms > ?2";
+pub const RESPONSE_AFFINITY_UPSERT_SQL: &str = "INSERT INTO response_affinity(response_key, candidate_id, expires_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(response_key) DO UPDATE SET candidate_id = excluded.candidate_id, expires_at_ms = excluded.expires_at_ms, updated_at_ms = excluded.updated_at_ms";
 pub const RESPONSE_AFFINITY_DELETE_SQL: &str =
     "DELETE FROM response_affinity WHERE response_key = ?1";
 pub const RESPONSE_AFFINITY_DELETE_CANDIDATE_SQL: &str =
@@ -415,7 +413,7 @@ impl Default for GatewayRuntimeOptions {
 
 #[cfg(test)]
 mod pool_access_tests {
-    use super::{pool_catalog_visibility_changed, pool_dispatch_permission_changed, PoolAccess};
+    use super::{PoolAccess, pool_catalog_visibility_changed, pool_dispatch_permission_changed};
 
     fn access<'a>(in_pool: bool, allowed: &'a [String]) -> PoolAccess<'a> {
         PoolAccess {

@@ -55,10 +55,12 @@ async fn text_only_prefix_roundtrip_is_scoped_and_never_authorizes_tools() {
         assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 2);
         let initial = crate::poison::mutex(&server.state.generation_bodies)[0].clone();
         let prefix = initial["input"][1].clone();
-        assert!(prefix["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("relay.catalog"));
+        assert!(
+            prefix["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("relay.catalog")
+        );
 
         *crate::poison::mutex(&server.state.generation_body) = final_response();
         let mut next = request;
@@ -127,10 +129,12 @@ async fn text_only_prefix_roundtrip_is_scoped_and_never_authorizes_tools() {
                 } else {
                     assert_eq!(input[5]["output"], "Synthetic file contents");
                 }
-                assert!(input.last().unwrap()["content"][0]["text"]
-                    .as_str()
-                    .unwrap()
-                    .contains("No client tools are available"));
+                assert!(
+                    input.last().unwrap()["content"][0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .contains("No client tools are available")
+                );
             }
             let events = crate::poison::mutex(&events);
             let event = events.last().unwrap();

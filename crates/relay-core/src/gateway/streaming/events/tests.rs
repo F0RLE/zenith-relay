@@ -26,7 +26,9 @@ fn messages_thinking_counts_as_output_without_counting_an_opaque_signature() {
 #[test]
 fn multiline_json_keeps_data_lines_with_all_sse_line_endings() {
     for ending in ["\n", "\r\n", "\r"] {
-        let frame = format!("event: response.output_text.delta{ending}data: {{\"type\":{ending}data: \"response.output_text.delta\",{ending}data: \"delta\":\"synthetic\"}}{ending}{ending}");
+        let frame = format!(
+            "event: response.output_text.delta{ending}data: {{\"type\":{ending}data: \"response.output_text.delta\",{ending}data: \"delta\":\"synthetic\"}}{ending}{ending}"
+        );
         let event = parse_sse_event(frame.as_bytes());
         assert!(event.has_data && event.valid && event.semantic_output);
         assert_eq!(event.event_payload.unwrap()["delta"], "synthetic");

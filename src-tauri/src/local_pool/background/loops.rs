@@ -4,8 +4,8 @@ use tauri::{AppHandle, Emitter, Manager};
 use zenith_relay_core::{
     pricing::pricing_refresh_delay,
     providers::chatgpt::{
-        configure_codex_client_version, refresh_codex_client_release,
-        CODEX_RELEASE_REFRESH_INTERVAL,
+        CODEX_RELEASE_REFRESH_INTERVAL, configure_codex_client_version,
+        refresh_codex_client_release,
     },
     unix_time_ms as current_time_ms,
 };

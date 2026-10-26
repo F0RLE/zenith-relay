@@ -1,16 +1,17 @@
 use crate::local_pool::{
-    accounts::proxy::{common_proxy_available, common_proxy_pool_id, ProxyPool},
+    accounts::proxy::{ProxyPool, common_proxy_available, common_proxy_pool_id},
     error::CommandError,
     state::{DesktopState, SnapshotInputs},
 };
 use crate::platform;
 use std::{sync::Arc, time::Instant};
 use zenith_relay_core::protocol::{
-    apply_model_metadata, apply_pool_model_configuration_with_context, pool_candidate_count,
-    pool_model_projection_with_pricing, DesktopCapabilities, GatewaySummary,
-    ModelDisplayProjection, PoolModelConfigurationInput, PoolModelProjection, RuntimeStateSnapshot,
+    DesktopCapabilities, GatewaySummary, ModelDisplayProjection, PoolModelConfigurationInput,
+    PoolModelProjection, RuntimeStateSnapshot, apply_model_metadata,
+    apply_pool_model_configuration_with_context, pool_candidate_count,
+    pool_model_projection_with_pricing,
 };
-use zenith_relay_core::{unix_time_ms, GatewayRuntime, PricingMetadata};
+use zenith_relay_core::{GatewayRuntime, PricingMetadata, unix_time_ms};
 
 mod members;
 #[cfg(test)]
@@ -19,8 +20,8 @@ mod summary;
 mod timing;
 mod worker;
 use members::{
-    append_missing_runtime_warnings, project_account_summaries, project_quota_window_usages,
-    project_source_summaries, AccountProjectionContext,
+    AccountProjectionContext, append_missing_runtime_warnings, project_account_summaries,
+    project_quota_window_usages, project_source_summaries,
 };
 #[cfg(test)]
 pub(super) use summary::oauth_account_runtime_available;

@@ -1,6 +1,6 @@
 use super::super::super::{
-    checked, optional_bool, optional_f64, optional_u64, required_text, AdapterError, AdapterResult,
-    OutputFormat, Request, ToolChoice,
+    AdapterError, AdapterResult, OutputFormat, Request, ToolChoice, checked, optional_bool,
+    optional_f64, optional_u64, required_text,
 };
 use crate::WireApi;
 use serde_json::Value;

@@ -29,8 +29,8 @@ fn response_cache_policy_is_observed_outside_usage_for_json_and_sse() {
     );
 }
 use axum::body::Body;
-use axum::http::header::CONTENT_TYPE;
 use axum::http::HeaderValue;
+use axum::http::header::CONTENT_TYPE;
 
 #[test]
 fn generation_evidence_uses_protocol_usage_without_inventing_a_first_token() {
@@ -612,9 +612,9 @@ async fn buffered_account_collectors_stop_at_terminal_without_waiting_for_upstre
             assert!(socket.read(&mut request).await.unwrap() > 0);
             socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
             let frame = concat!(
-            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"model\":\"gpt-6-astra\",\"status\":\"completed\",\"output\":[]}}\n\n",
-            "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"ignored_tail\"}}}\n\n",
-        );
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"model\":\"gpt-6-astra\",\"status\":\"completed\",\"output\":[]}}\n\n",
+                "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"ignored_tail\"}}}\n\n",
+            );
             socket
                 .write_all(format!("{:x}\r\n{frame}\r\n", frame.len()).as_bytes())
                 .await

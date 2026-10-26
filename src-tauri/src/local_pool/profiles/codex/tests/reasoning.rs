@@ -267,11 +267,13 @@ fn attach_restores_the_previous_ultra_picker_switch() {
     restore_with(&home, &backups, &secrets).unwrap();
     let restored = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
     assert_eq!(restored["model_provider"].as_str(), Some("openai"));
-    assert!(restored
-        .get("desktop")
-        .and_then(Item::as_table_like)
-        .and_then(|desktop| desktop.get(DESKTOP_SHOW_ULTRA_IN_MODEL_PICKER_KEY))
-        .is_none());
+    assert!(
+        restored
+            .get("desktop")
+            .and_then(Item::as_table_like)
+            .and_then(|desktop| desktop.get(DESKTOP_SHOW_ULTRA_IN_MODEL_PICKER_KEY))
+            .is_none()
+    );
     fs::remove_dir_all(root).unwrap();
 }
 #[test]

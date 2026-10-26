@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use zenith_relay_core::usage::TransportDiagnostics;
 
 pub(super) fn document(transport: &TransportDiagnostics) -> Value {

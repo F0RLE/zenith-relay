@@ -178,8 +178,7 @@ async fn native_batch_roundtrips_json_sse_and_discovery_without_regeneration() {
                 .unwrap();
             assert_eq!(reply.status(), StatusCode::OK);
             assert_eq!(
-                client_response(&reply.bytes().await.unwrap(), stream)["output"][0]["content"][0]
-                    ["text"],
+                client_response(&reply.bytes().await.unwrap(), stream)["output"][0]["content"][0]["text"],
                 "Ready"
             );
             assert_eq!(

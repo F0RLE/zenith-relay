@@ -1,9 +1,9 @@
 use super::{AccountRoutingBlockReason, OperationalStatus, ProxyMode, QuotaRefreshStatus};
 use crate::{
+    ApiEquivalentSummary,
     accounts::AccountAuthState,
     quota::{QuotaSnapshot, Subscription},
     scheduler::refresh::RefreshFreshness,
-    ApiEquivalentSummary,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -13,7 +13,7 @@ mod quota;
 mod source;
 
 pub use credential::{CredentialDiagnostics, CredentialRecovery, CredentialStatus};
-pub use quota::{api_equivalent_projection_window, QuotaWindowUsage, WeeklyValueCalibration};
+pub use quota::{QuotaWindowUsage, WeeklyValueCalibration, api_equivalent_projection_window};
 pub use source::{SourceRefreshState, SourceSummary, SourceSummaryRecord};
 
 /// Refresh evidence, not an inference eligibility or health decision. The

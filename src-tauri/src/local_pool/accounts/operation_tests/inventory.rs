@@ -140,21 +140,23 @@ fn account_patch_normalizes_metadata_and_rejects_zero_weight() {
     assert!(account.account.in_pool);
     assert!(account.image_pool_enabled);
     assert!(account.account.draining);
-    assert!(apply_account_patch(
-        &mut account,
-        UpdateAccountInput {
-            account_id: account_id.clone(),
-            label: None,
-            priority: None,
-            weight: Some(0),
-            allowed_models: None,
-            excluded_models: None,
-            in_pool: None,
-            draining: None,
-            purchase_cost_micro_usd: None,
-        },
-    )
-    .is_err());
+    assert!(
+        apply_account_patch(
+            &mut account,
+            UpdateAccountInput {
+                account_id: account_id.clone(),
+                label: None,
+                priority: None,
+                weight: Some(0),
+                allowed_models: None,
+                excluded_models: None,
+                in_pool: None,
+                draining: None,
+                purchase_cost_micro_usd: None,
+            },
+        )
+        .is_err()
+    );
     credential_store.delete(&account_id).unwrap();
 }
 #[test]
@@ -286,23 +288,29 @@ fn failed_delete_restores_credentials_quota_and_profile_binding() {
     .unwrap();
 
     assert!(credentials.require(&account_id).is_ok());
-    assert!(state
-        .store()
-        .unwrap()
-        .ensure_account_refresh_current(&before_refresh)
-        .is_err());
-    assert!(state
-        .sync_account_quota_refresh(&account_id, current_time_ms())
-        .unwrap());
+    assert!(
+        state
+            .store()
+            .unwrap()
+            .ensure_account_refresh_current(&before_refresh)
+            .is_err()
+    );
+    assert!(
+        state
+            .sync_account_quota_refresh(&account_id, current_time_ms())
+            .unwrap()
+    );
     assert_eq!(
         codex::account_bindings(&state.profile_backup_root())
             .unwrap()
             .len(),
         1
     );
-    assert!(std::fs::read_to_string(profile.join("auth.json"))
-        .unwrap()
-        .contains("access-private"));
+    assert!(
+        std::fs::read_to_string(profile.join("auth.json"))
+            .unwrap()
+            .contains("access-private")
+    );
 
     codex::restore_account_profile(&profile, &state.profile_backup_root()).unwrap();
     credentials.delete(&account_id).unwrap();

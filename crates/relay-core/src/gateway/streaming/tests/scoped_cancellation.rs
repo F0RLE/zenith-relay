@@ -80,10 +80,14 @@ async fn eof_after_partial_usage_is_not_a_success_and_never_invents_consumption(
         .filter_map(|line| line.strip_prefix("data: "))
         .filter_map(|data| serde_json::from_str(data).ok())
         .collect();
-    assert!(frames
-        .iter()
-        .any(|frame| frame["type"] == "response.failed"));
-    assert!(frames
-        .iter()
-        .all(|frame| frame["type"] != "response.completed"));
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame["type"] == "response.failed")
+    );
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame["type"] != "response.completed")
+    );
 }

@@ -1,7 +1,7 @@
 use std::{error::Error, fs, io, path::PathBuf};
 use zenith_relay_core::model_metadata::{
-    validate_model_order_catalog, ModelMetadataCatalogLoader, MODEL_CATALOG_SCHEMA,
-    MODEL_ORDER_JSON,
+    MODEL_CATALOG_SCHEMA, MODEL_ORDER_JSON, ModelMetadataCatalogLoader,
+    validate_model_order_catalog,
 };
 
 #[tokio::main(flavor = "current_thread")]

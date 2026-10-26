@@ -1,5 +1,6 @@
 use crate::local_pool::{
     accounts::{
+        NativeSecretBackend,
         credentials::{CredentialError, StoredCodexCredentials},
         import_session::SecretBackend,
         oauth::{CodexOAuthClient, OAuthClientKind, OAuthTokenSet},
@@ -9,7 +10,6 @@ use crate::local_pool::{
             OAuthFlowStatus,
         },
         records::{self},
-        NativeSecretBackend,
     },
     error::{ErrorCode, LocalPoolError, Result as LocalResult},
 };

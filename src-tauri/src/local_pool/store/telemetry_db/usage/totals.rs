@@ -1,7 +1,8 @@
 use rusqlite::types::Value as SqlValue;
 use zenith_relay_core::{
+    UsageEvent, WireApi,
     protocol::{UsageQuery, UsageTotals, UsageWorkload},
-    sql_like_contains_pattern, UsageEvent, WireApi,
+    sql_like_contains_pattern,
 };
 
 /// The scalar fields that contribute to a totals row for one request.

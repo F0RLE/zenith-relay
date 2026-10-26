@@ -1,7 +1,7 @@
 //! Preserve the synchronous usage acknowledgement without running disk I/O on
 //! Tokio's request workers. The queue is bounded; a full queue applies pressure
 //! rather than dropping accounting, and the last owner drains/joins the writer.
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use zenith_relay_core::UsageCallback;
 
@@ -114,8 +114,8 @@ pub(in crate::local_pool) fn offload(
 mod tests {
     use super::*;
     use std::sync::{
-        atomic::{AtomicBool, Ordering},
         Mutex,
+        atomic::{AtomicBool, Ordering},
     };
     use std::time::Duration;
 
@@ -151,13 +151,15 @@ mod tests {
         let mut acknowledgements = Vec::new();
         for event in 0..=QUEUE_CAPACITY {
             let (acknowledgement, done) = mpsc::sync_channel(1);
-            assert!(sender
-                .try_send(WriteJob {
-                    event,
-                    runtime: None,
-                    acknowledgement,
-                })
-                .is_ok());
+            assert!(
+                sender
+                    .try_send(WriteJob {
+                        event,
+                        runtime: None,
+                        acknowledgement,
+                    })
+                    .is_ok()
+            );
             acknowledgements.push(done);
             if event == 0 {
                 start.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -172,9 +174,11 @@ mod tests {
             }),
             Err(mpsc::TrySendError::Full(_))
         ));
-        assert!(acknowledgements
-            .iter()
-            .all(|done| matches!(done.try_recv(), Err(mpsc::TryRecvError::Empty))));
+        assert!(
+            acknowledgements
+                .iter()
+                .all(|done| matches!(done.try_recv(), Err(mpsc::TryRecvError::Empty)))
+        );
         release.send(()).unwrap();
         assert!(writer.record(QUEUE_CAPACITY + 1));
         drop(writer);

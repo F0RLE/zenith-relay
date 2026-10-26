@@ -346,12 +346,14 @@ fn canonical_account_credential_controls_availability() {
     account.account.secret_refs.clear();
 
     assert!(!account_secret_available(&account, &MemorySecrets(HashMap::new())).unwrap());
-    assert!(account_secret_available(
-        &account,
-        &MemorySecrets(HashMap::from([(
-            "account:codex:account_credential".into(),
-            "credential".into(),
-        )]))
-    )
-    .unwrap());
+    assert!(
+        account_secret_available(
+            &account,
+            &MemorySecrets(HashMap::from([(
+                "account:codex:account_credential".into(),
+                "credential".into(),
+            )]))
+        )
+        .unwrap()
+    );
 }

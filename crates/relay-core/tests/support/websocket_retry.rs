@@ -33,7 +33,7 @@ async fn failed_initial_websocket_response_with_generated_usage_is_not_retried()
 async fn assert_failed_initial_response_is_not_retried(failure: Value) {
     let (first, first_state) =
         spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![
-            failure.clone()
+            failure.clone(),
         ])))
         .await;
     let (second, second_state) =
@@ -306,9 +306,11 @@ async fn account_websocket_retries_rejection_but_stops_after_unknown_disconnect(
         events.iter().map(|event| event.attempt).collect::<Vec<_>>(),
         [1, 2]
     );
-    assert!(events[..2]
-        .iter()
-        .all(|event| event.request_id == events[0].request_id));
+    assert!(
+        events[..2]
+            .iter()
+            .all(|event| event.request_id == events[0].request_id)
+    );
     assert_eq!(
         events[0].http_status,
         StatusCode::TOO_MANY_REQUESTS.as_u16()

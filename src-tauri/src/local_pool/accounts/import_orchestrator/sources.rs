@@ -8,7 +8,7 @@ pub(crate) use identity::{
     find_existing_source, imported_source_base_url, imported_source_wire_api,
 };
 pub(crate) use persist::persist_imported_source;
-pub(crate) use record::{imported_source_record, ImportedSourceRecordInput};
+pub(crate) use record::{ImportedSourceRecordInput, imported_source_record};
 
 use super::{ImportItemError, ItemResult};
 use crate::local_pool::models::ProviderSourceRecord;
@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 use zenith_relay_core::accounts::ParsedImportItem;
 use zenith_relay_core::error_codes;
-use zenith_relay_core::{discover_source_models_and_protocol_bindings, ProviderSource};
+use zenith_relay_core::{ProviderSource, discover_source_models_and_protocol_bindings};
 
 pub(crate) async fn import_source_item(
     state: &DesktopState,

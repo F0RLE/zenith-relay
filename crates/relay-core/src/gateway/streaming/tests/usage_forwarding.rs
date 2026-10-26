@@ -314,11 +314,13 @@ async fn usage_stream_reports_interruption_after_complete_visible_frames() {
                 details.error_type.as_deref(),
                 Some("relay_stream_transport")
             );
-            assert!(details
-                .message
-                .as_ref()
-                .unwrap()
-                .contains("io=connection_reset"));
+            assert!(
+                details
+                    .message
+                    .as_ref()
+                    .unwrap()
+                    .contains("io=connection_reset")
+            );
         }
     }
 }

@@ -35,17 +35,19 @@ fn prompt_affinity_follows_the_admitted_native_route_of_the_same_member() {
     }
 
     scheduler.bind_response_affinity("response", "preferred::chat", 0);
-    assert!(scheduler
-        .select(SelectionRequest {
-            model: "gpt-5",
-            allowed_protocols: &[WireApi::Responses],
-            scope: &CandidateScope::default(),
-            tried: &HashSet::new(),
-            response_affinity_key: Some("response"),
-            prompt_affinity_key: Some("cache:thread"),
-            now_ms: 1,
-        })
-        .is_none());
+    assert!(
+        scheduler
+            .select(SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                scope: &CandidateScope::default(),
+                tried: &HashSet::new(),
+                response_affinity_key: Some("response"),
+                prompt_affinity_key: Some("cache:thread"),
+                now_ms: 1,
+            })
+            .is_none()
+    );
 }
 
 #[test]
@@ -357,17 +359,19 @@ fn response_affinity_owner_outside_key_scope_can_be_reset_for_fallback() {
     // opaque continuation, preserving the safety rule for a still-configured
     // owner while allowing the request layer to make the membership change
     // explicit before choosing the fallback.
-    assert!(scheduler
-        .select(SelectionRequest {
-            model: "gpt-5",
-            allowed_protocols: &[WireApi::Responses],
-            scope: &scope,
-            tried: &HashSet::new(),
-            response_affinity_key: Some("response"),
-            prompt_affinity_key: None,
-            now_ms: 1,
-        })
-        .is_none());
+    assert!(
+        scheduler
+            .select(SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                scope: &scope,
+                tried: &HashSet::new(),
+                response_affinity_key: Some("response"),
+                prompt_affinity_key: None,
+                now_ms: 1,
+            })
+            .is_none()
+    );
     assert!(scheduler.invalidate_response_affinity("response"));
     assert_eq!(
         scheduler
@@ -449,17 +453,19 @@ fn removed_candidate_keeps_response_owner_only_until_a_replacement_id_is_upserte
         scheduler.response_affinity_candidate("response", 1),
         Some("owner".into())
     );
-    assert!(scheduler
-        .select(SelectionRequest {
-            model: "gpt-5",
-            allowed_protocols: &[WireApi::Responses],
-            scope: &CandidateScope::default(),
-            tried: &HashSet::new(),
-            response_affinity_key: Some("response"),
-            prompt_affinity_key: None,
-            now_ms: 1,
-        })
-        .is_none());
+    assert!(
+        scheduler
+            .select(SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                scope: &CandidateScope::default(),
+                tried: &HashSet::new(),
+                response_affinity_key: Some("response"),
+                prompt_affinity_key: None,
+                now_ms: 1,
+            })
+            .is_none()
+    );
 
     scheduler.upsert(candidate("owner"));
     assert_eq!(scheduler.response_affinity_candidate("response", 1), None);

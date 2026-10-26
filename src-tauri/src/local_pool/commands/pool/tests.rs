@@ -4,7 +4,7 @@ use super::*;
 use crate::local_pool::models::ProviderSourceRecord;
 use std::collections::BTreeSet;
 use uuid::Uuid;
-use zenith_relay_core::protocol::{complete_model_display_order, SourcePresetRule};
+use zenith_relay_core::protocol::{SourcePresetRule, complete_model_display_order};
 use zenith_relay_core::{SourceProtocolBinding, WireApi};
 
 fn source(id: &str, in_pool: bool, wire_api: WireApi) -> ProviderSourceRecord {

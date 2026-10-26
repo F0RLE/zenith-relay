@@ -1,5 +1,5 @@
 use super::{has_semantic_output, is_compaction_payload};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
 const MAX_CAPTURE_BYTES: usize = 2 * 1024 * 1024;
@@ -167,9 +167,11 @@ mod tests {
             .observe(&json!({"type":"response.output_text.delta","output_index":0,"delta":"text"}));
         capture.observe(&json!({"type":"response.output_item.done","output_index":1,
             "item":{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"}}));
-        assert!(capture
-            .finish(Some(json!({"id":"resp_partial"})), None)
-            .is_none());
+        assert!(
+            capture
+                .finish(Some(json!({"id":"resp_partial"})), None)
+                .is_none()
+        );
     }
 
     #[test]
@@ -194,9 +196,11 @@ mod tests {
     fn unindexed_text_is_never_synthesized_into_an_assistant_message() {
         let mut capture = NativeReplayCapture::default();
         capture.observe(&json!({"type":"response.output_text.delta","delta":"hello"}));
-        assert!(capture
-            .finish(Some(json!({"id":"resp_sparse","output":[]})), None)
-            .is_none());
+        assert!(
+            capture
+                .finish(Some(json!({"id":"resp_sparse","output":[]})), None)
+                .is_none()
+        );
     }
 
     #[test]
@@ -205,9 +209,11 @@ mod tests {
         capture.observe(&json!({"type":"response.output_item.done","item":{
             "type":"message","content":"x".repeat(MAX_CAPTURE_BYTES)}}));
         assert!(capture.captured_items.is_empty());
-        assert!(capture
-            .finish(Some(json!({"id":"resp_large","output":[]})), None)
-            .is_none());
+        assert!(
+            capture
+                .finish(Some(json!({"id":"resp_large","output":[]})), None)
+                .is_none()
+        );
     }
 
     #[test]

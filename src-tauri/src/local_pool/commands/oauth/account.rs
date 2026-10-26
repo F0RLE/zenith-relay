@@ -1,7 +1,8 @@
 use crate::local_pool::{
     accounts::{
-        credentials::{credential_local_error as credential_error, CredentialStore},
-        records, NativeSecretBackend,
+        NativeSecretBackend,
+        credentials::{CredentialStore, credential_local_error as credential_error},
+        records,
     },
     error::{ErrorCode, LocalPoolError, Result as LocalResult},
     models::LocalAccountRecord,

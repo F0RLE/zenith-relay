@@ -20,12 +20,14 @@ async fn background_workers_stay_active_for_the_desktop_process_lifetime() {
 
     assert!(state.background_session_active());
     state.wait_for_background_session_active().await;
-    assert!(tokio::time::timeout(
-        std::time::Duration::from_millis(10),
-        state.wait_for_background_session_inactive()
-    )
-    .await
-    .is_err());
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            state.wait_for_background_session_inactive()
+        )
+        .await
+        .is_err()
+    );
 
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
@@ -64,12 +66,14 @@ fn deferred_catalog_refresh_warning_survives_restart_without_an_error_timestamp(
         state.catalog_refresh_warning().as_deref(),
         Some("model_catalog_refresh_deferred:codex_running")
     );
-    assert!(state
-        .store()
-        .unwrap()
-        .gateway()
-        .catalog_refresh_error_at_ms
-        .is_none());
+    assert!(
+        state
+            .store()
+            .unwrap()
+            .gateway()
+            .catalog_refresh_error_at_ms
+            .is_none()
+    );
     drop(state);
 
     let state = DesktopState::open(root.clone()).unwrap();
@@ -86,19 +90,23 @@ async fn subscription_refreshes_share_one_global_lock() {
     let state = DesktopState::open(root.clone()).unwrap();
     let first = state.subscription_refresh_guard().await;
 
-    assert!(tokio::time::timeout(
-        std::time::Duration::from_millis(10),
-        state.subscription_refresh_guard(),
-    )
-    .await
-    .is_err());
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            state.subscription_refresh_guard(),
+        )
+        .await
+        .is_err()
+    );
     drop(first);
-    assert!(tokio::time::timeout(
-        std::time::Duration::from_millis(10),
-        state.subscription_refresh_guard(),
-    )
-    .await
-    .is_ok());
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            state.subscription_refresh_guard(),
+        )
+        .await
+        .is_ok()
+    );
 
     drop(state);
     std::fs::remove_dir_all(root).unwrap();

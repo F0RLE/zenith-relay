@@ -2,11 +2,11 @@ use super::*;
 use crate::local_pool::models::LocalAccountRecord;
 use std::collections::BTreeMap;
 use zenith_relay_core::{
+    WireApi,
     accounts::{
         AccountAuthMode, AccountAuthState, AccountHealthState, AccountIdentity, AccountRecord,
     },
     quota::{QuotaSnapshot, Subscription},
-    WireApi,
 };
 
 fn input(model_policy: WakeModelPolicy) -> WakeAutomationInput {

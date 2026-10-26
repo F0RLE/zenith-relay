@@ -1,5 +1,5 @@
 use super::contracts::{AdapterError, AdapterResult};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 /// A bare empty text part has no replay state and can make Gemini reject a
 /// tool continuation. Empty parts with signatures or metadata remain opaque.

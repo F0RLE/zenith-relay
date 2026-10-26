@@ -116,7 +116,7 @@ fn discovery_failure_codes_keep_the_management_contract_stable() {
 
 #[tokio::test]
 async fn bps_free_token_claims_do_not_replace_provider_access_checks() {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     let token = format!(
         "e30.{}.synthetic",
         URL_SAFE_NO_PAD.encode(

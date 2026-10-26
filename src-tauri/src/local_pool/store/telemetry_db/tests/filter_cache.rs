@@ -96,9 +96,11 @@ fn account_purge_invalidates_cached_filter_choices() {
     database
         .replace_state_json_and_delete_accounts_data(&[], &["synthetic-filter-account".into()])
         .unwrap();
-    assert!(read(&database, &UsageQuery::default())
-        .pool_members
-        .is_empty());
+    assert!(
+        read(&database, &UsageQuery::default())
+            .pool_members
+            .is_empty()
+    );
     assert_eq!(reads(&database), 2);
 }
 

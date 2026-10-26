@@ -1,23 +1,24 @@
-use super::super::{collect_limited, LimitedBodyError};
+use super::super::{LimitedBodyError, collect_limited};
 use super::error::{OAuthError, OAuthErrorCode};
 use super::exchange::{OAuthCallback, OAuthStart, OAuthTokenSet};
 use super::parse::{
-    parse_token_response, validate_token, AuthorizationCodeRequest, RefreshTokenRequest,
+    AuthorizationCodeRequest, RefreshTokenRequest, parse_token_response, validate_token,
 };
 use super::session::OAuthPendingSession;
 use super::{
-    OAuthClientKind, BASIS_POINTS_OAUTH_REDIRECT_URI, CALLBACK_PATH, CODEX_OAUTH_CALLBACK_PORTS,
-    CODEX_OAUTH_ISSUER, CODEX_OAUTH_ORIGINATOR, MAX_TOKEN_RESPONSE_BYTES,
+    BASIS_POINTS_OAUTH_REDIRECT_URI, CALLBACK_PATH, CODEX_OAUTH_CALLBACK_PORTS, CODEX_OAUTH_ISSUER,
+    CODEX_OAUTH_ORIGINATOR, MAX_TOKEN_RESPONSE_BYTES, OAuthClientKind,
 };
 use crate::local_pool::random_urlsafe;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use reqwest::redirect::Policy;
 use sha2::{Digest, Sha256};
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 use url::Url;
+use zenith_relay_core::ProxyConfig;
 use zenith_relay_core::accounts::{
     TokenRefresh, TokenRefreshAdapter, TokenRefreshFailure, TokenRefreshFailureKind,
 };
@@ -25,8 +26,7 @@ use zenith_relay_core::error_codes;
 use zenith_relay_core::providers::chatgpt::{
     token_refresh_failure_kind, token_refresh_provider_error_code,
 };
-use zenith_relay_core::scheduler::refresh::http::{management_http_gate, HttpClass};
-use zenith_relay_core::ProxyConfig;
+use zenith_relay_core::scheduler::refresh::http::{HttpClass, management_http_gate};
 
 #[derive(Clone)]
 pub struct CodexOAuthClient {

@@ -8,18 +8,18 @@ use crate::{
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     fmt, fs,
     path::{Path, PathBuf},
 };
-use toml_edit::{value, DocumentMut, Item, Table};
+use toml_edit::{DocumentMut, Item, Table, value};
 use zenith_relay_core::{
-    accounts::TokenSet, model_metadata::ModelMetadataCatalog, DefaultServiceTier,
-    CODEX_RELAY_CATALOG_HASH,
+    CODEX_RELAY_CATALOG_HASH, DefaultServiceTier, accounts::TokenSet,
+    model_metadata::ModelMetadataCatalog,
 };
 #[cfg(test)]
 use zenith_relay_core::{codex_catalog_entry_is_compatible, routed_codex_catalog_entry};
@@ -50,7 +50,7 @@ mod backup;
 mod bindings;
 mod gateway_attach;
 mod memory_model;
-pub(crate) use memory_model::{memory_model, set_memory_model, CodexMemoryStage};
+pub(crate) use memory_model::{CodexMemoryStage, memory_model, set_memory_model};
 mod service_tier;
 mod switch_flow;
 

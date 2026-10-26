@@ -1,8 +1,8 @@
-use super::credentials::{
-    credential_invalid_state_error as credential_error, credential_secret_ref, CredentialError,
-    CredentialStore, StoredCodexCredentials,
-};
 use super::NativeSecretBackend;
+use super::credentials::{
+    CredentialError, CredentialStore, StoredCodexCredentials,
+    credential_invalid_state_error as credential_error, credential_secret_ref,
+};
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError, Result},
     models::LocalAccountRecord,
@@ -10,12 +10,11 @@ use crate::local_pool::{
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use zenith_relay_core::{
-    account_candidate_health,
+    CandidateHealth, CandidateQuota, WireApi, account_candidate_health,
     accounts::{
         AccountAuthMode, AccountAuthState, AccountHealthState, AccountIdentity, AccountRecord,
     },
     quota::{QuotaSnapshot, Subscription, SubscriptionInput},
-    CandidateHealth, CandidateQuota, WireApi,
 };
 
 pub const CODEX_SOURCE_ID: &str = "openai_codex";
@@ -151,7 +150,7 @@ pub fn new_account_record(
             health: AccountHealthState::Healthy,
             source_id: CODEX_SOURCE_ID.to_string(),
             secret_refs: vec![
-                credential_secret_ref(credentials.local_account_id()).map_err(credential_error)?
+                credential_secret_ref(credentials.local_account_id()).map_err(credential_error)?,
             ],
             subscription,
             quota: QuotaSnapshot::default(),
@@ -273,11 +272,7 @@ pub fn find_codex_account<'a, E>(
             }
         }
     }
-    if extra {
-        Err(duplicate())
-    } else {
-        Ok(found)
-    }
+    if extra { Err(duplicate()) } else { Ok(found) }
 }
 
 pub fn candidate_health(account: &AccountRecord) -> CandidateHealth {

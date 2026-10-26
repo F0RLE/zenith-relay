@@ -2,7 +2,7 @@ use super::errors::LocalGatewayError;
 use axum::body::Body;
 use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE, WWW_AUTHENTICATE};
 use axum::http::{HeaderValue, Response, StatusCode};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const MAX_ERROR_MESSAGE_CHARS: usize = 1_024;
 

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 mod failure;
 
-pub use failure::{classify_quota_http_failure, QuotaRefreshFailure};
+pub use failure::{QuotaRefreshFailure, classify_quota_http_failure};
 use std::collections::{BTreeSet, HashSet};
 
 const MAX_SUPPLEMENTAL_WINDOWS: usize = 32;

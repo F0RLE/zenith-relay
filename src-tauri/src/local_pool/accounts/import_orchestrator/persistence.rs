@@ -1,10 +1,10 @@
 #[cfg(test)]
+use crate::local_pool::accounts::NativeSecretBackend;
+#[cfg(test)]
 use crate::local_pool::accounts::authority::{ProcessAccountLocks, ProcessLockConfig};
 #[cfg(test)]
 use crate::local_pool::accounts::credentials::CredentialStore;
 use crate::local_pool::accounts::credentials::StoredCodexCredentials;
-#[cfg(test)]
-use crate::local_pool::accounts::NativeSecretBackend;
 use crate::local_pool::models::LocalAccountRecord;
 #[cfg(test)]
 use crate::local_pool::state::DesktopState;

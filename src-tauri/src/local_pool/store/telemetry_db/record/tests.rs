@@ -32,10 +32,12 @@ fn cached_record_statements_reuse_without_retaining_bound_values() {
         // SQLite may also count an automatic reprepare as a run. The counter
         // must accumulate across records rather than reset to a fresh statement.
         assert!(statement.get_status(StatementStatus::Run) > previous_runs);
-        assert!(!statement
-            .expanded_sql()
-            .unwrap()
-            .contains("synthetic-cache"));
+        assert!(
+            !statement
+                .expanded_sql()
+                .unwrap()
+                .contains("synthetic-cache")
+        );
     }
     drop(connection);
     drop(database);

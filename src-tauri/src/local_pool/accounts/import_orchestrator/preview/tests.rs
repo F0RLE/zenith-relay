@@ -1,6 +1,6 @@
 use super::*;
-use axum::http::{header::AUTHORIZATION, HeaderMap};
-use axum::{routing::get, Json, Router};
+use axum::http::{HeaderMap, header::AUTHORIZATION};
+use axum::{Json, Router, routing::get};
 use std::fs;
 use tokio::net::TcpListener;
 use url::Url;
@@ -103,10 +103,12 @@ async fn siwc_import_round_trip_is_inactive_preserves_registration_and_never_pro
         result.results[0].status,
         super::super::ImportItemStatus::Failed
     ));
-    assert!(credentials
-        .require(&account.account.id)
-        .unwrap()
-        .matches_snapshot(&stored));
+    assert!(
+        credentials
+            .require(&account.account.id)
+            .unwrap()
+            .matches_snapshot(&stored)
+    );
     credentials.delete(&account.account.id).unwrap();
     drop(state);
     fs::remove_dir_all(root).unwrap();

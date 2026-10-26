@@ -274,12 +274,14 @@ async fn mixed_responses_routes_default_to_full_and_preserve_explicit_client_lit
         StatusCode::OK
     );
 
-    assert!(source_state
-        .requests
-        .lock()
-        .unwrap()
-        .iter()
-        .all(|request| request.path == "/v1/models"));
+    assert!(
+        source_state
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.path == "/v1/models")
+    );
     let requests = account_state.requests.lock().unwrap();
     let response_requests = requests
         .iter()
@@ -288,9 +290,11 @@ async fn mixed_responses_routes_default_to_full_and_preserve_explicit_client_lit
     assert_eq!(response_requests.len(), 2);
     assert_eq!(response_requests[0].responses_lite, None);
     assert_eq!(response_requests[0].body["parallel_tool_calls"], true);
-    assert!(response_requests[0].body["reasoning"]
-        .get("context")
-        .is_none());
+    assert!(
+        response_requests[0].body["reasoning"]
+            .get("context")
+            .is_none()
+    );
     assert_eq!(response_requests[1].responses_lite.as_deref(), Some("true"));
     assert_eq!(response_requests[1].body["parallel_tool_calls"], false);
     assert_eq!(
@@ -367,9 +371,11 @@ async fn account_only_compaction_defaults_to_full_with_mixed_transport_cards() {
     assert_eq!(compact_requests.len(), 1);
     assert_eq!(compact_requests[0].responses_lite, None);
     assert_eq!(compact_requests[0].body["parallel_tool_calls"], true);
-    assert!(compact_requests[0].body["reasoning"]
-        .get("context")
-        .is_none());
+    assert!(
+        compact_requests[0].body["reasoning"]
+            .get("context")
+            .is_none()
+    );
     drop(requests);
     let full_requests = full_state.requests.lock().unwrap();
     assert_eq!(full_requests.len(), 1);
@@ -507,17 +513,21 @@ async fn mixed_websocket_routes_default_to_full_and_preserve_explicit_client_lit
         "response.completed"
     );
 
-    assert!(source_state
-        .requests
-        .lock()
-        .unwrap()
-        .iter()
-        .all(|request| request.path == "/v1/models"));
+    assert!(
+        source_state
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.path == "/v1/models")
+    );
     let headers = account_state.headers.lock().unwrap();
     assert_eq!(headers.len(), 2);
-    assert!(headers[0]
-        .get("x-openai-internal-codex-responses-lite")
-        .is_none());
+    assert!(
+        headers[0]
+            .get("x-openai-internal-codex-responses-lite")
+            .is_none()
+    );
     assert_eq!(
         header(&headers[1], "x-openai-internal-codex-responses-lite").as_deref(),
         Some("true")
@@ -695,9 +705,11 @@ async fn compact_and_alpha_search_use_the_oauth_account_runtime() {
     assert_eq!(events[0].cached_input_tokens, Some(800));
     assert_eq!(events[0].output_tokens, Some(100));
     assert_eq!(events[0].total_tokens, Some(1300));
-    assert!(events
-        .iter()
-        .all(|event| event.account_id.as_deref() == Some("relay-account")));
+    assert!(
+        events
+            .iter()
+            .all(|event| event.account_id.as_deref() == Some("relay-account"))
+    );
 }
 
 #[tokio::test]

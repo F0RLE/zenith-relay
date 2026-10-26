@@ -332,11 +332,13 @@ async fn http_continuation_materializes_the_full_chain_before_owner_rejection_fa
         .unwrap();
 
     assert_eq!(third["id"], "backup-third");
-    assert!(gateway
-        .runtime
-        .as_ref()
-        .unwrap()
-        .set_candidate_health("owner-account", CandidateHealth::ReauthRequired,));
+    assert!(
+        gateway
+            .runtime
+            .as_ref()
+            .unwrap()
+            .set_candidate_health("owner-account", CandidateHealth::ReauthRequired,)
+    );
     let branch = client
         .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)

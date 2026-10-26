@@ -1,7 +1,7 @@
 mod error;
 mod runtime_exec;
 pub use error::{
-    completion_from_execution, WakeExecutionErrorCode, WakeExecutionFailure, WakeExecutionMetrics,
+    WakeExecutionErrorCode, WakeExecutionFailure, WakeExecutionMetrics, completion_from_execution,
 };
 pub use runtime_exec::execute_with_runtime;
 #[cfg(test)]

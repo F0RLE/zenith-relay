@@ -1,5 +1,5 @@
 use super::*;
-use tokio::time::{sleep_until, Instant};
+use tokio::time::{Instant, sleep_until};
 
 impl GatewayRuntime {
     pub(in crate::runtime) async fn admit(

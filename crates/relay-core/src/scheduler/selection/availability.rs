@@ -155,7 +155,7 @@ impl PoolScheduler {
                     reason = Self::aggregate_cooldown_reason(reason, next_reason);
                 }
                 CandidateAvailability::Ready { .. } | CandidateAvailability::Busy(_) => {
-                    return None
+                    return None;
                 }
                 CandidateAvailability::Blocked(_) => {}
             }

@@ -64,12 +64,14 @@ mod tests {
                 .observed(None, 42);
         let observation =
             SourceStatsObservation::new("https://provider.example.test".into(), stats);
-        assert!(observation
-            .snapshot(
-                "https://provider.example.test/v1",
-                RefreshFreshness::Fresh { as_of_ms: 1 }
-            )
-            .is_none());
+        assert!(
+            observation
+                .snapshot(
+                    "https://provider.example.test/v1",
+                    RefreshFreshness::Fresh { as_of_ms: 1 }
+                )
+                .is_none()
+        );
         let stale = observation
             .snapshot(
                 "https://provider.example.test",

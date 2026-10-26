@@ -1,10 +1,10 @@
 use super::{
-    curve_secret_key, encode_ssh_public_key, parse_key, sign, validate_identifier,
-    AgentIdentityCredential, AgentIdentityError, AGENT_REGISTRATION_TIMEOUT,
+    AGENT_REGISTRATION_TIMEOUT, AgentIdentityCredential, AgentIdentityError,
     MAX_REGISTRATION_RESPONSE_BYTES, REGISTRATION_ATTEMPTS, TASK_REGISTRATION_BASE_URL,
-    TASK_REGISTRATION_TIMEOUT,
+    TASK_REGISTRATION_TIMEOUT, curve_secret_key, encode_ssh_public_key, parse_key, sign,
+    validate_identifier,
 };
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 use chrono::{SecondsFormat, Utc};
 use futures_util::StreamExt;
 use ring::{rand::SystemRandom, signature::Ed25519KeyPair};

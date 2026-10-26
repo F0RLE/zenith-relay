@@ -112,7 +112,9 @@ fn first_json_error_owns_a_forbidden_response_with_a_later_sse_event() {
             error_codes::UPSTREAM_ACCOUNT_DISABLED,
         ),
     ] {
-        let response = format!("{body}\n\nevent: response.failed\ndata: {{\"error\":{{\"code\":\"invalid_api_key\"}}}}\n\n");
+        let response = format!(
+            "{body}\n\nevent: response.failed\ndata: {{\"error\":{{\"code\":\"invalid_api_key\"}}}}\n\n"
+        );
         assert_eq!(
             classify_upstream_error(StatusCode::FORBIDDEN, Some(response.as_bytes())).category,
             expected

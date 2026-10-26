@@ -91,12 +91,10 @@ fn detected_prices_follow_the_source_upstream() {
         detected_prices_for_upstream(&source, " https://provider.test/v1 ", &source.wire_api),
         source.detected_model_prices
     );
-    assert!(detected_prices_for_upstream(
-        &source,
-        "https://other-provider.test/v1",
-        &source.wire_api
-    )
-    .is_empty());
+    assert!(
+        detected_prices_for_upstream(&source, "https://other-provider.test/v1", &source.wire_api)
+            .is_empty()
+    );
     assert!(detected_prices_for_upstream(&source, &base_url, &WireApi::ChatCompletions).is_empty());
 }
 
@@ -144,14 +142,18 @@ fn mixed_binding_normalization_keeps_the_legacy_protocol_default_stable() {
     source.validate_protocol_bindings().unwrap();
 
     assert_eq!(source.wire_api, WireApi::Responses);
-    assert!(!source
-        .models_for_wire_api(WireApi::Responses)
-        .unwrap()
-        .is_empty());
-    assert!(!source
-        .models_for_wire_api(WireApi::Messages)
-        .unwrap()
-        .is_empty());
+    assert!(
+        !source
+            .models_for_wire_api(WireApi::Responses)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !source
+            .models_for_wire_api(WireApi::Messages)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]

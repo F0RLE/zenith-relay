@@ -1,6 +1,6 @@
 use super::super::super::oauth::OAuthTokenSet;
 use super::super::error::CredentialError;
-use super::super::wire::{validate_optional, validate_token, MAX_TOKEN_BYTES};
+use super::super::wire::{MAX_TOKEN_BYTES, validate_optional, validate_token};
 use std::fmt;
 use zenith_relay_core::omit_blank;
 

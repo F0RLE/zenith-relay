@@ -86,12 +86,16 @@ async fn chat_completions_preserves_native_tools_and_bridges_responses() {
     {
         let requests = state.requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
-        assert!(requests
-            .iter()
-            .all(|request| request.path == "/v1/chat/completions"));
-        assert!(requests
-            .iter()
-            .all(|request| request.authorization.as_deref() == Some("Bearer chat-key")));
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.path == "/v1/chat/completions")
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.authorization.as_deref() == Some("Bearer chat-key"))
+        );
         assert_eq!(requests[0].body["messages"][0]["content"], "hello");
         assert_eq!(requests[0].body["service_tier"], "priority");
     }
@@ -99,9 +103,11 @@ async fn chat_completions_preserves_native_tools_and_bridges_responses() {
         let events = events.lock().unwrap();
         assert_eq!(events.len(), 1);
         assert!(events.iter().all(|event| event.success));
-        assert!(events
-            .iter()
-            .all(|event| event.wire_api == WireApi::ChatCompletions));
+        assert!(
+            events
+                .iter()
+                .all(|event| event.wire_api == WireApi::ChatCompletions)
+        );
     }
 
     let response = reqwest::Client::new()
@@ -416,15 +422,21 @@ async fn messages_passthrough_preserves_native_tool_use_headers_and_sse() {
 
     let requests = state.requests.lock().unwrap();
     assert_eq!(requests.len(), 3);
-    assert!(requests
-        .iter()
-        .all(|request| request.path == "/v1/messages"));
-    assert!(requests
-        .iter()
-        .all(|request| request.authorization.is_none()));
-    assert!(requests
-        .iter()
-        .all(|request| request.x_api_key.as_deref() == Some("messages-key")));
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.path == "/v1/messages")
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.authorization.is_none())
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.x_api_key.as_deref() == Some("messages-key"))
+    );
     assert!(requests[..2].iter().all(|request| {
         request.anthropic_version.as_deref() == Some("2023-06-01")
             && request.anthropic_beta.as_deref() == Some("fine-grained-tool-streaming-2025-05-14")
@@ -438,18 +450,22 @@ async fn messages_passthrough_preserves_native_tool_use_headers_and_sse() {
     );
     assert_eq!(requests[2].anthropic_version.as_deref(), Some("2023-06-01"));
     assert!(requests[2].anthropic_beta.is_none());
-    assert!(requests[2]
-        .claude_code_session_id
-        .as_deref()
-        .is_some_and(|session_id| !session_id.is_empty()));
+    assert!(
+        requests[2]
+            .claude_code_session_id
+            .as_deref()
+            .is_some_and(|session_id| !session_id.is_empty())
+    );
     drop(requests);
 
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 3);
     assert!(events.iter().all(|event| event.success));
-    assert!(events[..2]
-        .iter()
-        .all(|event| event.wire_api == WireApi::Messages));
+    assert!(
+        events[..2]
+            .iter()
+            .all(|event| event.wire_api == WireApi::Messages)
+    );
     assert_eq!(events[2].wire_api, WireApi::ChatCompletions);
     assert!(events[..2].iter().all(|event| {
         event.tool_use.client_tool_count == 1 && event.tool_use.forwarded_tool_count == 1
@@ -582,9 +598,11 @@ async fn automatic_routes_prefer_matching_native_upstream_contract_per_model() {
 
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 4);
-    assert!(events
-        .iter()
-        .all(|event| event.candidate_id.as_deref() == Some("mixed")));
+    assert!(
+        events
+            .iter()
+            .all(|event| event.candidate_id.as_deref() == Some("mixed"))
+    );
     assert_eq!(
         events
             .iter()
@@ -659,9 +677,11 @@ async fn native_gpt_picker_ids_and_legacy_aliases_keep_key_scope_and_upstream_id
         .filter(|request| request.path == "/v1/responses")
         .collect::<Vec<_>>();
     assert_eq!(requests.len(), 2);
-    assert!(requests
-        .iter()
-        .all(|request| request.body["model"] == "gpt-6-astra"));
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.body["model"] == "gpt-6-astra")
+    );
 }
 
 #[tokio::test]

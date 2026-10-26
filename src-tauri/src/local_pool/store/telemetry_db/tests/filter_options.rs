@@ -101,11 +101,13 @@ fn usage_filter_options_cover_history_independently_of_pages_and_filters() {
         serialized["filterOptions"]["errorCategories"],
         serde_json::json!(options.error_categories)
     );
-    assert!(database
-        .usage_page(&UsageQuery::default())
-        .unwrap()
-        .filter_options
-        .is_none());
+    assert!(
+        database
+            .usage_page(&UsageQuery::default())
+            .unwrap()
+            .filter_options
+            .is_none()
+    );
 }
 
 #[test]

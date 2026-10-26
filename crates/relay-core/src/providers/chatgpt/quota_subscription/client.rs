@@ -1,4 +1,4 @@
-use super::super::{collect_response_body, valid_access_token, ResponseBodyError};
+use super::super::{ResponseBodyError, collect_response_body, valid_access_token};
 use super::CodexSubscriptionMetadata;
 use crate::error_codes;
 use crate::quota::QuotaRefreshFailure;
@@ -6,8 +6,8 @@ use crate::scheduler::refresh::http::{HttpClass, ManagementHttpScope};
 use crate::{is_http_endpoint, url_has_userinfo};
 use chrono::Local;
 use reqwest::{
-    header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, REFERER, USER_AGENT},
     Client, StatusCode,
+    header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, REFERER, USER_AGENT},
 };
 use serde_json::Value;
 use url::Url;

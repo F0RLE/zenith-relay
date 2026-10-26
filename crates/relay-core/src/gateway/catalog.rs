@@ -1,14 +1,14 @@
 use super::auth::{client_api_forbidden, invalid_host, unauthorized, valid_local_host};
 use super::errors::api_error;
-use crate::{error_codes, protocol::ClientWireApi, GatewayRuntime, WireApi};
+use crate::{GatewayRuntime, WireApi, error_codes, protocol::ClientWireApi};
 use axum::{
+    Json,
     body::Body,
     extract::{Path, State},
     http::{HeaderMap, Response, StatusCode, Uri},
     response::IntoResponse,
-    Json,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 pub(super) fn catalog_protocol(headers: &HeaderMap) -> Option<WireApi> {

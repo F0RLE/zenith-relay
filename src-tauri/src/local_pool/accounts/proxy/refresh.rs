@@ -10,8 +10,8 @@ use std::{
     pin::Pin,
 };
 use zenith_relay_core::{
-    accounts::{TokenRefreshFailure, TokenRefreshFailureKind},
     ProxyConfig,
+    accounts::{TokenRefreshFailure, TokenRefreshFailureKind},
 };
 
 pub struct ProxyRefreshClient {

@@ -40,7 +40,7 @@ fn generic_cache_write_catalog_updates_reprice_history_without_a_ttl_migration()
 
 #[test]
 fn context_band_sql_matches_request_boundaries() {
-    use zenith_relay_core::usage::{UsageContextBand, USAGE_CONTEXT_BAND_SQL};
+    use zenith_relay_core::usage::{USAGE_CONTEXT_BAND_SQL, UsageContextBand};
     let connection = Connection::open_in_memory().unwrap();
     let query = format!("SELECT {USAGE_CONTEXT_BAND_SQL} FROM (SELECT ?1 AS input_tokens)");
     for tokens in [None, Some(0)].into_iter().chain(
@@ -482,9 +482,11 @@ fn account_purchase_cost_migration_preserves_direct_values_and_removes_legacy_ec
     assert_eq!(accounts[1]["purchaseCostMicroUsd"], 21_000_000);
     assert_eq!(accounts[2]["purchaseCostMicroUsd"], 25_000_000);
     assert!(accounts[3].get("purchaseCostMicroUsd").is_none());
-    assert!(accounts
-        .iter()
-        .all(|account| account.get("economics").is_none()));
+    assert!(
+        accounts
+            .iter()
+            .all(|account| account.get("economics").is_none())
+    );
     let version: u32 = database
         .connection
         .lock()
@@ -500,11 +502,13 @@ fn account_purchase_cost_migration_preserves_direct_values_and_removes_legacy_ec
     assert_eq!(accounts[0]["purchaseCostMicroUsd"], 42_000_000);
     assert_eq!(accounts[1]["purchaseCostMicroUsd"], 21_000_000);
     assert_eq!(accounts[2]["purchaseCostMicroUsd"], 25_000_000);
-    assert!(accounts
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|account| account.get("economics").is_none()));
+    assert!(
+        accounts
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|account| account.get("economics").is_none())
+    );
     drop(reopened);
     std::fs::remove_dir_all(root).unwrap();
 }

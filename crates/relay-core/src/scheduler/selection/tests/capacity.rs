@@ -185,17 +185,19 @@ fn execution_fences_are_reference_counted_and_capability_blocks_are_model_scoped
 
     assert!(scheduler.block_capability("account", "gpt-5"));
     assert!(select(&mut scheduler, &HashSet::new()).is_none());
-    assert!(scheduler
-        .select(SelectionRequest {
-            model: "gpt-5-mini",
-            allowed_protocols: &[WireApi::Responses],
-            scope: &CandidateScope::default(),
-            tried: &HashSet::new(),
-            response_affinity_key: None,
-            prompt_affinity_key: None,
-            now_ms: 100,
-        })
-        .is_some());
+    assert!(
+        scheduler
+            .select(SelectionRequest {
+                model: "gpt-5-mini",
+                allowed_protocols: &[WireApi::Responses],
+                scope: &CandidateScope::default(),
+                tried: &HashSet::new(),
+                response_affinity_key: None,
+                prompt_affinity_key: None,
+                now_ms: 100,
+            })
+            .is_some()
+    );
     assert!(scheduler.clear_capability_blocks("account"));
     assert!(select(&mut scheduler, &HashSet::new()).is_some());
 }

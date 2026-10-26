@@ -1,7 +1,7 @@
-use super::{collect_response_body, valid_codex_client_version, ResponseBodyError};
-use crate::scheduler::refresh::http::{management_http_gate, HttpClass};
+use super::{ResponseBodyError, collect_response_body, valid_codex_client_version};
+use crate::scheduler::refresh::http::{HttpClass, management_http_gate};
 use reqwest::{
-    header::{HeaderName, ACCEPT},
+    header::{ACCEPT, HeaderName},
     redirect::Policy,
 };
 use semver::Version;
@@ -140,7 +140,7 @@ fn parse_stable_rust_release_tag(tag: &str) -> Option<Version> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{response::IntoResponse, routing::get, Router};
+    use axum::{Router, response::IntoResponse, routing::get};
 
     #[test]
     fn latest_stable_rust_release_excludes_drafts_and_prereleases() {

@@ -40,12 +40,17 @@ fn messages_file_tool_chain_restores_state_after_client_reserialization() {
             assert_eq!(prepared.upstream_body()["reasoning"]["effort"], "max");
             if round > 0 {
                 let history = prepared.upstream_body()["input"].as_array().unwrap();
-                assert!(history
-                    .iter()
-                    .any(|item| item["encrypted_content"] == "synthetic-state"));
-                assert!(history
-                    .iter()
-                    .any(|item| item["arguments"] == r#"{"path":"synthetic.svg","count":1.30e2}"#));
+                assert!(
+                    history
+                        .iter()
+                        .any(|item| item["encrypted_content"] == "synthetic-state")
+                );
+                assert!(
+                    history
+                        .iter()
+                        .any(|item| item["arguments"]
+                            == r#"{"path":"synthetic.svg","count":1.30e2}"#)
+                );
             }
             let call_id = format!("call_file_{round}");
             let native = if round == 3 {

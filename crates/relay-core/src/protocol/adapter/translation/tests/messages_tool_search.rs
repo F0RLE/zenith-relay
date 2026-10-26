@@ -127,11 +127,13 @@ fn messages_tool_search_keeps_loaded_tools_for_the_next_real_call() {
     }
     // A compacted discovery may be absent while the real tool call remains.
     request["messages"].as_array_mut().unwrap().drain(1..3);
-    assert!(decode::request(WireApi::Messages, &request)
-        .unwrap()
-        .tools
-        .iter()
-        .any(|tool| tool.name == "lookup"));
+    assert!(
+        decode::request(WireApi::Messages, &request)
+            .unwrap()
+            .tools
+            .iter()
+            .any(|tool| tool.name == "lookup")
+    );
 }
 
 #[test]
@@ -408,10 +410,12 @@ fn messages_tool_search_preserves_opaque_reasoning_ownership_across_discovery() 
             .unwrap()
             .unwrap();
         let completed = response.translated_response();
-        assert!(!completed
-            .response_body
-            .to_string()
-            .contains("synthetic-private"));
+        assert!(
+            !completed
+                .response_body
+                .to_string()
+                .contains("synthetic-private")
+        );
         previous = Some(completed.continuation.clone());
         request["messages"].as_array_mut().unwrap().extend([
             json!({"role":"assistant","content":completed.response_body["content"]}),

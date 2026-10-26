@@ -2,10 +2,10 @@ use super::{WakeExecutionErrorCode, WakeExecutionFailure, WakeExecutionMetrics};
 use axum::{body::Body, http::Response};
 use std::sync::Arc;
 use std::time::Instant;
+use zenith_relay_core::GatewayRuntime;
 use zenith_relay_core::automations::WakeExecutionRequest;
 use zenith_relay_core::error_codes;
-use zenith_relay_core::gateway::{execute_account_wake, AccountWakeRequest};
-use zenith_relay_core::GatewayRuntime;
+use zenith_relay_core::gateway::{AccountWakeRequest, execute_account_wake};
 
 pub(super) const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 

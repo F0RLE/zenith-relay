@@ -126,7 +126,9 @@ fn provider_blocks_follow_catalog_and_preserve_manual_override() {
     ];
     assert_eq!(
         catalog.order_model_ids(inventory),
-        ["model-o", "model-a", "model-g", "model-x", "model-n", "unknown"]
+        [
+            "model-o", "model-a", "model-g", "model-x", "model-n", "unknown"
+        ]
     );
     let manual = inventory.map(str::to_string);
     assert_eq!(catalog.merge_display_order(inventory, &manual), inventory);

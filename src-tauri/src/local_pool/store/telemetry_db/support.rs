@@ -1,7 +1,7 @@
 //! Support evidence is a new allowlisted projection, never a dump of stored JSON.
 //! Unknown fields, provider messages, names, URLs and payloads cannot enter it.
 use super::UsageLog;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 const MAX_REPORT_BYTES: usize = 256 * 1024;

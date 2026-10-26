@@ -275,11 +275,11 @@ async fn repeated_images_share_one_upload_and_warm_requests_reuse_it() {
         .await;
         assert!(result.is_ok());
         assert_eq!(calls.load(Ordering::SeqCst), 1, "warm={warm}");
-        assert!(body["input"][0]["content"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|part| *part == json!({"type":"input_image", "file_id":"file-shared-sequence"})));
+        assert!(
+            body["input"][0]["content"].as_array().unwrap().iter().all(
+                |part| *part == json!({"type":"input_image", "file_id":"file-shared-sequence"})
+            )
+        );
     }
 }
 
@@ -303,15 +303,18 @@ async fn cold_upload_schedule_matches_serial_output_with_fewer_waits() {
     let mut parallel = input;
     let jobs = expect_jobs(stage_input_images(&parallel));
     let started = tokio::time::Instant::now();
-    assert!(resolve_input_images(&mut parallel, jobs, upload)
-        .await
-        .is_ok());
+    assert!(
+        resolve_input_images(&mut parallel, jobs, upload)
+            .await
+            .is_ok()
+    );
     let parallel_elapsed = started.elapsed();
     assert_eq!(parallel, serial);
     assert_eq!(serial_elapsed, Duration::from_millis(320));
     assert_eq!(parallel_elapsed, Duration::from_millis(80));
     println!(
         "synthetic cold uploads=8, unchanged bytes/output: serial={}ms, bounded={}ms (virtual time, not provider latency)",
-        serial_elapsed.as_millis(), parallel_elapsed.as_millis()
+        serial_elapsed.as_millis(),
+        parallel_elapsed.as_millis()
     );
 }

@@ -123,9 +123,11 @@ fn falls_back_to_litellm_when_openrouter_has_no_exact_levels() {
 fn does_not_invent_levels_from_reasoning_boolean() {
     let models = serde_json::json!({"openai/gpt-test": {"reasoning": true}});
     let merged = enrich_reasoning_metadata(&models, None, None);
-    assert!(merged["openai/gpt-test"]
-        .get("reasoning_effort_levels")
-        .is_none());
+    assert!(
+        merged["openai/gpt-test"]
+            .get("reasoning_effort_levels")
+            .is_none()
+    );
 }
 
 #[test]

@@ -1,8 +1,8 @@
 use super::*;
+use crate::PoolRoutingMode;
 use crate::scheduler::rotation::{
     AttemptObservation, ExecutionObservation, HealthObservation, SharedRequestBudget,
 };
-use crate::PoolRoutingMode;
 
 pub(super) fn dispatch(scheduler: &mut PoolScheduler, now: u64, affinity: Option<&str>) -> String {
     let active_before = scheduler.rotation.active_leases();
@@ -111,16 +111,18 @@ fn configured_order_and_operation_bindings_survive_rotation_admission() {
         })
         .unwrap();
     assert_eq!(compact.candidate_id, "account");
-    assert!(scheduler
-        .rotation
-        .select(
-            &RotationRequest::new(
-                RotationRequestId(99),
-                PoolScheduler::rotation_route_key("gpt-5", RotationOperation::Image),
-                "gpt-5"
+    assert!(
+        scheduler
+            .rotation
+            .select(
+                &RotationRequest::new(
+                    RotationRequestId(99),
+                    PoolScheduler::rotation_route_key("gpt-5", RotationOperation::Image),
+                    "gpt-5"
+                )
+                .with_operation(RotationOperation::Image),
+                100
             )
-            .with_operation(RotationOperation::Image),
-            100
-        )
-        .is_none());
+            .is_none()
+    );
 }

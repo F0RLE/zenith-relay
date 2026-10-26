@@ -1,4 +1,4 @@
-use super::{proxy_check_body, Duration, IpAddr, ProxyConfig};
+use super::{Duration, IpAddr, ProxyConfig, proxy_check_body};
 
 pub(super) const BASE_URL: &str = "https://ipwho.is/";
 

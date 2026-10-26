@@ -1,7 +1,7 @@
 use super::super::UsageLog;
 use zenith_relay_core::{
-    protocol::UsageTotals, ApiEquivalentSummary, ApiEquivalentUsage, DefaultServiceTier,
-    UsageTransport, WireApi,
+    ApiEquivalentSummary, ApiEquivalentUsage, DefaultServiceTier, UsageTransport, WireApi,
+    protocol::UsageTotals,
 };
 
 pub(super) fn usage_pricing_usage_from_row(

@@ -206,8 +206,7 @@ impl AdapterError {
     pub(in crate::protocol::adapter) const fn unsupported_tool() -> Self {
         Self {
             code: error_codes::ADAPTER_TOOL_UNSUPPORTED,
-            message:
-                "the selected source adapter cannot represent the requested tool type or format",
+            message: "the selected source adapter cannot represent the requested tool type or format",
             parameter: None,
             diagnostic: None,
         }
@@ -312,8 +311,15 @@ impl fmt::Display for AdapterError {
             )?;
         }
         if let Some(AdapterDiagnostic::Json(diagnostic)) = self.diagnostic {
-            write!(formatter, " (json_reason={}, payload_shape={}, parse_line={}, parse_column={}, payload_bytes={})",
-                diagnostic.reason, diagnostic.shape, diagnostic.line, diagnostic.column, diagnostic.bytes)?;
+            write!(
+                formatter,
+                " (json_reason={}, payload_shape={}, parse_line={}, parse_column={}, payload_bytes={})",
+                diagnostic.reason,
+                diagnostic.shape,
+                diagnostic.line,
+                diagnostic.column,
+                diagnostic.bytes
+            )?;
         }
         if let Some(AdapterDiagnostic::Shape(diagnostic)) = self.diagnostic {
             write!(

@@ -32,10 +32,12 @@ fn native_prepared_request_is_transparent_for_opaque_tools() {
     assert_eq!(prepared.upstream_body()["model"], "resolved-model");
     assert_eq!(prepared.upstream_body()["reasoning"], request["reasoning"]);
     assert_eq!(prepared.upstream_body()["tools"], request["tools"]);
-    assert!(prepared
-        .translate_response_bytes(br#"{}"#)
-        .unwrap()
-        .is_none());
+    assert!(
+        prepared
+            .translate_response_bytes(br#"{}"#)
+            .unwrap()
+            .is_none()
+    );
 }
 #[test]
 fn native_context_management_remains_client_owned() {

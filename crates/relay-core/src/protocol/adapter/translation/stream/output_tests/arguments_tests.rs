@@ -1,4 +1,4 @@
-use super::{stream, Block, WireApi};
+use super::{Block, WireApi, stream};
 use std::{hint::black_box, time::Instant};
 
 #[test]

@@ -1,5 +1,5 @@
 use super::ModelCapabilities;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 impl ModelCapabilities {
     pub fn unknown_model() -> Self {
@@ -289,10 +289,12 @@ impl ModelCapabilities {
         };
         catalog_object.insert(
             "supported_reasoning_levels".into(),
-            json!(levels
-                .iter()
-                .map(|level| json!({"effort":level, "description":level}))
-                .collect::<Vec<_>>()),
+            json!(
+                levels
+                    .iter()
+                    .map(|level| json!({"effort":level, "description":level}))
+                    .collect::<Vec<_>>()
+            ),
         );
         if let Some(default) = self
             .default_reasoning_effort
@@ -510,8 +512,10 @@ mod tests {
             reasoning_efforts: vec!["low".into(), "high".into()],
             service_tiers: None,
         };
-        assert!(reference
-            .reasoning_effort_levels_for_route(Some(&route))
-            .is_empty());
+        assert!(
+            reference
+                .reasoning_effort_levels_for_route(Some(&route))
+                .is_empty()
+        );
     }
 }

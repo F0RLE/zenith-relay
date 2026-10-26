@@ -1,8 +1,8 @@
-use super::super::{now_ms, ExecutorRoute, GatewayFailure};
+use super::super::{ExecutorRoute, GatewayFailure, now_ms};
+use crate::GatewayRuntime;
 use crate::error_codes;
 use crate::gateway::continuation;
 use crate::gateway::request::repair_legacy_responses_call_ids;
-use crate::GatewayRuntime;
 use serde_json::Value;
 
 impl super::ClientRequest {
@@ -57,12 +57,12 @@ impl super::ClientRequest {
         let replayed = match replay.replay_request(&self.request_body, owner_model, true) {
             Ok(replayed_request) => replayed_request,
             Err(error) if error.code() == error_codes::ADAPTER_CONTINUATION_MISMATCH => {
-                return Ok(false)
+                return Ok(false);
             }
             Err(_) => {
                 return Err(GatewayFailure::invalid_request(
                     "native continuation state is invalid",
-                ))
+                ));
             }
         };
         self.request_body = replayed;

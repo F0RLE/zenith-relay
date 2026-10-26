@@ -2,9 +2,9 @@ use super::DesktopState;
 use crate::{
     local_pool::{
         accounts::{
+            NativeSecretBackend,
             credentials::{CredentialStore, StoredCodexCredentials},
             proxy::ProxyRoute,
-            NativeSecretBackend,
         },
         error::{ErrorCode, LocalPoolError, Result},
         models::{

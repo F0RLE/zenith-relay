@@ -1,9 +1,9 @@
-use super::super::response::{usage_event, UsageAttempt};
+use super::super::response::{UsageAttempt, usage_event};
 use super::{ImageEndpoint, PreparedImageRequest};
 use crate::runtime::{AuthenticatedKey, ExecutorRoute};
-use crate::{error_codes, UsageEvent};
+use crate::{UsageEvent, error_codes};
 use axum::http::StatusCode;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::time::Instant;
 
 pub(super) struct ImageAttempt<'a> {

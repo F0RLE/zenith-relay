@@ -45,7 +45,10 @@ fn measure_cache_context_fingerprinting() {
         samples.sort_unstable();
         eprintln!(
             "cache_context items={items} bytes={} warmup=20 trials=9 iterations={iterations} median_ns={} min_ns={} max_ns={}",
-            serde_json::to_vec(&request).unwrap().len(), samples[4], samples[0], samples[8]
+            serde_json::to_vec(&request).unwrap().len(),
+            samples[4],
+            samples[0],
+            samples[8]
         );
     }
 }

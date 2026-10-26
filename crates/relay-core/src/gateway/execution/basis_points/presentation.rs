@@ -1,7 +1,7 @@
 //! A complete trusted catalog with a smaller, deterministic model-facing view.
-use super::catalog::{client_tool_call_name, selected_tools, ClientTool};
+use super::catalog::{ClientTool, client_tool_call_name, selected_tools};
 use super::prepare::describe_tools;
-use super::schema::{parameter_schema, PROMPT_SCHEMA_NOTATION};
+use super::schema::{PROMPT_SCHEMA_NOTATION, parameter_schema};
 use crate::protocol::AdapterError;
 use crate::usage::BasisPointsCatalogDiagnostics;
 use serde_json::Value;

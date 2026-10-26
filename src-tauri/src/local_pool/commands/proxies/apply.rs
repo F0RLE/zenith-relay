@@ -1,16 +1,16 @@
 use super::{
-    current_time_ms, fence_runtime_candidates, restart_or_rollback, ProxyChoice,
-    StoredProxyAssignmentResult,
+    ProxyChoice, StoredProxyAssignmentResult, current_time_ms, fence_runtime_candidates,
+    restart_or_rollback,
 };
 use crate::local_pool::accounts::proxy::observations::load_reconciled_pool;
 use crate::local_pool::{
     accounts::{
-        credentials::{
-            credential_invalid_state_error as credential_error, CredentialStore,
-            StoredCodexCredentials,
-        },
-        proxy::{ProxyPool, ProxyPoolSummary, COMMON_PROXY_SECRET_REF},
         NativeSecretBackend,
+        credentials::{
+            CredentialStore, StoredCodexCredentials,
+            credential_invalid_state_error as credential_error,
+        },
+        proxy::{COMMON_PROXY_SECRET_REF, ProxyPool, ProxyPoolSummary},
     },
     error::{ErrorCode, LocalPoolError, Result},
     state::DesktopState,

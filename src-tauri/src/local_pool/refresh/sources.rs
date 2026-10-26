@@ -4,7 +4,7 @@ mod execute;
 #[cfg(test)]
 mod tests;
 
-use super::{wait_error, DesktopState, RefreshRead, RefreshReadResult};
+use super::{DesktopState, RefreshRead, RefreshReadResult, wait_error};
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError, Result},
     models::ProviderSourceRecord,
@@ -12,18 +12,18 @@ use crate::local_pool::{
 };
 use std::{
     collections::BTreeSet,
-    sync::{atomic::Ordering, Arc},
+    sync::{Arc, atomic::Ordering},
 };
 use zenith_relay_core::{
+    SourceProviderStats,
     scheduler::{
         refresh::{
+            RefreshIdentity, RefreshKind, RefreshOutcome, SourceStatsObservation,
             service::{RefreshRegistration, RefreshResult},
-            source_stats_outcome, RefreshIdentity, RefreshKind, RefreshOutcome,
-            SourceStatsObservation,
+            source_stats_outcome,
         },
         source_member_key,
     },
-    SourceProviderStats,
 };
 
 pub(super) fn reconcile(

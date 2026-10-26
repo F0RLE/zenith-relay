@@ -218,9 +218,11 @@ fn prompt_affinity_uses_explicit_cache_key_before_session_context() {
         session,
         runtime.prompt_affinity_key("key-1", "gpt-test", None, Some("client-session"))
     );
-    assert!(runtime
-        .prompt_affinity_key("key-1", "gpt-test", None, None)
-        .is_none());
+    assert!(
+        runtime
+            .prompt_affinity_key("key-1", "gpt-test", None, None)
+            .is_none()
+    );
 }
 #[tokio::test]
 async fn selection_restores_persisted_response_affinity_before_reserving() {

@@ -30,9 +30,11 @@ fn messages_cache_write_lifetime_marks_stable_prefix_and_latest_turn() {
 
     assert_eq!(request["system"][0]["cache_control"]["ttl"], "1h");
     assert!(request["tools"][0].get("cache_control").is_none());
-    assert!(request["messages"][0]["content"][0]
-        .get("cache_control")
-        .is_none());
+    assert!(
+        request["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none()
+    );
     assert_eq!(
         request["messages"][1]["content"][0]["cache_control"]["ttl"],
         "1h"

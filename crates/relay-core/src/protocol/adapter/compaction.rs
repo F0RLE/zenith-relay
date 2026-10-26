@@ -1,6 +1,6 @@
 use super::contracts::{AdapterError, AdapterResult};
 use base64::Engine;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub(crate) const PREFIX: &str = "zenith-relay-compact-v1:";
 const SUMMARY_INSTRUCTION: &str = "Summarize this conversation so a later turn can continue it. Preserve the user's goal, decisions, constraints, file paths, tool results, and unfinished work. Reply with only the summary.";
@@ -260,9 +260,11 @@ mod tests {
             input_item.get("type").and_then(Value::as_str) != Some("compaction_trigger")
         }));
         assert!(rewritten.to_string().contains("Keep src/main.rs"));
-        assert!(rewritten
-            .to_string()
-            .contains("Reply with only the summary"));
+        assert!(
+            rewritten
+                .to_string()
+                .contains("Reply with only the summary")
+        );
 
         let mut response = json!({
             "id": "resp_test",
@@ -297,13 +299,15 @@ mod tests {
         assert!(!summarize);
         assert!(continued["tools"].is_null() || continued.get("tools").is_none());
         assert!(continued.to_string().contains("Goal: keep src/main.rs"));
-        assert!(continued["input"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|input_item| {
-                input_item.get("type").and_then(Value::as_str) != Some("compaction")
-            }));
+        assert!(
+            continued["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|input_item| {
+                    input_item.get("type").and_then(Value::as_str) != Some("compaction")
+                })
+        );
     }
 
     #[test]

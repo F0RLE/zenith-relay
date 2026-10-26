@@ -28,9 +28,11 @@ fn context_policy_removes_only_active_overrides_and_restores_previous_values() {
     sync_context_overrides(&home, &backups, true).unwrap();
     let mut active = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
     assert!(active.get("model_context_window").is_none());
-    assert!(active["profiles"]["active"]
-        .get("model_context_window")
-        .is_none());
+    assert!(
+        active["profiles"]["active"]
+            .get("model_context_window")
+            .is_none()
+    );
     assert_eq!(
         active["profiles"]["other"]["model_context_window"].as_integer(),
         Some(64000)
@@ -90,15 +92,17 @@ fn failed_profile_attach_can_restore_the_preceding_context_change() {
     let original = "# user comment\nmodel_context_window = 200000\n";
     fs::write(home.join(CONFIG_FILE), original).unwrap();
     let change = sync_context_overrides(&home, &backups, true).unwrap();
-    assert!(attach_with_catalog_for_test(
-        &home,
-        &backups,
-        "http://127.0.0.1:14998/v1",
-        "zlr_key",
-        "{\"models\":[]}",
-        &MemorySecrets::default(),
-    )
-    .is_err());
+    assert!(
+        attach_with_catalog_for_test(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            "{\"models\":[]}",
+            &MemorySecrets::default(),
+        )
+        .is_err()
+    );
     change.rollback().unwrap();
     assert_eq!(
         fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),

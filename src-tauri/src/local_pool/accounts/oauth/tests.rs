@@ -5,10 +5,10 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use serde_json::json;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::Value;
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use url::Url;
@@ -175,10 +175,12 @@ fn oversized_jwt_payload_is_rejected() {
 }
 
 async fn exchange(headers: HeaderMap, body: Bytes) -> impl IntoResponse {
-    assert!(headers
-        .get("content-type")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.starts_with("application/x-www-form-urlencoded")));
+    assert!(
+        headers
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("application/x-www-form-urlencoded"))
+    );
     let fields: HashMap<_, _> = url::form_urlencoded::parse(&body).into_owned().collect();
     assert_eq!(
         fields.get("grant_type").map(String::as_str),
@@ -196,9 +198,11 @@ async fn exchange(headers: HeaderMap, body: Bytes) -> impl IntoResponse {
         fields.get("client_id").map(String::as_str),
         Some(CODEX_OAUTH_CLIENT_ID)
     );
-    assert!(fields
-        .get("code_verifier")
-        .is_some_and(|value| value.len() >= 43));
+    assert!(
+        fields
+            .get("code_verifier")
+            .is_some_and(|value| value.len() >= 43)
+    );
     Json(json!({
         "access_token": "access-token",
         "refresh_token": "refresh-token",

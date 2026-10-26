@@ -1,8 +1,8 @@
 use serde_json::Value;
 
 use super::{
-    transport::StatsResult, SourceBalanceKind as Kind, SourceProviderStats as Stats,
-    SourceStatsCurrency as Currency, SourceStatsProvider as Provider, SourceStatsStatus as Status,
+    SourceBalanceKind as Kind, SourceProviderStats as Stats, SourceStatsCurrency as Currency,
+    SourceStatsProvider as Provider, SourceStatsStatus as Status, transport::StatsResult,
 };
 
 pub(in crate::sources) fn zenith_stats(stats_payload: &Value) -> StatsResult<Stats> {

@@ -1,10 +1,10 @@
 use super::{
-    loaded_state, map_io_error, ModelMetadataError, SourceEnvelope, SourceState, CACHE_FORMAT,
-    MAX_AUXILIARY_RESPONSE_BYTES, MAX_CACHE_BYTES, SOURCES,
+    CACHE_FORMAT, MAX_AUXILIARY_RESPONSE_BYTES, MAX_CACHE_BYTES, ModelMetadataError, SOURCES,
+    SourceEnvelope, SourceState, loaded_state, map_io_error,
 };
 use crate::{catalog_io, model_metadata::MetadataCacheEnvelope};
 use serde::{Deserialize, Serialize};
-use serde_json::{value::RawValue, Value};
+use serde_json::{Value, value::RawValue};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 #[derive(Deserialize)]

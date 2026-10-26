@@ -1,5 +1,5 @@
 use super::*;
-use zenith_relay_core::usage::{UsagePriceClass, USAGE_PRICE_CLASS_SQL};
+use zenith_relay_core::usage::{USAGE_PRICE_CLASS_SQL, UsagePriceClass};
 
 #[test]
 fn observed_tier_sql_matches_rust_without_a_standard_fallback_for_new_names() {

@@ -189,10 +189,12 @@ fn repeated_tools_namespaces_and_raw_payloads_roundtrip_without_losing_reasoning
     );
     let parts = restored[2]["output"].as_array().unwrap();
     assert_eq!(parts[1]["text"], "failed: synthetic");
-    assert!(parts[0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("\"is_error\":true"));
+    assert!(
+        parts[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("\"is_error\":true")
+    );
     assert_eq!(parts[3]["text"], "{\"literal\":true}");
     assert_eq!(parts[5], image);
     assert_eq!(parts[6], file);
@@ -449,10 +451,12 @@ fn interleaved_parallel_batches_and_single_results_preserve_identity_and_boundar
                     let first = if parent == "parent" { 0 } else { 2 };
                     assert_eq!(result["output"][1]["text"], format!("result-{first}"));
                     assert_eq!(result["output"][3]["text"], format!("result-{}", first + 1));
-                    assert!(result["output"][0]["text"]
-                        .as_str()
-                        .unwrap()
-                        .contains(calls[first]["call_id"].as_str().unwrap()));
+                    assert!(
+                        result["output"][0]["text"]
+                            .as_str()
+                            .unwrap()
+                            .contains(calls[first]["call_id"].as_str().unwrap())
+                    );
                 }
             }
         }

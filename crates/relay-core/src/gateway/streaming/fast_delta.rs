@@ -1,5 +1,5 @@
-use serde::de::IgnoredAny;
 use serde::Deserialize;
+use serde::de::IgnoredAny;
 
 /// Ordinary Responses token delta.
 ///
@@ -214,22 +214,26 @@ mod tests {
                 .unwrap()
                 .nonempty_text
         );
-        assert!(fast_response_delta_json(
-            br#"{"type":"response.output_text.delta","delta":"\uD800"}"#
-        )
-        .is_none());
-        assert!(fast_response_delta_json(
-            br#"{"type":"response.output_text.delta","delta":"\n","model":"gpt-other"}"#
-        )
-        .is_none());
+        assert!(
+            fast_response_delta_json(br#"{"type":"response.output_text.delta","delta":"\uD800"}"#)
+                .is_none()
+        );
+        assert!(
+            fast_response_delta_json(
+                br#"{"type":"response.output_text.delta","delta":"\n","model":"gpt-other"}"#
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn leaves_usage_terminal_and_split_data_on_the_full_parser() {
-        assert!(fast_response_delta_json(
-            br#"{"type":"response.output_text.delta","delta":"x","model":"gpt-5.6-luna"}"#
-        )
-        .is_none());
+        assert!(
+            fast_response_delta_json(
+                br#"{"type":"response.output_text.delta","delta":"x","model":"gpt-5.6-luna"}"#
+            )
+            .is_none()
+        );
         assert!(fast_response_delta(
             b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1}}}\n\n"
         )
@@ -248,9 +252,9 @@ mod tests {
         .is_none());
         assert!(fast_response_delta(b"data: [DONE]\n\n").is_none());
         assert!(fast_response_delta_json(br#"{"type":"response.created"}"#).is_none());
-        assert!(fast_response_delta_json(
-            br#"{"type":"response.compaction.delta","delta":"opaque"}"#
-        )
-        .is_none());
+        assert!(
+            fast_response_delta_json(br#"{"type":"response.compaction.delta","delta":"opaque"}"#)
+                .is_none()
+        );
     }
 }

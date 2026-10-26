@@ -1,5 +1,5 @@
 use super::{http_client, query_targets};
-use axum::{response::Redirect, routing::get, Json, Router};
+use axum::{Json, Router, response::Redirect, routing::get};
 use serde_json::json;
 use tokio::{net::TcpListener, task::JoinHandle};
 

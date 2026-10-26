@@ -269,9 +269,11 @@ fn cancel_and_complete_clear_secret_before_snapshot() {
     let completed_ref = secret_ref(&completed.session_id);
     store.complete(&completed.session_id).unwrap();
     assert!(!secrets.contains(&completed_ref));
-    assert!(!snapshot_path(&root, &completed.session_id)
-        .unwrap()
-        .exists());
+    assert!(
+        !snapshot_path(&root, &completed.session_id)
+            .unwrap()
+            .exists()
+    );
     fs::remove_dir_all(root).unwrap();
 }
 

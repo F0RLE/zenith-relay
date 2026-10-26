@@ -1,16 +1,16 @@
 use super::errors::AttemptFailure;
 use super::request::codex_client_version;
-use super::streaming::{parse_sse_event, NativeReplayCapture, TerminalOutcome};
+use super::streaming::{NativeReplayCapture, TerminalOutcome, parse_sse_event};
+use crate::GatewayRuntime;
 use crate::error_codes;
 use crate::protocol::{ensure_compaction_trigger, sse_event_end};
 use crate::runtime::{AuthorizationIdentityPolicy, CodexTurnStateScope, ExecutorRoute};
 use crate::scheduler::rotation::SharedRequestBudget;
-use crate::GatewayRuntime;
 use axum::http::{
-    header::{ACCEPT, CONTENT_TYPE},
     HeaderMap, StatusCode,
+    header::{ACCEPT, CONTENT_TYPE},
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub(super) fn missing_legacy_endpoint(status: StatusCode, response_body: &[u8]) -> bool {
     if status == StatusCode::METHOD_NOT_ALLOWED {
@@ -325,10 +325,12 @@ mod tests {
         ]
         .concat();
         assert!(compact_output(&failed).is_err());
-        assert!(compact_output(
-            b"data: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\n\n"
-        )
-        .is_err());
+        assert!(
+            compact_output(
+                b"data: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\n\n"
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use super::{
-    clear_false_upstream_block, provider_account_failure, AccountHealthState,
-    ProviderAccountFailure,
+    AccountHealthState, ProviderAccountFailure, clear_false_upstream_block,
+    provider_account_failure,
 };
 use crate::error_codes;
 use crate::quota::{
@@ -141,7 +141,7 @@ fn is_auth_owned_error(code: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{providers::chatgpt::parse_codex_usage, quota::SubscriptionInput, CandidateQuota};
+    use crate::{CandidateQuota, providers::chatgpt::parse_codex_usage, quota::SubscriptionInput};
 
     fn subscription() -> Subscription {
         Subscription::normalize(SubscriptionInput {

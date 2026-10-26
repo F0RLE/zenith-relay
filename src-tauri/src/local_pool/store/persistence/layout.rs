@@ -1,8 +1,8 @@
-use super::{PersistedState, LEGACY_STATE_FILES, MAX_LEGACY_JSON_BYTES, SQLITE_SIDECAR_SUFFIXES};
+use super::{LEGACY_STATE_FILES, MAX_LEGACY_JSON_BYTES, PersistedState, SQLITE_SIDECAR_SUFFIXES};
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
 use crate::local_pool::models::CURRENT_SCHEMA_VERSION;
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use std::fs;
 use std::path::{Path, PathBuf};
 use zenith_relay_core::path_with_suffix as companion_path;
@@ -86,7 +86,7 @@ pub(in crate::local_pool::store) fn cleanup_legacy_state_files(root: &Path) -> R
                 return Err(LocalPoolError::new(
                     ErrorCode::RecoveryRequired,
                     format!("legacy local state path is unsafe: {}", path.display()),
-                ))
+                ));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(legacy_io_error(error)),

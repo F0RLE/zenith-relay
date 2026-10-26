@@ -1,9 +1,8 @@
 use crate::error_codes;
 use crate::{
-    account_candidate_health,
+    CandidateHealth, CandidateQuota, account_candidate_health,
     accounts::{AccountAuthState, AccountHealthState},
     quota::{QuotaSnapshot, Subscription, SubscriptionStatus},
-    CandidateHealth, CandidateQuota,
 };
 use serde::{Deserialize, Serialize};
 
@@ -314,14 +313,14 @@ fn account_routing_block_reason(
     }
     match input.last_error_code {
         Some("checkpoint" | error_codes::UPSTREAM_ACCOUNT_VERIFICATION_REQUIRED) => {
-            return Some(AccountRoutingBlockReason::Checkpoint)
+            return Some(AccountRoutingBlockReason::Checkpoint);
         }
         Some("captcha") => return Some(AccountRoutingBlockReason::Captcha),
         _ => {}
     }
     match input.subscription.status {
         SubscriptionStatus::Forbidden => {
-            return Some(AccountRoutingBlockReason::SubscriptionForbidden)
+            return Some(AccountRoutingBlockReason::SubscriptionForbidden);
         }
         // ChatGPT Team/Business may continue serving Codex after the
         // entitlement date exposed by the auxiliary subscription endpoint has

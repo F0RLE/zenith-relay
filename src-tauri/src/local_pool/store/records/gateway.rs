@@ -1,4 +1,4 @@
-use super::super::{persistence, LocalPoolStore, STATE_GATEWAY, STATE_REFRESH_REVISIONS};
+use super::super::{LocalPoolStore, STATE_GATEWAY, STATE_REFRESH_REVISIONS, persistence};
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError, Result},
     models::{AutomationRecords, GatewaySettings},

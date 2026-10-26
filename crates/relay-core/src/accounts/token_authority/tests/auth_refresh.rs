@@ -76,10 +76,12 @@ async fn uncertain_rotation_persists_reauth_and_stops_repeated_refreshes() {
         .register("local-account", fresh, AccountAuthState::Active)
         .await
         .unwrap();
-    assert!(restarted
-        .prepare("local-account", 60_003, 0, &refresh)
-        .await
-        .is_ok());
+    assert!(
+        restarted
+            .prepare("local-account", 60_003, 0, &refresh)
+            .await
+            .is_ok()
+    );
     assert_eq!(refresh.0.load(Ordering::SeqCst), 1);
 }
 
@@ -350,10 +352,12 @@ async fn stale_management_unauthorized_does_not_invalidate_a_newer_login() {
         .await
         .unwrap();
     let persistence = CapturePersistence::default();
-    assert!(!authority
-        .invalidate_access_generation_and_persist("local-account", Some(7), 10, &persistence,)
-        .await
-        .unwrap());
+    assert!(
+        !authority
+            .invalidate_access_generation_and_persist("local-account", Some(7), 10, &persistence,)
+            .await
+            .unwrap()
+    );
     assert_eq!(
         authority.tokens("local-account").await,
         Some(current.clone())
@@ -373,29 +377,35 @@ async fn stale_management_unauthorized_does_not_invalidate_a_newer_login() {
         8,
     )
     .unwrap();
-    assert!(!authority
-        .invalidate_access_if_current_and_persist(
-            "local-account",
-            &same_generation_new_login,
-            10,
-            &persistence
-        )
-        .await
-        .unwrap());
+    assert!(
+        !authority
+            .invalidate_access_if_current_and_persist(
+                "local-account",
+                &same_generation_new_login,
+                10,
+                &persistence
+            )
+            .await
+            .unwrap()
+    );
     assert_eq!(
         authority.tokens("local-account").await,
         Some(current.clone())
     );
     assert_eq!(persistence.token_calls.load(Ordering::SeqCst), 0);
 
-    assert!(authority
-        .invalidate_access_generation_and_persist("local-account", Some(8), 20, &persistence,)
-        .await
-        .unwrap());
-    assert!(!authority
-        .invalidate_access_generation_and_persist("local-account", Some(8), 30, &persistence,)
-        .await
-        .unwrap());
+    assert!(
+        authority
+            .invalidate_access_generation_and_persist("local-account", Some(8), 20, &persistence,)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !authority
+            .invalidate_access_generation_and_persist("local-account", Some(8), 30, &persistence,)
+            .await
+            .unwrap()
+    );
     assert_eq!(
         authority
             .tokens("local-account")
@@ -434,15 +444,17 @@ async fn late_401_cannot_expire_a_reinstalled_login_with_identical_tokens() {
         .await
         .unwrap();
     let persistence = CapturePersistence::default();
-    assert!(!authority
-        .invalidate_access_revision_and_persist(
-            "account",
-            &rejected.dispatch_revision,
-            10,
-            &persistence,
-        )
-        .await
-        .unwrap());
+    assert!(
+        !authority
+            .invalidate_access_revision_and_persist(
+                "account",
+                &rejected.dispatch_revision,
+                10,
+                &persistence,
+            )
+            .await
+            .unwrap()
+    );
     assert_eq!(authority.tokens("account").await, Some(tokens));
     assert_eq!(persistence.token_calls.load(Ordering::SeqCst), 0);
 }

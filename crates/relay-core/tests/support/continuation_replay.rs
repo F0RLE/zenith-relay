@@ -237,9 +237,11 @@ async fn websocket_continuation_replays_to_another_candidate_after_owner_quota()
     drop(owner_requests);
     let replacement_requests = replacement_state.requests.lock().unwrap();
     assert_eq!(replacement_requests.len(), 1);
-    assert!(replacement_requests[0]
-        .get("previous_response_id")
-        .is_none());
+    assert!(
+        replacement_requests[0]
+            .get("previous_response_id")
+            .is_none()
+    );
     assert_eq!(
         replacement_requests[0]["input"][0]["content"][0]["text"],
         "first"
@@ -353,9 +355,11 @@ async fn websocket_continuation_replays_on_the_same_connection_when_another_chat
     assert_eq!(owner_state.requests.lock().unwrap().len(), 1);
     let replacement_requests = replacement_state.requests.lock().unwrap();
     assert_eq!(replacement_requests.len(), 1);
-    assert!(replacement_requests[0]
-        .get("previous_response_id")
-        .is_none());
+    assert!(
+        replacement_requests[0]
+            .get("previous_response_id")
+            .is_none()
+    );
     assert_eq!(
         replacement_requests[0]["input"][0]["content"][0]["text"],
         "first"
@@ -452,10 +456,12 @@ async fn http_continuation_replays_to_api_source_after_account_quota() {
     assert_eq!(owner_state.requests.lock().unwrap().len(), 2);
     let replacement_requests = replacement_state.requests.lock().unwrap();
     assert_eq!(replacement_requests.len(), 1);
-    assert!(replacement_requests[0]
-        .body
-        .get("previous_response_id")
-        .is_none());
+    assert!(
+        replacement_requests[0]
+            .body
+            .get("previous_response_id")
+            .is_none()
+    );
     assert_eq!(
         replacement_requests[0].body["input"][0]["content"][0]["text"],
         "first"
@@ -555,10 +561,12 @@ async fn http_continuation_replays_to_api_source_when_another_chat_exhausted_the
     assert_eq!(owner_state.requests.lock().unwrap().len(), 1);
     let replacement_requests = replacement_state.requests.lock().unwrap();
     assert_eq!(replacement_requests.len(), 1);
-    assert!(replacement_requests[0]
-        .body
-        .get("previous_response_id")
-        .is_none());
+    assert!(
+        replacement_requests[0]
+            .body
+            .get("previous_response_id")
+            .is_none()
+    );
     assert_eq!(
         replacement_requests[0].body["input"][0]["content"][0]["text"],
         "first"
@@ -905,11 +913,13 @@ async fn assert_stale_websocket_continuation(reconnect: bool) {
         "recovered-ws-response"
     );
 
-    assert!(gateway
-        .runtime
-        .as_ref()
-        .unwrap()
-        .set_candidate_health("owner-account", CandidateHealth::ReauthRequired,));
+    assert!(
+        gateway
+            .runtime
+            .as_ref()
+            .unwrap()
+            .set_candidate_health("owner-account", CandidateHealth::ReauthRequired,)
+    );
     second_socket
         .send(ClientWsMessage::Text(
             json!({

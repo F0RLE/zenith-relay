@@ -412,10 +412,12 @@ fn combined_pool_projection_keeps_all_member_provenance_and_current_prices() {
         &PricingContext::default(),
     );
     assert_eq!(unpriced.pricing_source, PricingSourceSummary::Unpriced);
-    assert!(unpriced
-        .models
-        .iter()
-        .all(|model| model.token_price.is_none()));
+    assert!(
+        unpriced
+            .models
+            .iter()
+            .all(|model| model.token_price.is_none())
+    );
 }
 
 #[test]

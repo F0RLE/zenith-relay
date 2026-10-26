@@ -168,9 +168,11 @@ fn converted_gemini_output_formats_reject_invalid_mime_types() {
         WireApi::Messages,
     ] {
         let prepared = prepare(WireApi::Gemini, upstream, &request, false);
-        assert!(decode::request(upstream, prepared.upstream_body())
-            .unwrap()
-            .output_format
-            .is_none());
+        assert!(
+            decode::request(upstream, prepared.upstream_body())
+                .unwrap()
+                .output_format
+                .is_none()
+        );
     }
 }

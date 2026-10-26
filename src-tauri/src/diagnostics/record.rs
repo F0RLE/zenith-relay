@@ -1,7 +1,7 @@
 use super::persist;
 use super::settings::is_debug_enabled;
 use super::{
-    safe_detail, safe_text, Breadcrumb, FrontendDiagnosticInput, MAX_STACK_BYTES, SESSION_ACTIVE,
+    Breadcrumb, FrontendDiagnosticInput, MAX_STACK_BYTES, SESSION_ACTIVE, safe_detail, safe_text,
 };
 use chrono::{SecondsFormat, Utc};
 use sha2::{Digest, Sha256};

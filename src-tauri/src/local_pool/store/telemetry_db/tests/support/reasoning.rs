@@ -1,5 +1,5 @@
 use super::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn event(id: &str, effort: Option<&str>, ttft: Option<u64>) -> UsageEvent {
     let mut event = aggregate_test_event(id, 1, 1000, 0, None, 20);

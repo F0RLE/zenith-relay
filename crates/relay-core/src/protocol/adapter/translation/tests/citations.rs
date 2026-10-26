@@ -94,8 +94,7 @@ fn fragmented_search_stream_preserves_text_and_emits_citations_once_before_finis
         }
         let completed = bridge.completed().expect("cited stream should complete");
         assert_eq!(
-            completed.response_body["choices"][0]["message"]["annotations"][0]["url_citation"]
-                ["start_index"],
+            completed.response_body["choices"][0]["message"]["annotations"][0]["url_citation"]["start_index"],
             3
         );
         let output = String::from_utf8(frames.concat()).unwrap();
@@ -121,19 +120,23 @@ fn malformed_or_unrepresentable_citations_fail_instead_of_being_dropped() {
     ] {
         let mut response = cited_response();
         response["output"][1]["content"][1]["annotations"] = json!([annotation]);
-        assert!(prepare(
-            WireApi::ChatCompletions,
-            WireApi::Responses,
-            &input(WireApi::ChatCompletions),
-            false
-        )
-        .translate_response_bytes(&serde_json::to_vec(&response).unwrap())
-        .is_err());
+        assert!(
+            prepare(
+                WireApi::ChatCompletions,
+                WireApi::Responses,
+                &input(WireApi::ChatCompletions),
+                false
+            )
+            .translate_response_bytes(&serde_json::to_vec(&response).unwrap())
+            .is_err()
+        );
     }
     for client in [WireApi::Messages, WireApi::Gemini] {
-        assert!(prepare(client, WireApi::Responses, &input(client), false)
-            .translate_response_bytes(&serde_json::to_vec(&cited_response()).unwrap())
-            .is_err());
+        assert!(
+            prepare(client, WireApi::Responses, &input(client), false)
+                .translate_response_bytes(&serde_json::to_vec(&cited_response()).unwrap())
+                .is_err()
+        );
     }
 }
 
@@ -150,8 +153,8 @@ fn citation_conflicts_and_truncated_streams_never_finish_successfully() {
         .unwrap();
         let mut events = cited_stream(true);
         if conflict {
-            events.last_mut().unwrap()["response"]["output"][1]["content"][1]["annotations"][0]
-                ["title"] = "Conflicting source".into();
+            events.last_mut().unwrap()["response"]["output"][1]["content"][1]["annotations"][0]["title"] =
+                "Conflicting source".into();
         } else {
             events.pop();
         }

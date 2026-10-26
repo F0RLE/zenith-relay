@@ -104,7 +104,7 @@ pub(super) fn settle_collected_rejection(
             }
             Ok(false) => {}
             Err(error) => {
-                return FailureStep::Respond(adapter_error_response(error, Some(request_id)))
+                return FailureStep::Respond(adapter_error_response(error, Some(request_id)));
             }
         }
     }

@@ -39,11 +39,13 @@ fn shared_rate_limits_only_block_confirmed_members_of_the_same_model_and_bucket(
     assert_eq!(scheduler.candidate("c").unwrap().cooldowns["gpt-5"], 5_300);
     assert!(scheduler.candidate("unknown").unwrap().cooldowns.is_empty());
     observe(&mut scheduler, "a", 1, "gpt-other", 6_100);
-    assert!(!scheduler
-        .candidate("b")
-        .unwrap()
-        .cooldowns
-        .contains_key("gpt-other"));
+    assert!(
+        !scheduler
+            .candidate("b")
+            .unwrap()
+            .cooldowns
+            .contains_key("gpt-other")
+    );
 }
 
 #[test]

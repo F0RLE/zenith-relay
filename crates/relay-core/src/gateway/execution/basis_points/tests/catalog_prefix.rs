@@ -42,10 +42,12 @@ fn appended_declarations_keep_their_history_position_and_current_schema_wins() {
                 &changed["input"].as_array().unwrap()[..3],
                 "{mode}/{declaration}"
             );
-            assert!(changed["input"][3]["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("second"));
+            assert!(
+                changed["input"][3]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("second")
+            );
             let tools = super::super::catalog::client_tools(&request).unwrap();
             let first = super::super::catalog::tool_spec(&tools, "first").unwrap();
             assert_eq!(

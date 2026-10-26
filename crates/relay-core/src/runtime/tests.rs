@@ -5,7 +5,7 @@ use crate::accounts::{
 };
 use crate::{
     CandidateHealth, CandidateQuota, CapabilityOrigin, CapabilityStatus, ModelEndpointCapability,
-    ToolUseDiagnostics, QUOTA_STALE_AFTER_MS,
+    QUOTA_STALE_AFTER_MS, ToolUseDiagnostics,
 };
 use futures_util::future::BoxFuture;
 use std::collections::{BTreeMap, HashMap};

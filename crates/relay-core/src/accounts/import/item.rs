@@ -8,12 +8,12 @@ mod present;
 mod profile;
 mod vocabulary;
 
-use assemble::{assemble_parsed_item, AssembleImport};
-use credentials::{choose_import_credentials, ImportCredentialChoice};
+use assemble::{AssembleImport, assemble_parsed_item};
+use credentials::{ImportCredentialChoice, choose_import_credentials};
 pub use jwt::chatgpt_token_identity_key;
 use jwt::imported_jwt_metadata;
-use present::{present_import_item, PresentedImport};
-use profile::{read_import_profile, ImportFieldSources};
+use present::{PresentedImport, present_import_item};
+use profile::{ImportFieldSources, read_import_profile};
 
 pub(super) fn parse_item(
     import_item_json: &Value,

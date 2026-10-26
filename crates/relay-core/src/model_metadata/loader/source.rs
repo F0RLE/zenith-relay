@@ -1,12 +1,12 @@
 use super::{
+    MetadataSourceStatus, ModelMetadataCatalog, ModelMetadataError, RETRY_DELAYS_MS, SOURCES, URLS,
     enrich_reasoning_metadata_with_models_dev_details, metadata_payload_hash,
-    validate_metadata_payload, MetadataSourceStatus, ModelMetadataCatalog, ModelMetadataError,
-    RETRY_DELAYS_MS, SOURCES, URLS,
+    validate_metadata_payload,
 };
 use crate::pricing::{CatalogRefreshDeadline, CatalogRefreshKind, CatalogStatus};
 use reqwest::header;
 use serde::{Deserialize, Serialize};
-use serde_json::{value::RawValue, Value};
+use serde_json::{Value, value::RawValue};
 use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

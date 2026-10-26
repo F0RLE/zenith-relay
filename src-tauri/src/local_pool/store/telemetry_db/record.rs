@@ -1,16 +1,16 @@
 use super::usage::{
-    apply_usage_totals_delta, consumption_totals, request_totals, usage_totals_from_event,
-    usage_totals_from_sample, UsageTotalsSample,
+    UsageTotalsSample, apply_usage_totals_delta, consumption_totals, request_totals,
+    usage_totals_from_event, usage_totals_from_sample,
 };
 use super::{
-    db_error, lock_error, sql_u64, ErrorCode, LocalPoolError, Result, TelemetryDb, UsageEvent,
-    ARCHIVE_USAGE_SQL,
+    ARCHIVE_USAGE_SQL, ErrorCode, LocalPoolError, Result, TelemetryDb, UsageEvent, db_error,
+    lock_error, sql_u64,
 };
-use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
-use std::sync::{atomic::Ordering, LazyLock};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use std::sync::{LazyLock, atomic::Ordering};
 
 mod aggregate;
-pub(super) use aggregate::{apply_aggregate_delta, UsageAggregate};
+pub(super) use aggregate::{UsageAggregate, apply_aggregate_delta};
 #[cfg(test)]
 mod tests;
 

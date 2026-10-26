@@ -1,8 +1,8 @@
 use super::error::{OAuthError, OAuthErrorCode};
 use super::exchange::OAuthCallback;
 use super::parse::set_once;
-use super::{OAuthClientKind, MAX_CALLBACK_URL_BYTES, MAX_TOKEN_BYTES, PENDING_TTL_MS};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use super::{MAX_CALLBACK_URL_BYTES, MAX_TOKEN_BYTES, OAuthClientKind, PENDING_TTL_MS};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;

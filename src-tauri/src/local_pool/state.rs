@@ -8,34 +8,34 @@ mod snapshot;
 pub(crate) use adapters::DesktopOAuthEvents;
 use coordination::wake_coordinator;
 pub(crate) use paths::migrate_storage_layout;
-#[cfg(test)]
-use snapshot::{account_secret_available, SecretLookup};
 pub(crate) use snapshot::{AccountCredentialFacts, LocalRuntimeInputs, SnapshotInputs};
+#[cfg(test)]
+use snapshot::{SecretLookup, account_secret_available};
 
 use super::{
     accounts::{
-        import_session::ImportSessionStore, oauth_flow::OAuthFlowManager, NativeSecretBackend,
+        NativeSecretBackend, import_session::ImportSessionStore, oauth_flow::OAuthFlowManager,
     },
     error::{ErrorCode, LocalPoolError, Result},
     host::GatewayManager,
     profiles::repair,
-    store::{telemetry_db::TelemetryDb, LocalPoolStore},
+    store::{LocalPoolStore, telemetry_db::TelemetryDb},
 };
 use crate::storage_paths::StoragePaths;
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{atomic::AtomicU64, Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, atomic::AtomicU64},
 };
-use tokio::sync::{watch, Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore, watch};
 use url::Url;
 use zenith_relay_core::{
+    RuntimeContinuationStores,
     accounts::TokenAuthority,
     automations::WakeCoordinator,
     model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogLoader},
     pricing::{CatalogStatus, PricingCatalog, PricingCatalogLoader},
-    scheduler::refresh::{service::RefreshService, RefreshLimits},
-    RuntimeContinuationStores,
+    scheduler::refresh::{RefreshLimits, service::RefreshService},
 };
 
 pub(super) use zenith_relay_core::unix_time_ms as now_ms;

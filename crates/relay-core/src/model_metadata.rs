@@ -20,10 +20,10 @@ use std::{
 };
 
 pub(crate) use display_projection::DisplayProjection;
-pub use export::{PublicModelCatalog, PublicModelCatalogEntry, MODEL_CATALOG_SCHEMA};
+pub use export::{MODEL_CATALOG_SCHEMA, PublicModelCatalog, PublicModelCatalogEntry};
 pub use loader::{ModelMetadataCatalogLoader, ModelMetadataError};
 pub use order::{
-    model_order_revision, validate_model_order_catalog, ModelDisplayIdentity, MODEL_ORDER_JSON,
+    MODEL_ORDER_JSON, ModelDisplayIdentity, model_order_revision, validate_model_order_catalog,
 };
 use parsing::{metadata_payload_hash, validate_metadata_payload};
 

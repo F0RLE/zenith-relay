@@ -1,6 +1,6 @@
 use super::super::{
-    checked, optional_u64, required_text, AdapterError, AdapterResult, Message, OutputFormat,
-    Reasoning, Request, Role, ToolChoice,
+    AdapterError, AdapterResult, Message, OutputFormat, Reasoning, Request, Role, ToolChoice,
+    checked, optional_u64, required_text,
 };
 use crate::WireApi;
 use serde_json::Value;
@@ -206,7 +206,7 @@ fn tool_choice(request_body: &Value) -> AdapterResult<Option<ToolChoice>> {
             _ => {
                 return Err(AdapterError::parameter_unsupported_for(
                     "toolConfig.functionCallingConfig.allowedFunctionNames",
-                ))
+                ));
             }
         },
         _ => return Err(AdapterError::unsupported_tool()),

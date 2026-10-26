@@ -1,5 +1,5 @@
 use super::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[test]
 fn sizing_matches_buffered_json_and_enforces_exact_byte_limits() {
@@ -91,6 +91,9 @@ fn sizing_throughput_probe() {
         }
         buffered.sort_unstable();
         counted.sort_unstable();
-        eprintln!("sizing {name}: encoded_bytes={expected}, buffered_median_ns={}, counted_median_ns={}; local CPU probe, not provider latency or process RAM", buffered[3], counted[3]);
+        eprintln!(
+            "sizing {name}: encoded_bytes={expected}, buffered_median_ns={}, counted_median_ns={}; local CPU probe, not provider latency or process RAM",
+            buffered[3], counted[3]
+        );
     }
 }

@@ -89,11 +89,13 @@ fn every_adapter_preserves_long_parallel_tool_chains_and_reversed_results() {
                             .clone()
                     };
                     if final_round {
-                        assert!(response::decode(client, &completed.response_body, "test")
-                            .unwrap()
-                            .blocks
-                            .iter()
-                            .any(|block| matches!(block, Block::Text(text) if text == "Hi")));
+                        assert!(
+                            response::decode(client, &completed.response_body, "test")
+                                .unwrap()
+                                .blocks
+                                .iter()
+                                .any(|block| matches!(block, Block::Text(text) if text == "Hi"))
+                        );
                     } else {
                         request = super::architecture::append_tool_results(
                             client, request, &completed, true,

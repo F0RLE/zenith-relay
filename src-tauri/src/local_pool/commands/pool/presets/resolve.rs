@@ -1,5 +1,5 @@
 use crate::local_pool::{
-    accounts::{credentials::CredentialStore, NativeSecretBackend},
+    accounts::{NativeSecretBackend, credentials::CredentialStore},
     error::{ErrorCode, LocalPoolError},
     models::ProviderSourceRecord,
     state::DesktopState,
@@ -8,9 +8,9 @@ use sha2::{Digest, Sha256};
 use zenith_relay_core::{
     merge_configuration_preset_settings, normalize_configuration_preset,
     protocol::{
-        AccountPresetRule, ConfigurationPreset, ConfigurationPresetChange,
-        ConfigurationPresetSettings, SourcePresetRule, CONFIGURATION_PRESET_FORMAT,
-        CONFIGURATION_PRESET_SCHEMA_VERSION,
+        AccountPresetRule, CONFIGURATION_PRESET_FORMAT, CONFIGURATION_PRESET_SCHEMA_VERSION,
+        ConfigurationPreset, ConfigurationPresetChange, ConfigurationPresetSettings,
+        SourcePresetRule,
     },
     validate_resolved_configuration_preset_members,
 };

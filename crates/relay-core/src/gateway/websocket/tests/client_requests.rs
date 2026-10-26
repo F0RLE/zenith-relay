@@ -320,11 +320,13 @@ fn websocket_frame_identity_keeps_root_affinity_and_child_context_separate() {
     assert!(!second.requires_affinity_owner);
     let cached = parse("child-a", Some("explicit-cache"));
     assert_ne!(first.prompt_affinity_key, cached.prompt_affinity_key);
-    assert!(cached
-        .prompt_affinity_key
-        .as_deref()
-        .unwrap()
-        .starts_with("cache:"));
+    assert!(
+        cached
+            .prompt_affinity_key
+            .as_deref()
+            .unwrap()
+            .starts_with("cache:")
+    );
 }
 
 #[test]
@@ -506,9 +508,11 @@ fn websocket_lite_marker_preserves_parallel_policy_on_non_account_routes() {
     native_route.account_transport = crate::runtime::AccountTransport::NativeResponses;
     let error = request.payload_for(&native_route).unwrap_err();
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert!(error
-        .message
-        .contains("does not support parallel_tool_calls: true"));
+    assert!(
+        error
+            .message
+            .contains("does not support parallel_tool_calls: true")
+    );
 }
 
 #[test]

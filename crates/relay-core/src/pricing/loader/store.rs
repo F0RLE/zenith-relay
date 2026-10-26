@@ -1,7 +1,7 @@
 use super::refresh::map_catalog_io_error;
 use super::{
-    PricingCacheEnvelope, PricingCatalog, PricingError, RetainedPricingEnvelope,
-    MAX_CATALOG_RESPONSE_BYTES,
+    MAX_CATALOG_RESPONSE_BYTES, PricingCacheEnvelope, PricingCatalog, PricingError,
+    RetainedPricingEnvelope,
 };
 use crate::catalog_io;
 use std::path::{Path, PathBuf};

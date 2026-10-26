@@ -1,6 +1,6 @@
 //! Manual, capped probes against an already running local Relay. Never runs at startup.
 use futures_util::StreamExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     error::Error,
     io,
@@ -8,7 +8,7 @@ use std::{
 };
 use zenith_relay_core::{
     is_valid_model_token,
-    quality::{generate_batch, Challenge, Observation, Verdict, MAX_SAMPLES},
+    quality::{Challenge, MAX_SAMPLES, Observation, Verdict, generate_batch},
 };
 
 fn invalid(message: &'static str) -> io::Error {
@@ -92,7 +92,9 @@ struct ProbeConfig {
 
 fn configuration(args: &[String]) -> Result<ProbeConfig, io::Error> {
     if args.len() < 4 || args.len() > 5 || args[0] != "--allow-requests" {
-        return Err(invalid("usage: quality_probe --allow-requests http://127.0.0.1:PORT/v1 model-a,model-b samples[1..8] [effort]; set ZENITH_RELAY_PROBE_KEY in the environment"));
+        return Err(invalid(
+            "usage: quality_probe --allow-requests http://127.0.0.1:PORT/v1 model-a,model-b samples[1..8] [effort]; set ZENITH_RELAY_PROBE_KEY in the environment",
+        ));
     }
     let mut url = url::Url::parse(&args[1]).map_err(|_| invalid("invalid local Relay URL"))?;
     let loopback = matches!(url.host(),Some(url::Host::Ipv4(ip)) if ip.is_loopback())
@@ -105,7 +107,9 @@ fn configuration(args: &[String]) -> Result<ProbeConfig, io::Error> {
         || url.fragment().is_some()
         || !matches!(url.path(), "/v1" | "/v1/")
     {
-        return Err(invalid("probe URL must be an explicit loopback HTTP /v1 endpoint without credentials, query, or fragment"));
+        return Err(invalid(
+            "probe URL must be an explicit loopback HTTP /v1 endpoint without credentials, query, or fragment",
+        ));
     }
     url.set_path("/v1/responses");
     let models: Vec<&str> = args[2].split(',').collect();
@@ -266,10 +270,10 @@ mod tests {
 
     #[tokio::test]
     async fn rejection_is_not_retried_and_provider_text_is_not_reported() {
-        use axum::{http::StatusCode, routing::post, Router};
+        use axum::{Router, http::StatusCode, routing::post};
         use std::sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         };
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = calls.clone();

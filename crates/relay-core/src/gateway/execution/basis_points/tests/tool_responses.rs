@@ -487,9 +487,11 @@ fn response_restores_client_metadata_instead_of_transport_metadata() {
                 .filter_map(|event| event.get("response").cloned())
                 .collect::<Vec<_>>();
             assert_eq!(response_events.len(), 3);
-            assert!(response_events
-                .iter()
-                .all(|event| event["metadata"] == expected));
+            assert!(
+                response_events
+                    .iter()
+                    .all(|event| event["metadata"] == expected)
+            );
         }
     }
 }
@@ -1080,11 +1082,13 @@ fn function_tool_arguments_must_be_an_object() {
 fn serial_tool_requests_do_not_return_multiple_client_tool_calls() {
     let mut request = request_with_tool();
     request["parallel_tool_calls"] = json!(false);
-    assert!(translate_response(
-        &tool_response(r#"{"tool":"exec_command","args":{"cmd":"pwd"}}"#),
-        &request
-    )
-    .is_ok());
+    assert!(
+        translate_response(
+            &tool_response(r#"{"tool":"exec_command","args":{"cmd":"pwd"}}"#),
+            &request
+        )
+        .is_ok()
+    );
     let envelope = |call_id: &str, command: &str| {
         json!({
             "type": "function_call",
@@ -1272,11 +1276,13 @@ fn current_tools_override_history_and_keep_namespaces() {
             .parameter(),
         Some("output.run_officejs.tool_choice")
     );
-    assert!(prepared["input"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|item| { item.get("type").and_then(Value::as_str) != Some("additional_tools") }));
+    assert!(
+        prepared["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| { item.get("type").and_then(Value::as_str) != Some("additional_tools") })
+    );
 
     let response = tool_response(r#"{"tool":"functions.exec","args":"pwd"}"#);
     let translated = translate_response(&response, &request).unwrap();
@@ -1419,11 +1425,13 @@ fn required_allowed_tools_rejects_a_response_without_a_call() {
     let prepared = prepare_request(&request).unwrap();
     assert!(prepared.get("tool_choice").is_none());
     let response = json!({"id": "resp_1", "status": "completed", "output": []});
-    assert!(translate_response(
-        serde_json::to_string(&response).unwrap().as_bytes(),
-        &request
-    )
-    .is_err());
+    assert!(
+        translate_response(
+            serde_json::to_string(&response).unwrap().as_bytes(),
+            &request
+        )
+        .is_err()
+    );
 }
 
 #[test]

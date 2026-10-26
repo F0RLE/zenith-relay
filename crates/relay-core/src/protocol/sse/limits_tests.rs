@@ -16,15 +16,17 @@ fn oversized_fragmented_event_is_rejected_without_retaining_its_bytes() {
         .unwrap();
     }
     assert_eq!(pending.len(), 16);
-    assert!(consume_bounded_frames(
-        &mut pending,
-        b"x",
-        16,
-        &mut delivered,
-        |_| false,
-        |n, _| *n += 1
-    )
-    .is_err());
+    assert!(
+        consume_bounded_frames(
+            &mut pending,
+            b"x",
+            16,
+            &mut delivered,
+            |_| false,
+            |n, _| *n += 1
+        )
+        .is_err()
+    );
     assert!(pending.is_empty());
     assert_eq!(delivered, 0);
 }

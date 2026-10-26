@@ -6,7 +6,7 @@ use crate::usage::{
     CacheContextBaseline, CacheContextDiagnostics, CacheContextScope, CacheContextSection,
 };
 use crate::{UsageEvent, WireApi};
-use fingerprint::{identity, Fingerprint, RequestFingerprint};
+use fingerprint::{Fingerprint, RequestFingerprint, identity};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};

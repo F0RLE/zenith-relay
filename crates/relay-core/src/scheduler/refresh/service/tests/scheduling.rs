@@ -36,11 +36,13 @@ async fn reset_event_accelerates_quota_without_changing_activity_or_models() {
             state.coordinator.next_due(&identity, RefreshKind::Models),
             due_before
         );
-        assert!(state
-            .coordinator
-            .entries
-            .values()
-            .all(|refresh_entry| !refresh_entry.active));
+        assert!(
+            state
+                .coordinator
+                .entries
+                .values()
+                .all(|refresh_entry| !refresh_entry.active)
+        );
     }
     service.respect_retry_after(&identity, RefreshKind::Quota, 60_000);
     assert!(service.schedule_after(&identity, RefreshKind::Quota, 0));
@@ -102,13 +104,15 @@ async fn becoming_eligible_schedules_once_without_resetting_every_reconciliation
     activated.due_now = true;
     service.register(activated, work).unwrap();
     let identity = registration(1, true).identity;
-    assert!(service
-        .state
-        .lock()
-        .unwrap()
-        .coordinator
-        .next_due(&identity, RefreshKind::Quota)
-        .is_some());
+    assert!(
+        service
+            .state
+            .lock()
+            .unwrap()
+            .coordinator
+            .next_due(&identity, RefreshKind::Quota)
+            .is_some()
+    );
     service
         .request(&identity, RefreshKind::Quota)
         .await

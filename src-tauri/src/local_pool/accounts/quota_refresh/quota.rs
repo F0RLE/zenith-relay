@@ -216,7 +216,7 @@ pub(crate) async fn prepare_account_credentials(
             return Err(LocalPoolError::new(
                 ErrorCode::InvalidState,
                 format!("failed to prepare account credentials: {error}"),
-            ))
+            ));
         }
     };
     let current_credentials = credentials

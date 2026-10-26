@@ -221,9 +221,11 @@ mod tests {
         assert_eq!(error.parameter(), Some("output.run_officejs.args.schema"));
         assert!(error.to_string().contains("schema_phase=arguments"));
         assert!(error.to_string().contains("schema_keyword=type"));
-        assert!(error
-            .to_string()
-            .contains("schema_depth=3, instance_depth=1"));
+        assert!(
+            error
+                .to_string()
+                .contains("schema_depth=3, instance_depth=1")
+        );
         let invalid = validate(
             &json!({}),
             &json!({"$ref":"https://synthetic-private.invalid/schema"}),
@@ -314,9 +316,11 @@ mod tests {
             };
             target["synthetic-private-extra"] = json!("synthetic-private-value");
             let error = validate(&invalid, &schema).unwrap_err();
-            assert!(error
-                .to_string()
-                .contains("schema_keyword=additionalProperties"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("schema_keyword=additionalProperties")
+            );
             assert!(!format!("{error} {error:?}").contains("synthetic-private"));
         }
     }

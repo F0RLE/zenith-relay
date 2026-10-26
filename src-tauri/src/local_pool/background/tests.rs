@@ -2,12 +2,12 @@ use super::*;
 use crate::local_pool::models::LocalAccountRecord;
 use std::collections::BTreeSet;
 use zenith_relay_core::{
+    WireApi,
     accounts::{
         AccountAuthMode, AccountAuthState, AccountHealthState, AccountIdentity, AccountRecord,
     },
     automations::{WakeExecutionRequest, WakeTrigger, WakeVerificationMetadata},
     quota::{QuotaAdapterCapabilities, QuotaSnapshot, QuotaWindow, QuotaWindowKind, Subscription},
-    WireApi,
 };
 
 #[test]

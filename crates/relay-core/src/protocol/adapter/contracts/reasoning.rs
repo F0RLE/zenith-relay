@@ -1,8 +1,8 @@
 use super::{AdapterError, AdapterResult};
-use crate::model_metadata::{ModelCapabilities, ReasoningMethod};
 use crate::WireApi;
+use crate::model_metadata::{ModelCapabilities, ReasoningMethod};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 /// The internal upstream thinking contract used by a Messages bridge.
 /// Persisted source bindings normalize to `Adaptive`; the enum remains part of
 /// the adapter contract and focused protocol tests.

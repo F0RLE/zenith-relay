@@ -1,4 +1,4 @@
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 pub(super) fn required_string(catalog_entry: &Map<String, Value>, key: &str) -> bool {
     catalog_entry.get(key).is_some_and(Value::is_string)

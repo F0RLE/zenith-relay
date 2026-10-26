@@ -60,11 +60,13 @@ fn cooldowns_share_one_upstream_across_client_bindings() {
             }
         ));
         let mut scheduler = runtime.lock_scheduler();
-        assert!(scheduler
-            .candidate("multi")
-            .unwrap()
-            .cooldowns
-            .contains_key(scope));
+        assert!(
+            scheduler
+                .candidate("multi")
+                .unwrap()
+                .cooldowns
+                .contains_key(scope)
+        );
         scheduler.clear_cooldown("multi", scope);
     }
 }
@@ -148,10 +150,12 @@ async fn pool_rotation_capacity_waits_wake_without_rebuilding_the_runtime() {
             ..Default::default()
         }
     ));
-    assert!(tokio::time::timeout(Duration::from_millis(500), waiting)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), waiting)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(
         runtime
             .candidate_runtime_order()
@@ -161,10 +165,12 @@ async fn pool_rotation_capacity_waits_wake_without_rebuilding_the_runtime() {
         3
     );
     drop((second_lease, released_lease, expanded_lease));
-    assert!(runtime
-        .candidate_runtime_order()
-        .iter()
-        .all(|candidate| candidate.active_request_count == 0));
+    assert!(
+        runtime
+            .candidate_runtime_order()
+            .iter()
+            .all(|candidate| candidate.active_request_count == 0)
+    );
 }
 #[tokio::test]
 async fn recovery_probe_waits_for_its_owner_and_snapshots_match_activity_versions() {
@@ -270,15 +276,19 @@ async fn source_activity_reports_its_physical_member_on_admission_and_release() 
         runtime.active_member_keys(current_time_ms(), 600_000),
         BTreeSet::from(["source:source-1".into()])
     );
-    assert!(runtime
-        .active_member_keys(current_time_ms() + 600_000, 600_000)
-        .is_empty());
+    assert!(
+        runtime
+            .active_member_keys(current_time_ms() + 600_000, 600_000)
+            .is_empty()
+    );
     let events = captured.lock().unwrap();
     assert_eq!(events.len(), 2);
-    assert!(events
-        .iter()
-        .all(|event| event.candidate_id == selection.candidate_id
-            && event.member_key == "source:source-1"));
+    assert!(
+        events
+            .iter()
+            .all(|event| event.candidate_id == selection.candidate_id
+                && event.member_key == "source:source-1")
+    );
     assert!(events[0].in_flight > 0);
     assert_eq!(events[1].in_flight, 0);
 }
@@ -388,9 +398,11 @@ fn passive_quota_exhaustion_and_recovery_are_persisted_without_waiting_for_the_d
         CandidateQuota::from_snapshot(&persisted, 3_000, QUOTA_STALE_AFTER_MS),
         CandidateQuota::Exhausted
     );
-    assert!(runtime
-        .take_passive_quota_snapshot("account-1", 3_001)
-        .is_none());
+    assert!(
+        runtime
+            .take_passive_quota_snapshot("account-1", 3_001)
+            .is_none()
+    );
 }
 #[test]
 fn refreshed_quota_snapshot_replaces_passive_state_before_header_merges() {

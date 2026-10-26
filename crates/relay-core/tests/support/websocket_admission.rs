@@ -490,9 +490,11 @@ async fn responses_websocket_fallback_locks_the_first_later_stream_id() {
     let rejection = rejection.expect("fallback did not emit an error event");
     assert_eq!(rejection["stream_id"], "stream-b");
     assert_eq!(rejection["error"]["code"], "invalid_request");
-    assert!(rejection["error"]["message"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("only one WebSocket stream_id is supported per connection"));
+    assert!(
+        rejection["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("only one WebSocket stream_id is supported per connection")
+    );
     assert_eq!(state.requests.lock().unwrap().len(), 2);
 }

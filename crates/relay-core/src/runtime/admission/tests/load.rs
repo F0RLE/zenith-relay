@@ -1,7 +1,7 @@
 //! Synthetic contention through the real reservation queue, without provider I/O.
 
 use super::*;
-use futures_util::{poll, stream::FuturesUnordered, StreamExt};
+use futures_util::{StreamExt, poll, stream::FuturesUnordered};
 
 #[tokio::test(start_paused = true)]
 async fn mixed_text_and_image_waiters_remain_bounded_and_principal_fair() {
@@ -96,8 +96,10 @@ async fn run_mixed_waiters(per_principal: usize) {
     );
     assert_eq!(served, [per_principal; 3]);
     assert_eq!(queued(&runtime), (0, 0));
-    assert!(runtime
-        .candidate_runtime_order()
-        .iter()
-        .all(|candidate| candidate.active_request_count == 0));
+    assert!(
+        runtime
+            .candidate_runtime_order()
+            .iter()
+            .all(|candidate| candidate.active_request_count == 0)
+    );
 }

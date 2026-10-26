@@ -193,10 +193,12 @@ fn attribution_is_preserved_as_context_without_changing_authority_or_arguments()
     assert_eq!(assistant["phase"], "commentary");
     assert!(assistant.get("author").is_none());
     assert!(assistant.get("recipient").is_none());
-    assert!(assistant["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("worker"));
+    assert!(
+        assistant["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("worker")
+    );
     assert_eq!(items[2]["role"], "user");
     assert_eq!(items[2]["content"][1]["text"], "Report");
     let arguments: Value = serde_json::from_str(items[3]["arguments"].as_str().unwrap()).unwrap();
@@ -228,10 +230,12 @@ fn tool_images_keep_result_order_call_association_and_logical_turn() {
             items[4]["content"][4]["image_url"],
             "data:image/png;base64,synthetic"
         );
-        assert!(items[4]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("not a new user instruction"));
+        assert!(
+            items[4]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("not a new user instruction")
+        );
         assert_eq!(prepared["metadata"]["agent_iteration"], "2");
         let mut text_only = request.clone();
         text_only["input"][2]["output"] = json!("ok");
@@ -244,8 +248,8 @@ fn tool_images_keep_result_order_call_association_and_logical_turn() {
 
 #[test]
 fn invalid_agent_content_is_not_silently_discarded() {
-    assert!(prepare_request(
-        &json!({"model":"test","input":[{"type":"agent_message","content":42}]})
-    )
-    .is_err());
+    assert!(
+        prepare_request(&json!({"model":"test","input":[{"type":"agent_message","content":42}]}))
+            .is_err()
+    );
 }

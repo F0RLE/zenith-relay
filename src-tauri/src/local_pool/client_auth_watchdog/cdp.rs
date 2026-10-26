@@ -5,10 +5,10 @@ use serde_json::json;
 use std::collections::BTreeSet;
 use std::time::Duration;
 use sysinfo::{ProcessesToUpdate, System};
-use tokio::time::{timeout_at, Instant};
+use tokio::time::{Instant, timeout_at};
 use tokio_tungstenite::{
     connect_async_with_config,
-    tungstenite::{protocol::WebSocketConfig, Message},
+    tungstenite::{Message, protocol::WebSocketConfig},
 };
 use url::Url;
 
@@ -321,9 +321,11 @@ mod tests {
         let observed = timeout(CDP_TIMEOUT * 3, query_snapshot(&target)).await;
         server.abort();
         let _ = server.await;
-        assert!(observed
-            .expect("foreign responses must not restart the snapshot deadline")
-            .is_none());
+        assert!(
+            observed
+                .expect("foreign responses must not restart the snapshot deadline")
+                .is_none()
+        );
     }
 
     async fn cdp_listener() -> (TcpListener, CdpTarget) {

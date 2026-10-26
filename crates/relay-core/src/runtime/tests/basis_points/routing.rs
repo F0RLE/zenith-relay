@@ -257,9 +257,11 @@ async fn websocket_bps_waiting_chat_survives_other_chats_replay_pressure() {
             .any(|items| items == expected_history),
         "waiting chat history must survive BPS message normalization: {input:?}"
     );
-    assert!(!input
-        .iter()
-        .any(|item| item.pointer("/content/0/text") == Some(&json!("Synthetic busy chat"))));
+    assert!(
+        !input
+            .iter()
+            .any(|item| item.pointer("/content/0/text") == Some(&json!("Synthetic busy chat")))
+    );
     task.abort();
 }
 

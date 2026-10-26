@@ -1,4 +1,4 @@
-use super::runtime_exec::{metrics_from_response, MAX_RESPONSE_BYTES};
+use super::runtime_exec::{MAX_RESPONSE_BYTES, metrics_from_response};
 use super::*;
 use axum::body::Body;
 use axum::http::{Response, StatusCode};
@@ -47,9 +47,11 @@ async fn oversized_and_malformed_success_responses_fail_closed() {
         .await
         .unwrap_err();
     assert_eq!(failure.code, WakeExecutionErrorCode::InvalidResponse);
-    assert!(!serde_json::to_string(&failure)
-        .unwrap()
-        .contains("not-json-private-body"));
+    assert!(
+        !serde_json::to_string(&failure)
+            .unwrap()
+            .contains("not-json-private-body")
+    );
 }
 
 #[tokio::test]
@@ -86,9 +88,11 @@ async fn http_failures_have_typed_retryability_without_body_leaks() {
         assert_eq!(failure.code, code);
         assert_eq!(failure.retryable, retryable);
         assert_eq!(failure.http_status, Some(status.as_u16()));
-        assert!(!serde_json::to_string(&failure)
-            .unwrap()
-            .contains("provider-secret-body"));
+        assert!(
+            !serde_json::to_string(&failure)
+                .unwrap()
+                .contains("provider-secret-body")
+        );
     }
 }
 

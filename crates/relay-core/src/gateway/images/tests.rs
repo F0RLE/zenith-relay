@@ -66,16 +66,20 @@ fn native_image_url_compatibility_preserves_usage_and_output_format() {
 #[tokio::test]
 async fn multipart_edit_parses_multiple_images_and_mask() {
     let boundary = "zenith-test-boundary";
-    let bytes = Bytes::from(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nedit\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"image[]\"; filename=\"a.png\"\r\nContent-Type: image/png\r\n\r\nPNG-A\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"image[]\"; filename=\"b.png\"\r\nContent-Type: image/png\r\n\r\nPNG-B\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"mask\"; filename=\"mask.png\"\r\nContent-Type: image/png\r\n\r\nMASK\r\n--{boundary}--\r\n"));
+    let bytes = Bytes::from(format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nedit\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"image[]\"; filename=\"a.png\"\r\nContent-Type: image/png\r\n\r\nPNG-A\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"image[]\"; filename=\"b.png\"\r\nContent-Type: image/png\r\n\r\nPNG-B\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"mask\"; filename=\"mask.png\"\r\nContent-Type: image/png\r\n\r\nMASK\r\n--{boundary}--\r\n"
+    ));
     let (fields, images, mask) =
         prepare::parse_multipart(&format!("multipart/form-data; boundary={boundary}"), bytes)
             .await
             .unwrap();
     assert_eq!(fields["prompt"], "edit");
     assert_eq!(images.len(), 2);
-    assert!(images
-        .iter()
-        .all(|image| image.starts_with("data:image/png;base64,")));
+    assert!(
+        images
+            .iter()
+            .all(|image| image.starts_with("data:image/png;base64,"))
+    );
     assert!(mask.unwrap().starts_with("data:image/png;base64,"));
 }
 

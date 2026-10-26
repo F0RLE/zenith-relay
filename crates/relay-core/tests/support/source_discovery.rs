@@ -619,10 +619,14 @@ async fn configured_discovery_hints_union_physical_catalogs_without_filtering_ru
         } else {
             WireApi::Responses
         };
-        assert!(routes
-            .iter()
-            .filter(|route| route.model_ids.contains(model))
-            .all(|route| route.adapter.upstream_protocol(route.wire_api).wire_api() == upstream));
+        assert!(
+            routes
+                .iter()
+                .filter(|route| route.model_ids.contains(model))
+                .all(
+                    |route| route.adapter.upstream_protocol(route.wire_api).wire_api() == upstream
+                )
+        );
         assert_eq!(
             routes
                 .iter()
@@ -753,17 +757,19 @@ async fn failed_native_binding_is_not_advertised_after_discovery() {
 #[tokio::test]
 async fn model_discovery_rejects_a_bad_source_key() {
     let (upstream, _) = spawn_upstream().await;
-    assert!(discover_source_models(&ProviderSource {
-        id: "source-1".into(),
-        name: "Synthetic upstream".into(),
-        base_url: format!("{}/v1", upstream.base_url),
-        api_key: "wrong-source-key".into(),
-        proxy_url: None,
-        wire_api: WireApi::Responses,
-        models: vec!["gpt-test".into()],
-    })
-    .await
-    .is_err());
+    assert!(
+        discover_source_models(&ProviderSource {
+            id: "source-1".into(),
+            name: "Synthetic upstream".into(),
+            base_url: format!("{}/v1", upstream.base_url),
+            api_key: "wrong-source-key".into(),
+            proxy_url: None,
+            wire_api: WireApi::Responses,
+            models: vec!["gpt-test".into()],
+        })
+        .await
+        .is_err()
+    );
 }
 
 #[tokio::test]
@@ -779,15 +785,17 @@ async fn model_discovery_rejects_an_oversized_body() {
         }),
     ))
     .await;
-    assert!(discover_source_models(&ProviderSource {
-        id: "source-1".into(),
-        name: "Synthetic upstream".into(),
-        base_url: format!("{}/v1", upstream.base_url),
-        api_key: SOURCE_KEY.into(),
-        proxy_url: None,
-        wire_api: WireApi::Responses,
-        models: vec![],
-    })
-    .await
-    .is_err());
+    assert!(
+        discover_source_models(&ProviderSource {
+            id: "source-1".into(),
+            name: "Synthetic upstream".into(),
+            base_url: format!("{}/v1", upstream.base_url),
+            api_key: SOURCE_KEY.into(),
+            proxy_url: None,
+            wire_api: WireApi::Responses,
+            models: vec![],
+        })
+        .await
+        .is_err()
+    );
 }

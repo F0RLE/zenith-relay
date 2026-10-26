@@ -87,7 +87,8 @@ fn parallel_stream_normalization_latency() {
             timings.sort();
             eprintln!(
                 "8 parallel calls, {fragments} fragments/call, {} bytes, chunk={chunk_size}: median={:?}",
-                wire.len(), timings[2]
+                wire.len(),
+                timings[2]
             );
         }
     }

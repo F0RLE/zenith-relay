@@ -6,8 +6,8 @@ mod rate_limit;
 #[cfg(test)]
 pub(crate) use rate_limit::rate_limit_body_hint_at;
 pub(crate) use rate_limit::{
-    rate_limit_body_hint, rate_limit_body_hint_value, retry_after_ms, retry_delay_ms,
-    RateLimitBodyHint,
+    RateLimitBodyHint, rate_limit_body_hint, rate_limit_body_hint_value, retry_after_ms,
+    retry_delay_ms,
 };
 
 #[allow(clippy::too_many_arguments)]

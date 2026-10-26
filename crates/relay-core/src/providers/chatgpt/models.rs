@@ -1,8 +1,8 @@
-use super::{is_agent_identity_task_invalid_response, CodexIdentityEnvelope};
-use crate::scheduler::refresh::http::ManagementHttpScope;
+use super::{CodexIdentityEnvelope, is_agent_identity_task_invalid_response};
 use crate::ProxyConfig;
+use crate::scheduler::refresh::http::ManagementHttpScope;
 use reqwest::{
-    header::{HeaderValue, AUTHORIZATION},
+    header::{AUTHORIZATION, HeaderValue},
     redirect::Policy,
 };
 use std::time::Duration;
@@ -14,8 +14,8 @@ mod parse;
 mod request;
 pub(crate) use basis_points::normalize_basis_points_reasoning_effort;
 pub use basis_points::{
-    basis_points_access_url, parse_basis_points_model_access, BasisPointsModelAccess,
-    BASIS_POINTS_ACCESS_ENDPOINT, MAX_BASIS_POINTS_ACCESS_BYTES,
+    BASIS_POINTS_ACCESS_ENDPOINT, BasisPointsModelAccess, MAX_BASIS_POINTS_ACCESS_BYTES,
+    basis_points_access_url, parse_basis_points_model_access,
 };
 pub use failure::{ModelDiscoveryFailure, ModelDiscoveryFailureCode};
 

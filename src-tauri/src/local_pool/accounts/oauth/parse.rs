@@ -1,7 +1,7 @@
+use super::MAX_TOKEN_BYTES;
 use super::error::{OAuthError, OAuthErrorCode};
 use super::exchange::OAuthTokenSet;
 use super::identity::OAuthIdentityClaims;
-use super::MAX_TOKEN_BYTES;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zenith_relay_core::accounts::decode_unverified_jwt_payload;

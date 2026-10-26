@@ -1,18 +1,18 @@
-use super::super::claims::ImportedIdentity;
 use super::super::MAX_ACCOUNT_PROFILE_RESPONSE_BYTES;
+use super::super::claims::ImportedIdentity;
 use super::ImportedCredentialMaterial;
 use crate::local_pool::accounts::import_orchestrator::{ImportItemError, ItemResult};
-use crate::local_pool::accounts::{collect_limited, LimitedBodyError};
+use crate::local_pool::accounts::{LimitedBodyError, collect_limited};
 use reqwest::header::{ACCEPT, AUTHORIZATION};
 use reqwest::redirect::Policy;
 use std::time::Duration;
 use url::Url;
+use zenith_relay_core::ProxyConfig;
 use zenith_relay_core::error_codes;
 use zenith_relay_core::providers::chatgpt::{
-    merge_subscription_metadata, push_account_id_hint, resolve_account_check_account_id,
-    AccountCheckIdentityError, CodexSubscriptionMetadata,
+    AccountCheckIdentityError, CodexSubscriptionMetadata, merge_subscription_metadata,
+    push_account_id_hint, resolve_account_check_account_id,
 };
-use zenith_relay_core::ProxyConfig;
 
 pub(in crate::local_pool::accounts) async fn resolve_import_account_identity(
     mut material: ImportedCredentialMaterial,

@@ -235,17 +235,19 @@ fn ownership_overrides_rotation_but_soft_affinity_does_not_override_order() {
     };
     assert_eq!(scheduler.select(request).unwrap().candidate_id, "api-b");
     scheduler.candidates.get_mut("api-b").unwrap().enabled = false;
-    assert!(scheduler
-        .select(SelectionRequest {
-            model: "gpt-5",
-            allowed_protocols: &[WireApi::Responses],
-            scope: &CandidateScope::default(),
-            tried: &HashSet::new(),
-            response_affinity_key: Some("response"),
-            prompt_affinity_key: None,
-            now_ms: 100,
-        })
-        .is_none());
+    assert!(
+        scheduler
+            .select(SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                scope: &CandidateScope::default(),
+                tried: &HashSet::new(),
+                response_affinity_key: Some("response"),
+                prompt_affinity_key: None,
+                now_ms: 100,
+            })
+            .is_none()
+    );
 }
 
 #[test]

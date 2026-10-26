@@ -1,6 +1,6 @@
 use super::super::{
-    apply_candidate_policy, model_rules, GatewayRuntime, RuntimeCandidatePolicy,
-    RuntimeSourcePolicyUpdate,
+    GatewayRuntime, RuntimeCandidatePolicy, RuntimeSourcePolicyUpdate, apply_candidate_policy,
+    model_rules,
 };
 use crate::{CandidateKind, CandidateScope};
 use std::collections::BTreeSet;

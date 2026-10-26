@@ -2,10 +2,10 @@ use super::*;
 use crate::local_pool::{accounts::records::new_account_record, store::LocalPoolStore};
 use base64::Engine;
 use zenith_relay_core::{
+    PoolMemberKind, PoolRoutingMember,
     accounts::AccountAuthMode,
     automations::{AccountSelector, WakeExecutionPolicy, WakeModelPolicy, WakeTrigger},
     quota::QuotaWindowKind,
-    PoolMemberKind, PoolRoutingMember,
 };
 
 fn same_route_owner(
@@ -398,15 +398,17 @@ fn selecting_a_route_preserves_quota_identity_and_one_pool_members_weight() {
     assert_eq!(policy.members[0].id, "account_excel");
     assert_eq!(policy.members[0].max_concurrency, 2);
     settings.account_routes[0].notes_account_id = Some("account_codex".into());
-    assert!(select_records(
-        &mut accounts,
-        &mut settings,
-        "account_codex",
-        "account_excel",
-        false,
-        OAuthClientKind::ExcelBps,
-    )
-    .is_err());
+    assert!(
+        select_records(
+            &mut accounts,
+            &mut settings,
+            "account_codex",
+            "account_excel",
+            false,
+            OAuthClientKind::ExcelBps,
+        )
+        .is_err()
+    );
     select_records(
         &mut accounts,
         &mut settings,
@@ -468,9 +470,11 @@ fn route_selection_is_atomic_restart_safe_and_rejects_duplicate_membership() {
     invalid[0].account.in_pool = true;
     let mut invalid_automations = automations.clone();
     invalid_automations.tasks.clear();
-    assert!(store
-        .replace_account_routes(invalid, settings.clone(), invalid_automations)
-        .is_err());
+    assert!(
+        store
+            .replace_account_routes(invalid, settings.clone(), invalid_automations)
+            .is_err()
+    );
     assert_eq!(store.automations(), &automations);
     drop(store);
     let mut store = LocalPoolStore::open(root.clone()).unwrap();

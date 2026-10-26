@@ -3,7 +3,7 @@ use super::super::{
     import_session::SecretBackend,
     oauth::{CodexOAuthClient, OAuthClientKind},
 };
-use super::lock::{lock_refresh_failure, ProcessAccountLocks, ProcessLockConfig, ProcessLockError};
+use super::lock::{ProcessAccountLocks, ProcessLockConfig, ProcessLockError, lock_refresh_failure};
 use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
 use zenith_relay_core::accounts::{
     TokenDispatchRevision, TokenRefresh, TokenRefreshAdapter, TokenRefreshFailure,

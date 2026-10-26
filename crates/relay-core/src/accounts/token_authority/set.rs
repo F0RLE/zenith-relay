@@ -145,7 +145,7 @@ impl fmt::Debug for TokenRefresh {
 
 #[cfg(test)]
 mod tests {
-    use super::{access_token_is_usable, TOKEN_REFRESH_SKEW_MS};
+    use super::{TOKEN_REFRESH_SKEW_MS, access_token_is_usable};
 
     #[test]
     fn refresh_window_is_five_minutes() {

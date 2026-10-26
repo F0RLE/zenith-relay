@@ -125,21 +125,25 @@ fn pool_inventory_enriches_unavailable_models_without_creating_routes() {
     assert_eq!(future.reasoning_supported_levels, ["low", "high"]);
     assert_eq!(future.reasoning_allowed_levels, ["high"]);
     assert!(future.reasoning_configurable);
-    assert!(models
-        .iter()
-        .all(|model| model.protocol_routes.is_empty() && !model.codex_visible));
+    assert!(
+        models
+            .iter()
+            .all(|model| model.protocol_routes.is_empty() && !model.codex_visible)
+    );
     assert!(
         models
             .iter()
             .position(|m| m.id.eq_ignore_ascii_case("future"))
             < models.iter().position(|m| m.id == "older")
     );
-    assert!(models
-        .iter()
-        .find(|m| m.id == "unknown")
-        .unwrap()
-        .reasoning_supported_levels
-        .is_empty());
+    assert!(
+        models
+            .iter()
+            .find(|m| m.id == "unknown")
+            .unwrap()
+            .reasoning_supported_levels
+            .is_empty()
+    );
 }
 #[test]
 fn pool_inventory_does_not_treat_saved_provider_modes_as_model_metadata() {

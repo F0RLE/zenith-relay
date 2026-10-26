@@ -2,13 +2,13 @@ use super::super::super::errors::AttemptFailure;
 use super::super::super::now_ms;
 use super::super::request::should_wait_for_candidate_availability;
 use super::super::{
-    reset_materialized_continuation, wait_for_candidate_retry, wait_for_recovery,
-    CandidateRetryContext, ContinuationReset,
+    CandidateRetryContext, ContinuationReset, reset_materialized_continuation,
+    wait_for_candidate_retry, wait_for_recovery,
 };
-use crate::runtime::AuthenticatedKey;
-use crate::scheduler::rotation::SharedRequestBudget;
 use crate::GatewayRuntime;
 use crate::WireApi;
+use crate::runtime::AuthenticatedKey;
+use crate::scheduler::rotation::SharedRequestBudget;
 use axum::body::Body;
 use axum::http::Response;
 use serde_json::Value;

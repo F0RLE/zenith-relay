@@ -1,7 +1,7 @@
 use crate::{DefaultServiceTier, UsageCallback, UsageEvent, UsageTransport, WireApi};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const MAX_TRACKED_REQUEST_ORIGINS: usize = 4096;
 pub(crate) const DEFAULT_ROUTE_RECOVERY_WINDOW_MS: u64 = 30_000;

@@ -306,9 +306,11 @@ mod tests {
                 crate::gateway::test_support::test_usage_event(),
                 Some("synthetic-model".into()),
             );
-            assert!(capture
-                .forward(Bytes::copy_from_slice(&frame[..split]))
-                .is_empty());
+            assert!(
+                capture
+                    .forward(Bytes::copy_from_slice(&frame[..split]))
+                    .is_empty()
+            );
             assert_eq!(capture.pending, frame[..split]);
             assert_eq!(
                 capture.forward(Bytes::copy_from_slice(&frame[split..])),
@@ -529,8 +531,11 @@ mod tests {
         assert!(capture.observe(
             b"data: {\"type\":\"response.created\",\"response\":{\"model\":\"gpt-6-astra\"}}\n\n"
         ));
-        assert!(capture
-            .observe(b"data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5.6-"));
+        assert!(
+            capture.observe(
+                b"data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5.6-"
+            )
+        );
         assert!(!capture.observe(b"luna\"}}\n\n"));
         assert!(!capture.observe(b"data: [DONE]\n\n"));
     }

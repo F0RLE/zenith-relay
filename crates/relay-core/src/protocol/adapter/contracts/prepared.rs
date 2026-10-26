@@ -1,7 +1,7 @@
 use super::super::stream::AdapterStreamBridge;
 use super::{AdapterContinuationState, AdapterError, AdapterResult, TranslatedResponse};
-use crate::tool_policy::{apply_tool_policy, ToolPolicyResult};
 use crate::ToolPolicy;
+use crate::tool_policy::{ToolPolicyResult, apply_tool_policy};
 use serde_json::Value;
 
 /// One response codec result, independent of the selected upstream API.

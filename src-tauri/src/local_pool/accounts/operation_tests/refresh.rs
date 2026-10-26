@@ -138,10 +138,12 @@ fn model_refresh_accepts_unknown_slugs_and_preserves_last_good_list() {
         Ok(vec!["gpt-future-codex".into()])
     ));
     assert_eq!(account.models, ["gpt-test"]);
-    assert!(account
-        .discovered_models
-        .as_ref()
-        .is_some_and(|models| models.len() == 1 && models[0] == "gpt-future-codex"));
+    assert!(
+        account
+            .discovered_models
+            .as_ref()
+            .is_some_and(|models| models.len() == 1 && models[0] == "gpt-future-codex")
+    );
     assert_eq!(account.effective_models(), ["gpt-future-codex"]);
 
     assert!(!apply_model_discovery(
@@ -182,10 +184,12 @@ fn model_refresh_accepts_unknown_slugs_and_preserves_last_good_list() {
         Ok(vec!["gpt-recovered".into()])
     ));
     assert_eq!(account.models, ["gpt-recovered"]);
-    assert!(account
-        .discovered_models
-        .as_ref()
-        .is_some_and(|models| models.len() == 1 && models[0] == "gpt-recovered"));
+    assert!(
+        account
+            .discovered_models
+            .as_ref()
+            .is_some_and(|models| models.len() == 1 && models[0] == "gpt-recovered")
+    );
     assert_eq!(account.effective_models(), ["gpt-recovered"]);
     assert_eq!(account.account.health, AccountHealthState::Healthy);
     assert!(account.account.last_error_code.is_none());

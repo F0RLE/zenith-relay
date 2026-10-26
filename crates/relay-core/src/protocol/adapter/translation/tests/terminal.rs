@@ -223,10 +223,12 @@ fn responses_stream_failures_name_the_stage_without_echoing_provider_content() {
         )
         .unwrap();
         assert_eq!(error["error"]["param"], parameter);
-        assert!(error["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains(parameter));
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(parameter)
+        );
         assert!(!wire.contains("synthetic-private"));
         assert!(!wire.contains("event: message_stop"));
     }
@@ -291,13 +293,15 @@ fn messages_server_tool_pause_is_not_reported_as_token_exhaustion() {
         assert!(!wire.contains("max_output_tokens"));
         assert!(!wire.contains("MAX_TOKENS"));
     }
-    assert!(prepare(
-        WireApi::Messages,
-        WireApi::Messages,
-        &input(WireApi::Messages),
-        false
-    )
-    .is_passthrough());
+    assert!(
+        prepare(
+            WireApi::Messages,
+            WireApi::Messages,
+            &input(WireApi::Messages),
+            false
+        )
+        .is_passthrough()
+    );
 }
 
 #[test]
@@ -598,9 +602,11 @@ fn messages_refusal_stream_completes_with_client_refusal_reason() {
         while let Some(chunk) = bridge.pop_output() {
             output.extend_from_slice(&chunk);
         }
-        assert!(!String::from_utf8(output)
-            .unwrap()
-            .contains("adapter_upstream_stream_invalid"));
+        assert!(
+            !String::from_utf8(output)
+                .unwrap()
+                .contains("adapter_upstream_stream_invalid")
+        );
     }
 }
 #[test]

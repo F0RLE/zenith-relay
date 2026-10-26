@@ -1,9 +1,9 @@
 use super::{current_time_ms, fence_runtime_candidates, restart_or_rollback};
 use crate::local_pool::{
     accounts::{
+        NativeSecretBackend,
         credentials::CredentialStore,
         proxy::{ProxyPool, ProxyPoolSummary},
-        NativeSecretBackend,
     },
     error::CommandError,
     state::DesktopState,

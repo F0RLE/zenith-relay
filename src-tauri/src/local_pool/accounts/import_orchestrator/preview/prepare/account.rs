@@ -1,6 +1,6 @@
 use super::super::super::ImportedCredentialMaterial;
 use super::super::*;
-use super::{mark_preview_quota_failed, reject_preview_item, PreviewItemFailure};
+use super::{PreviewItemFailure, mark_preview_quota_failed, reject_preview_item};
 
 pub(super) enum AccountPreviewStep {
     Skipped {

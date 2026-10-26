@@ -1,7 +1,7 @@
 use super::super::import_session::SecretBackendError;
 use super::super::oauth::CODEX_OAUTH_CALLBACK_PORTS;
 use super::callback::MAX_REQUEST_HEADER_BYTES;
-use super::callback::{callback_language, callback_success_html, CallbackLanguage};
+use super::callback::{CallbackLanguage, callback_language, callback_success_html};
 use super::snapshot::validate_snapshot;
 use super::snapshot::{ensure_pending_directory, pending_directory};
 use super::*;
@@ -143,8 +143,10 @@ async fn loopback_callback_validates_state_and_stores_only_secret_material() {
         .start_for_account(&CodexOAuthClient::new().unwrap(), None, None)
         .await
         .unwrap();
-    assert!(CODEX_OAUTH_CALLBACK_PORTS
-        .contains(&Url::parse(&start.redirect_uri).unwrap().port().unwrap()));
+    assert!(
+        CODEX_OAUTH_CALLBACK_PORTS
+            .contains(&Url::parse(&start.redirect_uri).unwrap().port().unwrap())
+    );
     let callback = callback_url_for(&start, "authorization-code", None);
 
     let response = send_callback(&start.redirect_uri, &request_target(&callback)).await;
@@ -281,10 +283,12 @@ async fn siwc_webview_callback_keeps_state_validation_and_cancellation_fences() 
             .append_pair("client_id", "oaiapp_synthetic_webview");
         if cancel {
             manager.cancel(&start.login_id).await.unwrap();
-            assert!(manager
-                .submit_manual_callback(&start.login_id, callback.as_str())
-                .await
-                .is_err());
+            assert!(
+                manager
+                    .submit_manual_callback(&start.login_id, callback.as_str())
+                    .await
+                    .is_err()
+            );
             assert!(!secrets.contains(&callback_secret_ref(&start.login_id)));
         } else {
             manager
@@ -297,10 +301,12 @@ async fn siwc_webview_callback_keeps_state_validation_and_cancellation_fences() 
                 .unwrap()
                 .into_parts();
             assert_eq!(pending.client_kind(), OAuthClientKind::Siwc);
-            assert!(manager
-                .submit_manual_callback(&start.login_id, callback.as_str())
-                .await
-                .is_err());
+            assert!(
+                manager
+                    .submit_manual_callback(&start.login_id, callback.as_str())
+                    .await
+                    .is_err()
+            );
             manager.complete(&start.login_id).await.unwrap();
         }
         assert!(!secrets.contains(&callback_secret_ref(&start.login_id)));

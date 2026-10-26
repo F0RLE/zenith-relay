@@ -50,10 +50,12 @@ fn explicit_disabled_reasoning_does_not_require_model_reasoning_support() {
                         "{upstream:?}: {field}"
                     );
                 }
-                assert!(prepared
-                    .upstream_body()
-                    .pointer("/generationConfig/thinkingConfig")
-                    .is_none());
+                assert!(
+                    prepared
+                        .upstream_body()
+                        .pointer("/generationConfig/thinkingConfig")
+                        .is_none()
+                );
             }
         }
     }
@@ -120,9 +122,10 @@ fn reasoning_effort_translation_keeps_target_modes_consistent_across_clients() {
                             &body["output_config"]["effort"]
                         }
                         (WireApi::Gemini, MessagesReasoningMode::Budget) => {
-                            assert!(body
-                                .pointer("/generationConfig/thinkingConfig/thinkingLevel")
-                                .is_none());
+                            assert!(
+                                body.pointer("/generationConfig/thinkingConfig/thinkingLevel")
+                                    .is_none()
+                            );
                             &body["generationConfig"]["thinkingConfig"]["thinkingBudget"]
                         }
                         _ => &body["generationConfig"]["thinkingConfig"]["thinkingLevel"],
@@ -162,8 +165,10 @@ fn messages_adaptive_reasoning_carries_very_high_without_downgrading() {
 fn openai_translation_preserves_explicit_effort_independently_of_messages_mode() {
     let request =
         json!({"messages":[{"role":"user","content":"Hello"}],"reasoning_effort":"vendor_level"});
-    assert!(SourceAdapter::ChatCompletionsToResponses
-        .supports_reasoning_effort(MessagesReasoningMode::Disabled, "vendor_level"));
+    assert!(
+        SourceAdapter::ChatCompletionsToResponses
+            .supports_reasoning_effort(MessagesReasoningMode::Disabled, "vendor_level")
+    );
     let prepared = prepare_reasoning(
         WireApi::ChatCompletions,
         WireApi::Responses,
@@ -227,13 +232,15 @@ fn malformed_or_unrepresentable_reasoning_fields_are_rejected_before_translation
         for (field, expected) in fields.as_object().unwrap() {
             assert_eq!(&native.upstream_body()[field], expected);
         }
-        assert!(prepare_reasoning(
-            client,
-            WireApi::Responses,
-            &request,
-            MessagesReasoningMode::Adaptive,
-        )
-        .is_err());
+        assert!(
+            prepare_reasoning(
+                client,
+                WireApi::Responses,
+                &request,
+                MessagesReasoningMode::Adaptive,
+            )
+            .is_err()
+        );
     }
 }
 
@@ -280,13 +287,15 @@ fn budget_reasoning_translation_preserves_exact_controls_and_explicit_limits() {
         } else {
             json!({"messages":[{"role":"user","content":"Hello"}],"reasoning_effort":"high","max_completion_tokens":8192})
         };
-        assert!(prepare_reasoning(
-            client,
-            WireApi::Messages,
-            &request,
-            MessagesReasoningMode::Budget
-        )
-        .is_err());
+        assert!(
+            prepare_reasoning(
+                client,
+                WireApi::Messages,
+                &request,
+                MessagesReasoningMode::Budget
+            )
+            .is_err()
+        );
         request
             .as_object_mut()
             .unwrap()

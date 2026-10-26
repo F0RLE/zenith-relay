@@ -8,29 +8,28 @@ pub use observations::SourceRead;
 mod stats;
 
 pub use probe::{
-    probe_source_generation, probe_source_generation_with_scope, SourceProbeInput,
-    SourceProbeResult,
+    SourceProbeInput, SourceProbeResult, probe_source_generation,
+    probe_source_generation_with_scope,
 };
 
 pub use capabilities::{
-    endpoint_url_protocol, service_protocol, CapabilityOrigin, CapabilityStatus,
-    ModelEndpointCapability, ProtocolFeature, SourceProtocolConfig, SourceProtocolResolution,
+    CapabilityOrigin, CapabilityStatus, ModelEndpointCapability, ProtocolFeature,
+    SourceProtocolConfig, SourceProtocolResolution, endpoint_url_protocol, service_protocol,
 };
 pub use connector::SourceConnector;
 pub(crate) use discovery::discover_models_with_client;
 pub use discovery::{
-    discover_source_models, discover_source_models_and_protocol_bindings,
-    discover_source_models_for_protocol_bindings, discover_source_with_protocol_config,
-    discover_source_with_protocol_config_with_scope, read_source_models,
-    read_source_models_with_scope, source_catalog_changed, SourceCatalogEvidence,
-    SourceCatalogRecord, SourceDiscovery,
+    SourceCatalogEvidence, SourceCatalogRecord, SourceDiscovery, discover_source_models,
+    discover_source_models_and_protocol_bindings, discover_source_models_for_protocol_bindings,
+    discover_source_with_protocol_config, discover_source_with_protocol_config_with_scope,
+    read_source_models, read_source_models_with_scope, source_catalog_changed,
 };
 pub use stats::{
-    fetch_source_provider_stats, fetch_source_provider_stats_with_proxy,
-    read_source_provider_stats, read_source_provider_stats_with_proxy,
-    read_source_provider_stats_with_scope, read_source_provider_stats_with_scope_and_proxy,
     SourceBalanceKind, SourceProviderStats, SourceStatsAmount, SourceStatsCurrency,
-    SourceStatsProvider, SourceStatsStatus,
+    SourceStatsProvider, SourceStatsStatus, fetch_source_provider_stats,
+    fetch_source_provider_stats_with_proxy, read_source_provider_stats,
+    read_source_provider_stats_with_proxy, read_source_provider_stats_with_scope,
+    read_source_provider_stats_with_scope_and_proxy,
 };
 #[cfg(test)]
 use stats::{openrouter_stats, source_stats_endpoint, source_stats_provider, zenith_stats};
@@ -46,15 +45,15 @@ mod provider;
 mod wire;
 
 pub use binding::{
-    cache_write_model_ids, normalize_source_protocol_bindings,
-    runtime_source_models_for_any_wire_api, runtime_source_models_for_wire_api,
-    runtime_source_models_with_cache_write_pricing, runtime_source_protocol_bindings,
-    runtime_source_supports_any_wire_api, runtime_source_supports_wire_api,
-    source_models_for_wire_api, SourceProtocolBinding, SourceProtocolBindingKey,
+    SourceProtocolBinding, SourceProtocolBindingKey, cache_write_model_ids,
+    normalize_source_protocol_bindings, runtime_source_models_for_any_wire_api,
+    runtime_source_models_for_wire_api, runtime_source_models_with_cache_write_pricing,
+    runtime_source_protocol_bindings, runtime_source_supports_any_wire_api,
+    runtime_source_supports_wire_api, source_models_for_wire_api,
 };
 pub use provider::{
-    is_http_endpoint, is_loopback_url, source_points_to_gateway, url_has_userinfo, LocalGatewayKey,
-    ProviderSource,
+    LocalGatewayKey, ProviderSource, is_http_endpoint, is_loopback_url, source_points_to_gateway,
+    url_has_userinfo,
 };
 pub(crate) use provider::{normalized_base_url, redact_url};
 pub use wire::{CacheWriteTtl, WireApi};

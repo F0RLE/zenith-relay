@@ -1,6 +1,6 @@
 use super::persist;
 use super::record::record_operation;
-use super::{DiagnosticSettings, DEBUG_ENABLED, DEBUG_MARKER_FILE, LOGS_DIRECTORY};
+use super::{DEBUG_ENABLED, DEBUG_MARKER_FILE, DiagnosticSettings, LOGS_DIRECTORY};
 use std::fs::{self, OpenOptions};
 use std::sync::atomic::Ordering;
 

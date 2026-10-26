@@ -81,7 +81,7 @@ impl TranslationStream {
             }
             "response.output_item.done" => self.finish_output_item(event_payload)?,
             "response.completed" | "response.done" | "response.incomplete" => {
-                return self.finish_translated_response(event_payload)
+                return self.finish_translated_response(event_payload);
             }
             "response.failed" => {
                 if !event_payload.get("response").is_some_and(Value::is_object) {

@@ -106,26 +106,30 @@ async fn host_membership_and_key_scope_update_revoke_pending_dispatch_together()
         ..CandidateScope::default()
     };
     // A missing internal key cannot leave the new policy partially applied.
-    assert!(!runtime
-        .set_pool_routing_policy_with_key_scopes(
-            policy.clone(),
-            2,
-            &[("missing".into(), next_scope.clone())],
-        )
-        .unwrap());
+    assert!(
+        !runtime
+            .set_pool_routing_policy_with_key_scopes(
+                policy.clone(),
+                2,
+                &[("missing".into(), next_scope.clone())],
+            )
+            .unwrap()
+    );
     assert_eq!(runtime.request_dispatch_budget(), 3);
     assert_eq!(key.scope_snapshot(), old_scope);
 
     let budget = SharedRequestBudget::for_incoming_request(3);
     let pending = reserve(&runtime, &budget, WireApi::Responses).await;
     assert_eq!(pending.candidate_id(), "source-a");
-    assert!(runtime
-        .set_pool_routing_policy_with_key_scopes(
-            policy.clone(),
-            2,
-            &[("key".into(), next_scope.clone())],
-        )
-        .unwrap());
+    assert!(
+        runtime
+            .set_pool_routing_policy_with_key_scopes(
+                policy.clone(),
+                2,
+                &[("key".into(), next_scope.clone())],
+            )
+            .unwrap()
+    );
     assert_eq!(key.scope_snapshot(), next_scope);
     assert_eq!(
         pending.begin_rotation_http_dispatch(),
@@ -138,9 +142,11 @@ async fn host_membership_and_key_scope_update_revoke_pending_dispatch_together()
     let next_lease = reserve(&runtime, &budget, WireApi::Responses).await;
     assert_eq!(next_lease.candidate_id(), "source-b");
     policy.members[0].weight = 2;
-    assert!(runtime
-        .set_pool_routing_policy_with_key_scopes(policy, 2, &[("key".into(), next_scope)])
-        .unwrap());
+    assert!(
+        runtime
+            .set_pool_routing_policy_with_key_scopes(policy, 2, &[("key".into(), next_scope)])
+            .unwrap()
+    );
     next_lease.begin_rotation_http_dispatch().unwrap();
     next_lease.settle_rotation_success(crate::unix_time_ms());
     assert_eq!(budget.dispatches(), 1);

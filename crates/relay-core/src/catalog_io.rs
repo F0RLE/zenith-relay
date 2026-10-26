@@ -1,5 +1,5 @@
 use reqwest::Response;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},

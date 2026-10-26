@@ -344,9 +344,11 @@ mod tests {
         assert_eq!(details.error_type.as_deref(), Some("INVALID_ARGUMENT"));
         assert_eq!(details.code.as_deref(), Some("future_validation_error"));
         assert!(details.redacted && details.truncated);
-        assert!(!serde_json::to_string(&details)
-            .unwrap()
-            .contains("synthetic-"));
+        assert!(
+            !serde_json::to_string(&details)
+                .unwrap()
+                .contains("synthetic-")
+        );
         assert_eq!(details.sanitized(), details);
     }
 
@@ -399,9 +401,11 @@ mod tests {
             Some("Invalid parameter: input[2].id")
         );
         assert_eq!(detail.http_status, Some(422));
-        assert!(!serde_json::to_string(&detail)
-            .unwrap()
-            .contains("synthetic request content"));
+        assert!(
+            !serde_json::to_string(&detail)
+                .unwrap()
+                .contains("synthetic request content")
+        );
     }
 
     #[test]

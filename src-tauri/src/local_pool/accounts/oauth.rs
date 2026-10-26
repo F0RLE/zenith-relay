@@ -16,7 +16,7 @@ pub use exchange::{OAuthCallback, OAuthTokenSet};
 pub use session::OAuthPendingSession;
 #[cfg(test)]
 pub use zenith_relay_core::providers::chatgpt::CODEX_OAUTH_CLIENT_ID;
-pub use zenith_relay_core::providers::chatgpt::{OAuthClientKind, BASIS_POINTS_OAUTH_REDIRECT_URI};
+pub use zenith_relay_core::providers::chatgpt::{BASIS_POINTS_OAUTH_REDIRECT_URI, OAuthClientKind};
 
 pub const CODEX_OAUTH_ISSUER: &str = "https://auth.openai.com";
 #[cfg(test)]

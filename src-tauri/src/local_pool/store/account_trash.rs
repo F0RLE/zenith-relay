@@ -1,10 +1,10 @@
 use super::{
-    serialize_state, LocalPoolStore, STATE_ACCOUNTS, STATE_ACCOUNT_TRASH, STATE_AUTOMATIONS,
-    STATE_REFRESH_REVISIONS,
+    LocalPoolStore, STATE_ACCOUNT_TRASH, STATE_ACCOUNTS, STATE_AUTOMATIONS,
+    STATE_REFRESH_REVISIONS, serialize_state,
 };
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError, Result},
-    models::{AutomationRecords, LocalAccountRecord, TrashedLocalAccount, MAX_LOCAL_ACCOUNTS},
+    models::{AutomationRecords, LocalAccountRecord, MAX_LOCAL_ACCOUNTS, TrashedLocalAccount},
 };
 use std::collections::BTreeSet;
 

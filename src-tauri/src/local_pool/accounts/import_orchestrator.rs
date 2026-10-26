@@ -1,7 +1,7 @@
 use super::quota_refresh::ConfirmAccountImportResponse;
+use crate::local_pool::accounts::NativeSecretBackend;
 use crate::local_pool::accounts::credentials::CredentialStore;
 use crate::local_pool::accounts::import_session::ImportSessionStore;
-use crate::local_pool::accounts::NativeSecretBackend;
 use crate::local_pool::error::CommandError;
 use crate::local_pool::state::DesktopState;
 use std::path::PathBuf;
@@ -26,7 +26,7 @@ mod refresh_state;
 mod sources;
 
 use account_import::{
-    account_import_proxy, import_account_item, import_proxy, AccountImportOptions,
+    AccountImportOptions, account_import_proxy, import_account_item, import_proxy,
 };
 pub(in crate::local_pool::accounts) use account_lookup::{
     existing_identity_index, find_existing_account,
@@ -39,14 +39,15 @@ pub(super) use confirmation::confirm_local_account_import_inner;
 #[cfg(test)]
 pub(super) use credential_material::lookup_import_account_id;
 pub(in crate::local_pool::accounts) use credential_material::{
-    build_import_credential_material, ImportedCredentialMaterial,
+    ImportedCredentialMaterial, build_import_credential_material,
 };
-pub(super) use documents::normalize_import_input;
 pub use documents::StartAccountImportInput;
+pub(super) use documents::normalize_import_input;
 pub(crate) use documents::{pick_account_import_documents, read_import_documents};
 pub(in crate::local_pool::accounts) use errors::{
-    credential_item_error, credential_local_error, import_item_command_error, import_session_error,
-    model_failure_code, model_item_error, proxy_item_error, ImportItemError, ItemResult,
+    ImportItemError, ItemResult, credential_item_error, credential_local_error,
+    import_item_command_error, import_session_error, model_failure_code, model_item_error,
+    proxy_item_error,
 };
 #[cfg(test)]
 pub(super) use identity::account_id_from_check_response;
@@ -98,9 +99,8 @@ fn record_import_command_result<T>(
 
 mod types;
 pub(super) use types::{
-    AccountImportProgressEvent, ImportRowContext, ACCOUNT_IMPORT_PROGRESS_EVENT,
-    DEFAULT_OPENAI_SOURCE_URL, MAX_ACCOUNT_LABEL_BYTES, MAX_ACCOUNT_PROFILE_RESPONSE_BYTES,
-    MAX_MODELS,
+    ACCOUNT_IMPORT_PROGRESS_EVENT, AccountImportProgressEvent, DEFAULT_OPENAI_SOURCE_URL,
+    ImportRowContext, MAX_ACCOUNT_LABEL_BYTES, MAX_ACCOUNT_PROFILE_RESPONSE_BYTES, MAX_MODELS,
 };
 pub use types::{
     ConfirmAccountImportInput, ImportItemStatus, ImportSessionResponse, PrepareAccountImportInput,

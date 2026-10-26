@@ -301,7 +301,7 @@ impl UsageQuery {
 
 #[cfg(test)]
 mod tests {
-    use super::{merge_model_equivalents, UsageQuery, UsageRange, UsageTotals};
+    use super::{UsageQuery, UsageRange, UsageTotals, merge_model_equivalents};
     use crate::{ApiEquivalentSummary, PriceSource};
 
     #[test]

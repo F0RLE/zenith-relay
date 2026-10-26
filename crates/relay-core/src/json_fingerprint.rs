@@ -29,7 +29,7 @@ impl Write for DigestWriter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     #[test]
     fn streaming_matches_buffered_json_for_escapes_numbers_and_large_payloads() {

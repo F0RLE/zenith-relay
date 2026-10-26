@@ -1,7 +1,7 @@
 use serde::Serialize;
 use std::time::{Duration, Instant};
-use zenith_relay_core::scheduler::refresh::http::{management_http_gate, HttpClass};
-use zenith_relay_core::{error_codes, ProxyConfig};
+use zenith_relay_core::scheduler::refresh::http::{HttpClass, management_http_gate};
+use zenith_relay_core::{ProxyConfig, error_codes};
 
 const DOWNLOAD_URL: &str = "https://speed.cloudflare.com/__down?bytes=5242880";
 const DOWNLOAD_BYTES: u64 = 5 * 1024 * 1024;

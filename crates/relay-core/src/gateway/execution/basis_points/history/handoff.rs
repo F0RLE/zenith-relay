@@ -1,7 +1,7 @@
 //! Observed Codex chat-handoff context, not an ordinary unpaired tool result.
 
 use crate::protocol::AdapterError;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub(in crate::gateway::execution::basis_points) fn is_thread_handoff(item: &Value) -> bool {
     item["type"] == "function_call_output"
@@ -63,10 +63,12 @@ mod tests {
         assert_eq!(lowered["role"], "user");
         assert_eq!(lowered["content"][1]["text"], original["output"]);
         assert!(lowered.get("call_id").is_none());
-        assert!(lowered["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("synthetic-handoff"));
+        assert!(
+            lowered["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("synthetic-handoff")
+        );
         assert_eq!(thread_context(&lowered).unwrap(), None);
     }
 

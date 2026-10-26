@@ -3,7 +3,7 @@
 
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 pub const GENERATOR_VERSION: u8 = 1;
@@ -70,7 +70,14 @@ fn challenge_from_seed(seed: [u8; 32], paths: bool) -> Challenge {
         );
         let turns = 2 + usize::from(seed[4]) % 6;
         let (count, first) = solve_paths(width, height, blocked, turns);
-        ("paths", format!("On an integer grid travel from (0,0) to ({width},{height}) using R=(1,0) or U=(0,1). Never visit ({},{}). Use exactly {turns} turns; a turn means two adjacent different letters, and the first step is not a turn. Count all valid paths and give the lexicographically smallest path with R<U, or an empty string if none. Return only JSON {{\"count\":integer,\"first\":string}}, no explanation or code fences.",blocked.0,blocked.1), json!({"count":count,"first":first}))
+        (
+            "paths",
+            format!(
+                "On an integer grid travel from (0,0) to ({width},{height}) using R=(1,0) or U=(0,1). Never visit ({},{}). Use exactly {turns} turns; a turn means two adjacent different letters, and the first step is not a turn. Count all valid paths and give the lexicographically smallest path with R<U, or an empty string if none. Return only JSON {{\"count\":integer,\"first\":string}}, no explanation or code fences.",
+                blocked.0, blocked.1
+            ),
+            json!({"count":count,"first":first}),
+        )
     } else {
         let mut rows = Vec::new();
         for index in 0..10 {

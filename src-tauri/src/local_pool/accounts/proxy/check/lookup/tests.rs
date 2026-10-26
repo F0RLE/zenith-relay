@@ -48,7 +48,7 @@ fn timezone_and_country_are_not_guessed() {
 
 #[tokio::test]
 async fn enrichment_uses_the_selected_proxy_and_the_explicit_observed_ip() {
-    use axum::{http::HeaderMap, routing::get, Json, Router};
+    use axum::{Json, Router, http::HeaderMap, routing::get};
     let app = Router::new().route(
         "/203.0.113.9",
         get(|headers: HeaderMap| async move {
@@ -76,14 +76,16 @@ async fn enrichment_uses_the_selected_proxy_and_the_explicit_observed_ip() {
     .await
     .unwrap();
     assert_eq!(result.city.as_deref(), Some("Amsterdam"));
-    assert!(lookup(
-        &proxy,
-        "203.0.113.10".parse().unwrap(),
-        Some("NL"),
-        "http://unreachable.invalid/",
-        Duration::from_secs(1)
-    )
-    .await
-    .is_err());
+    assert!(
+        lookup(
+            &proxy,
+            "203.0.113.10".parse().unwrap(),
+            Some("NL"),
+            "http://unreachable.invalid/",
+            Duration::from_secs(1)
+        )
+        .await
+        .is_err()
+    );
     server.abort();
 }

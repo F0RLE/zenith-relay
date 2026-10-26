@@ -1,6 +1,6 @@
-use super::{ModelDiscoveryFailure, ModelDiscoveryFailureCode, MAX_MODELS};
+use super::{MAX_MODELS, ModelDiscoveryFailure, ModelDiscoveryFailureCode};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashSet;
 use url::Url;
 
@@ -221,16 +221,18 @@ mod tests {
             access.manifest()["models"][0]["display_name"].as_str(),
             Some("gpt-test-b")
         );
-        assert!(parse_basis_points_model_access(br#"{"allowed":false}"#)
-            .unwrap()
-            .models
-            .is_empty());
-        assert!(parse_basis_points_model_access(
-            br#"{"allowed":true,"model_catalog":{"models":[]}}"#
-        )
-        .unwrap()
-        .models
-        .is_empty());
+        assert!(
+            parse_basis_points_model_access(br#"{"allowed":false}"#)
+                .unwrap()
+                .models
+                .is_empty()
+        );
+        assert!(
+            parse_basis_points_model_access(br#"{"allowed":true,"model_catalog":{"models":[]}}"#)
+                .unwrap()
+                .models
+                .is_empty()
+        );
         let malformed_row = parse_basis_points_model_access(
             br#"{"allowed":true,"model_catalog":{"models":[
                 {"id":"gpt-valid"},

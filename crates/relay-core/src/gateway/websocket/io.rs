@@ -18,8 +18,8 @@ where
 mod tests {
     use super::*;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     #[tokio::test(start_paused = true)]
@@ -43,13 +43,7 @@ mod tests {
         for success in [true, false] {
             let mut socket = Box::pin(futures_util::sink::unfold(
                 (),
-                move |(), _: u8| async move {
-                    if success {
-                        Ok(())
-                    } else {
-                        Err(())
-                    }
-                },
+                move |(), _: u8| async move { if success { Ok(()) } else { Err(()) } },
             ));
             let started = tokio::time::Instant::now();
             assert_eq!(send_message(&mut socket, 1).await.is_ok(), success);

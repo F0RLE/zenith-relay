@@ -40,15 +40,21 @@ fn basis_points_headers_match_excel_client_contract() {
     assert_eq!(headers.get("user-agent").unwrap(), "captured-agent/1");
     assert_eq!(headers.get("x-openai-account-user-id").unwrap(), "user-1");
     assert!(headers.get("x-stainless-runtime-version").is_none());
-    assert!(headers
-        .get("x-openai-internal-basispoints-browser-name")
-        .is_none());
-    assert!(headers
-        .get("x-openai-internal-basispoints-browser-ua-platform")
-        .is_none());
-    assert!(headers
-        .get("x-openai-internal-basispoints-oiiice-host")
-        .is_none());
+    assert!(
+        headers
+            .get("x-openai-internal-basispoints-browser-name")
+            .is_none()
+    );
+    assert!(
+        headers
+            .get("x-openai-internal-basispoints-browser-ua-platform")
+            .is_none()
+    );
+    assert!(
+        headers
+            .get("x-openai-internal-basispoints-oiiice-host")
+            .is_none()
+    );
 }
 #[test]
 fn ordinary_accounts_use_native_responses() {
@@ -329,9 +335,11 @@ async fn model_inventory_refresh_keeps_live_capacity_health_and_exact_dispatch_o
         })
         .unwrap();
     assert!(runtime.update_account_models("account-1", &["gpt-added".into()]));
-    assert!(runtime
-        .visible_models(&key, &[WireApi::Responses], now)
-        .contains(&"gpt-added".to_string()));
+    assert!(
+        runtime
+            .visible_models(&key, &[WireApi::Responses], now)
+            .contains(&"gpt-added".to_string())
+    );
     assert_eq!(
         pending.begin_rotation_http_dispatch(),
         Err(crate::scheduler::rotation::DispatchStartError::CandidateChanged)
@@ -349,26 +357,30 @@ async fn model_inventory_refresh_keeps_live_capacity_health_and_exact_dispatch_o
         .is_err(),
         "new inventory must not bypass the old physical lease"
     );
-    assert!(started
-        .settle_rotation(
-            crate::scheduler::rotation::AttemptObservation {
-                execution: crate::scheduler::rotation::ExecutionObservation::committed(),
-                health: crate::scheduler::rotation::HealthObservation::Success,
-            },
-            crate::unix_time_ms(),
-        )
-        .unwrap()
-        .is_some());
-    assert!(started
-        .settle_rotation(
-            crate::scheduler::rotation::AttemptObservation {
-                execution: crate::scheduler::rotation::ExecutionObservation::committed(),
-                health: crate::scheduler::rotation::HealthObservation::Success,
-            },
-            crate::unix_time_ms(),
-        )
-        .unwrap()
-        .is_none());
+    assert!(
+        started
+            .settle_rotation(
+                crate::scheduler::rotation::AttemptObservation {
+                    execution: crate::scheduler::rotation::ExecutionObservation::committed(),
+                    health: crate::scheduler::rotation::HealthObservation::Success,
+                },
+                crate::unix_time_ms(),
+            )
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        started
+            .settle_rotation(
+                crate::scheduler::rotation::AttemptObservation {
+                    execution: crate::scheduler::rotation::ExecutionObservation::committed(),
+                    health: crate::scheduler::rotation::HealthObservation::Success,
+                },
+                crate::unix_time_ms(),
+            )
+            .unwrap()
+            .is_none()
+    );
     let (_, added) = reserve_account(&runtime, &key, "gpt-added", &added_budget, now)
         .await
         .unwrap();
@@ -386,15 +398,17 @@ async fn model_inventory_refresh_keeps_live_capacity_health_and_exact_dispatch_o
         CandidateHealth::Blocked,
         "inventory edits are not positive health evidence"
     );
-    assert!(reserve_account(
-        &runtime,
-        &key,
-        "gpt-new",
-        &SharedRequestBudget::for_incoming_request(3),
-        now
-    )
-    .await
-    .is_none());
+    assert!(
+        reserve_account(
+            &runtime,
+            &key,
+            "gpt-new",
+            &SharedRequestBudget::for_incoming_request(3),
+            now
+        )
+        .await
+        .is_none()
+    );
 }
 #[test]
 fn model_inventory_refresh_keeps_native_images_and_retires_old_transport_evidence() {
@@ -409,9 +423,11 @@ fn model_inventory_refresh_keeps_native_images_and_retires_old_transport_evidenc
         1,
     );
     assert!(runtime.update_account_models("account-1", &["gpt-5.6-sol".into()]));
-    assert!(runtime
-        .stale_codex_model_manifests(["account-1"])
-        .is_empty());
+    assert!(
+        runtime
+            .stale_codex_model_manifests(["account-1"])
+            .is_empty()
+    );
     assert_eq!(
         runtime
             .image_executor_route(
@@ -425,14 +441,16 @@ fn model_inventory_refresh_keeps_native_images_and_retires_old_transport_evidenc
         IMAGE_API_MODEL
     );
     assert!(runtime.update_account_models("account-1", &["gpt-test".into()]));
-    assert!(runtime
-        .image_executor_route(
-            "account-1",
-            IMAGE_API_MODEL,
-            &scope,
-            &[WireApi::ChatCompletions],
-        )
-        .is_some());
+    assert!(
+        runtime
+            .image_executor_route(
+                "account-1",
+                IMAGE_API_MODEL,
+                &scope,
+                &[WireApi::ChatCompletions],
+            )
+            .is_some()
+    );
 }
 #[tokio::test]
 async fn removed_and_reintroduced_model_cannot_reuse_an_old_pending_lease() {

@@ -1,11 +1,12 @@
 use super::io::{prepared_secret_ref, prepared_snapshot_path, secret_ref, snapshot_path};
 use super::{
-    ImportSession, ImportSessionError, ImportSessionErrorCode, SessionSnapshot, MAX_SNAPSHOT_BYTES,
+    ImportSession, ImportSessionError, ImportSessionErrorCode, MAX_SNAPSHOT_BYTES,
     MAX_SNAPSHOT_DEPTH, MAX_SNAPSHOT_NODES, MAX_SNAPSHOT_STRING_BYTES, SNAPSHOT_VERSION,
+    SessionSnapshot,
 };
 use serde_json::Value;
 use std::{fs, path::Path};
-use zenith_relay_core::accounts::{parse_import, ImportPreview, ParsedImport, MAX_IMPORT_ITEMS};
+use zenith_relay_core::accounts::{ImportPreview, MAX_IMPORT_ITEMS, ParsedImport, parse_import};
 
 pub(in crate::local_pool::accounts::import_session) fn parse_stable(
     content: &str,

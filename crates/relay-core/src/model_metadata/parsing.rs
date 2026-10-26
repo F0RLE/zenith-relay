@@ -1,6 +1,6 @@
 use super::{
-    order, ModelCapabilities, ModelMetadata, ModelMetadataError, ReasoningMethod, MAX_RECORDS,
-    MAX_STRING_LENGTH,
+    MAX_RECORDS, MAX_STRING_LENGTH, ModelCapabilities, ModelMetadata, ModelMetadataError,
+    ReasoningMethod, order,
 };
 use crate::model_metadata::reasoning::{
     normalize_external_levels, parse_effort_flags, parse_reasoning_object, parse_reasoning_options,

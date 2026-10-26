@@ -3,7 +3,7 @@
 use super::*;
 use futures_util::{SinkExt, StreamExt};
 use reqwest_websocket::{Message, Upgrade};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[tokio::test]
 async fn http_sse_websocket_and_images_report_local_overload_without_upstream_activity() {

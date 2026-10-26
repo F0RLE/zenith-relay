@@ -210,11 +210,13 @@ fn remembered_names_use_current_schemas_and_never_restore_removed_or_disallowed_
         .unwrap();
     assert!(contracts.contains("\"minLength\":7"));
     assert!(!contracts.contains("removed.tool"));
-    assert!(translate_response(
-        &serde_json::to_vec(&response("files.write", json!({"text":"short"}))).unwrap(),
-        &request
-    )
-    .is_err());
+    assert!(
+        translate_response(
+            &serde_json::to_vec(&response("files.write", json!({"text":"short"}))).unwrap(),
+            &request
+        )
+        .is_err()
+    );
     request["tool_choice"] = json!({"type":"function","name":"files.read"});
     let mut session = DiscoverySession::new(&request, true).unwrap().unwrap();
     let mut upstream = prepare_request(&request).unwrap();
@@ -288,9 +290,11 @@ fn invalid_local_lookups_return_bounded_tool_errors_without_executing_client_too
     ] {
         let mut session = DiscoverySession::new(&request(), true).unwrap().unwrap();
         let mut upstream = prepare_request(&request()).unwrap();
-        assert!(session
-            .advance(&response(LOOKUP_TOOL, args), &mut upstream)
-            .unwrap());
+        assert!(
+            session
+                .advance(&response(LOOKUP_TOOL, args), &mut upstream)
+                .unwrap()
+        );
         let result = upstream["input"].as_array().unwrap().last().unwrap();
         let output: Value = serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
         assert_eq!(output["error"], "invalid_catalog_lookup");
@@ -388,12 +392,14 @@ fn discovery_budget_excludes_admitted_history_but_bounds_added_state() {
     request["input"] = json!("x".repeat(MAX_CONTINUATION_BYTES));
     let mut upstream = prepare_request(&request).unwrap();
     let mut session = DiscoverySession::new(&request, true).unwrap().unwrap();
-    assert!(session
-        .advance(
-            &response(LOOKUP_TOOL, json!({"names":["files.read"]})),
-            &mut upstream
-        )
-        .unwrap());
+    assert!(
+        session
+            .advance(
+                &response(LOOKUP_TOOL, json!({"names":["files.read"]})),
+                &mut upstream
+            )
+            .unwrap()
+    );
 
     let mut lookup = response(LOOKUP_TOOL, json!({"names":["files.read"]}));
     lookup["output"][0]["call_id"] = json!("lookup_too_large");
@@ -457,12 +463,14 @@ fn client_calls_cannot_reuse_a_history_or_local_lookup_identity() {
     ]);
     let mut upstream = prepare_request(&request).unwrap();
     let mut session = DiscoverySession::new(&request, true).unwrap().unwrap();
-    assert!(session
-        .advance(
-            &response(LOOKUP_TOOL, json!({"names":["files.read"]})),
-            &mut upstream
-        )
-        .unwrap());
+    assert!(
+        session
+            .advance(
+                &response(LOOKUP_TOOL, json!({"names":["files.read"]})),
+                &mut upstream
+            )
+            .unwrap()
+    );
     for reused in ["call_history", "call_synthetic", " \t "] {
         let mut client = response("files.read", json!({"path":"synthetic"}));
         client["output"][0]["call_id"] = json!(reused);
@@ -540,11 +548,13 @@ fn opaque_reasoning_and_text_replay_unchanged_inside_the_owned_turn() {
     let mut final_response = json!({"output":[]});
     session.finish(&mut final_response);
     assert_eq!(final_response["output"], json!([reasoning, text, search]));
-    assert!(final_response["output"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|item| item["type"] != "function_call"));
+    assert!(
+        final_response["output"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["type"] != "function_call")
+    );
 }
 
 #[test]
@@ -612,21 +622,25 @@ fn explicitly_selected_preloads_keep_existing_deferral_and_size_limits() {
     let mut request = request();
     request["tool_choice"] = json!({"type":"function","name":"files.read"});
     request["tools"][0]["tools"][0]["defer_loading"] = json!(true);
-    assert!(DiscoverySession::new(&request, true)
-        .unwrap()
-        .unwrap()
-        .loaded
-        .is_empty());
+    assert!(
+        DiscoverySession::new(&request, true)
+            .unwrap()
+            .unwrap()
+            .loaded
+            .is_empty()
+    );
     request["tools"][0]["tools"][0]
         .as_object_mut()
         .unwrap()
         .remove("defer_loading");
     request["tools"][0]["tools"][0]["description"] = json!("x".repeat(17 * 1024));
-    assert!(DiscoverySession::new(&request, true)
-        .unwrap()
-        .unwrap()
-        .loaded
-        .is_empty());
+    assert!(
+        DiscoverySession::new(&request, true)
+            .unwrap()
+            .unwrap()
+            .loaded
+            .is_empty()
+    );
 }
 
 #[test]
@@ -643,7 +657,9 @@ fn synthetic_large_catalog_reduces_initial_prompt_without_removing_tools() {
     let full = prepare_request(&request).unwrap().to_string().len();
     assert!(automatic < compact / 3);
     assert!(compact < full);
-    eprintln!("synthetic tools=291 request_json_bytes full={full} compact={compact} discovery={automatic}; not token or live billing evidence");
+    eprintln!(
+        "synthetic tools=291 request_json_bytes full={full} compact={compact} discovery={automatic}; not token or live billing evidence"
+    );
 }
 
 #[test]
@@ -678,16 +694,20 @@ fn initial_index_size_does_not_grow_with_verbose_descriptions_or_argument_names(
         serde_json::from_str(verbose_index.split_once("Tool index:\n").unwrap().1).unwrap();
     assert_eq!(index["function"][""].as_array().unwrap().len(), tools.len());
     for tool in &tools {
-        assert!(index["function"][""]
-            .as_array()
-            .unwrap()
-            .contains(&json!(tool.name)));
+        assert!(
+            index["function"][""]
+                .as_array()
+                .unwrap()
+                .contains(&json!(tool.name))
+        );
     }
     let indexed = prepare_request(&request).unwrap().to_string().len();
     request[OPTION] = json!("compact");
     let compact = prepare_request(&request).unwrap().to_string().len();
     assert!(indexed < compact / 10);
-    eprintln!("synthetic verbose tools=291 request_json_bytes compact={compact} discovery={indexed}; not token or live billing evidence");
+    eprintln!(
+        "synthetic verbose tools=291 request_json_bytes compact={compact} discovery={indexed}; not token or live billing evidence"
+    );
 }
 
 #[test]
@@ -772,15 +792,17 @@ fn grouped_index_preserves_nested_namespaces_custom_kinds_and_flat_dotted_names(
     assert_eq!(prepared["input"][0], reordered["input"][0]);
     let mut session = DiscoverySession::new(&request, true).unwrap().unwrap();
     let mut upstream = reordered;
-    assert!(session
-        .advance(
-            &response(
-                LOOKUP_TOOL,
-                json!({"names":["workspace.files.read","flat.dotted","patch"]})
-            ),
-            &mut upstream
-        )
-        .unwrap());
+    assert!(
+        session
+            .advance(
+                &response(
+                    LOOKUP_TOOL,
+                    json!({"names":["workspace.files.read","flat.dotted","patch"]})
+                ),
+                &mut upstream
+            )
+            .unwrap()
+    );
     let output: Value = serde_json::from_str(
         upstream["input"].as_array().unwrap().last().unwrap()["output"]
             .as_str()
@@ -819,16 +841,20 @@ fn known_contracts_use_lossless_compact_schemas_after_unchanged_history_and_pref
     assert!(known.contains("\"minLength\":1"));
     assert!(!known.contains("Write a file"));
     assert!(!known.contains("patch (custom)"));
-    assert!(input
-        .iter()
-        .any(|item| item["output"] == "Synthetic tool result remains unchanged."));
+    assert!(
+        input
+            .iter()
+            .any(|item| item["output"] == "Synthetic tool result remains unchanged.")
+    );
     assert_eq!(input[2]["content"][0]["text"], request["instructions"]);
     assert_eq!(request, before);
-    assert!(translate_response(
-        &serde_json::to_vec(&response("files.read", json!({"path":""}))).unwrap(),
-        &request
-    )
-    .is_err());
+    assert!(
+        translate_response(
+            &serde_json::to_vec(&response("files.read", json!({"path":""}))).unwrap(),
+            &request
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -909,5 +935,8 @@ fn namespace_grouping_reduces_a_synthetic_index_without_dropping_tools() {
             .sum::<usize>(),
         300
     );
-    eprintln!("synthetic 300-tool index bytes: prior_flat_list={prior_flat_list_bytes}, grouped_with_lookup_instructions={}; not live token evidence", grouped.len());
+    eprintln!(
+        "synthetic 300-tool index bytes: prior_flat_list={prior_flat_list_bytes}, grouped_with_lookup_instructions={}; not live token evidence",
+        grouped.len()
+    );
 }

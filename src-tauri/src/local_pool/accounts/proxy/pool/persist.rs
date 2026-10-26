@@ -1,5 +1,5 @@
 use super::super::{MAX_PROXY_POOL_ENTRIES, PROXY_POOL_VERSION};
-use super::{valid_label, PersistedProxyPool, ProxyPool, StoredProxy, PROXY_POOL_SECRET_REF};
+use super::{PROXY_POOL_SECRET_REF, PersistedProxyPool, ProxyPool, StoredProxy, valid_label};
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError, Result},
     store::secret_store,

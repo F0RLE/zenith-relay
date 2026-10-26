@@ -10,17 +10,17 @@ use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::{configured_codex_client_version, valid_codex_client_version};
 use crate::runtime::{AuthenticatedKey, AuthorizationIdentityPolicy};
 use crate::{
-    codex_model_is_picker_eligible_for, is_valid_model_id, routed_codex_catalog_entry,
-    GatewayRuntime, WireApi,
+    GatewayRuntime, WireApi, codex_model_is_picker_eligible_for, is_valid_model_id,
+    routed_codex_catalog_entry,
 };
+use axum::Json;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, Response, StatusCode, Uri};
 use axum::response::IntoResponse;
-use axum::Json;
-use futures_util::{stream, StreamExt};
-use serde_json::{json, Value};
+use futures_util::{StreamExt, stream};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;

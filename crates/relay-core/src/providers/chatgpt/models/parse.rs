@@ -1,7 +1,7 @@
 use super::super::{valid_access_token, valid_codex_client_version};
 use super::{
-    ModelDiscoveryFailure, ModelDiscoveryFailureCode, MAX_ACCOUNT_ID_BYTES, MAX_MODELS,
-    MAX_MODEL_SLUG_BYTES,
+    MAX_ACCOUNT_ID_BYTES, MAX_MODEL_SLUG_BYTES, MAX_MODELS, ModelDiscoveryFailure,
+    ModelDiscoveryFailureCode,
 };
 use serde::Deserialize;
 use std::collections::HashSet;

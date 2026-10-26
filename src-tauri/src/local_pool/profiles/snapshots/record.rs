@@ -1,8 +1,8 @@
 use super::codex::{self, UserProfileSnapshot};
 use super::io::{self, SnapshotSecrets};
 use super::{
-    ProfileSnapshotSummary, MAX_METADATA_BYTES, MAX_NAME_CHARS, MAX_PROFILE_FILE_BYTES,
-    PAYLOAD_VERSION, SNAPSHOT_VERSION,
+    MAX_METADATA_BYTES, MAX_NAME_CHARS, MAX_PROFILE_FILE_BYTES, PAYLOAD_VERSION,
+    ProfileSnapshotSummary, SNAPSHOT_VERSION,
 };
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
 use serde::{Deserialize, Serialize};

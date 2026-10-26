@@ -1,6 +1,6 @@
 use super::*;
-use zenith_relay_core::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
 use zenith_relay_core::ProtocolFeature;
+use zenith_relay_core::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
 
 #[tokio::test]
 async fn reasoning_checks_exact_capabilities_and_preserves_supported_native_extensions() {

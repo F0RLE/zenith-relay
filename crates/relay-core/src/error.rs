@@ -75,7 +75,7 @@ fn valid_error_code(error_code: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_error_code, safe_error_code, Error};
+    use super::{Error, normalize_error_code, safe_error_code};
 
     #[test]
     fn upstream_discovery_status_is_actionable_without_exposing_response_body() {

@@ -1,6 +1,6 @@
 use super::*;
 use crate::local_pool::store::retired_accounts::{STATE_OWNERSHIP_OPERATION, STATE_REMOTE_TARGET};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[test]
 fn retired_server_state_is_archived_and_pending_accounts_are_quarantined() {
@@ -63,9 +63,11 @@ fn retired_server_state_is_archived_and_pending_accounts_are_quarantined() {
         Some("null")
     );
 
-    assert!(store
-        .recover_account_locally("account-pending", false)
-        .is_err());
+    assert!(
+        store
+            .recover_account_locally("account-pending", false)
+            .is_err()
+    );
     assert!(store.account("account-pending").unwrap().recovery.is_some());
     store
         .recover_account_locally("account-pending", true)
@@ -77,11 +79,13 @@ fn retired_server_state_is_archived_and_pending_accounts_are_quarantined() {
     drop(store);
 
     let reopened = LocalPoolStore::open(root.clone()).unwrap();
-    assert!(reopened
-        .account("account-pending")
-        .unwrap()
-        .recovery
-        .is_none());
+    assert!(
+        reopened
+            .account("account-pending")
+            .unwrap()
+            .recovery
+            .is_none()
+    );
     assert_eq!(reopened.account("account-untouched"), Some(&untouched));
     assert_eq!(
         serde_json::from_str::<Value>(
@@ -133,10 +137,12 @@ fn invalid_retired_ownership_is_preserved_without_a_partial_archive() {
         database.state_json(STATE_OWNERSHIP_OPERATION).unwrap(),
         Some(invalid)
     );
-    assert!(database
-        .state_json("retired_server_state")
-        .unwrap()
-        .is_none());
+    assert!(
+        database
+            .state_json("retired_server_state")
+            .unwrap()
+            .is_none()
+    );
     drop(database);
     fs::remove_dir_all(root).unwrap();
 }

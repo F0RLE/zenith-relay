@@ -245,9 +245,11 @@ mod tests {
             repeated.exhaustion_transition_fingerprint,
             exhausted.exhaustion_transition_fingerprint
         );
-        assert!(repeated
-            .exhaustion_transition_from(Some(&exhausted))
-            .is_none());
+        assert!(
+            repeated
+                .exhaustion_transition_from(Some(&exhausted))
+                .is_none()
+        );
         let repeated_transition = repeated.exhaustion_transition().unwrap();
         assert_eq!(repeated_transition.fingerprint, transition.fingerprint);
         assert_eq!(

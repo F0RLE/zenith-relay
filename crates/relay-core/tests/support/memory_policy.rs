@@ -107,12 +107,16 @@ async fn memory_policy_http_blocks_before_dispatch_and_preserves_chat_and_other_
             Some(zenith_relay_core::ErrorOrigin::Relay)
         );
     }
-    assert!(events
-        .iter()
-        .any(|event| event.error_category.as_deref() == Some("codex_memory_extraction")));
-    assert!(events
-        .iter()
-        .any(|event| event.error_category.as_deref() == Some("codex_memory_consolidation")));
+    assert!(
+        events
+            .iter()
+            .any(|event| event.error_category.as_deref() == Some("codex_memory_extraction"))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event.error_category.as_deref() == Some("codex_memory_consolidation"))
+    );
 }
 
 #[tokio::test]

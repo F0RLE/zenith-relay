@@ -113,9 +113,11 @@ mod tests {
             assert_ne!(fitted, identifier);
             assert!(fitted.starts_with(prefix));
             assert!(fitted.len() <= RESPONSES_ID_LIMIT);
-            assert!(fitted
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')));
+            assert!(
+                fitted
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            );
             assert_eq!(fit_responses_id(identifier), fitted);
             assert_eq!(fit_responses_id(&fitted), fitted);
         }

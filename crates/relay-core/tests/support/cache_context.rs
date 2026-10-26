@@ -209,11 +209,13 @@ async fn native_responses_preserves_cache_prefix_and_does_not_duplicate_history(
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK, "stream={stream}");
-            assert!(response
-                .text()
-                .await
-                .unwrap()
-                .contains("resp_synthetic_cache"));
+            assert!(
+                response
+                    .text()
+                    .await
+                    .unwrap()
+                    .contains("resp_synthetic_cache")
+            );
         }
         assert_eq!(
             *observed.lock().unwrap(),

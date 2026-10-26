@@ -9,7 +9,9 @@ async fn model_identity_http_rotates_only_before_generated_output() {
                 json!({"model": "different-model", "output": [{"type": "message", "content": [{"type": "output_text", "text": "already generated"}]}]}),
             )
         } else {
-            Reply::Stream(vec![StreamChunk::Data("data: {\"type\":\"response.created\",\"response\":{\"model\":\"different-model\"}}\n\n")])
+            Reply::Stream(vec![StreamChunk::Data(
+                "data: {\"type\":\"response.created\",\"response\":{\"model\":\"different-model\"}}\n\n",
+            )])
         };
         let (first, first_state) = spawn_upstream(vec![reply]).await;
         let (second, second_state) = spawn_upstream(vec![success_reply("correct-response")]).await;

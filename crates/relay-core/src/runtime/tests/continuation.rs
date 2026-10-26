@@ -79,10 +79,11 @@ fn hot_runtime_replacement_preserves_continuations_and_late_completions() {
         let request = serde_json::json!({
             "model":"gpt-test", "previous_response_id":response.response_id, "input":"continue"
         });
-        assert!(next
-            .load_adapter_continuation(&next_route, "key-1", &request, current_time_ms())
-            .unwrap()
-            .is_some());
+        assert!(
+            next.load_adapter_continuation(&next_route, "key-1", &request, current_time_ms())
+                .unwrap()
+                .is_some()
+        );
         assert!(Arc::ptr_eq(
             &old.adapter_continuation_store,
             &next.adapter_continuation_store
@@ -162,28 +163,31 @@ fn hot_runtime_replacement_preserves_bounded_native_replay() {
         }),
         current_time_ms(),
     );
-    assert!(next
-        .load_native_responses_replay(
+    assert!(
+        next.load_native_responses_replay(
             "key-1",
             "resp_native_synthetic",
             "source-1",
             current_time_ms()
         )
-        .is_some());
-    assert!(next
-        .load_native_responses_replay(
+        .is_some()
+    );
+    assert!(
+        next.load_native_responses_replay(
             "other-key",
             "resp_native_synthetic",
             "source-1",
             current_time_ms()
         )
-        .is_none());
-    assert!(next
-        .load_native_responses_replay(
+        .is_none()
+    );
+    assert!(
+        next.load_native_responses_replay(
             "key-1",
             "resp_native_synthetic",
             "other-source",
             current_time_ms()
         )
-        .is_none());
+        .is_none()
+    );
 }

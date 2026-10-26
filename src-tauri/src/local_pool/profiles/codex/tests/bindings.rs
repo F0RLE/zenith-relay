@@ -141,9 +141,11 @@ model = "gpt-native"
         0
     );
     assert_eq!(account_bindings(&backups).unwrap().len(), 1);
-    assert!(fs::read_to_string(home.join(AUTH_FILE))
-        .unwrap()
-        .contains("access-refreshed"));
+    assert!(
+        fs::read_to_string(home.join(AUTH_FILE))
+            .unwrap()
+            .contains("access-refreshed")
+    );
 
     let restored = restore_account_with(&home, &backups, &secrets)
         .unwrap()
@@ -153,9 +155,11 @@ model = "gpt-native"
         fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
         previous_config
     );
-    assert!(fs::read_to_string(home.join(AUTH_FILE))
-        .unwrap()
-        .contains("previous"));
+    assert!(
+        fs::read_to_string(home.join(AUTH_FILE))
+            .unwrap()
+            .contains("previous")
+    );
     assert!(account_bindings(&backups).unwrap().is_empty());
     fs::remove_dir_all(root).unwrap();
 }
@@ -267,15 +271,17 @@ fn managed_profile_rotation_is_adopted_only_for_the_same_account() {
         sync_account_bindings(&backups, "account-local", &rotated, "provider-account").unwrap(),
         1
     );
-    assert!(managed_account_token_update(
-        &home,
-        &backups,
-        "account-local",
-        &rotated,
-        "provider-account",
-    )
-    .unwrap()
-    .is_none());
+    assert!(
+        managed_account_token_update(
+            &home,
+            &backups,
+            "account-local",
+            &rotated,
+            "provider-account",
+        )
+        .unwrap()
+        .is_none()
+    );
 
     let other = TokenSet::new(
         "other-access",
@@ -291,15 +297,17 @@ fn managed_profile_rotation_is_adopted_only_for_the_same_account() {
         account_auth_content(&other, "provider-other").unwrap(),
     )
     .unwrap();
-    assert!(managed_account_token_update(
-        &home,
-        &backups,
-        "account-local",
-        &rotated,
-        "provider-account",
-    )
-    .unwrap()
-    .is_none());
+    assert!(
+        managed_account_token_update(
+            &home,
+            &backups,
+            "account-local",
+            &rotated,
+            "provider-account",
+        )
+        .unwrap()
+        .is_none()
+    );
     fs::remove_dir_all(root).unwrap();
 }
 #[test]
@@ -366,15 +374,17 @@ fn managed_profile_refresh_only_rotation_updates_other_bound_profiles() {
     let peer_auth = fs::read_to_string(peer.join(AUTH_FILE)).unwrap();
     assert!(peer_auth.contains("refresh-rotated"));
     assert!(peer_auth.contains("id-rotated"));
-    assert!(managed_account_token_update(
-        &home,
-        &backups,
-        "account-local",
-        &rotated,
-        "provider-account",
-    )
-    .unwrap()
-    .is_none());
+    assert!(
+        managed_account_token_update(
+            &home,
+            &backups,
+            "account-local",
+            &rotated,
+            "provider-account",
+        )
+        .unwrap()
+        .is_none()
+    );
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -439,12 +449,16 @@ fn switching_account_and_local_gateway_preserves_the_original_profile() {
     assert_eq!(profile_backup_count(&backups), 1);
     restore_with(&home, &backups, &secrets).unwrap();
 
-    assert!(fs::read_to_string(home.join(CONFIG_FILE))
-        .unwrap()
-        .contains("model_provider = \"custom\""));
-    assert!(fs::read_to_string(home.join(AUTH_FILE))
-        .unwrap()
-        .contains("original"));
+    assert!(
+        fs::read_to_string(home.join(CONFIG_FILE))
+            .unwrap()
+            .contains("model_provider = \"custom\"")
+    );
+    assert!(
+        fs::read_to_string(home.join(AUTH_FILE))
+            .unwrap()
+            .contains("original")
+    );
     assert_eq!(profile_backup_count(&backups), 0);
     fs::remove_dir_all(root).unwrap();
 }
@@ -585,12 +599,16 @@ fn local_gateway_projects_and_syncs_a_bound_oauth_profile() {
         binding.bound_oauth_account_id.as_deref(),
         Some("account-local")
     );
-    assert!(fs::read_to_string(home.join(CONFIG_FILE))
-        .unwrap()
-        .contains("model_provider = \"zenith_relay_local\""));
-    assert!(fs::read_to_string(home.join(CONFIG_FILE))
-        .unwrap()
-        .contains("experimental_bearer_token = \"zlr_key\""));
+    assert!(
+        fs::read_to_string(home.join(CONFIG_FILE))
+            .unwrap()
+            .contains("model_provider = \"zenith_relay_local\"")
+    );
+    assert!(
+        fs::read_to_string(home.join(CONFIG_FILE))
+            .unwrap()
+            .contains("experimental_bearer_token = \"zlr_key\"")
+    );
     let projected = fs::read_to_string(home.join(AUTH_FILE)).unwrap();
     assert!(projected.contains("bound-access"));
     assert!(!projected.contains("zlr_key"));
@@ -609,33 +627,43 @@ fn local_gateway_projects_and_syncs_a_bound_oauth_profile() {
         2,
     )
     .unwrap();
-    assert!(sync_local_gateway_binding(
-        &home,
-        &backups,
-        "account-local",
-        &refreshed,
-        "provider-account",
-    )
-    .unwrap());
-    assert!(!sync_local_gateway_binding(
-        &home,
-        &backups,
-        "account-local",
-        &refreshed,
-        "provider-account",
-    )
-    .unwrap());
-    assert!(fs::read_to_string(home.join(AUTH_FILE))
+    assert!(
+        sync_local_gateway_binding(
+            &home,
+            &backups,
+            "account-local",
+            &refreshed,
+            "provider-account",
+        )
         .unwrap()
-        .contains("bound-access-refreshed"));
+    );
+    assert!(
+        !sync_local_gateway_binding(
+            &home,
+            &backups,
+            "account-local",
+            &refreshed,
+            "provider-account",
+        )
+        .unwrap()
+    );
+    assert!(
+        fs::read_to_string(home.join(AUTH_FILE))
+            .unwrap()
+            .contains("bound-access-refreshed")
+    );
 
     restore_with(&home, &backups, &secrets).unwrap();
-    assert!(fs::read_to_string(home.join(CONFIG_FILE))
-        .unwrap()
-        .contains("model_provider = \"custom\""));
-    assert!(fs::read_to_string(home.join(AUTH_FILE))
-        .unwrap()
-        .contains("original"));
+    assert!(
+        fs::read_to_string(home.join(CONFIG_FILE))
+            .unwrap()
+            .contains("model_provider = \"custom\"")
+    );
+    assert!(
+        fs::read_to_string(home.join(AUTH_FILE))
+            .unwrap()
+            .contains("original")
+    );
     fs::remove_dir_all(root).unwrap();
 }
 #[test]
@@ -710,9 +738,11 @@ fn local_gateway_restore_adopts_oauth_rotation_before_switching_to_chatgpt() {
     .unwrap();
 
     restore_with(&home, &backups, &secrets).unwrap();
-    assert!(fs::read_to_string(home.join(AUTH_FILE))
-        .unwrap()
-        .contains("original"));
+    assert!(
+        fs::read_to_string(home.join(AUTH_FILE))
+            .unwrap()
+            .contains("original")
+    );
     fs::remove_dir_all(root).unwrap();
 }
 #[test]
@@ -768,9 +798,11 @@ fn local_gateway_can_replace_bound_oauth_with_local_key() {
     assert!(projected.contains("zlr_key"));
     assert!(!projected.contains("bound-access"));
     restore_with(&home, &backups, &secrets).unwrap();
-    assert!(fs::read_to_string(home.join(AUTH_FILE))
-        .unwrap()
-        .contains("original"));
+    assert!(
+        fs::read_to_string(home.join(AUTH_FILE))
+            .unwrap()
+            .contains("original")
+    );
     fs::remove_dir_all(root).unwrap();
 }
 #[test]
@@ -846,9 +878,11 @@ fn oauth_account_restore_preserves_a_fresh_manual_login() {
         fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
         "model_provider = \"custom\"\n"
     );
-    assert!(fs::read_to_string(home.join(AUTH_FILE))
-        .unwrap()
-        .contains("fresh"));
+    assert!(
+        fs::read_to_string(home.join(AUTH_FILE))
+            .unwrap()
+            .contains("fresh")
+    );
     assert!(account_bindings(&backups).unwrap().is_empty());
     fs::remove_dir_all(root).unwrap();
 }
@@ -991,11 +1025,13 @@ fn sync_default_service_tier_preserves_codex_profile_state() {
         .unwrap()
         .parse::<DocumentMut>()
         .unwrap();
-    assert!(config["desktop"]
-        .as_table()
-        .unwrap()
-        .get(DESKTOP_DEFAULT_SERVICE_TIER_KEY)
-        .is_none());
+    assert!(
+        config["desktop"]
+            .as_table()
+            .unwrap()
+            .get(DESKTOP_DEFAULT_SERVICE_TIER_KEY)
+            .is_none()
+    );
     assert_eq!(config[TOP_LEVEL_SERVICE_TIER_KEY].as_str(), Some("default"));
     assert_eq!(config["desktop"]["appearanceTheme"].as_str(), Some("dark"));
     let state: Value =

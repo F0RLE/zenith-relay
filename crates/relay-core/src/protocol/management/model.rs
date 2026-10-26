@@ -15,9 +15,9 @@ pub use availability::{
     source_runtime_available,
 };
 pub use order::{
-    apply_member_model_display_order, apply_model_display_order,
-    apply_model_display_order_with_catalog, apply_model_metadata, member_model_catalog,
-    ModelCatalogIdentity, ModelDisplayProjection,
+    ModelCatalogIdentity, ModelDisplayProjection, apply_member_model_display_order,
+    apply_model_display_order, apply_model_display_order_with_catalog, apply_model_metadata,
+    member_model_catalog,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

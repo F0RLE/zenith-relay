@@ -1,5 +1,5 @@
-use super::{stream, Block, WireApi};
-use serde_json::{json, Value};
+use super::{Block, WireApi, stream};
+use serde_json::{Value, json};
 use std::{hint::black_box, time::Instant};
 
 fn text_buffer(block: &mut Block) -> &mut String {

@@ -52,11 +52,13 @@ async fn native_responses_preserves_images_in_tool_results_and_user_messages() {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert!(response
-            .text()
-            .await
-            .unwrap()
-            .contains("resp_synthetic_image"));
+        assert!(
+            response
+                .text()
+                .await
+                .unwrap()
+                .contains("resp_synthetic_image")
+        );
         let bodies = observed.lock().unwrap();
         assert_eq!(bodies.len(), 1);
         assert_eq!(bodies[0]["input"], request["input"]);

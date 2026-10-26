@@ -254,10 +254,12 @@ mod tests {
             restored_document["model_providers"]["relay"]["user_option"].as_bool(),
             Some(true)
         );
-        assert!(restored_document["model_providers"]["relay"]
-            .as_table_like()
-            .unwrap()
-            .get("base_url")
-            .is_none());
+        assert!(
+            restored_document["model_providers"]["relay"]
+                .as_table_like()
+                .unwrap()
+                .get("base_url")
+                .is_none()
+        );
     }
 }

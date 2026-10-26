@@ -2,9 +2,9 @@ use super::capacity::CandidateQuota;
 use super::cooldown::active_retry_at;
 use crate::error_codes;
 use crate::{
+    ModelRules, WireApi,
     accounts::{AccountAuthState, AccountHealthState},
     quota::SubscriptionStatus,
-    ModelRules, WireApi,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -108,7 +108,7 @@ pub fn account_candidate_health(
     }
     match last_error_code {
         Some("checkpoint" | error_codes::UPSTREAM_ACCOUNT_VERIFICATION_REQUIRED) => {
-            return CandidateHealth::Checkpoint
+            return CandidateHealth::Checkpoint;
         }
         Some("captcha") => return CandidateHealth::Captcha,
         _ => {}

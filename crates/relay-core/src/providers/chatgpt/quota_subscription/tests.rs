@@ -1,20 +1,20 @@
 use super::*;
 use axum::{
+    Json, Router,
     extract::{Request, State},
     http::HeaderMap,
     response::IntoResponse,
     routing::get,
-    Json, Router,
 };
 use base64::Engine;
 use reqwest::{
-    header::{AUTHORIZATION, USER_AGENT},
     Client, StatusCode,
+    header::{AUTHORIZATION, USER_AGENT},
 };
 use serde_json::json;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 use url::Url;
 

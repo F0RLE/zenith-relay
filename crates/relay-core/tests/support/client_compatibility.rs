@@ -76,11 +76,13 @@ async fn websocket_credential_change_reconnects_only_with_portable_history() {
             let requests = observed.requests.lock().unwrap();
             assert_eq!(requests.len(), 2);
             assert!(requests[1].get("previous_response_id").is_none());
-            assert!(requests[1]["input"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|item| item["role"] == "assistant"));
+            assert!(
+                requests[1]["input"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|item| item["role"] == "assistant")
+            );
         } else {
             let failure = receive_websocket_json(&mut socket).await;
             assert_eq!(
@@ -319,9 +321,11 @@ async fn compact_bridge_preserves_rate_limit_delay_and_stops() {
     let events = events.lock().unwrap();
     let event = events.last().unwrap();
     assert!(!event.success);
-    assert!(event
-        .retry_at_ms
-        .is_some_and(|retry_at| retry_at >= started + 120_000));
+    assert!(
+        event
+            .retry_at_ms
+            .is_some_and(|retry_at| retry_at >= started + 120_000)
+    );
 }
 
 #[tokio::test]

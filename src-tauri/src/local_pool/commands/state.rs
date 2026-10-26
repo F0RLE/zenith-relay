@@ -111,10 +111,12 @@ mod parity_tests {
             .collect::<Vec<_>>();
         capability_fields.sort_unstable();
         assert_eq!(capability_fields, ["accountConnectors", "features"]);
-        assert!(!local["capabilities"]["accountConnectors"]
-            .as_array()
-            .unwrap()
-            .is_empty());
+        assert!(
+            !local["capabilities"]["accountConnectors"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

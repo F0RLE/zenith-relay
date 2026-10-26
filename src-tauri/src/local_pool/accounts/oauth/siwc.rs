@@ -1,8 +1,8 @@
 //! A SIWC registration is not a Codex account/workspace claim.
 use super::error::{OAuthError, OAuthErrorCode};
 use serde::{Deserialize, Serialize};
-pub(super) use zenith_relay_core::providers::chatgpt::valid_siwc_client_id as valid_client_id;
 pub use zenith_relay_core::providers::chatgpt::SiwcRegistration;
+pub(super) use zenith_relay_core::providers::chatgpt::valid_siwc_client_id as valid_client_id;
 
 pub const RESOURCE: &str = "https://api.openai.com/v1";
 pub const ISSUER: &str = "https://auth.openai.com";
@@ -272,7 +272,7 @@ fn verify_id_token(
     nonce: Option<&str>,
     now_ms: u64,
 ) -> Result<VerifiedClaims, OAuthError> {
-    use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+    use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
     let invalid = || OAuthError::new(OAuthErrorCode::InvalidJwt, false);
     let header = decode_header(token).map_err(|_| invalid())?;
     if header.alg != Algorithm::RS256 {

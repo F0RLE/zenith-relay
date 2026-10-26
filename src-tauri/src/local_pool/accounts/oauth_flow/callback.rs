@@ -1,8 +1,8 @@
 use super::super::import_session::SecretBackend;
-use super::super::oauth::{OAuthPendingSession, CODEX_OAUTH_CALLBACK_PORTS};
+use super::super::oauth::{CODEX_OAUTH_CALLBACK_PORTS, OAuthPendingSession};
 use super::{
-    OAuthFlowError, OAuthFlowErrorCode, OAuthFlowEvent, OAuthFlowEventSink, OAuthFlowFailureReason,
-    OAuthFlowInner, OAuthFlowProgress, OAuthFlowStatus, PendingSnapshot, CALLBACK_PATH,
+    CALLBACK_PATH, OAuthFlowError, OAuthFlowErrorCode, OAuthFlowEvent, OAuthFlowEventSink,
+    OAuthFlowFailureReason, OAuthFlowInner, OAuthFlowProgress, OAuthFlowStatus, PendingSnapshot,
 };
 use std::io;
 use std::sync::Arc;

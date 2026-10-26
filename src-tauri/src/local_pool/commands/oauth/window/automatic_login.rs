@@ -7,8 +7,8 @@ use crate::local_pool::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
@@ -56,7 +56,10 @@ impl LoginNotes {
 }
 
 fn unavailable() -> LocalPoolError {
-    LocalPoolError::new(ErrorCode::InvalidState, "Automatic sign-in requires an existing account with saved email and password, and a supported sign-in window. SIWC uses manual sign-in.")
+    LocalPoolError::new(
+        ErrorCode::InvalidState,
+        "Automatic sign-in requires an existing account with saved email and password, and a supported sign-in window. SIWC uses manual sign-in.",
+    )
 }
 
 fn validate_request(

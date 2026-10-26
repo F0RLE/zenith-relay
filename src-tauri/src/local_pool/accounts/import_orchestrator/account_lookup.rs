@@ -1,9 +1,9 @@
 use super::{
-    credential_item_error, credential_local_error, provider_identity_key, ImportItemError,
-    ItemResult,
+    ImportItemError, ItemResult, credential_item_error, credential_local_error,
+    provider_identity_key,
 };
 use crate::local_pool::accounts::credentials::CredentialStore;
-use crate::local_pool::accounts::{records, NativeSecretBackend};
+use crate::local_pool::accounts::{NativeSecretBackend, records};
 use crate::local_pool::error::Result as LocalResult;
 use crate::local_pool::models::LocalAccountRecord;
 use crate::local_pool::state::DesktopState;

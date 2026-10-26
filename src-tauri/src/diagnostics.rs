@@ -11,8 +11,8 @@ use std::{
     collections::BTreeMap,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicU64},
         Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU64},
     },
 };
 

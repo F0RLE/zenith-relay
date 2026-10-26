@@ -12,8 +12,7 @@ use serde_json::Value;
 
 pub(super) const RESPONSE_CONTINUATION_UNAVAILABLE_CODE: &str =
     error_codes::RESPONSE_CONTINUATION_UNAVAILABLE;
-pub(super) const RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE: &str =
-    "response continuation is unavailable; resume with its original owner and context or start a new conversation";
+pub(super) const RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE: &str = "response continuation is unavailable; resume with its original owner and context or start a new conversation";
 
 /// Trimmed Responses `previous_response_id`, or `None` when the field is absent or blank.
 ///

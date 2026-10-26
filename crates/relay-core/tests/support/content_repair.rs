@@ -131,9 +131,11 @@ async fn assert_foreign_reasoning_repair(generated: bool) {
         retry_input[0]["summary"][0]["text"],
         "visible old reasoning"
     );
-    assert!(retry_input
-        .iter()
-        .all(|item| item.get("encrypted_content").is_none()));
+    assert!(
+        retry_input
+            .iter()
+            .all(|item| item.get("encrypted_content").is_none())
+    );
     assert!(requests[1].body.to_string().contains("previous answer"));
     assert!(requests[1].body.to_string().contains("continue"));
     drop(requests);
@@ -497,28 +499,71 @@ async fn bounded_image_retry_does_not_report_an_untried_account_as_cooled() {
 #[tokio::test]
 async fn native_image_stream_and_incomplete_json_keep_usage_without_replay() {
     for (stream, reply) in [
-        (true, Reply::Stream(vec![
-            StreamChunk::Data("data: {\"type\":\"image_generation.partial_image\",\"b64_json\":\"cHJldmlldw==\"}\n\n"),
-            StreamChunk::Data("data: {\"type\":\"image_generation.completed\",\"b64_json\":\"aW1hZ2U=\",\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}\n\n"),
-        ])),
-        (false, Reply::Json(StatusCode::OK, json!({"data":[],"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}))),
+        (
+            true,
+            Reply::Stream(vec![
+                StreamChunk::Data(
+                    "data: {\"type\":\"image_generation.partial_image\",\"b64_json\":\"cHJldmlldw==\"}\n\n",
+                ),
+                StreamChunk::Data(
+                    "data: {\"type\":\"image_generation.completed\",\"b64_json\":\"aW1hZ2U=\",\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}\n\n",
+                ),
+            ]),
+        ),
+        (
+            false,
+            Reply::Json(
+                StatusCode::OK,
+                json!({"data":[],"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}),
+            ),
+        ),
     ] {
         let (upstream, state) = spawn_upstream(vec![reply]).await;
         let authority = ready_authority("image-account", "synthetic-access").await;
-        let (gateway, events, _, _) = spawn_mixed_gateway(Vec::new(),
-            vec![account("image-account", "synthetic-provider", &upstream, 10)],
-            vec![mixed_key(None, None)], authority, refresh_adapter(), Arc::new(PersistenceAdapter::default())).await;
-        let response = reqwest::Client::new().post(format!("{}/v1/images/generations", gateway.base_url))
-            .bearer_auth(LOCAL_KEY).json(&json!({"model":"gpt-image-2.5-sunburst","prompt":"synthetic","stream":stream}))
-            .send().await.unwrap();
-        assert_eq!(response.status(), if stream { StatusCode::OK } else { StatusCode::BAD_GATEWAY });
+        let (gateway, events, _, _) = spawn_mixed_gateway(
+            Vec::new(),
+            vec![account(
+                "image-account",
+                "synthetic-provider",
+                &upstream,
+                10,
+            )],
+            vec![mixed_key(None, None)],
+            authority,
+            refresh_adapter(),
+            Arc::new(PersistenceAdapter::default()),
+        )
+        .await;
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/images/generations", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .json(&json!({"model":"gpt-image-2.5-sunburst","prompt":"synthetic","stream":stream}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            if stream {
+                StatusCode::OK
+            } else {
+                StatusCode::BAD_GATEWAY
+            }
+        );
         let body = response.text().await.unwrap();
-        if stream { assert!(body.contains("image_generation.partial_image")); assert!(body.contains("image_generation.completed")); }
+        if stream {
+            assert!(body.contains("image_generation.partial_image"));
+            assert!(body.contains("image_generation.completed"));
+        }
         assert_eq!(state.requests.lock().unwrap().len(), 1);
         let events = events.lock().unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].success, stream);
         assert_eq!(events[0].total_tokens, Some(5));
-        if !stream { assert_eq!(events[0].error_category.as_deref(), Some("image_output_missing")); }
+        if !stream {
+            assert_eq!(
+                events[0].error_category.as_deref(),
+                Some("image_output_missing")
+            );
+        }
     }
 }

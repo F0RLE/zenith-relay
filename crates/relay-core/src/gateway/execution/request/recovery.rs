@@ -177,7 +177,7 @@ pub(super) fn replay_native_affinity_continuation(
     *request = match replay.replay_request(request, model, stream) {
         Ok(request) => request,
         Err(error) if error.code() == error_codes::ADAPTER_CONTINUATION_MISMATCH => {
-            return Ok(false)
+            return Ok(false);
         }
         Err(error) => return Err(error),
     };

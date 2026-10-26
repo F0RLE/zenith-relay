@@ -36,7 +36,7 @@ impl CodexServerTiming {
                 if id.as_str().filter(|id| !id.is_empty()) != response_id
                     || response_id.is_none() =>
             {
-                return None
+                return None;
             }
             None if !first_response_on_connection => return None,
             _ => {}

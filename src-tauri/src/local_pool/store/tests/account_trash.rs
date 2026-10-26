@@ -32,9 +32,11 @@ fn trash_survives_restart_and_restore_keeps_the_account_disabled() {
     assert!(!restored.image_pool_enabled);
     assert_eq!(restored.account.secret_refs, record.account.secret_refs);
     assert_eq!(restored.models, record.models);
-    assert!(reopened
-        .ensure_account_refresh_current(&old_refresh)
-        .is_err());
+    assert!(
+        reopened
+            .ensure_account_refresh_current(&old_refresh)
+            .is_err()
+    );
     drop(reopened);
     fs::remove_dir_all(root).unwrap();
 }
@@ -45,13 +47,15 @@ fn trash_batch_validates_every_id_and_prevents_import_over_the_saved_account() {
     let mut store = LocalPoolStore::open(root.clone()).unwrap();
     let record = account_record("synthetic-trash");
     store.upsert_account(record.clone()).unwrap();
-    assert!(store
-        .trash_accounts(
-            &[record.account.id.clone(), "missing".into()],
-            AutomationRecords::default(),
-            1
-        )
-        .is_err());
+    assert!(
+        store
+            .trash_accounts(
+                &[record.account.id.clone(), "missing".into()],
+                AutomationRecords::default(),
+                1
+            )
+            .is_err()
+    );
     assert_eq!(store.accounts(), std::slice::from_ref(&record));
     assert!(store.account_trash().is_empty());
     store
@@ -89,13 +93,15 @@ fn failed_trash_and_restore_writes_preserve_both_durable_inventories() {
             .unwrap()
     };
     reject_writes();
-    assert!(store
-        .trash_accounts(
-            std::slice::from_ref(&record.account.id),
-            AutomationRecords::default(),
-            1
-        )
-        .is_err());
+    assert!(
+        store
+            .trash_accounts(
+                std::slice::from_ref(&record.account.id),
+                AutomationRecords::default(),
+                1
+            )
+            .is_err()
+    );
     assert_eq!(store.accounts(), std::slice::from_ref(&record));
     assert!(store.account_trash().is_empty());
     connection
@@ -109,9 +115,11 @@ fn failed_trash_and_restore_writes_preserve_both_durable_inventories() {
         )
         .unwrap();
     reject_writes();
-    assert!(store
-        .restore_trashed_accounts(std::slice::from_ref(&record.account.id))
-        .is_err());
+    assert!(
+        store
+            .restore_trashed_accounts(std::slice::from_ref(&record.account.id))
+            .is_err()
+    );
     assert!(store.accounts().is_empty());
     assert_eq!(store.account_trash()[0].record, record);
     drop(store);

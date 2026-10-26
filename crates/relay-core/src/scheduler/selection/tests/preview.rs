@@ -419,10 +419,12 @@ fn preview_does_not_guess_a_single_candidate_for_different_model_routes() {
         .models
         .insert("other-model".into());
     assert!(next(&scheduler.runtime_order(100)).is_none());
-    assert!(scheduler
-        .runtime_order(100)
-        .iter()
-        .all(|candidate| candidate.selection_rank.is_none()));
+    assert!(
+        scheduler
+            .runtime_order(100)
+            .iter()
+            .all(|candidate| candidate.selection_rank.is_none())
+    );
     let rules = crate::ModelRules {
         allowed: BTreeSet::from(["gpt-5".into()]),
         ..Default::default()

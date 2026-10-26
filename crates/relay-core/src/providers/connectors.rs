@@ -78,9 +78,11 @@ mod tests {
             .map(|item| item.id.as_str())
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(ids.len(), 3);
-        assert!(descriptors
-            .iter()
-            .all(|item| item.provider_family == AccountProviderFamily::Openai));
+        assert!(
+            descriptors
+                .iter()
+                .all(|item| item.provider_family == AccountProviderFamily::Openai)
+        );
         assert_eq!(
             descriptors[1].sign_in_flow,
             AccountSignInFlow::DynamicClientPkce

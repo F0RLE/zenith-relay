@@ -49,11 +49,13 @@ async fn account_catalog_uses_reference_metadata_and_preserves_native_transport(
         .json()
         .await
         .unwrap();
-    assert!(catalog["models"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|model| model["slug"] == OFFICIAL_CODEX_MODEL));
+    assert!(
+        catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|model| model["slug"] == OFFICIAL_CODEX_MODEL)
+    );
     // Native ChatGPT rows retain account transport, with shared model semantics.
     assert!(catalog["models"][0].get("service_tiers").is_some());
     assert_eq!(catalog["models"][0]["use_responses_lite"], false);
@@ -629,11 +631,13 @@ async fn codex_catalog_prefers_a_usable_account_token() {
         .await
         .unwrap();
 
-    assert!(catalog["models"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|model| model["slug"] == MODEL));
+    assert!(
+        catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|model| model["slug"] == MODEL)
+    );
     let requests = state.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(

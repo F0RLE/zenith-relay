@@ -1,8 +1,8 @@
-use super::error::{bearer_authorization, CredentialError, CredentialErrorCode};
+use super::error::{CredentialError, CredentialErrorCode, bearer_authorization};
 use super::wire::{
-    mask_email, validate_local_account_id, validate_optional, validate_token, AgentIdentityWire,
-    CredentialWire, CREDENTIAL_VERSION, MAX_EMAIL_BYTES, MAX_ID_BYTES, MAX_PLAN_BYTES,
-    MAX_TOKEN_BYTES,
+    AgentIdentityWire, CREDENTIAL_VERSION, CredentialWire, MAX_EMAIL_BYTES, MAX_ID_BYTES,
+    MAX_PLAN_BYTES, MAX_TOKEN_BYTES, mask_email, validate_local_account_id, validate_optional,
+    validate_token,
 };
 use crate::local_pool::accounts::oauth::OAuthClientKind;
 use reqwest::header::HeaderValue;

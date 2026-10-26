@@ -62,10 +62,12 @@ fn upstream_model_declarations_are_bounded_and_do_not_change_routing_identity() 
         .as_object_mut()
         .unwrap()
         .remove("upstreamResponseModel");
-    assert!(serde_json::from_value::<crate::RoutingDiagnostics>(legacy)
-        .unwrap()
-        .upstream_response_model
-        .is_none());
+    assert!(
+        serde_json::from_value::<crate::RoutingDiagnostics>(legacy)
+            .unwrap()
+            .upstream_response_model
+            .is_none()
+    );
 }
 
 #[test]
@@ -412,11 +414,13 @@ fn tool_policy_diagnostics_read_old_records_and_round_trip_without_false_availab
         serde_json::from_value::<ToolUseDiagnostics>(json).unwrap(),
         legacy_diagnostics
     );
-    assert!(ToolUseDiagnostics {
-        filtered_tool_count: 2,
-        ..Default::default()
-    }
-    .has_evidence());
+    assert!(
+        ToolUseDiagnostics {
+            filtered_tool_count: 2,
+            ..Default::default()
+        }
+        .has_evidence()
+    );
 }
 
 #[test]

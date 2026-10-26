@@ -1,6 +1,6 @@
 use super::*;
-use axum::{body::Body, extract::Request, http::StatusCode, response::Response, Router};
-use serde_json::{json, Value};
+use axum::{Router, body::Body, extract::Request, http::StatusCode, response::Response};
+use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
 #[test]
@@ -77,7 +77,7 @@ fn failed_stats_keep_only_a_fenced_success_and_unsupported_discards_it() {
 
 #[test]
 fn source_stats_scheduler_distinguishes_transient_failure_from_unsupported() {
-    use crate::scheduler::refresh::{source_stats_outcome, RefreshOutcome};
+    use crate::scheduler::refresh::{RefreshOutcome, source_stats_outcome};
     let available =
         SourceProviderStats::empty(SourceStatsProvider::Sub2Api, SourceStatsStatus::Available);
     assert_eq!(
@@ -102,7 +102,7 @@ fn source_stats_scheduler_distinguishes_transient_failure_from_unsupported() {
 
 #[tokio::test]
 async fn rate_limited_stats_return_retry_after_even_without_a_valid_payload() {
-    use axum::{routing::get, Router};
+    use axum::{Router, routing::get};
     let app = Router::new().route(
         "/v1/usage",
         get(|| async {
@@ -239,11 +239,13 @@ fn new_api_uses_advertised_conversion_and_never_guesses_quota_divisor() {
             Err(SourceStatsStatus::InvalidResponse)
         );
     }
-    assert!(formats::new_api_stats(
-        &json!({"success":true,"data":{"object":"token_usage","total_used":1}}),
-        None
-    )
-    .is_ok());
+    assert!(
+        formats::new_api_stats(
+            &json!({"success":true,"data":{"object":"token_usage","total_used":1}}),
+            None
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -458,11 +460,13 @@ async fn redirects_are_not_followed_and_oversized_payload_is_rejected() {
         .await
         .unwrap();
     assert_eq!(stats.status, SourceStatsStatus::Unsupported);
-    assert!(!seen
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|(path, _)| path.contains("redirect")));
+    assert!(
+        !seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(path, _)| path.contains("redirect"))
+    );
     task.abort();
     let (base, _, task) = mock_server(vec![(
         "/proxy/v1/usage",
@@ -494,11 +498,12 @@ async fn billing_discovery_uses_matching_versioned_paths_and_display_units() {
     assert_eq!(stats.balance_kind, SourceBalanceKind::KeyQuota);
     assert_eq!(stats.balance_micro_usd, None);
     assert_eq!(stats.amounts[0].balance_micros, Some(20_500_000));
-    assert!(seen
-        .lock()
-        .unwrap()
-        .iter()
-        .all(|(path, _)| path.starts_with("/proxy/")));
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .all(|(path, _)| path.starts_with("/proxy/"))
+    );
     task.abort();
 }
 

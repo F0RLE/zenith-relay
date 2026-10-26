@@ -3,14 +3,14 @@ use super::*;
 use crate::local_pool::accounts::quota_refresh::AccountQuotaOutcome;
 use crate::local_pool::accounts::{credentials::StoredCodexCredentials, records};
 use std::time::Duration;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{Notify, mpsc};
 use zenith_relay_core::protocol::RefreshStatus;
 use zenith_relay_core::{
     accounts::{AccountAuthMode, AccountAuthState, ReauthReason},
     quota::{QuotaWindow, QuotaWindowKind},
     scheduler::refresh::{
-        service::{RefreshRegistration, RefreshResult},
         RefreshIdentity, RefreshJob, RefreshJobId, RefreshOutcome,
+        service::{RefreshRegistration, RefreshResult},
     },
 };
 

@@ -93,7 +93,7 @@ pub fn normalize_one_account_id(account_id: String) -> Result<String, CommandErr
 mod tests {
     use super::*;
     use zenith_relay_core::accounts::parse_import;
-    use zenith_relay_core::accounts::{build_account_export, AccountExportCredential};
+    use zenith_relay_core::accounts::{AccountExportCredential, build_account_export};
 
     #[test]
     fn every_export_format_round_trips_through_the_account_import_parser() {

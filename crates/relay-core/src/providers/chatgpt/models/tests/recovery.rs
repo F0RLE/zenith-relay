@@ -1,7 +1,7 @@
 use super::*;
 use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 fn short_timeout_client(endpoint: Url) -> AccountModelsClient {

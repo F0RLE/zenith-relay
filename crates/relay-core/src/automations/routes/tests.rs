@@ -120,13 +120,15 @@ fn explicit_models_must_be_supported_and_allowed_but_disabled_tasks_can_move() {
 fn codex_rejects_enabled_pool_automations_but_keeps_disabled_targets_editable() {
     let mut tasks = vec![task(AccountSelector::AccountIds(["siwc".into()].into()))];
     let original = tasks.clone();
-    assert!(remap(
-        &mut tasks,
-        &[],
-        &ModelRules::default(),
-        OAuthClientKind::Codex
-    )
-    .is_err());
+    assert!(
+        remap(
+            &mut tasks,
+            &[],
+            &ModelRules::default(),
+            OAuthClientKind::Codex
+        )
+        .is_err()
+    );
     assert_eq!(tasks, original);
     tasks[0].enabled = false;
     remap(
@@ -150,12 +152,14 @@ fn a_later_conflict_does_not_partially_retarget_the_batch() {
     explicit.model_policy = WakeModelPolicy::Explicit("missing".into());
     let mut tasks = vec![lightest, explicit];
     let original = tasks.clone();
-    assert!(remap(
-        &mut tasks,
-        &[],
-        &ModelRules::default(),
-        OAuthClientKind::ExcelBps
-    )
-    .is_err());
+    assert!(
+        remap(
+            &mut tasks,
+            &[],
+            &ModelRules::default(),
+            OAuthClientKind::ExcelBps
+        )
+        .is_err()
+    );
     assert_eq!(tasks, original);
 }

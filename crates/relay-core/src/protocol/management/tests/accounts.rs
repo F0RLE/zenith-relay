@@ -121,11 +121,13 @@ fn usage_summary_accepts_saved_rows_without_reasoning_telemetry() {
 
     assert_eq!(summary.tokens.reasoning_tokens, None);
     assert_eq!(summary.ttft_ms, None);
-    assert!(!serde_json::to_value(&summary)
-        .unwrap()
-        .as_object()
-        .unwrap()
-        .contains_key("localKeyId"));
+    assert!(
+        !serde_json::to_value(&summary)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("localKeyId")
+    );
 
     let mut legacy_totals = serde_json::to_value(UsageTotals::default()).unwrap();
     let fields = legacy_totals.as_object_mut().unwrap();

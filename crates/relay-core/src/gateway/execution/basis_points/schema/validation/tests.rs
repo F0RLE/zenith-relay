@@ -9,9 +9,11 @@ fn memory_diagnostics_distinguish_input_bytes_from_compiled_validator_memory() {
     assert_eq!(snapshot.key, "schema_validators");
     assert_eq!(snapshot.basis, "schema_input");
     assert_eq!(snapshot.limit_bytes, Some(MAX_RETAINED_SCHEMA_BYTES));
-    assert!(!serde_json::to_string(&snapshot)
-        .unwrap()
-        .contains("synthetic-private-schema"));
+    assert!(
+        !serde_json::to_string(&snapshot)
+            .unwrap()
+            .contains("synthetic-private-schema")
+    );
 }
 
 #[test]
@@ -56,9 +58,11 @@ fn concurrent_compilation_reuses_one_retained_validator() {
         .into_iter()
         .map(|handle| handle.join().unwrap())
         .collect();
-    assert!(validators
-        .iter()
-        .all(|value| Arc::ptr_eq(&validators[0], value)));
+    assert!(
+        validators
+            .iter()
+            .all(|value| Arc::ptr_eq(&validators[0], value))
+    );
 }
 
 fn entry(schema_bytes: usize, now: Instant) -> Entry {

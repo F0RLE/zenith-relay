@@ -6,8 +6,8 @@ mod coordinator;
 mod policy;
 
 pub use policy::{
-    model_lightness_rank, AccountSelector, WakeAdapterPolicy, WakeExecutionPolicy, WakeModel,
-    WakeModelPolicy, WakePolicyAdapter, WakeTask, WakeTaskValidationError, WakeTrigger,
+    AccountSelector, WakeAdapterPolicy, WakeExecutionPolicy, WakeModel, WakeModelPolicy,
+    WakePolicyAdapter, WakeTask, WakeTaskValidationError, WakeTrigger, model_lightness_rank,
 };
 
 const MAX_WAKE_ATTEMPTS: u8 = 2;

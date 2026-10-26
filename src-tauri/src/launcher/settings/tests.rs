@@ -114,9 +114,11 @@ fn default_detection_does_not_create_preferences() {
         Application::Opencode,
     ] {
         assert!(fixture.store.path(application).unwrap().is_none());
-        assert!(configured_path_from(&fixture.store, application)
-            .unwrap()
-            .is_none());
+        assert!(
+            configured_path_from(&fixture.store, application)
+                .unwrap()
+                .is_none()
+        );
     }
     assert!(!fixture.store.path.exists());
 }
@@ -221,9 +223,11 @@ fn missing_selected_file_blocks_launch_instead_of_falling_back() {
         .store
         .set(Application::Opencode, Some("  "))
         .unwrap();
-    assert!(configured_path_from(&fixture.store, Application::Opencode)
-        .unwrap()
-        .is_none());
+    assert!(
+        configured_path_from(&fixture.store, Application::Opencode)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -311,17 +315,21 @@ fn invalid_paths_do_not_replace_a_saved_path() {
         "shell:AppsFolder\\Other!App",
         "x\n.exe",
     ] {
-        assert!(fixture
-            .store
-            .set(Application::Opencode, Some(input))
-            .is_err());
+        assert!(
+            fixture
+                .store
+                .set(Application::Opencode, Some(input))
+                .is_err()
+        );
         assert_eq!(fs::read(&fixture.store.path).unwrap(), original);
     }
     let with_arguments = format!("{} --argument", path.display());
-    assert!(fixture
-        .store
-        .set(Application::Opencode, Some(&with_arguments))
-        .is_err());
+    assert!(
+        fixture
+            .store
+            .set(Application::Opencode, Some(&with_arguments))
+            .is_err()
+    );
     assert_eq!(fs::read(&fixture.store.path).unwrap(), original);
 }
 

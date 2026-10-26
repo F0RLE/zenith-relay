@@ -13,7 +13,7 @@ const PROVIDER_ACCOUNT: &str = "provider-account-secret-id";
 const PROXY: &str = "http://proxy-user:proxy-pass@proxy.example:8080/";
 
 fn siwc_fixture() -> StoredCodexCredentials {
-    use crate::local_pool::accounts::oauth::{siwc::SiwcRegistration, OAuthClientKind};
+    use crate::local_pool::accounts::oauth::{OAuthClientKind, siwc::SiwcRegistration};
     let registration = SiwcRegistration {
         client_id: "oaiapp_synthetic".into(),
         host_id: "urn:uuid:synthetic-host".into(),
@@ -68,10 +68,12 @@ fn siwc_rotation_recovers_after_restart_without_reusing_the_old_grant() {
         store.recover_siwc_rotation(&before).unwrap_err().code,
         CredentialErrorCode::RotationOutcomeUnknown
     );
-    assert!(store
-        .require("siwc_synthetic")
-        .unwrap()
-        .matches_snapshot(&before));
+    assert!(
+        store
+            .require("siwc_synthetic")
+            .unwrap()
+            .matches_snapshot(&before)
+    );
     store
         .checkpoint_siwc_rotation(&before, Some(&after))
         .unwrap();
@@ -79,10 +81,12 @@ fn siwc_rotation_recovers_after_restart_without_reusing_the_old_grant() {
     let restarted = CredentialStore::new(backend);
     let recovered = restarted.recover_siwc_rotation(&before).unwrap().unwrap();
     assert!(recovered.matches_snapshot(&after));
-    assert!(restarted
-        .require("siwc_synthetic")
-        .unwrap()
-        .matches_snapshot(&after));
+    assert!(
+        restarted
+            .require("siwc_synthetic")
+            .unwrap()
+            .matches_snapshot(&after)
+    );
     assert!(restarted.recover_siwc_rotation(&after).unwrap().is_none());
     assert_eq!(recovered.siwc_registration(), before.siwc_registration());
 }
@@ -108,10 +112,12 @@ fn siwc_rotation_cannot_overwrite_a_newer_sign_in_or_survive_deletion() {
         .unwrap();
     store.save(&newer).unwrap();
     assert!(store.recover_siwc_rotation(&newer).unwrap().is_none());
-    assert!(store
-        .require("siwc_synthetic")
-        .unwrap()
-        .matches_snapshot(&newer));
+    assert!(
+        store
+            .require("siwc_synthetic")
+            .unwrap()
+            .matches_snapshot(&newer)
+    );
     store.checkpoint_siwc_rotation(&newer, None).unwrap();
     store.delete("siwc_synthetic").unwrap();
     assert!(store.load("siwc_synthetic").unwrap().is_none());
@@ -148,10 +154,12 @@ fn siwc_rotation_survives_proxy_changes_without_restoring_old_settings() {
     assert_eq!(recovered.refresh_token(), Some("rotated-refresh"));
     assert_eq!(recovered.proxy_url(), Some(PROXY));
     assert_eq!(recovered.generation(), 2);
-    assert!(store
-        .require("siwc_synthetic")
-        .unwrap()
-        .matches_snapshot(&recovered));
+    assert!(
+        store
+            .require("siwc_synthetic")
+            .unwrap()
+            .matches_snapshot(&recovered)
+    );
 }
 
 #[derive(Default)]
@@ -195,10 +203,12 @@ fn failed_primary_delete_retains_the_siwc_rotation_barrier() {
     store.checkpoint_siwc_rotation(&before, None).unwrap();
     backend.1.store(true, std::sync::atomic::Ordering::SeqCst);
     assert!(store.delete(before.local_account_id()).is_err());
-    assert!(store
-        .require(before.local_account_id())
-        .unwrap()
-        .matches_snapshot(&before));
+    assert!(
+        store
+            .require(before.local_account_id())
+            .unwrap()
+            .matches_snapshot(&before)
+    );
     assert!(store.recover_siwc_rotation(&before).is_err());
     backend.1.store(false, std::sync::atomic::Ordering::SeqCst);
     store.delete(before.local_account_id()).unwrap();
@@ -235,11 +245,13 @@ fn siwc_rotation_storage_outage_does_not_become_a_reauthentication_error() {
         CredentialErrorCode::SecretStoreUnavailable
     );
     backend.2.store(false, Ordering::SeqCst);
-    assert!(store
-        .recover_siwc_rotation(&before)
-        .unwrap()
-        .unwrap()
-        .matches_snapshot(&after));
+    assert!(
+        store
+            .recover_siwc_rotation(&before)
+            .unwrap()
+            .unwrap()
+            .matches_snapshot(&after)
+    );
 }
 
 #[test]
@@ -261,10 +273,12 @@ fn siwc_rotation_invalid_checkpoint_is_distinct_and_never_prints_secrets() {
         assert_eq!(error.code, CredentialErrorCode::RotationCheckpointInvalid);
         assert!(!error.to_string().contains("private-broken-secret"));
         assert_eq!(backend.load(&reference).unwrap().as_deref(), Some(invalid));
-        assert!(store
-            .require(before.local_account_id())
-            .unwrap()
-            .matches_snapshot(&before));
+        assert!(
+            store
+                .require(before.local_account_id())
+                .unwrap()
+                .matches_snapshot(&before)
+        );
     }
 }
 
@@ -327,7 +341,7 @@ fn token_set_merge_preserves_private_identity_metadata() {
 
 #[test]
 fn missing_stored_expiry_is_recovered_only_from_the_current_access_token() {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     let token = format!(
         "header.{}.signature",
         URL_SAFE_NO_PAD.encode(serde_json::json!({"exp": 2_000}).to_string()),
@@ -378,10 +392,12 @@ fn direct_route_survives_storage_and_token_refresh() {
     let loaded = store.require("relay_account_1").unwrap();
     assert!(loaded.bypass_common_proxy());
     let tokens = TokenSet::new("new-access", None, None, Some(9_000), 2_000, 8).unwrap();
-    assert!(loaded
-        .with_token_set(&tokens)
-        .unwrap()
-        .bypass_common_proxy());
+    assert!(
+        loaded
+            .with_token_set(&tokens)
+            .unwrap()
+            .bypass_common_proxy()
+    );
 }
 
 #[test]
@@ -413,12 +429,14 @@ fn agent_identity_round_trips_without_becoming_an_oauth_token() {
     assert!(loaded.is_agent_identity());
     assert!(loaded.access_token().is_empty());
     assert!(loaded.to_token_set().is_err());
-    assert!(loaded
-        .authorization(1_785_000_000_000)
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .starts_with("AgentAssertion "));
+    assert!(
+        loaded
+            .authorization(1_785_000_000_000)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("AgentAssertion ")
+    );
     assert!(!format!("{loaded:?}").contains(PRIVATE_KEY));
 }
 

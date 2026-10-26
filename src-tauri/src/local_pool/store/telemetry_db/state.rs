@@ -1,8 +1,8 @@
 use super::{
-    db_error, lock_error, ErrorCode, LocalPoolError, Result, TelemetryDb, MAX_STATE_JSON_BYTES,
+    ErrorCode, LocalPoolError, MAX_STATE_JSON_BYTES, Result, TelemetryDb, db_error, lock_error,
 };
 use rusqlite::OptionalExtension;
-use rusqlite::{params, TransactionBehavior};
+use rusqlite::{TransactionBehavior, params};
 use std::collections::HashMap;
 
 mod items;

@@ -84,11 +84,13 @@ fn successful_schema_preparation_is_shared_but_never_grants_permission() {
     ));
     assert_eq!(second.schema_validated.get(), Some(&()));
     second.validate_parameter_schema().unwrap();
-    assert!(selected_tools(
-        &json!({"tool_choice":"none"}),
-        std::slice::from_ref(&second)
-    )
-    .is_empty());
+    assert!(
+        selected_tools(
+            &json!({"tool_choice":"none"}),
+            std::slice::from_ref(&second)
+        )
+        .is_empty()
+    );
     let schema = super::super::schema::parameter_schema(&second).unwrap();
     assert!(super::super::schema::validate(&json!({"value":1}), schema).is_ok());
     assert!(super::super::schema::validate(&json!({"value":0}), schema).is_err());
@@ -196,5 +198,12 @@ fn measure_catalog_history_preparation() {
     ] {
         samples.sort_unstable();
     }
-    eprintln!("catalog fixture_bytes={}, declarations=416, prepared=32, median/10: eager={:?}, resolved={:?}; warm schema median/3200: cache_lookup={:?}, shared_success={:?}", request.to_string().len(), eager[2], resolved[2], repeated_validation[2], shared_validation[2]);
+    eprintln!(
+        "catalog fixture_bytes={}, declarations=416, prepared=32, median/10: eager={:?}, resolved={:?}; warm schema median/3200: cache_lookup={:?}, shared_success={:?}",
+        request.to_string().len(),
+        eager[2],
+        resolved[2],
+        repeated_validation[2],
+        shared_validation[2]
+    );
 }

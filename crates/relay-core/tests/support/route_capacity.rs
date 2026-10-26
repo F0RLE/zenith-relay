@@ -343,9 +343,11 @@ async fn concurrent_gateway_requests_rotate_and_persist_one_token_once() {
         }
     }))
     .await;
-    assert!(responses
-        .iter()
-        .all(|response| response.status() == StatusCode::OK));
+    assert!(
+        responses
+            .iter()
+            .all(|response| response.status() == StatusCode::OK)
+    );
     assert_eq!(refresh.calls.load(Ordering::SeqCst), 1);
     assert_eq!(persistence.token_writes.load(Ordering::SeqCst), 1);
     assert_eq!(
@@ -361,9 +363,11 @@ async fn concurrent_gateway_requests_rotate_and_persist_one_token_once() {
     );
     let requests = state.requests.lock().unwrap();
     assert_eq!(requests.len(), 20);
-    assert!(requests
-        .iter()
-        .all(|request| request.authorization.as_deref() == Some("Bearer rotated-access")));
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.authorization.as_deref() == Some("Bearer rotated-access"))
+    );
 }
 
 #[tokio::test]
@@ -389,18 +393,22 @@ async fn concurrent_new_chats_are_balanced_across_equal_accounts() {
 
     let responses = join_all((0..REQUESTS).map(|_| request(&gateway, false))).await;
 
-    assert!(responses
-        .iter()
-        .all(|response| response.status() == StatusCode::OK));
+    assert!(
+        responses
+            .iter()
+            .all(|response| response.status() == StatusCode::OK)
+    );
     assert_eq!(first_state.requests.lock().unwrap().len(), REQUESTS / 2);
     assert_eq!(second_state.requests.lock().unwrap().len(), REQUESTS / 2);
-    assert!(gateway
-        .runtime
-        .as_ref()
-        .unwrap()
-        .candidate_runtime_order()
-        .iter()
-        .all(|candidate| candidate.in_flight == 0));
+    assert!(
+        gateway
+            .runtime
+            .as_ref()
+            .unwrap()
+            .candidate_runtime_order()
+            .iter()
+            .all(|candidate| candidate.in_flight == 0)
+    );
 }
 
 #[tokio::test]
@@ -447,12 +455,16 @@ async fn independent_chat_uses_a_free_source_while_the_quota_account_is_busy() {
     tokio::time::sleep(Duration::from_millis(20)).await;
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 2);
-    assert!(events
-        .iter()
-        .any(|event| event.account_id.as_deref() == Some("stream-account")));
-    assert!(events
-        .iter()
-        .any(|event| event.source_id == "z-reserve-api"));
+    assert!(
+        events
+            .iter()
+            .any(|event| event.account_id.as_deref() == Some("stream-account"))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event.source_id == "z-reserve-api")
+    );
 }
 
 #[tokio::test]
@@ -480,19 +492,21 @@ async fn queued_request_rechecks_scope_after_pool_member_removal() {
     assert_eq!(removed_request.status(), StatusCode::OK);
     assert_eq!(removed_state.requests.lock().unwrap().len(), 1);
 
-    assert!(runtime.update_key_scope(
-        "local-key",
-        CandidateScope {
-            source_ids: Some(BTreeSet::new()),
-            account_ids: Some(
-                ["removed-account", "blocker-account"]
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect(),
-            ),
-            model_rules: Default::default(),
-        },
-    ));
+    assert!(
+        runtime.update_key_scope(
+            "local-key",
+            CandidateScope {
+                source_ids: Some(BTreeSet::new()),
+                account_ids: Some(
+                    ["removed-account", "blocker-account"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                ),
+                model_rules: Default::default(),
+            },
+        )
+    );
     let blocker_request = request(&gateway, true).await;
     assert_eq!(blocker_request.status(), StatusCode::OK);
     assert_eq!(blocker_state.requests.lock().unwrap().len(), 1);
@@ -604,22 +618,41 @@ async fn pre_output_failure_releases_only_replayable_tool_affinity() {
     for stream in [false, true] {
         for (include_call, previous_response) in [(true, false), (false, false), (true, true)] {
             for (failure, replay_safe) in [
-                (Reply::Json(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    json!({"error": {"code": "server_is_overloaded"}}),
-                ), true),
-                (Reply::Json(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    json!({"error": {"type": "server_error", "code": "server_error"}}),
-                ), false),
-                (Reply::Stream(vec![
-                    StreamChunk::Data("data: {\"type\":\"response.created\",\"response\":{\"id\":\"failed-setup\"}}\n\n"),
-                    StreamChunk::Data("data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"type\":\"server_error\",\"code\":\"server_error\"}}}\n\n"),
-                ]), false),
+                (
+                    Reply::Json(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({"error": {"code": "server_is_overloaded"}}),
+                    ),
+                    true,
+                ),
+                (
+                    Reply::Json(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        json!({"error": {"type": "server_error", "code": "server_error"}}),
+                    ),
+                    false,
+                ),
+                (
+                    Reply::Stream(vec![
+                        StreamChunk::Data(
+                            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"failed-setup\"}}\n\n",
+                        ),
+                        StreamChunk::Data(
+                            "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"type\":\"server_error\",\"code\":\"server_error\"}}}\n\n",
+                        ),
+                    ]),
+                    false,
+                ),
                 (Reply::Stream(vec![StreamChunk::Error]), false),
             ] {
-                assert_tool_affinity_retry(stream, include_call, previous_response, failure, replay_safe)
-                    .await;
+                assert_tool_affinity_retry(
+                    stream,
+                    include_call,
+                    previous_response,
+                    failure,
+                    replay_safe,
+                )
+                .await;
             }
         }
     }
@@ -808,8 +841,10 @@ async fn agent_identity_account_signs_each_gateway_request() {
     assert_eq!(response.status(), StatusCode::OK);
     let requests = state.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
-    assert!(requests[0]
-        .authorization
-        .as_deref()
-        .is_some_and(|value| value.starts_with("AgentAssertion ")));
+    assert!(
+        requests[0]
+            .authorization
+            .as_deref()
+            .is_some_and(|value| value.starts_with("AgentAssertion "))
+    );
 }

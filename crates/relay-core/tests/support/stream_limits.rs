@@ -106,7 +106,10 @@ async fn stream_prelude_is_buffered_until_the_first_text_output() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(second, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\",\"annotations\":[]}]}]}}\n\n");
+    assert_eq!(
+        second,
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\",\"annotations\":[]}]}]}}\n\n"
+    );
     assert!(chunks.next().await.is_none());
 
     let requests = state.requests.lock().unwrap();
@@ -120,15 +123,21 @@ async fn stream_prelude_is_buffered_until_the_first_text_output() {
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 1);
     assert!(events[0].success);
-    assert!(events[0]
-        .ttft_ms
-        .is_some_and(|ttft| ttft <= events[0].latency_ms));
+    assert!(
+        events[0]
+            .ttft_ms
+            .is_some_and(|ttft| ttft <= events[0].latency_ms)
+    );
 }
 
 #[tokio::test]
 async fn failed_stream_bootstrap_keeps_reported_usage_without_replaying() {
     for (tail, category, expected_status) in [
-        ("data: {broken\n\n", "stream_invalid", StatusCode::BAD_GATEWAY),
+        (
+            "data: {broken\n\n",
+            "stream_invalid",
+            StatusCode::BAD_GATEWAY,
+        ),
         (
             "data: {\"type\":\"response.completed\"",
             "stream_incomplete",
@@ -189,9 +198,11 @@ async fn failed_stream_bootstrap_keeps_reported_usage_without_replaying() {
         assert_eq!(event.cached_input_tokens, Some(5));
         assert_eq!(event.reasoning_tokens, Some(1));
         assert_eq!(event.total_tokens, Some(20));
-        assert!(!serde_json::to_string(event)
-            .unwrap()
-            .contains("synthetic-private-bootstrap"));
+        assert!(
+            !serde_json::to_string(event)
+                .unwrap()
+                .contains("synthetic-private-bootstrap")
+        );
     }
 }
 
@@ -283,9 +294,11 @@ async fn coalesced_terminal_sse_does_not_forward_later_output_or_record_it_twice
     assert_eq!(state.requests.lock().unwrap().len(), 2);
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 2);
-    assert!(events
-        .iter()
-        .all(|event| event.success && event.total_tokens == Some(3)));
+    assert!(
+        events
+            .iter()
+            .all(|event| event.success && event.total_tokens == Some(3))
+    );
 }
 
 #[tokio::test]
@@ -428,10 +441,12 @@ async fn non_account_compact_summarizes_every_bridged_model() {
     let compact: Value = response.json().await.unwrap();
     assert_eq!(compact["object"], "response.compaction");
     assert_eq!(compact["output"][0]["type"], "compaction");
-    assert!(compact["output"][0]["encrypted_content"]
-        .as_str()
-        .unwrap()
-        .starts_with("zenith-relay-compact-v1:"));
+    assert!(
+        compact["output"][0]["encrypted_content"]
+            .as_str()
+            .unwrap()
+            .starts_with("zenith-relay-compact-v1:")
+    );
 
     let continued = client
         .post(format!("{}/v1/responses", gateway.base_url))

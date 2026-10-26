@@ -237,18 +237,22 @@ fn account_and_revision_changes_commit_or_fail_together() {
 fn refresh_callbacks_cannot_change_account_configuration() {
     let (root, mut store) = seeded();
     let (original, fence) = store.account_refresh_scope("account-a").unwrap();
-    assert!(store
-        .apply_account_refresh(&fence, |account| {
-            account.account.enabled = false;
-            Ok(())
-        })
-        .is_err());
-    assert!(store
-        .apply_account_refresh(&fence, |account| {
-            account.account.id = "replacement".into();
-            Ok(())
-        })
-        .is_err());
+    assert!(
+        store
+            .apply_account_refresh(&fence, |account| {
+                account.account.enabled = false;
+                Ok(())
+            })
+            .is_err()
+    );
+    assert!(
+        store
+            .apply_account_refresh(&fence, |account| {
+                account.account.id = "replacement".into();
+                Ok(())
+            })
+            .is_err()
+    );
     assert_eq!(store.account("account-a"), Some(&original));
     drop(store);
     fs::remove_dir_all(root).unwrap();

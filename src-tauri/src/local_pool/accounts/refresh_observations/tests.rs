@@ -373,13 +373,15 @@ fn rejected_revision_never_applies_success_or_failure_for_either_kind() {
             apply_quota_read(store, scope, quota_failure(), Subscription::default(), None).is_err()
         );
         for kind in [RefreshReadKind::Models, RefreshReadKind::Quota] {
-            assert!(apply_read_error(
-                store,
-                scope,
-                kind,
-                &LocalPoolError::new(ErrorCode::Io, "synthetic storage failure")
-            )
-            .is_err());
+            assert!(
+                apply_read_error(
+                    store,
+                    scope,
+                    kind,
+                    &LocalPoolError::new(ErrorCode::Io, "synthetic storage failure")
+                )
+                .is_err()
+            );
         }
         assert_eq!(store.account("test-account"), Some(&current));
     });

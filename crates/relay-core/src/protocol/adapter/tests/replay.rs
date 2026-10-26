@@ -189,12 +189,16 @@ fn native_responses_replay_retains_only_history_within_budget() {
     let replay = store
         .get("key-a", "synthetic-response", "route-a", 100)
         .expect("unused previous options must not crowd history out of its byte budget");
-    assert!(store
-        .get("key-b", "synthetic-response", "route-a", 100)
-        .is_none());
-    assert!(store
-        .get("key-a", "synthetic-response", "route-b", 100)
-        .is_none());
+    assert!(
+        store
+            .get("key-b", "synthetic-response", "route-a", 100)
+            .is_none()
+    );
+    assert!(
+        store
+            .get("key-a", "synthetic-response", "route-b", 100)
+            .is_none()
+    );
     let continuation = json!({
         "previous_response_id":"synthetic-response",
         "input":[{"type":"function_call_output","call_id":"synthetic-call","output":"ok"}],
@@ -218,9 +222,11 @@ fn native_responses_replay_retains_only_history_within_budget() {
     )
     .unwrap();
     store.insert("key-a", "synthetic-oversized", "route-a", oversized, 100);
-    assert!(store
-        .get("key-a", "synthetic-oversized", "route-a", 100)
-        .is_none());
+    assert!(
+        store
+            .get("key-a", "synthetic-oversized", "route-a", 100)
+            .is_none()
+    );
 }
 
 #[test]
@@ -495,23 +501,33 @@ fn native_responses_replay_store_is_route_scoped_bounded_and_expiring() {
     let mut store = NativeResponsesReplayStore::new(1, 10);
 
     store.insert("key-a", "resp_store_01", "route-a", first, 100);
-    assert!(store
-        .get("key-a", "resp_store_01", "route-b", 100)
-        .is_none());
-    assert!(store
-        .get("key-b", "resp_store_01", "route-a", 100)
-        .is_none());
-    assert!(store
-        .get("key-a", "resp_store_01", "route-a", 100)
-        .is_some());
+    assert!(
+        store
+            .get("key-a", "resp_store_01", "route-b", 100)
+            .is_none()
+    );
+    assert!(
+        store
+            .get("key-b", "resp_store_01", "route-a", 100)
+            .is_none()
+    );
+    assert!(
+        store
+            .get("key-a", "resp_store_01", "route-a", 100)
+            .is_some()
+    );
 
     store.insert("key-a", "resp_store_02", "route-a", second, 101);
-    assert!(store
-        .get("key-a", "resp_store_01", "route-a", 101)
-        .is_none());
-    assert!(store
-        .get("key-a", "resp_store_02", "route-a", 112)
-        .is_none());
+    assert!(
+        store
+            .get("key-a", "resp_store_01", "route-a", 101)
+            .is_none()
+    );
+    assert!(
+        store
+            .get("key-a", "resp_store_02", "route-a", 112)
+            .is_none()
+    );
 }
 #[test]
 fn native_replay_does_not_store_an_unresolved_previous_response_reference() {
@@ -557,28 +573,30 @@ fn native_replay_requires_the_matching_tool_call_for_every_output() {
         json!([call, {"type":"custom_tool_call_output", "call_id":"call_1", "output":"value"}]),
         json!([call, output, output]),
     ] {
-        assert!(NativeResponsesReplayState::from_response(
-            &json!({"input":input}),
+        assert!(
+            NativeResponsesReplayState::from_response(&json!({"input":input}), "model", &completed)
+                .is_none()
+        );
+    }
+    assert!(
+        NativeResponsesReplayState::from_response(
+            &json!({"input":[call, output]}),
             "model",
             &completed
         )
-        .is_none());
-    }
-    assert!(NativeResponsesReplayState::from_response(
-        &json!({"input":[call, output]}),
-        "model",
-        &completed
-    )
-    .is_some());
+        .is_some()
+    );
     let (_, replay) = NativeResponsesReplayState::from_response(
         &json!({"input":"start"}),
         "model",
         &json!({"id":"resp_call", "output":[call]}),
     )
     .unwrap();
-    assert!(replay
-        .replay_request(&json!({"input":[output]}), "model", false)
-        .is_ok());
+    assert!(
+        replay
+            .replay_request(&json!({"input":[output]}), "model", false)
+            .is_ok()
+    );
     assert!(replay.replay_request(&json!({"input":[output, {"type":"function_call_output", "call_id":"missing", "output":"value"}]}), "model", false).is_err());
 }
 #[test]
@@ -624,9 +642,11 @@ fn continuation_stores_bound_entry_and_total_retained_bytes() {
             .code(),
         "adapter_continuation_missing"
     );
-    assert!(total_bound_store
-        .get("key-a", "resp_new", "route-a", 101)
-        .is_ok());
+    assert!(
+        total_bound_store
+            .get("key-a", "resp_new", "route-a", 101)
+            .is_ok()
+    );
 
     let initial = json!({"model": "alias", "input": "x".repeat(1_024)});
     let (_, replay) = NativeResponsesReplayState::from_response(
@@ -637,7 +657,9 @@ fn continuation_stores_bound_entry_and_total_retained_bytes() {
     .expect("a completed native response is replayable");
     let mut replay_store = NativeResponsesReplayStore::with_limits(4, 60_000, 256, 1_024);
     replay_store.insert("key-a", "resp_large_replay", "route-a", replay, 100);
-    assert!(replay_store
-        .get("key-a", "resp_large_replay", "route-a", 100)
-        .is_none());
+    assert!(
+        replay_store
+            .get("key-a", "resp_large_replay", "route-a", 100)
+            .is_none()
+    );
 }

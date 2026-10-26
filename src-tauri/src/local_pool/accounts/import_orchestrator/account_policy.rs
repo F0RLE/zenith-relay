@@ -1,9 +1,9 @@
 use super::{
     account_model_state_is_valid, credential_local_error, normalize_models, validate_label,
 };
+use crate::local_pool::accounts::NativeSecretBackend;
 use crate::local_pool::accounts::credentials::CredentialStore;
 use crate::local_pool::accounts::mutations::UpdateAccountInput;
-use crate::local_pool::accounts::NativeSecretBackend;
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result as LocalResult};
 use crate::local_pool::models::LocalAccountRecord;
 use zenith_relay_core::accounts::MAX_PURCHASE_COST_MICRO_USD;

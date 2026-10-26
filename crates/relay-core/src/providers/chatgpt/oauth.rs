@@ -5,8 +5,7 @@ pub const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const SIWC_BOOTSTRAP_CLIENT_ID: &str = "dynamic_agent_client";
 pub const SIWC_RESOURCE: &str = "https://api.openai.com/v1";
 pub const BASIS_POINTS_OAUTH_CLIENT_ID: &str = "app_fnr0pYvVwwFDocDumLG3H2Bp";
-pub const BASIS_POINTS_OAUTH_REDIRECT_URI: &str =
-    "https://bps.openai.com/basispoints/extension/360590d7-f8f9-4d88-bf75-0edfe0a4b9f3/auth/callback";
+pub const BASIS_POINTS_OAUTH_REDIRECT_URI: &str = "https://bps.openai.com/basispoints/extension/360590d7-f8f9-4d88-bf75-0edfe0a4b9f3/auth/callback";
 /// Retained for decoding legacy diagnostics; current admission does not reject plan names.
 pub const BASIS_POINTS_FREE_ACCOUNT_MESSAGE: &str =
     "Legacy Free plan restriction. Refresh the account to check current provider access.";

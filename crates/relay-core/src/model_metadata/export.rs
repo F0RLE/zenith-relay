@@ -1,6 +1,6 @@
 use super::{
-    model_order_revision, MetadataSourceStatus, ModelDisplayIdentity, ModelMetadata,
-    ModelMetadataCatalog, ModelMetadataError,
+    MetadataSourceStatus, ModelDisplayIdentity, ModelMetadata, ModelMetadataCatalog,
+    ModelMetadataError, model_order_revision,
 };
 use crate::catalog_io::{self, CatalogIoError};
 use serde::Serialize;

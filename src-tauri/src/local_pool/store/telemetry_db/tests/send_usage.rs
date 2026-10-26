@@ -304,11 +304,13 @@ fn every_send_contributes_once_but_only_final_outcome_counts_as_request() {
             .sum::<u64>(),
         130
     );
-    assert!(filtered
-        .filter_options
-        .unwrap()
-        .pool_members
-        .contains(&"lookup-source".to_string()));
+    assert!(
+        filtered
+            .filter_options
+            .unwrap()
+            .pool_members
+            .contains(&"lookup-source".to_string())
+    );
 
     let unknown = failed_fallback_test_event("unknown");
     database.record(&unknown).unwrap();

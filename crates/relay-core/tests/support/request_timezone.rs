@@ -1,5 +1,5 @@
 use super::*;
-use zenith_relay_core::request_timezone::{ProxyTimezone, PROXY_TIMEZONE_MAX_AGE_MS};
+use zenith_relay_core::request_timezone::{PROXY_TIMEZONE_MAX_AGE_MS, ProxyTimezone};
 
 fn account_with_timezone(
     id: &str,

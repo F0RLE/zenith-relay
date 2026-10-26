@@ -43,16 +43,22 @@ fn rejects_stale_updates_and_invalid_or_changed_membership() {
     let current = policy();
     let mut updated_policy = current.clone();
     updated_policy.members.swap(0, 1);
-    assert!(updated_policy
-        .validate_update(&current, Some(&current))
-        .is_ok());
-    assert!(updated_policy
-        .validate_update(&current, Some(&updated_policy))
-        .is_err());
+    assert!(
+        updated_policy
+            .validate_update(&current, Some(&current))
+            .is_ok()
+    );
+    assert!(
+        updated_policy
+            .validate_update(&current, Some(&updated_policy))
+            .is_err()
+    );
     updated_policy.members.pop();
-    assert!(updated_policy
-        .validate_update(&current, Some(&current))
-        .is_err());
+    assert!(
+        updated_policy
+            .validate_update(&current, Some(&current))
+            .is_err()
+    );
     let mut invalid = current.clone();
     invalid.members[0].weight = 0;
     assert!(invalid.validate().is_err());
@@ -139,9 +145,11 @@ fn pre_policy_inventory_upgrades_and_invalid_values_still_fail_validation() {
         version: 255,
         ..Default::default()
     };
-    assert!(resolve_pool_routing(Some(&future), vec![])
-        .validate_activation()
-        .is_err());
+    assert!(
+        resolve_pool_routing(Some(&future), vec![])
+            .validate_activation()
+            .is_err()
+    );
 }
 
 #[test]

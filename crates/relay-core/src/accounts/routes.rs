@@ -71,7 +71,9 @@ pub fn validate_account_route_connection(
             return Err("This account already has a connection of this type");
         }
         if !existing.same_owner(candidate) {
-            return Err("Authorize a different route for the same account and workspace before associating it");
+            return Err(
+                "Authorize a different route for the same account and workspace before associating it",
+            );
         }
     }
     Ok(())

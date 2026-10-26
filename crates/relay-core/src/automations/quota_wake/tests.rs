@@ -199,9 +199,11 @@ fn pending_and_retry_due_times_survive_restart() {
     let state: WakeAutomationState = serde_json::from_str(&serialized).unwrap();
     let mut coordinator = WakeCoordinator::from_state(state).unwrap();
     assert_eq!(coordinator.pending(), vec![schedule.clone()]);
-    assert!(coordinator
-        .claim_due(schedule.due_at_ms.saturating_sub(1), 1)
-        .is_empty());
+    assert!(
+        coordinator
+            .claim_due(schedule.due_at_ms.saturating_sub(1), 1)
+            .is_empty()
+    );
 
     let first = coordinator.claim_due(schedule.due_at_ms, 1).pop().unwrap();
     assert!(coordinator.complete(

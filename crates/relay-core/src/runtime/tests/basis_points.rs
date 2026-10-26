@@ -448,7 +448,7 @@ impl TokenRefreshAdapter for FreePlanRefresh {
         now_ms: u64,
     ) -> BoxFuture<'a, std::result::Result<TokenRefresh, TokenRefreshFailure>> {
         Box::pin(async move {
-            use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+            use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
             assert_eq!(refresh_token, "synthetic-refresh");
             self.calls.fetch_add(1, Ordering::SeqCst);
             let id_token = format!(

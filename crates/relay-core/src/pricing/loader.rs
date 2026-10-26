@@ -1,14 +1,14 @@
 use super::{
-    CatalogRefreshDeadline, CatalogRefreshKind, PricingCacheEnvelope, PricingCatalog,
-    PricingCatalogHandle, PricingError, PRICING_REFRESH_INTERVAL_SECONDS,
+    CatalogRefreshDeadline, CatalogRefreshKind, PRICING_REFRESH_INTERVAL_SECONDS,
+    PricingCacheEnvelope, PricingCatalog, PricingCatalogHandle, PricingError,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, RwLock,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };

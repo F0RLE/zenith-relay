@@ -1,21 +1,73 @@
 use super::UsageLog;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use zenith_relay_core::AttemptOutcome;
 
 fn classification(row: &UsageLog) -> (&'static str, &'static str, bool) {
-    match row.routing.as_ref().and_then(|routing| routing.attempt_outcome) {
-        Some(AttemptOutcome::ToolDiscovery) if !row.success && (200..300).contains(&row.http_status)
-            && row.error_category.is_none() && row.error_origin.is_none() && row.upstream_error.is_none()
-            => ("intermediate", "Relay loaded tool definitions; this is not a failed client request.", false),
-        Some(AttemptOutcome::ToolDiscovery) => ("inconsistent", "The tool-discovery stage conflicts with success/error evidence; inspect this observation.", false),
-        Some(AttemptOutcome::RetrySelection | AttemptOutcome::RetryRepair | AttemptOutcome::RetryAuthorization) => ("retrying", "Relay continued with another attempt; this step is not the final request outcome.", false),
-        Some(AttemptOutcome::ExecutionUncertain) => ("execution_uncertain", "Execution may have started; completion is unknown. Do not infer that retrying is safe.", true),
-        Some(AttemptOutcome::ClientDisconnected) => ("client_disconnected", "The client disconnected; this does not establish whether provider execution completed.", true),
-        Some(AttemptOutcome::ReturnedFailure) => ("failed", "Relay returned a failure for this request.", true),
-        _ if row.success => ("succeeded", "Relay completed the request successfully.", true),
-        Some(AttemptOutcome::Completed) => ("inconsistent", "A completed outcome has a false success flag; inspect the retained evidence.", false),
-        None if row.http_status >= 400 || row.error_category.is_some() => ("failed", "The retained observation records a failure.", true),
-        None => ("unknown", "No terminal outcome was retained; a false success flag alone does not establish failure.", false),
+    match row
+        .routing
+        .as_ref()
+        .and_then(|routing| routing.attempt_outcome)
+    {
+        Some(AttemptOutcome::ToolDiscovery)
+            if !row.success
+                && (200..300).contains(&row.http_status)
+                && row.error_category.is_none()
+                && row.error_origin.is_none()
+                && row.upstream_error.is_none() =>
+        {
+            (
+                "intermediate",
+                "Relay loaded tool definitions; this is not a failed client request.",
+                false,
+            )
+        }
+        Some(AttemptOutcome::ToolDiscovery) => (
+            "inconsistent",
+            "The tool-discovery stage conflicts with success/error evidence; inspect this observation.",
+            false,
+        ),
+        Some(
+            AttemptOutcome::RetrySelection
+            | AttemptOutcome::RetryRepair
+            | AttemptOutcome::RetryAuthorization,
+        ) => (
+            "retrying",
+            "Relay continued with another attempt; this step is not the final request outcome.",
+            false,
+        ),
+        Some(AttemptOutcome::ExecutionUncertain) => (
+            "execution_uncertain",
+            "Execution may have started; completion is unknown. Do not infer that retrying is safe.",
+            true,
+        ),
+        Some(AttemptOutcome::ClientDisconnected) => (
+            "client_disconnected",
+            "The client disconnected; this does not establish whether provider execution completed.",
+            true,
+        ),
+        Some(AttemptOutcome::ReturnedFailure) => {
+            ("failed", "Relay returned a failure for this request.", true)
+        }
+        _ if row.success => (
+            "succeeded",
+            "Relay completed the request successfully.",
+            true,
+        ),
+        Some(AttemptOutcome::Completed) => (
+            "inconsistent",
+            "A completed outcome has a false success flag; inspect the retained evidence.",
+            false,
+        ),
+        None if row.http_status >= 400 || row.error_category.is_some() => (
+            "failed",
+            "The retained observation records a failure.",
+            true,
+        ),
+        None => (
+            "unknown",
+            "No terminal outcome was retained; a false success flag alone does not establish failure.",
+            false,
+        ),
     }
 }
 

@@ -1,5 +1,5 @@
 use super::super::error::{CredentialError, CredentialErrorCode};
-use super::super::wire::{CredentialWire, CREDENTIAL_VERSION, MAX_SECRET_JSON_BYTES};
+use super::super::wire::{CREDENTIAL_VERSION, CredentialWire, MAX_SECRET_JSON_BYTES};
 use super::StoredCodexCredentials;
 use zenith_relay_core::providers::chatgpt::{AgentIdentityCredential, OAuthClientKind};
 

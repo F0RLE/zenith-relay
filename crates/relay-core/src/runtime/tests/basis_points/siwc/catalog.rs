@@ -151,17 +151,21 @@ async fn siwc_native_catalog_loads_only_requested_tools_and_preserves_roundtrip(
             .unwrap();
         assert_eq!(namespace["description"], "Synthetic namespace usage rules");
         assert_eq!(namespace["tools"][0]["name"], "read");
-        assert!(bodies[1]["input"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item["encrypted_content"] == "synthetic-opaque-reasoning"));
-        assert!(bodies[2]["input"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item["call_id"] == "call_native_edit"
-                && item["type"] == "custom_tool_call_output"));
+        assert!(
+            bodies[1]["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["encrypted_content"] == "synthetic-opaque-reasoning")
+        );
+        assert!(
+            bodies[2]["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["call_id"] == "call_native_edit"
+                    && item["type"] == "custom_tool_call_output")
+        );
         assert_eq!(siwc.state.attachment_requests.load(Ordering::SeqCst), 0);
         assert_eq!(native.state.generation_requests.load(Ordering::SeqCst), 0);
         task.abort();

@@ -12,6 +12,10 @@ export default defineConfig({
   build: {
     manifest: true,
     target: "es2020",
+    // Spend a little more build time to reduce shipped JavaScript without
+    // changing lazy-entry boundaries or the supported WebView target.
+    minify: "terser",
+    terserOptions: { compress: { passes: 2 } },
     outDir: "dist",
     emptyOutDir: true,
     rolldownOptions: {

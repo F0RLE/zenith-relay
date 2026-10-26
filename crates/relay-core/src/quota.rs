@@ -12,9 +12,9 @@ pub(crate) fn observation_is_fresh(
 }
 
 pub use refresh::{
-    classify_quota_http_failure, subscription_plan_changed, QuotaAdapter, QuotaAdapterCapabilities,
-    QuotaAdapterContext, QuotaRefreshData, QuotaRefreshFailure, QuotaRefreshResult,
-    SupplementalQuotaWindowInput,
+    QuotaAdapter, QuotaAdapterCapabilities, QuotaAdapterContext, QuotaRefreshData,
+    QuotaRefreshFailure, QuotaRefreshResult, SupplementalQuotaWindowInput,
+    classify_quota_http_failure, subscription_plan_changed,
 };
 pub use windows::{
     QuotaErrorState, QuotaNormalizationError, QuotaSnapshot, QuotaTransition, QuotaWindow,

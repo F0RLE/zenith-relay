@@ -1,6 +1,6 @@
 use super::*;
-use crate::error_codes;
 use crate::ErrorOrigin;
+use crate::error_codes;
 
 pub(super) async fn send_gateway_error(
     downstream: &mut WebSocket,
@@ -177,8 +177,7 @@ impl GatewayFailure {
         Self {
             status: StatusCode::BAD_REQUEST,
             category: error_codes::INVALID_STREAM_ID,
-            message:
-                "stream_id must be 1-256 ASCII letters, digits, underscores, hyphens or periods",
+            message: "stream_id must be 1-256 ASCII letters, digits, underscores, hyphens or periods",
             retry_at_ms: None,
             upstream_error: None,
             origin: ErrorOrigin::Relay,

@@ -219,13 +219,15 @@ fn model_discovery_preserves_independent_account_failures() {
                 &mut health,
                 &mut last_error_code,
             ));
-            assert!(!account_candidate_health(
-                auth_state,
-                health,
-                SubscriptionStatus::Active,
-                last_error_code.as_deref(),
-            )
-            .is_eligible());
+            assert!(
+                !account_candidate_health(
+                    auth_state,
+                    health,
+                    SubscriptionStatus::Active,
+                    last_error_code.as_deref(),
+                )
+                .is_eligible()
+            );
         }
     }
 }

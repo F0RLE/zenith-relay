@@ -189,9 +189,11 @@ fn attach_and_restore_preserve_previous_profile_and_nested_provider() {
     let config = fs::read_to_string(home.join(CONFIG_FILE)).unwrap();
     assert!(config.contains("model_provider = \"openai\""));
     assert!(config.contains("model_provider = \"custom\""));
-    assert!(fs::read_to_string(home.join(AUTH_FILE))
-        .unwrap()
-        .contains("chatgpt"));
+    assert!(
+        fs::read_to_string(home.join(AUTH_FILE))
+            .unwrap()
+            .contains("chatgpt")
+    );
     fs::remove_dir_all(root).unwrap();
 }
 #[test]
@@ -367,9 +369,11 @@ fn repeated_attach_upgrades_a_profile_without_managed_bearer_metadata() {
         &secrets,
     )
     .unwrap();
-    assert!(fs::read_to_string(home.join(CONFIG_FILE))
-        .unwrap()
-        .contains("experimental_bearer_token = \"zlr_key\""));
+    assert!(
+        fs::read_to_string(home.join(CONFIG_FILE))
+            .unwrap()
+            .contains("experimental_bearer_token = \"zlr_key\"")
+    );
     fs::remove_dir_all(root).unwrap();
 }
 #[test]
@@ -403,9 +407,11 @@ fn repeated_attach_blocks_after_fresh_login() {
         .code,
         ErrorCode::ProfileRestoreBlocked
     ));
-    assert!(fs::read_to_string(home.join(AUTH_FILE))
-        .unwrap()
-        .contains("fresh"));
+    assert!(
+        fs::read_to_string(home.join(AUTH_FILE))
+            .unwrap()
+            .contains("fresh")
+    );
     fs::remove_dir_all(root).unwrap();
 }
 #[test]
@@ -722,13 +728,11 @@ fn repeated_attach_rebases_external_takeover_and_restores_latest_profile() {
     )
     .unwrap();
 
-    let external_config = legacy_config
-            .replacen(
-                "model_provider = \"zenith_relay_local\"",
-                "model_provider = \"codex_local_access\"",
-                1,
-            )
-            + "\n[model_providers.codex_local_access]\nname = \"Codex API Service\"\nbase_url = \"http://127.0.0.1:49976/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n";
+    let external_config = legacy_config.replacen(
+        "model_provider = \"zenith_relay_local\"",
+        "model_provider = \"codex_local_access\"",
+        1,
+    ) + "\n[model_providers.codex_local_access]\nname = \"Codex API Service\"\nbase_url = \"http://127.0.0.1:49976/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n";
     fs::write(home.join(CONFIG_FILE), external_config).unwrap();
     let external_auth = "{\"OPENAI_API_KEY\":null,\"tokens\":{\"access_token\":\"fresh\"}}";
     fs::write(home.join(AUTH_FILE), external_auth).unwrap();
@@ -741,12 +745,16 @@ fn repeated_attach_rebases_external_takeover_and_restores_latest_profile() {
         &secrets,
     )
     .unwrap();
-    assert!(fs::read_to_string(home.join(CONFIG_FILE))
-        .unwrap()
-        .starts_with("model_provider = \"zenith_relay_local\""));
-    assert!(fs::read_to_string(home.join(CONFIG_FILE))
-        .unwrap()
-        .contains("supports_websockets = true"));
+    assert!(
+        fs::read_to_string(home.join(CONFIG_FILE))
+            .unwrap()
+            .starts_with("model_provider = \"zenith_relay_local\"")
+    );
+    assert!(
+        fs::read_to_string(home.join(CONFIG_FILE))
+            .unwrap()
+            .contains("supports_websockets = true")
+    );
     let upgraded_backup: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&backup_path).unwrap()).unwrap();
     assert_eq!(upgraded_backup["managedSupportsWebsockets"], true);
@@ -796,14 +804,16 @@ fn attach_rejects_non_utf8_config_without_rewriting_it() {
     fs::write(&config_path, &original).unwrap();
     let secrets = MemorySecrets::default();
 
-    assert!(attach_with(
-        &home,
-        &backups,
-        "http://127.0.0.1:14998/v1",
-        "zlr_key",
-        &secrets
-    )
-    .is_err());
+    assert!(
+        attach_with(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            &secrets
+        )
+        .is_err()
+    );
     assert_eq!(fs::read(config_path).unwrap(), original);
     assert!(!backup_path(&backups).exists());
     fs::remove_dir_all(root).unwrap();
@@ -816,14 +826,16 @@ fn attach_rejects_non_utf8_auth_without_rewriting_it() {
     let original = vec![0xff, 0xfe, 0xfd];
     fs::write(&auth_path, &original).unwrap();
 
-    assert!(attach_with(
-        &home,
-        &backups,
-        "http://127.0.0.1:14998/v1",
-        "zlr_key",
-        &MemorySecrets::default()
-    )
-    .is_err());
+    assert!(
+        attach_with(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            &MemorySecrets::default()
+        )
+        .is_err()
+    );
     assert_eq!(fs::read(auth_path).unwrap(), original);
     assert!(!backup_path(&backups).exists());
     fs::remove_dir_all(root).unwrap();
@@ -909,14 +921,16 @@ fn failed_reattach_restores_previous_backup_metadata() {
     let managed_auth = fs::read(home.join(AUTH_FILE)).unwrap();
     fs::create_dir(home.join("config.tmp")).unwrap();
 
-    assert!(attach_with(
-        &home,
-        &backups,
-        "http://127.0.0.1:14999/v1",
-        "zlr_new_key",
-        &secrets,
-    )
-    .is_err());
+    assert!(
+        attach_with(
+            &home,
+            &backups,
+            "http://127.0.0.1:14999/v1",
+            "zlr_new_key",
+            &secrets,
+        )
+        .is_err()
+    );
     assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), managed_config);
     assert_eq!(fs::read(home.join(AUTH_FILE)).unwrap(), managed_auth);
     let pending: Value =
@@ -953,9 +967,11 @@ fn failed_backup_secret_cleanup_rolls_restore_back() {
         fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
         "model_provider = \"openai\"\n"
     );
-    assert!(fs::read_to_string(home.join(AUTH_FILE))
-        .unwrap()
-        .contains("old"));
+    assert!(
+        fs::read_to_string(home.join(AUTH_FILE))
+            .unwrap()
+            .contains("old")
+    );
     let pending: Value =
         serde_json::from_str(&fs::read_to_string(backup_path(&backups)).unwrap()).unwrap();
     assert_eq!(pending["restorePending"], true);

@@ -175,7 +175,7 @@ async fn prepare_account_removal(
         match revocation {
             Ok(revoked) => prepared.provider_revoked = revoked,
             Err(error) => {
-                return rollback_failed_delete_step(state, credentials, &prepared, error).await
+                return rollback_failed_delete_step(state, credentials, &prepared, error).await;
             }
         }
     }
@@ -219,7 +219,10 @@ async fn revoke_siwc_before_delete(
 
 pub(super) fn ensure_provider_rollback_possible(revoked: bool) -> LocalResult<()> {
     if revoked {
-        return Err(LocalPoolError::new(ErrorCode::RecoveryRequired, "SIWC was revoked but local deletion failed. Sign in again before restarting the gateway."));
+        return Err(LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            "SIWC was revoked but local deletion failed. Sign in again before restarting the gateway.",
+        ));
     }
     Ok(())
 }

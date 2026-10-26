@@ -61,7 +61,7 @@ fn with_database(test: impl FnOnce(&TelemetryDb)) {
 async fn performance_sample_does_not_block_navigation_while_history_is_locked() {
     use std::{
         future::Future,
-        sync::{mpsc, Arc},
+        sync::{Arc, mpsc},
         task::{Context, Waker},
         time::Duration,
     };

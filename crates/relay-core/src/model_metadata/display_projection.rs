@@ -1,4 +1,4 @@
-use super::{order::ModelOrderKey, ModelDisplayIdentity, ModelMetadataCatalog};
+use super::{ModelDisplayIdentity, ModelMetadataCatalog, order::ModelOrderKey};
 use std::collections::BTreeMap;
 
 /// Presentation work shared only inside one immutable catalog projection.

@@ -420,9 +420,11 @@ fn websocket_errors_keep_the_source_origin_and_unmapped_category() {
     assert_eq!(event["stream_id"], "main");
 
     assert_eq!(event["error"]["code"], "invalid_request");
-    assert!(event["error"]["message"]
-        .as_str()
-        .is_some_and(|message| message.starts_with("Account: ")));
+    assert!(
+        event["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("Account: "))
+    );
     assert_eq!(
         event["error"]["zenith_relay"]["category"],
         "upstream_invalid_request"

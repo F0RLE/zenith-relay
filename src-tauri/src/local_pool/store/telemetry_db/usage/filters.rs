@@ -2,10 +2,10 @@ use super::{send_projection, usage_filter};
 use crate::local_pool::{
     error::Result,
     store::telemetry_db::{
-        db_error, lock_error, CachedUsageFilterOptions, TelemetryDb, UsageFilterOptions,
+        CachedUsageFilterOptions, TelemetryDb, UsageFilterOptions, db_error, lock_error,
     },
 };
-use rusqlite::{params_from_iter, Connection};
+use rusqlite::{Connection, params_from_iter};
 use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;
 use zenith_relay_core::protocol::UsageQuery;
@@ -91,8 +91,14 @@ fn usage_filter_options(connection: &Connection, query: &UsageQuery) -> Result<U
             }
         }
     }
-    let [wire_apis, transports, error_categories, requested_models, resolved_models, pool_members] =
-        values;
+    let [
+        wire_apis,
+        transports,
+        error_categories,
+        requested_models,
+        resolved_models,
+        pool_members,
+    ] = values;
     Ok(UsageFilterOptions {
         models: requested_models.union(&resolved_models).cloned().collect(),
         pool_members: pool_members.into_iter().collect(),

@@ -334,10 +334,12 @@ async fn claude_tool_cycle(stream: bool, unsigned_history: bool) {
     }
     assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 3);
     let bodies = crate::poison::mutex(&server.state.generation_bodies);
-    assert!(bodies
-        .iter()
-        .all(|body| body["metadata"].get("user_id").is_none()
-            && body["metadata"].as_object().unwrap().len() == 3));
+    assert!(
+        bodies
+            .iter()
+            .all(|body| body["metadata"].get("user_id").is_none()
+                && body["metadata"].as_object().unwrap().len() == 3)
+    );
     let final_input = bodies[2]["input"].as_array().unwrap();
     if unsigned_history {
         for body in bodies.iter() {
@@ -520,12 +522,14 @@ async fn bps_401_does_not_put_next_request_behind_a_global_authentication_pause(
         StatusCode::UNAUTHORIZED
     );
     assert_eq!(refresh.calls.load(Ordering::SeqCst), 0);
-    assert!(runtime
-        .lock_scheduler()
-        .candidate("account-1")
-        .unwrap()
-        .cooldowns
-        .is_empty());
+    assert!(
+        runtime
+            .lock_scheduler()
+            .candidate("account-1")
+            .unwrap()
+            .cooldowns
+            .is_empty()
+    );
     *crate::poison::mutex(&server.state.generation_status) = StatusCode::OK;
     *crate::poison::mutex(&server.state.generation_body) = json!({
         "id":"synthetic-response","status":"completed","output":[]

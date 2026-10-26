@@ -1,6 +1,6 @@
 use super::super::sanitization::*;
 use super::super::*;
-use super::identity::{stable_import_identity, ImportIdentity, ImportIdentityInput};
+use super::identity::{ImportIdentity, ImportIdentityInput, stable_import_identity};
 use super::profile::ImportProfile;
 
 pub(super) struct AssembleImport<'a> {

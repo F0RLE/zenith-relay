@@ -3,7 +3,7 @@ use super::super::{
     credentials::StoredCodexCredentials,
     import_session::{SecretBackend, SecretBackendError},
 };
-use super::lock::{ensure_lock_dir, lock_path, LockOwner};
+use super::lock::{LockOwner, ensure_lock_dir, lock_path};
 use super::*;
 use std::fs;
 use std::future::Future;
@@ -13,11 +13,11 @@ use std::sync::Arc;
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
         Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
-use tokio::time::{sleep, Duration, Instant};
+use tokio::time::{Duration, Instant, sleep};
 use uuid::Uuid;
 use zenith_relay_core::accounts::{
     AccountAuthState, PrepareStatus, TokenAuthority, TokenAuthorityError, TokenPersistenceAdapter,
@@ -171,7 +171,7 @@ async fn twenty_concurrent_refreshes_make_one_network_rotation() {
 
 #[tokio::test]
 async fn unresolved_siwc_checkpoint_stops_refresh_and_persists_recovery_state() {
-    use super::super::oauth::{siwc::SiwcRegistration, OAuthClientKind};
+    use super::super::oauth::{OAuthClientKind, siwc::SiwcRegistration};
     use zenith_relay_core::accounts::ReauthReason;
     let root = temp_root("siwc-recovery-state");
     let store = CredentialStore::new(Arc::new(MemorySecrets::default()));
@@ -244,10 +244,12 @@ async fn unresolved_siwc_checkpoint_stops_refresh_and_persists_recovery_state() 
             AccountAuthState::RequiresReauth(ReauthReason::TokenRotationRecoveryRequired)
         )]
     );
-    assert!(store
-        .require("siwc_account")
-        .unwrap()
-        .matches_snapshot(&initial));
+    assert!(
+        store
+            .require("siwc_account")
+            .unwrap()
+            .matches_snapshot(&initial)
+    );
     assert_eq!(
         store.recover_siwc_rotation(&initial).unwrap_err().code,
         super::super::credentials::CredentialErrorCode::RotationOutcomeUnknown
@@ -426,10 +428,12 @@ async fn removed_account_refresh_cannot_overwrite_a_readded_credential() {
             .unwrap(),
         Err(TokenAuthorityError::AccountNotFound)
     ));
-    assert!(store
-        .require("relay_account_1")
-        .unwrap()
-        .matches_snapshot(&replacement));
+    assert!(
+        store
+            .require("relay_account_1")
+            .unwrap()
+            .matches_snapshot(&replacement)
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -470,10 +474,12 @@ async fn pending_token_persistence_cannot_write_into_a_readded_account() {
             .unwrap(),
         Err(TokenAuthorityError::PersistenceFailed(_))
     ));
-    assert!(store
-        .require("relay_account_1")
-        .unwrap()
-        .matches_snapshot(&replacement));
+    assert!(
+        store
+            .require("relay_account_1")
+            .unwrap()
+            .matches_snapshot(&replacement)
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -503,14 +509,18 @@ async fn stale_agent_task_result_cannot_update_a_replaced_identity_with_no_task(
         Arc::new(CaptureMetadata::default()),
         root.clone(),
     );
-    assert!(persistence
-        .persist_agent_task_id_for_identity("relay_account_1", &previous_identity, "old-task")
-        .await
-        .is_err());
-    assert!(store
-        .require("relay_account_1")
-        .unwrap()
-        .matches_snapshot(&replacement));
+    assert!(
+        persistence
+            .persist_agent_task_id_for_identity("relay_account_1", &previous_identity, "old-task")
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .require("relay_account_1")
+            .unwrap()
+            .matches_snapshot(&replacement)
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -629,10 +639,12 @@ async fn transient_refresh_backoff_survives_adapter_restart_grows_and_clears_on_
         fast_lock_config(),
     )
     .unwrap();
-    assert!(adapter
-        .refresh("relay_account_1", "ignored", 30_000)
-        .await
-        .is_ok());
+    assert!(
+        adapter
+            .refresh("relay_account_1", "ignored", 30_000)
+            .await
+            .is_ok()
+    );
     let saved = store.require("relay_account_1").unwrap();
     assert!(!saved.refresh_is_paused(30_000));
     assert_eq!(saved.generation(), 8);
@@ -664,10 +676,12 @@ async fn usable_tokens_and_new_login_are_not_blocked_by_refresh_backoff() {
         fast_lock_config(),
     )
     .unwrap();
-    assert!(adapter
-        .refresh("relay_account_1", "ignored", 2_000)
-        .await
-        .is_ok());
+    assert!(
+        adapter
+            .refresh("relay_account_1", "ignored", 2_000)
+            .await
+            .is_ok()
+    );
     assert_eq!(client.calls.load(Ordering::SeqCst), 0);
     store.save(&expired_credentials()).unwrap();
     assert_eq!(
@@ -709,10 +723,12 @@ async fn terminal_grant_errors_do_not_become_retry_backoff() {
             .kind,
         TokenRefreshFailureKind::InvalidGrant
     );
-    assert!(store
-        .require("relay_account_1")
-        .unwrap()
-        .matches_snapshot(&previous));
+    assert!(
+        store
+            .require("relay_account_1")
+            .unwrap()
+            .matches_snapshot(&previous)
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -751,10 +767,12 @@ async fn concurrent_failed_refreshes_share_the_persisted_pause() {
     for _ in 0..20 {
         let adapter = adapter.clone();
         tasks.push(tokio::spawn(async move {
-            assert!(adapter
-                .refresh("relay_account_1", "ignored", 1_000)
-                .await
-                .is_err());
+            assert!(
+                adapter
+                    .refresh("relay_account_1", "ignored", 1_000)
+                    .await
+                    .is_err()
+            );
         }));
     }
     for task in tasks {
@@ -794,10 +812,12 @@ async fn failed_backoff_persistence_preserves_credentials_and_reports_storage_fa
         error.code,
         zenith_relay_core::error_codes::CREDENTIAL_PERSIST_FAILED
     );
-    assert!(store
-        .require("relay_account_1")
-        .unwrap()
-        .matches_snapshot(&previous));
+    assert!(
+        store
+            .require("relay_account_1")
+            .unwrap()
+            .matches_snapshot(&previous)
+    );
     fs::remove_dir_all(root).unwrap();
 }
 

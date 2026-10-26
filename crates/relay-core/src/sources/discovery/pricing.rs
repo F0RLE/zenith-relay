@@ -414,31 +414,39 @@ mod tests {
 
     #[test]
     fn ignores_incomplete_or_invalid_catalog_prices() {
-        assert!(detected_model_price(&json!({
-            "id": "incomplete",
-            "inputCostMicrousdPerMillion": 1_000_000,
-        }))
-        .is_none());
-        assert!(detected_model_price(&json!({
-            "id": "invalid",
-            "pricing": { "prompt": "-1", "completion": "0.000001" },
-        }))
-        .is_none());
+        assert!(
+            detected_model_price(&json!({
+                "id": "incomplete",
+                "inputCostMicrousdPerMillion": 1_000_000,
+            }))
+            .is_none()
+        );
+        assert!(
+            detected_model_price(&json!({
+                "id": "invalid",
+                "pricing": { "prompt": "-1", "completion": "0.000001" },
+            }))
+            .is_none()
+        );
     }
 
     #[test]
     fn does_not_turn_request_priced_models_into_zero_cost_token_models() {
-        assert!(detected_model_price(&json!({
-            "id": "image-model",
-            "inputCostMicrousdPerMillion": 0,
-            "outputCostMicrousdPerMillion": 0,
-            "requestCostMicrousd": 500_000,
-        }))
-        .is_none());
-        assert!(detected_model_price(&json!({
-            "id": "image-model-openrouter",
-            "pricing": { "prompt": "0", "completion": "0", "request": "0.5" },
-        }))
-        .is_none());
+        assert!(
+            detected_model_price(&json!({
+                "id": "image-model",
+                "inputCostMicrousdPerMillion": 0,
+                "outputCostMicrousdPerMillion": 0,
+                "requestCostMicrousd": 500_000,
+            }))
+            .is_none()
+        );
+        assert!(
+            detected_model_price(&json!({
+                "id": "image-model-openrouter",
+                "pricing": { "prompt": "0", "completion": "0", "request": "0.5" },
+            }))
+            .is_none()
+        );
     }
 }

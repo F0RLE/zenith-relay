@@ -111,7 +111,13 @@ async fn native_interactions_preserves_tools_and_scopes_json_and_sse_continuatio
                     .unwrap();
                 let status = response.status();
                 let text = response.text().await.unwrap();
-                assert!(!status.is_success(),"unexpected foreign/background continuation: first_stream={first_stream} next_stream={next_stream} model={} background={} foreign_key={} body={text}", invalid["model"], invalid["background"], secret != LOCAL_KEY);
+                assert!(
+                    !status.is_success(),
+                    "unexpected foreign/background continuation: first_stream={first_stream} next_stream={next_stream} model={} background={} foreign_key={} body={text}",
+                    invalid["model"],
+                    invalid["background"],
+                    secret != LOCAL_KEY
+                );
             }
             let requests = observed.lock().unwrap();
             assert_eq!(requests.len(), 2);
@@ -129,13 +135,15 @@ async fn native_interactions_preserves_tools_and_scopes_json_and_sse_continuatio
                 .filter(|event| event.success)
                 .collect::<Vec<_>>();
             assert_eq!(successes.len(), 2, "{ledger:?}");
-            assert!(successes
-                .iter()
-                .all(|event| event.wire_api == WireApi::GeminiInteractions
-                    && event.input_tokens == Some(3)
-                    && event.output_tokens == Some(3)
-                    && event.reasoning_tokens == Some(1)
-                    && event.cached_input_tokens == Some(0)));
+            assert!(
+                successes
+                    .iter()
+                    .all(|event| event.wire_api == WireApi::GeminiInteractions
+                        && event.input_tokens == Some(3)
+                        && event.output_tokens == Some(3)
+                        && event.reasoning_tokens == Some(1)
+                        && event.cached_input_tokens == Some(0))
+            );
         }
     }
 }

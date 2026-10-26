@@ -253,15 +253,17 @@ mod tests {
                 continue;
             }
             assert_eq!(model.protocol_routes.len(), 4);
-            assert!(model
-                .protocol_routes
-                .iter()
-                .all(|route| route.upstream_wire_api
-                    == if i % 2 == 0 {
-                        WireApi::Messages
-                    } else {
-                        WireApi::Responses
-                    }));
+            assert!(
+                model
+                    .protocol_routes
+                    .iter()
+                    .all(|route| route.upstream_wire_api
+                        == if i % 2 == 0 {
+                            WireApi::Messages
+                        } else {
+                            WireApi::Responses
+                        })
+            );
         }
         let offline = models.last().unwrap();
         assert!(offline.protocol_routes.is_empty());
@@ -304,9 +306,11 @@ mod tests {
         other.id = "second-source".into();
         other.protocol_config.capabilities.clear();
         assert!(rejected.is_empty());
-        assert!(ModelProtocolIndex::new(std::slice::from_ref(&source), &[])
-            .routes_for("future-model")
-            .is_empty());
+        assert!(
+            ModelProtocolIndex::new(std::slice::from_ref(&source), &[])
+                .routes_for("future-model")
+                .is_empty()
+        );
         let expected = other
             .protocol_config
             .resolve(

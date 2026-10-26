@@ -1,11 +1,11 @@
+use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE};
 use axum::http::{HeaderMap, Response, StatusCode, Uri};
 use axum::routing::{get, post};
-use axum::Router;
 use futures_util::stream;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -41,7 +41,7 @@ mod stream_safety;
 
 #[path = "support/local_server.rs"]
 mod local_server;
-use local_server::{spawn, TestServer};
+use local_server::{TestServer, spawn};
 
 #[derive(Clone, Debug)]
 struct ObservedRequest {

@@ -18,15 +18,22 @@ async fn proxy_timezone_hot_updates_expire_without_inventing_a_fallback() {
             .unwrap();
         let mut body = request();
         runtime.apply_request_timezone("account-1", &mut body);
-        assert!(body["input"]
-            .as_str()
-            .unwrap()
-            .contains(&format!("<timezone>{timezone}</timezone>")));
+        assert!(
+            body["input"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("<timezone>{timezone}</timezone>"))
+        );
         assert!(body["input"].as_str().unwrap().contains("2026-10-18"));
     }
-    assert!(runtime
-        .set_account_proxy_timezone("account-1", evidence("Invalid/Zone", crate::unix_time_ms()))
-        .is_err());
+    assert!(
+        runtime
+            .set_account_proxy_timezone(
+                "account-1",
+                evidence("Invalid/Zone", crate::unix_time_ms())
+            )
+            .is_err()
+    );
     let mut body = request();
     runtime.apply_request_timezone("account-1", &mut body);
     assert!(body["input"].as_str().unwrap().contains("Asia/Tokyo"));
