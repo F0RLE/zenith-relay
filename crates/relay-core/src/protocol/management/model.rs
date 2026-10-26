@@ -66,6 +66,8 @@ pub struct GatewaySummary {
     #[serde(default = "default_block_degraded_routes_enabled")]
     pub block_degraded_routes_enabled: bool,
     #[serde(default)]
+    pub codex_text_models_enabled: bool,
+    #[serde(default)]
     pub routing_order: Vec<CandidateRuntimeSnapshot>,
 }
 

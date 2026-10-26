@@ -81,6 +81,7 @@ mod parity_tests {
                 codex_websockets_enabled: true,
                 chatgpt_retry_until_available: false,
                 block_degraded_routes_enabled: true,
+                codex_text_models_enabled: false,
                 routing_order: Vec::new(),
             },
             platform: "test".into(),

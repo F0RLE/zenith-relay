@@ -7,6 +7,118 @@ for (const appearance of [
   { locale: "ru", theme: "light", width: 360 },
   { locale: "en", theme: "dark", width: 360 },
 ] as const) {
+  test(`Codex text opt-in waits for consent: ${appearance.locale}/${appearance.theme}/${appearance.width}`, async ({ page }) => {
+    const ru = appearance.locale === "ru";
+    await page.clock.install();
+    await installTauriMock(page, { ...appearance, mode: "local", populated: true });
+    await page.setViewportSize({ width: appearance.width, height: 760 });
+    await page.goto("/");
+    await page.getByRole("button", { name: ru ? "Настройки" : "Settings", exact: true }).click();
+    const toggle = page.getByRole("checkbox", { name: ru ? "Текстовые модели через вход Codex" : "Text models through Codex sign-in", exact: true });
+    await expect(toggle).not.toBeChecked();
+    await toggle.click();
+    const dialog = page.getByRole("dialog", { name: ru ? "Разрешить текстовые модели через Codex?" : "Allow text models through Codex?" });
+    const confirm = dialog.getByRole("button", { name: ru ? /Понимаю риски/ : /Accept risks/ });
+    await expect(confirm).toBeDisabled();
+    await expect(confirm).toHaveClass(/danger/);
+    await expect(dialog.getByRole("heading")).toHaveCount(1);
+    await expect(dialog.locator("header h2 svg")).toHaveCount(1);
+    expect(await dialog.locator("header h2").evaluate((heading) => {
+      const title = heading.getBoundingClientRect();
+      const icon = heading.querySelector("svg")!.getBoundingClientRect();
+      return Math.abs(icon.top + icon.height / 2 - title.top - title.height / 2);
+    })).toBeLessThanOrEqual(1);
+    await expect(dialog.locator(".codex-text-risk-copy strong")).toHaveCount(0);
+    expect(await confirm.evaluate((element) => getComputedStyle(element).backgroundColor)).not.toBe("rgba(0, 0, 0, 0)");
+    await expect(toggle).not.toBeChecked();
+    await page.keyboard.press("Enter");
+    await expect(dialog).toBeVisible();
+    await dialog.screenshot({ path: `output/playwright/codex-text-risk-${appearance.locale}-${appearance.theme}-${appearance.width}.png` });
+    expect(await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+    const box = await dialog.boundingBox();
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(appearance.width);
+    expect(box!.y + box!.height).toBeLessThanOrEqual(760);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(toggle).not.toBeChecked();
+    // A cancelled dialog never writes, even when its original timer expires.
+    await page.clock.fastForward(11_000);
+    const invocations = () => page.evaluate(() => (window as unknown as {
+      __TAURI_TEST_INVOKES__: Array<{ command: string; args: unknown }>;
+    }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_local_codex_text_models"));
+    expect(await invocations()).toHaveLength(0);
+    await toggle.click();
+    await expect(confirm).toBeDisabled();
+    await page.clock.fastForward(8_000);
+    await expect(confirm).toBeDisabled();
+    await page.clock.fastForward(2_200);
+    await expect(confirm).toBeEnabled();
+    await confirm.click();
+    await expect(dialog).toHaveCount(0);
+    await expect(toggle).toBeChecked();
+    expect(await invocations()).toEqual([{ command: "set_local_codex_text_models", args: { input: { enabled: true, expectedEnabled: false, riskAccepted: true } } }]);
+    await toggle.click();
+    await expect(dialog).toHaveCount(0);
+    await expect(toggle).not.toBeChecked();
+    expect((await invocations()).at(-1)?.args).toEqual({ input: { enabled: false, expectedEnabled: true, riskAccepted: false } });
+    expect(await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__
+      .filter((call) => call.command === "set_local_block_degraded_routes" || call.command === "set_local_pool_membership"))).toHaveLength(0);
+  });
+}
+
+test("Codex text opt-in remains off after save failure and blocks duplicate confirmation", async ({ page }) => {
+  await page.clock.install();
+  await installTauriMock(page, { locale: "en", mode: "local", populated: true, codexTextModelsFailure: true, codexTextModelsSaveDelayMs: 2_000 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const toggle = page.getByRole("checkbox", { name: "Text models through Codex sign-in", exact: true });
+  await toggle.click();
+  const dialog = page.getByRole("dialog", { name: "Allow text models through Codex?" });
+  const confirm = dialog.getByRole("button", { name: /Accept risks/ });
+  await page.clock.fastForward(10_200);
+  await confirm.click();
+  await expect(confirm).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeVisible();
+  await page.clock.fastForward(2_500);
+  await expect(confirm).toBeEnabled();
+  await expect(toggle).not.toBeChecked();
+  expect(await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__
+    .filter((call) => call.command === "set_local_codex_text_models"))).toHaveLength(1);
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(toggle).not.toBeChecked();
+});
+
+test("Codex text opt-in respects saved state and leaves image-only badges consistent", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", mode: "local", populated: true, accountOAuthClientKind: "codex", poolMembers: true, codexTextModelsEnabled: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await expect(page.getByText("Images only", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const toggle = page.getByRole("checkbox", { name: "Text models through Codex sign-in", exact: true });
+  await expect(toggle).toBeChecked();
+  await toggle.click();
+  await expect(toggle).not.toBeChecked();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await expect(page.getByText("Images only", { exact: true }).first()).toBeVisible();
+});
+
+test("Codex text opt-in cannot run on a backend without the capability", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", mode: "local", populated: true, codexTextModelsUnavailable: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(page.getByRole("checkbox", { name: "Text models through Codex sign-in", exact: true })).toBeDisabled();
+});
+
+for (const appearance of [
+  { locale: "ru", theme: "dark", width: 1160 },
+  { locale: "en", theme: "light", width: 1160 },
+  { locale: "ru", theme: "light", width: 360 },
+  { locale: "en", theme: "dark", width: 360 },
+] as const) {
   test(`diagnostics are log-only: ${appearance.locale}/${appearance.theme}/${appearance.width}`, async ({ page }) => {
     await page.clock.install();
     await installTauriMock(page, { ...appearance, mode: "local", populated: true, diagnosticDebug: true });
@@ -23,6 +135,9 @@ for (const appearance of [
     await expect(page.getByRole("button", { name: ru ? "Измерить" : "Measure", exact: true })).toHaveCount(0);
     await expect(page.getByRole("dialog")).toHaveCount(0);
     await expect(diagnostics.getByRole("button")).toHaveCount(4);
+    const labelsFit = await diagnostics.locator(".settings-path-row strong").evaluateAll((labels) =>
+      labels.every((label) => label.scrollWidth <= label.clientWidth));
+    expect(labelsFit).toBe(true);
     await page.clock.fastForward(60_000);
     expect(await reads()).toBe(0);
     const operations = diagnostics.getByRole("button", { name: ru ? "Открыть операции" : "Open operations", exact: true });

@@ -128,7 +128,11 @@ pub(super) async fn set_local_model_display_order(
     let (order, old_gateway) = {
         let store = state.store()?;
         let order = complete_model_display_order(
-            configured_pool_model_ids(store.sources(), store.accounts()),
+            configured_pool_model_ids(
+                store.sources(),
+                store.accounts(),
+                store.gateway().codex_text_models_enabled,
+            ),
             &input.model_ids,
             &store.gateway().model_display_order,
         )

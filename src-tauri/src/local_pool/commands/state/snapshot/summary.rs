@@ -124,7 +124,10 @@ pub(super) fn local_account_summary(
             .with_runtime_available(runtime_available, runtime_quota_wait && !plan_use_disabled),
         auth_state: account_record.account.auth_state,
         health: account_record.account.health.summary_label(),
-        models: account_record.pool_models().to_vec(),
+        models: account_record
+            .pool_models(settings.codex_text_models_enabled)
+            .cloned()
+            .collect(),
         allowed_models: account_record.allowed_models.clone(),
         excluded_models: account_record.excluded_models.clone(),
         priority: account_record.priority,

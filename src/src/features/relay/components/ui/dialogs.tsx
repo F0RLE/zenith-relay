@@ -12,6 +12,7 @@ let focusRestoreGeneration = 0;
 
 export function Dialog({
   title,
+  titleIcon,
   subtitle,
   children,
   onClose,
@@ -24,6 +25,7 @@ export function Dialog({
   layer = "default",
 }: {
   title: string;
+  titleIcon?: ReactNode;
   subtitle?: ReactNode;
   children: ReactNode;
   onClose: () => void;
@@ -161,10 +163,10 @@ export function Dialog({
         <header>
           {subtitle ? (
             <div className="relay-dialog-heading">
-              <h2 id={titleId}>{title}</h2>
+              <h2 id={titleId}>{titleIcon}{title}</h2>
               {subtitle}
             </div>
-          ) : <h2 id={titleId}>{title}</h2>}
+          ) : <h2 id={titleId}>{titleIcon}{title}</h2>}
           {headerActions ? <div className="relay-dialog-header-actions">{headerActions}</div> : null}
           <IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={onClose} />
         </header>

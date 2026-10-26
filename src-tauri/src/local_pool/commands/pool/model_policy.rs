@@ -14,7 +14,11 @@ use zenith_relay_core::protocol::{
 pub(crate) fn canonical_pool_model(state: &DesktopState, model_id: &str) -> LocalResult<String> {
     let store = state.store()?;
     canonical_pool_model_id(
-        configured_pool_model_ids(store.sources(), store.accounts()),
+        configured_pool_model_ids(
+            store.sources(),
+            store.accounts(),
+            store.gateway().codex_text_models_enabled,
+        ),
         model_id,
     )
     .map(str::to_owned)
@@ -26,6 +30,7 @@ pub(crate) fn canonical_pool_model(state: &DesktopState, model_id: &str) -> Loca
 pub(super) fn configured_pool_model_ids<'a>(
     sources: &'a [ProviderSourceRecord],
     accounts: &'a [LocalAccountRecord],
+    codex_text_models_enabled: bool,
 ) -> impl Iterator<Item = &'a String> {
     let source_models = sources
         .iter()
@@ -34,7 +39,7 @@ pub(super) fn configured_pool_model_ids<'a>(
     let account_models = accounts
         .iter()
         .filter(|account| account.account.in_pool)
-        .flat_map(LocalAccountRecord::pool_models);
+        .flat_map(move |account| account.pool_models(codex_text_models_enabled));
     source_models.chain(account_models)
 }
 

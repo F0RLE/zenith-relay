@@ -42,6 +42,7 @@ impl DesktopCapabilities {
             "chatgpt_retry_until_available",
             "route_recovery_v1",
             "block_degraded_routes",
+            "codex_text_models",
             "tool_policy_v1",
             "images",
         ]

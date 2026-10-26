@@ -120,6 +120,10 @@ export type MockOptions = {
   basisPointsEnabled?: boolean;
   chatgptRetryUntilAvailable?: boolean;
   blockDegradedRoutesEnabled?: boolean;
+  codexTextModelsEnabled?: boolean;
+  codexTextModelsFailure?: boolean;
+  codexTextModelsSaveDelayMs?: number;
+  codexTextModelsUnavailable?: boolean;
   poolMembers?: boolean;
   proxyCount?: number;
   commonProxyConfigured?: boolean;
@@ -477,9 +481,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     const savedAccountModels = new Map(accounts.map((account) => [account.id, [...account.models]]));
     const localRuntime = {
       schemaVersion: 14,
-      gateway: { toolPolicy: defaultToolPolicy, modelCatalog: modelMetadata, poolRouting: { version: rotationVersion, mode: rotationVersion === 1 ? "smart" : "automatic", members: [] } as import("../../src/features/relay/api/types").PoolRoutingSnapshot, running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, defaultServiceTier: "standard" as "standard" | "fast" | "ultrafast", models: [] as MockModelSummary[], commonProxyConfigured: input.commonProxyConfigured ?? true, commonProxyAvailable: input.commonProxyConfigured ?? true, commonProxyId: input.commonProxyId ?? null, accountProxyRequired: false, quotaRequestTimeoutSeconds: 20, chatgptInterfaceQuotaReserveBasisPoints: 100, codexBackgroundTasksEnabled: input.codexBackgroundTasksEnabled ?? true, codexMemoryExtractionEnabled: input.codexMemoryExtractionEnabled ?? true, codexMemoryConsolidationEnabled: input.codexMemoryConsolidationEnabled ?? true, codexWebsocketsEnabled: input.codexWebsocketsEnabled ?? true, chatgptRetryUntilAvailable: input.chatgptRetryUntilAvailable ?? false, blockDegradedRoutesEnabled: input.blockDegradedRoutesEnabled ?? true, routingOrder: [] as MockCandidateRuntime[] },
+      gateway: { codexTextModelsEnabled: input.codexTextModelsEnabled ?? false, toolPolicy: defaultToolPolicy, modelCatalog: modelMetadata, poolRouting: { version: rotationVersion, mode: rotationVersion === 1 ? "smart" : "automatic", members: [] } as import("../../src/features/relay/api/types").PoolRoutingSnapshot, running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, defaultServiceTier: "standard" as "standard" | "fast" | "ultrafast", models: [] as MockModelSummary[], commonProxyConfigured: input.commonProxyConfigured ?? true, commonProxyAvailable: input.commonProxyConfigured ?? true, commonProxyId: input.commonProxyId ?? null, accountProxyRequired: false, quotaRequestTimeoutSeconds: 20, chatgptInterfaceQuotaReserveBasisPoints: 100, codexBackgroundTasksEnabled: input.codexBackgroundTasksEnabled ?? true, codexMemoryExtractionEnabled: input.codexMemoryExtractionEnabled ?? true, codexMemoryConsolidationEnabled: input.codexMemoryConsolidationEnabled ?? true, codexWebsocketsEnabled: input.codexWebsocketsEnabled ?? true, chatgptRetryUntilAvailable: input.chatgptRetryUntilAvailable ?? false, blockDegradedRoutesEnabled: input.blockDegradedRoutesEnabled ?? true, routingOrder: [] as MockCandidateRuntime[] },
       platform: input.platform ?? "windows",
-      capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies", "account_export", "account_identity_reveal", "runtime_routing", rotationVersion === 3 ? "rotation_v3" : "rotation_v2", "source_protocols_v1"] },
+      capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies", "account_export", "account_identity_reveal", "runtime_routing", rotationVersion === 3 ? "rotation_v3" : "rotation_v2", "source_protocols_v1", ...(!input.codexTextModelsUnavailable ? ["codex_text_models"] : [])] },
       sources: populated ? sources : [],
       accounts: populated ? accounts : [],
       automations: populated ? [automation] : [],
@@ -815,7 +819,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           }
           case "get_local_weekly_capacity": {
             if (input.weeklyCapacityError) throw { code: "io", message: "Synthetic capacity error" };
-            return structuredClone(input.weeklyCapacity ?? { generatedAtMs: Date.now(), summaries: [], groups: [], events: [] });
+            return structuredClone(input.weeklyCapacity ?? { generatedAtMs: Date.now(), summaries: [], models: [], groups: [], events: [] });
           }
           case "get_local_usage_page": {
             const historyQuery = args.input as { requestId?: string; page?: number } | undefined;
@@ -1103,6 +1107,15 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             const request = args.input as { enabled: boolean };
             localRuntime.gateway.blockDegradedRoutesEnabled = request.enabled;
             return structuredClone(localRuntime);
+          }
+          case "set_local_codex_text_models": {
+            const request = args.input as { enabled: boolean; expectedEnabled: boolean; riskAccepted: boolean };
+            if (input.codexTextModelsSaveDelayMs) await new Promise((resolve) => setTimeout(resolve, input.codexTextModelsSaveDelayMs));
+            if (input.codexTextModelsFailure) throw { code: "storage_error", message: "Codex text-model policy was not saved" };
+            if (request.expectedEnabled !== localRuntime.gateway.codexTextModelsEnabled) throw { code: "conflict", message: "Codex text-model policy changed" };
+            if (request.enabled && !request.riskAccepted) throw { code: "invalid_state", message: "Risk confirmation required" };
+            localRuntime.gateway.codexTextModelsEnabled = request.enabled;
+            return null;
           }
         case "update_local_routing": {
             const request = args.input as { poolRouting?: import("../../src/features/relay/api/types").PoolRoutingPolicy; expectedPoolRouting?: import("../../src/features/relay/api/types").PoolRoutingSnapshot; maxRetryCandidates: number; defaultServiceTier: "standard" | "fast" | "ultrafast" };

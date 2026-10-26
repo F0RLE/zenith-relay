@@ -126,14 +126,20 @@ pub struct TrashedLocalAccount {
 }
 
 impl LocalAccountRecord {
-    pub fn pool_models(&self) -> &[String] {
-        if self.image_pool_enabled {
-            static MODELS: std::sync::LazyLock<[String; 1]> =
-                std::sync::LazyLock::new(|| [zenith_relay_core::IMAGE_API_MODEL.to_string()]);
-            &*MODELS
-        } else {
-            self.effective_models()
-        }
+    pub fn pool_models(&self, codex_text_models_enabled: bool) -> impl Iterator<Item = &String> {
+        static IMAGE_MODEL: std::sync::LazyLock<String> =
+            std::sync::LazyLock::new(|| zenith_relay_core::IMAGE_API_MODEL.to_string());
+        let text_enabled = !self.image_pool_enabled || codex_text_models_enabled;
+        let models = self.effective_models();
+        let append_image = self.image_pool_enabled
+            && (!text_enabled
+                || !models
+                    .iter()
+                    .any(|model| model.eq_ignore_ascii_case(&IMAGE_MODEL)));
+        models
+            .iter()
+            .filter(move |_| text_enabled)
+            .chain(append_image.then_some(&*IMAGE_MODEL))
     }
 
     /// Compares the operational record while ignoring Codex client-login

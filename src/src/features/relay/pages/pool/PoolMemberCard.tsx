@@ -161,7 +161,7 @@ export function PoolMemberCard({
           </strong>
           <div className="pool-member-meta">
             {member.kind === "account"
-              ? <AccountBadges planType={metadata!.plan.subscription.planType} oauthClientKind={member.oauthClientKind} unknown={t("common.unknown")} poolScope
+              ? <AccountBadges planType={metadata!.plan.subscription.planType} oauthClientKind={member.oauthClientKind} unknown={t("common.unknown")} poolScope codexTextModelsEnabled={runtime?.gateway.codexTextModelsEnabled}
                 planHint={metadata!.plan.id !== member.id ? accountMetadataHint(metadata!.plan, "plan", nowMs, t, i18n.language) : undefined}
                 planStale={metadata!.plan.id !== member.id && accountMetadataIsStale(metadata!.plan, "plan", nowMs)}
                 routeControl={<AccountRouteSelector account={member} />} />

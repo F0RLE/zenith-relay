@@ -8,6 +8,7 @@ import type { DiagnosticSettings, RelayStorageInfo } from "../../api/types";
 import { Button, OptionMenu, PageHeader, SettingToggle, StatusBadge, useConfirm } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { usePendingFlag } from "../../state/usePendingFlag";
+import { CodexTextModelsControl } from "./CodexTextModelsControl";
 
 type SettingsUpdateState = "idle" | "checking" | "current" | "available" | "error" | "skipped";
 
@@ -115,6 +116,7 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
       </SettingsGroup>
 
       {mode === "local" ? <SettingsGroup icon={<Database aria-hidden />} title={t("settings.localData")}>
+        <CodexTextModelsControl />
         <SettingToggle className="settings-profile-backup-toggle" label={t("settings.profileSwitchBackupPrompt")} description={t("settings.profileSwitchBackupPromptHint")} checked={profileSwitchBackupPrompt} onChange={setProfileSwitchBackupPrompt} />
         <div className="settings-debug-section">
           <SettingToggle
@@ -137,7 +139,6 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
       {mode === "local" && diagnosticSettings?.debugEnabled ? <SettingsGroup icon={<Bug aria-hidden />} title={t("settings.diagnostics")}>
         <SettingsPathRow
           title={t("settings.logsPath")}
-          hint={t("settings.logsHint")}
           path={storageInfo?.logsPath}
           missing={t(storageUnavailable ? "settings.pathUnavailable" : "settings.pathLoading")}
           icon={<FolderOpen aria-hidden />}
@@ -181,9 +182,8 @@ function SettingsGroup({ icon, title, children }: { icon: ReactNode; title: stri
   return <section className="settings-group"><header>{icon}<h2>{title}</h2></header><div className="settings-group-body">{children}</div></section>;
 }
 
-function SettingsPathRow({ title, hint, path, missing, icon, action, busy, onOpen }: {
+function SettingsPathRow({ title, path, missing, icon, action, busy, onOpen }: {
   title: string;
-  hint?: string;
   path: string | undefined;
   missing: string;
   icon: ReactNode;
@@ -195,9 +195,9 @@ function SettingsPathRow({ title, hint, path, missing, icon, action, busy, onOpe
     <div className="settings-control-row settings-path-row">
       <div>
         <strong>{title}</strong>
-        <small>{hint}<code data-relay-tooltip={path}>{path ?? missing}</code></small>
+        <small><code data-relay-tooltip={path}>{path ?? missing}</code></small>
       </div>
-      <Button variant="secondary" icon={icon} busy={busy} onClick={onOpen}>{action}</Button>
+      <Button variant="secondary" icon={icon} busy={busy} onClick={onOpen} aria-label={action} title={action}>{action}</Button>
     </div>
   );
 }

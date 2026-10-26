@@ -208,7 +208,7 @@ fn model_display_order_accepts_models_before_automatic_route_confirmation() {
     source.protocol_config = zenith_relay_core::SourceProtocolConfig::automatic(&source.base_url);
 
     let order = complete_model_display_order(
-        configured_pool_model_ids(&[source], &[]),
+        configured_pool_model_ids(&[source], &[], false),
         &["gpt-pending".into()],
         &[],
     )
@@ -227,7 +227,7 @@ fn pool_model_inventory_includes_ids_only_present_on_source_bindings() {
     )];
 
     let sources = [binding_only];
-    let current = configured_pool_model_ids(&sources, &[])
+    let current = configured_pool_model_ids(&sources, &[], false)
         .map(String::as_str)
         .collect::<Vec<_>>();
     assert_eq!(current, ["binding-model"]);
@@ -277,7 +277,7 @@ fn model_edits_keep_unavailable_members_and_prefer_discovered_account_inventory(
     included.models = vec!["Shared".into()];
     included.excluded_models = vec!["Shared".into()];
     let sources = [included, source("outside", false, WireApi::Responses)];
-    let inventory = || configured_pool_model_ids(&sources, &accounts);
+    let inventory = || configured_pool_model_ids(&sources, &accounts, false);
 
     assert_eq!(canonical_pool_model_id(inventory(), "shared"), Ok("Shared"));
     assert_eq!(

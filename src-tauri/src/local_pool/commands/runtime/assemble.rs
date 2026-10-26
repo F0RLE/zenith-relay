@@ -170,7 +170,7 @@ pub(in crate::local_pool) async fn runtime_from_store(
         hidden_models: settings.hidden_models,
         default_service_tier: settings.default_service_tier,
         quota_stale_after_ms,
-        native_codex_images_only: true,
+        native_codex_images_only: !settings.codex_text_models_enabled,
         image_base_model: None,
         image_pricing_catalog: Some(state.pricing_catalog()),
         model_metadata_catalog: Some(state.model_metadata_loader().catalog_handle()),

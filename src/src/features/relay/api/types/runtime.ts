@@ -44,6 +44,7 @@ export type RuntimeSnapshot = {
     codexWebsocketsEnabled?: boolean;
     chatgptRetryUntilAvailable?: boolean;
     blockDegradedRoutesEnabled?: boolean;
+    codexTextModelsEnabled?: boolean;
     routingOrder?: CandidateRuntimeSnapshot[];
   };
   platform: string;

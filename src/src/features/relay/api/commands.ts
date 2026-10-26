@@ -129,9 +129,7 @@ export const relayCommands = {
   consumeResetCredit: (accountId: string) => invoke<ConsumeResetCreditResponse>("consume_local_reset_credit", { accountId }),
   updateAccount: (accountUpdate: Record<string, unknown>) => invoke("update_local_account", { input: accountUpdate }),
   setAccountEnabled: (accountId: string, enabled: boolean) => invoke("set_local_account_enabled", { accountId, enabled }),
-  accountRouteCandidates: (accountId: string) => invoke<string[]>("local_account_route_candidates", { accountId }),
   selectAccountRoute: (accountId: string, connectionId: string, attach = false) => invoke<void>("select_local_account_route", { accountId, connectionId, attach }),
-  detachAccountRoute: (accountId: string, connectionId: string) => invoke<void>("detach_local_account_route", { accountId, connectionId }),
   deleteAccount: (accountId: string) => invoke("delete_local_account", { accountId }),
   deleteAccounts: (accountIds: string[]) => invoke("delete_local_accounts", { accountIds }),
   accountTrash: () => invoke<TrashedAccountSummary[]>("list_local_account_trash"),
@@ -191,6 +189,8 @@ export const relayCommands = {
   setCodexMemoryEnabled: (stage: CodexMemoryStage, enabled: boolean) => invoke<RuntimeSnapshot>("set_local_codex_memory_enabled", { input: { stage, enabled } }),
   setChatgptRetryUntilAvailable: (enabled: boolean) => invoke("set_local_chatgpt_retry_until_available", { input: { enabled } }),
   setBlockDegradedRoutes: (enabled: boolean) => invoke("set_local_block_degraded_routes", { input: { enabled } }),
+  setCodexTextModels: (enabled: boolean, expectedEnabled: boolean, riskAccepted: boolean) =>
+    invoke<void>("set_local_codex_text_models", { input: { enabled, expectedEnabled, riskAccepted } }),
   setCodexWebsockets: (enabled: boolean) => invoke("set_local_codex_websockets", { input: { enabled } }),
 
   createAutomation: (automationInput: Record<string, unknown>) => invoke("create_quota_wake_automation", { input: automationInput }),
