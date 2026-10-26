@@ -1,6 +1,30 @@
 import { expect, test } from "bun:test";
 import { startupAssets } from "../../scripts/check/frontend-bundle-assets.mjs";
-import { staticModuleGraph } from "../build/startupChunks.ts";
+import { staticModuleGraph, startupChunks } from "../build/startupChunks.ts";
+
+test("shared value helpers join the workspace without pulling lazy pages or the native loader", () => {
+  const root = "/app";
+  const main = `${root}/src/main.tsx`;
+  const bootstrap = `${root}/src/bootstrap.ts`;
+  const value = `${root}/src/features/relay/accountEconomics.ts`;
+  const clock = `${root}/src/features/relay/hooks/useRelativeTimeClock.ts`;
+  const modules = {
+    [main]: { importedIds: ["react"], dynamicImports: ["pool"] },
+    [bootstrap]: { importedIds: ["native"] },
+    [value]: { importedIds: ["formatting"] },
+    [clock]: { importedIds: ["react"] },
+    formatting: { importedIds: [] }, react: { importedIds: [] },
+    native: { importedIds: [] }, pool: { importedIds: [value] },
+  };
+  const plugin = startupChunks();
+  plugin.configResolved({ root });
+  plugin.buildStart();
+  plugin.buildEnd.call({ getModuleInfo: id => modules[id], error: message => { throw Error(message); } }, null);
+  const groups = plugin.config().build.rolldownOptions.output.codeSplitting.groups;
+  const workspace = groups.find(group => group.name === "workspace");
+  for (const id of [value, clock, "formatting", "react"]) expect(workspace.test(id)).toBe(true);
+  for (const id of ["native", "pool", main]) expect(workspace.test(id)).toBe(false);
+});
 
 test("startup grouping follows static dependencies through cycles and ignores external modules", () => {
   const modules = {

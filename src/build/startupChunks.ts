@@ -24,6 +24,7 @@ export function startupChunks(): Plugin {
   const workspace = new Set<string>();
   let bootstrapEntry = "";
   let workspaceEntry = "";
+  let sharedEntries: string[] = [];
   return {
     name: "relay-startup-chunks",
     apply: "build",
@@ -35,6 +36,16 @@ export function startupChunks(): Plugin {
       const root = config.root.replaceAll("\\", "/");
       bootstrapEntry = `${root}/src/bootstrap.ts`;
       workspaceEntry = `${root}/src/main.tsx`;
+      // These small helpers are shared by Connections, Pool and Usage. Keep
+      // their common code in one dictionary rather than extra shared chunks.
+      sharedEntries = [
+        `${root}/src/features/relay/accountEconomics.ts`,
+        `${root}/src/features/relay/hooks/useRelativeTimeClock.ts`,
+        `${root}/src/features/relay/hooks/useProxyPool.ts`,
+        `${root}/src/features/relay/state/selectionModel.ts`,
+        `${root}/src/features/relay/pages/usage/usageFormatting.ts`,
+        `${root}/src/features/relay/sourceUrl.ts`,
+      ];
     },
     buildStart() {
       bootstrap.clear();
@@ -47,7 +58,7 @@ export function startupChunks(): Plugin {
       }
       const lookup = (id: string) => this.getModuleInfo(id);
       for (const id of staticModuleGraph([bootstrapEntry], lookup)) bootstrap.add(id);
-      for (const id of staticModuleGraph([workspaceEntry], lookup)) {
+      for (const id of staticModuleGraph([workspaceEntry, ...sharedEntries], lookup)) {
         // Keep the native loader independent and preserve main's dynamic-entry facade.
         if (id !== workspaceEntry && !bootstrap.has(id)) workspace.add(id);
       }
