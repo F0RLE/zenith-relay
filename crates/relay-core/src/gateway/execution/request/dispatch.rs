@@ -32,7 +32,7 @@ pub(super) struct RequestDispatchInput<'a> {
     pub(super) account_route: bool,
     pub(super) basis_points_route: bool,
     pub(super) route_responses_lite: Option<HeaderValue>,
-    pub(super) adapter_request: &'a PreparedAdapterRequest,
+    pub(super) adapter_request: &'a mut PreparedAdapterRequest,
     pub(super) request_body: Option<Vec<u8>>,
     pub(super) reasoning_effort: &'a ReasoningEffortDiagnostics,
     pub(super) tool_use: &'a mut ToolUseDiagnostics,
@@ -89,7 +89,9 @@ pub(super) async fn dispatch_request_attempt(
         let (body, session) =
             match super::super::basis_points::discovery::execution::prepare_dispatch(
                 original,
-                adapter_request.upstream_body(),
+                // Response conversion retains its codec/continuation state, not
+                // a second copy of the already prepared upstream request body.
+                std::mem::take(adapter_request.upstream_body_mut()),
                 budget,
                 tool_use,
                 runtime,
@@ -168,9 +170,8 @@ pub(super) async fn dispatch_request_attempt(
         }
         let encoding_started = preparation_started.map(|_| Instant::now());
         let encoded = serde_json::to_vec(body).expect("prepared JSON is serializable");
-        if let (Some(catalog_ms), Some(start)) = (&mut preparation.catalog_ms, encoding_started) {
-            *catalog_ms += start.elapsed().as_millis() as u64;
-        }
+        preparation.serialization_ms =
+            encoding_started.map(|start| start.elapsed().as_millis() as u64);
         encoded
     } else {
         request_body.expect("non-BPS requests are serialized during preparation")

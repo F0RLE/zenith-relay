@@ -442,7 +442,9 @@ async fn parallel_call_diagnostics_separate_native_calls_from_validated_client_c
             let body = preparation.body_ms.unwrap();
             assert!(preparation.schema_validation_ms.unwrap() <= body);
             assert!(
-                body + preparation.catalog_ms.unwrap() + preparation.attachments_ms.unwrap()
+                body + preparation.catalog_ms.unwrap()
+                    + preparation.attachments_ms.unwrap()
+                    + preparation.serialization_ms.unwrap()
                     <= transport.request_preparation_ms.unwrap()
             );
             assert_eq!(transport.client_response_ready_ms.is_some(), event.success);

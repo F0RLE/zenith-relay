@@ -22,6 +22,7 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
     ["preparationBodyTime", transport?.requestPreparation?.bodyMs],
     ["preparationSchemaTime", transport?.requestPreparation?.schemaValidationMs],
     ["preparationCatalogTime", transport?.requestPreparation?.catalogMs],
+    ["preparationSerializationTime", transport?.requestPreparation?.serializationMs],
     ["preparationAttachmentsTime", transport?.requestPreparation?.attachmentsMs],
   ] as const;
   // These are dispatch-relative offsets, not durations to add to preparation.

@@ -69,20 +69,26 @@ fn preparation_report(total: Option<u64>, phases: Value) -> Value {
 
 #[test]
 fn diagnostic_report_explains_preparation_remainder_without_adding_nested_validation() {
-    let report = preparation_report(
-        Some(2408),
-        json!({
-            "bodyMs": 139, "schemaValidationMs": 22, "catalogMs": 71, "attachmentsMs": 2175
-        }),
-    );
-    let transport = &report["finalRequest"]["routing"]["transport"];
-    assert_eq!(transport["requestPreparationMs"], 2408);
-    assert_eq!(transport["requestPreparation"]["schemaValidationMs"], 22);
-    let accounting = &transport["preparationAccounting"];
-    assert_eq!(accounting["measuredNonOverlappingPhasesMs"], 2385);
-    assert_eq!(accounting["unattributedMs"], 23);
-    assert_eq!(accounting["observedPhaseCount"], 3);
-    assert_eq!(accounting["status"], "consistent");
+    for (phases, phase_count) in [
+        (
+            json!({"bodyMs":139,"schemaValidationMs":22,"catalogMs":71,"attachmentsMs":2175}),
+            3,
+        ),
+        (
+            json!({"bodyMs":139,"schemaValidationMs":22,"catalogMs":31,"serializationMs":40,"attachmentsMs":2175}),
+            4,
+        ),
+    ] {
+        let report = preparation_report(Some(2408), phases);
+        let transport = &report["finalRequest"]["routing"]["transport"];
+        assert_eq!(transport["requestPreparationMs"], 2408);
+        assert_eq!(transport["requestPreparation"]["schemaValidationMs"], 22);
+        let accounting = &transport["preparationAccounting"];
+        assert_eq!(accounting["measuredNonOverlappingPhasesMs"], 2385);
+        assert_eq!(accounting["unattributedMs"], 23);
+        assert_eq!(accounting["observedPhaseCount"], phase_count);
+        assert_eq!(accounting["status"], "consistent");
+    }
 }
 
 #[test]

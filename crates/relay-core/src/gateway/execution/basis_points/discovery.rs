@@ -22,7 +22,13 @@ pub(in crate::gateway::execution) fn capture(request: &Value, tool_use: &mut Too
         return;
     }
     if let Ok(tools) = client_tools(request) {
-        tool_use.basis_points_catalog = Some(diagnostics(&tools, request));
+        capture_catalog(&tools, request, tool_use);
+    }
+}
+
+fn capture_catalog(tools: &[ClientTool], request: &Value, tool_use: &mut ToolUseDiagnostics) {
+    if tool_use.client_context.is_some() {
+        tool_use.basis_points_catalog = Some(diagnostics(tools, request));
         tool_use.deferred_tool_search = false;
     }
 }
@@ -43,11 +49,29 @@ pub(in crate::gateway) struct DiscoverySession {
 }
 
 impl DiscoverySession {
+    #[cfg(test)]
     pub(in crate::gateway::execution) fn new(
         request: &Value,
         diagnostics_enabled: bool,
     ) -> Result<Option<Self>, AdapterError> {
         let tools = client_tools(request)?;
+        Self::from_catalog(request, tools, diagnostics_enabled)
+    }
+
+    fn prepare(
+        request: &Value,
+        tool_use: &mut ToolUseDiagnostics,
+    ) -> Result<Option<Self>, AdapterError> {
+        let tools = client_tools(request)?;
+        capture_catalog(&tools, request, tool_use);
+        Self::from_catalog(request, tools, tool_use.client_context.is_some())
+    }
+
+    fn from_catalog(
+        request: &Value,
+        tools: Vec<ClientTool>,
+        diagnostics_enabled: bool,
+    ) -> Result<Option<Self>, AdapterError> {
         if !uses_discovery(&tools, request) {
             return Ok(None);
         }

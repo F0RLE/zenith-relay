@@ -116,7 +116,7 @@ pub(super) async fn dispatch_account_attempt(
         let (body, session) =
             match super::super::basis_points::discovery::execution::prepare_dispatch(
                 original_request,
-                &upstream_body,
+                upstream_body,
                 budget,
                 &mut tool_use,
                 runtime,
@@ -171,9 +171,8 @@ pub(super) async fn dispatch_account_attempt(
             attachments_started.map(|start| start.elapsed().as_millis() as u64);
         let encoding_started = preparation_started.map(|_| Instant::now());
         let encoded = serde_json::to_vec(&upstream_body).expect("prepared JSON is serializable");
-        if let (Some(catalog_ms), Some(start)) = (&mut preparation.catalog_ms, encoding_started) {
-            *catalog_ms += start.elapsed().as_millis() as u64;
-        }
+        preparation.serialization_ms =
+            encoding_started.map(|start| start.elapsed().as_millis() as u64);
         encoded
     } else {
         request_body.expect("non-BPS requests are serialized during preparation")

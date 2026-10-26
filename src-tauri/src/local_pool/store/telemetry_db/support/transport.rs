@@ -8,6 +8,7 @@ pub(super) fn document(transport: &TransportDiagnostics) -> Value {
         [
             preparation.body_ms,
             preparation.catalog_ms,
+            preparation.serialization_ms,
             preparation.attachments_ms,
         ]
     });

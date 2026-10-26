@@ -81,8 +81,10 @@ export type RoutingDiagnostics = {
       /** Included in bodyMs. */
       schemaValidationMs?: number | null;
       catalogMs?: number | null;
+      serializationMs?: number | null;
       attachmentsMs?: number | null;
     } | null;
+    httpVersion?: string | null;
     upstreamResponseMs?: number | null;
     clientFirstOutputMs?: number | null;
     clientResponseReadyMs?: number | null;

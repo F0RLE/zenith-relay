@@ -20,6 +20,9 @@ pub struct RequestPreparationDiagnostics {
     pub schema_validation_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_ms: Option<u64>,
+    /// Final JSON encoding, separate from catalog work in new observations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serialization_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachments_ms: Option<u64>,
 }
@@ -34,6 +37,9 @@ pub struct TransportDiagnostics {
     pub fallback_reason: Option<TransportFallbackReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_format: Option<TransportResponseFormat>,
+    /// Negotiated upstream response version, never inferred from client ingress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handshake_ms: Option<u64>,
     /// Native WS: false is selected-route setup before generation, true is reuse.
@@ -117,6 +123,7 @@ impl ExecutorRoute {
                 mode,
                 fallback_reason,
                 response_format: None,
+                http_version: None,
                 handshake_ms: None,
                 connection_reused: None,
                 response_headers_ms: None,
@@ -171,6 +178,7 @@ impl ExecutorRoute {
                 mode: TransportMode::Native,
                 fallback_reason: None,
                 response_format: None,
+                http_version: None,
                 handshake_ms,
                 connection_reused: Some(false),
                 response_headers_ms: None,
@@ -427,6 +435,7 @@ mod tests {
             body_ms: Some(0),
             schema_validation_ms: Some(0),
             catalog_ms: Some(0),
+            serialization_ms: Some(0),
             attachments_ms: Some(0),
         };
         route.observe_request_preparation(0, preparation.clone());
@@ -449,7 +458,7 @@ mod tests {
         assert_eq!(
             encoded["requestPreparation"],
             json!({
-                "bodyMs":0, "schemaValidationMs":0, "catalogMs":0, "attachmentsMs":0
+                "bodyMs":0, "schemaValidationMs":0, "catalogMs":0, "serializationMs":0, "attachmentsMs":0
             })
         );
         assert_eq!(
@@ -466,5 +475,32 @@ mod tests {
         let partial: RequestPreparationDiagnostics =
             serde_json::from_value(json!({"bodyMs": 0})).unwrap();
         assert_eq!(serde_json::to_value(partial).unwrap(), json!({"bodyMs": 0}));
+    }
+
+    #[test]
+    fn upstream_http_version_is_observed_and_never_carried_between_attempts() {
+        fn version(route: &ExecutorRoute) -> Option<&str> {
+            let transport = route.routing.as_ref()?.transport.as_ref()?;
+            transport.http_version.as_deref()
+        }
+        let mut route = route();
+        for (http_version, label) in [
+            (axum::http::Version::HTTP_11, "HTTP/1.1"),
+            (axum::http::Version::HTTP_2, "HTTP/2.0"),
+        ] {
+            route.observe_http_dispatch(None);
+            let response = reqwest::Response::from(
+                axum::http::Response::builder()
+                    .version(http_version)
+                    .body(String::new())
+                    .unwrap(),
+            );
+            route.observe_http_payload(&response);
+            assert_eq!(version(&route), Some(label));
+            route.observe_websocket_dispatch(None);
+            assert_eq!(version(&route), None);
+        }
+        route.observe_http_dispatch(None);
+        assert_eq!(version(&route), None);
     }
 }

@@ -13,6 +13,10 @@ recoverable account deletion. Changes below are grouped by area.
 
 ### Changed
 
+- BPS preparation moves the request history and reuses parsed tool declarations
+  instead of copying them again. Diagnostics separate JSON serialization from
+  catalog preparation and record the observed upstream HTTP version.
+
 - Codex connections retain their catalog format during temporary BPS access
   failures. Unavailable models no longer appear as an invalid catalog or an
   unreachable API address; a fresh successful access check restores discovery
@@ -664,6 +668,10 @@ recoverable account deletion. Changes below are grouped by area.
 преобразования протоколов и корзину аккаунтов. Изменения сгруппированы по темам.
 
 ### Изменения
+
+- Подготовка BPS использует историю запроса и разобранный каталог без повторного
+  копирования. Диагностика отдельно измеряет сериализацию JSON и подготовку
+  каталога, а также сохраняет фактическую версию HTTP ответа провайдера.
 
 - При временном отказе доступа BPS подключение Codex сохраняет формат каталога.
   Недоступные модели больше не показываются как повреждённый каталог или

@@ -1,9 +1,10 @@
 use super::catalog::{client_tool_call_name, history_tool, tool_spec, ClientTool};
-use super::codec::{encode_function_arguments, json_text, parse_function_arguments};
+use super::codec::{encode_function_arguments, parse_function_arguments};
 use super::{is_transport_tool, TRANSPORT_TOOL};
 use crate::gateway::request::responses_item_has_ciphertext as has_item_ciphertext;
 use crate::protocol::AdapterError;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
+use std::borrow::Cow;
 
 mod handoff;
 mod identifiers;
@@ -24,6 +25,15 @@ fn function_transport_id(call_id: &str) -> String {
     fit_responses_id(&normalized_call_id)
 }
 
+#[derive(serde::Serialize)]
+struct TransportCallArguments<'a> {
+    summary: String,
+    extended_summary: &'static str,
+    destructive: bool,
+    references: [String; 1],
+    code: &'a str,
+}
+
 pub(super) fn transport_call(
     tool_call_object: &Map<String, Value>,
     tool: &ClientTool,
@@ -38,30 +48,34 @@ pub(super) fn transport_call(
     // for new calls; otherwise history teaches nested escaping again.
     // Custom input stays opaque.
     let code = if tool.kind == "custom" {
-        tool_call_object
-            .get("input")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| AdapterError::invalid_request().with_parameter("input"))?
+        Cow::Borrowed(
+            tool_call_object
+                .get("input")
+                .and_then(Value::as_str)
+                .ok_or_else(|| AdapterError::invalid_request().with_parameter("input"))?,
+        )
     } else {
-        encode_function_arguments(&parse_function_arguments(tool_call_object)?)?
+        let arguments = parse_function_arguments(tool_call_object)?;
+        Cow::Owned(encode_function_arguments(&arguments)?)
     };
-    let arguments = json!({
-        "summary": format!("Run client tool {}", tool.call_name()),
-        "extended_summary": "Relay client tool through the Excel / Basis Points transport",
-        "destructive": false,
-        "references": [tool.call_name()],
-        "code": code,
-    });
+    let tool_name = tool.call_name();
+    let arguments = serde_json::to_string(&TransportCallArguments {
+        summary: format!("Run client tool {tool_name}"),
+        extended_summary: "Relay client tool through the Excel / Basis Points transport",
+        destructive: false,
+        references: [tool_name],
+        code: &code,
+    })
+    .map_err(|_| AdapterError::invalid_request())?;
     let transport_id = function_transport_id(call_id);
-    Ok(json!({
-        "type": "function_call",
-        "id": transport_id,
-        "call_id": call_id,
-        "name": TRANSPORT_TOOL,
-        "arguments": json_text(&arguments)?,
-        "status": "completed",
-    }))
+    Ok(Value::Object(Map::from_iter([
+        ("type".into(), "function_call".into()),
+        ("id".into(), transport_id.into()),
+        ("call_id".into(), call_id.into()),
+        ("name".into(), TRANSPORT_TOOL.into()),
+        ("arguments".into(), arguments.into()),
+        ("status".into(), "completed".into()),
+    ])))
 }
 
 pub(super) fn record_client_call(
@@ -83,7 +97,7 @@ pub(super) fn translate_input_items(
     input_items: Vec<Value>,
     tools: &[ClientTool],
 ) -> Result<Vec<Value>, AdapterError> {
-    translate_input_items_with_catalog(input_items, tools, &json!({}))
+    translate_input_items_with_catalog(input_items, tools, &serde_json::json!({}))
 }
 
 pub(super) fn translate_input_items_with_catalog(

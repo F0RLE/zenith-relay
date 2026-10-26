@@ -414,7 +414,7 @@ pub(super) fn collapse_history(
                         .cloned()
                         .ok_or_else(invalid)?
                 } else {
-                    parse_function_arguments(object)?
+                    parse_function_arguments(object)?.into_owned()
                 });
                 kinds.push(format!("{}_output", entry["type"].as_str().unwrap()));
             }

@@ -44,15 +44,14 @@ impl From<reqwest::Response> for DiscoveryResponse {
 
 pub(in crate::gateway::execution) fn prepare_dispatch(
     original: &Value,
-    upstream: &Value,
+    mut upstream: Value,
     budget: &SharedRequestBudget,
     tool_use: &mut ToolUseDiagnostics,
     runtime: &GatewayRuntime,
     local_key_id: &str,
     client_context_id: Option<&str>,
 ) -> Result<(Value, Option<DiscoverySession>), crate::AdapterError> {
-    capture(original, tool_use);
-    let mut session = DiscoverySession::new(original, tool_use.client_context.is_some())?;
+    let mut session = DiscoverySession::prepare(original, tool_use)?;
     if session.is_some() && budget.with_budget(|budget| budget.remaining()) < 2 {
         let mut fallback = original.clone();
         fallback[super::super::presentation::OPTION] = serde_json::json!("compact");
@@ -60,7 +59,6 @@ pub(in crate::gateway::execution) fn prepare_dispatch(
         capture(&fallback, tool_use);
         return super::super::prepare_request(&fallback).map(|body| (body, None));
     }
-    let mut upstream = upstream.clone();
     let model = original["model"].as_str().unwrap_or_default();
     let prefix_scope = runtime
         .basis_points_catalog_store

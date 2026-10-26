@@ -137,6 +137,13 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
 
 ## Diagnostics and timings
 
+- Dispatch moves the prepared BPS body instead of retaining a duplicate history;
+  catalog diagnostics share the session's parsed declarations. Wire bytes,
+  discovery authority and cache-prefix ordering stay unchanged.
+- `httpVersion` records the actual upstream HTTP response version when observed,
+  independently of client WebSocket ingress. It does not prove connection reuse;
+  failures before response headers leave it absent.
+
 - Safe request diagnostics retain the client's explicit parallel-call boolean
   separately from the native BPS final-generation call count and validated
   client call count. Native counts include local catalog lookups before they
@@ -165,10 +172,13 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
   retention or a new database schema.
 - `requestPreparation` optionally breaks that duration into request building
   (`bodyMs`), initial schema validation (`schemaValidationMs`, a subset of
-  `bodyMs`), catalog preload/fallback plus final encoding (`catalogMs`), and
+  `bodyMs`), catalog preload/fallback (`catalogMs`), final JSON encoding
+  (`serializationMs`), and
   attachment scanning/cache/upload (`attachmentsMs`). These are durations,
   not dispatch-relative offsets. They describe successful preparation in the
-  HTTP request/account executors; unobserved stages stay absent. Schema timing
+  HTTP request/account executors; unobserved stages stay absent. Older
+  observations without `serializationMs` retain final encoding inside
+  `catalogMs`; no separate encoding time is inferred for them. Schema timing
   includes selecting/parsing the tool catalog and structured-output schemas,
   not just validator compilation. Compact fallback revalidation belongs to
   catalog time. Rounding and remaining dispatch setup can leave a gap to the

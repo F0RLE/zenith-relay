@@ -1094,6 +1094,7 @@ export const en = {
     preparationBodyTime: "Request building",
     preparationSchemaTime: "Of which: schema checks",
     preparationCatalogTime: "Catalog preparation",
+    preparationSerializationTime: "Request serialization",
     preparationAttachmentsTime: "Attachments",
     upstreamResponseTime: "Upstream response collected",
     clientFirstOutputTime: "First Relay output",

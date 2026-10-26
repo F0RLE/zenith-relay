@@ -1,6 +1,7 @@
 use crate::protocol::AdapterError;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 
 pub(super) fn as_input_items(request_input: Option<&Value>) -> Vec<Value> {
     match request_input {
@@ -57,32 +58,52 @@ pub(super) fn json_text(json_value: &Value) -> Result<String, AdapterError> {
     serde_json::to_string(json_value).map_err(|_| AdapterError::invalid_request())
 }
 
+#[derive(serde::Serialize)]
+struct FunctionFrameHeader<'a> {
+    field: &'a str,
+    #[serde(serialize_with = "serialize_argument_fields")]
+    args: Vec<(&'a String, &'a Value)>,
+}
+
+fn serialize_argument_fields<S>(
+    fields: &[(&String, &Value)],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.collect_map(fields.iter().copied())
+}
+
 pub(super) fn encode_function_arguments(arguments: &Value) -> Result<String, AdapterError> {
     let fields = arguments
         .as_object()
         .ok_or_else(|| AdapterError::invalid_request().with_parameter("input.arguments"))?;
     let framed_field = fields
         .iter()
-        .filter_map(|(field, value)| {
+        .enumerate()
+        .filter_map(|(index, (field, value))| {
             let raw = value.as_str()?;
             let escapes = raw
                 .bytes()
                 .filter(|byte| matches!(*byte, b'"' | b'\\' | 0..=0x1f))
                 .count();
-            (escapes > 0).then_some((field, raw, escapes))
+            (escapes > 0).then_some((index, field, raw, escapes))
         })
-        .max_by_key(|(_, _, escapes)| *escapes);
-    let Some((field, raw, _)) = framed_field else {
+        .max_by_key(|(_, _, _, escapes)| *escapes);
+    let Some((index, field, raw, _)) = framed_field else {
         return json_text(arguments);
     };
-    let mut other_arguments = fields.clone();
-    other_arguments.remove(field);
-    let header = json!({"field":field,"args":other_arguments});
-    Ok(format!(
-        "{}{}\n{raw}",
-        super::FUNCTION_STRING_PREFIX,
-        json_text(&header)?
-    ))
+    let mut other_arguments = fields.iter().collect::<Vec<_>>();
+    // Match Map::remove's preserve_order swap exactly: changing key order
+    // here would invalidate existing prompt-cache prefixes.
+    other_arguments.swap_remove(index);
+    let header = serde_json::to_string(&FunctionFrameHeader {
+        field,
+        args: other_arguments,
+    })
+    .map_err(|_| AdapterError::invalid_request())?;
+    Ok(format!("{}{header}\n{raw}", super::FUNCTION_STRING_PREFIX))
 }
 
 pub(super) fn parse_payload_json(text: &str) -> Result<Value, serde_json::Error> {
@@ -303,9 +324,13 @@ pub(super) fn parse_json_object(json_value: Option<&Value>) -> Option<Value> {
 
 pub(super) fn parse_function_arguments(
     tool_call_object: &Map<String, Value>,
-) -> Result<Value, AdapterError> {
-    let raw_arguments = tool_call_object.get("arguments");
-    let parsed = parse_json_object(raw_arguments).ok_or_else(AdapterError::invalid_request)?;
+) -> Result<Cow<'_, Value>, AdapterError> {
+    let parsed = match tool_call_object.get("arguments") {
+        Some(arguments @ Value::Object(_)) => Cow::Borrowed(arguments),
+        raw_arguments => {
+            Cow::Owned(parse_json_object(raw_arguments).ok_or_else(AdapterError::invalid_request)?)
+        }
+    };
     if !parsed.is_object() {
         return Err(AdapterError::invalid_request().with_parameter("input.arguments"));
     }

@@ -1094,6 +1094,7 @@ export const ru = {
     preparationBodyTime: "Сборка запроса",
     preparationSchemaTime: "В т. ч. проверка схем",
     preparationCatalogTime: "Подготовка каталога",
+    preparationSerializationTime: "Сериализация запроса",
     preparationAttachmentsTime: "Вложения",
     upstreamResponseTime: "Ответ источника собран",
     clientFirstOutputTime: "Первый вывод Relay",

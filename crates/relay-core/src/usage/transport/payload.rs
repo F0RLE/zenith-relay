@@ -98,6 +98,7 @@ impl ExecutorRoute {
             .as_mut()
             .and_then(|routing| routing.transport.as_mut())
         {
+            transport.http_version = Some(format!("{:?}", response.version()));
             transport.request_payload = response
                 .extensions()
                 .get::<RequestPayloadDiagnostics>()
