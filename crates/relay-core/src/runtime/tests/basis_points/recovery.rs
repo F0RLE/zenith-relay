@@ -22,6 +22,96 @@ async fn request(base: &str, model: &str) -> reqwest::Response {
 }
 
 #[tokio::test]
+async fn codex_catalog_keeps_its_shape_and_recovers_after_bps_access_failure() {
+    for (status, body, empty_access) in [
+        (
+            StatusCode::FORBIDDEN,
+            json!({"error":"synthetic denial"}),
+            false,
+        ),
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            json!({"error":"synthetic throttle"}),
+            false,
+        ),
+        (StatusCode::OK, json!({"allowed":false}), true),
+        (
+            StatusCode::OK,
+            json!({"allowed":true,"model_catalog":{"models":[]}}),
+            true,
+        ),
+        (StatusCode::OK, json!({"allowed":true}), false),
+    ] {
+        let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+        server.reply_with(status, body);
+        let runtime = Arc::new(runtime(&server).await);
+        let (base, task) = gateway(runtime.clone()).await;
+        let url = format!(
+            "{base}/v1/models?client_version={}",
+            crate::providers::chatgpt::configured_codex_client_version()
+        );
+        let client = retry_admission::bounded_client();
+        for _ in 0..2 {
+            let response = client
+                .get(&url)
+                .bearer_auth("local-secret")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.json::<Value>().await.unwrap(),
+                json!({"models":[]})
+            );
+        }
+        let generic = client
+            .get(format!("{base}/v1/models"))
+            .bearer_auth("local-secret")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(generic.status(), StatusCode::OK);
+        assert_eq!(
+            generic.json::<Value>().await.unwrap(),
+            json!({"object":"list","data":[]})
+        );
+        assert_eq!(server.state.access_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            runtime
+                .lock_scheduler()
+                .candidate("account-1")
+                .unwrap()
+                .models,
+            if empty_access {
+                BTreeSet::new()
+            } else {
+                BTreeSet::from(["gpt-test".to_string()])
+            }
+        );
+        server.reply_with(
+            StatusCode::OK,
+            json!({"allowed":true,"model_catalog":{"models":[{"id":"gpt-test"}]}}),
+        );
+        expire_access(&runtime);
+        let restored = client
+            .get(&url)
+            .bearer_auth("local-secret")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(restored.status(), StatusCode::OK);
+        let restored: Value = restored.json().await.unwrap();
+        let models = restored["models"].as_array().unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["slug"], "gpt-test");
+        assert!(restored.get("data").is_none());
+        assert_eq!(server.state.access_requests.load(Ordering::SeqCst), 2);
+        assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 0);
+        task.abort();
+    }
+}
+
+#[tokio::test]
 async fn invalid_bps_body_422_is_returned_once_without_cooling_the_account() {
     let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
     *crate::poison::mutex(&server.state.generation_status) = StatusCode::UNPROCESSABLE_ENTITY;

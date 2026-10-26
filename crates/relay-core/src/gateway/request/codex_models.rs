@@ -79,11 +79,10 @@ pub(in crate::gateway) async fn models(
                 error_codes::INVALID_REQUEST,
             );
         }
-        if let Some(catalog) =
-            codex_models_response(runtime.as_ref(), &key, &models, client_version).await
-        {
-            return Json(catalog).into_response();
-        }
+        let catalog = codex_models_response(runtime.as_ref(), &key, &models, client_version)
+            .await
+            .unwrap_or_else(|| json!({ "models": [] }));
+        return Json(catalog).into_response();
     }
     Json(json!({
         "object": "list",
