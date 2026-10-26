@@ -82,9 +82,9 @@ pub(super) fn is_transport_tool(tool_name: &str) -> bool {
 /// Frame complex string arguments explicitly instead of nesting their JSON escapes.
 pub(super) const FUNCTION_RELAY_ENCODING: &str = concat!(
     "For function tools with multiline strings, embedded quotes or backslashes, use a framed code payload instead of nested JSON. ",
-    "Its first line is relay-function-string-v1 followed by a space and a JSON header {\"field\":\"FIELD\",\"args\":{}}; after one newline, put the exact raw string value for FIELD. ",
+    "Its first line is relay-function-string-v1 followed by a space and a JSON header {\"field\":\"FIELD\",\"args\":{}}; after one actual newline, put the exact raw string value for FIELD. ",
     "FIELD must name the string argument from the tool schema. Put all other arguments in args and do not repeat FIELD there. ",
-    "Keep the header compact on one line and JSON-escape every string in args; only the body is raw. With several string arguments, frame the script/command or the string needing the most escaping. ",
+    "Keep the header compact on one line and JSON-escape every string in args; only the body is raw. Prefer framing the command/script, not workdir or a path: commands and their quotes then stay out of the JSON header. Other string arguments still need JSON escaping. ",
     "Do not put JSON quotes around the raw body or escape it as inner JSON. Relay reconstructs the complete arguments object and validates the original schema. Serialize the outer native arguments object once. ",
     "For ordinary JSON-form function tools, first JSON-serialize the complete arguments object, then use that JSON text as the outer code string and serialize the outer arguments object. ",
     "These are two distinct JSON layers: preserve escaped quotes, backslashes, newlines and tabs in string arguments at both layers. ",

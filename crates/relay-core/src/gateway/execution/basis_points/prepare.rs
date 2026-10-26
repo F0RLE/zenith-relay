@@ -127,12 +127,20 @@ fn tool_relay_examples(tools: &[&ClientTool]) -> String {
             continue;
         };
         let tool_code_payload = if tool.kind == "function" {
-            let Some(arguments) = function_arguments else {
+            let Some(mut arguments) = function_arguments else {
                 continue;
             };
             let Some(schema) = parameter_schema(tool) else {
                 continue;
             };
+            if is_named_tool(tool, "exec_command") && schema["properties"].get("workdir").is_some()
+            {
+                let mut with_workdir = arguments.clone();
+                with_workdir["workdir"] = json!(r"C:\synthetic\project");
+                if schema_matches(&with_workdir, schema) {
+                    arguments = with_workdir;
+                }
+            }
             if !schema_matches(&arguments, schema) {
                 continue;
             }

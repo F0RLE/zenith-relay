@@ -232,6 +232,56 @@ fn framed_headers_share_lossless_json_parsing_without_modifying_the_raw_body() {
 }
 
 #[test]
+fn framed_separator_compatibility_preserves_every_raw_body_byte() {
+    use super::super::codec::function_arguments;
+
+    let header = r#"{"field":"cmd","args":{"workdir":"C:\\synthetic\\project"}}"#;
+    let raw = " \n\\nWrite-Output \"synthetic\"\r\n$x = 'C:\\synthetic\\q'\n\t";
+    for separator in ["\n", "\r\n", "\r", "\\n", "\\r\\n", "\\r"] {
+        let payload = json!(format!(
+            "{}{header}{separator}{raw}",
+            super::super::FUNCTION_STRING_PREFIX
+        ));
+        assert_eq!(
+            function_arguments(&payload).unwrap(),
+            json!({"cmd":raw,"workdir":r"C:\synthetic\project"}),
+            "separator: {separator:?}"
+        );
+    }
+}
+
+#[test]
+fn framed_separator_compatibility_never_splits_inside_header_strings() {
+    use super::super::codec::function_arguments;
+
+    let header = json!({
+        "field":"cmd",
+        "args":{"label":"first\nsecond\rthird\\nliteral","nested":{"value":"}\\r\\n"}}
+    });
+    let raw = "\\r\\nsynthetic\n{\"field\":\"not-a-header\"}";
+    for header in [
+        header.to_string(),
+        serde_json::to_string_pretty(&header).unwrap(),
+    ] {
+        let payload = json!(format!(
+            "{}{header}\\n{raw}",
+            super::super::FUNCTION_STRING_PREFIX
+        ));
+        assert_eq!(
+            function_arguments(&payload).unwrap(),
+            json!({"cmd":raw,"label":"first\nsecond\rthird\\nliteral","nested":{"value":"}\\r\\n"}})
+        );
+    }
+    for suffix in ["", " ", "\\t", "x\\nsynthetic"] {
+        let payload = json!(format!(
+            "{}{{\"field\":\"cmd\",\"args\":{{}}}}{suffix}",
+            super::super::FUNCTION_STRING_PREFIX
+        ));
+        assert!(function_arguments(&payload).is_err());
+    }
+}
+
+#[test]
 fn framed_multiline_headers_keep_json_and_raw_body_boundaries() {
     use super::super::codec::function_arguments;
 

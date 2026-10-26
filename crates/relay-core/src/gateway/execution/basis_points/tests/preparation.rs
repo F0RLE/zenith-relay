@@ -402,6 +402,56 @@ fn tool_examples_follow_the_declared_tool_instead_of_a_fixed_patch() {
 }
 
 #[test]
+fn tool_examples_keep_other_declared_strings_in_a_valid_frame_header() {
+    for required in [json!(["cmd"]), json!(["cmd", "workdir"])] {
+        let mut request = request_with_tool();
+        request["tools"][0]["parameters"] = json!({
+            "type":"object",
+            "properties":{"cmd":{"type":"string"},"workdir":{"type":"string"}},
+            "required":required,"additionalProperties":false
+        });
+        let instructions = prompt_text(&prepare_request(&request).unwrap());
+        let encoded = instructions
+            .split_once("Example outer arguments for exec_command (function): ")
+            .unwrap()
+            .1;
+        let example = serde_json::Deserializer::from_str(encoded)
+            .into_iter::<Value>()
+            .next()
+            .unwrap()
+            .unwrap();
+        let code = example["code"].as_str().unwrap();
+        let header = code
+            .strip_prefix(super::super::FUNCTION_STRING_PREFIX)
+            .unwrap()
+            .split_once('\n')
+            .unwrap()
+            .0;
+        let header: Value = serde_json::from_str(header).unwrap();
+        assert_eq!(header["field"], "cmd");
+        assert_eq!(header["args"], json!({"workdir":r"C:\synthetic\project"}));
+        let arguments = super::super::codec::function_arguments(&example["code"]).unwrap();
+        assert_eq!(
+            arguments,
+            json!({
+                "cmd":"echo \"hello\"\necho \"world\"","workdir":r"C:\synthetic\project"
+            })
+        );
+        let response = json!({"status":"completed","output":[{
+            "type":"function_call","name":"run_officejs","call_id":"synthetic_example",
+            "arguments":example.to_string()
+        }]});
+        let translated =
+            super::super::response::translate_response_value(response, &request).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(translated["output"][0]["arguments"].as_str().unwrap())
+                .unwrap(),
+            arguments
+        );
+    }
+}
+
+#[test]
 fn tool_catalog_is_one_message_and_examples_follow_the_bare_name() {
     let request = json!({
         "model": "gpt-6-astra",

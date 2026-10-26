@@ -83,12 +83,18 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
   strings: the body starts at the first newline outside JSON containers and
   strings, without trimming or decoding its bytes. Malformed quotes and missing
   separators remain failures; Relay never guesses or regenerates executable code.
+  CR-only and literal `\n`, `\r\n`, or `\r` delimiters are also accepted outside
+  the header for transport compatibility. Only that delimiter is consumed;
+  subsequent body bytes, including escapes and leading whitespace, stay exact.
   The reconstructed object still passes the original schema and tool-choice checks;
   duplicate fields and malformed headers fail. Ordinary JSON calls remain
   supported and custom tools stay opaque, even if their text resembles a frame.
   Replayed client function calls and generated examples share this encoder:
   the top-level string needing the most JSON escapes becomes the raw frame body;
   other arguments retain their types in its header. Plain arguments stay JSON.
+  Shell examples include a declared working directory when its schema accepts
+  the example, keeping the command raw and the directory JSON-escaped in the
+  header. Undeclared arguments and incompatible examples are never added.
   This removes one JSON-escaping layer, not context or model reasoning.
   For compatibility, the inner function JSON decoder also escapes literal LF,
   CR, and tab characters inside quoted strings without changing their decoded

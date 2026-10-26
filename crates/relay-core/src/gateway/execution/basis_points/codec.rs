@@ -206,6 +206,24 @@ fn split_function_string_frame(frame: &str) -> Option<(&str, &str)> {
             b'{' | b'[' => depth += 1,
             b'}' | b']' => depth = depth.saturating_sub(1),
             b'\n' if depth == 0 => return Some((&frame[..offset], &frame[offset + 1..])),
+            b'\r' if depth == 0 => {
+                let bytes = if frame[offset..].starts_with("\r\n") {
+                    2
+                } else {
+                    1
+                };
+                return Some((&frame[..offset], &frame[offset + bytes..]));
+            }
+            b'\\' if depth == 0 => {
+                // The outer JSON can leave one separator escaped. Interpret
+                // only that delimiter outside the header; executable bytes
+                // after it remain opaque, including any further escapes.
+                for separator in [r"\r\n", r"\n", r"\r"] {
+                    if let Some(raw) = frame[offset..].strip_prefix(separator) {
+                        return Some((&frame[..offset], raw));
+                    }
+                }
+            }
             _ => {}
         }
     }
