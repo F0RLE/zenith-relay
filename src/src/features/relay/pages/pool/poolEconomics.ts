@@ -46,10 +46,12 @@ export function poolEconomics(members: readonly PoolMember[], nowMs = Date.now()
   const estimates = [...remaining.values()];
   const remainingCount = estimates.length;
   const remainingMicroUsd = estimates.reduce((sum, { value }) => sum + value.microUsd, 0);
+  const remainingApproximate = estimates.some(({ value }) => value.approximate) || remainingCount < ledgers.size;
   return {
     used, accountCount, remainingCount, remainingTotalCount: ledgers.size,
     remainingMicroUsd: remainingCount ? remainingMicroUsd : null,
-    remainingApproximate: estimates.some(({ value }) => value.approximate) || remainingCount < ledgers.size,
+    remainingApproximate,
+    remainingEstimate: remainingCount ? { microUsd: remainingMicroUsd, approximate: remainingApproximate } : null,
     purchaseCount, purchaseMicroUsd, recoveredMicroUsd,
     // Use matched account usage and purchase costs, never average percentages
     // or inflate payback with API sources that have no account purchase cost.

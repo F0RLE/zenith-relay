@@ -88,12 +88,14 @@ export type QuotaWindowUsage = {
   calibration: {
     profileId: string;
     workload: string;
-    cacheBand: number;
-    outputBand: number;
-    medianMicroUsd: number;
+    cacheBand: number | null;
+    outputBand: number | null;
+    medianMicroUsd: number | null;
     lowMicroUsd: number;
     highMicroUsd: number;
     accountCount: number;
+    profileCount?: number;
+    pricingCoverageBasisPoints?: number;
     observedAtMs: number;
     validUntilMs: number;
   };

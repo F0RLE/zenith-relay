@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { AccountSummary } from "../api/types";
-import { accountPaybackHint, buildAccountValueProjection, formatAccountPayback, remainingValueDeadlines, remainingValueHint } from "../accountEconomics";
+import { accountPaybackHint, buildAccountValueProjection, formatAccountPayback, formatRemainingApiEquivalent, remainingValueDeadlines, remainingValueHint } from "../accountEconomics";
 import { useRelativeTimeClock } from "../hooks/useRelativeTimeClock";
 import { formatAccountValueMicroUsd } from "../poolFormatting";
 import { useTooltip } from "./Ui";
@@ -46,7 +46,7 @@ export function AccountValueStrip({ account }: { account: AccountSummary }) {
     </AccountValueMetric>
     <AccountValueMetric title={remainingValueHint(remainingApiEquivalent, locale, t)}>
       <dt>{t(remainingApiEquivalent && !remainingApiEquivalent.approximate ? "accounts.accountValue.remainingDirect" : "accounts.accountValue.remaining")}</dt>
-      <dd>{remainingApiEquivalent ? formatAccountValueMicroUsd(remainingApiEquivalent.microUsd, locale, remainingApiEquivalent.approximate) : "—"}</dd>
+      <dd>{formatRemainingApiEquivalent(remainingApiEquivalent, locale)}</dd>
     </AccountValueMetric>
     <AccountValueMetric title={paybackTitle} {...(payback != null && payback >= 1 ? { state: "paid" } : {})}>
       <dt>{t("accounts.accountValue.payback")}</dt>

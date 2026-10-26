@@ -27,6 +27,14 @@ fn collector_uses_shared_weekly_evidence_not_siwc_ceiling_without_ui_snapshot() 
     let mut codex = super::super::tests::account_record();
     codex.account.id = "codex".into();
     codex.account.subscription.plan_type = Some("plus".into());
+    codex.account.quota.primary = Some(
+        serde_json::from_value(serde_json::json!({
+            "kind":"primary", "windowStartMs":NOW - 17_970_000,
+            "resetAtMs":NOW + 30_000, "availableBasisPoints":0,
+            "windowMinutes":300, "observedAtMs":NOW,
+        }))
+        .unwrap(),
+    );
     codex.account.quota.secondary = Some(
         serde_json::from_value(serde_json::json!({
             "kind":"secondary", "windowStartMs":NOW - 86_400_000, "resetAtMs":NOW + 6 * 86_400_000,
@@ -73,6 +81,20 @@ fn collector_uses_shared_weekly_evidence_not_siwc_ceiling_without_ui_snapshot() 
         .unwrap()
     };
     observe(&inventory, NOW + 2000);
+    let revision_before_reset = telemetry.weekly_capacity_revision();
+    let weekly_before_reset = subscription_ledgers(&inventory, &facts)[0].window.clone();
+    let burst = inventory[1].account.quota.primary.as_mut().unwrap();
+    burst.window_start_ms = Some(NOW + 30_000);
+    burst.reset_at_ms = Some(NOW + 18_030_000);
+    burst.available_basis_points = Some(10_000);
+    burst.explicitly_full = Some(true);
+    burst.observed_at_ms = NOW + 30_000;
+    observe(&inventory, NOW + 30_000);
+    assert_eq!(
+        subscription_ledgers(&inventory, &facts)[0].window,
+        &weekly_before_reset
+    );
+    assert_eq!(telemetry.weekly_capacity_revision(), revision_before_reset);
     inventory[1].account.subscription.plan_type = Some("pro".into());
     inventory[1]
         .account
@@ -132,11 +154,13 @@ fn collector_uses_shared_weekly_evidence_not_siwc_ceiling_without_ui_snapshot() 
         .unwrap()
         .observed_at_ms = NOW + 120_000;
     observe(&inventory[2..], NOW + 120_000);
-    assert!(telemetry
-        .weekly_capacity_report(WeeklyCapacityQuery::default(), NOW + 120_000)
-        .unwrap()
-        .events
-        .is_empty());
+    assert!(
+        telemetry
+            .weekly_capacity_report(WeeklyCapacityQuery::default(), NOW + 120_000)
+            .unwrap()
+            .events
+            .is_empty()
+    );
     drop(telemetry);
     std::fs::remove_dir_all(root).unwrap();
 }

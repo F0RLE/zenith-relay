@@ -15,9 +15,9 @@ test("shared calibration crosses the snapshot boundary and linked routes count o
   await expect(total).toHaveAttribute("data-relay-tooltip", /1 of 1 independent pool limits/);
   const remaining = cards.first().locator(".account-value-strip > div").nth(1);
   await remaining.focus();
-  await expect(page.getByRole("tooltip")).toContainText("Shared calibration");
-  await expect(page.getByRole("tooltip")).toContainText("sampled subscriptions: 3");
-  await expect(page.getByRole("tooltip")).toContainText("P10–P90");
+  await expect(page.getByRole("tooltip")).toContainText("Price coverage 100%");
+  await expect(page.getByRole("tooltip")).toContainText("subscriptions: 3");
+  await expect(page.getByRole("tooltip")).toContainText("Median estimate from weekly quota");
 });
 
 test("missing calibration is an explicit unknown, not the old per-account extrapolation", async ({ page }) => {
@@ -31,4 +31,16 @@ test("missing calibration is an explicit unknown, not the old per-account extrap
   await expect(page.locator('[data-metric="api-remaining"] strong')).toHaveText("—");
   await strip.locator(":scope > div").nth(1).focus();
   await expect(page.getByRole("tooltip")).toContainText("unknown, not zero");
+});
+
+test("mixed workloads display one observed estimate instead of a range or midpoint", async ({ page }) => {
+  await installTauriMock(page, { accountCalibrationMixed: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  const strip = page.locator('.pool-member-card[data-member-kind="account"] .account-value-strip').first();
+  await expect(strip.locator("dd").nth(1)).toHaveText("≈$5.44");
+  await expect(page.locator('[data-metric="api-remaining"] strong')).toHaveText("≈$5.44");
+  await strip.locator(":scope > div").nth(1).focus();
+  await expect(page.getByRole("tooltip")).toContainText("2 workload profiles");
+  await expect(page.getByRole("tooltip")).toContainText("80%");
 });

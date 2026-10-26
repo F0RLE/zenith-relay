@@ -1,7 +1,7 @@
 use super::*;
 use zenith_relay_core::{
-    pricing::{PricingCatalog, PricingContext},
     ApiEquivalentUsage, CatalogPriceResolver, ObservedUsageSums,
+    pricing::{PricingCatalog, PricingContext},
 };
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -34,6 +34,12 @@ impl Workload {
     }
 }
 
+pub(super) struct PricedWorkload {
+    pub cost: u64,
+    pub workload: Workload,
+    pub pricing_coverage_basis_points: u16,
+}
+
 pub(super) fn measure(
     connection: &Connection,
     accounts: &[String],
@@ -41,7 +47,7 @@ pub(super) fn measure(
     to_ms: u64,
     catalog: &PricingCatalog,
     pricing: &PricingContext,
-) -> Result<Option<(u64, Workload)>> {
+) -> Result<Option<PricedWorkload>> {
     let sql = format!(
         "SELECT COALESCE(resolved_model, requested_model, ''), {class}, {context},
          COALESCE(effective_reasoning_effort, ''), {columns}, COUNT(*)
@@ -57,6 +63,7 @@ pub(super) fn measure(
     let mut profiles = BTreeMap::<String, u64>::new();
     let mut models = std::collections::BTreeSet::new();
     let (mut cost, mut input, mut cached, mut output) = (0_u64, 0_u64, 0_u64, 0_u64);
+    let (mut priced_tokens, mut unpriced_tokens) = (0_u64, 0_u64);
     for account in accounts {
         let rows = statement
             .query_map(params![account, sql_u64(from_ms), sql_u64(to_ms)], |row| {
@@ -81,11 +88,7 @@ pub(super) fn measure(
         for row in rows {
             let (model, class, context, effort, usage, complete) = row.map_err(db_error)?;
             let value = resolver.estimate("account", account, Some(&model), usage);
-            if !complete
-                || model.is_empty()
-                || value.unpriced_tokens > 0
-                || usage.cached_input_tokens > usage.input_tokens
-            {
+            if !complete || model.is_empty() || usage.cached_input_tokens > usage.input_tokens {
                 return Ok(None);
             }
             let row_input = usage.input_tokens.unwrap_or_default();
@@ -95,6 +98,8 @@ pub(super) fn measure(
                 continue;
             }
             cost = cost.saturating_add(value.micro_usd);
+            priced_tokens = priced_tokens.saturating_add(value.priced_tokens);
+            unpriced_tokens = unpriced_tokens.saturating_add(value.unpriced_tokens);
             input = input.saturating_add(row_input);
             cached = cached.saturating_add(usage.cached_input_tokens.unwrap_or_default());
             output = output.saturating_add(row_output);
@@ -108,7 +113,16 @@ pub(super) fn measure(
         }
     }
     let total = input.saturating_add(output);
-    if cost == 0 || total == 0 || profiles.is_empty() || profiles.len() > 8 {
+    let coverage_total = u128::from(priced_tokens) + u128::from(unpriced_tokens);
+    let pricing_coverage_basis_points = (u128::from(priced_tokens) * 10_000)
+        .checked_div(coverage_total)
+        .unwrap_or_default() as u16;
+    if cost == 0
+        || total == 0
+        || profiles.is_empty()
+        || profiles.len() > 8
+        || pricing_coverage_basis_points < 8_000
+    {
         return Ok(None);
     }
     let band = |part: u64, whole: u64, size: u64| -> u8 {
@@ -126,14 +140,15 @@ pub(super) fn measure(
         .join("|");
     let key = fingerprint(&format!("{mix}|cache:{cache_band}|output:{output_band}"));
     let label = profiles.keys().cloned().collect::<Vec<_>>().join(" + ");
-    Ok(Some((
+    Ok(Some(PricedWorkload {
         cost,
-        Workload {
+        workload: Workload {
             key,
             label,
             models: models.into_iter().collect(),
             cache_band,
             output_band,
         },
-    )))
+        pricing_coverage_basis_points,
+    }))
 }

@@ -37,6 +37,7 @@ fn sample(current: &CapacityObservation<'_>, cost: u64, profile: &str) -> Measur
         pricing_revision: fingerprint(current.pricing_revision),
         consumed: 500,
         micro_usd: Some(cost),
+        pricing_coverage_basis_points: 10_000,
         event: None,
         workload: Some(workload::Workload {
             key: profile.into(),
@@ -61,7 +62,7 @@ fn anchor(current: &CapacityObservation<'_>) -> Anchor {
 }
 
 #[test]
-fn common_workload_median_is_identical_for_equal_quotas_and_linked_routes() {
+fn different_workloads_share_the_observed_median_not_a_range_midpoint() {
     let window = window();
     let a = vec!["a-codex".into(), "a-bps".into(), "a-siwc".into()];
     let b = vec!["b".into()];
@@ -95,14 +96,15 @@ fn common_workload_median_is_identical_for_equal_quotas_and_linked_routes() {
     let result = project(&observations, &samples);
     assert_eq!(result.len(), 7);
     for value in result.values() {
-        assert_eq!(value.calibration.median_micro_usd, 200);
-        assert_eq!(value.calibration.account_count, 3);
+        assert_eq!(value.calibration.median_micro_usd, Some(250));
+        assert_eq!(value.calibration.account_count, 4);
+        assert_eq!(value.calibration.profile_count, 2);
         assert_eq!(
             (
                 value.calibration.low_micro_usd,
                 value.calibration.high_micro_usd
             ),
-            (100, 300)
+            (100, 10_000)
         );
         assert_eq!(value.available_basis_points, 8400);
     }
@@ -110,9 +112,30 @@ fn common_workload_median_is_identical_for_equal_quotas_and_linked_routes() {
     let json = serde_json::to_value(&result["a-codex"]).unwrap();
     assert_eq!(json["ledgerKey"], "a");
     assert_eq!(json["availableBasisPoints"], 8400);
-    assert_eq!(json["calibration"]["medianMicroUsd"], 200);
+    assert_eq!(json["calibration"]["medianMicroUsd"], 250);
     assert!(json.get("apiEquivalent").is_none());
     assert!(json.get("recentApiEquivalent").is_none());
+}
+
+#[test]
+fn old_persisted_measurements_keep_full_coverage_and_single_samples_stay_explicit() {
+    let quota = window();
+    let ids = vec!["a".into()];
+    let current = observation("a", &ids, &quota);
+    let mut legacy = serde_json::to_value(sample(&current, 100, "one")).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("pricing_coverage_basis_points");
+    let restored: Measurement = serde_json::from_value(legacy).unwrap();
+    assert_eq!(restored.pricing_coverage_basis_points, 10_000);
+    let values = project(
+        &[observation("a", &ids, &quota)],
+        &BTreeMap::from([("a", (&current, restored))]),
+    );
+    assert_eq!(values["a"].calibration.account_count, 1);
+    assert_eq!(values["a"].calibration.profile_count, 1);
+    assert_eq!(values["a"].calibration.median_micro_usd, Some(100));
 }
 
 #[test]
@@ -145,13 +168,13 @@ fn cohorts_never_mix_plans_prices_or_weekly_durations() {
     for (i, id) in ids.iter().enumerate() {
         assert_eq!(
             result[&id[0]].calibration.median_micro_usd,
-            (i as u64 + 1) * 100
+            Some((i as u64 + 1) * 100)
         );
     }
 }
 
 #[test]
-fn fresh_profiles_precede_old_ones_and_equal_groups_have_stable_selection() {
+fn freshness_is_per_profile_and_equal_groups_do_not_have_a_hash_selected_winner() {
     let window = window();
     let a = vec!["a".into()];
     let b = vec!["b".into()];
@@ -165,7 +188,9 @@ fn fresh_profiles_precede_old_ones_and_equal_groups_have_stable_selection() {
         ("b", (&observations[1], fresh)),
     ]);
     let result = project(&observations, &samples);
-    assert_eq!(result["a"].calibration.median_micro_usd, 200);
+    assert_eq!(result["a"].calibration.median_micro_usd, Some(550));
+    assert_eq!(result["a"].calibration.low_micro_usd, 200);
+    assert_eq!(result["a"].calibration.high_micro_usd, 900);
     assert_eq!(
         result["a"].calibration.valid_until_ms,
         NOW - 60_000 + DAY_MS
@@ -174,7 +199,7 @@ fn fresh_profiles_precede_old_ones_and_equal_groups_have_stable_selection() {
         &observations,
         &BTreeMap::from([("a", (&observations[0], old))]),
     );
-    assert_eq!(fallback["b"].calibration.median_micro_usd, 900);
+    assert_eq!(fallback["b"].calibration.median_micro_usd, Some(900));
     let samples = BTreeMap::from([
         ("a", (&observations[0], sample(&observations[0], 100, "a"))),
         ("b", (&observations[1], sample(&observations[1], 200, "b"))),
@@ -183,7 +208,19 @@ fn fresh_profiles_precede_old_ones_and_equal_groups_have_stable_selection() {
         project(&observations, &samples)["b"]
             .calibration
             .median_micro_usd,
+        Some(150)
+    );
+    assert_eq!(
+        project(&observations, &samples)["b"]
+            .calibration
+            .low_micro_usd,
         100
+    );
+    assert_eq!(
+        project(&observations, &samples)["b"]
+            .calibration
+            .high_micro_usd,
+        200
     );
     assert!(project(&observations, &BTreeMap::new()).is_empty());
 }

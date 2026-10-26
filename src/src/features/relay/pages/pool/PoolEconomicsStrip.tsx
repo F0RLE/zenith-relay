@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { DollarSign, TrendingUp, Wallet } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { formatAccountPayback, remainingValueDeadlines } from "../../accountEconomics";
+import { formatAccountPayback, formatRemainingApiEquivalent, remainingValueDeadlines } from "../../accountEconomics";
 import { useRelativeTimeClock } from "../../hooks/useRelativeTimeClock";
 import { formatAccountValueMicroUsd } from "../../poolFormatting";
 import type { PoolMember } from "../../poolHelpers";
@@ -20,7 +20,7 @@ export function PoolEconomicsStrip({ members }: { members: readonly PoolMember[]
     </div>
     <div role="group" tabIndex={0} aria-label={t("accounts.accountValue.remainingDirect")} data-metric="api-remaining" data-relay-tooltip={`${t("accounts.accountValue.remainingDirect")}. ${t("pool.economicsRemainingHint", { known: economics.remainingCount, total: economics.remainingTotalCount })}`}>
       <Wallet aria-hidden />
-      <strong>{economics.remainingMicroUsd != null ? formatAccountValueMicroUsd(economics.remainingMicroUsd, locale, economics.remainingApproximate) : "—"}</strong>
+      <strong>{formatRemainingApiEquivalent(economics.remainingEstimate, locale)}</strong>
     </div>
     <div role="group" tabIndex={0} aria-label={t("pool.totalPayback")} data-metric="payback" data-paid={economics.payback != null && economics.payback >= 1} data-relay-tooltip={`${t("pool.totalPayback")}. ${t("pool.economicsPaybackHint", {
       known: economics.purchaseCount, total: economics.accountCount,

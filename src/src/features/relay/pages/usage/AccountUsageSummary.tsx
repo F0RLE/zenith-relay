@@ -2,7 +2,7 @@ import { Activity, CreditCard } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { AccountSummary, UsageTotals } from "../../api/types";
-import { accountPaybackHint, buildAccountValueProjection, formatAccountPayback, remainingValueDeadlines, remainingValueHint } from "../../accountEconomics";
+import { accountPaybackHint, buildAccountValueProjection, formatAccountPayback, formatRemainingApiEquivalent, remainingValueDeadlines, remainingValueHint } from "../../accountEconomics";
 import { useRelativeTimeClock } from "../../hooks/useRelativeTimeClock";
 import { formatAccountValueMicroUsd } from "../../poolFormatting";
 import { formatDetailedRemainingTime, formatQuotaRemaining, formatWindowDuration } from "../../quotaFormatting";
@@ -71,7 +71,7 @@ export function AccountUsageSummary({ account, totals }: { account: AccountSumma
         <UsageMetric
           icon={<CreditCard aria-hidden />}
           label={t(remainingApiEquivalent && !remainingApiEquivalent.approximate ? "accounts.accountValue.remainingDirect" : "accounts.accountValue.remaining")}
-          value={remainingApiEquivalent ? formatAccountValueMicroUsd(remainingApiEquivalent.microUsd, locale, remainingApiEquivalent.approximate) : "—"}
+          value={formatRemainingApiEquivalent(remainingApiEquivalent, locale)}
           title={remainingValueHint(remainingApiEquivalent, locale, t)}
         />
       <UsageMetric

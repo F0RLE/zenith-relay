@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildAccountValueProjection, estimateRemainingApiEquivalent, formatAccountPayback } from "../src/features/relay/accountEconomics";
+import { buildAccountValueProjection, estimateRemainingApiEquivalent, formatAccountPayback, formatRemainingApiEquivalent } from "../src/features/relay/accountEconomics";
 import type { QuotaWindowUsage } from "../src/features/relay/api/types";
 import { calibratedWeek } from "./accountEconomics.fixture";
 
@@ -69,6 +69,42 @@ describe("account value projection", () => {
     expect(first.remainingApiEquivalent).toEqual(second.remainingApiEquivalent);
     expect(first.payback).toBe(1);
     expect(second.payback).toBe(90);
+  });
+
+  test("different workloads show the observed median, not the range or its midpoint", () => {
+    const multiple = { ...evidence, calibration: { ...evidence.calibration,
+      profileCount: 2, workload: "", cacheBand: null, outputBand: null, medianMicroUsd: 8_500_000,
+    } };
+    const value = estimateRemainingApiEquivalent(quota, multiple, now);
+    expect(value).toMatchObject({ microUsd: 4_930_000, lowMicroUsd: 4_640_000, highMicroUsd: 6_960_000 });
+    expect(formatRemainingApiEquivalent(value, "en-US")).toBe("≈$4.93");
+    expect(formatRemainingApiEquivalent(value, "ru-RU")).toMatch(/^≈4,93\s\$$/);
+    expect(estimateRemainingApiEquivalent(quota, { ...multiple, calibration: {
+      ...multiple.calibration, medianMicroUsd: null,
+    } }, now)).toBeNull();
+  });
+
+  test("a five-hour reset does not change the weekly remaining value", () => {
+    const primary = { ...quota.secondary, kind: "primary" as const,
+      windowMinutes: 300, availableBasisPoints: 0, resetAtMs: now };
+    const before = estimateRemainingApiEquivalent({ ...quota, primary }, evidence, now);
+    const after = estimateRemainingApiEquivalent({ ...quota, primary: { ...primary,
+      windowStartMs: now, resetAtMs: now + 5 * 60 * 60 * 1_000,
+      availableBasisPoints: 10_000, explicitlyFull: true,
+    } }, evidence, now);
+    expect(after).toEqual(before);
+    expect(after?.microUsd).toBe(5_800_000);
+    expect(estimateRemainingApiEquivalent(quota, { ...evidence,
+      availableBasisPoints: 4_800,
+    }, now)?.microUsd).toBe(4_800_000);
+  });
+
+  test("cards accept the existing eighty-percent pricing threshold without inventing missing prices", () => {
+    const partial = { ...evidence, calibration: { ...evidence.calibration, pricingCoverageBasisPoints: 8_000 } };
+    expect(estimateRemainingApiEquivalent(quota, partial, now)?.microUsd).toBe(5_800_000);
+    expect(estimateRemainingApiEquivalent(quota, { ...partial, calibration: {
+      ...partial.calibration, pricingCoverageBasisPoints: 7_999,
+    } }, now)).toBeNull();
   });
 
   test("a fresh or unused account can use an established shared calibration", () => {

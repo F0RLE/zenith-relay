@@ -100,6 +100,7 @@ fn compatible_sample(
         && sample.plan == next.plan
         && sample.pricing_revision == next.pricing_revision
         && sample.workload.is_some()
+        && (8_000..=10_000).contains(&sample.pricing_coverage_basis_points)
         && (MIN_CONSUMED..=10_000).contains(&sample.consumed)
         && sample
             .micro_usd
@@ -148,20 +149,32 @@ fn project(
     let mut calibrations = BTreeMap::new();
     let now = observations.first().map_or(0, |value| value.now_ms);
     for (key, groups) in cohorts {
-        let has_fresh = groups
-            .values()
-            .flatten()
-            .any(|sample| sample.from_ms >= now.saturating_sub(DAY_MS));
+        let profile_keys = groups.keys().copied().collect::<Vec<_>>().join("\0");
         let mut selected = Vec::new();
+        let mut points = Vec::new();
+        let mut valid_until = u64::MAX;
         for values in groups.into_values() {
+            // Prefer recent observations within each profile, never use a
+            // fresh sample of another workload to erase this profile's range.
+            let has_fresh = values
+                .iter()
+                .any(|sample| sample.from_ms >= now.saturating_sub(DAY_MS));
             let values = values
                 .into_iter()
                 .filter(|sample| !has_fresh || sample.from_ms >= now.saturating_sub(DAY_MS))
                 .collect::<Vec<_>>();
-            // Most represented exact workload; ties use the stable workload key,
-            // never whichever account happened to refresh most recently.
-            if values.len() > selected.len() {
-                selected = values;
+            if let Some(point) = report::point(now, &values) {
+                points.push(point);
+                for sample in values {
+                    valid_until = valid_until.min(sample.reset_at_ms.min(
+                        sample.from_ms.saturating_add(if has_fresh {
+                            DAY_MS
+                        } else {
+                            MAX_ANCHOR_AGE
+                        }),
+                    ));
+                    selected.push(sample);
+                }
             }
         }
         let Some(point) = report::point(now, &selected) else {
@@ -175,29 +188,37 @@ fn project(
             WeeklyValueCalibration {
                 profile_id: fingerprint(&format!(
                     "{}\0{}\0{}\0{}",
-                    key.0, key.1, key.2, workload.key
+                    key.0, key.1, key.2, profile_keys
                 )),
-                workload: workload.label.clone(),
-                cache_band: workload.cache_band,
-                output_band: workload.output_band,
-                median_micro_usd: point.median_micro_usd,
-                low_micro_usd: point.low_micro_usd,
-                high_micro_usd: point.high_micro_usd,
-                account_count: point.account_count,
-                observed_at_ms: point.observed_at_ms,
-                valid_until_ms: selected
+                workload: if points.len() == 1 {
+                    workload.label.clone()
+                } else {
+                    String::new()
+                },
+                cache_band: (points.len() == 1).then_some(workload.cache_band),
+                output_band: (points.len() == 1).then_some(workload.output_band),
+                // Use the observed subscription samples, not a selected
+                // workload or the midpoint of the diagnostic bounds.
+                median_micro_usd: Some(point.median_micro_usd),
+                low_micro_usd: points
                     .iter()
-                    .map(|sample| {
-                        sample
-                            .reset_at_ms
-                            .min(sample.from_ms.saturating_add(if has_fresh {
-                                DAY_MS
-                            } else {
-                                MAX_ANCHOR_AGE
-                            }))
-                    })
+                    .map(|point| point.low_micro_usd)
                     .min()
-                    .unwrap_or(point.valid_until_ms),
+                    .unwrap_or_default(),
+                high_micro_usd: points
+                    .iter()
+                    .map(|point| point.high_micro_usd)
+                    .max()
+                    .unwrap_or_default(),
+                account_count: point.account_count,
+                profile_count: points.len(),
+                pricing_coverage_basis_points: selected
+                    .iter()
+                    .map(|sample| sample.pricing_coverage_basis_points)
+                    .min()
+                    .unwrap_or_default(),
+                observed_at_ms: point.observed_at_ms,
+                valid_until_ms: valid_until,
             },
         );
     }

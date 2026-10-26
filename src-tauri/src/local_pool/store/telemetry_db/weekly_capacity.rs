@@ -1,6 +1,6 @@
 //! Observational analytics, isolated from quota admission, routing and billing.
 use super::{
-    db_error, params, sql_u64, Connection, ErrorCode, LocalPoolError, Result, TelemetryDb,
+    Connection, ErrorCode, LocalPoolError, Result, TelemetryDb, db_error, params, sql_u64,
 };
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -66,8 +66,14 @@ pub(super) struct Measurement {
     pricing_revision: String,
     consumed: u16,
     micro_usd: Option<u64>,
+    #[serde(default = "full_pricing_coverage")]
+    pricing_coverage_basis_points: u16,
     workload: Option<workload::Workload>,
     event: Option<CapacityEventKind>,
+}
+
+fn full_pricing_coverage() -> u16 {
+    10_000
 }
 
 pub(super) fn fingerprint(value: &str) -> String {
@@ -203,6 +209,7 @@ impl TelemetryDb {
                     pricing_revision: revision.clone(),
                     consumed: 0,
                     micro_usd: None,
+                    pricing_coverage_basis_points: 0,
                     workload: None,
                     event: Some(event),
                 });
@@ -220,24 +227,26 @@ impl TelemetryDb {
                         catalog,
                         pricing,
                     )?;
-                    if let Some((cost, workload)) = priced {
-                        let capacity = u128::from(cost) * 10_000 / u128::from(consumed);
-                        if let Ok(capacity) = u64::try_from(capacity) {
-                            if capacity > 0 && capacity <= 9_007_199_254_740_991 {
-                                measurement = Some(Measurement {
-                                    ledger: ledger.to_owned(),
-                                    account_ids: account_ids.to_vec(),
-                                    at_ms: window.observed_at_ms,
-                                    from_ms: previous.from_ms,
-                                    reset_at_ms,
-                                    plan: plan.clone(),
-                                    pricing_revision: revision.clone(),
-                                    consumed,
-                                    micro_usd: Some(capacity),
-                                    workload: Some(workload),
-                                    event: None,
-                                });
-                            }
+                    if let Some(priced) = priced {
+                        let capacity = u128::from(priced.cost) * 10_000 / u128::from(consumed);
+                        if let Ok(capacity) = u64::try_from(capacity)
+                            && capacity > 0
+                            && capacity <= 9_007_199_254_740_991
+                        {
+                            measurement = Some(Measurement {
+                                ledger: ledger.to_owned(),
+                                account_ids: account_ids.to_vec(),
+                                at_ms: window.observed_at_ms,
+                                from_ms: previous.from_ms,
+                                reset_at_ms,
+                                plan: plan.clone(),
+                                pricing_revision: revision.clone(),
+                                consumed,
+                                micro_usd: Some(capacity),
+                                pricing_coverage_basis_points: priced.pricing_coverage_basis_points,
+                                workload: Some(priced.workload),
+                                event: None,
+                            });
                         }
                     }
                     // An unpriced/incomplete block cannot contaminate the next one.

@@ -85,6 +85,18 @@ describe("pool economics", () => {
       remainingCount: 1, remainingTotalCount: 1, accountCount: 3 });
   });
 
+  test("pool sums shared median estimates once per proven ledger", () => {
+    const quotaWindowUsage = calibratedWeek(Date.now());
+    quotaWindowUsage.calibration = { ...quotaWindowUsage.calibration,
+      profileCount: 2, workload: "", medianMicroUsd: 8_500_000, cacheBand: null, outputBand: null };
+    const quota = { ...account().quota, directBalanceMicroUsd: null };
+    const linked = ["codex", "bps"].map((id) => account({ id, quota, quotaWindowUsage }));
+    const total = poolEconomics([...linked, account({ id: "cash" })]);
+    expect(total.remainingCount).toBe(2);
+    expect(total.remainingMicroUsd).toBe(9_930_000);
+    expect(total.remainingEstimate).toEqual({ microUsd: 9_930_000, approximate: true });
+  });
+
   test("direct balances deduplicate only proven identities and use the freshest observation", () => {
     const first = account({ id: "first", creditBalanceKey: "shared", quota: { ...account().quota, updatedAtMs: 1 } });
     const next = account({ id: "next", creditBalanceKey: "shared", quota: { ...account().quota, updatedAtMs: 2, directBalanceMicroUsd: 3_000_000 } });

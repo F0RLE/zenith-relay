@@ -39,6 +39,10 @@ export function accountPaybackHint(usage: Pick<ApiEquivalentSummary, "microUsd">
     });
 }
 
+export function formatRemainingApiEquivalent(value: Pick<RemainingApiEquivalentEstimate, "microUsd" | "approximate"> | null, locale: string) {
+  return value ? formatAccountValueMicroUsd(value.microUsd, locale, value.approximate) : "—";
+}
+
 /**
  * Builds the shared display projection for account usage cards.
  *
@@ -83,8 +87,15 @@ export function estimateRemainingApiEquivalent(
   const calibration = evidence?.calibration;
   if (!evidence || !calibration) return null;
   const available = evidence.availableBasisPoints;
+  const profiles = calibration.profileCount ?? 1;
+  const coverage = calibration.pricingCoverageBasisPoints ?? 10_000;
+  const median = calibration.medianMicroUsd;
   if (
-    !evidence.ledgerKey || !calibration.profileId || !calibration.workload
+    !evidence.ledgerKey || !calibration.profileId
+    || !Number.isSafeInteger(profiles) || profiles < 1
+    || !Number.isSafeInteger(coverage) || coverage < 8_000 || coverage > 10_000
+    || (profiles === 1 && !calibration.workload)
+    || median == null || !Number.isSafeInteger(median) || median <= 0
     || !Number.isSafeInteger(nowMs)
     || !Number.isSafeInteger(evidence.windowStartMs) || evidence.windowStartMs < 0
     || evidence.windowStartMs > evidence.observedAtMs
@@ -101,14 +112,14 @@ export function estimateRemainingApiEquivalent(
     || nowMs - calibration.observedAtMs >= MAX_ESTIMATE_AGE_MS
     || !Number.isSafeInteger(calibration.validUntilMs) || calibration.validUntilMs <= nowMs
     || !Number.isSafeInteger(calibration.accountCount) || calibration.accountCount < 1
-    || ![calibration.lowMicroUsd, calibration.medianMicroUsd, calibration.highMicroUsd]
+    || ![calibration.lowMicroUsd, calibration.highMicroUsd]
       .every((value) => Number.isSafeInteger(value) && value > 0)
-    || calibration.lowMicroUsd > calibration.medianMicroUsd
-    || calibration.medianMicroUsd > calibration.highMicroUsd
+    || calibration.lowMicroUsd > calibration.highMicroUsd
+    || calibration.lowMicroUsd > median || median > calibration.highMicroUsd
   ) return null;
   const remaining = (capacity: number) => Number((BigInt(capacity) * BigInt(available) + 5_000n) / 10_000n);
   return {
-    microUsd: remaining(calibration.medianMicroUsd),
+    microUsd: remaining(median),
     approximate: true,
     windowKind: evidence.kind,
     windowMinutes: evidence.windowMinutes,
@@ -122,13 +133,13 @@ export function remainingValueHint(value: RemainingApiEquivalentEstimate | null,
   if (!value) return t("accounts.accountValue.remainingMissing");
   if (!value.calibration) return t("accounts.accountValue.remainingDirectHint");
   const profile = value.calibration;
-  return t("accounts.accountValue.remainingHint", {
+  return t((profile.profileCount ?? 1) > 1 ? "accounts.accountValue.remainingMixedHint" : "accounts.accountValue.remainingHint", {
     workload: profile.workload,
-    cache: `${profile.cacheBand}–${Math.min(100, profile.cacheBand + 25)}%`,
-    output: `${profile.outputBand}–${Math.min(100, profile.outputBand + 10)}%`,
+    cache: `${profile.cacheBand}–${Math.min(100, (profile.cacheBand ?? 0) + 25)}%`,
+    output: `${profile.outputBand}–${Math.min(100, (profile.outputBand ?? 0) + 10)}%`,
     samples: profile.accountCount,
-    low: formatAccountValueMicroUsd(value.lowMicroUsd!, locale),
-    high: formatAccountValueMicroUsd(value.highMicroUsd!, locale),
+    profiles: profile.profileCount ?? 1,
+    coverage: formatNumber((profile.pricingCoverageBasisPoints ?? 10_000) / 10_000, locale, { style: "percent", maximumFractionDigits: 1 }),
   });
 }
 

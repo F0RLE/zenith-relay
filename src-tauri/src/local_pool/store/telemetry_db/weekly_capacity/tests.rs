@@ -101,7 +101,10 @@ fn weekly_capacity_persists_anchors_and_counts_linked_routes_as_one_ledger() {
     };
     let before_restart = projected(&database);
     assert_eq!(before_restart.len(), 2);
-    assert_eq!(before_restart["a"].calibration.median_micro_usd, 11_200);
+    assert_eq!(
+        before_restart["a"].calibration.median_micro_usd,
+        Some(11_200)
+    );
     assert_eq!(before_restart["a"], before_restart["b"]);
     let scoped = |id: &str| {
         database
@@ -128,12 +131,69 @@ fn weekly_capacity_persists_anchors_and_counts_linked_routes_as_one_ledger() {
     );
     database.clear().unwrap();
     assert!(projected(&database).is_empty());
-    assert!(report(&database, NOW + 60_000)["groups"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    assert!(
+        report(&database, NOW + 60_000)["groups"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     drop(database);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn cards_keep_eighty_percent_price_coverage_without_changing_overview_measurements() {
+    for known in [3, 4] {
+        let (root, database) = database();
+        observe(&database, NOW, 10_000, "plus", "v1");
+        for index in 0..known {
+            usage(
+                &database,
+                &format!("priced-{index}"),
+                "a",
+                NOW + 30_000 + index * 1_000,
+                Some(80),
+            );
+        }
+        usage(&database, "unpriced", "a", NOW + 40_000, Some(80));
+        {
+            let connection = database.lock_connection().unwrap();
+            for table in ["request_logs", "request_attempts"] {
+                connection.execute(&format!("UPDATE {table} SET resolved_model = 'unpriced-model' WHERE request_id = 'unpriced'"), []).unwrap();
+            }
+        }
+        observe(&database, NOW + 60_000, 9_500, "plus", "v1");
+        let ids = vec!["a".into(), "b".into()];
+        let quota = window(NOW + 60_000, 9_500);
+        let values = database
+            .weekly_value_projections(&[CapacityObservation {
+                ledger: "synthetic-ledger",
+                account_ids: &ids,
+                plan: "plus",
+                window: &quota,
+                pricing_revision: "v1",
+                now_ms: NOW + 60_000,
+            }])
+            .unwrap();
+        if known == 4 {
+            assert_eq!(values["a"].calibration.pricing_coverage_basis_points, 8_000);
+            // Four priced requests cost 1,120 microUSD over 5% consumption;
+            // the unpriced fifth request must not inflate this to 28,000.
+            assert_eq!(values["a"].calibration.median_micro_usd, Some(22_400));
+        } else {
+            assert!(values.is_empty());
+        }
+        // Overview still requires fully priced measurements. The card policy
+        // cannot silently widen chart evidence or turn unknown prices into zero.
+        assert!(
+            report(&database, NOW + 60_000)["groups"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[test]
@@ -142,15 +202,19 @@ fn weekly_capacity_rejects_small_incomplete_expired_or_reversed_observations() {
     observe(&database, NOW, 10_000, "plus", "v1");
     usage(&database, "unknown-cache", "a", NOW + 30_000, None);
     observe(&database, NOW + 60_000, 9_600, "plus", "v1");
-    assert!(report(&database, NOW + 60_000)["groups"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    assert!(
+        report(&database, NOW + 60_000)["groups"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     observe(&database, NOW + 120_000, 9_500, "plus", "v1");
-    assert!(report(&database, NOW + 120_000)["groups"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    assert!(
+        report(&database, NOW + 120_000)["groups"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     usage(&database, "known", "a", NOW + 150_000, Some(80));
     observe(&database, NOW + 180_000, 9_000, "plus", "v1");
     assert_eq!(
@@ -266,10 +330,12 @@ fn weekly_capacity_maintenance_prunes_history_without_new_measurements() {
         .unwrap();
     drop(connection);
     assert_eq!(database.maintain_usage().unwrap(), 1);
-    assert!(report(&database, now)["groups"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    assert!(
+        report(&database, now)["groups"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(database.weekly_capacity_revision(), 1);
     drop(database);
     std::fs::remove_dir_all(root).unwrap();
@@ -284,10 +350,12 @@ fn weekly_capacity_account_purge_removes_derived_shared_ledger_history() {
     database
         .replace_state_json_and_delete_account_data(&[], "a")
         .unwrap();
-    assert!(report(&database, NOW + 60_000)["groups"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    assert!(
+        report(&database, NOW + 60_000)["groups"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     assert!(database.capacity_seen.lock().unwrap().is_empty());
     assert_eq!(
         database

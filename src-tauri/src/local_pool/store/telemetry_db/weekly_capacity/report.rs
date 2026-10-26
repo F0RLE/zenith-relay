@@ -199,27 +199,30 @@ fn build_report(
                     .insert(&value.ledger);
             }
         }
-        if let Some(workload) = &value.workload {
-            if value.micro_usd.is_some() {
-                let key = fingerprint(&format!(
-                    "{}\0{}\0{}",
-                    value.plan, workload.key, value.pricing_revision
-                ));
-                groups.entry(key).or_default().push(value);
-                plans
-                    .entry((value.plan.clone(), value.pricing_revision.clone()))
+        if value.pricing_coverage_basis_points < 10_000 {
+            continue;
+        }
+        if let Some(workload) = &value.workload
+            && value.micro_usd.is_some()
+        {
+            let key = fingerprint(&format!(
+                "{}\0{}\0{}",
+                value.plan, workload.key, value.pricing_revision
+            ));
+            groups.entry(key).or_default().push(value);
+            plans
+                .entry((value.plan.clone(), value.pricing_revision.clone()))
+                .or_default()
+                .push(value);
+            if let Some(model) = workload.single_model() {
+                models
+                    .entry((
+                        value.plan.clone(),
+                        model.to_owned(),
+                        value.pricing_revision.clone(),
+                    ))
                     .or_default()
                     .push(value);
-                if let Some(model) = workload.single_model() {
-                    models
-                        .entry((
-                            value.plan.clone(),
-                            model.to_owned(),
-                            value.pricing_revision.clone(),
-                        ))
-                        .or_default()
-                        .push(value);
-                }
             }
         }
     }
@@ -365,6 +368,7 @@ mod tests {
             pricing_revision: "v1".into(),
             consumed: 500,
             micro_usd: Some(cost),
+            pricing_coverage_basis_points: 10_000,
             event: None,
             workload: Some(workload::Workload {
                 key: "model-default".into(),
@@ -473,10 +477,12 @@ mod tests {
             NOW,
         );
         assert_eq!(report.groups.len(), 4);
-        assert!(report
-            .groups
-            .iter()
-            .all(|group| group.current.as_ref().unwrap().account_count == 1));
+        assert!(
+            report
+                .groups
+                .iter()
+                .all(|group| group.current.as_ref().unwrap().account_count == 1)
+        );
         assert_eq!(report.summaries.len(), 3);
         assert_eq!(report.models.len(), 3);
         let plus = report
@@ -486,11 +492,13 @@ mod tests {
             .unwrap();
         assert_eq!(plus.current.as_ref().unwrap().median_micro_usd, 200);
         assert_eq!(plus.current.as_ref().unwrap().account_count, 2);
-        assert!(report
-            .summaries
-            .iter()
-            .filter(|summary| summary.plan != "plus" || summary.pricing_revision != "v1")
-            .all(|summary| summary.current.as_ref().unwrap().account_count == 1));
+        assert!(
+            report
+                .summaries
+                .iter()
+                .filter(|summary| summary.plan != "plus" || summary.pricing_revision != "v1")
+                .all(|summary| summary.current.as_ref().unwrap().account_count == 1)
+        );
     }
 
     #[test]
