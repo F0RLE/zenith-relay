@@ -456,7 +456,7 @@ for (const theme of ["light", "dark"] as const) {
         await expect(card).toHaveCount(1);
         await expect(card.locator(".account-plan-badge")).toHaveText(plan === "plus" ? "Plus" : "Pro 200");
         await expect(card.locator(".account-route-selector > button")).toHaveAttribute("data-value", "excel_bps");
-        for (const width of [360, 800, 1152, 1160]) {
+        for (const width of [360, 800, 1148, 1152, 1160]) {
           await page.setViewportSize({ width, height: 900 });
           const badges = await card.locator(".account-badges").evaluate((element) => {
             const planBadge = element.querySelector(".account-plan-badge")!;
@@ -471,7 +471,7 @@ for (const theme of ["light", "dark"] as const) {
                 paddingLeft: style.paddingLeft, paddingRight: style.paddingRight, radius: style.borderRadius };
             });
             return { styles, sameLine: Math.abs(planBounds.top - routeBounds.top) < 1,
-              requiredWidth: planBounds.width + routeBounds.width + gap, availableWidth: element.clientWidth,
+              requiredWidth: planBounds.width + routeBounds.width + gap, availableWidth: element.getBoundingClientRect().width,
               rowGap: routeBounds.top - planBounds.bottom, gap };
           });
           expect(badges.styles[0]).toEqual(badges.styles[1]);
