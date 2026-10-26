@@ -1,18 +1,9 @@
-import type { WeeklyCapacityGroup, WeeklyCapacityReport, WeeklyCapacitySeries } from "../../api/types/weeklyCapacity";
+import type { WeeklyCapacityModel, WeeklyCapacityReport, WeeklyCapacitySeries } from "../../api/types/weeklyCapacity";
 import { DAY_MS } from "./overviewAnalyticsModel";
 
-export function capacityGroupOptions(groups: WeeklyCapacityGroup[]) {
-  const names = groups.map((group) => [...new Set(group.workload.split(" + ")
-    .map((workload) => workload.split(" · ")[0]))].join(" + "));
-  const counts = new Map<string, number>();
-  const ordinals = new Map<string, number>();
-  for (const name of names) counts.set(name, (counts.get(name) ?? 0) + 1);
-  return groups.map((group, index) => {
-    const name = names[index]!;
-    const ordinal = (ordinals.get(name) ?? 0) + 1;
-    ordinals.set(name, ordinal);
-    return { value: group.id, label: counts.get(name)! > 1 ? `${name} · ${ordinal}` : name };
-  });
+export function capacityModelOptions(models: WeeklyCapacityModel[]) {
+  return [...new Set(models.map(({ model }) => model))].sort()
+    .map((model) => ({ value: model, label: model }));
 }
 
 export function capacityCurrent(group: WeeklyCapacitySeries | undefined, nowMs: number) {
@@ -22,7 +13,7 @@ export function capacityCurrent(group: WeeklyCapacitySeries | undefined, nowMs: 
 }
 
 export function nextCapacityExpiry(report: WeeklyCapacityReport, nowMs: number) {
-  const deadlines = [...report.summaries, ...report.groups].flatMap((group) => group.current
+  const deadlines = [...report.summaries, ...(report.models ?? []), ...report.groups].flatMap((group) => group.current
     ? [group.current.sampleStartMs + DAY_MS, group.current.validUntilMs, group.current.observedAtMs + 3 * DAY_MS]
     : []).filter((at) => at > nowMs);
   return deadlines.length ? Math.min(...deadlines) : null;
@@ -47,6 +38,7 @@ export function loadCapacity(key: string, revision: number, load: () => Promise<
   if (existing) return existing;
   const request = load().then((report) => {
     if (!report || !Array.isArray(report.summaries) || !Array.isArray(report.groups) || !Array.isArray(report.events)) throw new Error("Invalid weekly capacity report");
+    if (report.models !== undefined && !Array.isArray(report.models)) throw new Error("Invalid weekly capacity models");
     // Native responses may finish out of order after a reset or history clear.
     if (latest.get(key) === request) {
       cache.delete(key);

@@ -1,4 +1,5 @@
 import { useTranslation } from "react-i18next";
+import type { ReactNode } from "react";
 import type { CacheContextDiagnostics, CacheContextSection, CacheHistoryDiagnostics } from "../../api/types";
 import { formatFullNumber } from "../../usageTotals";
 import { formatDurationMs } from "./usageReportFormat";
@@ -6,6 +7,7 @@ import { formatDurationMs } from "./usageReportFormat";
 export function CacheContextDetails({ diagnostics }: { diagnostics: CacheContextDiagnostics | null | undefined }) {
   const { t, i18n } = useTranslation();
   if (!diagnostics) return null;
+  const field = (label: string, value: ReactNode) => <div key={label}><dt>{t(label)}</dt><dd>{value}</dd></div>;
   // Structural differences do not prove why a provider missed its prompt cache.
   const compared = diagnostics.baseline === "completed_request";
   const sections = (changes: CacheContextSection[]) => changes.length
@@ -19,26 +21,21 @@ export function CacheContextDetails({ diagnostics }: { diagnostics: CacheContext
           {diagnostics.provider.type === "cache_miss" ? <> · {t(`usage.cacheContext.providerReasons.${diagnostics.provider.reason}`)}</> : null}
         </dd>
       </div> : null}
-      <div><dt>{t("usage.cacheContext.baseline")}</dt><dd>{t(`usage.cacheContext.baselines.${diagnostics.baseline}`)}</dd></div>
-      <div><dt>{t("usage.cacheContext.scope")}</dt><dd>{t(`usage.cacheContext.scopes.${diagnostics.scope}`)}</dd></div>
-      {compared && diagnostics.previousCompletedAgeMs != null ? <div>
-        <dt>{t("usage.cacheContext.previousAge")}</dt>
-        <dd>{formatDurationMs(diagnostics.previousCompletedAgeMs, i18n.resolvedLanguage ?? i18n.language, t)}</dd>
-      </div> : null}
-      {compared && diagnostics.candidateChanged != null ? <div>
-        <dt>{t("usage.cacheContext.candidate")}</dt>
-        <dd>{t(diagnostics.candidateChanged ? "usage.cacheContext.candidateChanged" : "usage.cacheContext.candidateUnchanged")}</dd>
-      </div> : null}
+      {field("usage.cacheContext.baseline", t(`usage.cacheContext.baselines.${diagnostics.baseline}`))}
+      {field("usage.cacheContext.scope", t(`usage.cacheContext.scopes.${diagnostics.scope}`))}
+      {compared && diagnostics.previousCompletedAgeMs != null
+        ? field("usage.cacheContext.previousAge", formatDurationMs(diagnostics.previousCompletedAgeMs, i18n.resolvedLanguage ?? i18n.language, t)) : null}
+      {compared && diagnostics.candidateChanged != null
+        ? field("usage.cacheContext.candidate", t(diagnostics.candidateChanged ? "usage.cacheContext.candidateChanged" : "usage.cacheContext.candidateUnchanged")) : null}
       {compared ? <>
-        <div><dt>{t("usage.cacheContext.clientChanges")}</dt><dd>{sections(diagnostics.clientChanges)}</dd></div>
-        <div><dt>{t("usage.cacheContext.upstreamChanges")}</dt><dd>{sections(diagnostics.upstreamChanges)}</dd></div>
+        {field("usage.cacheContext.clientChanges", sections(diagnostics.clientChanges))}
+        {field("usage.cacheContext.upstreamChanges", sections(diagnostics.upstreamChanges))}
       </> : null}
-      {diagnostics.relayHistory.comparison !== "not_compared" ? <div>
-        <dt>{t("usage.cacheContext.relayChanges")}</dt><dd>{sections(diagnostics.relayChanges)}</dd>
-      </div> : null}
-      <div><dt>{t("usage.cacheContext.clientHistory")}</dt><dd><History diagnostics={diagnostics.clientHistory} /></dd></div>
-      <div><dt>{t("usage.cacheContext.upstreamHistory")}</dt><dd><History diagnostics={diagnostics.upstreamHistory} /></dd></div>
-      <div><dt>{t("usage.cacheContext.relayHistory")}</dt><dd><History diagnostics={diagnostics.relayHistory} /></dd></div>
+      {diagnostics.relayHistory.comparison !== "not_compared"
+        ? field("usage.cacheContext.relayChanges", sections(diagnostics.relayChanges)) : null}
+      {field("usage.cacheContext.clientHistory", <History diagnostics={diagnostics.clientHistory} />)}
+      {field("usage.cacheContext.upstreamHistory", <History diagnostics={diagnostics.upstreamHistory} />)}
+      {field("usage.cacheContext.relayHistory", <History diagnostics={diagnostics.relayHistory} />)}
     </dl>
   </div>;
 }

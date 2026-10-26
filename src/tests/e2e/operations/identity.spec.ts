@@ -134,7 +134,8 @@ test("stale identity reveal cannot replace a newer request after switching throu
   await page.locator('.mode-picker > button[aria-haspopup="menu"]').click();
   await page.getByRole("menuitemradio", { name: "Relay Hosted", exact: true }).click();
   await expect(page.getByText("In development", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Use this computer", exact: true }).click();
+  await page.locator(".mode-picker-trigger").click();
+  await page.getByRole("menuitemradio", { name: "Computer", exact: true }).click();
   await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.mode"))).toBe("local");
   await expect.poll(() => page.evaluate(() => (window as unknown as { __PENDING_IDENTITY_REVEALS__: () => number }).__PENDING_IDENTITY_REVEALS__())).toBe(2);
 

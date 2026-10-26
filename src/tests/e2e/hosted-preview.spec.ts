@@ -2,17 +2,22 @@ import { expect, test } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
 
 for (const locale of ["ru", "en"] as const) {
-  test(`${locale} development launcher opens the isolated Hosted demo without touching runtimes`, async ({ page }) => {
+  test(`${locale} development launcher opens the isolated Hosted demo without touching runtimes`, async ({ page }, testInfo) => {
     test.skip(!test.info().config.configFile?.endsWith("playwright.hosted-preview.config.ts"), "The preview action is development-only.");
-    await installTauriMock(page, { mode: "hosted", locale, populated: true });
+    await installTauriMock(page, { mode: "hosted", locale, theme: locale === "ru" ? "dark" : "light", populated: true });
     await page.goto("/");
-    const button = page.getByRole("button", { name: locale === "ru" ? "Открыть демо Hosted" : "Open Hosted demo", exact: true });
+    const placeholder = page.locator(".relay-empty");
+    await expect(placeholder.locator(":scope > *")).toHaveCount(2);
+    await expect(placeholder.locator("strong")).toHaveText(locale === "ru" ? "В разработке" : "In development");
+    await expect(placeholder.locator(":scope > svg, p")).toHaveCount(0);
+    const button = placeholder.getByRole("button", { name: locale === "ru" ? "Открыть демо" : "Open demo", exact: true });
     await expect(button).toBeVisible();
+    await placeholder.screenshot({ path: testInfo.outputPath(`hosted-minimal-${locale}.png`) });
     await button.click();
     const commands = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args?: unknown }> }).__TAURI_TEST_INVOKES__);
     expect(commands.filter(call => call.command === "open_hosted_preview")).toHaveLength(1);
     expect(commands.some(call => call.command === "get_local_runtime_state" || call.command === "stop_local_gateway" || call.command.startsWith("get_remote_"))).toBe(false);
-    await expect(page.getByRole("button", { name: locale === "ru" ? "Использовать это устройство" : "Use this computer", exact: true })).toBeVisible();
+    await expect(placeholder.getByRole("button")).toHaveCount(1);
   });
 }
 
@@ -25,7 +30,7 @@ test("failed preview launch shows recovery, not a successful launch", async ({ p
     const original = internals.invoke.bind(internals);
     internals.invoke = (command, ...args) => command === "open_hosted_preview" ? Promise.reject(new Error("synthetic preview unavailable")) : original(command, ...args);
   });
-  await page.getByRole("button", { name: "Открыть демо Hosted", exact: true }).click();
+  await page.getByRole("button", { name: "Открыть демо", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("bun run dev");
-  await expect(page.getByRole("button", { name: "Открыть демо Hosted", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Открыть демо", exact: true })).toBeEnabled();
 });

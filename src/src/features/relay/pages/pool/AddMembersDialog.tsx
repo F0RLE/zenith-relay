@@ -243,7 +243,7 @@ export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void
                 {...accountPickerStatus(account, accountNeedsRecovery(account), t)}
                 name={account.label}
                 icon={<UserRound />}
-                badge={<AccountBadges planType={planType(account)} oauthClientKind={account.oauthClientKind} unknown={t("common.unknown")} poolScope />}
+                badge={<AccountBadges planType={planType(account)} oauthClientKind={account.oauthClientKind} unknown={t("common.unknown")} poolScope codexTextModelsEnabled={runtime?.gateway.codexTextModelsEnabled} />}
                 checked={accountIds.includes(account.id)}
                 disabled={saving}
                 onChange={() => setAccountIds((previousAccountIds) => toggle(previousAccountIds, account.id))}

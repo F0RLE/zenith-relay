@@ -54,8 +54,20 @@ export function RequestDetails({ row, local, onClose }: {
   }, []);
   useEffect(() => {
     if (!showCacheClock) return;
-    const timer = window.setInterval(() => setNowMs(Date.now()), 15_000);
-    return () => window.clearInterval(timer);
+    let timer: number | undefined;
+    const resume = () => {
+      window.clearInterval(timer);
+      timer = undefined;
+      if (document.visibilityState !== "visible") return;
+      setNowMs(Date.now());
+      timer = window.setInterval(() => setNowMs(Date.now()), 15_000);
+    };
+    resume();
+    document.addEventListener("visibilitychange", resume);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", resume);
+    };
   }, [showCacheClock]);
   useEffect(() => {
     if (!local || !row.clientContextId) return;

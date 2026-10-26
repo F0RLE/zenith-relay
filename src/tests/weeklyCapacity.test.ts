@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { WeeklyCapacityGroup, WeeklyCapacityReport } from "../src/features/relay/api/types/weeklyCapacity";
-import { cachedCapacity, capacityCurrent, capacityGroupOptions, loadCapacity, nextCapacityExpiry } from "../src/features/relay/pages/overview/weeklyCapacityModel";
+import { cachedCapacity, capacityCurrent, capacityModelOptions, loadCapacity, nextCapacityExpiry } from "../src/features/relay/pages/overview/weeklyCapacityModel";
 
 const DAY = 86_400_000;
 const NOW = 2_000_000_000_000;
@@ -12,29 +12,28 @@ function report(id = "synthetic"): WeeklyCapacityReport {
       validUntilMs: NOW + 3 * DAY, medianMicroUsd: 100_000_000,
       lowMicroUsd: 90_000_000, highMicroUsd: 110_000_000, accountCount: 3, consumedBasisPoints: 1500 },
   };
-  return { generatedAtMs: NOW, events: [], groups: [group], summaries: [{
+  return { generatedAtMs: NOW, events: [], groups: [group], models: [{ ...group, model: "model" }], summaries: [{
     plan: group.plan, pricingRevision: group.pricingRevision,
     points: group.points, current: group.current, stale: group.stale,
   }] };
 }
 
 describe("weekly capacity", () => {
-  test("model choices stay short without merging distinct measurements", () => {
-    const group = report().groups[0]!;
-    const options = capacityGroupOptions([
-      { ...group, id: "short", workload: "model · standard · short · high" },
-      { ...group, id: "long", workload: "model · standard · long · high" },
-      { ...group, id: "other", workload: "other-model · standard · short · high" },
-      { ...group, id: "mixed", workload: "model · standard · short · high + model · priority · long · high + other-model · standard · short · high" },
+  test("model choices are unique names without workload ordinals or mixtures", () => {
+    const model = report().models[0]!;
+    const options = capacityModelOptions([
+      { ...model, model: "other-model" },
+      model,
+      { ...model, pricingRevision: "older" },
+      { ...model, model: "literal+model" },
     ]);
     expect(options).toEqual([
-      { value: "short", label: "model · 1" },
-      { value: "long", label: "model · 2" },
-      { value: "other", label: "other-model" },
-      { value: "mixed", label: "model + other-model" },
+      { value: "literal+model", label: "literal+model" },
+      { value: "model", label: "model" },
+      { value: "other-model", label: "other-model" },
     ]);
-    expect(capacityGroupOptions([group])).toEqual([{ value: group.id, label: "model" }]);
-    expect(capacityGroupOptions([])).toEqual([]);
+    expect(capacityModelOptions([model])).toEqual([{ value: "model", label: "model" }]);
+    expect(capacityModelOptions([])).toEqual([]);
   });
 
   test("marks 24-hour evidence stale and hides expired/future estimates", () => {

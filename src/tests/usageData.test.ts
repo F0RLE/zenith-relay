@@ -16,9 +16,31 @@ import {
 } from "../src/features/relay/pages/usage/cacheLifetime";
 import type { LocalUsage } from "../src/features/relay/api/types";
 import { formatUsageApiEquivalent } from "../src/features/relay/pages/usage/usageFormatting";
-import { compactRequestId, formatModelId, formatReasoningEffort, formatReasoningSummary, formatTiming, prefixErrorOrigin, requestStatusKind, requestStatusLabel } from "../src/features/relay/pages/usage/usageReportFormat";
+import { compactRequestId, formatEndpointKind, formatModelId, formatReasoningEffort, formatReasoningSummary, formatTiming, formatWireApi, prefixErrorOrigin, requestStatusKind, requestStatusLabel } from "../src/features/relay/pages/usage/usageReportFormat";
 import { en } from "../src/i18n/locales/en";
 import { ru } from "../src/i18n/locales/ru";
+
+test("request protocol and endpoint names share labels and preserve unknown values", async () => {
+  for (const [language, translations] of Object.entries({ en, ru })) {
+    const i18n = createInstance();
+    await i18n.init({ lng: language, resources: { [language]: { translation: translations } } });
+    for (const [wireApi, label] of Object.entries({
+      responses: translations.usage.protocols.responses,
+      messages: translations.usage.protocols.messages,
+      chat_completions: translations.usage.protocols.chatCompletions,
+      gemini: translations.usage.protocols.gemini,
+      gemini_interactions: translations.usage.protocols.gemini_interactions,
+      custom_api: "custom_api",
+    })) {
+      expect(formatWireApi(wireApi, i18n.t)).toBe(label);
+      expect(formatEndpointKind(wireApi, "responses", i18n.t)).toBe(label);
+      expect(formatEndpointKind(undefined, wireApi, i18n.t)).toBe(label);
+    }
+    expect(formatEndpointKind("excel_basis_points", "responses", i18n.t)).toBe(translations.usage.endpoints.excelBasisPoints);
+    expect(formatEndpointKind(null, null, i18n.t)).toBe("—");
+    expect(formatWireApi(null, i18n.t)).toBe("—");
+  }
+});
 
 const row = (overrides: Partial<UsageRow> = {}): UsageRow => ({
   id: "request",

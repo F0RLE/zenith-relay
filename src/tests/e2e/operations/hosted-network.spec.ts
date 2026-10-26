@@ -39,7 +39,9 @@ for (const locale of ["en", "ru"] as const) {
     expect((await calls(page)).some(({ command }) => command === "stop_local_gateway" || command.startsWith("get_remote_") || command === "execute_remote_server_action")).toBe(false);
     await page.screenshot({ path: `output/playwright/hosted-${locale}.png` });
 
-    await page.getByRole("button", { name: locale === "ru" ? "Использовать это устройство" : "Use this computer", exact: true }).click();
+    await expect(page.locator(".relay-empty button")).toHaveCount(0);
+    await page.locator(".mode-picker-trigger").click();
+    await page.getByRole("menuitemradio", { name: computer, exact: true }).click();
     await expect(page.getByRole("button", { name: locale === "ru" ? "Остановить API" : "Stop API", exact: true })).toBeVisible();
   });
 }
@@ -48,7 +50,7 @@ test("Hosted startup does not load either runtime", async ({ page }) => {
   await installTauriMock(page, { mode: "hosted", locale: "en", populated: true });
   await page.goto("/");
   await expect(page.getByText("In development", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Open Hosted demo", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Open demo", exact: true })).toHaveCount(0);
   expect((await calls(page)).some(({ command }) => command === "get_local_runtime_state" || command.startsWith("get_remote_"))).toBe(false);
 });
 

@@ -254,12 +254,13 @@ export function poolActivityState(
 ): PoolActivityState {
   const effectiveOrder = activityRuntimeOrder(runtimeOrder, activity, members);
   const activeMembers = members.filter((member) => activeRequestCount(runtimeByMember.get(member.id)) > 0);
+  const canRoute = createMemberRouteCheck(visibleModelIds);
   let nextMember: PoolMember | null = null;
   for (const candidate of effectiveOrder) {
     if (!candidate.available || candidate.nextForNewRequest !== true) continue;
     nextMember = members.find((member) =>
       candidateBelongsToMember(member, candidate)
-      && memberCanRoute(member, visibleModelIds)) ?? null;
+      && canRoute(member)) ?? null;
     if (nextMember) break;
   }
   const activeRuntime = activeMembers.flatMap((member) => {
@@ -325,13 +326,23 @@ function activityRuntimeOrder(
   return applyRuntimeActivities([...runtimeOrder, ...missingActive], activities);
 }
 
-export function memberCanRoute(member: PoolMember, visibleModelIds?: readonly string[]) {
+function memberIsRouteReady(member: PoolMember) {
   if (!member.inPool || !member.enabled || member.draining || member.operationalStatus !== "rotation") return false;
   if (member.kind === "source" && !member.secretAvailable) return false;
   if (member.kind === "account" && (!member.secretAvailable || !member.proxyAvailable)) return false;
-  if (visibleModelIds == null) return true;
-  const visible = new Set(visibleModelIds.map((model) => modelIdKey(model)));
-  return member.models.some((model) => visible.has(modelIdKey(model)));
+  return true;
+}
+
+/** Share catalog normalization within this projection only. No eligible
+ * candidate or next-route preview means no catalog work is needed. */
+function createMemberRouteCheck(visibleModelIds?: readonly string[]) {
+  let visible: Set<string> | undefined;
+  return (member: PoolMember) => {
+    if (!memberIsRouteReady(member)) return false;
+    if (visibleModelIds == null) return true;
+    const modelKeys = visible ??= new Set(visibleModelIds.map((model) => modelIdKey(model)));
+    return member.models.some((model) => modelKeys.has(modelIdKey(model)));
+  };
 }
 
 /** Missing route telemetry preserves configured-member availability.
@@ -342,8 +353,8 @@ export function poolRoutingAvailability(
   activeRequestTotal: number,
 ): "active" | "ready" | "noModels" | "unavailable" {
   if (activeRequestTotal > 0) return "active";
-  if (members.some((member) => memberCanRoute(member, visibleModelIds))) return "ready";
-  if (members.some((member) => memberCanRoute(member))) return "noModels";
+  if (members.some(createMemberRouteCheck(visibleModelIds))) return "ready";
+  if (members.some(memberIsRouteReady)) return "noModels";
   return "unavailable";
 }
 

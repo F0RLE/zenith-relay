@@ -99,7 +99,8 @@ describe("Relay translations", () => {
     const used = new Set<string>();
     for (const file of walk(join(import.meta.dir, "..", "src"))) {
       const source = readFileSync(file, "utf8");
-      for (const match of source.matchAll(/\bt\(\s*["']([^"']+)["']/g)) used.add(match[1]);
+      for (const match of source.matchAll(/\b(?:t|field|copyField)\(\s*["']([^"']+)["']/g)) used.add(match[1]);
+      for (const match of source.matchAll(/\bcopyField\([^\n]*,\s*["']([^"']+)["']\s*\)/g)) used.add(match[1]);
     }
     expect([...used].filter((key) => !known.has(key)).sort()).toEqual([]);
   });

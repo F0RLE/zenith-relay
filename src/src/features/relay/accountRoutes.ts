@@ -45,6 +45,17 @@ export function accountRouteConnections(account: AccountSummary, accounts: reado
 // Display freshness only; mirrors the core's default QUOTA_STALE_AFTER_MS, not admission.
 const ROUTE_METADATA_MAX_AGE_MS = 20 * 60_000;
 
+let metadataDateFormatter: { locale: string; formatter: Intl.DateTimeFormat } | undefined;
+
+function formatMetadataDate(timestampMs: number, locale: string) {
+  if (metadataDateFormatter?.locale === locale) {
+    return metadataDateFormatter.formatter.format(timestampMs);
+  }
+  const formatter = new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "short" });
+  metadataDateFormatter = { locale, formatter };
+  return formatter.format(timestampMs);
+}
+
 export function accountMetadataObservation(account: AccountSummary, resource: "plan" | "quota") {
   const windows = [account.quota.primary, account.quota.secondary,
     ...(account.quota.supplemental ?? []).filter((item) => !isFastSupplementalQuota(item)).map((item) => item.window),
@@ -69,7 +80,7 @@ export function accountMetadataIsStale(account: AccountSummary, resource: "plan"
 export function accountMetadataHint(source: AccountSummary, resource: "plan" | "quota", nowMs: number, t: TFunction, locale: string) {
   const { observedAtMs } = accountMetadataObservation(source, resource);
   const time = observedAtMs != null && observedAtMs <= nowMs
-    ? new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "short" }).format(observedAtMs)
+    ? formatMetadataDate(observedAtMs, locale)
     : t("accounts.routeMetadataTimeUnknown");
   return [
     t("accounts.routeMetadataSource", { client: source.oauthClientKind === "excel_bps" ? "Excel / BPS" : "Codex", time }),

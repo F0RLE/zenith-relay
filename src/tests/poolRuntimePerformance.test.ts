@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import type { CandidateRuntimeSnapshot, RuntimeActivitySnapshot } from "../src/features/relay/api/types";
 import type { PoolMember } from "../src/features/relay/poolHelpers";
-import { poolMemberRuntimeStates } from "../src/features/relay/pages/pool/poolMembersModel";
+import { poolActivityState, poolMemberRuntimeStates, poolRoutingAvailability } from "../src/features/relay/pages/pool/poolMembersModel";
 
 function poolFixture(count: number) {
   const members = Array.from({ length: count }, (_, index) => ({
@@ -45,6 +45,47 @@ test("pool projection reads each activity record once for overlay and member loo
   });
   expect(projected.get(event.candidateId)?.activeRequestCount).toBe(1);
   expect(reads).toBe(1);
+});
+
+test("availability and next-route checks normalize the catalog once per projection", () => {
+  const { members, order } = poolFixture(500);
+  for (const member of members) Object.assign(member, {
+    inPool: true, enabled: true, operationalStatus: "rotation",
+    secretAvailable: true, proxyAvailable: true, models: ["not-in-catalog"],
+  });
+  const catalog = Array.from({ length: 512 }, (_, index) => `model-${index}`);
+  let reads = 0;
+  for (let index = 0; index < catalog.length; index += 1) {
+    const model = catalog[index];
+    Object.defineProperty(catalog, index, { get() { reads += 1; return model; } });
+  }
+  expect(poolRoutingAvailability(members, catalog, 0)).toBe("noModels");
+  expect(reads).toBe(catalog.length);
+
+  members[499]!.models = ["MODEL-511"];
+  for (const candidate of order) candidate.nextForNewRequest = true;
+  const state = poolActivityState(members, poolMemberRuntimeStates(members, order), order, undefined, catalog);
+  expect(state.nextMember).toBe(members[499]);
+  expect(reads).toBe(catalog.length * 2);
+
+  // A new projection uses the current inventory, not a cross-snapshot cache.
+  expect(poolRoutingAvailability(members, ["other-model"], 0)).toBe("noModels");
+  expect(poolRoutingAvailability(members, [], 0)).toBe("noModels");
+  expect(poolRoutingAvailability(members, catalog, 0)).toBe("ready");
+  expect(reads).toBe(catalog.length * 3);
+});
+
+test("active or unavailable pools and absent previews never read the visible catalog", () => {
+  const { members, order } = poolFixture(3);
+  const catalog = ["synthetic"];
+  Object.defineProperty(catalog, 0, { get() { throw new Error("catalog read without an eligible candidate"); } });
+  expect(poolRoutingAvailability(members, catalog, 1)).toBe("active");
+  expect(poolRoutingAvailability(members, catalog, 0)).toBe("unavailable");
+  for (const member of members) Object.assign(member, {
+    inPool: true, enabled: true, operationalStatus: "rotation",
+    secretAvailable: true, proxyAvailable: true, models: ["synthetic"],
+  });
+  expect(poolActivityState(members, poolMemberRuntimeStates(members, order), order, undefined, catalog).nextMember).toBeNull();
 });
 
 const measure = process.env.RELAY_MEASURE_POOL_PROJECTION === "1" ? test : test.skip;

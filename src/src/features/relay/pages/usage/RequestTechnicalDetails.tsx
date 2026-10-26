@@ -1,4 +1,5 @@
 import { Braces } from "lucide-react";
+import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { CopyButton } from "../../components/Ui";
 import { CacheContextDetails } from "./CacheContextDetails";
@@ -9,6 +10,10 @@ import { formatContextBytes, formatDurationMs, formatEndpointKind, formatErrorOr
 
 export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; debugEnabled: boolean }) {
   const { t, i18n } = useTranslation();
+  const field = (label: string, value: ReactNode) => <div key={label}><dt>{t(label)}</dt><dd>{value}</dd></div>;
+  const copyField = (label: string, value: string, copyLabel: string) => <div key={label}>
+    <dt>{t(label)}</dt><dd className="request-details-copy-value"><code>{value}</code><CopyButton value={value} label={t(copyLabel)} /></dd>
+  </div>;
   const routing = row.routing;
   const transport = routing?.transport;
   const payload = transport?.requestPayload;
@@ -61,86 +66,83 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
       {hasErrorMetadata || separateEndpoint || observedTier ? <RequestSection title={t(hasErrorMetadata ? "usage.requestSections.failure" : "usage.requestSections.response")} className="request-response-section">
         <dl className="request-details-list request-technical-fields">
           {requestFailed ? <>
-            {row.httpStatus != null ? <div><dt>{t("usage.httpStatus")}</dt><dd>{row.httpStatus}</dd></div> : null}
-            {row.errorOrigin ? <div><dt>{t("usage.errorOrigin")}</dt><dd>{formatErrorOrigin(row.errorOrigin, t)}</dd></div> : null}
-            {row.errorCategory ? <div><dt>{t("usage.errorCategory")}</dt><dd><code>{row.errorCategory}</code></dd></div> : null}
+            {row.httpStatus != null ? field("usage.httpStatus", row.httpStatus) : null}
+            {row.errorOrigin ? field("usage.errorOrigin", formatErrorOrigin(row.errorOrigin, t)) : null}
+            {row.errorCategory ? field("usage.errorCategory", <code>{row.errorCategory}</code>) : null}
             {row.upstreamError?.httpStatus != null && row.upstreamError.httpStatus !== row.httpStatus
-              ? <div><dt>{t("usage.upstreamHttpStatus")}</dt><dd>{row.upstreamError.httpStatus}</dd></div> : null}
+              ? field("usage.upstreamHttpStatus", row.upstreamError.httpStatus) : null}
             {row.upstreamError?.code && row.upstreamError.code !== row.errorCategory
-              ? <div><dt>{t("usage.upstreamErrorCode")}</dt><dd><code>{row.upstreamError.code}</code></dd></div> : null}
+              ? field("usage.upstreamErrorCode", <code>{row.upstreamError.code}</code>) : null}
             {row.upstreamError?.errorType
-              ? <div><dt>{t("usage.upstreamErrorType")}</dt><dd><code>{row.upstreamError.errorType}</code></dd></div> : null}
+              ? field("usage.upstreamErrorType", <code>{row.upstreamError.errorType}</code>) : null}
           </> : null}
           {separateEndpoint && routing?.endpointKind
-            ? <div><dt>{t("usage.endpoint")}</dt><dd>{formatEndpointKind(routing.endpointKind, row.wireApi, t)}</dd></div> : null}
-          {observedTier ? <div><dt>{t("usage.upstreamTier")}</dt><dd>{observedTier}</dd></div> : null}
+            ? field("usage.endpoint", formatEndpointKind(routing.endpointKind, row.wireApi, t)) : null}
+          {observedTier ? field("usage.upstreamTier", observedTier) : null}
         </dl>
       </RequestSection> : null}
       {debugEnabled && routing ? <RequestSection title={t("usage.requestSections.route")} className={`request-route-section${!payload ? " request-technical-wide" : ""}`}>
         <dl className="request-details-list request-technical-fields">
           <div className="request-route-reason"><dt>{t("usage.routingReason")}</dt><dd>{t(`usage.routingReasons.${routing.reason}`)}</dd></div>
           {transport ? <>
-            <div><dt>{t("usage.transportPath")}</dt><dd>{formatTransport(row.transport, t)} → {formatTransport(transport.upstream, t)}</dd></div>
-            <div><dt>{t("usage.transportMode")}</dt><dd>{t(`usage.transportModes.${transport.mode}`)}</dd></div>
-            {transport.fallbackReason ? <div><dt>{t("usage.transportFallback")}</dt><dd>{t(`usage.transportFallbackReasons.${transport.fallbackReason}`)}</dd></div> : null}
-            {transport.responseFormat ? <div><dt>{t("usage.upstreamResponseFormat")}</dt><dd>{t(`usage.transportResponseFormats.${transport.responseFormat}`)}</dd></div> : null}
-            {transport.handshakeMs != null ? <div><dt>{t("usage.handshakeMs")}</dt><dd>{formatDurationMs(transport.handshakeMs, i18n.language, t)}</dd></div> : null}
-            {transport.connectionReused != null ? <div><dt>{t("usage.connectionReuse")}</dt><dd>{t(transport.connectionReused ? "usage.connectionReused" : "usage.connectionOpened")}</dd></div> : null}
+            {field("usage.transportPath", `${formatTransport(row.transport, t)} → ${formatTransport(transport.upstream, t)}`)}
+            {field("usage.transportMode", t(`usage.transportModes.${transport.mode}`))}
+            {transport.fallbackReason ? field("usage.transportFallback", t(`usage.transportFallbackReasons.${transport.fallbackReason}`)) : null}
+            {transport.responseFormat ? field("usage.upstreamResponseFormat", t(`usage.transportResponseFormats.${transport.responseFormat}`)) : null}
+            {transport.handshakeMs != null ? field("usage.handshakeMs", formatDurationMs(transport.handshakeMs, i18n.language, t)) : null}
+            {transport.connectionReused != null ? field("usage.connectionReuse", t(transport.connectionReused ? "usage.connectionReused" : "usage.connectionOpened")) : null}
           </> : null}
         </dl>
         <dl className="request-details-list request-route-stats">
-          <div><dt>{t("usage.eligibleCandidates")}</dt><dd>{routing.eligibleCandidates}</dd></div>
+          {field("usage.eligibleCandidates", routing.eligibleCandidates)}
           {row.candidateKind === "account" && routing.quotaRemainingBasisPoints != null
-            ? <div><dt>{t("usage.quotaAtSelection")}</dt><dd>{(routing.quotaRemainingBasisPoints / 100).toFixed(2)}%</dd></div> : null}
-          <div><dt>{t("usage.inFlightAtSelection")}</dt><dd>{routing.inFlightBefore}</dd></div>
-          <div><dt>{t("usage.dispatchesBefore")}</dt><dd>{routing.dispatchesBefore}</dd></div>
+            ? field("usage.quotaAtSelection", `${(routing.quotaRemainingBasisPoints / 100).toFixed(2)}%`) : null}
+          {field("usage.inFlightAtSelection", routing.inFlightBefore)}
+          {field("usage.dispatchesBefore", routing.dispatchesBefore)}
         </dl>
       </RequestSection> : null}
       {debugEnabled && payload ? <RequestSection title={t("usage.requestSections.payload")} className="request-payload-section">
         <dl className="request-details-list request-technical-fields">
-          <div><dt>{t("usage.requestPayloadMode")}</dt><dd>{t(`usage.requestPayloadModes.${payload.mode}`)}</dd></div>
-          {payload.fullRequestReason ? <div><dt>{t("usage.fullRequestReason")}</dt><dd>{t(`usage.fullRequestReasons.${payload.fullRequestReason}`)}</dd></div> : null}
-          <div><dt>{t("usage.requestPayloadBytes")}</dt><dd>{contextBytes(payload.jsonBytes, payload.bodyBytes)}</dd></div>
-          <div><dt>{t("usage.requestEncoding")}</dt><dd>{payload.contentEncoding === "zstd" ? "Zstd" : t("usage.requestUncompressed")}</dd></div>
-          {payload.compressionMs != null ? <div><dt>{t("usage.requestCompressionTime")}</dt><dd>{formatDurationMs(payload.compressionMs, i18n.language, t)}</dd></div> : null}
-          {payload.httpSendToHeadersMs != null ? <div><dt>{t("usage.requestHttpSendTime")}</dt><dd>{formatDurationMs(payload.httpSendToHeadersMs, i18n.language, t)}</dd></div> : null}
+          {field("usage.requestPayloadMode", t(`usage.requestPayloadModes.${payload.mode}`))}
+          {payload.fullRequestReason ? field("usage.fullRequestReason", t(`usage.fullRequestReasons.${payload.fullRequestReason}`)) : null}
+          {field("usage.requestPayloadBytes", contextBytes(payload.jsonBytes, payload.bodyBytes))}
+          {field("usage.requestEncoding", payload.contentEncoding === "zstd" ? "Zstd" : t("usage.requestUncompressed"))}
+          {payload.compressionMs != null ? field("usage.requestCompressionTime", formatDurationMs(payload.compressionMs, i18n.language, t)) : null}
+          {payload.httpSendToHeadersMs != null ? field("usage.requestHttpSendTime", formatDurationMs(payload.httpSendToHeadersMs, i18n.language, t)) : null}
         </dl>
       </RequestSection> : null}
       {debugEnabled && hasTimings ? <RequestSection title={t("usage.requestSections.timings")} className="request-timings-section">
         {hasPreparation ? <div className="request-preparation-details">
           <dl className="request-details-list request-preparation-total">
-            <div><dt>{t("usage.requestPreparationTime")}</dt><dd>{transport?.requestPreparationMs != null
-              ? formatDurationMs(transport.requestPreparationMs, i18n.language, t) : "—"}</dd></div>
+            {field("usage.requestPreparationTime", transport?.requestPreparationMs != null
+              ? formatDurationMs(transport.requestPreparationMs, i18n.language, t) : "—")}
           </dl>
           {hasPreparationTimings ? <dl className="request-details-list request-technical-fields">
             {preparationTimings.map(([label, milliseconds]) => milliseconds != null
-              ? <div key={label}><dt>{t(`usage.${label}`)}</dt><dd>{formatDurationMs(milliseconds, i18n.language, t)}</dd></div> : null)}
+              ? field(`usage.${label}`, formatDurationMs(milliseconds, i18n.language, t)) : null)}
           </dl> : null}
         </div> : null}
         {responseTimings.length > 0 ? <div className="request-response-timings">
           <h4>{t("usage.requestSections.afterDispatch")}</h4>
           <dl className="request-details-list request-timing-metrics">
-            {responseTimings.map(([label, milliseconds]) => <div key={label}>
-              <dt>{t(`usage.${label}`)}</dt><dd>+{formatDurationMs(milliseconds, i18n.language, t)}</dd>
-            </div>)}
+            {responseTimings.map(([label, milliseconds]) => field(`usage.${label}`, `+${formatDurationMs(milliseconds, i18n.language, t)}`))}
           </dl>
         </div> : null}
       </RequestSection> : null}
       {debugEnabled && hasContext ? <RequestSection title={t("usage.contextSize.title")} className={`request-context-section${!hasTools ? " request-technical-wide" : ""}`}>
         <div className="request-context-columns">
           <dl className="request-details-list">
-            {(["bodyBytes", "instructionBytes", "conversationBytes", "toolCatalogBytes"] as const).map((field, index) => <div key={field}>
-              <dt>{t(`usage.contextSize.fields.${index}`)}</dt><dd>{contextBytes(clientContext?.[field], upstreamContext?.[field])}</dd>
-            </div>)}
+            {(["bodyBytes", "instructionBytes", "conversationBytes", "toolCatalogBytes"] as const).map((name, index) =>
+              field(`usage.contextSize.fields.${index}`, contextBytes(clientContext?.[name], upstreamContext?.[name])))}
           </dl>
           {catalog ? <dl className="request-details-list">
-            <div><dt>{t("usage.contextSize.catalogMode")}</dt><dd>{t(`usage.contextSize.modes.${catalog.mode}`)}</dd></div>
-            <div><dt>{t("usage.contextSize.schemas")}</dt><dd>{contextBytes(catalog.fullSchemaBytes, catalog.renderedSchemaBytes)}</dd></div>
-            <div><dt>{t("usage.contextSize.loaded")}</dt><dd>{catalog.loadedToolCount} / {toolUse?.forwardedToolCount ?? 0}</dd></div>
+            {field("usage.contextSize.catalogMode", t(`usage.contextSize.modes.${catalog.mode}`))}
+            {field("usage.contextSize.schemas", contextBytes(catalog.fullSchemaBytes, catalog.renderedSchemaBytes))}
+            {field("usage.contextSize.loaded", `${catalog.loadedToolCount} / ${toolUse?.forwardedToolCount ?? 0}`)}
             {catalog.mode === "discovery" ? <>
-              <div><dt>{t("usage.contextSize.lookups")}</dt><dd>{catalog.discoveryRounds}</dd></div>
-              {catalog.discoveryLatencyMs != null ? <div><dt>{t("usage.contextSize.lookupDuration")}</dt><dd>{formatDurationMs(catalog.discoveryLatencyMs, i18n.language, t)}</dd></div> : null}
-              {catalog.discoveryRounds > 0 ? <div><dt>{t("usage.contextSize.lookupTokens")}</dt><dd>{catalog.discoveryInputTokens ?? "—"} / {catalog.discoveryOutputTokens ?? "—"}</dd></div> : null}
+              {field("usage.contextSize.lookups", catalog.discoveryRounds)}
+              {catalog.discoveryLatencyMs != null ? field("usage.contextSize.lookupDuration", formatDurationMs(catalog.discoveryLatencyMs, i18n.language, t)) : null}
+              {catalog.discoveryRounds > 0 ? field("usage.contextSize.lookupTokens", `${catalog.discoveryInputTokens ?? "—"} / ${catalog.discoveryOutputTokens ?? "—"}`) : null}
             </> : null}
           </dl> : null}
         </div>
@@ -148,16 +150,16 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
       {((debugEnabled && hasTools) || toolWarning) && toolUse ? <RequestSection title={t("usage.requestSections.tools")} className={`request-tool-details${!debugEnabled || !hasContext ? " request-technical-wide" : ""}`}>
         <dl className={`request-details-list${debugEnabled ? " request-tools-list" : ""}`}>
           {debugEnabled ? <>
-            <div><dt>{t("usage.clientTools")}</dt><dd>{toolUse.clientToolCount}{!hasContext && toolUse.clientSchemaBytes != null ? ` · ${formatContextBytes(toolUse.clientSchemaBytes, i18n.language)}` : null}</dd></div>
+            {field("usage.clientTools", <>{toolUse.clientToolCount}{!hasContext && toolUse.clientSchemaBytes != null ? ` · ${formatContextBytes(toolUse.clientSchemaBytes, i18n.language)}` : null}</>)}
             {toolUse.forwardedToolCount !== toolUse.clientToolCount
-              ? <div><dt>{t("usage.forwardedTools")}</dt><dd>{toolUse.forwardedToolCount}</dd></div>
+              ? field("usage.forwardedTools", toolUse.forwardedToolCount)
               : null}
-            <div><dt>{t("usage.toolCallsReturned")}</dt><dd>{toolUse.toolCallCount}</dd></div>
-            {toolUse.requestedParallelToolCalls != null ? <div><dt>{t("usage.requestedParallelTools")}</dt><dd>{t(toolUse.requestedParallelToolCalls ? "common.yes" : "common.no")}</dd></div> : null}
-            {toolUse.upstreamToolCallCount != null ? <div><dt>{t("usage.upstreamToolCalls")}</dt><dd>{toolUse.upstreamToolCallCount}</dd></div> : null}
-            {toolUse.toolCallsReadyMs != null ? <div><dt>{t("usage.toolCallsReadyTime")}</dt><dd>{formatDurationMs(toolUse.toolCallsReadyMs, i18n.language, t)}</dd></div> : null}
+            {field("usage.toolCallsReturned", toolUse.toolCallCount)}
+            {toolUse.requestedParallelToolCalls != null ? field("usage.requestedParallelTools", t(toolUse.requestedParallelToolCalls ? "common.yes" : "common.no")) : null}
+            {toolUse.upstreamToolCallCount != null ? field("usage.upstreamToolCalls", toolUse.upstreamToolCallCount) : null}
+            {toolUse.toolCallsReadyMs != null ? field("usage.toolCallsReadyTime", formatDurationMs(toolUse.toolCallsReadyMs, i18n.language, t)) : null}
             {toolUse.toolChoice && toolUse.toolChoice !== "auto"
-              ? <div><dt>{t("usage.toolChoice")}</dt><dd>{formatToolChoice(toolUse.toolChoice, t)}</dd></div>
+              ? field("usage.toolChoice", formatToolChoice(toolUse.toolChoice, t))
               : null}
           </> : null}
           <div><dt>{t("usage.terminalOutput")}</dt><dd className={toolWarning ? "warning-text" : undefined}>
@@ -167,24 +169,11 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
       </RequestSection> : null}
       {row.requestId || row.upstreamError?.requestId || modelAlias || upstreamModel ? <RequestSection title={t("usage.requestSections.identifiers")} className="request-identifiers-section">
         <dl className="request-details-list request-id-list">
-          {row.requestId ? <div>
-            <dt>{t("usage.localRequestId")}</dt>
-            <dd className="request-details-copy-value"><code>{row.requestId}</code><CopyButton value={row.requestId} label={t("usage.copyRequestId")} /></dd>
-          </div> : null}
-          {row.upstreamError?.requestId ? <div>
-            <dt>{t("usage.upstreamRequestId")}</dt>
-            <dd className="request-details-copy-value"><code>{row.upstreamError.requestId}</code><CopyButton value={row.upstreamError.requestId} label={t("usage.copyUpstreamRequestId")} /></dd>
-          </div> : null}
-          {requestedModel ? <div>
-            <dt>{t("usage.requestedModel")}</dt>
-            <dd className="request-details-copy-value"><code>{requestedModel}</code><CopyButton value={requestedModel} label={t("usage.copyModelId")} /></dd>
-          </div> : null}
-          {(modelAlias || upstreamModel) && row.routedModel ? <div>
-            <dt>{t("usage.routedModel")}</dt><dd><code>{row.routedModel}</code></dd>
-          </div> : null}
-          {upstreamModel ? <div>
-            <dt>{t("usage.upstreamResponseModel")}</dt><dd><code>{upstreamModel}</code></dd>
-          </div> : null}
+          {row.requestId ? copyField("usage.localRequestId", row.requestId, "usage.copyRequestId") : null}
+          {row.upstreamError?.requestId ? copyField("usage.upstreamRequestId", row.upstreamError.requestId, "usage.copyUpstreamRequestId") : null}
+          {requestedModel ? copyField("usage.requestedModel", requestedModel, "usage.copyModelId") : null}
+          {(modelAlias || upstreamModel) && row.routedModel ? field("usage.routedModel", <code>{row.routedModel}</code>) : null}
+          {upstreamModel ? field("usage.upstreamResponseModel", <code>{upstreamModel}</code>) : null}
         </dl>
       </RequestSection> : null}
     </div>

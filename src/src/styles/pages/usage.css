@@ -532,16 +532,8 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Flexible columns share the remainder without expanding fixed icon/ID columns. */
-.usage-request-table col[data-column="time"] { width: 18%; }
-.usage-request-table col[data-column="status"] { width: 64px; }
-.usage-request-table col[data-column="model"] { width: 26%; }
-.usage-request-table col[data-column="connection"] { width: 26%; }
-.usage-request-table col[data-column="timing"] { width: 18%; }
-.usage-request-table col[data-column="speed"] { width: 104px; }
-.usage-request-table col[data-column="tokens"] { width: 76px; }
-.usage-request-table col[data-column="equivalent"] { width: 12%; }
-.usage-request-table col[data-column="request"] { width: 110px; }
+/* Fixed table layout shares space equally; explicit user resizing stays inline. */
+.usage-request-table col { width: auto; }
 
 .usage-request-connection {
   display: block;
@@ -1911,9 +1903,6 @@
   .usage-scope-controls > .relay-icon-button { justify-self: end; }
   .usage-scope-controls[data-filter-count="3"] > :nth-child(3) { grid-column: 1 / -1; }
   .usage-request-table [data-column="tokens"] { display: none; }
-  .usage-request-table col[data-column="connection"] { width: 19%; }
-  .usage-request-table col[data-column="equivalent"] { width: 12%; }
-  .usage-request-table col[data-column="request"] { width: 17%; }
   .usage-sortable-table th { font-size: 11px; }
   .usage-sortable-table th,
   .usage-sortable-table td { padding-inline: 6px; }

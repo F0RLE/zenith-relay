@@ -21,18 +21,14 @@
       interface: "Preparing the interface…",
       runtime: "Loading your workspace…",
       slow: "Startup is taking longer than usual",
-      waiting: "You can wait or reload the window. Your settings are kept.",
       error: "Relay could not start",
-      retry: "Reload the window to try again. Your settings are kept.",
       reload: "Reload",
     },
     ru: {
       interface: "Подготовка интерфейса…",
       runtime: "Загрузка рабочего пространства…",
       slow: "Запуск занимает больше времени",
-      waiting: "Можно подождать или перезагрузить окно. Настройки сохранятся.",
       error: "Не удалось запустить Relay",
-      retry: "Перезагрузите окно. Ваши настройки сохранятся.",
       reload: "Перезагрузить",
     },
   };
@@ -45,9 +41,6 @@
     var text = copy[html.lang.startsWith("ru") ? "ru" : "en"];
     var failed = phase === "error";
     message.textContent = failed ? text.error : slow ? text.slow : text[phase];
-    var hint = document.getElementById("splash-hint");
-    hint.hidden = !failed && !slow;
-    hint.textContent = failed ? text.retry : text.waiting;
     var reload = document.getElementById("splash-reload");
     reload.hidden = !failed && !slow;
     reload.textContent = text.reload;

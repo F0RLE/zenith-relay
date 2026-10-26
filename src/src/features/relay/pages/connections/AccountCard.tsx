@@ -105,7 +105,7 @@ export function AccountCard({
     ? t("pool.recoveryProbe")
     : modelRetryHint;
   const proxyLabel = account.proxyAvailable === false && account.proxyMode === "direct" ? t("proxies.modes.blocked") : t(`proxies.modes.${account.proxyMode ?? "direct"}`);
-  const poolActionLabel = participates ? t("accounts.excludeFromPool") : t(account.oauthClientKind === "codex" ? "accounts.includeImagesInPool" : "accounts.includeInPool");
+  const poolActionLabel = participates ? t("accounts.excludeFromPool") : t(account.oauthClientKind === "codex" && !runtime?.gateway.codexTextModelsEnabled ? "accounts.includeImagesInPool" : "accounts.includeInPool");
   const quotaStatus = accountQuotaRefreshState(account);
   const clientAuthWarning = account.clientAuthStatus === "login_required";
   const displayedErrorCode = quotaStatus === "refreshing" ? null : errorCode;

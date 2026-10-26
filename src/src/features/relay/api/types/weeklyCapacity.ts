@@ -39,9 +39,13 @@ export type WeeklyCapacitySummary = WeeklyCapacitySeries & {
   pricingRevision: string;
 };
 
+/** Single-model observations across workload variants, deduplicated by ledger. */
+export type WeeklyCapacityModel = WeeklyCapacitySummary & { model: string };
+
 export type WeeklyCapacityReport = {
   generatedAtMs: number;
   summaries: WeeklyCapacitySummary[];
+  models: WeeklyCapacityModel[];
   groups: WeeklyCapacityGroup[];
   events: WeeklyCapacityEvent[];
 };

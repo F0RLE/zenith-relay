@@ -83,8 +83,7 @@
         letter-spacing: -0.5px;
       }
 
-      #splash-message,
-      #splash-hint {
+      #splash-message {
         margin: 0;
         color: var(--bootstrap-muted);
         font-size: 13px;
@@ -115,8 +114,6 @@
         50%, 100% { transform: translateX(250%); }
       }
 
-      #splash-hint { margin-top: 20px; }
-
       #splash-reload {
         margin-top: 16px;
         padding: 8px 18px;
@@ -130,7 +127,7 @@
 
       #splash-reload:hover { background: color-mix(in srgb, var(--bootstrap-text) 6%, transparent); }
       #splash-reload:focus-visible { outline: 2px solid var(--bootstrap-accent) !important; outline-offset: 3px; }
-      #splash-reload[hidden], #splash-hint[hidden] { display: none; }
+      #splash-reload[hidden] { display: none; }
       html[data-startup-state="error"] .splash-progress { visibility: hidden; }
       html[data-startup-state="error"] .splash-progress::after { animation: none; }
 
@@ -148,7 +145,6 @@
         <p class="splash-brand">Zenith Relay</p>
         <p id="splash-message" role="status" aria-live="polite" aria-atomic="true">Opening Relay…</p>
         <div class="splash-progress" aria-hidden="true"></div>
-        <p id="splash-hint" hidden></p>
         <button id="splash-reload" type="button" hidden>Reload</button>
       </div>
     </div>

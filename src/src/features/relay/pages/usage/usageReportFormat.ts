@@ -106,6 +106,7 @@ export function formatWireApi(wireApi: string | null, t: TFunction): string {
   if (wireApi === "messages") return t("usage.protocols.messages");
   if (wireApi === "chat_completions") return t("usage.protocols.chatCompletions");
   if (wireApi === "gemini") return t("usage.protocols.gemini");
+  if (wireApi === "gemini_interactions") return t("usage.protocols.gemini_interactions");
   return wireApi ?? "—";
 }
 
@@ -117,11 +118,7 @@ export function formatTransport(transportKind: string | null | undefined, t: TFu
 
 export function formatEndpointKind(value: string | null | undefined, wireApi: string | null, t: TFunction): string {
   if (value === "excel_basis_points") return t("usage.endpoints.excelBasisPoints");
-  if (value === "responses") return t("usage.protocols.responses");
-  if (value === "chat_completions") return t("usage.protocols.chatCompletions");
-  if (value === "messages") return t("usage.protocols.messages");
-  if (value === "gemini") return t("usage.protocols.gemini");
-  return value ?? formatWireApi(wireApi, t);
+  return formatWireApi(value ?? wireApi, t);
 }
 
 export function formatErrorCategory(category: string | null, t: TFunction): string {

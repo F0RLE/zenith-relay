@@ -405,8 +405,8 @@ function GlobalFeedback({ feedback, clearFeedback, focusAfterClose }: { feedback
 }
 
 function Page({ page, onImport, updateCheckState, updateVersion, onCheckUpdates }: { page: PageId; onImport: () => void; updateCheckState: UpdateCheckState; updateVersion: string | null; onCheckUpdates: () => Promise<UpdateCheckState> }) {
-  const { mode, setMode } = useRelayState();
-  if (mode === "hosted" && page !== "help") return <HostedDevelopmentPage onComputer={() => setMode("local")} />;
+  const { mode } = useRelayState();
+  if (mode === "hosted" && page !== "help") return <HostedDevelopmentPage />;
   if (page === "overview") return <OverviewPage />;
   if (page === "connections") return <connectionsPage.Component onImport={onImport} />;
   if (page === "pool") return <poolPage.Component />;

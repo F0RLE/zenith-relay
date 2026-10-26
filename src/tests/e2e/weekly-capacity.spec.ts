@@ -27,6 +27,7 @@ function fixture(now: number): WeeklyCapacityReport {
       { plan: "plus", pricingRevision: group.pricingRevision, points: summaryPoints, current: summaryPoints.at(-1)!, stale: false },
       { plan: "pro", pricingRevision: group.pricingRevision, points, current: group.current, stale: false },
     ],
+    models: [{ ...group, model: "model" }, { ...group, model: "other-model" }, { ...group, model: "model", plan: "pro" }],
     groups: [group, { ...group, id: "plus-other", workload: "other-model · standard · short · high" }, { ...group, id: "pro-model", plan: "pro" }],
     events: [{ atMs: windows.at(-4)!.startMs, plan: "plus", kind: "reset", count: 1 }] };
 }
@@ -71,7 +72,7 @@ for (const locale of ["ru", "en"] as const) {
     await expect(chart.locator(".overview-chart-summary")).toContainText("170");
     await chart.locator(".relay-option-trigger").first().click();
     await page.getByRole("option", { name: "pro", exact: true }).click();
-    await expect(chart.locator(".relay-option-trigger")).toHaveCount(1);
+    await expect(chart.locator(".relay-option-trigger")).toHaveCount(2);
     await expect(chart.locator(".overview-capacity-controls")).toContainText(allModels);
     await expect(chart.locator(".overview-chart-summary")).toContainText("120");
     await chart.locator(".relay-option-trigger").first().click();
@@ -106,14 +107,21 @@ for (const locale of ["ru", "en"] as const) {
   });
 }
 
-test("one subscription has no redundant menu and same-model variants stay selectable", async ({ page }, testInfo) => {
+test("model menu collapses workload variants and pricing revisions into plain names", async ({ page }, testInfo) => {
   const now = Date.now();
   await page.clock.install({ time: now });
   const report = fixture(now);
   report.summaries = report.summaries.filter((summary) => summary.plan === "plus");
-  report.groups = report.groups.filter((group) => group.plan === "plus").map((group, index) => ({
-    ...group, workload: `example-model · standard · ${index ? "long" : "short"} · high`,
+  const base = report.groups[0]!;
+  report.groups = Array.from({ length: 20 }, (_, index) => ({
+    ...base, id: `variant-${index}`, cacheBand: index % 4 * 25,
+    workload: `example-model · standard · ${index % 2 ? "long" : "short"} · high${index % 3 ? "" : " + other-model · priority · long · high"}`,
   }));
+  report.models = [
+    { ...report.models[0]!, model: "example-model" },
+    { ...report.models[0]!, model: "example-model", pricingRevision: "older", current: { ...base.current!, medianMicroUsd: 900_000_000 } },
+    { ...report.models[1]!, model: "other-model" },
+  ];
   await installTauriMock(page, { locale: "ru", theme: "dark", weeklyCapacity: report });
   await page.setViewportSize({ width: 860, height: 760 });
   await page.goto("/");
@@ -126,12 +134,16 @@ test("one subscription has no redundant menu and same-model variants stay select
   expect((await model.boundingBox())!.width).toBeLessThan(200);
   await model.click();
   const menu = page.getByRole("listbox", { name: "Модель", exact: true });
-  await expect(menu.getByRole("option")).toHaveText(["Все модели", "example-model · 1", "example-model · 2"]);
+  await expect(menu.getByRole("option")).toHaveText(["Все модели", "example-model", "other-model"]);
   expect((await menu.boundingBox())!.width).toBeLessThan(220);
   await page.screenshot({ path: testInfo.outputPath("weekly-capacity-compact-menu.png") });
-  await menu.getByRole("option", { name: "example-model · 2", exact: true }).click();
-  await expect(model).toHaveAttribute("data-value", report.groups[1]!.id);
-  await expect(model).toHaveText("example-model · 2");
+  await menu.getByRole("option", { name: "example-model", exact: true }).click();
+  await expect(model).toHaveAttribute("data-value", "example-model");
+  await expect(model).toHaveText("example-model");
+  await expect(chart.locator(".overview-chart-summary")).toContainText("120");
+  await model.click();
+  await menu.getByRole("option", { name: "Все модели", exact: true }).click();
+  await expect(chart.locator(".overview-chart-summary")).toContainText("170");
 });
 
 test("empty and failed measurements never become a zero-dollar estimate", async ({ page }) => {

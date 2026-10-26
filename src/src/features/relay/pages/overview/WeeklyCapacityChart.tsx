@@ -7,7 +7,7 @@ import { OptionMenu } from "../../components/Ui";
 import { formatApproximateUsd, formatScaledUsd } from "../../currencyFormatting";
 import { OverviewChart } from "./OverviewAnalytics";
 import { DAY_MS, HOUR_MS, type WindowBucket } from "./overviewAnalyticsModel";
-import { cachedCapacity, capacityCurrent, capacityGroupOptions, loadCapacity, nextCapacityExpiry } from "./weeklyCapacityModel";
+import { cachedCapacity, capacityCurrent, capacityModelOptions, loadCapacity, nextCapacityExpiry } from "./weeklyCapacityModel";
 
 type Props = { windows: WindowBucket[]; revision: number; accountId?: string };
 
@@ -22,7 +22,7 @@ function WeeklyCapacityChart({ windows, revision, accountId }: Props) {
   const [error, setError] = useState(false);
   const [now, setNow] = useState(Date.now);
   const [planChoice, setPlanChoice] = useState("");
-  const [groupChoice, setGroupChoice] = useState("");
+  const [modelChoice, setModelChoice] = useState("");
   const report = loaded.key === key && loaded.revision === revision ? loaded.report : cachedCapacity(key, revision);
   useEffect(() => {
     let active = true;
@@ -42,10 +42,11 @@ function WeeklyCapacityChart({ windows, revision, accountId }: Props) {
   }, [report, now]);
   const plans = useMemo(() => [...new Set([...(report?.summaries.map((summary) => summary.plan) ?? []), ...(report?.groups.map((group) => group.plan) ?? []), ...(report?.events.map((event) => event.plan) ?? [])])], [report]);
   const plan = plans.includes(planChoice) ? planChoice : plans[0] ?? "";
-  const groups = useMemo(() => report?.groups.filter((group) => group.plan === plan) ?? [], [report, plan]);
-  const groupOptions = useMemo(() => capacityGroupOptions(groups), [groups]);
-  const selectedGroup = groups.find((group) => group.id === groupChoice);
-  const series = selectedGroup ?? report?.summaries.find((summary) => summary.plan === plan);
+  const models = useMemo(() => report?.models?.filter((model) => model.plan === plan) ?? [], [report, plan]);
+  const modelOptions = useMemo(() => capacityModelOptions(models), [models]);
+  // Native model series are newest-first; never average workload medians here.
+  const selectedModel = models.find((entry) => entry.model === modelChoice);
+  const series = selectedModel ?? report?.summaries.find((summary) => summary.plan === plan);
   const points = useMemo(() => {
     const byTime = new Map(series?.points.map((point) => [point.atMs, point]));
     return windows.map((window) => byTime.get(window.startMs) ?? null);
@@ -68,9 +69,9 @@ function WeeklyCapacityChart({ windows, revision, accountId }: Props) {
     formatValue={money} formatAxis={(value) => formatScaledUsd(value, locale)} bandValues={bands} markers={markers}
     emptyLabel={error ? t("overview.capacity.unavailable") : !report ? t("common.loading") : t("overview.noMeasurements")}
     controls={<div className="overview-capacity-controls">
-      {plans.length > 1 ? <OptionMenu label={t("overview.capacity.plan")} value={plan} onChange={(value) => { setPlanChoice(value); setGroupChoice(""); }} options={plans.map((value) => ({ value, label: value }))} fitContent align="start" />
+      {plans.length > 1 ? <OptionMenu label={t("overview.capacity.plan")} value={plan} onChange={(value) => { setPlanChoice(value); setModelChoice(""); }} options={plans.map((value) => ({ value, label: value }))} fitContent align="start" />
         : plan ? <span className="overview-capacity-plan" aria-label={`${t("overview.capacity.plan")}: ${plan}`}>{plan}</span> : null}
-      {groups.length > 1 ? <OptionMenu label={t("overview.capacity.workload")} value={selectedGroup?.id ?? ""} onChange={setGroupChoice} options={[{ value: "", label: t("overview.capacity.allModels") }, ...groupOptions]} fitContent align="start" />
+      {modelOptions.length > 0 ? <OptionMenu label={t("overview.capacity.workload")} value={selectedModel?.model ?? ""} onChange={setModelChoice} options={[{ value: "", label: t("overview.capacity.allModels") }, ...modelOptions]} fitContent align="start" />
         : plan ? <span className="overview-capacity-plan">{t("overview.capacity.allModels")}</span> : null}
     </div>}
     details={(index) => {

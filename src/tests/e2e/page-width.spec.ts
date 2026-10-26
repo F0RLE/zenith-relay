@@ -8,6 +8,7 @@ const appearances = [
 const pageIds = ["overview", "connections", "pool", "integrations", "usage", "profiles", "settings", "help"] as const;
 
 async function expectPageFits(page: Page) {
+  await expect(page.locator(".relay-page")).toBeVisible();
   await expect.poll(() => page.locator(".relay-page").evaluate((element) => {
     const content = element.closest<HTMLElement>(".relay-content");
     if (!content) return null;
@@ -15,7 +16,7 @@ async function expectPageFits(page: Page) {
     const parent = content.getBoundingClientRect();
     const header = element.querySelector(".relay-page-header")?.getBoundingClientRect();
     return {
-      fillsWorkspace: Math.abs(bounds.width - content.clientWidth) <= 1,
+      fillsWorkspace: bounds.width > 0 && Math.abs(bounds.width - content.clientWidth) <= 1,
       leftAligned: Math.abs(bounds.left - parent.left) <= 1,
       headerFits: Boolean(header && header.left >= bounds.left && header.right <= bounds.right),
       contentFits: content.scrollWidth <= content.clientWidth,
@@ -80,6 +81,7 @@ for (const appearance of appearances) {
     await page.setViewportSize({ width: 2548, height: 1432 });
     await page.goto("/");
     await page.getByRole("button", { name: appearance.labels[2], exact: true }).click();
+    await expect(page.locator(".pool-member-list")).toBeVisible();
     await expectPageFits(page);
     const expandedWidth = await page.locator(".relay-page").evaluate((element) => element.getBoundingClientRect().width);
     const columns = () => page.locator(".pool-member-list").evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(" ").length);
@@ -123,6 +125,7 @@ for (const appearance of appearances) {
     await page.goto("/");
     await page.getByRole("button", { name: appearance.labels[2], exact: true }).click();
     const members = page.locator(".pool-member-list");
+    await expect(members).toBeVisible();
     for (const width of [2394, 1920, 1440, 1160, 840, 600, 390, 320]) {
       await page.setViewportSize({ width, height: 900 });
       await expectPageFits(page);
