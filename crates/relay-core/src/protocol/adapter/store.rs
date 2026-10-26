@@ -55,6 +55,7 @@ struct StoredState<T> {
     candidate_id: String,
     observed_at_ms: u64,
     size_bytes: usize,
+    superseded: bool,
 }
 
 /// Shared bounded state implementation for protocol continuations. The wrapper
@@ -104,6 +105,7 @@ impl<T> BoundedStateStore<T> {
         candidate_id: &str,
         state: T,
         now_ms: u64,
+        is_predecessor: impl Fn(&T, &T) -> bool,
     ) -> bool
     where
         T: Serialize,
@@ -122,6 +124,18 @@ impl<T> BoundedStateStore<T> {
         if let Some(existing) = self.entries.remove(&key) {
             self.total_bytes = self.total_bytes.saturating_sub(existing.size_bytes);
         }
+        // A busy chat must not evict another chat's latest response while
+        // older snapshots of its own complete history still occupy the store.
+        // This changes eviction priority only, never replay lookup/ownership.
+        for ((stored_key, _), stored) in &mut self.entries {
+            if !stored.superseded
+                && stored_key == local_key_id
+                && stored.candidate_id == candidate_id
+                && is_predecessor(&stored.state, &state)
+            {
+                stored.superseded = true;
+            }
+        }
         while self.entries.len() >= self.max_entries
             || self.total_bytes.saturating_add(size_bytes) > self.max_total_bytes
         {
@@ -136,6 +150,7 @@ impl<T> BoundedStateStore<T> {
                 candidate_id: candidate_id.to_string(),
                 observed_at_ms: now_ms,
                 size_bytes,
+                superseded: false,
             },
         );
         self.total_bytes = self.total_bytes.saturating_add(size_bytes);
@@ -158,7 +173,7 @@ impl<T> BoundedStateStore<T> {
         let Some(key) = self
             .entries
             .iter()
-            .min_by_key(|(_, stored_state)| stored_state.observed_at_ms)
+            .min_by_key(|(_, stored_state)| (!stored_state.superseded, stored_state.observed_at_ms))
             .map(|(key, _)| key.clone())
         else {
             return false;
@@ -268,6 +283,7 @@ impl AdapterContinuationStore {
             candidate_id,
             bridge_state,
             now_ms,
+            |_, _| false,
         )
     }
 }
@@ -323,6 +339,7 @@ impl NativeResponsesReplayStore {
             candidate_id,
             replay_state,
             now_ms,
+            NativeResponsesReplayState::is_materialized_predecessor_of,
         );
     }
 }

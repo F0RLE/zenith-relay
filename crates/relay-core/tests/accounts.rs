@@ -183,6 +183,7 @@ enum WebSocketBehavior {
     GatedSuccess(Arc<Barrier>),
     StopReadingAfterSuccess(Arc<Notify>),
     Events(Arc<Vec<Value>>),
+    Frames(Arc<Vec<AxumWsMessage>>),
     Sequence(Arc<Mutex<VecDeque<Vec<Value>>>>),
     Hold(Arc<Notify>),
     Close,
@@ -972,6 +973,14 @@ async fn upstream_websocket(
                     vec![json!({"type": "response.created", "response": {"id": "setup-only"}})]
                 }
                 WebSocketBehavior::Events(events) => events.as_ref().clone(),
+                WebSocketBehavior::Frames(frames) => {
+                    for frame in frames.iter() {
+                        if socket.send(frame.clone()).await.is_err() {
+                            return;
+                        }
+                    }
+                    continue;
+                }
                 WebSocketBehavior::Sequence(events) => {
                     events.lock().unwrap().pop_front().unwrap_or_default()
                 }

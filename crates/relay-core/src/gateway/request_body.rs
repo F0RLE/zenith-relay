@@ -3,7 +3,15 @@ use crate::error_codes;
 use axum::body::Body;
 use axum::http::{header::CONTENT_ENCODING, HeaderMap, Response, StatusCode};
 use serde_json::{Map, Value};
-use std::io::Read;
+use std::{io::Read, sync::LazyLock};
+
+const MAX_INLINE_JSON_BYTES: usize = 64 * 1024;
+// Keep CPU-heavy decoding off network workers without filling Tokio's blocking
+// pool with one runnable parser per incoming request. The permit follows the
+// worker even when the caller disconnects.
+static JSON_READ_JOBS: LazyLock<tokio::sync::Semaphore> = LazyLock::new(|| {
+    tokio::sync::Semaphore::new(std::thread::available_parallelism().map_or(1, usize::from))
+});
 
 /// Upper-biased envelope accounting without serializing another copy. Include
 /// parsed container allocations, repair/bridge copies and fixed request state;
@@ -45,6 +53,7 @@ fn retained_value_bytes(json_value: &Value) -> usize {
 #[derive(Debug, PartialEq)]
 enum ReadError {
     InvalidEncoding,
+    InvalidJson,
 }
 
 fn decode(encoded_body: &[u8], encoding: &str) -> Result<Vec<u8>, ReadError> {
@@ -91,22 +100,48 @@ pub(super) async fn read_json_object(
     let encoded_request_body = axum::body::to_bytes(request_body, usize::MAX)
         .await
         .map_err(|_| Box::new(unread_body()))?;
-    let request_bytes = if encoding == "identity" {
-        encoded_request_body
+    let compressed = encoding != "identity";
+    let parsed = if !compressed && encoded_request_body.len() <= MAX_INLINE_JSON_BYTES {
+        parse_json_object(&encoded_request_body)
     } else {
-        tokio::task::spawn_blocking(move || decode(&encoded_request_body, &encoding))
+        let permit = JSON_READ_JOBS
+            .acquire()
             .await
-            .map_err(|_| Box::new(invalid_encoding()))?
-            .map_err(|_| Box::new(invalid_encoding()))?
-            .into()
+            .map_err(|_| Box::new(unread_body()))?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            if compressed {
+                let decoded = decode(&encoded_request_body, &encoding)?;
+                parse_json_object(&decoded)
+            } else {
+                parse_json_object(&encoded_request_body)
+            }
+        })
+        .await
+        .map_err(|_| {
+            Box::new(if compressed {
+                invalid_encoding()
+            } else {
+                unread_body()
+            })
+        })?
     };
-    match serde_json::from_slice(&request_bytes) {
+    parsed.map_err(|error| {
+        Box::new(match error {
+            ReadError::InvalidEncoding => invalid_encoding(),
+            ReadError::InvalidJson => api_error(
+                StatusCode::BAD_REQUEST,
+                "request body must be a JSON object",
+                error_codes::INVALID_REQUEST,
+            ),
+        })
+    })
+}
+
+fn parse_json_object(request_bytes: &[u8]) -> Result<Map<String, Value>, ReadError> {
+    match serde_json::from_slice(request_bytes) {
         Ok(Value::Object(request_fields)) => Ok(request_fields),
-        _ => Err(Box::new(api_error(
-            StatusCode::BAD_REQUEST,
-            "request body must be a JSON object",
-            error_codes::INVALID_REQUEST,
-        ))),
+        _ => Err(ReadError::InvalidJson),
     }
 }
 
@@ -168,6 +203,86 @@ mod tests {
                 serde_json::to_string(prepared.upstream_body()).unwrap(),
                 expected
             );
+        }
+    }
+
+    #[test]
+    fn large_json_waits_for_a_worker_without_blocking_small_requests() {
+        use std::{future::Future, pin::pin, sync::mpsc, task::Poll};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker = runtime.spawn_blocking(move || {
+            started_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        started_rx.recv().unwrap();
+        runtime.block_on(async {
+            let headers = HeaderMap::new();
+            let large = format!("{{\"input\":\"{}\"}}", "x".repeat(MAX_INLINE_JSON_BYTES));
+            let mut large_read = pin!(read_json_object(&headers, Body::from(large)));
+            let pending_large =
+                std::future::poll_fn(|context| Poll::Ready(large_read.as_mut().poll(context)))
+                    .await;
+            let mut small_read = pin!(read_json_object(
+                &headers,
+                Body::from(r#"{"input":"small"}"#)
+            ));
+            let ready_small =
+                std::future::poll_fn(|context| Poll::Ready(small_read.as_mut().poll(context)))
+                    .await;
+            // Always release the occupied worker before asserting, so a failure
+            // cannot strand runtime shutdown behind this synthetic job.
+            release_tx.send(()).unwrap();
+            assert!(pending_large.is_pending());
+            assert!(matches!(ready_small, Poll::Ready(Ok(fields)) if fields["input"] == "small"));
+            let fields = large_read.await.unwrap();
+            assert_eq!(
+                fields["input"].as_str().unwrap().len(),
+                MAX_INLINE_JSON_BYTES
+            );
+            worker.await.unwrap();
+        });
+    }
+
+    #[tokio::test]
+    async fn encoding_paths_preserve_json_and_distinguish_parse_errors() {
+        let json = r#"{"z":123456789012345678901234567890,"a":"Unicode: привет","fraction":0.12345678901234567890123456789}"#;
+        for encoding in ["identity", "gzip", "zstd"] {
+            for padding in [0, MAX_INLINE_JSON_BYTES] {
+                for (raw, valid) in [(json, true), ("[]", false), ("{invalid", false)] {
+                    let input = format!("{}{raw}", " ".repeat(padding));
+                    let body = match encoding {
+                        "gzip" => {
+                            let mut gzip = flate2::write::GzEncoder::new(
+                                Vec::new(),
+                                flate2::Compression::fast(),
+                            );
+                            gzip.write_all(input.as_bytes()).unwrap();
+                            gzip.finish().unwrap()
+                        }
+                        "zstd" => zstd::stream::encode_all(input.as_bytes(), 1).unwrap(),
+                        _ => input.into_bytes(),
+                    };
+                    let mut headers = HeaderMap::new();
+                    headers.insert(CONTENT_ENCODING, encoding.parse().unwrap());
+                    let result = read_json_object(&headers, Body::from(body)).await;
+                    if valid {
+                        assert_eq!(serde_json::to_string(&result.unwrap()).unwrap(), json);
+                    } else {
+                        let response = result.unwrap_err();
+                        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                            .await
+                            .unwrap();
+                        let error: Value = serde_json::from_slice(&bytes).unwrap();
+                        assert_eq!(error["error"]["code"], error_codes::INVALID_REQUEST);
+                    }
+                }
+            }
         }
     }
 

@@ -1,5 +1,9 @@
 use std::borrow::Cow;
 
+#[cfg(test)]
+#[path = "tool_arguments/scan_test.rs"]
+mod scan_tests;
+
 /// JSON has one numeric domain: an exact integral decimal or exponent value can
 /// use integer syntax. Typed Responses tools may require that syntax. Work on
 /// literal digits, not f64, to preserve precision, strings, and negative zero.
@@ -37,6 +41,14 @@ pub(super) fn normalize(arguments: &str, complete: bool) -> Cow<'_, str> {
                     output.push_str(&integer);
                     copied = index;
                 }
+            }
+            // Digits inside strings are never normalized. Jump to the next
+            // quote or escape; their existing handling stays above.
+            _ if quoted => {
+                let Some(offset) = memchr::memchr2(b'\\', b'"', &bytes[index..]) else {
+                    break;
+                };
+                index += offset;
             }
             _ => index += 1,
         }

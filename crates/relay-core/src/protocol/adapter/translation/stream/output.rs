@@ -83,7 +83,13 @@ impl TranslationStream {
             {
                 break;
             }
-            let mut block = current.clone();
+            if self.emit_append(block_index, upstream_finished)? {
+                if !self.finish_message_block(block_index, upstream_finished) {
+                    break;
+                }
+                continue;
+            }
+            let mut block = self.decoded_response.blocks[block_index].clone();
             self.translation_request
                 .normalize_function_arguments(&mut block, upstream_finished);
             if self.translation_request.client != WireApi::Messages
@@ -91,11 +97,11 @@ impl TranslationStream {
             {
                 continue;
             }
-            let previous_block = self.emitted.get(block_index).cloned();
+            let previous_block = self.emitted.get(block_index);
             if self.translation_request.client == WireApi::Messages
                 && block_index < self.finished_message_blocks
             {
-                if previous_block.as_ref() != Some(&block) {
+                if previous_block != Some(&block) {
                     return Err(AdapterError::upstream_stream_invalid());
                 }
                 continue;
@@ -122,41 +128,12 @@ impl TranslationStream {
                 }
                 self.block_start(block_index, &block)?;
             }
-            match (&block, &previous_block) {
-                (Block::Text(text), Some(Block::Text(previous_text)))
-                | (Block::Reasoning(text), Some(Block::Reasoning(previous_text)))
-                | (Block::Refusal(text), Some(Block::Refusal(previous_text))) => {
-                    let delta = text
-                        .strip_prefix(previous_text)
-                        .ok_or_else(AdapterError::upstream_stream_invalid)?;
-                    if matches!(block, Block::Refusal(_)) {
-                        self.refusal_delta(block_index, delta)?;
-                    } else {
-                        self.text_delta(block_index, delta, matches!(block, Block::Reasoning(_)))?;
-                    }
-                }
+            // Reborrow after block_start: validation only needs the previous
+            // snapshot by reference, not another copy of its growing strings.
+            match (&block, self.emitted.get(block_index)) {
                 (Block::Refusal(text), None) => self.refusal_delta(block_index, text)?,
                 (Block::Text(text), None) | (Block::Reasoning(text), None) => {
                     self.text_delta(block_index, text, matches!(block, Block::Reasoning(_)))?
-                }
-                (
-                    Block::ToolCall {
-                        id,
-                        name,
-                        arguments,
-                    },
-                    Some(Block::ToolCall {
-                        id: previous_id,
-                        name: previous_name,
-                        arguments: previous_arguments,
-                    }),
-                ) if id == previous_id && name == previous_name => {
-                    self.arguments_delta(
-                        block_index,
-                        arguments
-                            .strip_prefix(previous_arguments)
-                            .ok_or_else(AdapterError::upstream_stream_invalid)?,
-                    );
                 }
                 (Block::ToolCall { arguments, .. }, None) => {
                     self.arguments_delta(block_index, arguments)
@@ -168,24 +145,87 @@ impl TranslationStream {
             } else {
                 self.emitted[block_index] = block;
             }
-            if self.translation_request.client == WireApi::Messages {
-                // Messages streams one block at a time. Buffer later blocks while
-                // the upstream can still add deltas to the active block.
-                // A tool is executable only after the entire response validates.
-                if !upstream_finished
-                    && (!self.closed.contains(&block_index)
-                        || matches!(&self.emitted[block_index], Block::ToolCall { .. }))
-                {
-                    break;
-                }
-                self.event(
-                    "content_block_stop",
-                    json!({"type":"content_block_stop","index":block_index}),
-                );
-                self.finished_message_blocks += 1;
+            if !self.finish_message_block(block_index, upstream_finished) {
+                break;
             }
         }
         Ok(())
+    }
+
+    fn emit_append(&mut self, block_index: usize, complete: bool) -> AdapterResult<bool> {
+        let current = &self.decoded_response.blocks[block_index];
+        let (text, previous_text) = match (current, self.emitted.get(block_index)) {
+            (Block::Text(text), Some(Block::Text(previous)))
+            | (Block::Reasoning(text), Some(Block::Reasoning(previous)))
+            | (Block::Refusal(text), Some(Block::Refusal(previous))) => {
+                (std::borrow::Cow::Borrowed(text.as_str()), previous)
+            }
+            (
+                Block::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                },
+                Some(Block::ToolCall {
+                    id: previous_id,
+                    name: previous_name,
+                    arguments: previous_arguments,
+                }),
+            ) if id == previous_id && name == previous_name => (
+                self.translation_request
+                    .normalized_function_arguments(name, arguments, complete),
+                previous_arguments,
+            ),
+            _ => return Ok(false),
+        };
+        // Keep the full prefix check: equal lengths alone cannot detect edits
+        // to previously emitted content. Own only the new suffix across emission.
+        let delta = text
+            .strip_prefix(previous_text)
+            .ok_or_else(AdapterError::upstream_stream_invalid)?
+            .to_owned();
+        if matches!(current, Block::ToolCall { .. }) {
+            self.arguments_delta(block_index, &delta);
+        } else if matches!(current, Block::Refusal(_)) {
+            self.refusal_delta(block_index, &delta)?;
+        } else {
+            self.text_delta(block_index, &delta, matches!(current, Block::Reasoning(_)))?;
+        }
+        match &mut self.emitted[block_index] {
+            Block::Text(previous)
+            | Block::Reasoning(previous)
+            | Block::Refusal(previous)
+            | Block::ToolCall {
+                arguments: previous,
+                ..
+            } => {
+                previous.push_str(&delta);
+            }
+            _ => unreachable!("append-only snapshot was validated before emission"),
+        }
+        Ok(true)
+    }
+
+    // Returns whether the next block may be emitted.
+    fn finish_message_block(&mut self, block_index: usize, upstream_finished: bool) -> bool {
+        if self.translation_request.client != WireApi::Messages {
+            return true;
+        }
+        // Messages streams one block at a time. Buffer later blocks while
+        // the upstream can still add deltas to the active block.
+        // A tool is executable only after the entire response validates.
+        if !upstream_finished
+            && (!self.closed.contains(&block_index)
+                || matches!(&self.emitted[block_index], Block::ToolCall { .. }))
+        {
+            return false;
+        }
+        self.event(
+            "content_block_stop",
+            json!({"type":"content_block_stop","index":block_index}),
+        );
+        self.finished_message_blocks += 1;
+        true
     }
 
     fn block_start(&mut self, output_index: usize, block: &Block) -> AdapterResult<()> {

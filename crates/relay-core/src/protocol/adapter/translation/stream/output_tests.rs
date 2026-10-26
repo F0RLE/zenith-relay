@@ -1,6 +1,12 @@
 use super::{Block, TranslationStream, WireApi};
 use serde_json::json;
 
+#[path = "output_tests/snapshots_tests.rs"]
+mod snapshots;
+
+#[path = "output_tests/arguments_tests.rs"]
+mod arguments;
+
 fn stream(client: WireApi, upstream: WireApi) -> Box<TranslationStream> {
     let request = match client {
         WireApi::GeminiInteractions => unreachable!("native-only fixture is separate"),

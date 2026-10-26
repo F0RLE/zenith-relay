@@ -96,7 +96,8 @@ pub(super) fn expand_output(
     if items.len() > MAX_OUTPUT_ITEMS {
         return Err(invalid_tool_output("response.output"));
     }
-    let mut expanded = Vec::with_capacity(items.len());
+    let mut replacements = Vec::new();
+    let mut expanded_len = items.len();
     let mut native_ids = HashSet::new();
     let history = request
         .get("input")
@@ -111,7 +112,6 @@ pub(super) fn expand_output(
             item["type"].as_str(),
             Some("function_call" | "custom_tool_call")
         ) {
-            expanded.push(item.clone());
             continue;
         }
         super::response::validate_tool_completion(item)?;
@@ -125,7 +125,6 @@ pub(super) fn expand_output(
         let outer = parse_json_object(item.get("arguments"));
         let references = outer.as_ref().and_then(|v| v["references"].as_array());
         let Some(references) = references.filter(|v| v.len() > 1) else {
-            expanded.push(item.clone());
             continue;
         };
         if !item["name"].as_str().is_some_and(is_transport_tool) {
@@ -137,7 +136,7 @@ pub(super) fn expand_output(
         if !valid_parent(parent) {
             return Err(invalid_tool_output("output.run_officejs.call_id"));
         }
-        if expanded.len() + references.len() + items.len() - position - 1 > MAX_OUTPUT_ITEMS {
+        if expanded_len + references.len() - 1 > MAX_OUTPUT_ITEMS {
             return Err(invalid_tool_output(
                 "output.run_officejs.batch.output_limit",
             ));
@@ -172,6 +171,7 @@ pub(super) fn expand_output(
         if payloads.len() != references.len() {
             return Err(invalid_tool_output("output.run_officejs.batch.count"));
         }
+        let mut children = Vec::with_capacity(references.len());
         for (index, (reference, payload)) in references.iter().zip(payloads).enumerate() {
             let name = reference
                 .as_str()
@@ -196,10 +196,29 @@ pub(super) fn expand_output(
                 count: references.len(),
                 index,
             };
-            expanded.push(json!({
+            children.push(json!({
                 "type":"function_call", "name":TRANSPORT_TOOL, "call_id":alias.encode(),
                 "arguments":json!({"references":[name],"code":code}).to_string()
             }));
+        }
+        expanded_len += children.len() - 1;
+        replacements.push((position, children));
+    }
+    // Do not clone the whole response just to inspect batch declarations. All
+    // validation above is read-only: an error still leaves the original intact.
+    if replacements.is_empty() {
+        return Ok(());
+    }
+    let mut expanded = Vec::with_capacity(expanded_len);
+    let mut replacements = replacements.into_iter().peekable();
+    for (position, item) in std::mem::take(items).into_iter().enumerate() {
+        if replacements
+            .peek()
+            .is_some_and(|(index, _)| *index == position)
+        {
+            expanded.extend(replacements.next().unwrap().1);
+        } else {
+            expanded.push(item);
         }
     }
     *items = expanded;

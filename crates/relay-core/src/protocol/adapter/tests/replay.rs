@@ -1,6 +1,171 @@
 use super::*;
 use serde_json::json;
 
+mod sharing;
+
+#[test]
+fn native_replay_retains_other_conversations_before_superseded_snapshots() {
+    let snapshot = |id: &str, request: &Value| {
+        NativeResponsesReplayState::from_response(
+            request,
+            "gpt-test",
+            &json!({"id": id, "output": [{"type":"message", "role":"assistant",
+                "content":[{"type":"output_text", "text":"Synthetic answer"}]}]}),
+        )
+        .unwrap()
+        .1
+    };
+    let waiting = snapshot(
+        "resp_waiting",
+        &json!({"input":"Synthetic waiting conversation"}),
+    );
+    let older = snapshot(
+        "resp_busy_first",
+        &json!({"input":"Synthetic busy conversation"}),
+    );
+    let next_request = older
+        .replay_request(
+            &json!({"input":[{"role":"user","content":"Synthetic next turn"}]}),
+            "gpt-test",
+            false,
+        )
+        .unwrap();
+    let newer = snapshot("resp_busy_next", &next_request);
+    let newcomer = snapshot(
+        "resp_new_chat",
+        &json!({"input":"Synthetic new conversation"}),
+    );
+    let size = |state: &NativeResponsesReplayState| serde_json::to_vec(state).unwrap().len();
+    for (max_entries, byte_budget) in [
+        (3, 16_384),
+        (64, size(&waiting) + size(&newer) + size(&newcomer)),
+    ] {
+        let mut store =
+            NativeResponsesReplayStore::with_limits(max_entries, 60_000, 16_384, byte_budget);
+        store.insert("key", "resp_waiting", "route", waiting.clone(), 10);
+        store.insert("key", "resp_busy_first", "route", older.clone(), 20);
+        store.insert("key", "resp_busy_next", "route", newer.clone(), 30);
+        store.insert("key", "resp_new_chat", "route", newcomer.clone(), 40);
+        assert!(
+            store.get("key", "resp_waiting", "route", 40).is_some(),
+            "a different chat's latest response must outlive a superseded snapshot"
+        );
+        assert!(store.get("key", "resp_busy_next", "route", 40).is_some());
+        assert!(store.get("key", "resp_new_chat", "route", 40).is_some());
+        assert!(store.get("key", "resp_busy_first", "route", 40).is_none());
+        let (entries, bytes, limit) = store.memory_usage();
+        assert!(entries <= max_entries && bytes <= limit);
+    }
+}
+
+#[test]
+fn native_replay_eviction_preference_requires_same_owner_model_and_complete_history() {
+    let snapshot = |id: &str, request: &Value, model: &str| {
+        NativeResponsesReplayState::from_response(
+            request,
+            model,
+            &json!({"id":id, "output":[{"type":"message", "role":"assistant",
+                "content":[{"type":"output_text", "text":"Synthetic answer"}]}]}),
+        )
+        .unwrap()
+        .1
+    };
+    for mismatch in ["key", "route", "model", "input", "output", "missing_output"] {
+        let waiting = snapshot("waiting", &json!({"input":"Waiting chat"}), "gpt-test");
+        let previous = snapshot("previous", &json!({"input":"Busy chat"}), "gpt-test");
+        let mut next = previous
+            .replay_request(
+                &json!({"input":[{"role":"user", "content":"Next turn"}]}),
+                "gpt-test",
+                false,
+            )
+            .unwrap();
+        match mismatch {
+            "input" => next["input"][0]["content"][0]["text"] = json!("Changed input"),
+            "output" => next["input"][1]["content"][0]["text"] = json!("Changed output"),
+            "missing_output" => {
+                next["input"].as_array_mut().unwrap().remove(1);
+            }
+            _ => {}
+        }
+        let next = snapshot(
+            "next",
+            &next,
+            if mismatch == "model" {
+                "other-model"
+            } else {
+                "gpt-test"
+            },
+        );
+        let mut store = NativeResponsesReplayStore::with_limits(2, 60_000, 4096, 8192);
+        store.insert("key", "waiting", "route", waiting, 10);
+        store.insert("key", "previous", "route", previous, 20);
+        store.insert(
+            if mismatch == "key" {
+                "other-key"
+            } else {
+                "key"
+            },
+            "next",
+            if mismatch == "route" {
+                "other-route"
+            } else {
+                "route"
+            },
+            next,
+            30,
+        );
+        assert!(
+            store.get("key", "waiting", "route", 30).is_none(),
+            "{mismatch}"
+        );
+        assert!(
+            store.get("key", "previous", "route", 30).is_some(),
+            "{mismatch}"
+        );
+        assert!(store.get("other-key", "previous", "route", 30).is_none());
+        assert!(store.get("key", "previous", "other-route", 30).is_none());
+    }
+}
+
+#[test]
+fn rejected_native_replay_does_not_retire_its_predecessor() {
+    let snapshot = |id: &str, request: &Value| {
+        NativeResponsesReplayState::from_response(
+            request,
+            "gpt-test",
+            &json!({"id":id, "output":[]}),
+        )
+        .unwrap()
+        .1
+    };
+    let waiting = snapshot("waiting", &json!({"input":"Waiting chat"}));
+    let previous = snapshot("previous", &json!({"input":"Busy chat"}));
+    let oversized = previous
+        .replay_request(&json!({"input":"x".repeat(2048)}), "gpt-test", false)
+        .unwrap();
+    let mut store = NativeResponsesReplayStore::with_limits(2, 60_000, 1024, 2048);
+    store.insert("key", "waiting", "route", waiting, 10);
+    store.insert("key", "previous", "route", previous, 20);
+    store.insert(
+        "key",
+        "oversized",
+        "route",
+        snapshot("oversized", &oversized),
+        30,
+    );
+    assert!(store.get("key", "oversized", "route", 30).is_none());
+    store.insert(
+        "key",
+        "new",
+        "route",
+        snapshot("new", &json!({"input":"New chat"})),
+        40,
+    );
+    assert!(store.get("key", "waiting", "route", 40).is_none());
+    assert!(store.get("key", "previous", "route", 40).is_some());
+}
+
 #[test]
 fn native_responses_replay_retains_only_history_within_budget() {
     let input = json!([{"role":"user","content":"Synthetic retained history"}]);

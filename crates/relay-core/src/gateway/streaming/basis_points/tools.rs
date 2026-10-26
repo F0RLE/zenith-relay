@@ -8,16 +8,25 @@ pub(super) struct NativeTools {
 
 impl NativeTools {
     fn remember(&mut self, id: &str, call_id: Option<&str>) -> Result<(), &'static str> {
-        if id.is_empty() || (!self.calls.contains_key(id) && self.calls.len() >= MAX_TOOLS) {
+        if id.is_empty() || call_id == Some("") {
             return Err("stream.tool.identity");
         }
-        let recorded = self.calls.entry(id.to_owned()).or_default();
-        if let Some(call_id) = call_id {
-            if call_id.is_empty() || recorded.as_deref().is_some_and(|before| before != call_id) {
-                return Err("stream.tool.identity");
+        if let Some(recorded) = self.calls.get_mut(id) {
+            if let Some(call_id) = call_id {
+                match recorded {
+                    Some(before) if before.as_str() != call_id => {
+                        return Err("stream.tool.identity")
+                    }
+                    Some(_) => {}
+                    None => *recorded = Some(call_id.to_owned()),
+                }
             }
-            *recorded = Some(call_id.to_owned());
+            return Ok(());
         }
+        if self.calls.len() >= MAX_TOOLS {
+            return Err("stream.tool.identity");
+        }
+        self.calls.insert(id.to_owned(), call_id.map(str::to_owned));
         Ok(())
     }
 
@@ -83,5 +92,60 @@ impl NativeTools {
             return Err("stream.tool.output");
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repeated_fragments_reuse_identity_storage() {
+        let mut tools = NativeTools::default();
+        tools.remember("fc_test", None).unwrap();
+        tools.remember("fc_test", Some("call_test")).unwrap();
+        let (key, call) = tools.calls.get_key_value("fc_test").unwrap();
+        let key_pointer = key.as_ptr();
+        let call_pointer = call.as_ref().unwrap().as_ptr();
+        for _ in 0..128 {
+            tools.remember("fc_test", None).unwrap();
+            tools.remember("fc_test", Some("call_test")).unwrap();
+            let (key, call) = tools.calls.get_key_value("fc_test").unwrap();
+            assert_eq!(key.as_ptr(), key_pointer);
+            assert_eq!(call.as_ref().unwrap().as_ptr(), call_pointer);
+        }
+        assert_eq!(tools.calls.len(), 1);
+        assert_eq!(
+            tools.remember("fc_test", Some("changed")),
+            Err("stream.tool.identity")
+        );
+        assert_eq!(
+            tools.remember("fc_test", Some("")),
+            Err("stream.tool.identity")
+        );
+        assert_eq!(tools.remember("", None), Err("stream.tool.identity"));
+        tools
+            .complete(&[serde_json::json!({
+                "type":"function_call","id":"fc_test","call_id":"call_test"
+            })])
+            .unwrap();
+        assert!(tools.calls.is_empty());
+    }
+
+    #[test]
+    fn identity_limit_rejects_new_calls_not_known_fragments() {
+        let mut tools = NativeTools::default();
+        for index in 0..MAX_TOOLS {
+            tools.remember(&format!("fc_{index}"), None).unwrap();
+        }
+        assert_eq!(
+            tools.remember("overflow", None),
+            Err("stream.tool.identity")
+        );
+        tools.remember("fc_0", Some("call_0")).unwrap();
+        tools.remember("fc_0", None).unwrap();
+        tools.remember("fc_0", Some("call_0")).unwrap();
+        assert_eq!(tools.calls.len(), MAX_TOOLS);
+        assert_eq!(tools.complete(&[]), Err("stream.tool.output"));
     }
 }

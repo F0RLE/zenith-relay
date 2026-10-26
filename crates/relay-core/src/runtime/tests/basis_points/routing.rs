@@ -160,6 +160,110 @@ async fn websocket_bps_continuation_preserves_tool_history() {
 }
 
 #[tokio::test]
+async fn websocket_bps_waiting_chat_survives_other_chats_replay_pressure() {
+    let bps = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+    bps.state.stream_generations.store(true, Ordering::SeqCst);
+    let runtime = retry_admission::pool_runtime(&bps, 1, false).await;
+    *crate::poison::mutex(&runtime.native_responses_replay_store) =
+        crate::NativeResponsesReplayStore::with_limits(3, 60_000, 16_384, 49_152);
+    let (base, task) = recovery::gateway(Arc::new(runtime)).await;
+    let client = retry_admission::bounded_client();
+    let output = json!([{"type":"message","role":"assistant","content":[{
+        "type":"output_text","text":"Synthetic completed answer"
+    }]}]);
+    for (id, previous, text) in [
+        ("resp_waiting", None, "Synthetic waiting chat"),
+        ("resp_busy_first", None, "Synthetic busy chat"),
+        (
+            "resp_busy_next",
+            Some("resp_busy_first"),
+            "Synthetic busy next turn",
+        ),
+        ("resp_new_chat", None, "Synthetic new chat"),
+    ] {
+        *crate::poison::mutex(&bps.state.generation_body) = json!({
+            "id":id,"status":"completed","model":"gpt-test","output":output
+        });
+        let mut request = json!({"model":"gpt-test","input":[{"role":"user","content":text}]});
+        if let Some(previous) = previous {
+            request["previous_response_id"] = json!(previous);
+        }
+        let response = client
+            .post(format!("{base}/v1/responses"))
+            .bearer_auth("local-secret")
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.text().await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{id}: {body}");
+    }
+    *crate::poison::mutex(&bps.state.generation_body) = json!({
+        "id":"resp_waiting_next","status":"completed","model":"gpt-test","output":output
+    });
+    let mut socket = client
+        .get(format!("{base}/v1/responses"))
+        .bearer_auth("local-secret")
+        .upgrade()
+        .send()
+        .await
+        .unwrap()
+        .into_websocket()
+        .await
+        .unwrap();
+    socket
+        .send(Message::Text(
+            json!({
+                "type":"response.create","model":"gpt-test","stream_id":"main",
+                "previous_response_id":"resp_waiting",
+                "input":[{"role":"user","content":"Continue the waiting chat"}]
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    let terminal = tokio::time::timeout(Duration::from_secs(3), async {
+        while let Some(message) = socket.next().await {
+            if let Message::Text(text) = message.unwrap() {
+                let event: Value = serde_json::from_str(&text).unwrap();
+                if event["type"] == "response.completed" || event["type"] == "error" {
+                    return event;
+                }
+            }
+        }
+        panic!("waiting chat closed without a terminal response");
+    })
+    .await
+    .unwrap();
+    assert_eq!(terminal["type"], "response.completed", "{terminal}");
+    assert_eq!(bps.state.generation_requests.load(Ordering::SeqCst), 5);
+    let bodies = crate::poison::mutex(&bps.state.generation_bodies);
+    let resumed = bodies.last().unwrap();
+    assert!(resumed.get("previous_response_id").is_none());
+    let input = resumed["input"].as_array().unwrap();
+    let expected_history = [
+        json!({"type":"message","role":"user","content":[{
+            "type":"input_text","text":"Synthetic waiting chat"
+        }]}),
+        output[0].clone(),
+        json!({"type":"message","role":"user","content":[{
+            "type":"input_text","text":"Continue the waiting chat"
+        }]}),
+    ];
+    assert!(
+        input
+            .windows(expected_history.len())
+            .any(|items| items == expected_history),
+        "waiting chat history must survive BPS message normalization: {input:?}"
+    );
+    assert!(!input
+        .iter()
+        .any(|item| item.pointer("/content/0/text") == Some(&json!("Synthetic busy chat"))));
+    task.abort();
+}
+
+#[tokio::test]
 async fn bps_missing_replay_reports_local_state_loss_without_a_provider_send() {
     for stream in [false, true] {
         let bps = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;

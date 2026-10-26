@@ -3,6 +3,8 @@ use super::super::history::{separate_tool_images, translate_input_items};
 use super::super::response::translate_response_value;
 use super::*;
 
+mod throughput;
+
 fn request() -> Value {
     json!({"model":"synthetic", "input":[], "tools":[
         {"type":"function","name":"inspect","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}},

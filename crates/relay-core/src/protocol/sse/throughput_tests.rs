@@ -1,5 +1,41 @@
-use super::{consume_frames, take_event};
+use super::{consume_frames, fragmentation_tests::scalar_line_end, line_end, take_event};
 use std::{hint::black_box, time::Instant};
+
+#[test]
+#[ignore = "manual synthetic scalar versus vectorized SSE line scan measurement"]
+fn measure_line_ending_search() {
+    for payload_bytes in [0, 16, 240, 64 * 1024, 1024 * 1024] {
+        let input = format!("{}\r\n", "x".repeat(payload_bytes)).into_bytes();
+        assert_eq!(line_end(&input), scalar_line_end(&input));
+        let iterations = if payload_bytes < 1024 { 10_000 } else { 100 };
+        let mut samples = [Vec::new(), Vec::new()];
+        for _ in 0..5 {
+            black_box(line_end(black_box(&input)));
+            black_box(scalar_line_end(black_box(&input)));
+        }
+        for trial in 0..7 {
+            for variant in [trial % 2, 1 - trial % 2] {
+                let started = Instant::now();
+                for _ in 0..iterations {
+                    black_box(if variant == 0 {
+                        line_end(black_box(&input))
+                    } else {
+                        scalar_line_end(black_box(&input))
+                    });
+                }
+                samples[variant].push(started.elapsed().as_nanos() / iterations);
+            }
+        }
+        for (variant, mut samples) in samples.into_iter().enumerate() {
+            samples.sort_unstable();
+            let variant = if variant == 0 { "memchr" } else { "scalar" };
+            eprintln!(
+                "SSE line scan variant={variant} payload={payload_bytes} iterations={iterations} trials=7 median_ns={} min_ns={} max_ns={}",
+                samples[3], samples[0], samples[6]
+            );
+        }
+    }
+}
 
 #[test]
 #[ignore = "manual synthetic complete SSE chunk throughput measurement"]

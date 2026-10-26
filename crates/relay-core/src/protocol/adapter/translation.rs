@@ -307,26 +307,35 @@ impl TranslationRequest {
     }
 
     fn normalize_function_arguments(&self, block: &mut Block, complete: bool) {
-        if self.client != WireApi::Responses {
-            return;
-        }
         if let Block::ToolCall {
             name, arguments, ..
         } = block
         {
-            if !self
+            match self.normalized_function_arguments(name, arguments, complete) {
+                std::borrow::Cow::Borrowed(prefix) => {
+                    let retained = prefix.len();
+                    arguments.truncate(retained);
+                }
+                std::borrow::Cow::Owned(normalized) => *arguments = normalized,
+            }
+        }
+    }
+
+    fn normalized_function_arguments<'a>(
+        &self,
+        name: &str,
+        arguments: &'a str,
+        complete: bool,
+    ) -> std::borrow::Cow<'a, str> {
+        if self.client == WireApi::Responses
+            && !self
                 .client_tools
                 .get(name)
                 .is_some_and(|target| target.kind == ResponsesToolKind::Custom)
-            {
-                match tool_arguments::normalize(arguments, complete) {
-                    std::borrow::Cow::Borrowed(prefix) => {
-                        let retained = prefix.len();
-                        arguments.truncate(retained);
-                    }
-                    std::borrow::Cow::Owned(normalized) => *arguments = normalized,
-                }
-            }
+        {
+            tool_arguments::normalize(arguments, complete)
+        } else {
+            std::borrow::Cow::Borrowed(arguments)
         }
     }
 

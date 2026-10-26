@@ -2,6 +2,41 @@ use super::super::*;
 use super::terminal::{finish_incomplete, finish_terminal};
 use super::BridgeState;
 
+enum UpstreamPayload {
+    Delta(crate::gateway::streaming::FastResponseDelta),
+    Json(Value),
+    Malformed,
+}
+
+impl UpstreamPayload {
+    fn parse(bytes: &[u8]) -> Self {
+        if let Some(delta) = crate::gateway::streaming::fast_response_delta_json(bytes) {
+            return Self::Delta(delta);
+        }
+        serde_json::from_slice(bytes).map_or(Self::Malformed, Self::Json)
+    }
+
+    fn serves_rejected_model(&self, expected: &str) -> bool {
+        match self {
+            Self::Json(payload) => {
+                crate::gateway::streaming::served_model_is_rejected(payload, expected)
+            }
+            Self::Delta(_) | Self::Malformed => false,
+        }
+    }
+
+    fn is_response(&self) -> bool {
+        match self {
+            Self::Delta(_) => true,
+            Self::Json(payload) => payload
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|event_type| event_type.starts_with("response.")),
+            Self::Malformed => false,
+        }
+    }
+}
+
 pub(super) async fn handle_initial_messages(
     downstream: &mut WebSocket,
     runtime: &GatewayRuntime,
@@ -22,74 +57,47 @@ pub(super) async fn handle_upstream_message(
     state: &mut BridgeState,
     message: UpstreamMessage,
 ) -> bool {
-    if runtime.block_degraded_routes_enabled()
-        && state.in_flight.as_ref().is_some_and(|in_flight| {
-            in_flight.route.account_id.is_some()
-                && super::super::upstream::message_serves_rejected_model(
-                    &message,
-                    &in_flight.route.source_model,
-                )
-        })
-    {
-        let request_id = state.request_id().map(str::to_owned);
-        let stream_id = state.request_stream_id().map(str::to_owned);
-        // Keep actual usage even though this frame will not be forwarded.
-        match &message {
-            UpstreamMessage::Text(text) => {
-                inspect_upstream_event(text.as_bytes(), state);
-            }
-            UpstreamMessage::Binary(bytes) => {
-                inspect_upstream_event(bytes, state);
-            }
-            _ => {}
+    let bytes = match &message {
+        UpstreamMessage::Text(text) => Some(text.as_bytes()),
+        UpstreamMessage::Binary(bytes) => Some(bytes.as_ref()),
+        _ => None,
+    };
+    let (terminal, replacement) = if let Some(bytes) = bytes {
+        if bytes.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
+            reject_oversized_upstream_message(downstream, runtime, state).await;
+            return false;
         }
-        // This bridge may already have forwarded setup or output bytes. End
-        // this response and retain its owner; do not reconnect and replay it.
-        if let Some(in_flight) = state.in_flight.as_mut() {
-            in_flight.client_visible_output = true;
+        // Reuse validation for the model guard, turn observation and error
+        // rewriting. Ordinary frames still forward their original buffers.
+        let payload = UpstreamPayload::parse(bytes);
+        if runtime.block_degraded_routes_enabled()
+            && state.in_flight.as_ref().is_some_and(|in_flight| {
+                in_flight.route.account_id.is_some()
+                    && payload.serves_rejected_model(&in_flight.route.source_model)
+            })
+        {
+            // Keep actual usage even though this frame will not be forwarded.
+            classify_upstream_payload(&payload, state);
+            drop(payload);
+            reject_degraded_upstream_message(downstream, runtime, state).await;
+            return false;
         }
-        finish_terminal(
-            runtime,
-            state,
-            EventTerminal {
-                outcome: Some(EventTerminalOutcome::Failure),
-                status: Some(StatusCode::NOT_FOUND),
-                error_category: Some(error_codes::UPSTREAM_ROUTE_DEGRADED),
-                ..EventTerminal::default()
-            },
-        );
-        send_gateway_error(
-            downstream,
-            &GatewayFailure::classified(
-                StatusCode::NOT_FOUND,
-                error_codes::UPSTREAM_ROUTE_DEGRADED,
-                state.upstream_origin,
-            ),
-            request_id.as_deref(),
-            stream_id.as_deref(),
-        )
-        .await;
-        return false;
-    }
+        let Some((terminal, has_visible_output)) = prepare_upstream_forward(&payload, state) else {
+            return true;
+        };
+        if has_visible_output {
+            if let Some(in_flight) = state.in_flight.as_mut() {
+                in_flight.client_visible_output = true;
+            }
+        }
+        let replacement = prefix_websocket_error_payload(payload, &terminal, state.upstream_origin);
+        (terminal, replacement)
+    } else {
+        (EventTerminal::default(), None)
+    };
     match message {
         UpstreamMessage::Text(text) => {
-            if text.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
-                reject_oversized_upstream_message(downstream, runtime, state).await;
-                return false;
-            }
-            let Some((terminal, has_visible_output)) =
-                prepare_upstream_forward(text.as_bytes(), state)
-            else {
-                return true;
-            };
-            if has_visible_output {
-                if let Some(in_flight) = state.in_flight.as_mut() {
-                    in_flight.client_visible_output = true;
-                }
-            }
-            let forwarded_text =
-                prefix_websocket_error_payload(text.as_bytes(), &terminal, state.upstream_origin)
-                    .and_then(|payload| String::from_utf8(payload).ok());
+            let forwarded_text = replacement.and_then(|payload| String::from_utf8(payload).ok());
             let forwarded_message = match forwarded_text {
                 Some(rewritten) => Message::Text(rewritten.into()),
                 None => Message::Text(text.into()),
@@ -101,23 +109,7 @@ pub(super) async fn handle_upstream_message(
             finish_terminal(runtime, state, terminal)
         }
         UpstreamMessage::Binary(bytes) => {
-            if bytes.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
-                reject_oversized_upstream_message(downstream, runtime, state).await;
-                return false;
-            }
-            let Some((terminal, has_visible_output)) =
-                prepare_upstream_forward(bytes.as_ref(), state)
-            else {
-                return true;
-            };
-            if has_visible_output {
-                if let Some(in_flight) = state.in_flight.as_mut() {
-                    in_flight.client_visible_output = true;
-                }
-            }
-            let forwarded_payload =
-                prefix_websocket_error_payload(bytes.as_ref(), &terminal, state.upstream_origin)
-                    .map_or_else(|| bytes, Into::into);
+            let forwarded_payload = replacement.map_or(bytes, Into::into);
             if send_message(downstream, Message::Binary(forwarded_payload))
                 .await
                 .is_err()
@@ -167,7 +159,7 @@ pub(super) async fn handle_upstream_message(
 
 /// Returns a replacement only when an error envelope actually needs rewriting.
 fn prefix_websocket_error_payload(
-    upstream_frame: &[u8],
+    payload: UpstreamPayload,
     terminal: &EventTerminal,
     origin: crate::ErrorOrigin,
 ) -> Option<Vec<u8>> {
@@ -177,7 +169,9 @@ fn prefix_websocket_error_payload(
     ) {
         return None;
     }
-    let mut event_payload = serde_json::from_slice::<Value>(upstream_frame).ok()?;
+    let UpstreamPayload::Json(mut event_payload) = payload else {
+        return None;
+    };
     let category = terminal
         .error_category
         .unwrap_or(error_codes::UPSTREAM_TERMINAL);
@@ -208,59 +202,80 @@ async fn reject_oversized_upstream_message(
     }
 }
 
-fn is_response_frame(upstream_frame: &[u8]) -> bool {
-    serde_json::from_slice::<Value>(upstream_frame)
-        .ok()
-        .is_some_and(|event_payload| {
-            event_payload
-                .get("type")
-                .and_then(Value::as_str)
-                .is_some_and(|event_type| event_type.starts_with("response."))
-        })
+async fn reject_degraded_upstream_message(
+    downstream: &mut WebSocket,
+    runtime: &GatewayRuntime,
+    state: &mut BridgeState,
+) {
+    let request_id = state.request_id().map(str::to_owned);
+    let stream_id = state.request_stream_id().map(str::to_owned);
+    // Output may already have reached the client. End this response and
+    // retain its owner; do not reconnect and replay it.
+    if let Some(in_flight) = state.in_flight.as_mut() {
+        in_flight.client_visible_output = true;
+    }
+    finish_terminal(
+        runtime,
+        state,
+        EventTerminal {
+            outcome: Some(EventTerminalOutcome::Failure),
+            status: Some(StatusCode::NOT_FOUND),
+            error_category: Some(error_codes::UPSTREAM_ROUTE_DEGRADED),
+            ..EventTerminal::default()
+        },
+    );
+    send_gateway_error(
+        downstream,
+        &GatewayFailure::classified(
+            StatusCode::NOT_FOUND,
+            error_codes::UPSTREAM_ROUTE_DEGRADED,
+            state.upstream_origin,
+        ),
+        request_id.as_deref(),
+        stream_id.as_deref(),
+    )
+    .await;
 }
 
 /// A completed turn no longer owns upstream response frames. Keep late
 /// `response.*` events off the next client turn.
 fn prepare_upstream_forward(
-    upstream_frame: &[u8],
+    payload: &UpstreamPayload,
     state: &mut BridgeState,
 ) -> Option<(EventTerminal, bool)> {
-    if state.in_flight.is_none() && is_late_response_frame(upstream_frame) {
+    if state.in_flight.is_none() && payload.is_response() {
         return None;
     }
-    Some(classify_upstream_payload(upstream_frame, state))
-}
-
-fn is_late_response_frame(upstream_frame: &[u8]) -> bool {
-    crate::gateway::streaming::fast_response_delta_json(upstream_frame).is_some()
-        || is_response_frame(upstream_frame)
+    Some(classify_upstream_payload(payload, state))
 }
 
 fn classify_upstream_payload(
-    upstream_frame: &[u8],
+    payload: &UpstreamPayload,
     state: &mut BridgeState,
 ) -> (EventTerminal, bool) {
-    if let Some(delta) = crate::gateway::streaming::fast_response_delta_json(upstream_frame) {
-        record_fast_response_delta(state, delta);
-        return (EventTerminal::default(), true);
-    }
-    let Ok(event_payload) = serde_json::from_slice::<Value>(upstream_frame) else {
-        if let Some(in_flight) = state.in_flight.as_mut() {
-            in_flight.native_replay_capture.mark_unmaterialized();
+    match payload {
+        UpstreamPayload::Delta(delta) => {
+            record_fast_response_delta(state, delta);
+            (EventTerminal::default(), true)
         }
-        // Malformed frames are conservative visible output: a pre-output
-        // reconnect must not replay bytes the client may already have seen.
-        return (EventTerminal::default(), true);
-    };
-    (
-        inspect_parsed_event(&event_payload, state),
-        semantic_output_value(&event_payload),
-    )
+        UpstreamPayload::Json(event_payload) => (
+            inspect_parsed_event(event_payload, state),
+            semantic_output_value(event_payload),
+        ),
+        UpstreamPayload::Malformed => {
+            if let Some(in_flight) = state.in_flight.as_mut() {
+                in_flight.native_replay_capture.mark_unmaterialized();
+            }
+            // A reconnect must not replay malformed bytes already seen by
+            // the client as if they had been harmless setup metadata.
+            (EventTerminal::default(), true)
+        }
+    }
 }
 
 fn record_fast_response_delta(
     state: &mut BridgeState,
-    delta: crate::gateway::streaming::FastResponseDelta,
+    delta: &crate::gateway::streaming::FastResponseDelta,
 ) {
     let Some(in_flight) = state.in_flight.as_mut() else {
         return;
@@ -294,7 +309,7 @@ pub(super) fn inspect_upstream_event(
     upstream_frame: &[u8],
     state: &mut BridgeState,
 ) -> EventTerminal {
-    classify_upstream_payload(upstream_frame, state).0
+    classify_upstream_payload(&UpstreamPayload::parse(upstream_frame), state).0
 }
 
 fn inspect_parsed_event(event_payload: &Value, state: &mut BridgeState) -> EventTerminal {
@@ -359,9 +374,12 @@ mod tests {
             ..EventTerminal::default()
         };
         let original = br#"{"type":"response.failed","response":{"error":{"code":"server_error","message":"Provider: unavailable"}}}"#;
-        let prefixed_payload =
-            prefix_websocket_error_payload(original, &terminal, crate::ErrorOrigin::Account)
-                .unwrap();
+        let prefixed_payload = prefix_websocket_error_payload(
+            UpstreamPayload::parse(original),
+            &terminal,
+            crate::ErrorOrigin::Account,
+        )
+        .unwrap();
         let error_response: Value = serde_json::from_slice(&prefixed_payload).unwrap();
 
         assert_eq!(
@@ -375,10 +393,70 @@ mod tests {
     fn ordinary_frames_do_not_build_replacement_payloads() {
         let original = br#"{ "type":"response.output_text.delta", "delta":"hello", "extension":123456789012345678901234567890 }"#;
         assert!(prefix_websocket_error_payload(
-            original,
+            UpstreamPayload::parse(original),
             &EventTerminal::default(),
             crate::ErrorOrigin::Account,
         )
         .is_none());
+    }
+
+    #[test]
+    fn decoded_deltas_keep_the_full_model_and_terminal_guards() {
+        for payload in [
+            json!({"type":"response.output_text.delta","delta":"hello"}),
+            json!({"type":"response.function_call_arguments.delta","delta":"{\"arg\":"}),
+            json!({"type":"response.output_text.delta","delta":"hello","model":"gpt-other"}),
+            json!({"type":"response.output_text.delta","delta":"hello","response":{"model":"gpt-other"}}),
+            json!({"type":"response.output_text.delta","delta":"hello","model":"gpt-other","error":{"code":"permission_denied","type":"permission_error"},"status":403}),
+            json!({"type":"response.output_text.delta","delta":"hello","usage":{"input_tokens":9,"output_tokens":2}}),
+        ] {
+            let decoded = UpstreamPayload::parse(&serde_json::to_vec(&payload).unwrap());
+            assert!(decoded.is_response());
+            assert_eq!(
+                decoded.serves_rejected_model("gpt-test"),
+                crate::gateway::streaming::served_model_is_rejected(&payload, "gpt-test")
+            );
+            if payload.get("model").is_some()
+                || payload.get("response").is_some()
+                || payload.get("usage").is_some()
+            {
+                assert!(
+                    matches!(decoded, UpstreamPayload::Json(ref parsed) if parsed == &payload),
+                    "metadata must retain the full event for inspection"
+                );
+            } else {
+                assert!(matches!(decoded, UpstreamPayload::Delta(_)));
+            }
+        }
+    }
+
+    #[test]
+    fn late_frame_detection_distinguishes_responses_from_timing_and_invalid_json() {
+        for (bytes, is_response) in [
+            (
+                br#"{"type":"response.output_text.delta","delta":"hi"}"#.as_slice(),
+                true,
+            ),
+            (br#"{"type":"response.future_event"}"#.as_slice(), true),
+            (
+                br#"{"type":"responsesapi.websocket_timing","response_id":"old"}"#.as_slice(),
+                false,
+            ),
+            (
+                br#"{"type":"response.output_text.delta","delta":"\uD800"}"#.as_slice(),
+                false,
+            ),
+            (b"not-json".as_slice(), false),
+        ] {
+            let decoded = UpstreamPayload::parse(bytes);
+            assert_eq!(decoded.is_response(), is_response);
+            assert!(!decoded.serves_rejected_model("gpt-test"));
+            assert!(prefix_websocket_error_payload(
+                decoded,
+                &EventTerminal::default(),
+                crate::ErrorOrigin::Account,
+            )
+            .is_none());
+        }
     }
 }

@@ -1,6 +1,81 @@
 use super::*;
 
 #[tokio::test]
+async fn guarded_websocket_reuses_decoding_without_changing_text_or_binary_frames() {
+    let frames = Arc::new(vec![
+        AxumWsMessage::Text(r#"{ "type":"response.output_text.delta", "output_index":0, "delta":"hello\n\"quoted\"" }"#.into()),
+        AxumWsMessage::Binary(br#"{ "type":"response.function_call_arguments.delta", "output_index":1, "delta":"{" }"#.as_slice().into()),
+        AxumWsMessage::Text(r#"{"type":"response.in_progress","response":{"id":"ws-bytes","usage":{"input_tokens":11,"input_tokens_details":{"cached_tokens":7}}}}"#.into()),
+        AxumWsMessage::Text(r#"{"type":"responsesapi.websocket_timing","response_id":"old-response"}"#.into()),
+        AxumWsMessage::Text(r#"{ "type":"response.future_event", "extension":123456789012345678901234567890 }"#.into()),
+        AxumWsMessage::Binary(vec![0xff, 0xfe].into()),
+        AxumWsMessage::Text(r#"{ "type":"response.completed", "response":{"id":"ws-bytes","status":"completed","output":[],"usage":{"output_tokens":5}} }"#.into()),
+    ]);
+    let (upstream, state) =
+        spawn_websocket_upstream_with_behavior(WebSocketBehavior::Frames(frames.clone())).await;
+    let authority = ready_authority("bytes-account", "synthetic-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account("bytes-account", "provider-bytes", &upstream, 10)],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    gateway
+        .runtime
+        .as_ref()
+        .unwrap()
+        .set_block_degraded_routes_enabled(true);
+    let mut socket = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap()
+        .into_websocket()
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        socket
+            .send(ClientWsMessage::Text(
+                json!({"type":"response.create","model":MODEL,"input":"synthetic request"})
+                    .to_string(),
+            ))
+            .await
+            .unwrap();
+        for expected in frames.iter() {
+            let actual = tokio::time::timeout(Duration::from_secs(5), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            match (expected, actual) {
+                (AxumWsMessage::Text(expected), ClientWsMessage::Text(actual)) => {
+                    assert_eq!(actual.as_bytes(), expected.as_bytes());
+                }
+                (AxumWsMessage::Binary(expected), ClientWsMessage::Binary(actual)) => {
+                    assert_eq!(&actual, expected);
+                }
+                (_, actual) => panic!("frame representation changed: {actual:?}"),
+            }
+        }
+    }
+    assert_eq!(state.requests.lock().unwrap().len(), 2);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    for event in events.iter() {
+        assert!(event.success);
+        assert_eq!(event.input_tokens, Some(11));
+        assert_eq!(event.cached_input_tokens, Some(7));
+        assert_eq!(event.output_tokens, Some(5));
+        assert!(event.ttft_ms.is_some());
+    }
+}
+
+#[tokio::test]
 async fn websocket_tool_owners_survive_reconnect_only_after_completed_responses() {
     for (custom, completed, reconnect) in [
         (false, true, false),

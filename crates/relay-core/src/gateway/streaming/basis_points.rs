@@ -170,10 +170,7 @@ impl Translator {
                 _ => return Err("response.status"),
             };
         }
-        let kind = event["type"]
-            .as_str()
-            .ok_or("stream.event.type")?
-            .to_owned();
+        let kind = event["type"].as_str().ok_or("stream.event.type")?;
         if ResponseCompletion::from_responses_event(&event) == Some(ResponseCompletion::Invalid) {
             return Err("response.status");
         }
@@ -192,7 +189,7 @@ impl Translator {
             }
             // Search progress does not publish the output item itself.
             if !matches!(
-                kind.as_str(),
+                kind,
                 "response.web_search_call.in_progress"
                     | "response.web_search_call.searching"
                     | "response.web_search_call.completed"
@@ -200,6 +197,14 @@ impl Translator {
                 self.seen.insert(index);
             }
         }
+        let terminal = matches!(
+            kind,
+            "response.incomplete"
+                | "response.failed"
+                | "response.cancelled"
+                | "response.canceled"
+                | "error"
+        );
         if kind == "response.completed" {
             let response = event
                 .get("response")
@@ -256,14 +261,7 @@ impl Translator {
                     .unwrap_or_else(|| json!({})),
             );
         }
-        self.terminal |= matches!(
-            kind.as_str(),
-            "response.incomplete"
-                | "response.failed"
-                | "response.cancelled"
-                | "response.canceled"
-                | "error"
-        );
+        self.terminal |= terminal;
         self.emit(event);
         Ok(())
     }

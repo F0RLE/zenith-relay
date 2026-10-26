@@ -52,9 +52,12 @@ pub(crate) fn event_data(sse_event: &[u8]) -> std::borrow::Cow<'_, [u8]> {
 }
 
 fn line_end(bytes: &[u8]) -> Option<(usize, usize)> {
-    let position = bytes
-        .iter()
-        .position(|byte| matches!(byte, b'\r' | b'\n'))?;
+    // Empty lines delimit every event; do not invoke a search for a delimiter
+    // already at the front (also common when resuming a fragmented CRLF).
+    let position = match bytes.first()? {
+        b'\r' | b'\n' => 0,
+        _ => memchr::memchr2(b'\r', b'\n', bytes)?,
+    };
     let crlf = bytes[position] == b'\r' && bytes.get(position + 1) == Some(&b'\n');
     // CR is a complete SSE terminator by itself. If its optional LF arrives
     // after dispatch, the next frame contains a harmless empty leading line.

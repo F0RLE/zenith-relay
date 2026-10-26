@@ -3,7 +3,11 @@
 use super::{AdapterError, AdapterResult};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
+
+#[cfg(test)]
+#[path = "replay/performance_tests.rs"]
+mod performance;
 
 /// Local history for native Responses recovery before client-visible output.
 ///
@@ -12,15 +16,48 @@ use std::collections::BTreeSet;
 /// response id is portable across transports. This is deliberately separate
 /// from `ResponsesToMessages`: no protocol conversion happens here.
 #[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(transparent)]
 pub struct NativeResponsesReplayState {
-    pub(super) model: String,
+    // Store lookups share immutable history instead of deep-cloning it while
+    // the cache mutex is held. Serialization still counts the complete history.
+    history: Arc<NativeResponsesReplayHistory>,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+struct NativeResponsesReplayHistory {
+    model: String,
     initial_input: Value,
     completed_output: Vec<Value>,
 }
 
 impl NativeResponsesReplayState {
     pub(crate) fn model(&self) -> &str {
-        &self.model
+        &self.history.model
+    }
+
+    /// Retention hint only: the next snapshot already contains this complete
+    /// native turn. Keep older response IDs usable until a store limit needs
+    /// room, but prefer evicting them over unrelated conversations' heads.
+    pub(crate) fn is_materialized_predecessor_of(&self, next: &Self) -> bool {
+        if !self.model().eq_ignore_ascii_case(next.model()) {
+            return false;
+        }
+        let Some(next_input) = next.history.initial_input.as_array() else {
+            return false;
+        };
+        let prefix_len = match &self.history.initial_input {
+            Value::Array(input) if next_input.starts_with(input) => input.len(),
+            Value::Object(_) if next_input.first() == Some(&self.history.initial_input) => 1,
+            Value::String(text)
+                if next_input
+                    .first()
+                    .is_some_and(|input| is_replay_text_message(input, text)) =>
+            {
+                1
+            }
+            _ => return false,
+        };
+        next_input[prefix_len..].starts_with(&self.history.completed_output)
     }
 
     pub fn from_response(
@@ -70,12 +107,14 @@ impl NativeResponsesReplayState {
         Some((
             response_id,
             Self {
-                model: model.to_string(),
-                // Replay uses the current turn's options, never the old tool
-                // catalog or instructions. Retaining those unused fields can
-                // evict otherwise valid history from the bounded store.
-                initial_input: initial_input.clone(),
-                completed_output,
+                history: Arc::new(NativeResponsesReplayHistory {
+                    model: model.to_string(),
+                    // Replay uses the current turn's options, never the old tool
+                    // catalog or instructions. Retaining those unused fields can
+                    // evict otherwise valid history from the bounded store.
+                    initial_input: initial_input.clone(),
+                    completed_output,
+                }),
             },
         ))
     }
@@ -89,7 +128,8 @@ impl NativeResponsesReplayState {
         model: &str,
         stream: bool,
     ) -> AdapterResult<Value> {
-        if !self.model.eq_ignore_ascii_case(model) || native_replay_has_provider_state(continuation)
+        if !self.model().eq_ignore_ascii_case(model)
+            || native_replay_has_provider_state(continuation)
         {
             return Err(AdapterError::continuation_mismatch());
         }
@@ -100,8 +140,8 @@ impl NativeResponsesReplayState {
             .get("input")
             .ok_or_else(AdapterError::invalid_request)?;
         let mut replay_input = Vec::new();
-        append_replay_input(&mut replay_input, &self.initial_input)?;
-        replay_input.extend(self.completed_output.iter().cloned());
+        append_replay_input(&mut replay_input, &self.history.initial_input)?;
+        replay_input.extend(self.history.completed_output.iter().cloned());
         append_replay_input(&mut replay_input, current_input)?;
         if replay_input.is_empty() {
             return Err(AdapterError::invalid_request());
@@ -119,6 +159,30 @@ impl NativeResponsesReplayState {
         replay_request.insert("input".to_string(), Value::Array(replay_input));
         Ok(Value::Object(replay_request))
     }
+}
+
+// Match the exact message produced by append_replay_input for a string without
+// allocating another copy of its text. Extra fields must still prevent a match.
+fn is_replay_text_message(input: &Value, text: &str) -> bool {
+    let Some(message) = input.as_object() else {
+        return false;
+    };
+    if message.len() != 2 || message.get("role").and_then(Value::as_str) != Some("user") {
+        return false;
+    }
+    let Some([content]) = message
+        .get("content")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+    else {
+        return false;
+    };
+    let Some(content) = content.as_object() else {
+        return false;
+    };
+    content.len() == 2
+        && content.get("type").and_then(Value::as_str) == Some("input_text")
+        && content.get("text").and_then(Value::as_str) == Some(text)
 }
 
 fn native_tool_outputs_are_materialized(input_items: &[Value]) -> bool {
