@@ -24,7 +24,7 @@ pub(in crate::local_pool::profiles::repair) fn create_backup(
         fs::create_dir_all(target.parent().unwrap()).map_err(io_error)?;
         Connection::open(&database_snapshot.path)
             .map_err(db_error)?
-            .backup(rusqlite::MAIN_DB, &target, None)
+            .backup(rusqlite::MAIN_DB, &target, rusqlite::backup::NO_PROGRESS)
             .map_err(db_error)?;
         sync_file(&target)?;
         backup_entries.push(BackupEntry {
@@ -340,12 +340,12 @@ fn replace_file_with(
     if sqlite {
         for suffix in ["-wal", "-shm"] {
             let sidecar = sibling_path(path, suffix);
-            if sidecar.exists() {
-                if let Err(error) = fs::remove_file(sidecar) {
-                    let _ = fs::rename(&previous_repair_path, path);
-                    let _ = fs::remove_file(&temporary);
-                    return Err(io_error(error));
-                }
+            if sidecar.exists()
+                && let Err(error) = fs::remove_file(sidecar)
+            {
+                let _ = fs::rename(&previous_repair_path, path);
+                let _ = fs::remove_file(&temporary);
+                return Err(io_error(error));
             }
         }
     }

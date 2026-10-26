@@ -76,9 +76,11 @@ fn groups_new_models_by_native_sdk_and_preserves_existing_selection_and_options(
     )
     .unwrap();
     assert_eq!(config["model"], "zenith-relay-messages/claude");
-    assert!(config["provider"]["zenith-relay"]["models"]
-        .get("claude")
-        .is_none());
+    assert!(
+        config["provider"]["zenith-relay"]["models"]
+            .get("claude")
+            .is_none()
+    );
     let moved = &config["provider"]["zenith-relay-messages"]["models"]["claude"];
     assert_eq!(moved["name"], "My model");
     assert_eq!(moved["options"]["custom"], true);
@@ -105,12 +107,16 @@ fn converted_only_models_keep_their_existing_provider() {
         &[bridged],
     )
     .unwrap();
-    assert!(config["provider"]["zenith-relay-chat"]["models"]
-        .get("bridged")
-        .is_some());
-    assert!(config["provider"]["zenith-relay"]["models"]
-        .get("bridged")
-        .is_none());
+    assert!(
+        config["provider"]["zenith-relay-chat"]["models"]
+            .get("bridged")
+            .is_some()
+    );
+    assert!(
+        config["provider"]["zenith-relay"]["models"]
+            .get("bridged")
+            .is_none()
+    );
 }
 
 #[test]

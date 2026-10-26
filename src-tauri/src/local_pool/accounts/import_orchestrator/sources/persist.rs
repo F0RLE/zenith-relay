@@ -1,6 +1,6 @@
 use super::super::{ImportItemError, ItemResult};
-use crate::local_pool::commands::sync_records_or_rollback;
 use crate::local_pool::models::{LocalGatewayKeyRecord, ProviderSourceRecord};
+use crate::local_pool::runtime::sync_records_or_rollback;
 use crate::local_pool::state::DesktopState;
 use crate::local_pool::store::secret_store;
 use zenith_relay_core::error_codes;

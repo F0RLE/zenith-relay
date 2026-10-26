@@ -1,16 +1,16 @@
 use super::super::import_orchestrator::{apply_account_patch, validate_account_record};
 use super::{SetAccountProxyInput, UpdateAccountInput};
-use crate::local_pool::commands::{
+use crate::local_pool::error::{CommandError, ErrorCode, LocalPoolError};
+use crate::local_pool::models::{LocalAccountRecord, LocalPoolSnapshot};
+use crate::local_pool::runtime::{
     apply_account_policy_if_running, current_time_ms, fence_runtime_candidates,
     refresh_active_codex_catalog_in_background, refresh_local_gateway_key_scope_if_running,
     sync_account_or_rollback,
 };
-use crate::local_pool::error::{CommandError, ErrorCode, LocalPoolError};
-use crate::local_pool::models::{LocalAccountRecord, LocalPoolSnapshot};
 use crate::local_pool::state::DesktopState;
 use tauri::{AppHandle, State};
 use zenith_relay_core::{
-    pool_catalog_visibility_changed, pool_dispatch_permission_changed, PoolParticipant,
+    PoolParticipant, pool_catalog_visibility_changed, pool_dispatch_permission_changed,
 };
 
 type CommandResult<T> = std::result::Result<T, CommandError>;

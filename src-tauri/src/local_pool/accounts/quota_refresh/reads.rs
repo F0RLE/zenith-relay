@@ -48,20 +48,20 @@ async fn read_account_quota(
         Duration::from_secs(state.store()?.gateway().quota_request_timeout_seconds);
     let account_before_refresh = &scope.initial_account;
     let mut subscription = account_before_refresh.account.subscription.clone();
-    if subscription.active_until_ms.is_none() {
-        if let Some(active_until_ms) = prepared.tokens.as_ref().and_then(|tokens| {
+    if subscription.active_until_ms.is_none()
+        && let Some(active_until_ms) = prepared.tokens.as_ref().and_then(|tokens| {
             imported_identity(tokens.id_token(), Some(tokens.access_token()))
                 .subscription_active_until_ms
-        }) {
-            subscription = zenith_relay_core::quota::Subscription::normalize(
-                zenith_relay_core::quota::SubscriptionInput {
-                    plan_type: subscription.plan_type.clone(),
-                    active_until_ms: Some(active_until_ms),
-                    forbidden: false,
-                    observed_at_ms: now_ms,
-                },
-            );
-        }
+        })
+    {
+        subscription = zenith_relay_core::quota::Subscription::normalize(
+            zenith_relay_core::quota::SubscriptionInput {
+                plan_type: subscription.plan_type.clone(),
+                active_until_ms: Some(active_until_ms),
+                forbidden: false,
+                observed_at_ms: now_ms,
+            },
+        );
     }
     let refresh_subscription = force_subscription_refresh
         || subscription_refresh_due(

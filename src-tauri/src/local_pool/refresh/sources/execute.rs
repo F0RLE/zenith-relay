@@ -1,15 +1,17 @@
 use super::{DesktopState, RefreshRead, RefreshReadResult};
 use crate::local_pool::{
-    commands::{
-        connections::ensure_not_gateway_self_source, core_error, fence_runtime_candidates,
-        queue_active_client_catalog_refresh, sync_records_or_rollback,
-    },
+    commands::connections::ensure_not_gateway_self_source,
     error::{ErrorCode, LocalPoolError, Result},
-    store::{secret_store, SourceRefreshFence},
+    runtime::{
+        core_error, fence_runtime_candidates, queue_active_client_catalog_refresh,
+        sync_records_or_rollback,
+    },
+    store::{SourceRefreshFence, secret_store},
 };
 use zenith_relay_core::{
+    ProviderSource,
     scheduler::refresh::{RefreshKind, SourceStatsObservation},
-    source_catalog_changed, ProviderSource,
+    source_catalog_changed,
 };
 
 pub(super) async fn execute(

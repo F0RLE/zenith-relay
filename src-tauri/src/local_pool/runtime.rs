@@ -1,26 +1,29 @@
 #[cfg(test)]
-use super::super::{
-    accounts::{credentials::CredentialStore, NativeSecretBackend},
+use super::{
+    accounts::{NativeSecretBackend, credentials::CredentialStore},
+    commands::pool,
     models::LocalGatewayKeyRecord,
     store::secret_store,
 };
-use super::super::{
+use super::{
     error::{LocalPoolError, Result},
     models::{LocalAccountRecord, ProviderSourceRecord},
+    profiles,
     state::DesktopState,
+    store::gateway_keys,
 };
-use super::{pool, profiles};
+use std::collections::BTreeSet;
 use zenith_relay_core::{
+    ExecutionFence, GatewayRuntime, QUOTA_STALE_AFTER_MS, RuntimeCandidatePolicy,
     accounts::AccountRecord,
     changed_runtime_source_policy_updates,
     protocol::{
-        account_candidate_enabled, account_operational_state, AccountOperationalInput,
-        AccountOperationalState,
+        AccountOperationalInput, AccountOperationalState, account_candidate_enabled,
+        account_operational_state,
     },
-    ExecutionFence, GatewayRuntime, RuntimeCandidatePolicy, QUOTA_STALE_AFTER_MS,
 };
 #[cfg(test)]
-use zenith_relay_core::{protocol::AccountRoutingBlockReason, WireApi};
+use zenith_relay_core::{WireApi, protocol::AccountRoutingBlockReason};
 
 pub(in crate::local_pool) use zenith_relay_core::unix_time_ms as current_time_ms;
 
@@ -96,7 +99,7 @@ pub(in crate::local_pool) fn apply_local_gateway_key_scope(
     state: &DesktopState,
     runtime: &GatewayRuntime,
 ) -> Result<bool> {
-    let system_key = pool::ensure_system_gateway_key(state)?;
+    let system_key = gateway_keys::ensure_system_gateway_key(state)?;
     let (sources, accounts, settings) = {
         let store = state.store()?;
         (
@@ -105,7 +108,7 @@ pub(in crate::local_pool) fn apply_local_gateway_key_scope(
             store.gateway().clone(),
         )
     };
-    let (source_ids, account_ids) = pool::local_pool_member_ids(&sources, &accounts)?;
+    let (source_ids, account_ids) = local_pool_member_ids(&sources, &accounts)?;
     // Authorization follows configured membership. Temporary auth failures,
     // cooldowns and disables are enforced by the scheduler and must recover
     // without a second membership edit.
@@ -213,6 +216,29 @@ pub(in crate::local_pool) fn runtime_account_policy(
         allowed_models: account.allowed_models.clone(),
         excluded_models: account.excluded_models.clone(),
     }
+}
+
+/// Return configured pool members without consulting live scheduler health.
+/// Availability is intentionally a runtime concern and is applied later.
+pub(in crate::local_pool) fn local_pool_member_ids(
+    sources: &[ProviderSourceRecord],
+    accounts: &[LocalAccountRecord],
+) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
+    let mut source_ids = BTreeSet::new();
+    for source in sources.iter().filter(|source| source.in_pool) {
+        // A damaged legacy binding is an unavailable candidate, not a reason
+        // to reject the complete local key scope. Runtime admission records a
+        // stable source error and keeps the remaining pool routes usable.
+        if source.supports_any_wire_api().unwrap_or(false) {
+            source_ids.insert(source.id.clone());
+        }
+    }
+    let account_ids = accounts
+        .iter()
+        .filter(|account| account.account.in_pool && account.recovery.is_none())
+        .map(|account| account.account.id.clone())
+        .collect();
+    Ok((source_ids, account_ids))
 }
 
 #[cfg(test)]

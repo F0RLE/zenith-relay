@@ -1,6 +1,6 @@
 use super::{
-    config_uses_zenith_provider, default_codex_home, is_zenith_customer_key, AUTH_FILE,
-    CONFIG_FILE, LEGACY_PROVIDER_ID, PROVIDER_ID,
+    AUTH_FILE, CONFIG_FILE, LEGACY_PROVIDER_ID, PROVIDER_ID, config_uses_zenith_provider,
+    default_codex_home, is_zenith_customer_key,
 };
 use crate::{files::unquote_toml_string, key_storage::load_saved_app_key};
 
@@ -38,12 +38,11 @@ fn load_zenith_key_from_codex_config() -> Option<String> {
                 || trimmed == format!("[model_providers.{LEGACY_PROVIDER_ID}]");
             continue;
         }
-        if in_zenith {
-            if let Some(token_text) = trimmed.strip_prefix("experimental_bearer_token = ") {
-                let api_key = unquote_toml_string(token_text.trim())?;
-                if !api_key.is_empty() {
-                    return Some(api_key);
-                }
+        if in_zenith && let Some(token_text) = trimmed.strip_prefix("experimental_bearer_token = ")
+        {
+            let api_key = unquote_toml_string(token_text.trim())?;
+            if !api_key.is_empty() {
+                return Some(api_key);
             }
         }
     }

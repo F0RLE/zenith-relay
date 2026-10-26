@@ -181,10 +181,10 @@ fn sync_context_keys_locked(
                     continue;
                 }
                 let key = KEYS[index];
-                if !table.contains_key(key) {
-                    if let Some(number) = *saved {
-                        table.insert(key, value(number));
-                    }
+                if !table.contains_key(key)
+                    && let Some(number) = *saved
+                {
+                    table.insert(key, value(number));
                 }
                 *managed = false;
                 *saved = None;
@@ -211,13 +211,13 @@ fn sync_context_keys_locked(
         replace_if_unchanged(&undo_path, &undo_before, text)?;
     }
     let after = document.to_string();
-    if before.as_deref() != Some(after.as_bytes()) {
-        if let Err(error) = replace_if_unchanged(&config_path, &before, &after) {
-            return Err(with_rollback(
-                error,
-                restore_snapshot_if_unchanged(&undo_path, &intermediate, &undo_before),
-            ));
-        }
+    if before.as_deref() != Some(after.as_bytes())
+        && let Err(error) = replace_if_unchanged(&config_path, &before, &after)
+    {
+        return Err(with_rollback(
+            error,
+            restore_snapshot_if_unchanged(&undo_path, &intermediate, &undo_before),
+        ));
     }
     let write_final = if let Some(content) = &undo_after {
         let text = std::str::from_utf8(content).map_err(LocalPoolError::invalid_state)?;

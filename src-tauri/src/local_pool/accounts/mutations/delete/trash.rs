@@ -53,7 +53,7 @@ pub async fn trash_local_accounts(
         state.store()?.trash_accounts(
             &account_ids,
             automations,
-            crate::local_pool::commands::current_time_ms(),
+            crate::local_pool::runtime::current_time_ms(),
         )
     }
     .await;

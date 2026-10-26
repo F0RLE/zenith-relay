@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 
 /// Caller holds setup_guard. Split from the Tauri event wrapper so the
 /// durable membership and live routing transaction can be exercised locally.
-pub(in crate::local_pool::commands) async fn apply_local_pool_membership(
+pub(in crate::local_pool) async fn apply_local_pool_membership(
     input: PoolMembershipInput,
     state: &DesktopState,
 ) -> CommandResult<(LocalPoolSnapshot, bool, Vec<String>)> {

@@ -121,7 +121,7 @@ pub(crate) async fn sync_managed_account_profile(
     })();
     if account_write.is_err() {
         drop(profile_sync_guard);
-        return Err(crate::local_pool::commands::fail_closed(
+        return Err(crate::local_pool::runtime::fail_closed(
             state,
             "managed ChatGPT token synchronization could not persist account state".to_string(),
         )

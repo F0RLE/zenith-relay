@@ -4,8 +4,8 @@ use axum::response::IntoResponse;
 use std::{io::ErrorKind, net::SocketAddr, sync::Arc};
 use tokio::{
     net::TcpListener,
-    sync::{oneshot, watch, Mutex},
-    time::{sleep, timeout, Duration},
+    sync::{Mutex, oneshot, watch},
+    time::{Duration, sleep, timeout},
 };
 use tower::ServiceExt;
 use zenith_relay_core::GatewayRuntime;
@@ -43,7 +43,7 @@ impl GatewayRoutes {
             network_router: (scope == BindScope::Lan).then(|| {
                 zenith_relay_core::gateway::network_router(
                     runtime.clone(),
-                    crate::local_pool::commands::pool::LAN_GATEWAY_KEY_ID,
+                    crate::local_pool::store::gateway_keys::LAN_GATEWAY_KEY_ID,
                 )
             }),
             runtime,
@@ -418,18 +418,22 @@ mod tests {
         sleep(Duration::from_millis(20)).await;
 
         let next = test_runtime("source_two", "model-two", "key-two");
-        assert!(timeout(
-            Duration::from_millis(50),
-            manager.replace_runtime(next.clone(), address.port()),
-        )
-        .await
-        .expect("runtime replacement must not drain open requests"));
+        assert!(
+            timeout(
+                Duration::from_millis(50),
+                manager.replace_runtime(next.clone(), address.port()),
+            )
+            .await
+            .expect("runtime replacement must not drain open requests")
+        );
         assert_eq!(manager.address().await, Some(address));
         assert!(Arc::ptr_eq(&manager.runtime().await.unwrap(), &next));
-        assert!(previous
-            .candidate_runtime_order_for_key("local-source_one")
-            .iter()
-            .all(|candidate| !candidate.available));
+        assert!(
+            previous
+                .candidate_runtime_order_for_key("local-source_one")
+                .iter()
+                .all(|candidate| !candidate.available)
+        );
         drop(stalled_client);
         manager.stop().await;
     }
@@ -448,10 +452,12 @@ mod tests {
         );
         assert!(Arc::ptr_eq(&manager.runtime().await.unwrap(), &runtime));
         assert_eq!(manager.address().await, Some(address));
-        assert!(runtime
-            .candidate_runtime_order_for_key("local-source_one")
-            .iter()
-            .any(|candidate| candidate.available));
+        assert!(
+            runtime
+                .candidate_runtime_order_for_key("local-source_one")
+                .iter()
+                .any(|candidate| candidate.available)
+        );
         let body = models_response(
             &reqwest::Client::new(),
             &format!("http://{address}/v1/models"),
@@ -516,10 +522,12 @@ mod tests {
             .write_all(request("key-one").as_bytes())
             .await
             .unwrap();
-        assert!(read_response(&mut client)
-            .await
-            .0
-            .starts_with("HTTP/1.1 401"));
+        assert!(
+            read_response(&mut client)
+                .await
+                .0
+                .starts_with("HTTP/1.1 401")
+        );
         client
             .get_mut()
             .write_all(request("key-two").as_bytes())
@@ -535,8 +543,8 @@ mod tests {
 
     #[tokio::test]
     async fn replacement_preserves_an_already_dispatched_stream() {
-        use axum::{body::Body, http::Response, routing::post, Router};
-        use futures_util::{stream, StreamExt};
+        use axum::{Router, body::Body, http::Response, routing::post};
+        use futures_util::{StreamExt, stream};
         use std::convert::Infallible;
         use tokio::sync::Notify;
 
@@ -632,9 +640,11 @@ mod tests {
         let address = manager.start(runtime.clone(), 0).await.unwrap();
         let models_url = format!("http://{address}/v1/models");
         let client = reqwest::Client::new();
-        assert!(models_response(&client, &models_url, "key")
-            .await
-            .contains("model"));
+        assert!(
+            models_response(&client, &models_url, "key")
+                .await
+                .contains("model")
+        );
 
         let running_runtime = manager.runtime().await.unwrap();
         assert!(Arc::ptr_eq(&running_runtime, &runtime));
@@ -651,9 +661,11 @@ mod tests {
             0,
         ));
         assert_eq!(manager.address().await, Some(address));
-        assert!(!models_response(&client, &models_url, "key")
-            .await
-            .contains("model"));
+        assert!(
+            !models_response(&client, &models_url, "key")
+                .await
+                .contains("model")
+        );
         manager.stop().await;
     }
 
@@ -684,9 +696,11 @@ mod tests {
         let address = manager.start(runtime.clone(), 0).await.unwrap();
         let models_url = format!("http://{address}/v1/models");
         let client = reqwest::Client::new();
-        assert!(models_response(&client, &models_url, "key")
-            .await
-            .contains("model"));
+        assert!(
+            models_response(&client, &models_url, "key")
+                .await
+                .contains("model")
+        );
 
         assert!(runtime.update_key_scope(
             "local-source",
@@ -697,9 +711,11 @@ mod tests {
             },
         ));
         assert_eq!(manager.address().await, Some(address));
-        assert!(!models_response(&client, &models_url, "key")
-            .await
-            .contains("model"));
+        assert!(
+            !models_response(&client, &models_url, "key")
+                .await
+                .contains("model")
+        );
         manager.stop().await;
     }
 

@@ -1,11 +1,11 @@
-use super::model_policy::{configured_pool_model_ids, model_policy_error};
 use super::CommandResult;
+use super::model_policy::{configured_pool_model_ids, model_policy_error};
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError},
     state::DesktopState,
 };
 use tauri::{AppHandle, State};
-use zenith_relay_core::{protocol::complete_model_display_order, DefaultServiceTier};
+use zenith_relay_core::{DefaultServiceTier, protocol::complete_model_display_order};
 
 pub(super) use zenith_relay_core::protocol::{
     SetModelContextInput, SetModelEnabledInput, SetModelOrderInput as SetModelDisplayOrderInput,
@@ -71,13 +71,12 @@ pub(super) async fn set_local_model_service_tier(
         return Ok(());
     }
     state.store()?.replace_gateway(gateway.clone())?;
-    if let Some(runtime) = runtime {
-        if let Err(error) =
+    if let Some(runtime) = runtime
+        && let Err(error) =
             runtime.set_model_service_tier_overrides(gateway.model_service_tier_overrides)
-        {
-            state.store()?.replace_gateway(old_gateway)?;
-            return Err(LocalPoolError::invalid_state(error).into());
-        }
+    {
+        state.store()?.replace_gateway(old_gateway)?;
+        return Err(LocalPoolError::invalid_state(error).into());
     }
     Ok(())
 }
@@ -101,13 +100,12 @@ pub(super) async fn set_local_model_context(
         .insert(key, input.context_policy);
     if gateway != old_gateway {
         state.store()?.replace_gateway(gateway.clone())?;
-        if let Some(runtime) = state.gateway.runtime().await {
-            if let Err(error) =
+        if let Some(runtime) = state.gateway.runtime().await
+            && let Err(error) =
                 runtime.set_model_context_policies(gateway.model_context_policies.clone())
-            {
-                state.store()?.replace_gateway(old_gateway)?;
-                return Err(LocalPoolError::invalid_state(error).into());
-            }
+        {
+            state.store()?.replace_gateway(old_gateway)?;
+            return Err(LocalPoolError::invalid_state(error).into());
         }
     }
     drop(_mutation);

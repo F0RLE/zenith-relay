@@ -2,18 +2,18 @@ use super::super::authority::{
     ProcessAccountGuard, ProcessAccountLocks, ProcessLockConfig, ProcessLockError,
 };
 use super::super::import_orchestrator::credential_local_error;
+use crate::local_pool::accounts::NativeSecretBackend;
 use crate::local_pool::accounts::credentials::{CredentialStore, StoredCodexCredentials};
 use crate::local_pool::accounts::exports::normalize_account_ids;
 use crate::local_pool::accounts::proxy::ProxyPool;
-use crate::local_pool::accounts::NativeSecretBackend;
-use crate::local_pool::commands::{
-    fail_closed, fence_runtime_candidates, refresh_active_codex_catalog_in_background,
-};
 use crate::local_pool::error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult};
 use crate::local_pool::models::{
     AutomationRecords, LocalAccountRecord, LocalGatewayKeyRecord, LocalPoolSnapshot,
 };
 use crate::local_pool::profiles::codex;
+use crate::local_pool::runtime::{
+    fail_closed, fence_runtime_candidates, refresh_active_codex_catalog_in_background,
+};
 use crate::local_pool::state::DesktopState;
 use tauri::{AppHandle, State};
 
@@ -22,11 +22,11 @@ type CommandResult<T> = std::result::Result<T, CommandError>;
 mod cleanup;
 mod prepare;
 pub(crate) mod trash;
+#[cfg(test)]
+pub(in crate::local_pool::accounts) use prepare::PreparedAccountDelete;
 pub(in crate::local_pool::accounts) use prepare::ensure_accounts_exist;
 #[cfg(test)]
 use prepare::rollback_prepared_delete;
-#[cfg(test)]
-pub(in crate::local_pool::accounts) use prepare::PreparedAccountDelete;
 use prepare::{
     acquire_delete_credential_guards, delete_local_account_inner,
     ensure_delete_rollback_or_fail_closed, prepare_delete_local_account, rollback_batch_delete,

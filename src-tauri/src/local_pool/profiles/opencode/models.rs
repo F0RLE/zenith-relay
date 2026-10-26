@@ -1,5 +1,5 @@
 use crate::local_pool::error::LocalPoolError;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use zenith_relay_core::{
     model_metadata::{ModelCapabilities, ModelMetadataCatalog},
     protocol::ModelSummary,

@@ -1,19 +1,20 @@
 use crate::{
     launcher::restart_opencode,
     local_pool::{
+        commands,
         error::{CommandError, ErrorCode, LocalPoolError},
         models::ProviderSourceRecord,
         state::DesktopState,
-        store::secret_store,
+        store::{gateway_keys, secret_store},
     },
     platform::default_opencode_config_path,
 };
 use serde::Serialize;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::{collections::HashSet, fs};
 use tauri::State;
 use zenith_relay_core::{
-    model_metadata::ModelMetadataCatalog, protocol::ModelSummary, SourceAdapter, WireApi,
+    SourceAdapter, WireApi, model_metadata::ModelMetadataCatalog, protocol::ModelSummary,
 };
 
 const PROVIDER_ID: &str = "zenith-relay";
@@ -81,7 +82,7 @@ pub async fn get_opencode_config_status(
     state: State<'_, DesktopState>,
 ) -> Result<OpenCodeConfigStatus, CommandError> {
     let state = state.inner().clone();
-    super::run_blocking(move || config_status_for(&state))
+    commands::run_blocking(move || config_status_for(&state))
         .await
         .map_err(Into::into)
 }
@@ -110,18 +111,18 @@ pub async fn connect_opencode_to_local_gateway(
 ) -> Result<OpenCodeConnectionResult, CommandError> {
     let _mutation = state.setup_guard().await;
     let config_path = default_opencode_config_path();
-    let prepared = super::state::build_local_runtime_state(&state)
+    let prepared = commands::state::build_local_runtime_state(&state)
         .await
         .map_err(|error| LocalPoolError::new(error.code, error.message))?;
-    let gateway_key = super::pool::ensure_system_gateway_key(&state)?;
-    if !gateway_key.enabled || !super::pool::has_usable_pool_candidate(&state)? {
+    let gateway_key = gateway_keys::ensure_system_gateway_key(&state)?;
+    if !gateway_key.enabled || !commands::pool::has_usable_pool_candidate(&state)? {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
             "managed pool is not available for any enabled candidate",
         )
         .into());
     }
-    let gateway_secret = super::pool::ensure_local_gateway_key_secret(&gateway_key)?;
+    let gateway_secret = gateway_keys::ensure_local_gateway_key_secret(&gateway_key)?;
     let model_ids = model_ids(&prepared.gateway.models);
     let mut config_document = read_config(&config_path)?;
     let backup_created = backup_original_config(&state, &config_path, None)?;

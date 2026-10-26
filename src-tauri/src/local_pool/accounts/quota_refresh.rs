@@ -1,30 +1,30 @@
 use super::import_orchestrator::{
-    credential_local_error, imported_identity, ImportItemError, ImportItemStatus,
+    ImportItemError, ImportItemStatus, credential_local_error, imported_identity,
 };
 #[cfg(test)]
 use super::refresh_observations::model_refresh_error_kind;
 use super::refresh_observations::{
-    apply_models_read, apply_quota_read, record_read_error, AccountRefreshScope, RefreshReadKind,
+    AccountRefreshScope, RefreshReadKind, apply_models_read, apply_quota_read, record_read_error,
 };
+use crate::local_pool::accounts::NativeSecretBackend;
 use crate::local_pool::accounts::authority::{
     CredentialPersistence, ProcessAccountLocks, ProcessLockConfig, ProcessLockError,
     StoredRefreshAdapter,
 };
 use crate::local_pool::accounts::credentials::{
-    bearer_authorization, CredentialStore, StoredCodexCredentials,
+    CredentialStore, StoredCodexCredentials, bearer_authorization,
 };
 use crate::local_pool::accounts::oauth::CodexOAuthClient;
 use crate::local_pool::accounts::proxy::effective_proxy_config;
-use crate::local_pool::accounts::NativeSecretBackend;
-use crate::local_pool::commands::{
-    current_time_ms, sync_account_state_if_running, sync_refreshed_account_or_rollback,
-};
 use crate::local_pool::error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult};
 use crate::local_pool::models::{LocalAccountRecord, ProviderSourceRecord};
 use crate::local_pool::profiles::codex;
 use crate::local_pool::refresh::{self, RefreshRead};
+use crate::local_pool::runtime::{
+    current_time_ms, sync_account_state_if_running, sync_refreshed_account_or_rollback,
+};
 use crate::local_pool::state::DesktopState;
-use futures_util::{stream, StreamExt};
+use futures_util::{StreamExt, stream};
 use reqwest::header::HeaderValue;
 use reqwest::redirect::Policy;
 use serde::Serialize;
@@ -32,17 +32,17 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, State};
+use zenith_relay_core::ProxyConfig;
 use zenith_relay_core::accounts::{AccountAuthState, ReauthReason, TokenSet};
 use zenith_relay_core::error_codes;
 use zenith_relay_core::providers::chatgpt::{
-    is_agent_identity_task_invalid_failure, merge_subscription_metadata_at,
-    subscription_refresh_due, AccountModelsClient, AgentIdentityCredential, CodexQuotaClient,
-    CodexSubscriptionClient, CodexSubscriptionMetadata, ModelDiscoveryFailure,
-    ModelDiscoveryFailureCode, QuotaRefreshOutcome,
+    AccountModelsClient, AgentIdentityCredential, CodexQuotaClient, CodexSubscriptionClient,
+    CodexSubscriptionMetadata, ModelDiscoveryFailure, ModelDiscoveryFailureCode,
+    QuotaRefreshOutcome, is_agent_identity_task_invalid_failure, merge_subscription_metadata_at,
+    subscription_refresh_due,
 };
 use zenith_relay_core::quota::{QuotaRefreshFailure, QuotaTransition, Subscription};
-use zenith_relay_core::scheduler::refresh::{http::ManagementHttpScope, RefreshKind};
-use zenith_relay_core::ProxyConfig;
+use zenith_relay_core::scheduler::refresh::{RefreshKind, http::ManagementHttpScope};
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
 
@@ -117,7 +117,7 @@ pub(in crate::local_pool) async fn register_active_authority(
         .register_if_newer(account_id, tokens, auth_state)
         .await
     {
-        return Err(crate::local_pool::commands::fail_closed(
+        return Err(crate::local_pool::runtime::fail_closed(
             state,
             format!("{register_error}: {error}"),
         )
@@ -125,13 +125,11 @@ pub(in crate::local_pool) async fn register_active_authority(
     }
     let Some(tokens) = authority.tokens(account_id).await else {
         return Err(
-            crate::local_pool::commands::fail_closed(state, missing_tokens.to_string()).await,
+            crate::local_pool::runtime::fail_closed(state, missing_tokens.to_string()).await,
         );
     };
     let Some(auth_state) = authority.auth_state(account_id).await else {
-        return Err(
-            crate::local_pool::commands::fail_closed(state, missing_auth.to_string()).await,
-        );
+        return Err(crate::local_pool::runtime::fail_closed(state, missing_auth.to_string()).await);
     };
     Ok(RegisteredAccountAuthority { tokens, auth_state })
 }
@@ -157,7 +155,7 @@ async fn project_registered_account(
         .is_err()
     {
         return Err(
-            crate::local_pool::commands::fail_closed(state, errors.persist.to_string()).await,
+            crate::local_pool::runtime::fail_closed(state, errors.persist.to_string()).await,
         );
     }
     let account = match state.store().and_then(|store| {
@@ -168,16 +166,14 @@ async fn project_registered_account(
     }) {
         Ok(account) => account,
         Err(_) => {
-            return Err(crate::local_pool::commands::fail_closed(
-                state,
-                errors.missing.to_string(),
-            )
-            .await);
+            return Err(
+                crate::local_pool::runtime::fail_closed(state, errors.missing.to_string()).await,
+            );
         }
     };
     if !sync_account_state_if_running(state, &account.account.id).await {
         return Err(
-            crate::local_pool::commands::fail_closed(state, errors.policy.to_string()).await,
+            crate::local_pool::runtime::fail_closed(state, errors.policy.to_string()).await,
         );
     }
     Ok(())

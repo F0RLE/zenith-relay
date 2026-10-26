@@ -1,6 +1,6 @@
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
@@ -41,8 +41,10 @@ pub(super) struct LibraryStatus {
 }
 
 fn invalid() -> LocalPoolError {
-    LocalPoolError::new(ErrorCode::ProfileRestoreBlocked,
-        "Claude Desktop configuration changed outside Relay or is invalid; keep the recovery record and inspect the configuration before reconnecting")
+    LocalPoolError::new(
+        ErrorCode::ProfileRestoreBlocked,
+        "Claude Desktop configuration changed outside Relay or is invalid; keep the recovery record and inspect the configuration before reconnecting",
+    )
 }
 
 fn io_error(_: impl std::fmt::Display) -> LocalPoolError {
@@ -129,10 +131,11 @@ fn metadata(bytes: Option<&[u8]>) -> Result<Value> {
             return Err(invalid());
         }
     }
-    if let Some(id) = value.get("appliedId") {
-        if !id.is_null() && id.as_str().is_none_or(|id| !safe_id(id)) {
-            return Err(invalid());
-        }
+    if let Some(id) = value.get("appliedId")
+        && !id.is_null()
+        && id.as_str().is_none_or(|id| !safe_id(id))
+    {
+        return Err(invalid());
     }
     Ok(value)
 }

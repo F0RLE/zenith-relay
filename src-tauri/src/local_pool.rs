@@ -9,11 +9,12 @@ mod models;
 pub(crate) mod profiles;
 mod refresh;
 mod response_affinity;
+mod runtime;
 mod state;
 mod store;
 mod usage_writer;
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::Rng;
 use std::{fs, path::Path, time::Instant};
 
@@ -33,7 +34,7 @@ pub fn initialize(app: &tauri::AppHandle) -> error::Result<DesktopState> {
     let vault_ms = vault_started.elapsed().as_secs_f64() * 1_000.0;
     let secrets_ready = started.elapsed();
     let desktop_state = DesktopState::open(relay_root)?;
-    commands::pool::retire_user_gateway_keys(&desktop_state)?;
+    store::gateway_keys::retire_user_gateway_keys(&desktop_state)?;
     let state_ready = started.elapsed();
     desktop_state.set_app_handle(app.clone());
     let _ = desktop_state.record_performance("vault", vault_ms, Some("startup"));

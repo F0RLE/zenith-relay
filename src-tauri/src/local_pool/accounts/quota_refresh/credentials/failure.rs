@@ -35,7 +35,7 @@ pub(in crate::local_pool::accounts) async fn persist_authorization_failure(
         return Ok(());
     };
     if !sync_account_state_if_running(state, &account.account.id).await {
-        return Err(crate::local_pool::commands::fail_closed(
+        return Err(crate::local_pool::runtime::fail_closed(
             state,
             "authorization failure could not update the running account policy".to_string(),
         )
@@ -53,7 +53,7 @@ pub(in crate::local_pool::accounts) async fn persist_authorization_failure(
     {
         Ok(applied) => applied,
         Err(error) => {
-            return Err(crate::local_pool::commands::fail_closed(
+            return Err(crate::local_pool::runtime::fail_closed(
                 state,
                 format!("failed to update credential state: {error}"),
             )
@@ -65,14 +65,14 @@ pub(in crate::local_pool::accounts) async fn persist_authorization_failure(
     }
 
     let Some(authoritative_tokens) = authority.tokens(account_id).await else {
-        return Err(crate::local_pool::commands::fail_closed(
+        return Err(crate::local_pool::runtime::fail_closed(
             state,
             "newer account token state disappeared".to_string(),
         )
         .await);
     };
     let Some(authoritative_auth_state) = authority.auth_state(account_id).await else {
-        return Err(crate::local_pool::commands::fail_closed(
+        return Err(crate::local_pool::runtime::fail_closed(
             state,
             "newer account authentication state disappeared".to_string(),
         )
@@ -89,21 +89,21 @@ pub(in crate::local_pool::accounts) async fn persist_authorization_failure(
     ) {
         Ok(reconciled) => reconciled,
         Err(_) => {
-            return Err(crate::local_pool::commands::fail_closed(
+            return Err(crate::local_pool::runtime::fail_closed(
                 state,
                 "newer credential state could not be persisted".to_string(),
             )
             .await);
         }
     };
-    if let Some(account) = reconciled {
-        if !sync_account_state_if_running(state, &account.account.id).await {
-            return Err(crate::local_pool::commands::fail_closed(
-                state,
-                "newer credential state could not update the running account policy".to_string(),
-            )
-            .await);
-        }
+    if let Some(account) = reconciled
+        && !sync_account_state_if_running(state, &account.account.id).await
+    {
+        return Err(crate::local_pool::runtime::fail_closed(
+            state,
+            "newer credential state could not update the running account policy".to_string(),
+        )
+        .await);
     }
     Ok(())
 }

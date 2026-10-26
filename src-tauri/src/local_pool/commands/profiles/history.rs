@@ -62,13 +62,13 @@ pub(super) fn rollback_history_on_error<T>(
             Ok(operation_value)
         }
         Err(mut error) => {
-            if let Some(backup_id) = backup_id {
-                if let Err(rollback) = rollback_codex_history(state, backup_id) {
-                    error.message = format!(
-                        "{}; automatic history rollback failed: {rollback}",
-                        error.message
-                    );
-                }
+            if let Some(backup_id) = backup_id
+                && let Err(rollback) = rollback_codex_history(state, backup_id)
+            {
+                error.message = format!(
+                    "{}; automatic history rollback failed: {rollback}",
+                    error.message
+                );
             }
             Err(error)
         }

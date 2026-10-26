@@ -6,8 +6,8 @@ use crate::local_pool::{
         reset_credits::consume_reset_credit_for_scope,
     },
     background::codex_wake_policy,
-    commands::current_time_ms,
     error::{ErrorCode, LocalPoolError, Result},
+    runtime::current_time_ms,
     state::DesktopState,
     store::AccountRefreshFence,
 };
@@ -62,32 +62,30 @@ fn quota_full_candidates(response: &AccountQuotaRefreshResponse) -> Vec<QuotaTra
     if !transitions
         .iter()
         .any(|transition| transition.window_kind == QuotaWindowKind::Primary)
-    {
-        if let Some(window) = response
+        && let Some(window) = response
             .account
             .account
             .quota
             .primary
             .as_ref()
             .filter(|window| window.kind == QuotaWindowKind::Primary && window.is_fully_available())
+    {
+        // A rule can be enabled after the quota became full, or Relay can
+        // miss the edge while stopped. Reuse the persisted cycle identity:
+        // repeated reads/restarts must never create another wake request.
+        if let Some(fingerprint) = window
+            .full_transition_fingerprint
+            .as_ref()
+            .filter(|fingerprint| !fingerprint.trim().is_empty())
         {
-            // A rule can be enabled after the quota became full, or Relay can
-            // miss the edge while stopped. Reuse the persisted cycle identity:
-            // repeated reads/restarts must never create another wake request.
-            if let Some(fingerprint) = window
-                .full_transition_fingerprint
-                .as_ref()
-                .filter(|fingerprint| !fingerprint.trim().is_empty())
-            {
-                transitions.push(QuotaTransition {
-                    window_kind: QuotaWindowKind::Primary,
-                    fingerprint: fingerprint.clone(),
-                    transitioned_at_ms: window
-                        .window_start_ms
-                        .filter(|start| *start <= window.observed_at_ms)
-                        .unwrap_or(window.observed_at_ms),
-                });
-            }
+            transitions.push(QuotaTransition {
+                window_kind: QuotaWindowKind::Primary,
+                fingerprint: fingerprint.clone(),
+                transitioned_at_ms: window
+                    .window_start_ms
+                    .filter(|start| *start <= window.observed_at_ms)
+                    .unwrap_or(window.observed_at_ms),
+            });
         }
     }
     transitions
@@ -155,17 +153,15 @@ fn weekly_exhaustion_candidates(
     let mut transitions = response.exhaustion_transitions.clone();
     if !transitions.iter().any(|transition| {
         transition.window_kind == zenith_relay_core::quota::QuotaWindowKind::Secondary
-    }) {
-        if let Some(transition) = response
-            .account
-            .account
-            .quota
-            .secondary
-            .as_ref()
-            .and_then(zenith_relay_core::quota::QuotaWindow::exhaustion_transition)
-        {
-            transitions.push(transition);
-        }
+    }) && let Some(transition) = response
+        .account
+        .account
+        .quota
+        .secondary
+        .as_ref()
+        .and_then(zenith_relay_core::quota::QuotaWindow::exhaustion_transition)
+    {
+        transitions.push(transition);
     }
     transitions
 }

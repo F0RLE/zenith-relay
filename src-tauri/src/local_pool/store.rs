@@ -1,11 +1,12 @@
 mod account_trash;
+pub(in crate::local_pool) mod gateway_keys;
 mod persistence;
 mod records;
 mod refresh;
 mod retired_accounts;
 mod source_refresh;
 pub(crate) use source_refresh::SourceRefreshFence;
-use source_refresh::{SourceRefreshRevisions, STATE_SOURCE_REVISIONS};
+use source_refresh::{STATE_SOURCE_REVISIONS, SourceRefreshRevisions};
 pub mod secret_store;
 pub mod telemetry_db;
 pub(crate) mod vault;
@@ -16,7 +17,7 @@ use crate::{
         error::{ErrorCode, LocalPoolError, Result},
         models::{
             AutomationRecords, GatewaySettings, LocalAccountRecord, LocalGatewayKeyRecord,
-            ProviderSourceRecord, TrashedLocalAccount, MAX_LOCAL_ACCOUNTS,
+            MAX_LOCAL_ACCOUNTS, ProviderSourceRecord, TrashedLocalAccount,
         },
     },
     storage_paths::StoragePaths,
@@ -26,8 +27,8 @@ use persistence::serialize_state;
 pub(crate) use refresh::{AccountRefreshFence, AppliedAccountRefresh};
 use refresh::{RefreshRevisions, STATE_REFRESH_REVISIONS};
 use std::{path::PathBuf, sync::Arc};
-use zenith_relay_core::automations::WakeExecutionPolicy;
 use zenith_relay_core::PoolRoutingPolicy;
+use zenith_relay_core::automations::WakeExecutionPolicy;
 
 const STATE_GATEWAY: &str = "gateway";
 const STATE_SOURCES: &str = "sources";

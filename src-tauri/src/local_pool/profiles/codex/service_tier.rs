@@ -102,17 +102,17 @@ pub fn sync_default_service_tier(
     if config_changed {
         replace_if_unchanged(&config_path, &original_config, &next_config)?;
     }
-    if original_state.as_deref() != Some(next_state.as_bytes()) {
-        if let Err(error) = replace_if_unchanged(&state_path, &original_state, &next_state) {
-            return Err(if config_changed {
-                with_rollback(
-                    error,
-                    rollback_file(&config_path, &next_config, &original_config),
-                )
-            } else {
-                error
-            });
-        }
+    if original_state.as_deref() != Some(next_state.as_bytes())
+        && let Err(error) = replace_if_unchanged(&state_path, &original_state, &next_state)
+    {
+        return Err(if config_changed {
+            with_rollback(
+                error,
+                rollback_file(&config_path, &next_config, &original_config),
+            )
+        } else {
+            error
+        });
     }
     Ok(())
 }

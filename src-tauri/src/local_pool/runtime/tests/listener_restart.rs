@@ -52,10 +52,12 @@ async fn runtime_restarts_after_pool_eviction_and_source_deletion() {
     let secret = secret_store::load(&key.secret_ref).unwrap().unwrap();
     let address = state.gateway.start(runtime, 0).await.unwrap();
     let previous_runtime = state.gateway.runtime().await.unwrap();
-    assert!(previous_runtime
-        .candidate_runtime_order_for_key(&key.id)
-        .iter()
-        .any(|candidate| candidate.available));
+    assert!(
+        previous_runtime
+            .candidate_runtime_order_for_key(&key.id)
+            .iter()
+            .any(|candidate| candidate.available)
+    );
     let mut gateway = state.store().unwrap().gateway().clone();
     gateway.port = address.port();
     state.store().unwrap().replace_gateway(gateway).unwrap();
@@ -88,10 +90,12 @@ async fn runtime_restarts_after_pool_eviction_and_source_deletion() {
     .await
     .unwrap();
     assert_eq!(state.gateway.address().await, Some(address));
-    assert!(previous_runtime
-        .candidate_runtime_order_for_key(&key.id)
-        .iter()
-        .all(|candidate| !candidate.available));
+    assert!(
+        previous_runtime
+            .candidate_runtime_order_for_key(&key.id)
+            .iter()
+            .all(|candidate| !candidate.available)
+    );
     drop(previous_runtime);
     let client = reqwest::Client::new();
     let evicted_models: serde_json::Value = client
@@ -134,9 +138,11 @@ async fn runtime_restarts_after_pool_eviction_and_source_deletion() {
 
     state.gateway.stop().await;
     let restarted_runtime = runtime_from_store(&state).await.unwrap();
-    assert!(restarted_runtime
-        .visible_models_for_secret(&secret, &[WireApi::Responses], current_time_ms())
-        .is_empty());
+    assert!(
+        restarted_runtime
+            .visible_models_for_secret(&secret, &[WireApi::Responses], current_time_ms())
+            .is_empty()
+    );
     drop(restarted_runtime);
     secret_store::delete(&source_secret_ref).unwrap();
     secret_store::delete(&key.secret_ref).unwrap();
@@ -381,9 +387,11 @@ async fn occupied_new_port_restores_settings_and_previous_listener() {
         .replace_gateway(next_gateway)
         .unwrap();
 
-    assert!(sync_gateway_or_rollback(&state, old_gateway.clone())
-        .await
-        .is_err());
+    assert!(
+        sync_gateway_or_rollback(&state, old_gateway.clone())
+            .await
+            .is_err()
+    );
     assert_eq!(state.store().unwrap().gateway().port, old_gateway.port);
     assert_eq!(state.gateway.address().await, Some(address));
 

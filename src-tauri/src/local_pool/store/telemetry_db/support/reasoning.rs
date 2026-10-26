@@ -1,8 +1,8 @@
 //! Bounded observational comparison, not a benchmark or a routing recommendation.
-use super::super::{db_error, UsageLog};
+use super::super::{UsageLog, db_error};
 use crate::local_pool::error::Result;
-use rusqlite::{params, Connection};
-use serde_json::{json, Value};
+use rusqlite::{Connection, params};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 const RECENT_REQUEST_LIMIT: usize = 1000;
@@ -140,12 +140,13 @@ pub(crate) fn document(samples: Samples) -> Value {
         if let Some(input) = sample.input_tokens {
             group.input.push(input);
         }
-        if let (Some(input), Some(cached)) = (sample.input_tokens, sample.cached_tokens) {
-            if input > 0 && cached <= input {
-                group
-                    .cache_rates
-                    .push(((cached as u128 * 10000) / input as u128) as u64);
-            }
+        if let (Some(input), Some(cached)) = (sample.input_tokens, sample.cached_tokens)
+            && input > 0
+            && cached <= input
+        {
+            group
+                .cache_rates
+                .push(((cached as u128 * 10000) / input as u128) as u64);
         }
     }
     let enough_groups = groups

@@ -205,7 +205,7 @@ fn selected_send_pages_preserve_order_filters_prices_and_legacy_rows() {
         parameters.push(SqlValue::Integer(i64::from(page - 1) * i64::from(size)));
         let reference = {
             let connection = database.connection.lock().unwrap();
-            let reference = connection
+            connection
                 .prepare(&format!(
                     "SELECT request_id, attempt FROM usage_sends{where_sql}
                  ORDER BY created_at DESC, ABS(id) DESC LIMIT ? OFFSET ?",
@@ -216,8 +216,7 @@ fn selected_send_pages_preserve_order_filters_prices_and_legacy_rows() {
                 })
                 .unwrap()
                 .collect::<std::result::Result<Vec<_>, _>>()
-                .unwrap();
-            reference
+                .unwrap()
         };
         let expected = database.usage_page(&query).unwrap();
         let actual = sends(&database, &query).unwrap();
@@ -352,14 +351,16 @@ fn first_page_does_not_read_aggregates_filters_or_decode_the_lookahead_row() {
         0
     );
     // Only an explicit request for page two attempts to decode that row.
-    assert!(sends(
-        &database,
-        &UsageQuery {
-            page: 2,
-            ..Default::default()
-        }
-    )
-    .is_err());
+    assert!(
+        sends(
+            &database,
+            &UsageQuery {
+                page: 2,
+                ..Default::default()
+            }
+        )
+        .is_err()
+    );
 }
 
 #[test]

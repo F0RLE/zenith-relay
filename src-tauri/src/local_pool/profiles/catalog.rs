@@ -1,7 +1,7 @@
 use crate::{
     launcher::is_codex_running,
     local_pool::{
-        accounts::{collect_limited, LimitedBodyError},
+        accounts::{LimitedBodyError, collect_limited},
         error::{CommandError, ErrorCode, ErrorDiagnostics, LocalPoolError, Result as LocalResult},
         models::{LocalGatewayKeyRecord, ProviderSourceRecord},
         profiles::codex,
@@ -12,7 +12,7 @@ use crate::{
 use std::{future::Future, time::Duration};
 use url::Url;
 use zenith_relay_core::{
-    providers::chatgpt::configured_codex_client_version, url_has_userinfo, SourceAdapter, WireApi,
+    SourceAdapter, WireApi, providers::chatgpt::configured_codex_client_version, url_has_userinfo,
 };
 
 const ZENITH_API_HOST: &str = "api.zenithmarket.dev";
@@ -20,7 +20,7 @@ const ZENITH_API_HOST: &str = "api.zenithmarket.dev";
 // the profile catalog parser. Full ChatGPT inventories may exceed 512 KiB.
 const MAX_CODEX_MODEL_CATALOG_BYTES: usize = 4 * 1024 * 1024;
 
-pub(super) async fn fetch_local_codex_model_catalog(
+pub(in crate::local_pool) async fn fetch_local_codex_model_catalog(
     base_url: &str,
     secret: &str,
 ) -> Result<String, CommandError> {
@@ -108,7 +108,7 @@ pub(super) async fn fetch_local_codex_model_catalog(
         .map_err(|_| LocalPoolError::new(ErrorCode::InvalidState, "model catalog failed").into())
 }
 
-pub(super) enum CodexCatalogRefreshTarget {
+pub(in crate::local_pool) enum CodexCatalogRefreshTarget {
     LocalGateway(String),
     DirectSource(Box<ProviderSourceRecord>),
 }
@@ -131,7 +131,7 @@ pub(super) async fn refresh_client_catalogs(
     codex_result.and_then(|status| opencode_result.map(|()| status))
 }
 
-pub(super) fn active_catalog_refresh_target(
+pub(in crate::local_pool) fn active_catalog_refresh_target(
     binding: &codex::ProfileBinding,
     keys: &[LocalGatewayKeyRecord],
     sources: &[ProviderSourceRecord],
@@ -189,7 +189,8 @@ pub(in crate::local_pool) async fn refresh_active_codex_catalog(
             else {
                 return Ok(CodexCatalogRefreshStatus::Skipped);
             };
-            let secret = super::super::pool::ensure_local_gateway_key_secret(&key)?;
+            let secret =
+                crate::local_pool::store::gateway_keys::ensure_local_gateway_key_secret(&key)?;
             supports_websockets = Some(state.store()?.gateway().codex_websockets_enabled);
             fetch_local_codex_model_catalog(&format!("http://{address}/v1"), &secret)
                 .await
@@ -260,8 +261,11 @@ pub(in crate::local_pool) async fn refresh_active_codex_catalog(
     Ok(CodexCatalogRefreshStatus::Updated)
 }
 
-pub(super) fn context_catalog(state: &DesktopState, catalog: &str) -> LocalResult<String> {
-    use serde_json::{json, Value};
+pub(in crate::local_pool) fn context_catalog(
+    state: &DesktopState,
+    catalog: &str,
+) -> LocalResult<String> {
+    use serde_json::{Value, json};
     let model_policies = state.store()?.gateway().model_context_policies.clone();
     let mut document: Value =
         serde_json::from_str(catalog).map_err(LocalPoolError::invalid_state)?;
@@ -313,7 +317,9 @@ pub(super) fn direct_source_response_models(
     Ok(binding.model_ids)
 }
 
-pub(super) fn validate_direct_source(source: &ProviderSourceRecord) -> LocalResult<Vec<String>> {
+pub(in crate::local_pool) fn validate_direct_source(
+    source: &ProviderSourceRecord,
+) -> LocalResult<Vec<String>> {
     if !source.enabled {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
@@ -323,7 +329,7 @@ pub(super) fn validate_direct_source(source: &ProviderSourceRecord) -> LocalResu
     direct_source_response_models(source)
 }
 
-pub(super) fn load_direct_source_api_key(
+pub(in crate::local_pool) fn load_direct_source_api_key(
     base_url: &str,
     secret_ref: &str,
     load: impl FnOnce(&str) -> LocalResult<Option<String>>,

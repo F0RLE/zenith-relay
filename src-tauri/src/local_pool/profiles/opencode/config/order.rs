@@ -1,6 +1,6 @@
 use serde::{
-    ser::{SerializeMap, SerializeSeq, Serializer},
     Serialize,
+    ser::{SerializeMap, SerializeSeq, Serializer},
 };
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -9,13 +9,13 @@ use std::collections::BTreeMap;
 /// order. A normal `serde_json` object is a `BTreeMap`, so `max` is written
 /// before `xhigh` and the OpenCode menu follows that order.
 #[cfg(test)]
-pub(in crate::local_pool::commands::opencode) fn serialize_config(
+pub(in crate::local_pool::profiles::opencode) fn serialize_config(
     config: &Map<String, Value>,
 ) -> Result<String, serde_json::Error> {
     serialize_config_with_model_order(config, &[])
 }
 
-pub(in crate::local_pool::commands::opencode) fn serialize_config_with_model_order(
+pub(in crate::local_pool::profiles::opencode) fn serialize_config_with_model_order(
     config: &Map<String, Value>,
     models: &[String],
 ) -> Result<String, serde_json::Error> {

@@ -3,9 +3,8 @@ use crate::local_pool::{
     models::{LocalAccountRecord, ProviderSourceRecord},
     state::DesktopState,
 };
-use std::collections::BTreeSet;
 use zenith_relay_core::protocol::{
-    canonical_pool_model_id, configured_source_model_ids, ModelPolicyError,
+    ModelPolicyError, canonical_pool_model_id, configured_source_model_ids,
 };
 
 /// Resolve a user-facing model id to the canonical casing used by the pool.
@@ -51,27 +50,4 @@ pub(super) fn model_policy_error(error: ModelPolicyError) -> LocalPoolError {
         }
     };
     LocalPoolError::new(code, error.to_string())
-}
-
-/// Return configured pool members without consulting live scheduler health.
-/// Availability is intentionally a runtime concern and is applied later.
-pub(crate) fn local_pool_member_ids(
-    sources: &[ProviderSourceRecord],
-    accounts: &[LocalAccountRecord],
-) -> LocalResult<(BTreeSet<String>, BTreeSet<String>)> {
-    let mut source_ids = BTreeSet::new();
-    for source in sources.iter().filter(|source| source.in_pool) {
-        // A damaged legacy binding is an unavailable candidate, not a reason
-        // to reject the complete local key scope. Runtime admission records a
-        // stable source error and keeps the remaining pool routes usable.
-        if source.supports_any_wire_api().unwrap_or(false) {
-            source_ids.insert(source.id.clone());
-        }
-    }
-    let account_ids = accounts
-        .iter()
-        .filter(|account| account.account.in_pool && account.recovery.is_none())
-        .map(|account| account.account.id.clone())
-        .collect();
-    Ok((source_ids, account_ids))
 }

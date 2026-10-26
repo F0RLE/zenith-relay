@@ -38,13 +38,13 @@ pub(crate) fn managed_account_token_update(
         }
     }
 
-    if let Some(backup) = local_backup(codex_home, backup_root)? {
-        if backup.bound_oauth_account_id.as_deref() == Some(account_id) {
-            merge_managed_token_update(
-                &mut update,
-                read_managed_account_token_update(codex_home, current_tokens, provider_account_id)?,
-            )?;
-        }
+    if let Some(backup) = local_backup(codex_home, backup_root)?
+        && backup.bound_oauth_account_id.as_deref() == Some(account_id)
+    {
+        merge_managed_token_update(
+            &mut update,
+            read_managed_account_token_update(codex_home, current_tokens, provider_account_id)?,
+        )?;
     }
 
     Ok(update)

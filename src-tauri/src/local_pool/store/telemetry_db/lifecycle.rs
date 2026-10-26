@@ -241,10 +241,10 @@ impl TelemetryDb {
         where_sql: &str,
         query_parameters: &[SqlValue],
     ) -> Result<UsageTotals> {
-        if is_unfiltered_all_time(query) {
-            if let Some(cached) = connection.totals.clone() {
-                return Ok(cached);
-            }
+        if is_unfiltered_all_time(query)
+            && let Some(cached) = connection.totals.clone()
+        {
+            return Ok(cached);
         }
         let totals = usage_totals(connection, where_sql, query_parameters)?;
         if is_unfiltered_all_time(query) {

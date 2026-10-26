@@ -172,12 +172,16 @@ async fn invalid_source_is_quarantined_without_blocking_other_routes() {
 
     let runtime = runtime_from_store(&state).await.unwrap();
     let order = runtime.candidate_runtime_order();
-    assert!(order
-        .iter()
-        .any(|candidate| candidate.candidate_id == "valid_source"));
-    assert!(!order
-        .iter()
-        .any(|candidate| candidate.candidate_id == "invalid_source"));
+    assert!(
+        order
+            .iter()
+            .any(|candidate| candidate.candidate_id == "valid_source")
+    );
+    assert!(
+        !order
+            .iter()
+            .any(|candidate| candidate.candidate_id == "invalid_source")
+    );
     assert_eq!(
         state
             .store()

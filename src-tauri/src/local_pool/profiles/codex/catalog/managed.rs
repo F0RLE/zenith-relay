@@ -1,25 +1,25 @@
 use super::super::{
-    io_error_at, parse_config, read_optional_bytes, root_model_catalog_json, snapshot_text,
-    CONFIG_FILE,
+    CONFIG_FILE, io_error_at, parse_config, read_optional_bytes, root_model_catalog_json,
+    snapshot_text,
 };
 use super::installed::add_installed_codex_ultra;
 use super::installed::bundled_codex_ultra_models;
 use super::{
-    cached_native_catalog_models, catalog_entry_is_picker_eligible, is_native_catalog_entry,
-    model_slug, DIRECT_SOURCE_FALLBACK_PRIORITY, MAX_MODEL_CATALOG_BYTES,
+    DIRECT_SOURCE_FALLBACK_PRIORITY, MAX_MODEL_CATALOG_BYTES, cached_native_catalog_models,
+    catalog_entry_is_picker_eligible, is_native_catalog_entry, model_slug,
 };
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     fs,
     path::Path,
 };
 use zenith_relay_core::{
-    codex_catalog_entry_is_compatible, codex_model_is_picker_eligible_for,
-    decode_codex_model_alias, normalize_codex_catalog_priorities,
-    normalize_native_codex_catalog_entry, normalize_upstream_codex_catalog_entry,
-    routed_codex_catalog_entry, CODEX_RELAY_CATALOG_HASH,
+    CODEX_RELAY_CATALOG_HASH, codex_catalog_entry_is_compatible,
+    codex_model_is_picker_eligible_for, decode_codex_model_alias,
+    normalize_codex_catalog_priorities, normalize_native_codex_catalog_entry,
+    normalize_upstream_codex_catalog_entry, routed_codex_catalog_entry,
 };
 
 pub(super) fn collect_native_catalog_template(
@@ -344,10 +344,10 @@ pub(in crate::local_pool::profiles::codex) fn build_managed_model_catalog_with_b
                 limits.get("output").and_then(Value::as_u64),
             );
         }
-        if let Some(slug) = model_slug(&catalog_entry) {
-            if seen.insert(slug.to_ascii_lowercase()) {
-                models.push(catalog_entry);
-            }
+        if let Some(slug) = model_slug(&catalog_entry)
+            && seen.insert(slug.to_ascii_lowercase())
+        {
+            models.push(catalog_entry);
         }
     }
     if accepted == 0 {

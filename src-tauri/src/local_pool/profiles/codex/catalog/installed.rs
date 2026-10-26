@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     ffi::OsString,
@@ -27,10 +27,10 @@ pub(in crate::local_pool::profiles::codex) fn bundled_codex_ultra_models() -> Ha
 
 fn codex_cli_candidates() -> Vec<OsString> {
     let mut candidates = vec![OsString::from("codex")];
-    if let Some(bin_dir) = installed_codex_bin_dir() {
-        if let Some(executable) = newest_installed_codex_executable(&bin_dir) {
-            candidates.push(executable.into_os_string());
-        }
+    if let Some(bin_dir) = installed_codex_bin_dir()
+        && let Some(executable) = newest_installed_codex_executable(&bin_dir)
+    {
+        candidates.push(executable.into_os_string());
     }
     candidates
 }
@@ -46,11 +46,7 @@ fn installed_codex_bin_dir() -> Option<PathBuf> {
 }
 
 pub(super) fn codex_cli_file_name() -> &'static str {
-    if cfg!(windows) {
-        "codex.exe"
-    } else {
-        "codex"
-    }
+    if cfg!(windows) { "codex.exe" } else { "codex" }
 }
 
 pub(super) fn newest_installed_codex_executable(bin_dir: &Path) -> Option<PathBuf> {

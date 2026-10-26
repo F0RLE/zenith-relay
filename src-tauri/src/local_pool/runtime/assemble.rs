@@ -1,35 +1,35 @@
-use super::super::super::{
+use super::sync::core_error;
+use super::{current_time_ms, local_pool_member_ids, runtime_account_operational_state};
+use crate::local_pool::{
     accounts::{
+        NativeSecretBackend,
         authority::{CredentialPersistence, StoredRefreshAdapter},
         credentials::{
-            credential_invalid_state_error as account_credential_error, CredentialStore,
-            StoredCodexCredentials,
+            CredentialStore, StoredCodexCredentials,
+            credential_invalid_state_error as account_credential_error,
         },
         proxy::{
-            account_proxy_pool_id, common_proxy_pool_id, effective_proxy_config, ProxyPool,
-            ProxyRefreshClient,
+            ProxyPool, ProxyRefreshClient, account_proxy_pool_id, common_proxy_pool_id,
+            effective_proxy_config,
         },
         records::CODEX_RESPONSES_URL,
-        NativeSecretBackend,
     },
     error::{ErrorCode, LocalPoolError, Result},
     models::{GatewaySettings, LocalAccountRecord, ProviderSourceRecord},
     profiles::codex,
     state::{DesktopState, LocalRuntimeInputs},
+    store::gateway_keys,
 };
-use super::super::pool;
-use super::sync::core_error;
-use super::{current_time_ms, runtime_account_operational_state};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
 use zenith_relay_core::error_codes;
 use zenith_relay_core::{
-    accounts::TokenAuthority, protocol::account_candidate_enabled,
-    providers::chatgpt::AgentIdentityCredential, GatewayRuntime, GatewayRuntimeOptions,
-    LocalGatewayKey, ProviderSource, ProxyConfig, RuntimeChatGptAccount, RuntimeChatGptAuth,
-    RuntimeMixedLocalKey, RuntimeSource, SourceTransportRecord, QUOTA_STALE_AFTER_MS,
+    GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, ProxyConfig,
+    QUOTA_STALE_AFTER_MS, RuntimeChatGptAccount, RuntimeChatGptAuth, RuntimeMixedLocalKey,
+    RuntimeSource, SourceTransportRecord, accounts::TokenAuthority,
+    protocol::account_candidate_enabled, providers::chatgpt::AgentIdentityCredential,
 };
 
 /// A malformed source record must not make an otherwise usable local pool
@@ -42,7 +42,7 @@ pub(in crate::local_pool) async fn runtime_from_store(
     state: &DesktopState,
 ) -> Result<Arc<GatewayRuntime>> {
     crate::diagnostics::breadcrumb("gateway-runtime", "build_started", &[]);
-    let system_key = pool::ensure_system_gateway_key(state)?;
+    let system_key = gateway_keys::ensure_system_gateway_key(state)?;
     let codex_home = crate::platform::default_codex_home();
     let protected_account_id =
         managed_chatgpt_account_id_for_reserve(&codex_home, &state.profile_backup_root());
@@ -74,7 +74,7 @@ pub(in crate::local_pool) async fn runtime_from_store(
     // The managed profile can expose every verified source protocol. Requests
     // still select only the protocol they actually use at the gateway edge.
     let (mut pool_source_ids, mut pool_account_ids) =
-        pool::local_pool_member_ids(&source_records, &account_records)?;
+        local_pool_member_ids(&source_records, &account_records)?;
     pool_account_ids.retain(|account_id| {
         account_credentials
             .get(account_id)
@@ -113,7 +113,7 @@ pub(in crate::local_pool) async fn runtime_from_store(
         &account_credentials,
         &proxy_pool,
     )?;
-    let secret = pool::ensure_local_gateway_key_secret(&system_key)?;
+    let secret = gateway_keys::ensure_local_gateway_key_secret(&system_key)?;
     let mut keys = vec![RuntimeMixedLocalKey {
         key: LocalGatewayKey {
             id: system_key.id,
@@ -128,9 +128,9 @@ pub(in crate::local_pool) async fn runtime_from_store(
         wire_apis: Some(zenith_relay_core::protocol::local_gateway_client_wire_apis()),
     }];
     if settings.bind_scope == crate::local_pool::models::BindScope::Lan {
-        let lan = pool::ensure_lan_gateway_key(state)?;
+        let lan = gateway_keys::ensure_lan_gateway_key(state)?;
         let mut network_key = keys[0].clone();
-        let secret = pool::ensure_local_gateway_key_secret(&lan)?;
+        let secret = gateway_keys::ensure_local_gateway_key_secret(&lan)?;
         network_key.key = LocalGatewayKey { id: lan.id, secret };
         network_key.enabled = lan.enabled;
         keys.push(network_key);

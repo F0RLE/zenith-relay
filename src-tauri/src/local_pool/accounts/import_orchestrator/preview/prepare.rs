@@ -1,7 +1,7 @@
 use super::*;
 
 mod account;
-use account::{prepare_account_preview_item, AccountPreviewInput, AccountPreviewStep};
+use account::{AccountPreviewInput, AccountPreviewStep, prepare_account_preview_item};
 
 pub(in crate::local_pool::accounts::import_orchestrator) async fn prepare_import_preview(
     state: &DesktopState,
@@ -63,14 +63,12 @@ pub(in crate::local_pool::accounts::import_orchestrator) async fn prepare_import
             if let (Some(base_url), Some(api_key)) = (
                 import_item.base_url.as_deref(),
                 import_item.secrets().api_key(),
-            ) {
-                if find_existing_source(state, base_url, api_key)
-                    .map_err(import_item_command_error)?
-                    .is_some()
-                {
-                    row.existing = true;
-                    row.status = ImportPreviewStatus::Existing;
-                }
+            ) && find_existing_source(state, base_url, api_key)
+                .map_err(import_item_command_error)?
+                .is_some()
+            {
+                row.existing = true;
+                row.status = ImportPreviewStatus::Existing;
             }
             prepared_items.push(original_json);
             crate::diagnostics::breadcrumb(

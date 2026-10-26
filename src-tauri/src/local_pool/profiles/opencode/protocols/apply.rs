@@ -1,6 +1,6 @@
 use super::*;
 
-pub(in crate::local_pool::commands::opencode) fn apply(
+pub(in crate::local_pool::profiles::opencode) fn apply(
     config: &mut Map<String, Value>,
     base: &str,
     secret: &str,
@@ -43,7 +43,7 @@ pub(in crate::local_pool::commands::opencode) fn apply(
     merge_groups(config, groups, false)
 }
 
-pub(in crate::local_pool::commands::opencode) fn apply_source(
+pub(in crate::local_pool::profiles::opencode) fn apply_source(
     config: &mut Map<String, Value>,
     source: &ProviderSourceRecord,
     secret: &str,

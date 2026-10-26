@@ -1,23 +1,24 @@
 //! Proxy observations use the existing bounded refresh owner, never a request's
 //! critical path or a renderer-owned polling loop.
-use super::{wait_error, DesktopState, RefreshRead};
+use super::{DesktopState, RefreshRead, wait_error};
 use crate::local_pool::{
     accounts::proxy::{
+        ProxyPool, ProxyRefreshScope,
         check::{self, ProxyCheckResult},
-        observations, ProxyPool, ProxyRefreshScope,
+        observations,
     },
-    commands::current_time_ms,
     error::{LocalPoolError, Result},
+    runtime::current_time_ms,
 };
 use std::{
     collections::BTreeSet,
-    sync::{atomic::Ordering, Arc},
+    sync::{Arc, atomic::Ordering},
 };
 use zenith_relay_core::{
     request_timezone::PROXY_TIMEZONE_MAX_AGE_MS,
     scheduler::refresh::{
-        service::{RefreshRegistration, RefreshResult},
         RefreshIdentity, RefreshKind, RefreshOutcome,
+        service::{RefreshRegistration, RefreshResult},
     },
 };
 

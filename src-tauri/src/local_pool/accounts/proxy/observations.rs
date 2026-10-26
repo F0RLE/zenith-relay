@@ -1,7 +1,7 @@
-use super::{account_proxy_pool_id, common_proxy_pool_id, common_proxy_url, ProxyPool};
+use super::{ProxyPool, account_proxy_pool_id, common_proxy_pool_id, common_proxy_url};
 use crate::local_pool::error::{LocalPoolError, Result};
 use crate::local_pool::{
-    accounts::{credentials::CredentialStore, NativeSecretBackend},
+    accounts::{NativeSecretBackend, credentials::CredentialStore},
     state::DesktopState,
 };
 
@@ -51,12 +51,10 @@ pub(crate) async fn save_pool(
             if let Some(secret) = credentials
                 .load(&account.account.id)
                 .map_err(crate::local_pool::accounts::credentials::credential_invalid_state_error)?
-            {
-                if account_proxy_pool_id(pool, &secret, common_proxy_id.as_deref()).as_deref()
+                && account_proxy_pool_id(pool, &secret, common_proxy_id.as_deref()).as_deref()
                     == Some(proxy_id)
-                {
-                    affected_accounts.push(account.account.id.clone());
-                }
+            {
+                affected_accounts.push(account.account.id.clone());
             }
         }
     }

@@ -1,5 +1,5 @@
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result as LocalResult};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use zenith_relay_core::protocol::ModelSummary;
 
 const MAX_INFERENCE_MODELS: usize = 200;

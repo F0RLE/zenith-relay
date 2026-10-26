@@ -13,7 +13,6 @@ const ignore = [
   "**/app/account_runtime.rs",
   "**/store/usage.rs",
   "**/store/usage/**",
-  "**/local_pool/commands/runtime.rs",
   "**/local_pool/commands/automations.rs",
   "**/local_pool/state.rs",
   "**/local_pool/store.rs",

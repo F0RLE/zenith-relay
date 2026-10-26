@@ -231,12 +231,12 @@ fn reference_requires_fresh_complete_windows_and_usable_source() {
 async fn inactive_reference_refresh_updates_siwc_without_replacing_runtime() {
     use crate::local_pool::{
         accounts::{
-            credentials::CredentialStore,
-            refresh_observations::{record_read_error, AccountRefreshScope, RefreshReadKind},
             NativeSecretBackend,
+            credentials::CredentialStore,
+            refresh_observations::{AccountRefreshScope, RefreshReadKind, record_read_error},
         },
-        commands::runtime::{runtime_from_store, sync_refreshed_account_or_rollback},
         error::{ErrorCode, LocalPoolError},
+        runtime::{runtime_from_store, sync_refreshed_account_or_rollback},
         store::secret_store,
     };
     use std::sync::Arc;
@@ -316,15 +316,17 @@ async fn inactive_reference_refresh_updates_siwc_without_replacing_runtime() {
         }
         assert!(!runtime.remove_candidate(&donor.account.id));
         assert_eq!(headroom(), None);
-        assert!(state
-            .store()
-            .unwrap()
-            .account(&selected.account.id)
-            .unwrap()
-            .account
-            .quota
-            .primary
-            .is_none());
+        assert!(
+            state
+                .store()
+                .unwrap()
+                .account(&selected.account.id)
+                .unwrap()
+                .account
+                .quota
+                .primary
+                .is_none()
+        );
         let key = state
             .store()
             .unwrap()

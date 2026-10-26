@@ -55,10 +55,12 @@ async fn startup_removes_codex_membership_without_deleting_login_or_quota() {
         credentials.refresh_token()
     );
     let runtime = runtime_from_store(&state).await.unwrap();
-    assert!(runtime
-        .candidate_runtime_order()
-        .iter()
-        .all(|candidate| !candidate.available));
+    assert!(
+        runtime
+            .candidate_runtime_order()
+            .iter()
+            .all(|candidate| !candidate.available)
+    );
     for key in state.store().unwrap().keys() {
         secret_store::delete(&key.secret_ref).unwrap();
     }

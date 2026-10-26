@@ -81,11 +81,11 @@ pub(super) fn respect_quota_retry_after(
     scope: &AccountRefreshScope,
     refresh_result: &std::result::Result<QuotaRefreshOutcome, tokio::time::error::Elapsed>,
 ) {
-    if let Ok(QuotaRefreshOutcome::Failed { failure, .. }) = refresh_result {
-        if let Some(delay) = failure.retry_after_ms() {
-            state
-                .refresh
-                .respect_retry_after(&scope.fence.identity(), RefreshKind::Quota, delay);
-        }
+    if let Ok(QuotaRefreshOutcome::Failed { failure, .. }) = refresh_result
+        && let Some(delay) = failure.retry_after_ms()
+    {
+        state
+            .refresh
+            .respect_retry_after(&scope.fence.identity(), RefreshKind::Quota, delay);
     }
 }

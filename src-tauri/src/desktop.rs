@@ -3,7 +3,7 @@ use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 
 use crate::{
     local_pool, platform,
-    tray::{build_tray, close_main_window, AppState},
+    tray::{AppState, build_tray, close_main_window},
 };
 
 mod commands;
@@ -254,17 +254,17 @@ fn desktop_commands() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send 
         local_pool::commands::profiles::actions::launch_managed_codex_profile,
         local_pool::commands::profiles::actions::launch_codex_account,
         local_pool::commands::profiles::actions::launch_codex_source,
-        local_pool::commands::claude_desktop::get_claude_desktop_status,
-        local_pool::commands::claude_desktop::create_claude_desktop_snapshot,
-        local_pool::commands::claude_desktop::connect_claude_desktop,
-        local_pool::commands::claude_desktop::launch_claude_desktop,
-        local_pool::commands::claude_desktop::restore_claude_desktop,
-        local_pool::commands::opencode::get_opencode_config_status,
-        local_pool::commands::opencode::create_opencode_snapshot,
-        local_pool::commands::opencode::connect_opencode_to_local_gateway,
-        local_pool::commands::opencode::launch_opencode_source,
-        local_pool::commands::opencode::restart_opencode_app,
-        local_pool::commands::opencode::restore_opencode_config,
+        local_pool::profiles::claude_desktop::get_claude_desktop_status,
+        local_pool::profiles::claude_desktop::create_claude_desktop_snapshot,
+        local_pool::profiles::claude_desktop::connect_claude_desktop,
+        local_pool::profiles::claude_desktop::launch_claude_desktop,
+        local_pool::profiles::claude_desktop::restore_claude_desktop,
+        local_pool::profiles::opencode::get_opencode_config_status,
+        local_pool::profiles::opencode::create_opencode_snapshot,
+        local_pool::profiles::opencode::connect_opencode_to_local_gateway,
+        local_pool::profiles::opencode::launch_opencode_source,
+        local_pool::profiles::opencode::restart_opencode_app,
+        local_pool::profiles::opencode::restore_opencode_config,
         local_pool::commands::recovery::get_relay_storage_info,
         local_pool::commands::recovery::recover_local_account,
         local_pool::commands::recovery::open_relay_folder,

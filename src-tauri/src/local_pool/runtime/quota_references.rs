@@ -7,8 +7,8 @@ use crate::local_pool::{
 };
 use std::collections::{BTreeMap, HashMap};
 use zenith_relay_core::{
-    providers::chatgpt::OAuthClientKind, CandidateQuotaReference, GatewayRuntime,
-    QUOTA_STALE_AFTER_MS,
+    CandidateQuotaReference, GatewayRuntime, QUOTA_STALE_AFTER_MS,
+    providers::chatgpt::OAuthClientKind,
 };
 
 pub(super) fn account_quota_references(

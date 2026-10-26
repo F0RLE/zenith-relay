@@ -78,10 +78,10 @@ pub(super) fn cleanup_history_repair_backups_preserving(
     }
     backups.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
     let mut keep = HashSet::new();
-    if let Some(id) = preserve_id {
-        if backups.iter().any(|(_, name, _)| name == id) {
-            keep.insert(id.to_string());
-        }
+    if let Some(id) = preserve_id
+        && backups.iter().any(|(_, name, _)| name == id)
+    {
+        keep.insert(id.to_string());
     }
     for (created_at_ms, name, _) in &backups {
         let expired = created_at_ms.saturating_add(HISTORY_REPAIR_BACKUP_TTL_MS) <= now;

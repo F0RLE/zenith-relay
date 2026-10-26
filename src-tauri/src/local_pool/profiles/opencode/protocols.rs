@@ -121,6 +121,6 @@ pub(super) fn provider(
 
 mod apply;
 
-pub(in crate::local_pool::commands::opencode) use apply::{apply, apply_source};
+pub(in crate::local_pool::profiles::opencode) use apply::{apply, apply_source};
 #[cfg(test)]
 mod tests;

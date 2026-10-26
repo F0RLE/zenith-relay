@@ -1,12 +1,12 @@
-use super::super::{credential_item_error, ImportItemError, ItemResult};
+use super::super::{ImportItemError, ItemResult, credential_item_error};
 use super::ImportedAccountCommit;
 use crate::local_pool::accounts::{
+    NativeSecretBackend,
     authority::ProcessAccountLocks,
     credentials::{CredentialStore, StoredCodexCredentials},
-    NativeSecretBackend,
 };
-use crate::local_pool::commands::restart_or_rollback;
 use crate::local_pool::models::LocalAccountRecord;
+use crate::local_pool::runtime::restart_or_rollback;
 use crate::local_pool::state::DesktopState;
 use zenith_relay_core::accounts::{AccountAuthState, TokenSet};
 

@@ -10,9 +10,9 @@ use super::{
     quota_service::apply_quota_failure,
 };
 use crate::local_pool::{
-    commands::{current_time_ms, sync_account_quota_references},
     error::{ErrorCode, LocalPoolError, Result},
     models::LocalAccountRecord,
+    runtime::{current_time_ms, sync_account_quota_references},
     state::DesktopState,
     store::{AccountRefreshFence, AppliedAccountRefresh, LocalPoolStore},
 };
@@ -202,14 +202,14 @@ pub(in crate::local_pool) fn apply_read_error(
         let account_snapshot = account.clone();
         match kind {
             RefreshReadKind::Quota => {
-                if !quota_is_newer(account, scope) {
-                    if let Some(code) = quota_refresh_error_kind(error.code) {
-                        apply_quota_failure(
-                            account,
-                            &QuotaRefreshFailure::new(code, true),
-                            scope.started_at_ms,
-                        );
-                    }
+                if !quota_is_newer(account, scope)
+                    && let Some(code) = quota_refresh_error_kind(error.code)
+                {
+                    apply_quota_failure(
+                        account,
+                        &QuotaRefreshFailure::new(code, true),
+                        scope.started_at_ms,
+                    );
                 }
             }
             RefreshReadKind::Models => {

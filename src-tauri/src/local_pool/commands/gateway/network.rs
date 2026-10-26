@@ -35,13 +35,13 @@ fn network_addresses<'a>(
             continue;
         }
         for network in networks {
-            if let IpAddr::V4(ip) = network.addr {
-                if ip.is_private() {
-                    addresses.push(NetworkAddress {
-                        interface: name.to_owned(),
-                        base_url: format!("http://{ip}:{port}/v1"),
-                    });
-                }
+            if let IpAddr::V4(ip) = network.addr
+                && ip.is_private()
+            {
+                addresses.push(NetworkAddress {
+                    interface: name.to_owned(),
+                    base_url: format!("http://{ip}:{port}/v1"),
+                });
             }
         }
     }

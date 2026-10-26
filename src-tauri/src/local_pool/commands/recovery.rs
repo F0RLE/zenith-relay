@@ -1,8 +1,8 @@
 use crate::local_pool::{
     accounts::{
+        NativeSecretBackend,
         credentials::CredentialStore,
         proxy::{COMMON_PROXY_SECRET_REF, PROXY_POOL_SECRET_REF},
-        NativeSecretBackend,
     },
     commands::profiles::restore_managed_profiles_before_reset,
     error::{CommandError, ErrorCode, LocalPoolError},
@@ -152,7 +152,7 @@ pub async fn open_relay_folder(
 #[tauri::command]
 pub async fn reset_local_pool_data(state: State<'_, DesktopState>) -> Result<(), CommandError> {
     let _mutation = state.setup_guard().await;
-    super::claude_desktop::restore_connection(&state)?;
+    crate::local_pool::profiles::claude_desktop::restore_connection(&state)?;
     restore_managed_profiles_before_reset(&state).await?;
     state.gateway.stop().await;
     let (source_refs, account_ids, key_refs) = {

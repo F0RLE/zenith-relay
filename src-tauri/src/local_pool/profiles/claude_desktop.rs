@@ -1,7 +1,8 @@
 use crate::local_pool::{
+    commands,
     error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
     state::DesktopState,
-    store::secret_store,
+    store::{gateway_keys, secret_store},
 };
 use serde::Serialize;
 use tauri::State;
@@ -72,7 +73,7 @@ pub async fn connect_claude_desktop(
             "Start the local pool before connecting Claude Desktop",
         )
     })?;
-    let snapshot = super::state::build_local_runtime_state(&state).await?;
+    let snapshot = commands::state::build_local_runtime_state(&state).await?;
     let models = models::inference_models(&snapshot.gateway.models)?;
     if models.is_empty() {
         return Err(LocalPoolError::new(
@@ -81,13 +82,13 @@ pub async fn connect_claude_desktop(
         )
         .into());
     }
-    let key = super::pool::ensure_system_gateway_key(&state)?;
-    if !key.enabled || !super::pool::has_usable_pool_candidate(&state)? {
+    let key = gateway_keys::ensure_system_gateway_key(&state)?;
+    if !key.enabled || !commands::pool::has_usable_pool_candidate(&state)? {
         return Err(
             LocalPoolError::new(ErrorCode::Conflict, "The local pool is unavailable").into(),
         );
     }
-    let secret = super::pool::ensure_local_gateway_key_secret(&key)?;
+    let secret = gateway_keys::ensure_local_gateway_key_secret(&key)?;
     let model_count = models.len();
     let config = models::gateway_config(&format!("http://{address}"), &secret, models);
     let path = paths::config_library()?;
@@ -125,7 +126,7 @@ pub async fn launch_claude_desktop(state: State<'_, DesktopState>) -> Result<(),
         )
         .into());
     }
-    if !super::pool::has_usable_pool_candidate(&state)? {
+    if !commands::pool::has_usable_pool_candidate(&state)? {
         return Err(
             LocalPoolError::new(ErrorCode::Conflict, "The local pool is unavailable").into(),
         );
@@ -177,7 +178,7 @@ pub(in crate::local_pool) async fn refresh_catalog(state: &DesktopState) -> Loca
     let Some(address) = state.gateway.address().await else {
         return Ok(());
     };
-    let snapshot = super::state::build_local_runtime_state(state)
+    let snapshot = commands::state::build_local_runtime_state(state)
         .await
         .map_err(|error| LocalPoolError::new(error.code, error.message))?;
     let key = state

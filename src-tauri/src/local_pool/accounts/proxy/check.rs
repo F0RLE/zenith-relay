@@ -3,8 +3,8 @@ use std::{
     net::IpAddr,
     time::{Duration, Instant},
 };
-use zenith_relay_core::scheduler::refresh::http::{management_http_gate, HttpClass};
-use zenith_relay_core::{error_codes, ProxyConfig};
+use zenith_relay_core::scheduler::refresh::http::{HttpClass, management_http_gate};
+use zenith_relay_core::{ProxyConfig, error_codes};
 
 const CHECK_URL: &str = "https://www.cloudflare.com/cdn-cgi/trace";
 const MAX_RESPONSE_BYTES: usize = 4_096;
@@ -208,13 +208,12 @@ fn parse_trace(trace_body: &[u8]) -> Result<(IpAddr, Option<String>), &'static s
                     .parse()
                     .map_err(|_| error_codes::PROXY_CHECK_INVALID_RESPONSE)?,
             );
-        } else if let Some(country_value) = line.strip_prefix("loc=") {
-            if country_value.len() == 2
-                && country_value.bytes().all(|byte| byte.is_ascii_uppercase())
-                && country_value != "XX"
-            {
-                country = Some(country_value.to_string());
-            }
+        } else if let Some(country_value) = line.strip_prefix("loc=")
+            && country_value.len() == 2
+            && country_value.bytes().all(|byte| byte.is_ascii_uppercase())
+            && country_value != "XX"
+        {
+            country = Some(country_value.to_string());
         }
     }
     ip.map(|ip| (ip, country))
@@ -225,9 +224,9 @@ fn parse_trace(trace_body: &[u8]) -> Result<(IpAddr, Option<String>), &'static s
 mod tests {
     use super::*;
     use axum::{
+        Router,
         http::{HeaderMap, StatusCode},
         routing::get,
-        Router,
     };
 
     #[test]

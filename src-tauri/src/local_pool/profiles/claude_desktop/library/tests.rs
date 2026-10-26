@@ -65,13 +65,15 @@ fn attach_preserves_foreign_metadata_and_restore_removes_only_owned_profile() {
     let foreign_path = fixture.library.join("other.json");
     let foreign_bytes = br#"{ "inferenceProvider": "bedrock", "custom": true }"#;
     fs::write(&foreign_path, foreign_bytes).unwrap();
-    assert!(apply(
-        &fixture.library,
-        &fixture.recovery,
-        &config("pool/model"),
-        true
-    )
-    .unwrap());
+    assert!(
+        apply(
+            &fixture.library,
+            &fixture.recovery,
+            &config("pool/model"),
+            true
+        )
+        .unwrap()
+    );
     let metadata = fs::read(fixture.library.join("_meta.json")).unwrap();
     let metadata_value: Value = serde_json::from_slice(&metadata).unwrap();
     assert_eq!(metadata_value["custom"], json!({ "theme": "dark" }));
@@ -80,11 +82,13 @@ fn attach_preserves_foreign_metadata_and_restore_removes_only_owned_profile() {
         json!({ "keep": true })
     );
     assert_eq!(metadata_value["appliedId"], PROFILE_ID);
-    assert!(metadata_value["entries"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entry| entry["id"] == "other"));
+    assert!(
+        metadata_value["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["id"] == "other")
+    );
     assert!(restore(&fixture.library, &fixture.recovery).unwrap());
     let restored: Value =
         serde_json::from_slice(&fs::read(fixture.library.join("_meta.json")).unwrap()).unwrap();
@@ -99,13 +103,15 @@ fn attach_preserves_foreign_metadata_and_restore_removes_only_owned_profile() {
 fn inactive_refresh_does_not_overwrite_a_newer_manual_selection() {
     let fixture = Fixture::new();
     fixture.write_meta(Some("other"));
-    assert!(apply(
-        &fixture.library,
-        &fixture.recovery,
-        &config("pool/model"),
-        true
-    )
-    .unwrap());
+    assert!(
+        apply(
+            &fixture.library,
+            &fixture.recovery,
+            &config("pool/model"),
+            true
+        )
+        .unwrap()
+    );
     let mut meta: Value =
         serde_json::from_slice(&fs::read(fixture.library.join("_meta.json")).unwrap()).unwrap();
     meta["appliedId"] = json!("other");
@@ -115,13 +121,15 @@ fn inactive_refresh_does_not_overwrite_a_newer_manual_selection() {
     )
     .unwrap();
     let before = fs::read(fixture.profile()).unwrap();
-    assert!(!apply(
-        &fixture.library,
-        &fixture.recovery,
-        &config("pool/new-model"),
-        false
-    )
-    .unwrap());
+    assert!(
+        !apply(
+            &fixture.library,
+            &fixture.recovery,
+            &config("pool/new-model"),
+            false
+        )
+        .unwrap()
+    );
     assert_eq!(fs::read(fixture.profile()).unwrap(), before);
 }
 
@@ -129,13 +137,15 @@ fn inactive_refresh_does_not_overwrite_a_newer_manual_selection() {
 fn tampered_owned_profile_blocks_restore() {
     let fixture = Fixture::new();
     fixture.write_meta(None);
-    assert!(apply(
-        &fixture.library,
-        &fixture.recovery,
-        &config("pool/model"),
-        true
-    )
-    .unwrap());
+    assert!(
+        apply(
+            &fixture.library,
+            &fixture.recovery,
+            &config("pool/model"),
+            true
+        )
+        .unwrap()
+    );
     fs::write(fixture.profile(), br"{}").unwrap();
     assert!(check_restore(&fixture.library, &fixture.recovery).is_err());
     assert_eq!(
@@ -201,17 +211,19 @@ fn refreshing_effort_variants_keeps_three_models_and_restorable_ownership() {
         .map(|model| json!({"name": zenith_relay_core::claude_desktop_model_alias(model)}))
         .collect();
     let mut expanded = config("unused");
-    expanded["inferenceModels"] = json!(entries
-        .iter()
-        .flat_map(|entry| {
-            let name = entry["name"].as_str().unwrap();
-            [
-                entry.clone(),
-                json!({"name":format!("{name}-effort-low"),"maxEffort":"low"}),
-                json!({"name":format!("{name}-effort-high"),"maxEffort":"high"}),
-            ]
-        })
-        .collect::<Vec<_>>());
+    expanded["inferenceModels"] = json!(
+        entries
+            .iter()
+            .flat_map(|entry| {
+                let name = entry["name"].as_str().unwrap();
+                [
+                    entry.clone(),
+                    json!({"name":format!("{name}-effort-low"),"maxEffort":"low"}),
+                    json!({"name":format!("{name}-effort-high"),"maxEffort":"high"}),
+                ]
+            })
+            .collect::<Vec<_>>()
+    );
     assert!(apply(&fixture.library, &fixture.recovery, &expanded, true).unwrap());
     let mut updated = config("unused");
     updated["inferenceModels"] = json!(entries);
@@ -270,26 +282,30 @@ fn unowned_id_collisions_never_overwrite_configuration() {
         let meta_path = fixture.library.join("_meta.json");
         let bytes = serialize(&meta).unwrap();
         fs::write(&meta_path, &bytes).unwrap();
-        assert!(apply(
-            &fixture.library,
-            &fixture.recovery,
-            &config("pool/model"),
-            true
-        )
-        .is_err());
+        assert!(
+            apply(
+                &fixture.library,
+                &fixture.recovery,
+                &config("pool/model"),
+                true
+            )
+            .is_err()
+        );
         assert_eq!(fs::read(&meta_path).unwrap(), bytes);
         assert!(!fixture.recovery.exists());
     }
     let fixture = Fixture::new();
     let profile_path = fixture.profile();
     fs::write(&profile_path, b"foreign profile bytes").unwrap();
-    assert!(apply(
-        &fixture.library,
-        &fixture.recovery,
-        &config("pool/model"),
-        true
-    )
-    .is_err());
+    assert!(
+        apply(
+            &fixture.library,
+            &fixture.recovery,
+            &config("pool/model"),
+            true
+        )
+        .is_err()
+    );
     assert_eq!(fs::read(profile_path).unwrap(), b"foreign profile bytes");
     assert!(!fixture.recovery.exists());
 }
@@ -347,13 +363,15 @@ fn interrupted_attach_can_be_retried_or_restored() {
                 .configured
         );
         if write_profile {
-            assert!(!apply(
-                &fixture.library,
-                &fixture.recovery,
-                &config("pool/model"),
-                true
-            )
-            .unwrap());
+            assert!(
+                !apply(
+                    &fixture.library,
+                    &fixture.recovery,
+                    &config("pool/model"),
+                    true
+                )
+                .unwrap()
+            );
             assert!(
                 inspect(&fixture.library, &fixture.recovery)
                     .unwrap()
@@ -441,9 +459,10 @@ fn selected_profile_is_readable_by_desktop_uuid_bootstrap() {
     let meta = metadata(Some(&fs::read(fixture.library.join("_meta.json")).unwrap())).unwrap();
     let id = meta["appliedId"].as_str().unwrap();
     assert_eq!(id.len(), 36);
-    assert!(id
-        .bytes()
-        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte) || byte == b'-'));
+    assert!(
+        id.bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte) || byte == b'-')
+    );
     assert!(uuid::Uuid::parse_str(id).is_ok());
     assert!(fixture.library.join(format!("{id}.json")).is_file());
 }
@@ -468,13 +487,15 @@ fn orphaned_legacy_profile_is_cleaned_up_on_connect() {
     fs::write(&foreign_path, b"synthetic foreign bytes").unwrap();
     assert!(!fixture.recovery.exists());
     // Connect creates the UUID profile and cleans up the orphaned legacy file.
-    assert!(apply(
-        &fixture.library,
-        &fixture.recovery,
-        &config("pool/new"),
-        true
-    )
-    .unwrap());
+    assert!(
+        apply(
+            &fixture.library,
+            &fixture.recovery,
+            &config("pool/new"),
+            true
+        )
+        .unwrap()
+    );
     assert!(
         inspect(&fixture.library, &fixture.recovery)
             .unwrap()
@@ -499,11 +520,13 @@ fn orphaned_legacy_profile_is_cleaned_up_on_connect() {
     assert_eq!(meta["appliedId"], "other");
     assert!(!fixture.profile().exists());
     assert!(!fixture.recovery.exists());
-    assert!(!meta["entries"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entry| entry["id"] == "zenith-relay"));
+    assert!(
+        !meta["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["id"] == "zenith-relay")
+    );
 }
 
 mod snapshots;
@@ -516,13 +539,15 @@ fn lost_recovery_with_owned_entry_is_reclaimed_on_reconnect() {
     let fixture = Fixture::new();
     fixture.write_meta(Some("other"));
     // First connect normally.
-    assert!(apply(
-        &fixture.library,
-        &fixture.recovery,
-        &config("pool/model"),
-        true
-    )
-    .unwrap());
+    assert!(
+        apply(
+            &fixture.library,
+            &fixture.recovery,
+            &config("pool/model"),
+            true
+        )
+        .unwrap()
+    );
     assert!(
         inspect(&fixture.library, &fixture.recovery)
             .unwrap()
@@ -536,13 +561,15 @@ fn lost_recovery_with_owned_entry_is_reclaimed_on_reconnect() {
             .configured
     );
     // Reconnect must succeed and recreate the recovery record.
-    assert!(apply(
-        &fixture.library,
-        &fixture.recovery,
-        &config("pool/new-model"),
-        true
-    )
-    .unwrap());
+    assert!(
+        apply(
+            &fixture.library,
+            &fixture.recovery,
+            &config("pool/new-model"),
+            true
+        )
+        .unwrap()
+    );
     let status = inspect(&fixture.library, &fixture.recovery).unwrap();
     assert!(status.configured);
     assert_eq!(status.model_count, 1);
@@ -566,11 +593,13 @@ fn identical_profile_recreates_lost_recovery_without_a_self_reference() {
             .unwrap()
             .configured
     );
-    assert!(recovery(&fixture.recovery, &fixture.library)
-        .unwrap()
-        .unwrap()
-        .previous_applied_id
-        .is_none());
+    assert!(
+        recovery(&fixture.recovery, &fixture.library)
+            .unwrap()
+            .unwrap()
+            .previous_applied_id
+            .is_none()
+    );
     restore(&fixture.library, &fixture.recovery).unwrap();
     let meta = metadata(Some(&fs::read(fixture.library.join("_meta.json")).unwrap())).unwrap();
     assert!(meta.get("appliedId").is_none());
@@ -691,11 +720,13 @@ fn old_owned_profile_disables_unsupported_auto_mode_with_or_without_recovery() {
         if keep_recovery {
             assert_eq!(meta["appliedId"], "other");
         }
-        assert!(meta["entries"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry["id"] == "other"));
+        assert!(
+            meta["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["id"] == "other")
+        );
     }
 }
 

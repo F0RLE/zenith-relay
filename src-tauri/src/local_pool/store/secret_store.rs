@@ -3,15 +3,15 @@ use crate::{
     key_storage::{delete_named_secret_result, load_named_secret_result, save_named_secret},
     local_pool::error::{ErrorCode, LocalPoolError, Result},
 };
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
         Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -31,6 +31,21 @@ static SECRET_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 pub fn generation() -> u64 {
     SECRET_GENERATION.load(Ordering::Acquire)
+}
+
+pub(in crate::local_pool) fn cleanup_created_secret(
+    secret_ref: &str,
+    cause: &LocalPoolError,
+) -> Result<()> {
+    delete(secret_ref).map_err(|cleanup| {
+        LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            format!(
+                "{}; secret cleanup failed: {}",
+                cause.message, cleanup.message
+            ),
+        )
+    })
 }
 
 fn bump_generation() {
@@ -130,14 +145,14 @@ fn migrate_legacy_keyring_once(migration_root: &Path, vault: &Vault) -> Result<(
             return Err(LocalPoolError::new(
                 ErrorCode::RecoveryRequired,
                 format!("keyring migration marker is unsafe: {}", marker.display()),
-            ))
+            ));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
             return Err(LocalPoolError::new(
                 ErrorCode::Io,
                 format!("failed to inspect keyring migration marker: {error}"),
-            ))
+            ));
         }
     }
     let Ok(secret_refs) = vault.secret_refs() else {

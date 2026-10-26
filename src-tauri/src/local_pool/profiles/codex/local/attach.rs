@@ -76,13 +76,12 @@ pub(in crate::local_pool::profiles::codex) fn attach_local_locked(
     {
         return Err(profile_restore_blocked());
     }
-    if let Some(backup) = existing_backup.as_ref() {
-        if !external_takeover
-            && !managed_auth_matches_snapshot(&original_auth_bytes, &auth_path, backup)?
-            && !previous_auth_matches_snapshot(&original_auth_bytes, backup)
-        {
-            return Err(profile_restore_blocked());
-        }
+    if let Some(backup) = existing_backup.as_ref()
+        && !external_takeover
+        && !managed_auth_matches_snapshot(&original_auth_bytes, &auth_path, backup)?
+        && !previous_auth_matches_snapshot(&original_auth_bytes, backup)
+    {
+        return Err(profile_restore_blocked());
     }
 
     let user_catalog_path = if external_takeover {
@@ -230,25 +229,23 @@ fn stage_managed_profile(
     {
         backup.previous_model_catalog_json = root_model_catalog_json(document);
     }
-    if !created_backup {
-        if let Some(secret_ref) = backup.projection_secret_ref.as_deref() {
-            let config_before = projection::config_before(secret_ref, secrets)?
-                .as_deref()
-                .map(parse_config)
-                .transpose()?;
-            if let Some(config_before) = config_before {
-                if backup.previous_model.is_none() {
-                    backup.previous_model = root_model(&config_before);
-                }
-                if backup.previous_review_model.is_none() {
-                    backup.previous_review_model = root_review_model(&config_before);
-                }
-                if backup.previous_chatgpt_base_url.is_none() {
-                    backup.previous_chatgpt_base_url = root_chatgpt_base_url(&config_before);
-                }
-                if backup.previous_openai_base_url.is_none() {
-                    backup.previous_openai_base_url = root_openai_base_url(&config_before);
-                }
+    if !created_backup && let Some(secret_ref) = backup.projection_secret_ref.as_deref() {
+        let config_before = projection::config_before(secret_ref, secrets)?
+            .as_deref()
+            .map(parse_config)
+            .transpose()?;
+        if let Some(config_before) = config_before {
+            if backup.previous_model.is_none() {
+                backup.previous_model = root_model(&config_before);
+            }
+            if backup.previous_review_model.is_none() {
+                backup.previous_review_model = root_review_model(&config_before);
+            }
+            if backup.previous_chatgpt_base_url.is_none() {
+                backup.previous_chatgpt_base_url = root_chatgpt_base_url(&config_before);
+            }
+            if backup.previous_openai_base_url.is_none() {
+                backup.previous_openai_base_url = root_openai_base_url(&config_before);
             }
         }
     }
@@ -293,12 +290,12 @@ fn stage_managed_profile(
             secrets.save(BACKUP_SECRET_REF, previous_auth)?;
             backup.previous_auth_secret_ref = Some(BACKUP_SECRET_REF.to_string());
         }
-    } else if backup.previous_auth_hash.is_none() {
-        if let Some(secret_ref) = backup.previous_auth_secret_ref.as_deref() {
-            backup.previous_auth_hash = secrets
-                .load(secret_ref)?
-                .map(|content| bytes_hash(content.as_bytes()));
-        }
+    } else if backup.previous_auth_hash.is_none()
+        && let Some(secret_ref) = backup.previous_auth_secret_ref.as_deref()
+    {
+        backup.previous_auth_hash = secrets
+            .load(secret_ref)?
+            .map(|content| bytes_hash(content.as_bytes()));
     }
     backup.managed_key_id = key_id.to_string();
     backup.managed_key_hash = key_hash(local_key);
@@ -427,13 +424,13 @@ fn commit_staged_profile(
             },
         );
     }
-    if let Some(secret_ref) = backup.projection_secret_ref.clone() {
-        if let Err(error) = projection::record_show_ultra_picker(&secret_ref, secrets) {
-            return Err(with_rollback(
-                error,
-                rollback_uncommitted_secrets(created_backup, &backup, secrets, &rebased_secret),
-            ));
-        }
+    if let Some(secret_ref) = backup.projection_secret_ref.clone()
+        && let Err(error) = projection::record_show_ultra_picker(&secret_ref, secrets)
+    {
+        return Err(with_rollback(
+            error,
+            rollback_uncommitted_secrets(created_backup, &backup, secrets, &rebased_secret),
+        ));
     }
     let backup_content = match serialize_backup(&backup) {
         Ok(content) => content,

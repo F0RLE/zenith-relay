@@ -1,12 +1,12 @@
 use crate::local_pool::{
     accounts::{
-        credentials::{credential_local_error, CredentialStore},
+        NativeSecretBackend,
+        credentials::{CredentialStore, credential_local_error},
         oauth::{CodexOAuthClient, OAuthClientKind},
         oauth_flow::{OAuthFlowStart, OAuthFlowStatus},
         proxy::{
-            common_proxy_url, effective_proxy_url, ensure_account_proxy, is_proxy_id, ProxyPool,
+            ProxyPool, common_proxy_url, effective_proxy_url, ensure_account_proxy, is_proxy_id,
         },
-        NativeSecretBackend,
     },
     error::{CommandError, LocalPoolError},
     models::LocalAccountRecord,
@@ -149,8 +149,7 @@ pub async fn start_codex_oauth(
     };
     if (open_browser.unwrap_or(true) || automatic_login.is_some())
         && start.status == OAuthFlowStatus::Pending
-    {
-        if let Err(error) = window::open_sign_in_window(
+        && let Err(error) = window::open_sign_in_window(
             &app,
             &authorization_url,
             &start,
@@ -158,10 +157,9 @@ pub async fn start_codex_oauth(
             automatic_login,
         )
         .await
-        {
-            let _ = flow.cancel(&start.login_id).await;
-            return Err(error.into());
-        }
+    {
+        let _ = flow.cancel(&start.login_id).await;
+        return Err(error.into());
     }
     Ok(start)
 }

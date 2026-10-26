@@ -46,7 +46,7 @@ pub(in crate::local_pool) async fn refresh_active_opencode_catalog(
     {
         return Ok(());
     }
-    let snapshot = super::super::state::build_local_runtime_state(state)
+    let snapshot = commands::state::build_local_runtime_state(state)
         .await
         .map_err(|error| LocalPoolError::new(error.code, error.message))?;
     let (key, sources) = {
@@ -58,24 +58,23 @@ pub(in crate::local_pool) async fn refresh_active_opencode_catalog(
     };
     let mut updated = false;
     let mut model_order = Vec::new();
-    if let Some(key) = key {
-        if let Some(secret) = secret_store::load(&key.secret_ref)? {
-            if owns_connection(&config, &snapshot.gateway.base_url, &secret) {
-                protocols::apply(
-                    &mut config,
-                    &snapshot.gateway.base_url,
-                    &secret,
-                    &snapshot.gateway.models,
-                )?;
-                model_order = snapshot
-                    .gateway
-                    .models
-                    .iter()
-                    .map(|model| model.id.clone())
-                    .collect();
-                updated = true;
-            }
-        }
+    if let Some(key) = key
+        && let Some(secret) = secret_store::load(&key.secret_ref)?
+        && owns_connection(&config, &snapshot.gateway.base_url, &secret)
+    {
+        protocols::apply(
+            &mut config,
+            &snapshot.gateway.base_url,
+            &secret,
+            &snapshot.gateway.models,
+        )?;
+        model_order = snapshot
+            .gateway
+            .models
+            .iter()
+            .map(|model| model.id.clone())
+            .collect();
+        updated = true;
     }
     if !updated {
         for source in sources.iter().filter(|source| source.enabled) {

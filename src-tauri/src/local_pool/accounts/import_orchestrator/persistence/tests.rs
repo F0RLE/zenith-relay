@@ -1,6 +1,6 @@
 use super::*;
 use crate::local_pool::accounts::records;
-use crate::local_pool::commands::runtime_from_store;
+use crate::local_pool::runtime::runtime_from_store;
 use crate::local_pool::store::secret_store;
 use zenith_relay_core::accounts::AccountAuthMode;
 
@@ -98,11 +98,13 @@ async fn reimporting_identical_credentials_retires_preexisting_refresh_reads() {
         .await
         .unwrap();
     }
-    assert!(state
-        .store()
-        .unwrap()
-        .ensure_account_refresh_current(&old_scope)
-        .is_err());
+    assert!(
+        state
+            .store()
+            .unwrap()
+            .ensure_account_refresh_current(&old_scope)
+            .is_err()
+    );
     cleanup_import_test_state(state, credential_store, &account_id, root).await;
 }
 
@@ -133,15 +135,17 @@ async fn account_trash_prevents_reimport_from_replacing_retained_credentials() {
         )
         .unwrap();
     let replacement = credentials(&account_id, "replacement", 30, 2);
-    assert!(persist_imported_account(
-        &state,
-        &credential_store,
-        &replacement,
-        Some(&retained),
-        record,
-    )
-    .await
-    .is_err());
+    assert!(
+        persist_imported_account(
+            &state,
+            &credential_store,
+            &replacement,
+            Some(&retained),
+            record,
+        )
+        .await
+        .is_err()
+    );
     assert!(StoredCodexCredentials::snapshots_match(
         credential_store.load(&account_id).unwrap().as_ref(),
         Some(&retained),
@@ -150,15 +154,17 @@ async fn account_trash_prevents_reimport_from_replacing_retained_credentials() {
     assert_eq!(state.store().unwrap().account_trash().len(), 1);
     let duplicate_id = format!("account_{}", uuid::Uuid::new_v4().simple());
     let duplicate_credentials = credentials(&duplicate_id, "duplicate", 40, 1);
-    assert!(persist_imported_account(
-        &state,
-        &credential_store,
-        &duplicate_credentials,
-        None,
-        account(&duplicate_credentials),
-    )
-    .await
-    .is_err());
+    assert!(
+        persist_imported_account(
+            &state,
+            &credential_store,
+            &duplicate_credentials,
+            None,
+            account(&duplicate_credentials),
+        )
+        .await
+        .is_err()
+    );
     assert!(credential_store.load(&duplicate_id).unwrap().is_none());
     cleanup_import_test_state(state, credential_store, &account_id, root).await;
 }
@@ -225,10 +231,12 @@ async fn importing_a_pool_account_restarts_the_gateway_without_losing_it() {
         Some(address.port())
     );
     let running = state.gateway.runtime().await.expect("running runtime");
-    assert!(running
-        .candidate_runtime_order()
-        .iter()
-        .any(|candidate| candidate.candidate_id.starts_with("account_")));
+    assert!(
+        running
+            .candidate_runtime_order()
+            .iter()
+            .any(|candidate| candidate.candidate_id.starts_with("account_"))
+    );
     drop(running);
     cleanup_import_test_state(state, credential_store, &account_id, root).await;
 }
@@ -276,10 +284,12 @@ fn import_rollback_restores_only_its_own_durable_snapshot() {
         restore_import_durable_state_if_current(&credential_store, &state, &commit)
             .expect("rollback")
     );
-    assert!(credential_store
-        .require(&account_id)
-        .expect("restored secret")
-        .matches_snapshot(&previous_credentials));
+    assert!(
+        credential_store
+            .require(&account_id)
+            .expect("restored secret")
+            .matches_snapshot(&previous_credentials)
+    );
     let store = state.store().expect("store");
     assert_eq!(store.account(&account_id), Some(&previous_account));
     assert_eq!(store.account("account_unrelated"), Some(&unrelated_account));
@@ -329,10 +339,12 @@ fn import_rollback_never_replaces_a_newer_credential_snapshot() {
         !restore_import_durable_state_if_current(&credential_store, &state, &commit)
             .expect("stale rollback")
     );
-    assert!(credential_store
-        .require(&account_id)
-        .expect("newer secret")
-        .matches_snapshot(&newer_credentials));
+    assert!(
+        credential_store
+            .require(&account_id)
+            .expect("newer secret")
+            .matches_snapshot(&newer_credentials)
+    );
     assert_eq!(
         state.store().expect("store").account(&account_id),
         Some(&newer_account)
@@ -382,14 +394,16 @@ async fn stale_import_reconciliation_persists_the_authoritative_tokens() {
     let attempted_tokens = attempted_credentials
         .to_token_set()
         .expect("attempted tokens");
-    assert!(!authority
-        .register_if_newer(
-            &account_id,
-            attempted_tokens.clone(),
-            AccountAuthState::Active
-        )
-        .await
-        .expect("stale registration"));
+    assert!(
+        !authority
+            .register_if_newer(
+                &account_id,
+                attempted_tokens.clone(),
+                AccountAuthState::Active
+            )
+            .await
+            .expect("stale registration")
+    );
 
     let commit = ImportedAccountCommit {
         account_id: account_id.clone(),
@@ -412,10 +426,12 @@ async fn stale_import_reconciliation_persists_the_authoritative_tokens() {
     .await
     .expect("reconcile");
 
-    assert!(credential_store
-        .require(&account_id)
-        .expect("authoritative secret")
-        .matches_snapshot(&authoritative_credentials));
+    assert!(
+        credential_store
+            .require(&account_id)
+            .expect("authoritative secret")
+            .matches_snapshot(&authoritative_credentials)
+    );
     let account = state
         .store()
         .expect("store")

@@ -1,16 +1,16 @@
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 
 use tauri::{
+    AppHandle, Emitter, Manager, State, WebviewWindow, WebviewWindowBuilder,
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, State, WebviewWindow, WebviewWindowBuilder,
 };
 
-use crate::local_pool::{commands::gateway::lifecycle as gateway, DesktopState};
+use crate::local_pool::{DesktopState, commands::gateway::lifecycle as gateway};
 use crate::platform::ui_text;
 
 pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
@@ -238,10 +238,10 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow<tauri:
 /// process, tray, and local pool keep running. The next open creates a new
 /// window; a failed destroy still hides the current one instead of exiting.
 pub fn close_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-        if window.destroy().is_err() {
-            let _ = window.hide();
-        }
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL)
+        && window.destroy().is_err()
+    {
+        let _ = window.hide();
     }
 }
 

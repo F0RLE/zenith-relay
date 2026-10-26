@@ -1,7 +1,7 @@
 use crate::local_pool::{
     accounts::{
-        credentials::{credential_local_error, CredentialStore, StoredCodexCredentials},
         NativeSecretBackend,
+        credentials::{CredentialStore, StoredCodexCredentials, credential_local_error},
     },
     error::{CommandError, ErrorCode, LocalPoolError, Result},
     models::{GatewaySettings, LocalAccountRecord},
@@ -9,12 +9,12 @@ use crate::local_pool::{
 };
 use tauri::State;
 use zenith_relay_core::{
+    CandidateRuntimeSnapshot, ModelRules,
     accounts::{
-        select_account_route_group, validate_account_route_connection, AccountRouteIdentity,
+        AccountRouteIdentity, select_account_route_group, validate_account_route_connection,
     },
     automations::WakeTask,
     providers::chatgpt::OAuthClientKind,
-    CandidateRuntimeSnapshot, ModelRules,
 };
 
 fn conflict(message: &'static str) -> LocalPoolError {
@@ -275,28 +275,27 @@ pub async fn select_local_account_route(
         attach,
         next_credentials.oauth_client_kind(),
     )?;
-    if attach {
-        if let Some(group) = gateway
+    if attach
+        && let Some(group) = gateway
             .account_routes
             .iter_mut()
             .find(|group| group.selected_account_id == connection_id)
-        {
-            group.notes_account_id.get_or_insert_with(|| {
-                if owner.password().is_some()
-                    || owner.totp_secret().is_some()
-                    || owner.phone().is_some()
-                {
-                    account_id.clone()
-                } else if next_credentials.password().is_some()
-                    || next_credentials.totp_secret().is_some()
-                    || next_credentials.phone().is_some()
-                {
-                    connection_id.clone()
-                } else {
-                    account_id.clone()
-                }
-            });
-        }
+    {
+        group.notes_account_id.get_or_insert_with(|| {
+            if owner.password().is_some()
+                || owner.totp_secret().is_some()
+                || owner.phone().is_some()
+            {
+                account_id.clone()
+            } else if next_credentials.password().is_some()
+                || next_credentials.totp_secret().is_some()
+                || next_credentials.phone().is_some()
+            {
+                connection_id.clone()
+            } else {
+                account_id.clone()
+            }
+        });
     }
     let runtime = state.gateway.runtime().await;
     let _fences = super::fence_runtime_candidates(runtime.as_deref(), &ids, &[]);

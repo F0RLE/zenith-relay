@@ -62,7 +62,7 @@ async fn network_access_is_opt_in_revision_checked_and_keeps_independent_keys() 
     let network_secret = pool::ensure_local_gateway_key_secret(&network).unwrap();
     assert_ne!(local_secret, network_secret);
     assert_ne!(local.id, network.id);
-    pool::retire_user_gateway_keys(&state).unwrap();
+    crate::local_pool::store::gateway_keys::retire_user_gateway_keys(&state).unwrap();
     assert_eq!(state.store().unwrap().keys().len(), 2);
     assert_eq!(
         secret_store::load(&local.secret_ref).unwrap(),

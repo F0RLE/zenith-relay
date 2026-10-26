@@ -177,9 +177,12 @@ fn stop_windows_processes(
     let mut signaled = Vec::new();
     let mut forced = Vec::new();
     let mut empty_since = None;
+    let mut last_signal_failure = None;
 
     for pid in initial_pids {
-        signal_windows_process(*pid, false);
+        if let Some(failure) = signal_windows_process(*pid, false) {
+            last_signal_failure = Some(failure);
+        }
         signaled.push(*pid);
     }
 
@@ -194,7 +197,18 @@ fn stop_windows_processes(
         let now = Instant::now();
         let elapsed = now.duration_since(started);
         if elapsed >= timeout {
-            return Err(format!("{product} did not exit before the restart timeout"));
+            let message = format!("{product} did not exit before the restart timeout");
+            let mut details = vec![("product", product.to_string())];
+            if let Some(failure) = last_signal_failure {
+                details.push(("last_signal_failure", failure));
+            }
+            crate::diagnostics::record_error(
+                "launcher-stop",
+                Some("process_stop_timeout"),
+                &message,
+                &details,
+            );
+            return Err(message);
         }
         if process_stop_is_stable(
             !running.is_empty(),
@@ -209,7 +223,9 @@ fn stop_windows_processes(
         for pid in running {
             let attempted = if force { &mut forced } else { &mut signaled };
             if !attempted.contains(&pid) {
-                signal_windows_process(pid, force);
+                if let Some(failure) = signal_windows_process(pid, force) {
+                    last_signal_failure = Some(failure);
+                }
                 attempted.push(pid);
             }
         }
@@ -218,10 +234,29 @@ fn stop_windows_processes(
 }
 
 #[cfg(target_os = "windows")]
-fn signal_windows_process(pid: u32, force: bool) {
+fn signal_windows_process(pid: u32, force: bool) -> Option<String> {
     let mut command = windows_hidden_command("taskkill");
     command.args(windows_taskkill_arguments(pid, force));
-    let _ = command.status();
+    // taskkill uses localized console output that is not necessarily UTF-8.
+    // Capture both streams without decoding them; the stop loop still checks
+    // process identity and exit, so a rejected graceful signal is not fatal.
+    windows_taskkill_failure(command.output())
+        .map(|failure| format!("PID {pid}, force={force}: {failure}"))
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn windows_taskkill_failure(
+    result: std::io::Result<std::process::Output>,
+) -> Option<String> {
+    match result {
+        Ok(output) if output.status.success() => None,
+        Ok(output) => Some(format!("taskkill exit code: {:?}", output.status.code())),
+        Err(error) => Some(format!(
+            "taskkill I/O error: {:?} (OS code: {:?})",
+            error.kind(),
+            error.raw_os_error()
+        )),
+    }
 }
 
 #[cfg(target_os = "windows")]

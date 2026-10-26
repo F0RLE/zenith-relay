@@ -67,13 +67,12 @@ fn restore_local_profile_locked(
         if let (Some(expected), Some(content)) = (
             backup.previous_auth_hash.as_deref(),
             previous_auth.as_deref(),
-        ) {
-            if bytes_hash(content.as_bytes()) != expected {
-                return Err(LocalPoolError::new(
-                    ErrorCode::RecoveryRequired,
-                    "ChatGPT profile backup secret does not match its integrity hash",
-                ));
-            }
+        ) && bytes_hash(content.as_bytes()) != expected
+        {
+            return Err(LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                "ChatGPT profile backup secret does not match its integrity hash",
+            ));
         }
         if backup.previous_auth_secret_ref.is_some() && previous_auth.is_none() {
             return Err(LocalPoolError::new(

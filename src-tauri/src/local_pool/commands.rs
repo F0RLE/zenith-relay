@@ -1,10 +1,8 @@
 pub(crate) mod account_routes;
 pub(crate) mod automations;
-pub(crate) mod claude_desktop;
 pub(crate) mod connections;
 pub(crate) mod gateway;
 pub(crate) mod oauth;
-pub(crate) mod opencode;
 pub(crate) mod pool;
 pub(crate) mod profiles;
 pub(crate) mod proxies;
@@ -14,17 +12,16 @@ pub(crate) mod usage;
 
 #[cfg(test)]
 mod rotation_regression_test;
-mod runtime;
+use super::runtime;
 
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError, Result as LocalResult},
     models::{GatewaySettings, LocalAccountRecord, ProviderSourceRecord},
-    store::secret_store,
 };
 use std::collections::BTreeMap;
 use zenith_relay_core::{
-    cache_write_model_ids, model_id_key, model_metadata::ModelMetadataCatalog, PriceEvidence,
-    PricingContext, SourcePricingMetadata, SourceProtocolResolution, TokenPrice,
+    PriceEvidence, PricingContext, SourcePricingMetadata, SourceProtocolResolution, TokenPrice,
+    cache_write_model_ids, model_id_key, model_metadata::ModelMetadataCatalog,
 };
 
 /// Move owned local I/O off both the window thread and async executor. Await
@@ -37,17 +34,7 @@ pub(in crate::local_pool) async fn run_blocking<T: Send + 'static>(
         .map_err(|_| LocalPoolError::new(ErrorCode::Io, "Local operation was interrupted"))?
 }
 
-pub(super) fn cleanup_created_secret(secret_ref: &str, cause: &LocalPoolError) -> LocalResult<()> {
-    secret_store::delete(secret_ref).map_err(|cleanup| {
-        LocalPoolError::new(
-            ErrorCode::RecoveryRequired,
-            format!(
-                "{}; secret cleanup failed: {}",
-                cause.message, cleanup.message
-            ),
-        )
-    })
-}
+pub(super) use super::store::secret_store::cleanup_created_secret;
 
 /// Builds the immutable pricing identity used by all desktop projections.
 /// Storage records contain only redacted/local identifiers and explicit
@@ -112,15 +99,12 @@ pub(super) fn pricing_context(
 }
 
 pub(in crate::local_pool) use runtime::{
-    apply_account_policy_if_running, apply_local_gateway_key_scope,
-    apply_source_policies_if_running, apply_source_policy_if_running, core_error, current_time_ms,
-    fail_closed, fence_runtime_candidates, queue_active_client_catalog_refresh,
-    record_catalog_refresh_result, refresh_active_codex_catalog_in_background,
-    refresh_local_gateway_key_scope_if_running, restart_after_secret_change, restart_or_rollback,
-    runtime_account_policy, runtime_from_store, sync_account_or_rollback,
-    sync_account_quota_references, sync_account_state_if_running, sync_gateway_or_rollback,
-    sync_records_or_rollback, sync_refreshed_account_or_rollback, sync_running_account_states,
-    sync_runtime_account_state,
+    apply_local_gateway_key_scope, apply_source_policies_if_running,
+    apply_source_policy_if_running, core_error, current_time_ms, fail_closed,
+    fence_runtime_candidates, queue_active_client_catalog_refresh, record_catalog_refresh_result,
+    refresh_active_codex_catalog_in_background, refresh_local_gateway_key_scope_if_running,
+    restart_after_secret_change, restart_or_rollback, runtime_account_policy, runtime_from_store,
+    sync_gateway_or_rollback, sync_records_or_rollback, sync_running_account_states,
 };
 
 #[cfg(test)]

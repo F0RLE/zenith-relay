@@ -22,7 +22,7 @@ pub async fn set_local_codex_text_models(
     apply_codex_text_models(input, state.inner()).await
 }
 
-pub(in crate::local_pool::commands) async fn apply_codex_text_models(
+pub(in crate::local_pool) async fn apply_codex_text_models(
     input: SetCodexTextModelsInput,
     state: &DesktopState,
 ) -> Result<(), CommandError> {

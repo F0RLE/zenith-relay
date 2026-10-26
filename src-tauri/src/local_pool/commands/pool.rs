@@ -1,7 +1,7 @@
 use super::{fence_runtime_candidates, restart_or_rollback, runtime_account_policy};
 use crate::{
     local_pool::{
-        accounts::{credentials::CredentialStore, NativeSecretBackend},
+        accounts::{NativeSecretBackend, credentials::CredentialStore},
         error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
         models::LocalPoolSnapshot,
         profiles::codex,
@@ -13,25 +13,25 @@ use crate::{
 use serde::Deserialize;
 use tauri::{AppHandle, State};
 use zenith_relay_core::{
+    DefaultServiceTier,
     protocol::{
         ConfigurationPresetApplyInput, ConfigurationPresetApplyResult, ConfigurationPresetPreview,
     },
-    DefaultServiceTier,
 };
 
 mod model_policy;
 mod model_settings;
 mod reasoning;
 
-pub(super) use model_policy::{canonical_pool_model, local_pool_member_ids};
+#[cfg(test)]
+use crate::local_pool::runtime::local_pool_member_ids;
+use crate::local_pool::store::gateway_keys;
+pub(in crate::local_pool) use model_policy::canonical_pool_model;
 use reasoning::SetModelReasoningInput;
-mod gateway_keys;
 mod membership;
 mod presets;
-pub(super) use membership::apply_local_pool_membership;
+pub(in crate::local_pool) use membership::apply_local_pool_membership;
 
-pub(crate) use gateway_keys::retire_user_gateway_keys;
-pub(in crate::local_pool) use gateway_keys::LAN_GATEWAY_KEY_ID;
 pub(in crate::local_pool) use gateway_keys::SYSTEM_GATEWAY_KEY_ID;
 pub(super) use gateway_keys::{
     ensure_lan_gateway_key, ensure_local_gateway_key_secret, ensure_system_gateway_key,

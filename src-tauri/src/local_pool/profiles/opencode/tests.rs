@@ -1,11 +1,11 @@
 use super::{
-    apply_managed_provider, managed_provider, model_ids, normalize_snapshot_name, parse_jsonc,
-    remove_managed_configuration, serialize_config, source_opencode_models, ProviderSourceRecord,
-    SourceAdapter, PROVIDER_ID, PROVIDER_NPM,
+    PROVIDER_ID, PROVIDER_NPM, ProviderSourceRecord, SourceAdapter, apply_managed_provider,
+    managed_provider, model_ids, normalize_snapshot_name, parse_jsonc,
+    remove_managed_configuration, serialize_config, source_opencode_models,
 };
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
-use zenith_relay_core::{protocol::ModelSummary, SourceProtocolBinding, WireApi};
+use zenith_relay_core::{SourceProtocolBinding, WireApi, protocol::ModelSummary};
 
 pub(super) fn source(bindings: Vec<SourceProtocolBinding>) -> ProviderSourceRecord {
     ProviderSourceRecord {
@@ -224,9 +224,11 @@ fn model_capabilities_are_shared_by_pool_and_direct_source_configs() {
         32000
     );
     models[0].context_windows = Some(Default::default());
-    assert!(super::model_config(&models)["text-only"]["limit"]
-        .get("context")
-        .is_none());
+    assert!(
+        super::model_config(&models)["text-only"]["limit"]
+            .get("context")
+            .is_none()
+    );
     assert_eq!(pooled["unknown"]["modalities"]["input"], json!(["text"]));
     assert_eq!(pooled["unknown"]["attachment"], false);
     assert_eq!(pooled["unknown"]["reasoning"], false);
@@ -277,13 +279,15 @@ fn direct_source_models_use_the_native_upstream_of_legacy_bridges() {
         source_opencode_models(&source).unwrap(),
         ["gpt-test", "gpt-other", "chat-only", "claude"]
     );
-    assert!(source
-        .effective_protocol_bindings()
-        .unwrap()
-        .iter()
-        .any(|route| {
-            route.wire_api == WireApi::Messages && route.adapter == SourceAdapter::Native
-        }));
+    assert!(
+        source
+            .effective_protocol_bindings()
+            .unwrap()
+            .iter()
+            .any(|route| {
+                route.wire_api == WireApi::Messages && route.adapter == SourceAdapter::Native
+            })
+    );
 }
 
 #[test]
@@ -333,14 +337,18 @@ fn removing_a_missing_original_only_removes_relay_configuration() {
     assert!(remove_managed_configuration(&mut config));
     assert_eq!(config.get("model"), None);
     assert_eq!(config.get("theme"), Some(&json!("dark")));
-    assert!(config
-        .get("provider")
-        .and_then(serde_json::Value::as_object)
-        .is_some_and(|providers| providers.contains_key("anthropic")));
-    assert!(!config
-        .get("provider")
-        .and_then(serde_json::Value::as_object)
-        .is_some_and(|providers| providers.contains_key(PROVIDER_ID)));
+    assert!(
+        config
+            .get("provider")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|providers| providers.contains_key("anthropic"))
+    );
+    assert!(
+        !config
+            .get("provider")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|providers| providers.contains_key(PROVIDER_ID))
+    );
 }
 
 #[test]
@@ -370,7 +378,9 @@ fn serializes_opencode_variants_in_reasoning_order() {
     let serialized = serialize_config(config.as_object().unwrap()).unwrap();
     assert_eq!(
         object_keys_after(&serialized, "variants"),
-        ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "alpha", "custom"]
+        [
+            "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "alpha", "custom"
+        ]
     );
 
     let plain = json!({"b": 1, "a": {"z": true, "m": [1, {"q": 2, "p": 3}]}});

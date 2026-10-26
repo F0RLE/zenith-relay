@@ -106,40 +106,39 @@ pub(super) fn switch_to_account_with_intent(
     let _profile_guard = lock_codex_profile();
     ensure_single_profile_backup(codex_home, backup_root)?;
     switch_transaction::run(codex_home, secrets, |secrets| {
-        if rebase_newer_login {
-            if let Some(account_backup_path) = account_backup_for_profile(codex_home, backup_root)?
+        if rebase_newer_login
+            && let Some(account_backup_path) = account_backup_for_profile(codex_home, backup_root)?
+        {
+            let backup_bytes = read_optional_bytes(&account_backup_path)?;
+            let backup = parse_account_backup_snapshot(&backup_bytes, &account_backup_path)?
+                .ok_or_else(|| {
+                    LocalPoolError::new(
+                        ErrorCode::RecoveryRequired,
+                        "ChatGPT account profile backup disappeared during activation",
+                    )
+                })?;
+            let profile_dir = canonical_profile_dir(codex_home)?;
+            let auth_path = profile_dir.join(AUTH_FILE);
+            let auth_bytes = read_optional_bytes(&auth_path)?;
+            let config_path = profile_dir.join(CONFIG_FILE);
+            let config_bytes = read_optional_bytes(&config_path)?;
+            let config_document =
+                parse_config(snapshot_text(&config_bytes, &config_path)?.unwrap_or_default())?;
+            if !account_managed_config_matches(&config_document)
+                || !account_auth_matches_snapshot(
+                    &auth_bytes,
+                    &auth_path,
+                    &backup.managed_access_hash,
+                )?
             {
-                let backup_bytes = read_optional_bytes(&account_backup_path)?;
-                let backup = parse_account_backup_snapshot(&backup_bytes, &account_backup_path)?
-                    .ok_or_else(|| {
-                        LocalPoolError::new(
-                            ErrorCode::RecoveryRequired,
-                            "ChatGPT account profile backup disappeared during activation",
-                        )
-                    })?;
-                let profile_dir = canonical_profile_dir(codex_home)?;
-                let auth_path = profile_dir.join(AUTH_FILE);
-                let auth_bytes = read_optional_bytes(&auth_path)?;
-                let config_path = profile_dir.join(CONFIG_FILE);
-                let config_bytes = read_optional_bytes(&config_path)?;
-                let config_document =
-                    parse_config(snapshot_text(&config_bytes, &config_path)?.unwrap_or_default())?;
-                if !account_managed_config_matches(&config_document)
-                    || !account_auth_matches_snapshot(
-                        &auth_bytes,
-                        &auth_path,
-                        &backup.managed_access_hash,
-                    )?
-                {
-                    account::restore_account_locked(codex_home, backup_root, secrets)?;
-                }
+                account::restore_account_locked(codex_home, backup_root, secrets)?;
             }
         }
         if backup_path(backup_root).exists() {
-            if let Some(backup) = local_backup(codex_home, backup_root)? {
-                if !rebase_newer_login {
-                    local::ensure_no_newer_login(codex_home, &backup)?;
-                }
+            if let Some(backup) = local_backup(codex_home, backup_root)?
+                && !rebase_newer_login
+            {
+                local::ensure_no_newer_login(codex_home, &backup)?;
             }
             local::restore_local_locked(codex_home, backup_root, secrets)?;
         }

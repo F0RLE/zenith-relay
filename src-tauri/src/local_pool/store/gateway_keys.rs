@@ -1,4 +1,4 @@
-use super::super::cleanup_created_secret;
+use super::secret_store::cleanup_created_secret;
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError, Result as LocalResult},
     models::{LocalGatewayKeyRecord, ProviderSourceRecord},
@@ -13,7 +13,7 @@ const SYSTEM_GATEWAY_KEY_LABEL: &str = "ChatGPT pool";
 pub(in crate::local_pool) const SYSTEM_GATEWAY_KEY_ID: &str = "key_system";
 pub(in crate::local_pool) const LAN_GATEWAY_KEY_ID: &str = "key_lan";
 
-pub(in crate::local_pool::commands) fn ensure_lan_gateway_key(
+pub(in crate::local_pool) fn ensure_lan_gateway_key(
     state: &DesktopState,
 ) -> LocalResult<LocalGatewayKeyRecord> {
     if let Some(key) = state
@@ -43,11 +43,11 @@ pub(in crate::local_pool::commands) fn ensure_lan_gateway_key(
     Ok(key)
 }
 
-pub(in crate::local_pool::commands) fn new_local_gateway_api_key() -> String {
+pub(in crate::local_pool) fn new_local_gateway_api_key() -> String {
     format!("zlr_{}", Uuid::new_v4().simple())
 }
 
-pub(in crate::local_pool::commands) fn ensure_local_gateway_key_secret(
+pub(in crate::local_pool) fn ensure_local_gateway_key_secret(
     key: &LocalGatewayKeyRecord,
 ) -> LocalResult<String> {
     if let Some(secret) = secret_store::load(&key.secret_ref)? {
@@ -58,7 +58,7 @@ pub(in crate::local_pool::commands) fn ensure_local_gateway_key_secret(
     Ok(secret)
 }
 
-pub(in crate::local_pool::commands) fn ensure_system_gateway_key(
+pub(in crate::local_pool) fn ensure_system_gateway_key(
     state: &DesktopState,
 ) -> LocalResult<LocalGatewayKeyRecord> {
     let existing = {
@@ -215,10 +215,10 @@ fn rollback_gateway_key_cleanup(
         {
             continue;
         }
-        if let Some(secret) = secret {
-            if let Err(error) = secret_store::save(secret_ref, secret) {
-                failures.push(format!("secret restore failed: {error}"));
-            }
+        if let Some(secret) = secret
+            && let Err(error) = secret_store::save(secret_ref, secret)
+        {
+            failures.push(format!("secret restore failed: {error}"));
         }
     }
     if failures.is_empty() {

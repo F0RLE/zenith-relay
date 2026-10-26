@@ -41,12 +41,11 @@ pub(super) fn prepare_existing_local_binding_locked(
         && backup.managed_model_catalog_hash.is_none()
         && backup.managed_model_catalog_pending_hash.is_none()
         && managed_config_matches(&config_document, &backup)
+        && let Some(legacy_catalog) = root_model_catalog_json(&config_document)
     {
-        if let Some(legacy_catalog) = root_model_catalog_json(&config_document) {
-            backup.previous_model_catalog_json = Some(legacy_catalog);
-            let updated = serialize_backup(&backup)?;
-            replace_if_unchanged(&backup_file_path, &backup_bytes, &updated)?;
-        }
+        backup.previous_model_catalog_json = Some(legacy_catalog);
+        let updated = serialize_backup(&backup)?;
+        replace_if_unchanged(&backup_file_path, &backup_bytes, &updated)?;
     }
     restore_local_locked(codex_home, backup_root, secrets)
 }

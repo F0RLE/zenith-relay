@@ -2,26 +2,26 @@ use super::{DesktopState, RefreshRead, RefreshReadResult};
 use crate::local_pool::{
     accounts::{
         quota_refresh::{
+            AccountQuotaOutcome, AccountQuotaRefreshResponse, PreparedAccountAuthorization,
             prepare_account_request_authorization, read_account_models_once,
-            read_account_quota_once, AccountQuotaOutcome, AccountQuotaRefreshResponse,
-            PreparedAccountAuthorization,
+            read_account_quota_once,
         },
         refresh_observations::AccountRefreshScope,
     },
-    commands::current_time_ms,
     error::{ErrorCode, LocalPoolError, Result},
     models::LocalAccountRecord,
+    runtime::current_time_ms,
     store::AccountRefreshFence,
 };
 use std::{
     collections::BTreeSet,
-    sync::{atomic::Ordering, Arc},
+    sync::{Arc, atomic::Ordering},
 };
 use zenith_relay_core::scheduler::{
     account_member_key,
     refresh::{
-        service::{RefreshRegistration, RefreshResult, RefreshWaitError},
         RefreshJob, RefreshKind, RefreshOutcome,
+        service::{RefreshRegistration, RefreshResult, RefreshWaitError},
     },
 };
 
@@ -200,7 +200,7 @@ pub(in crate::local_pool) async fn request_authorization_now(
         _ => {
             return Err(LocalPoolError::invalid_state(
                 "unexpected authorization result",
-            ))
+            ));
         }
     };
     state.store()?.ensure_account_refresh_current(fence)?;
@@ -260,7 +260,7 @@ pub(super) async fn execute(
         _ => {
             return Err(LocalPoolError::invalid_state(
                 "unsupported account refresh kind",
-            ))
+            ));
         }
     };
     let activity = super::active_members(state).await;

@@ -38,16 +38,15 @@ pub(super) fn attach_account_locked(
     let existing_backup = parse_account_backup_snapshot(&original_backup_bytes, &backup_path)?;
 
     let orphaned_managed_provider = existing_backup.is_none() && document_has_provider(&document);
-    if let Some(backup) = existing_backup.as_ref() {
-        if backup.profile_dir != profile_dir.to_string_lossy()
+    if let Some(backup) = existing_backup.as_ref()
+        && (backup.profile_dir != profile_dir.to_string_lossy()
             || !account_auth_matches_snapshot(
                 &original_auth_bytes,
                 &auth_path,
                 &backup.managed_access_hash,
-            )?
-        {
-            return Err(profile_restore_blocked());
-        }
+            )?)
+    {
+        return Err(profile_restore_blocked());
     }
 
     // Codex caches the model list independently from config.toml. Remove it
@@ -88,12 +87,10 @@ pub(super) fn attach_account_locked(
     // Older backups may not have the newer root fields. Read the encrypted
     // before-snapshot once and fill only missing fields from that source.
     fill_missing_account_config(&mut backup, &document, secrets)?;
-    if created_backup {
-        if let Some(previous_auth) = zenith_relay_core::omit_blank(original_auth) {
-            let secret_ref = account_backup_secret_ref(&profile_dir);
-            secrets.save(&secret_ref, previous_auth)?;
-            backup.previous_auth_secret_ref = Some(secret_ref);
-        }
+    if created_backup && let Some(previous_auth) = zenith_relay_core::omit_blank(original_auth) {
+        let secret_ref = account_backup_secret_ref(&profile_dir);
+        secrets.save(&secret_ref, previous_auth)?;
+        backup.previous_auth_secret_ref = Some(secret_ref);
     }
     backup.managed_account_id = account_id.to_string();
     backup.managed_access_hash = key_hash(tokens.access_token());

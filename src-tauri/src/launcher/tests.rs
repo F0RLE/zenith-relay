@@ -10,7 +10,7 @@ use super::opencode_desktop::{
 #[cfg(target_os = "windows")]
 use super::process::{
     is_codex_process_identity, is_opencode_process_identity, parse_windows_start_apps_output,
-    windows_taskkill_arguments,
+    windows_taskkill_arguments, windows_taskkill_failure,
 };
 use super::process::{process_stop_is_stable, running_target_pids};
 
@@ -26,15 +26,17 @@ fn launch_confirmation_requires_a_running_desktop() {
         assert!(error.contains("saved profile was kept"));
     }
     let mut probes = 0;
-    assert!(super::process::wait_for_application_start(
-        || {
-            probes += 1;
-            probes == 2
-        },
-        Duration::from_secs(2),
-        "OpenCode",
-    )
-    .is_ok());
+    assert!(
+        super::process::wait_for_application_start(
+            || {
+                probes += 1;
+                probes == 2
+            },
+            Duration::from_secs(2),
+            "OpenCode",
+        )
+        .is_ok()
+    );
     assert_eq!(probes, 2);
 }
 
@@ -238,6 +240,43 @@ fn windows_taskkill_never_targets_a_process_tree() {
     assert_eq!(
         windows_taskkill_arguments(1234, true),
         vec!["/PID".to_string(), "1234".to_string(), "/F".to_string()]
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_taskkill_uses_status_without_decoding_console_output() {
+    use std::os::windows::process::ExitStatusExt;
+    use std::process::{ExitStatus, Output};
+
+    for (code, expected) in [
+        (0, None),
+        (1, Some("taskkill exit code: Some(1)".to_string())),
+        (128, Some("taskkill exit code: Some(128)".to_string())),
+    ] {
+        let output = Output {
+            status: ExitStatus::from_raw(code),
+            stdout: vec![0xff, 0xfe, 0x80],
+            stderr: vec![0x81, 0xf0, 0xff],
+        };
+        assert_eq!(windows_taskkill_failure(Ok(output)), expected);
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_taskkill_io_failure_keeps_codes_without_raw_error_text() {
+    let error = std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "localized private subprocess detail",
+    );
+    assert_eq!(
+        windows_taskkill_failure(Err(error)).as_deref(),
+        Some("taskkill I/O error: PermissionDenied (OS code: None)")
+    );
+    assert_eq!(
+        windows_taskkill_failure(Err(std::io::Error::from_raw_os_error(5))).as_deref(),
+        Some("taskkill I/O error: PermissionDenied (OS code: Some(5))")
     );
 }
 

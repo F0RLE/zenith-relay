@@ -1,14 +1,14 @@
-use super::super::super::{
+use super::assemble::runtime_from_store;
+use super::{current_time_ms, record_catalog_refresh_result, runtime_account_operational_state};
+use crate::local_pool::{
     error::{ErrorCode, ErrorDiagnostics, LocalPoolError, Result},
     models::{GatewaySettings, LocalAccountRecord, LocalGatewayKeyRecord, ProviderSourceRecord},
+    profiles,
     state::DesktopState,
     store::secret_store,
 };
-use super::super::profiles;
-use super::assemble::runtime_from_store;
-use super::{current_time_ms, record_catalog_refresh_result, runtime_account_operational_state};
 use tauri::{AppHandle, Manager};
-use zenith_relay_core::{protocol::account_candidate_enabled, GatewayRuntime};
+use zenith_relay_core::{GatewayRuntime, protocol::account_candidate_enabled};
 
 pub(in crate::local_pool) fn refresh_active_codex_catalog_in_background(app: AppHandle) {
     queue_active_client_catalog_refresh(&app.state::<DesktopState>());
@@ -235,7 +235,7 @@ pub(in crate::local_pool) async fn restart_or_rollback(
                         state,
                         format!("{error}; failed to rebuild restored gateway: {restore}"),
                     )
-                    .await)
+                    .await);
                 }
             };
             let restored_scope = state.store()?.gateway().bind_scope;
@@ -320,7 +320,7 @@ pub(in crate::local_pool) async fn restart_or_rollback(
                     state,
                     format!("{error}; failed to rebuild previous gateway: {restore}"),
                 )
-                .await)
+                .await);
             }
         };
         let scope = state.store()?.gateway().bind_scope;

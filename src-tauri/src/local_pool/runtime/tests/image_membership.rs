@@ -1,5 +1,5 @@
 use super::*;
-use zenith_relay_core::{protocol::PoolMembershipInput, IMAGE_API_MODEL};
+use zenith_relay_core::{IMAGE_API_MODEL, protocol::PoolMembershipInput};
 
 async fn close_fixture(state: DesktopState, runtime: std::sync::Arc<GatewayRuntime>) {
     let database = std::sync::Arc::downgrade(&state.telemetry);
@@ -71,9 +71,11 @@ async fn codex_text_opt_in_rebuilds_live_routes_without_enrolling_or_removing_ac
         }))
         .unwrap()
     };
-    assert!(apply_codex_text_models(input(true, false, false), &state)
-        .await
-        .is_err());
+    assert!(
+        apply_codex_text_models(input(true, false, false), &state)
+            .await
+            .is_err()
+    );
     assert!(!state.store().unwrap().gateway().codex_text_models_enabled);
     apply_codex_text_models(input(true, false, true), &state)
         .await

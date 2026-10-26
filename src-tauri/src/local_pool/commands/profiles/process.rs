@@ -53,10 +53,9 @@ pub(super) async fn stop_codex_and_sync_account_at(
     let synchronization_result: Result<(), CommandError> = async {
         if let Some(account_id) =
             codex::active_managed_account_id(profile_dir, &state.profile_backup_root())?
+            && state.store()?.account(&account_id).is_some()
         {
-            if state.store()?.account(&account_id).is_some() {
-                sync_managed_account_profile(state, &account_id).await?;
-            }
+            sync_managed_account_profile(state, &account_id).await?;
         }
         Ok(())
     }
