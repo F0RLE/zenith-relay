@@ -5,21 +5,20 @@ use axum::http::{HeaderMap, Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use futures_util::{stream, SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt, stream};
 use reqwest_websocket::{Message as ClientWsMessage, Upgrade};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
 use zenith_relay_core::gateway;
 use zenith_relay_core::{
-    discover_source_models, discover_source_models_and_protocol_bindings,
-    discover_source_models_for_protocol_bindings, discover_source_with_protocol_config,
     CapabilityOrigin, CapabilityStatus, ErrorOrigin, GatewayRuntime, GatewayRuntimeOptions,
     LocalGatewayKey, MessagesReasoningMode, ModelEndpointCapability, ProviderSource,
     RuntimeLocalKey, RuntimeSource, SourceAdapter, SourceProtocolBinding, SourceProtocolConfig,
-    UsageEvent, WireApi,
+    UsageEvent, WireApi, discover_source_models, discover_source_models_and_protocol_bindings,
+    discover_source_models_for_protocol_bindings, discover_source_with_protocol_config,
 };
 
 const LOCAL_KEY: &str = "local-test-key";
@@ -42,6 +41,9 @@ mod native_fidelity;
 #[path = "support/native_interactions.rs"]
 mod native_interactions;
 
+#[path = "support/token_count.rs"]
+mod token_count;
+
 #[path = "support/cache_context.rs"]
 mod cache_context;
 
@@ -60,7 +62,7 @@ mod protocol_bridges;
 
 #[path = "support/local_server.rs"]
 mod local_server;
-use local_server::{spawn, TestServer};
+use local_server::{TestServer, spawn};
 #[path = "support/source_discovery.rs"]
 mod source_discovery;
 #[path = "support/stream_limits.rs"]

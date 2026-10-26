@@ -1,6 +1,6 @@
 //! Portable Responses history and restoration of provider-owned assistant turns.
 
-use super::{request_tool_catalog, AdapterContinuationState, AdapterError, AdapterResult};
+use super::{AdapterContinuationState, AdapterError, AdapterResult, request_tool_catalog};
 use crate::WireApi;
 use serde_json::Value;
 use std::borrow::Cow;
@@ -87,7 +87,7 @@ pub(in crate::protocol::adapter) fn is_assistant_item(item: &Value) -> bool {
             && item.get("execution").and_then(Value::as_str) == Some("client"))
         || matches!(
             item.get("type").and_then(Value::as_str),
-            Some("reasoning" | "function_call" | "custom_tool_call")
+            Some("reasoning" | "function_call" | "custom_tool_call" | "web_search_call")
         )
 }
 

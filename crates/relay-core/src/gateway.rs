@@ -1,14 +1,14 @@
-use self::execution::{execute_account_endpoint, AccountExecution};
+use self::execution::{AccountExecution, execute_account_endpoint};
 use self::request::AccountEndpoint;
 use self::request::{
     alpha_search, chat_completions, gemini, messages, models, responses, responses_compact,
 };
-use crate::error_codes;
 use crate::GatewayRuntime;
+use crate::error_codes;
+use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Response, StatusCode};
 use axum::routing::{get, post};
-use axum::Router;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -27,6 +27,7 @@ mod request;
 mod request_body;
 mod response;
 mod streaming;
+mod token_count;
 mod turn_state;
 mod websocket;
 
@@ -243,6 +244,7 @@ pub fn router(runtime: Arc<GatewayRuntime>) -> Router {
         .route("/backend-api/codex/alpha/search", post(alpha_search))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/messages", post(messages))
+        .route("/v1/messages/count_tokens", post(token_count::messages))
         .route("/v1beta/interactions", post(request::interactions))
         .route("/v1beta/models", get(catalog::gemini_models))
         .route(

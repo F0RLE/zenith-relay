@@ -36,10 +36,13 @@ pub(in crate::gateway) async fn gemini(
     axum::extract::Path(model_action): axum::extract::Path<String>,
     request: Request<Body>,
 ) -> Response<Body> {
+    if let Some(model) = model_action.strip_suffix(":countTokens") {
+        return super::super::token_count::gemini(runtime, request, model).await;
+    }
     let Some((model, stream)) = parse_gemini_model_action(&model_action) else {
         return super::super::errors::api_error(
             axum::http::StatusCode::NOT_FOUND,
-            "Gemini endpoint must end with :generateContent or :streamGenerateContent",
+            "Gemini endpoint must end with :generateContent, :streamGenerateContent or :countTokens",
             error_codes::INVALID_REQUEST,
         );
     };

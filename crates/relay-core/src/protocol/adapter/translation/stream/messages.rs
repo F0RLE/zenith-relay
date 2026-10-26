@@ -35,7 +35,35 @@ impl TranslationStream {
                 if self.native_indices.contains_key(&key) {
                     return Err(invalid());
                 }
+                let native_index = self.decoded_response.native_output.len();
                 let block = match native.get("type").and_then(Value::as_str) {
+                    Some("server_tool_use") => {
+                        if !self.translation_request.web_search_allowed {
+                            return Err(invalid());
+                        }
+                        let search = web_search::start(native).map_err(|_| invalid())?;
+                        if self.decoded_response.blocks.iter().any(|block| {
+                            matches!(block, Block::WebSearch(previous) if previous.id == search.id)
+                        }) {
+                            return Err(invalid());
+                        }
+                        let input = native
+                            .get("input")
+                            .filter(|input| {
+                                input.as_object().is_some_and(|fields| !fields.is_empty())
+                            })
+                            .map(Value::to_string)
+                            .unwrap_or_default();
+                        self.search_inputs.insert(native_index, input);
+                        Block::WebSearch(search)
+                    }
+                    Some("web_search_tool_result") => {
+                        web_search::finish(&mut self.decoded_response.blocks, native)
+                            .map_err(|_| invalid())?;
+                        self.native_indices.insert(key, native_index);
+                        self.decoded_response.native_output.push(native.clone());
+                        return Ok(false);
+                    }
                     Some("text") => Block::Text(
                         native
                             .get("text")
@@ -72,7 +100,6 @@ impl TranslationStream {
                     }
                     _ => return Err(invalid()),
                 };
-                let native_index = self.decoded_response.native_output.len();
                 self.native_indices.insert(key.clone(), native_index);
                 self.decoded_response.native_output.push(native.clone());
                 self.insert(key, block)?;
@@ -92,6 +119,22 @@ impl TranslationStream {
                 super::super::super::messages::validate_response_delta(delta)?;
                 match delta.get("type").and_then(Value::as_str) {
                     Some("text_delta" | "thinking_delta" | "input_json_delta") => {}
+                    Some("citations_delta") => {
+                        if !self.translation_request.web_search_allowed
+                            || !matches!(self.decoded_response.blocks[index], Block::Text(_))
+                        {
+                            return Err(invalid());
+                        }
+                        let native = &mut self.decoded_response.native_output[native_index];
+                        if native.get("citations").is_none_or(Value::is_null) {
+                            native["citations"] = json!([]);
+                        }
+                        native["citations"]
+                            .as_array_mut()
+                            .ok_or_else(invalid)?
+                            .push(delta["citation"].clone());
+                        return Ok(false);
+                    }
                     Some("signature_delta") => {
                         let signature = delta
                             .get("signature")
@@ -133,6 +176,12 @@ impl TranslationStream {
                                 .and_then(Value::as_str)
                                 .ok_or_else(invalid)?,
                         ),
+                    (Block::WebSearch(_), Some("input_json_delta")) => {
+                        self.search_inputs
+                            .get_mut(&native_index)
+                            .ok_or_else(invalid)?
+                            .push_str(delta["partial_json"].as_str().ok_or_else(invalid)?);
+                    }
                     _ => return Err(invalid()),
                 }
             }
@@ -155,6 +204,17 @@ impl TranslationStream {
                     Block::Text(text) => {
                         self.decoded_response.native_output[native_index]["text"] =
                             text.clone().into();
+                        let citations = web_search::citations(
+                            &self.decoded_response.native_output[native_index],
+                            text,
+                        )
+                        .map_err(|_| invalid())?;
+                        if !citations.is_empty() {
+                            if !self.translation_request.web_search_allowed {
+                                return Err(invalid());
+                            }
+                            self.decoded_response.citations.insert(index, citations);
+                        }
                     }
                     Block::Reasoning(text) => {
                         self.decoded_response.native_output[native_index]["thinking"] =
@@ -178,6 +238,15 @@ impl TranslationStream {
                         }
                         self.decoded_response.native_output[native_index]["input"] = input;
                     }
+                }
+                if let Block::WebSearch(search) = &mut self.decoded_response.blocks[index] {
+                    let fragments = self
+                        .search_inputs
+                        .remove(&native_index)
+                        .ok_or_else(invalid)?;
+                    let input: Value = serde_json::from_str(&fragments).map_err(|_| invalid())?;
+                    search.query = web_search::query(&input).map_err(|_| invalid())?;
+                    self.decoded_response.native_output[native_index]["input"] = input;
                 }
             }
             "message_delta" => {

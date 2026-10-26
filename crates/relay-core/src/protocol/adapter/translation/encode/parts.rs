@@ -41,7 +41,7 @@ pub(super) fn tool_choice(choice: &ToolChoice, protocol: WireApi) -> AdapterResu
         WireApi::GeminiInteractions => {
             return Err(AdapterError::parameter_unsupported_for(
                 "gemini_interactions.native_only",
-            ))
+            ));
         }
         WireApi::Responses | WireApi::ChatCompletions => match choice {
             ToolChoice::Auto => "auto".into(),
@@ -75,7 +75,7 @@ pub(super) fn output_format(
         WireApi::GeminiInteractions => {
             return Err(AdapterError::parameter_unsupported_for(
                 "gemini_interactions.native_only",
-            ))
+            ));
         }
         WireApi::Responses | WireApi::ChatCompletions => {
             let mut format_value = match format {
@@ -196,6 +196,7 @@ pub(super) fn message_value(message: &Message, protocol: WireApi) -> AdapterResu
         Role::User => "user",
         Role::Assistant => "assistant",
         Role::System => "system",
+        Role::Developer => "developer",
     };
     let mut encoded_items = Vec::new();
     let mut content = Vec::new();
@@ -322,6 +323,11 @@ pub(super) fn flush_responses_content(
 
 pub(super) fn content_block(block: &Block, protocol: WireApi, role: Role) -> AdapterResult<Value> {
     Ok(match block {
+        // Search result ciphertext must come from the originating native turn,
+        // never be reconstructed from the public sources list.
+        Block::WebSearch(_) | Block::CitedText { .. } => {
+            return Err(AdapterError::continuation_missing());
+        }
         Block::Refusal(text)
             if matches!(protocol, WireApi::Responses | WireApi::ChatCompletions) =>
         {
@@ -338,7 +344,7 @@ pub(super) fn content_block(block: &Block, protocol: WireApi, role: Role) -> Ada
             WireApi::GeminiInteractions => {
                 return Err(AdapterError::parameter_unsupported_for(
                     "gemini_interactions.native_only",
-                ))
+                ));
             }
             WireApi::Responses => {
                 let mut responses_image = json!({"type":"input_image","image_url":url});
@@ -389,7 +395,7 @@ pub(super) fn content_block(block: &Block, protocol: WireApi, role: Role) -> Ada
                 WireApi::GeminiInteractions => {
                     return Err(AdapterError::parameter_unsupported_for(
                         "gemini_interactions.native_only",
-                    ))
+                    ));
                 }
                 WireApi::Responses => {
                     let mut file = json!({"type":"input_file"});

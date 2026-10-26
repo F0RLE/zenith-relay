@@ -69,7 +69,7 @@ pub(super) fn request(protocol: WireApi, request_body: &Value) -> AdapterResult<
         WireApi::GeminiInteractions => {
             return Err(AdapterError::parameter_unsupported_for(
                 "gemini_interactions.native_only",
-            ))
+            ));
         }
         WireApi::Responses => responses::decode(request_body)?,
         WireApi::ChatCompletions => chat::decode(request_body)?,
@@ -100,17 +100,18 @@ pub(super) fn request(protocol: WireApi, request_body: &Value) -> AdapterResult<
     if decoded_request
         .messages
         .iter()
-        .all(|message| message.role == Role::System)
+        .all(|message| matches!(message.role, Role::System | Role::Developer))
     {
         return Err(AdapterError::invalid_request());
     }
-    if let Some(ToolChoice::Function(name)) = &decoded_request.tool_choice {
-        if !decoded_request.tools.iter().any(|tool| tool.name == *name) {
-            return Err(AdapterError::unsupported_tool());
-        }
+    if let Some(ToolChoice::Function(name)) = &decoded_request.tool_choice
+        && !decoded_request.tools.iter().any(|tool| tool.name == *name)
+    {
+        return Err(AdapterError::unsupported_tool());
     }
     if matches!(decoded_request.tool_choice, Some(ToolChoice::Required))
         && decoded_request.tools.is_empty()
+        && decoded_request.web_search.is_none()
     {
         return Err(AdapterError::unsupported_tool());
     }
@@ -208,7 +209,7 @@ fn validate_tool_history(messages: &[Message]) -> AdapterResult<()> {
                     }
                 }
                 _ if message.role != Role::Assistant && !pending.is_empty() => {
-                    return Err(AdapterError::invalid_request())
+                    return Err(AdapterError::invalid_request());
                 }
                 _ => {}
             }

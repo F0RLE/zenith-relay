@@ -2,6 +2,159 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn coding_instruction_roles_and_positions_survive_openai_conversion() {
+    let messages = json!([
+        {"role":"system","content":"Keep project boundaries"},
+        {"role":"developer","content":"Use the configured tool contract"},
+        {"role":"user","content":"Read the source"},
+        {"role":"assistant","content":"Source inspected"},
+        {"role":"developer","content":"Apply the new task constraints"},
+        {"role":"user","content":"Continue"}
+    ]);
+    for (client, upstream, input_key, output_key) in [
+        (
+            WireApi::Responses,
+            WireApi::ChatCompletions,
+            "input",
+            "messages",
+        ),
+        (
+            WireApi::ChatCompletions,
+            WireApi::Responses,
+            "messages",
+            "input",
+        ),
+    ] {
+        let request = json!({input_key:messages});
+        for stream in [false, true] {
+            let prepared = prepare(client, upstream, &request, stream);
+            let converted = prepared.upstream_body()[output_key].as_array().unwrap();
+            assert_eq!(converted.len(), messages.as_array().unwrap().len());
+            for (original, translated) in messages.as_array().unwrap().iter().zip(converted) {
+                assert_eq!(original["role"], translated["role"], "{client:?}");
+                assert_eq!(original["content"], translated["content"][0]["text"]);
+            }
+        }
+    }
+}
+
+#[test]
+fn coding_instruction_role_changes_have_distinct_continuation_keys() {
+    for (client, field) in [
+        (WireApi::Responses, "input"),
+        (WireApi::ChatCompletions, "messages"),
+    ] {
+        let mut request = json!({field:[
+            {"role":"developer","content":"Task instructions"},
+            {"role":"user","content":"Continue"}
+        ]});
+        let developer = decode::request(client, &request).unwrap();
+        request[field][0]["role"] = "system".into();
+        let system = decode::request(client, &request).unwrap();
+        assert_ne!(
+            continuation::history_key(client, "test", &developer.messages).unwrap(),
+            continuation::history_key(client, "test", &system.messages).unwrap(),
+            "{client:?}"
+        );
+    }
+}
+
+#[test]
+fn coding_developer_instructions_keep_the_foreign_startup_boundary() {
+    for (client, field) in [
+        (WireApi::Responses, "input"),
+        (WireApi::ChatCompletions, "messages"),
+    ] {
+        for upstream in [WireApi::Messages, WireApi::Gemini] {
+            let mut request = json!({field:[
+                {"role":"user","content":"Read the source"},
+                {"role":"developer","content":"Use synthetic data"}
+            ]});
+            for stream in [false, true] {
+                let prepared = prepare(client, upstream, &request, stream);
+                let instruction = if upstream == WireApi::Messages {
+                    &prepared.upstream_body()["system"][0]["text"]
+                } else {
+                    &prepared.upstream_body()["systemInstruction"]["parts"][0]["text"]
+                };
+                assert_eq!(instruction, "Use synthetic data");
+            }
+            request[field]
+                .as_array_mut()
+                .unwrap()
+                .insert(1, json!({"role":"assistant","content":"Source inspected"}));
+            let parameter = if client == WireApi::Responses {
+                "input[].role"
+            } else {
+                "messages[].role"
+            };
+            assert_eq!(
+                try_convert(client, upstream, &request, false)
+                    .unwrap_err()
+                    .parameter(),
+                Some(parameter)
+            );
+        }
+        let instructions_only = json!({field:[
+            {"role":"system","content":"Root policy"},
+            {"role":"developer","content":"Task instructions"}
+        ]});
+        assert!(decode::request(client, &instructions_only).is_err());
+    }
+}
+
+#[test]
+fn coding_developer_roles_survive_previous_response_continuations() {
+    let request = json!({"input":[
+        {"role":"developer","content":"Initial task constraints"},
+        {"role":"user","content":"Read the source"}
+    ]});
+    let first = prepare(
+        WireApi::Responses,
+        WireApi::ChatCompletions,
+        &request,
+        false,
+    )
+    .translate_response_bytes(&serde_json::to_vec(&output(WireApi::ChatCompletions)).unwrap())
+    .unwrap()
+    .unwrap();
+    let (_, previous) = first.continuation().unwrap();
+    let next = json!({"previous_response_id":first.response_id(),"input":[
+        {"role":"developer","content":"Updated task constraints"},
+        {"role":"user","content":"Continue"}
+    ]});
+    for stream in [false, true] {
+        let prepared = SourceAdapter::between(WireApi::Responses, WireApi::ChatCompletions)
+            .unwrap()
+            .prepare_request(AdapterRequestContext {
+                client_wire_api: WireApi::Responses,
+                request: &next,
+                model: "test",
+                stream,
+                reasoning_mode: MessagesReasoningMode::Adaptive,
+                cache_write_ttl: CacheWriteTtl::Provider,
+                previous: Some(previous.clone()),
+                response_scope: "source-test",
+                response_id_seed: "coding-followup",
+            })
+            .unwrap();
+        let messages = prepared.upstream_body()["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0]["role"], "developer");
+        assert_eq!(
+            messages[0]["content"][0]["text"],
+            "Initial task constraints"
+        );
+        assert_eq!(messages[2]["role"], "assistant");
+        assert_eq!(messages[3]["role"], "developer");
+        assert_eq!(
+            messages[3]["content"][0]["text"],
+            "Updated task constraints"
+        );
+    }
+}
+
+#[test]
 fn chat_refusal_history_preserves_both_documented_forms_without_duplication() {
     for assistant in [
         json!({"role":"assistant","content":null,"refusal":"Cannot help."}),
@@ -58,13 +211,15 @@ fn chat_refusal_history_rejects_conflicting_values_and_non_assistant_roles() {
     ] {
         let request = json!({"messages":[assistant]});
         assert!(decode::request(WireApi::ChatCompletions, &request).is_err());
-        assert!(prepare(
-            WireApi::ChatCompletions,
-            WireApi::ChatCompletions,
-            &request,
-            false
-        )
-        .is_passthrough());
+        assert!(
+            prepare(
+                WireApi::ChatCompletions,
+                WireApi::ChatCompletions,
+                &request,
+                false
+            )
+            .is_passthrough()
+        );
     }
 }
 
@@ -155,10 +310,12 @@ fn translated_chat_refusal_can_be_replayed_before_the_next_user_turn() {
             {"role":"user","content":"A different question"}]});
         for streaming in [false, true] {
             let prepared = prepare(WireApi::ChatCompletions, upstream, &request, streaming);
-            assert!(prepared
-                .upstream_body()
-                .to_string()
-                .contains("Cannot help."));
+            assert!(
+                prepared
+                    .upstream_body()
+                    .to_string()
+                    .contains("Cannot help.")
+            );
         }
     }
 }
@@ -533,16 +690,18 @@ fn reasoning_preserves_schema_and_honors_output_limits() {
     }
     let invalid = json!({"messages":[{"role":"user","content":"Hello"}],"thinking":{"type":"enabled","budget_tokens":2048},"max_tokens":100});
     let parsed = decode::request(WireApi::Messages, &invalid).unwrap();
-    assert!(encode::request(
-        &parsed,
-        WireApi::Messages,
-        "test",
-        false,
-        &Default::default(),
-        MessagesReasoningMode::Adaptive,
-        None,
-    )
-    .is_err());
+    assert!(
+        encode::request(
+            &parsed,
+            WireApi::Messages,
+            "test",
+            false,
+            &Default::default(),
+            MessagesReasoningMode::Adaptive,
+            None,
+        )
+        .is_err()
+    );
 }
 #[test]
 fn messages_thinking_blocks_are_translated_as_reasoning() {
@@ -652,9 +811,11 @@ fn messages_stream_rejects_thinking_without_a_signature() {
     let output = std::iter::from_fn(|| bridge.pop_output())
         .flatten()
         .collect::<Vec<_>>();
-    assert!(String::from_utf8(output)
-        .unwrap()
-        .contains("adapter_upstream_stream_invalid"));
+    assert!(
+        String::from_utf8(output)
+            .unwrap()
+            .contains("adapter_upstream_stream_invalid")
+    );
 }
 #[test]
 fn responses_to_chat_continuation_resolves_results_after_loading_history() {
@@ -784,11 +945,13 @@ fn encrypted_responses_reasoning_without_public_summary_is_preserved_for_replay(
         None,
     )
     .unwrap();
-    assert!(replay.upstream_body["input"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|item| item["encrypted_content"] == "synthetic-encrypted-state"));
+    assert!(
+        replay.upstream_body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["encrypted_content"] == "synthetic-encrypted-state")
+    );
 }
 
 #[test]

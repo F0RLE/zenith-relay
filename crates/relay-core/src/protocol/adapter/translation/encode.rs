@@ -1,5 +1,5 @@
 use super::*;
-use serde_json::{json, Map};
+use serde_json::{Map, json};
 
 pub(super) fn request(
     request: &Request,
@@ -104,7 +104,9 @@ fn conversation(
         .chain(&request.messages)
         .enumerate()
     {
-        if message.role == Role::System && matches!(protocol, WireApi::Messages | WireApi::Gemini) {
+        if matches!(message.role, Role::System | Role::Developer)
+            && matches!(protocol, WireApi::Messages | WireApi::Gemini)
+        {
             if assistant_started {
                 // Initial client attachments can follow a user message, but
                 // later instructions must not govern earlier assistant turns.
@@ -243,7 +245,7 @@ fn write_sampling(
                 WireApi::GeminiInteractions => {
                     return Err(AdapterError::parameter_unsupported_for(
                         "gemini_interactions.native_only",
-                    ))
+                    ));
                 }
                 WireApi::ChatCompletions => "max_completion_tokens",
                 WireApi::Messages => "max_tokens",
@@ -330,7 +332,13 @@ fn write_tools(
     request: &Request,
     protocol: WireApi,
 ) -> AdapterResult<()> {
-    if request.tools.is_empty() {
+    if request.web_search.is_some() && protocol != WireApi::Messages {
+        return Err(AdapterError::unsupported_tool().with_parameter("tools.web_search"));
+    }
+    if request.web_search.is_some() && request.tools.iter().any(|tool| tool.name == "web_search") {
+        return Err(AdapterError::invalid_request().with_parameter("tools.name"));
+    }
+    if request.tools.is_empty() && request.web_search.is_none() {
         return if matches!(
             request.tool_choice,
             Some(ToolChoice::Required | ToolChoice::Function(_))
@@ -340,11 +348,14 @@ fn write_tools(
             Ok(())
         };
     }
-    let declarations = request
+    let mut declarations = request
         .tools
         .iter()
         .map(|tool| parts::function(tool, protocol))
         .collect::<AdapterResult<Vec<_>>>()?;
+    if let Some(search) = &request.web_search {
+        declarations.push(search.clone());
+    }
     request_fields.insert(
         "tools".into(),
         if protocol == WireApi::Gemini {
@@ -369,7 +380,7 @@ fn write_tools(
             WireApi::GeminiInteractions => {
                 return Err(AdapterError::parameter_unsupported_for(
                     "gemini_interactions.native_only",
-                ))
+                ));
             }
             WireApi::Responses | WireApi::ChatCompletions => {
                 request_fields.insert("parallel_tool_calls".into(), parallel.into());

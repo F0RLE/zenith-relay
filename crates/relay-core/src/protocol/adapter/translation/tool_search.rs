@@ -139,7 +139,13 @@ pub(super) fn lower_result(
     block: &mut Block,
     targets: &BTreeMap<String, ClientToolTarget>,
 ) -> AdapterResult<()> {
-    let Block::ToolResult { name, content, .. } = block else {
+    let Block::ToolResult {
+        name,
+        content,
+        raw_text,
+        ..
+    } = block
+    else {
         return Ok(());
     };
     if !targets
@@ -164,5 +170,6 @@ pub(super) fn lower_result(
     )?;
     // Exact definitions stay in the catalog and checkpoint, not twice in the model input.
     *content = vec![Block::Text(json!({"loaded_tools":loaded}).to_string())];
+    *raw_text = false;
     Ok(())
 }

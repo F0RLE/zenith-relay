@@ -12,6 +12,7 @@ mod stream;
 mod tests;
 mod tool_arguments;
 mod tool_search;
+pub(in crate::protocol::adapter) mod web_search;
 
 pub(super) use super::contracts::validate_bridge_fields as checked;
 use super::contracts::{
@@ -60,6 +61,7 @@ pub struct TranslationRequest {
     allowed_tool_names: BTreeSet<String>,
     requires_tool_call: bool,
     parallel_tools: bool,
+    web_search_allowed: bool,
     response_tools: Option<Vec<Value>>,
     response_call_targets: BTreeMap<String, ClientToolTarget>,
     native_turns: BTreeMap<usize, Vec<Value>>,
@@ -92,14 +94,12 @@ impl TranslationRequest {
                     .get("previous_response_id")
                     .and_then(Value::as_str)
                     .is_some_and(|id| !id.is_empty())
-            {
-                if let Some(tools) = context
+                && let Some(tools) = context
                     .previous
                     .as_ref()
                     .and_then(|previous| previous.response_tools.clone())
-                {
-                    effective_request.to_mut()["tools"] = Value::Array(tools);
-                }
+            {
+                effective_request.to_mut()["tools"] = Value::Array(tools);
             }
             super::contracts::request_tool_catalog(
                 effective_request.as_object().expect("request object"),
@@ -146,6 +146,22 @@ impl TranslationRequest {
                 context.reasoning_mode,
             )?
         } else {
+            if decoded_request
+                .messages
+                .iter()
+                .flat_map(|message| &message.blocks)
+                .any(|block| matches!(block, Block::WebSearch(_)))
+            {
+                return Err(AdapterError::continuation_missing());
+            }
+            if decoded_request
+                .messages
+                .iter()
+                .flat_map(|message| &message.blocks)
+                .any(|block| matches!(block, Block::CitedText { .. }))
+            {
+                return Err(AdapterError::parameter_unsupported());
+            }
             // Plain tool history is portable for a confirmed non-reasoning model.
             // Otherwise these protocols may require opaque assistant state that
             // the client cannot reconstruct after a restart or cache expiry.
@@ -208,6 +224,11 @@ impl TranslationRequest {
                 })
                 .collect(),
             parallel_tools: decoded_request.parallel_tools.unwrap_or(true),
+            web_search_allowed: decoded_request.web_search.is_some()
+                && !matches!(
+                    decoded_request.tool_choice,
+                    Some(ToolChoice::None | ToolChoice::Function(_))
+                ),
             response_tools,
             response_call_targets,
             native_turns,
@@ -228,6 +249,13 @@ impl TranslationRequest {
     }
 
     fn complete(&mut self, mut response: Response) -> AdapterResult<TranslatedResponse> {
+        web_search::validate_output(&response.blocks, self.web_search_allowed)?;
+        if self.upstream == WireApi::Messages
+            && !self.web_search_allowed
+            && !response.citations.is_empty()
+        {
+            return Err(AdapterError::upstream_response_invalid().with_parameter("citations"));
+        }
         self.validate_tool_calls(&response.blocks)?;
         let has_calls = response
             .blocks
@@ -238,7 +266,14 @@ impl TranslationRequest {
         {
             return Err(AdapterError::upstream_response_invalid().with_parameter("finish_reason"));
         }
-        if self.requires_tool_call && response.finish == Finish::Stop && !has_calls {
+        if self.requires_tool_call
+            && response.finish == Finish::Stop
+            && !has_calls
+            && !response
+                .blocks
+                .iter()
+                .any(|block| matches!(block, Block::WebSearch(_)))
+        {
             return Err(AdapterError::upstream_response_invalid().with_parameter("tool_choice"));
         }
         for block in &mut response.blocks {
@@ -266,6 +301,14 @@ impl TranslationRequest {
                 .insert(history.len(), response.native_output);
         }
         continuation.upstream_protocol = Some(self.upstream);
+        if self.client == WireApi::Responses && self.upstream == WireApi::Messages {
+            for (index, citations) in response.citations {
+                if let Some(Block::Text(text)) = response.blocks.get_mut(index) {
+                    let text = std::mem::take(text);
+                    response.blocks[index] = Block::CitedText { text, citations };
+                }
+            }
+        }
         history.push(Message {
             role: Role::Assistant,
             blocks: response.blocks,
@@ -280,13 +323,13 @@ impl TranslationRequest {
             .iter()
             .flat_map(|message| &message.blocks)
         {
-            if let Block::ToolCall { id, name, .. } = block {
-                if let Some(target) = self.client_tools.get(name) {
-                    continuation
-                        .response_call_targets
-                        .entry(id.clone())
-                        .or_insert_with(|| target.clone());
-                }
+            if let Block::ToolCall { id, name, .. } = block
+                && let Some(target) = self.client_tools.get(name)
+            {
+                continuation
+                    .response_call_targets
+                    .entry(id.clone())
+                    .or_insert_with(|| target.clone());
             }
         }
         if continuation.reusable {

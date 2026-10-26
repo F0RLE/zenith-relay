@@ -1,6 +1,6 @@
 use super::super::{
-    checked, optional_bool, optional_u64, required_text, AdapterError, AdapterResult, Block,
-    Message, Reasoning, Request, Role,
+    AdapterError, AdapterResult, Block, Message, Reasoning, Request, Role, checked, optional_bool,
+    optional_u64, required_text,
 };
 use crate::WireApi;
 use serde_json::Value;
@@ -136,7 +136,7 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
                         WireApi::ChatCompletions,
                     )?,
                     is_error: false,
-                    raw_text: false,
+                    raw_text: true,
                 }],
             });
             continue;

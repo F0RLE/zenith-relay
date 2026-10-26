@@ -164,14 +164,13 @@ impl SourceAdapter {
         if self.is_passthrough() {
             return Ok(None);
         }
-        if client == WireApi::Responses {
-            if let Some(key) = request
+        if client == WireApi::Responses
+            && let Some(key) = request
                 .get("previous_response_id")
                 .and_then(Value::as_str)
                 .filter(|id| !id.trim().is_empty())
-            {
-                return Ok(Some(key.to_owned()));
-            }
+        {
+            return Ok(Some(key.to_owned()));
         }
         super::super::translation::continuation_key(client, request, model)
     }

@@ -1,8 +1,8 @@
 use super::*;
 use serde_json::json;
 
-#[derive(Clone, Debug, PartialEq)]
-pub(super) struct UrlCitation {
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub(in crate::protocol::adapter) struct UrlCitation {
     pub start: usize,
     pub end: usize,
     url: String,

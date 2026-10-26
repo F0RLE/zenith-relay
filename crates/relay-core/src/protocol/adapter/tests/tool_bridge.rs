@@ -492,7 +492,7 @@ fn messages_bridge_rejects_tool_result_for_an_unknown_call() {
     assert_eq!(error.code(), "adapter_continuation_mismatch");
 }
 #[test]
-fn messages_bridge_rejects_hosted_tools_before_sending_the_request() {
+fn messages_bridge_rejects_a_forced_undeclared_function_with_hosted_search() {
     let error = prepare_responses_to_messages(
         &json!({
             "model": "claude-test",
@@ -509,13 +509,13 @@ fn messages_bridge_rejects_hosted_tools_before_sending_the_request() {
     assert_eq!(error.code(), "adapter_tool_unsupported");
 }
 #[test]
-fn messages_bridge_rejects_hosted_tools_even_beside_client_tools() {
+fn messages_bridge_rejects_unsupported_hosted_tools_even_beside_client_tools() {
     let request = prepare_responses_to_messages(
         &json!({
             "model": "claude-test",
             "input": "inspect",
             "tools": [
-                {"type": "web_search"},
+                {"type": "file_search", "vector_store_ids": ["vs_synthetic"]},
                 {
                     "type": "function",
                     "name": "run_command",
@@ -564,8 +564,10 @@ fn messages_bridge_flattens_namespace_tools_from_codex_catalogs() {
     assert_eq!(tools.len(), 1);
     let name = tools[0]["name"].as_str().unwrap();
     assert!(name.starts_with("relay_ns_"));
-    assert!(tools[0]["description"]
-        .as_str()
-        .unwrap()
-        .starts_with("Namespace `mcp__synthetic` tool `lookup`."));
+    assert!(
+        tools[0]["description"]
+            .as_str()
+            .unwrap()
+            .starts_with("Namespace `mcp__synthetic` tool `lookup`.")
+    );
 }

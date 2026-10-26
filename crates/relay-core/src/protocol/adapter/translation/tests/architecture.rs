@@ -65,6 +65,21 @@ fn hosted_tools_are_never_silently_dropped_at_any_catalog_depth() {
             let prepared = try_prepare(upstream, &request);
             if upstream == WireApi::Responses {
                 assert_eq!(prepared.unwrap().upstream_body()["tools"], tools);
+            } else if upstream == WireApi::Messages
+                && tools
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|tool| tool["type"] == "web_search")
+            {
+                let mapped = prepared.unwrap();
+                assert!(
+                    mapped.upstream_body()["tools"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|tool| tool["type"] == "web_search_20250305")
+                );
             } else {
                 assert_eq!(
                     prepared.unwrap_err().code(),
@@ -307,15 +322,19 @@ fn structured_output_keeps_envelope_and_schema_descriptions() {
         &json!({"input":"Hello","response_format":format}),
     )
     .unwrap();
-    assert!(alias
-        .upstream_body()
-        .pointer("/generationConfig/responseJsonSchema")
-        .is_some());
-    assert!(try_prepare(
-        WireApi::Gemini,
-        &json!({"input":"Hello","text":{"format":format},"response_format":format})
-    )
-    .is_err());
+    assert!(
+        alias
+            .upstream_body()
+            .pointer("/generationConfig/responseJsonSchema")
+            .is_some()
+    );
+    assert!(
+        try_prepare(
+            WireApi::Gemini,
+            &json!({"input":"Hello","text":{"format":format},"response_format":format})
+        )
+        .is_err()
+    );
 }
 
 pub(super) fn tool_reply(protocol: WireApi) -> Value {
@@ -558,17 +577,18 @@ fn custom_result_text_and_kind_survive_catalog_replacement_on_all_upstreams() {
         let empty_request = make_request("custom_tool_call_output", &json!([]));
         let empty = resume(&empty_request).unwrap();
         let body = empty.upstream_body();
-        let empty_content = match upstream {
-            WireApi::ChatCompletions => {
-                &body["messages"].as_array().unwrap().last().unwrap()["content"]
-            }
-            WireApi::Messages => {
-                &body["messages"].as_array().unwrap().last().unwrap()["content"][0]["content"]
-            }
-            WireApi::Gemini => &body["contents"].as_array().unwrap().last().unwrap()["parts"][0]
-                ["functionResponse"]["response"]["output"],
-            _ => unreachable!(),
-        };
+        let empty_content =
+            match upstream {
+                WireApi::ChatCompletions => {
+                    &body["messages"].as_array().unwrap().last().unwrap()["content"]
+                }
+                WireApi::Messages => {
+                    &body["messages"].as_array().unwrap().last().unwrap()["content"][0]["content"]
+                }
+                WireApi::Gemini => &body["contents"].as_array().unwrap().last().unwrap()["parts"]
+                    [0]["functionResponse"]["response"]["output"],
+                _ => unreachable!(),
+            };
         assert_eq!(empty_content, "");
         empty
             .translate_response_bytes(&serde_json::to_vec(&super::output(upstream)).unwrap())

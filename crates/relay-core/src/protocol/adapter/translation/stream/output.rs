@@ -10,10 +10,9 @@ impl TranslationStream {
             if let Some(response) = event_payload
                 .get_mut("response")
                 .and_then(Value::as_object_mut)
+                && !self.translation_request.metadata.is_empty()
             {
-                if !self.translation_request.metadata.is_empty() {
-                    response.insert("metadata".into(), json!(self.translation_request.metadata));
-                }
+                response.insert("metadata".into(), json!(self.translation_request.metadata));
             }
             event_payload["sequence_number"] = self.sequence.into();
             self.sequence += 1;
@@ -47,9 +46,18 @@ impl TranslationStream {
         }
         for block_index in 0..self.decoded_response.blocks.len() {
             let current = &self.decoded_response.blocks[block_index];
+            // Search results carry provider-owned handles. Do not publish a
+            // completed item, or later output, until its result is validated.
+            if matches!(current, Block::WebSearch(search) if search.sources.is_none()) {
+                break;
+            }
             if matches!(
                 current,
-                Block::Text(_) | Block::Reasoning(_) | Block::Refusal(_) | Block::ToolCall { .. }
+                Block::Text(_)
+                    | Block::Reasoning(_)
+                    | Block::Refusal(_)
+                    | Block::ToolCall { .. }
+                    | Block::WebSearch(_)
             ) {
                 let previous = self.emitted.get(block_index);
                 if self.translation_request.client == WireApi::Messages {
@@ -131,6 +139,7 @@ impl TranslationStream {
             // Reborrow after block_start: validation only needs the previous
             // snapshot by reference, not another copy of its growing strings.
             match (&block, self.emitted.get(block_index)) {
+                (Block::WebSearch(_), None) => {}
                 (Block::Refusal(text), None) => self.refusal_delta(block_index, text)?,
                 (Block::Text(text), None) | (Block::Reasoning(text), None) => {
                     self.text_delta(block_index, text, matches!(block, Block::Reasoning(_)))?
@@ -233,10 +242,11 @@ impl TranslationStream {
             WireApi::GeminiInteractions => {
                 return Err(AdapterError::parameter_unsupported_for(
                     "gemini_interactions.native_only",
-                ))
+                ));
             }
             WireApi::Responses => {
                 let output_item = match block {
+                    Block::WebSearch(search) => search.item(false)?,
                     Block::Text(_) | Block::Refusal(_) => {
                         json!({"type":"message","id":format!("msg_{}_{output_index}",self.decoded_response.id),"role":"assistant","status":"in_progress","content":[]})
                     }
@@ -271,6 +281,17 @@ impl TranslationStream {
                     "response.output_item.added",
                     json!({"type":"response.output_item.added","output_index":output_index,"item":output_item}),
                 );
+                if let Block::WebSearch(search) = block {
+                    for kind in [
+                        "response.web_search_call.in_progress",
+                        "response.web_search_call.searching",
+                    ] {
+                        self.event(
+                            kind,
+                            json!({"type":kind,"output_index":output_index,"item_id":search.id}),
+                        );
+                    }
+                }
                 if matches!(block, Block::Refusal(_)) {
                     self.event("response.content_part.added", json!({"type":"response.content_part.added","output_index":output_index,"item_id":format!("msg_{}_{output_index}",self.decoded_response.id),"content_index":0,"part":{"type":"refusal","refusal":""}}));
                 } else if matches!(block, Block::Text(_)) {
@@ -357,22 +378,20 @@ impl TranslationStream {
         if arguments.is_empty() {
             return;
         }
-        if self.translation_request.client == WireApi::Responses {
-            if let Block::ToolCall { name, .. } = &self.decoded_response.blocks[output_index] {
-                if self
-                    .translation_request
-                    .client_tools
-                    .get(name)
-                    .is_some_and(|target| {
-                        matches!(
-                            target.kind,
-                            ResponsesToolKind::Custom | ResponsesToolKind::ToolSearch
-                        )
-                    })
-                {
-                    return;
-                }
-            }
+        if self.translation_request.client == WireApi::Responses
+            && let Block::ToolCall { name, .. } = &self.decoded_response.blocks[output_index]
+            && self
+                .translation_request
+                .client_tools
+                .get(name)
+                .is_some_and(|target| {
+                    matches!(
+                        target.kind,
+                        ResponsesToolKind::Custom | ResponsesToolKind::ToolSearch
+                    )
+                })
+        {
+            return;
         }
         match self.translation_request.client {
             WireApi::Responses => self.event("response.function_call_arguments.delta", json!({"type":"response.function_call_arguments.delta","output_index":output_index,"item_id":format!("fc_{}_{output_index}",self.decoded_response.id),"delta":arguments})),
@@ -395,7 +414,7 @@ impl TranslationStream {
             WireApi::GeminiInteractions => {
                 return Err(AdapterError::parameter_unsupported_for(
                     "gemini_interactions.native_only",
-                ))
+                ));
             }
             WireApi::Responses => {
                 for (output_index, output_item) in completed_response
@@ -429,6 +448,9 @@ impl TranslationStream {
                             self.event("response.custom_tool_call_input.done", json!({"type":"response.custom_tool_call_input.done","output_index":output_index,"item_id":output_item["id"],"input":output_item["input"]}));
                         }
                         Some("tool_search_call") => {}
+                        Some("web_search_call") => {
+                            self.event("response.web_search_call.completed", json!({"type":"response.web_search_call.completed","output_index":output_index,"item_id":output_item["id"]}));
+                        }
                         Some("reasoning") => {
                             self.event("response.reasoning_summary_text.done", json!({"type":"response.reasoning_summary_text.done","output_index":output_index,"item_id":output_item["id"],"summary_index":0,"text":output_item["summary"][0]["text"]}));
                             self.event("response.reasoning_summary_part.done", json!({"type":"response.reasoning_summary_part.done","output_index":output_index,"item_id":output_item["id"],"summary_index":0,"part":output_item["summary"][0]}));

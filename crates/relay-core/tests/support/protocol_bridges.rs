@@ -154,10 +154,12 @@ async fn responses_to_messages_bridge_translates_tool_turn_and_preserves_continu
     assert_eq!(first.status(), StatusCode::OK);
     let first_body: Value = first.json().await.unwrap();
     assert_eq!(first_body["object"], "response");
-    assert!(first_body["id"]
-        .as_str()
-        .unwrap()
-        .starts_with("resp_bridge_"));
+    assert!(
+        first_body["id"]
+            .as_str()
+            .unwrap()
+            .starts_with("resp_bridge_")
+    );
     assert_eq!(first_body["output"][0]["type"], "function_call");
     assert_eq!(first_body["output"][0]["name"], "read_file");
     let response_id = first_body["id"].as_str().unwrap().to_string();
@@ -429,9 +431,11 @@ async fn source_can_mix_native_and_bridged_responses_models() {
         .unwrap();
     assert_eq!(bridged.status(), StatusCode::OK);
     let bridged_body: Value = bridged.json().await.unwrap();
-    assert!(bridged_body["id"]
-        .as_str()
-        .is_some_and(|id| id.starts_with("resp_bridge_")));
+    assert!(
+        bridged_body["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("resp_bridge_"))
+    );
     assert_eq!(
         bridged_body["output"][0]["content"][0]["text"],
         "Native Messages response"
@@ -557,15 +561,21 @@ async fn responses_to_gemini_bridge_uses_native_routes_for_plain_and_streaming_r
         requests[1].path,
         "/v1/models/gemini-test:streamGenerateContent"
     );
-    assert!(requests
-        .iter()
-        .all(|request| request.authorization.is_none()));
-    assert!(requests
-        .iter()
-        .all(|request| request.x_goog_api_key.as_deref() == Some(SOURCE_KEY)));
-    assert!(requests
-        .iter()
-        .all(|request| request.x_oai_attestation.is_none()));
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.authorization.is_none())
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.x_goog_api_key.as_deref() == Some(SOURCE_KEY))
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.x_oai_attestation.is_none())
+    );
     drop(requests);
 
     let bodies = state.bodies.lock().unwrap();
@@ -1042,14 +1052,14 @@ async fn legacy_disabled_reasoning_mode_is_ignored_and_unmatched_forced_tools_ar
         assert_eq!(bodies[0]["thinking"]["type"], "adaptive");
     }
 
-    // A hosted tool has no Messages equivalent: reject it before upstream I/O.
+    // File search has no Messages equivalent: reject it before upstream I/O.
     let hosted_only = client
         .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
         .json(&json!({
             "model": "claude-test",
             "input": "tool",
-            "tools": [{"type": "web_search"}]
+            "tools": [{"type": "file_search", "vector_store_ids": ["vs_synthetic"]}]
         }))
         .send()
         .await

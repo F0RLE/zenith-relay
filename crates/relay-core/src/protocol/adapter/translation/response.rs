@@ -1,5 +1,5 @@
 use super::*;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
 mod upstream;
@@ -229,10 +229,10 @@ pub(super) fn usage_value(protocol: WireApi, usage: &Usage) -> Value {
     if let Some(count) = output_count {
         usage_payload.insert(output.into(), count.into());
     }
-    if !total.is_empty() {
-        if let Some(count) = usage.total {
-            usage_payload.insert(total.into(), count.into());
-        }
+    if !total.is_empty()
+        && let Some(count) = usage.total
+    {
+        usage_payload.insert(total.into(), count.into());
     }
     if let Some(count) = usage.cached {
         usage_payload.insert(
@@ -244,17 +244,17 @@ pub(super) fn usage_value(protocol: WireApi, usage: &Usage) -> Value {
             },
         );
     }
-    if let Some(count) = usage.reasoning {
-        if !reasoning.is_empty() {
-            usage_payload.insert(
-                reasoning.into(),
-                if protocol == WireApi::Gemini {
-                    count.into()
-                } else {
-                    json!({"reasoning_tokens":count})
-                },
-            );
-        }
+    if let Some(count) = usage.reasoning
+        && !reasoning.is_empty()
+    {
+        usage_payload.insert(
+            reasoning.into(),
+            if protocol == WireApi::Gemini {
+                count.into()
+            } else {
+                json!({"reasoning_tokens":count})
+            },
+        );
     }
     if matches!(
         protocol,
@@ -324,6 +324,7 @@ pub(super) fn encode(
     let mut calls = Vec::new();
     for (index, block) in response.blocks.iter().enumerate() {
         match (protocol, block) {
+            (WireApi::Responses, Block::WebSearch(search)) => content.push(search.item(true)?),
             (WireApi::Responses, Block::Text(text)) => content.push(json!({"type":"message","id":format!("msg_{}_{index}",response.id),"role":"assistant","status":"completed","content":[{"type":"output_text","text":text,"annotations":response.citations.get(&index).map(|items| items.iter().map(citations::UrlCitation::responses_value).collect::<Vec<_>>()).unwrap_or_default()}]})),
             (WireApi::Responses, Block::Refusal(text)) => content.push(json!({"type":"message","id":format!("msg_{}_{index}",response.id),"role":"assistant","status":"completed","content":[{"type":"refusal","refusal":text}]})),
             (WireApi::Responses, Block::ToolCall { id, name, arguments }) => {
@@ -373,7 +374,7 @@ pub(super) fn encode(
         WireApi::GeminiInteractions => {
             return Err(AdapterError::parameter_unsupported_for(
                 "gemini_interactions.native_only",
-            ))
+            ));
         }
         WireApi::Responses => {
             let incomplete = matches!(response.finish, Finish::Length | Finish::Filter);

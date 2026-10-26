@@ -36,7 +36,7 @@ pub(in crate::protocol::adapter::translation) fn decode(
         WireApi::GeminiInteractions => {
             return Err(AdapterError::parameter_unsupported_for(
                 "gemini_interactions.native_only",
-            ))
+            ));
         }
         WireApi::ChatCompletions => {
             decode_chat_completion(upstream_response, protocol, &mut response, invalid)?
@@ -375,6 +375,14 @@ fn decode_messages(
         super::super::super::messages::validate_response_block(message_block)?;
         match message_block.get("type").and_then(Value::as_str) {
             Some("text") => {
+                let text = message_block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .ok_or_else(invalid)?;
+                let citations = web_search::citations(message_block, text)?;
+                if !citations.is_empty() {
+                    response.citations.insert(response.blocks.len(), citations);
+                }
                 response.blocks.push(Block::Text(
                     message_block
                         .get("text")
@@ -395,6 +403,14 @@ fn decode_messages(
             }
             Some("redacted_thinking") => {
                 required_text(message_block, "data").map_err(|_| invalid())?;
+            }
+            Some("server_tool_use") => {
+                let mut search = web_search::start(message_block)?;
+                search.query = web_search::query(&message_block["input"])?;
+                response.blocks.push(Block::WebSearch(search));
+            }
+            Some("web_search_tool_result") => {
+                web_search::finish(&mut response.blocks, message_block)?;
             }
             Some("tool_use") => {
                 response.blocks.push(Block::ToolCall {

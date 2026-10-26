@@ -1,6 +1,6 @@
 //! Schema dialect conversion visits schema positions, never literal user data.
 use super::{AdapterError, AdapterResult};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[cfg(test)]
 mod tests;
@@ -64,21 +64,21 @@ fn transform(schema: &mut Value, direction: Direction) -> AdapterResult<()> {
                 "minProperties",
                 "maxProperties",
             ] {
-                if let Some(value) = fields.get_mut(keyword) {
-                    if let Some(text) = value.as_str() {
-                        *value = text
-                            .parse::<u64>()
-                            .map_err(|_| AdapterError::invalid_request())?
-                            .into();
-                    }
+                if let Some(value) = fields.get_mut(keyword)
+                    && let Some(text) = value.as_str()
+                {
+                    *value = text
+                        .parse::<u64>()
+                        .map_err(|_| AdapterError::invalid_request())?
+                        .into();
                 }
             }
-            if let Some(ordering) = fields.shift_remove("propertyOrdering") {
-                if !ordering.as_array().is_some_and(Vec::is_empty) {
-                    return Err(AdapterError::parameter_unsupported_for(
-                        "schema.propertyOrdering",
-                    ));
-                }
+            if let Some(ordering) = fields.shift_remove("propertyOrdering")
+                && !ordering.as_array().is_some_and(Vec::is_empty)
+            {
+                return Err(AdapterError::parameter_unsupported_for(
+                    "schema.propertyOrdering",
+                ));
             }
         }
     }

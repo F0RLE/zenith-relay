@@ -12,6 +12,7 @@ mod terminal;
 mod tool_arguments;
 mod tools;
 mod validation;
+mod web_search;
 
 mod architecture;
 mod chains;

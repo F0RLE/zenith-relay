@@ -1,8 +1,8 @@
 use super::super::{
-    checked, optional_bool, required_text, AdapterError, AdapterResult, Block, Role,
+    AdapterError, AdapterResult, Block, Role, checked, optional_bool, required_text,
 };
-use crate::url_has_userinfo;
 use crate::WireApi;
+use crate::url_has_userinfo;
 use serde_json::Value;
 
 mod documents;
@@ -42,7 +42,7 @@ pub(super) fn role(message_part: &Value, protocol: WireApi) -> AdapterResult<Rol
         (WireApi::Responses | WireApi::ChatCompletions | WireApi::Messages, Some("system")) => {
             Ok(Role::System)
         }
-        (WireApi::Responses | WireApi::ChatCompletions, Some("developer")) => Ok(Role::System),
+        (WireApi::Responses | WireApi::ChatCompletions, Some("developer")) => Ok(Role::Developer),
         _ => Err(AdapterError::invalid_request()),
     }
 }
@@ -105,6 +105,23 @@ pub(super) fn block(
                 .and_then(Value::as_array)
                 .is_some_and(|annotation_items| !annotation_items.is_empty())
             {
+                if protocol == WireApi::Responses
+                    && content_part.get("type").and_then(Value::as_str) == Some("output_text")
+                {
+                    let text = content_part
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .ok_or_else(AdapterError::invalid_request)?;
+                    let citations = super::super::citations::parse_annotations(
+                        content_part.get("annotations"),
+                        text,
+                    )
+                    .map_err(|_| AdapterError::parameter_unsupported())?;
+                    return Ok(Block::CitedText {
+                        text: text.into(),
+                        citations,
+                    });
+                }
                 return Err(AdapterError::parameter_unsupported());
             }
             Ok(Block::Text(
@@ -153,7 +170,7 @@ pub(super) fn block(
                     protocol,
                 )?,
                 is_error: optional_bool(content_part, "is_error")?.unwrap_or(false),
-                raw_text: false,
+                raw_text: true,
             })
         }
         _ => Err(AdapterError::parameter_unsupported()),

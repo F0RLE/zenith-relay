@@ -1,6 +1,6 @@
 //! Reject Responses controls that a bridged provider cannot represent.
 
-use super::{request_tool_catalog, AdapterError, AdapterResult};
+use super::{AdapterError, AdapterResult, request_tool_catalog};
 use crate::WireApi;
 use serde_json::Value;
 
@@ -142,13 +142,12 @@ pub(in crate::protocol::adapter) fn validate_responses_bridge_request(
             return Err(AdapterError::invalid_request());
         }
     }
-    if let Some(reasoning) = request_object.get("reasoning").and_then(Value::as_object) {
-        if reasoning
+    if let Some(reasoning) = request_object.get("reasoning").and_then(Value::as_object)
+        && reasoning
             .get("effort")
             .is_some_and(|effort_value| !effort_value.is_null() && !effort_value.is_string())
-        {
-            return Err(AdapterError::invalid_request());
-        }
+    {
+        return Err(AdapterError::invalid_request());
     }
     if let Some(format) = request
         .pointer("/text/format")
@@ -207,14 +206,13 @@ fn validate_responses_transport_controls(request: &Value) -> AdapterResult<()> {
     if let Some(metadata) = request
         .get("client_metadata")
         .filter(|metadata_value| !metadata_value.is_null())
-    {
-        if metadata.as_object().is_none_or(|metadata_fields| {
+        && metadata.as_object().is_none_or(|metadata_fields| {
             metadata_fields
                 .values()
                 .any(|metadata_field| !metadata_field.is_string())
-        }) {
-            return Err(AdapterError::invalid_request().with_parameter("client_metadata"));
-        }
+        })
+    {
+        return Err(AdapterError::invalid_request().with_parameter("client_metadata"));
     }
     // `include` asks for optional output fields; it does not supply encrypted
     // history. Bridges keep their native continuation state locally. Never
@@ -226,20 +224,30 @@ fn validate_responses_transport_controls(request: &Value) -> AdapterResult<()> {
         let include_items = include
             .as_array()
             .ok_or_else(|| AdapterError::invalid_request().with_parameter("include"))?;
-        if include_items
-            .iter()
-            .any(|include_item| include_item.as_str() != Some("reasoning.encrypted_content"))
-        {
+        if include_items.iter().any(|include_item| {
+            include_item.as_str() != Some("reasoning.encrypted_content")
+                && !(include_item.as_str() == Some("web_search_call.action.sources")
+                    && request
+                        .get("tools")
+                        .and_then(Value::as_array)
+                        .is_some_and(|tools| {
+                            tools.iter().any(|tool| {
+                                matches!(
+                                    tool.get("type").and_then(Value::as_str),
+                                    Some("web_search" | "web_search_2025_08_26")
+                                )
+                            })
+                        }))
+        }) {
             return Err(AdapterError::parameter_unsupported_for("include"));
         }
     }
     if let Some(summary) = request
         .pointer("/reasoning/summary")
         .filter(|summary_value| !summary_value.is_null())
+        && summary != "auto"
     {
-        if summary != "auto" {
-            return Err(AdapterError::parameter_unsupported_for("reasoning.summary"));
-        }
+        return Err(AdapterError::parameter_unsupported_for("reasoning.summary"));
     }
     if request
         .get("input")

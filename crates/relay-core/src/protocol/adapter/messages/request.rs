@@ -4,7 +4,7 @@ use super::{
     TranslationRequest,
 };
 use crate::{AdapterRequestContext, CacheWriteTtl, PreparedAdapterRequest, SourceAdapter, WireApi};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 8_192;
@@ -116,10 +116,8 @@ pub(crate) fn apply_cache_write_ttl(
     let prefix_marked = fields
         .get_mut("system")
         .is_some_and(|value| set_last_cache_control(value, ttl));
-    if !prefix_marked {
-        if let Some(tools) = fields.get_mut("tools") {
-            set_last_cache_control(tools, ttl);
-        }
+    if !prefix_marked && let Some(tools) = fields.get_mut("tools") {
+        set_last_cache_control(tools, ttl);
     }
     if let Some(content) = fields
         .get_mut("messages")

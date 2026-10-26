@@ -60,6 +60,10 @@ pub(super) fn history_key(
         for block in &message.blocks {
             let value = match block {
                 Block::Reasoning(_) => continue,
+                Block::WebSearch(search) => json!({"web_search": search}),
+                Block::CitedText { text, citations } => {
+                    json!({"cited_text": text, "citations": citations})
+                }
                 Block::Text(text) | Block::Refusal(text) if text.is_empty() => continue,
                 Block::Text(text) | Block::Refusal(text) => json!({"text": text}),
                 Block::Image { url, detail } => {
@@ -132,14 +136,14 @@ pub(super) fn history_key(
 /// same comparison normalization within a message and across its boundaries;
 /// the retained portable history and native blocks remain untouched.
 fn append_history_block(blocks: &mut Vec<Value>, value: Value) {
-    if let Some(previous) = blocks.last_mut().and_then(Value::as_object_mut) {
-        if let (Some(Value::String(previous_text)), Some(text)) = (
+    if let Some(previous) = blocks.last_mut().and_then(Value::as_object_mut)
+        && let (Some(Value::String(previous_text)), Some(text)) = (
             previous.get_mut("text"),
             value.get("text").and_then(Value::as_str),
-        ) {
-            previous_text.push_str(text);
-            return;
-        }
+        )
+    {
+        previous_text.push_str(text);
+        return;
     }
     blocks.push(value);
 }

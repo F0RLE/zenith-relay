@@ -1,7 +1,7 @@
 //! Portable conversation semantics shared by the four protocol codecs.
 //! Provider-owned blocks stay in `Response::native_output`, never in text.
 
-use super::{citations, ClientToolTarget, ToolChoice, WireApi};
+use super::{ClientToolTarget, ToolChoice, WireApi, citations};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -9,6 +9,12 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub(in crate::protocol::adapter) enum Block {
     Text(String),
+    /// Public citations are part of continuation identity. Their provider-owned
+    /// handles still replay only from the matching native turn.
+    CitedText {
+        text: String,
+        citations: Vec<citations::UrlCitation>,
+    },
     Image {
         url: String,
         detail: Option<String>,
@@ -28,11 +34,13 @@ pub(in crate::protocol::adapter) enum Block {
         name: String,
         content: Vec<Block>,
         is_error: bool,
-        /// Custom-tool output is literal text, even when it looks like JSON.
+        /// Client output is literal text, even when it looks like JSON. Only
+        /// native structured results and Relay-owned discovery use JSON objects.
         raw_text: bool,
     },
     Reasoning(String),
     Refusal(String),
+    WebSearch(super::web_search::SearchCall),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -40,6 +48,7 @@ pub(in crate::protocol::adapter) enum Role {
     User,
     Assistant,
     System,
+    Developer,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -82,6 +91,7 @@ pub(super) struct Request {
     pub(super) instructions: Option<Message>,
     pub(super) messages: Vec<Message>,
     pub(super) tools: Vec<Function>,
+    pub(super) web_search: Option<Value>,
     /// Responses tool kind, local name and namespace, keyed by upstream name.
     pub(super) client_tools: BTreeMap<String, ClientToolTarget>,
     pub(super) tool_choice: Option<ToolChoice>,

@@ -24,6 +24,7 @@ pub struct TranslationStream {
     gemini_completion: crate::protocol::completion::GeminiStreamCompletion,
     native_indices: BTreeMap<String, usize>,
     native_closed: BTreeSet<usize>,
+    search_inputs: BTreeMap<usize, String>,
     gemini_calls: super::super::gemini::GeminiFunctionCalls,
     closed: BTreeSet<usize>,
     emitted: Vec<Block>,
@@ -63,6 +64,7 @@ impl TranslationStream {
             gemini_completion: crate::protocol::completion::GeminiStreamCompletion::default(),
             native_indices: BTreeMap::new(),
             native_closed: BTreeSet::new(),
+            search_inputs: BTreeMap::new(),
             gemini_calls: super::super::gemini::GeminiFunctionCalls::default(),
             closed: BTreeSet::new(),
             emitted: Vec::new(),
@@ -172,7 +174,7 @@ impl TranslationStream {
             WireApi::GeminiInteractions => {
                 return Err(AdapterError::parameter_unsupported_for(
                     "gemini_interactions.native_only",
-                ))
+                ));
             }
             WireApi::ChatCompletions => self.chat(&event_payload)?,
             WireApi::Responses => self.responses(&event_payload).map_err(|error| {
@@ -266,10 +268,10 @@ impl TranslationStream {
             && self.decoded_response.finish == Finish::Tools
         {
             for block in &mut self.decoded_response.blocks {
-                if let Block::ToolCall { arguments, .. } = block {
-                    if arguments.is_empty() {
-                        *arguments = "{}".into();
-                    }
+                if let Block::ToolCall { arguments, .. } = block
+                    && arguments.is_empty()
+                {
+                    *arguments = "{}".into();
                 }
             }
         }
@@ -295,11 +297,10 @@ impl TranslationStream {
                 .and_then(|error| error.get("type"))
                 .and_then(Value::as_str)
                 == Some("response.failed")
+            && let Some(event) = self.upstream_error.clone()
         {
-            if let Some(event) = self.upstream_error.clone() {
-                self.event("response.failed", event);
-                return;
-            }
+            self.event("response.failed", event);
+            return;
         }
         // Adapter errors contain only static diagnostics. Keep their cause and
         // field in the error envelope without echoing any provider payload.

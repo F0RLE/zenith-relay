@@ -1,8 +1,8 @@
 //! Lower client-owned Messages discovery, not a provider-hosted search engine.
 //! The client chooses what to load. Native Messages routes never enter here.
-use super::super::super::{optional_bool, required_text, AdapterError, AdapterResult};
+use super::super::super::{AdapterError, AdapterResult, optional_bool, required_text};
 use crate::WireApi;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{borrow::Cow, collections::BTreeSet};
 
 pub(super) fn prepare(request: &Value) -> AdapterResult<Cow<'_, Value>> {
@@ -76,12 +76,12 @@ pub(super) fn prepare(request: &Value) -> AdapterResult<Cow<'_, Value>> {
         {
             // A retained call also establishes that the client already loaded
             // the tool, including after its earlier discovery was compacted.
-            if assistant_call && block["type"] == "tool_use" {
-                if let Some(name) = block.get("name").and_then(Value::as_str) {
-                    if names.contains(name) {
-                        loaded.insert(name.to_owned());
-                    }
-                }
+            if assistant_call
+                && block["type"] == "tool_use"
+                && let Some(name) = block.get("name").and_then(Value::as_str)
+                && names.contains(name)
+            {
+                loaded.insert(name.to_owned());
             }
             if block["type"] != "tool_result" {
                 continue;

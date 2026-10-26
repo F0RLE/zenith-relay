@@ -1,9 +1,9 @@
 use super::super::{
-    checked, optional_bool, required_text, validate_direct_tool_execution, AdapterError,
-    AdapterResult, Block, Message, Reasoning, Request, Role,
+    AdapterError, AdapterResult, Block, Message, Reasoning, Request, Role, checked, optional_bool,
+    required_text, validate_direct_tool_execution,
 };
 use crate::WireApi;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
     super::super::super::contracts::validate_responses_bridge_request(
@@ -62,6 +62,14 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
                 // Tools loaded during the turn are part of the catalog, which
                 // `responses_tools` reads; they are not conversation content.
                 "additional_tools" => {}
+                "web_search_call" => {
+                    append_assistant_blocks(
+                        &mut decoded_request.messages,
+                        vec![Block::WebSearch(super::super::web_search::history(
+                            response_item,
+                        )?)],
+                    );
+                }
                 "tool_search_call" | "tool_search_output"
                     if response_item.get("execution").and_then(Value::as_str) == Some("client") =>
                 {
@@ -174,8 +182,7 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
                             name: String::new(),
                             content: tool_result_content(response_item)?,
                             is_error: false,
-                            raw_text: response_item.get("type").and_then(Value::as_str)
-                                == Some("custom_tool_call_output"),
+                            raw_text: true,
                         }],
                     });
                 }
@@ -212,13 +219,24 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
             }
         }
     }
-    (decoded_request.tools, decoded_request.client_tools) =
-        super::content::responses_tools(request_body)?;
-    let (choice, allowed) = super::super::super::contracts::resolve_responses_tool_choice(
-        request_body.get("tool_choice").unwrap_or(&Value::Null),
-        &decoded_request.client_tools,
-    )?;
+    let tools = super::content::responses_tools(request_body)?;
+    decoded_request.tools = tools.functions;
+    decoded_request.client_tools = tools.targets;
+    decoded_request.web_search = tools.web_search;
+    let (choice, allowed) = if decoded_request.web_search.is_some()
+        && request_body.get("tool_choice").and_then(Value::as_str) == Some("required")
+    {
+        (Some(ToolChoice::Required), None)
+    } else {
+        super::super::super::contracts::resolve_responses_tool_choice(
+            request_body.get("tool_choice").unwrap_or(&Value::Null),
+            &decoded_request.client_tools,
+        )?
+    };
     if let Some(allowed) = allowed {
+        if !matches!(choice, Some(ToolChoice::None)) {
+            decoded_request.web_search = None;
+        }
         decoded_request
             .tools
             .retain(|tool| allowed.contains(&tool.name));
@@ -257,18 +275,16 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
     if let Some(reasoning) = request_body
         .get("reasoning")
         .filter(|reasoning_value| !reasoning_value.is_null())
-    {
-        if let Some(effort) = reasoning
+        && let Some(effort) = reasoning
             .get("effort")
             .filter(|field_value| !field_value.is_null())
-        {
-            decoded_request.reasoning = Some(Reasoning::Effort(
-                effort
-                    .as_str()
-                    .ok_or_else(AdapterError::invalid_request)?
-                    .into(),
-            ));
-        }
+    {
+        decoded_request.reasoning = Some(Reasoning::Effort(
+            effort
+                .as_str()
+                .ok_or_else(AdapterError::invalid_request)?
+                .into(),
+        ));
     }
     Ok(decoded_request)
 }
@@ -380,3 +396,4 @@ fn append_assistant_blocks(messages: &mut Vec<Message>, blocks: Vec<Block>) {
         });
     }
 }
+use super::super::ToolChoice;

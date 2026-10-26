@@ -2,7 +2,7 @@
 
 use super::{AdapterError, AdapterResult};
 use serde::Serialize;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::{collections::BTreeSet, sync::Arc};
 
 #[cfg(test)]
@@ -206,10 +206,10 @@ fn native_tool_outputs_are_materialized(input_items: &[Value]) -> bool {
             if !call_id.is_some_and(|call_id_value| calls.remove(&(call_kind, call_id_value))) {
                 return false;
             }
-        } else if kind.ends_with("_call") {
-            if let Some(call_id_value) = call_id {
-                calls.insert((kind, call_id_value));
-            }
+        } else if kind.ends_with("_call")
+            && let Some(call_id_value) = call_id
+        {
+            calls.insert((kind, call_id_value));
         }
     }
     true

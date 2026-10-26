@@ -1,9 +1,9 @@
 use super::super::super::{
-    checked, optional_bool, required_text, AdapterError, AdapterResult, ClientToolTarget, Function,
-    ResponsesToolKind,
+    AdapterError, AdapterResult, ClientToolTarget, Function, ResponsesToolKind, checked,
+    optional_bool, required_text,
 };
 use crate::WireApi;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
 pub(in crate::protocol::adapter::translation::decode) fn tools(
@@ -78,9 +78,15 @@ pub(in crate::protocol::adapter::translation::decode) fn tools(
 /// flattened to opaque names and recorded in the returned target map so the
 /// response can restore the client's own name and namespace. Hosted tools have
 /// no function equivalent upstream and must be rejected, not silently omitted.
+pub(in crate::protocol::adapter::translation::decode) struct ResponsesTools {
+    pub functions: Vec<Function>,
+    pub targets: BTreeMap<String, ClientToolTarget>,
+    pub web_search: Option<Value>,
+}
+
 pub(in crate::protocol::adapter::translation::decode) fn responses_tools(
     request_body: &Value,
-) -> AdapterResult<(Vec<Function>, BTreeMap<String, ClientToolTarget>)> {
+) -> AdapterResult<ResponsesTools> {
     let request_object = request_body
         .as_object()
         .ok_or_else(AdapterError::invalid_request)?;
@@ -88,8 +94,20 @@ pub(in crate::protocol::adapter::translation::decode) fn responses_tools(
         .unwrap_or_default();
     let mut functions = Vec::new();
     let mut targets = BTreeMap::new();
-    push_responses_tools(&mut functions, &mut targets, &catalog, None, None)?;
-    Ok((functions, targets))
+    let mut web_search = None;
+    push_responses_tools(
+        &mut functions,
+        &mut targets,
+        &catalog,
+        None,
+        None,
+        &mut web_search,
+    )?;
+    Ok(ResponsesTools {
+        functions,
+        targets,
+        web_search,
+    })
 }
 
 fn push_responses_tools(
@@ -98,6 +116,7 @@ fn push_responses_tools(
     tools: &[Value],
     namespace: Option<&str>,
     namespace_description: Option<&str>,
+    web_search: &mut Option<Value>,
 ) -> AdapterResult<()> {
     for tool in tools {
         let tool = tool
@@ -134,7 +153,16 @@ fn push_responses_tools(
                     children,
                     Some(&qualified),
                     Some(&description),
+                    web_search,
                 )?;
+            }
+            Some("web_search" | "web_search_2025_08_26") if namespace.is_none() => {
+                if web_search.is_some() {
+                    return Err(AdapterError::invalid_request().with_parameter("tools"));
+                }
+                *web_search = Some(super::super::super::web_search::tool(&Value::Object(
+                    tool.clone(),
+                ))?);
             }
             Some("function" | "custom" | "tool_search") | None => {
                 push_responses_tool(functions, targets, tool, namespace, namespace_description)?;

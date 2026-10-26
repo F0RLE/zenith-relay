@@ -2,6 +2,85 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn coding_tool_stdout_stays_literal_when_translated_to_gemini() {
+    for text in [
+        r#"{"error":"field read from a source file","output":"not an envelope"}"#,
+        " { \"count\": 1e2, \"count\": 101 }\r\n",
+        "{\"path\":\"C:\\\\code\\\\main.rs\",\"line\":9007199254740993}",
+        "[1,2,3]",
+        "\"quoted output\"",
+        "Проверка\r\nexit code: 0\r\n",
+        "",
+    ] {
+        for client in [
+            WireApi::Responses,
+            WireApi::ChatCompletions,
+            WireApi::Messages,
+        ] {
+            let mut request = tool_history(client);
+            match client {
+                WireApi::Responses => request["input"][2]["output"] = text.into(),
+                WireApi::ChatCompletions => request["messages"][3]["content"] = text.into(),
+                WireApi::Messages => {
+                    request["messages"][2]["content"][0]["content"] = text.into();
+                }
+                _ => unreachable!(),
+            }
+            for stream in [false, true] {
+                let prepared = prepare_coding_history(client, &request, stream);
+                let result =
+                    &prepared.upstream_body()["contents"][2]["parts"][0]["functionResponse"];
+                assert_eq!(result["id"], "call_first", "{client:?}");
+                assert_eq!(result["response"], json!({"output":text}), "{client:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn coding_tool_errors_keep_their_original_text_when_translated_to_gemini() {
+    let text = " {\"error\":\"compiler output\",\"diagnostic\":\"E0001\"}\r\n";
+    let mut request = tool_history(WireApi::Messages);
+    request["messages"][2]["content"][0]["content"] = text.into();
+    request["messages"][2]["content"][0]["is_error"] = true.into();
+    for stream in [false, true] {
+        let prepared = prepare_coding_history(WireApi::Messages, &request, stream);
+        assert_eq!(
+            prepared.upstream_body()["contents"][2]["parts"][0]["functionResponse"]["response"],
+            json!({"error":text})
+        );
+    }
+}
+
+fn prepare_coding_history(
+    client: WireApi,
+    request: &Value,
+    stream: bool,
+) -> crate::PreparedAdapterRequest {
+    // These imported synthetic histories have no provider-owned reasoning state.
+    SourceAdapter::between(client, WireApi::Gemini)
+        .unwrap()
+        .prepare_request_with_capabilities(
+            AdapterRequestContext {
+                client_wire_api: client,
+                request,
+                model: "synthetic-tools",
+                stream,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: CacheWriteTtl::Provider,
+                previous: None,
+                response_scope: "source-test",
+                response_id_seed: "tool-stdout",
+            },
+            &crate::model_metadata::ModelCapabilities {
+                reasoning: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+}
+
+#[test]
 fn responses_upstream_preserves_foreign_tool_strict_defaults_and_optional_fields() {
     let schema = json!({
         "type":"object",
@@ -523,10 +602,12 @@ fn chat_bridge_keeps_apply_patch_as_a_custom_tool_call() {
     assert_eq!(item["call_id"], "call_new");
     assert!(item["id"].as_str().unwrap().starts_with("ctc_"));
     assert!(item["input"].as_str().unwrap().contains("Begin Patch"));
-    assert!(!translated
-        .response_body()
-        .to_string()
-        .contains("function_call"));
+    assert!(
+        !translated
+            .response_body()
+            .to_string()
+            .contains("function_call")
+    );
 }
 #[test]
 fn chat_bridge_flattens_selected_codex_namespace_and_restores_it_on_output() {
@@ -695,8 +776,10 @@ fn responses_custom_input_rejects_conflicting_identity_done_and_terminal_data() 
         let output = std::iter::from_fn(|| bridge.pop_output())
             .flatten()
             .collect::<Vec<_>>();
-        assert!(String::from_utf8(output)
-            .unwrap()
-            .contains("adapter_upstream_stream_invalid"));
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("adapter_upstream_stream_invalid")
+        );
     }
 }

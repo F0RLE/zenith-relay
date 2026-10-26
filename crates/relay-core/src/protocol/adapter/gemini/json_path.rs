@@ -1,7 +1,7 @@
 //! Gemini partial tool-argument patches applied to one JSON value.
 
 use super::{AdapterError, AdapterResult};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Default)]
@@ -223,12 +223,12 @@ fn partial_arg_value(patch_object: &Map<String, Value>) -> AdapterResult<Option<
         if key == "nullValue" {
             return Ok(Some(Value::Null));
         }
-        if key == "jsonValue" {
-            if let Some(text) = patch_value.as_str() {
-                return serde_json::from_str(text)
-                    .map(Some)
-                    .map_err(|_| AdapterError::invalid_request());
-            }
+        if key == "jsonValue"
+            && let Some(text) = patch_value.as_str()
+        {
+            return serde_json::from_str(text)
+                .map(Some)
+                .map_err(|_| AdapterError::invalid_request());
         }
         return Ok(Some(patch_value.clone()));
     }
@@ -333,13 +333,12 @@ fn set_json_path_segments(
     append_string: bool,
 ) -> AdapterResult<()> {
     let Some(segment) = segments.first() else {
-        if append_string {
-            if let (Value::String(current), Some(fragment)) =
+        if append_string
+            && let (Value::String(current), Some(fragment)) =
                 (&mut *current_value, replacement_value.as_str())
-            {
-                current.push_str(fragment);
-                return Ok(());
-            }
+        {
+            current.push_str(fragment);
+            return Ok(());
         }
         *current_value = replacement_value;
         return Ok(());
