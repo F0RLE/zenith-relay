@@ -14,8 +14,10 @@ impl Fixture {
     }
 
     fn new() -> Self {
-        let root =
-            std::env::temp_dir().join(format!("zenith-relay-claude-{}", uuid::Uuid::new_v4()));
+        // Resolve platform-owned temp aliases before creating the isolated fixture.
+        let root = fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("zenith-relay-claude-{}", uuid::Uuid::new_v4()));
         let library = root.join("configLibrary");
         fs::create_dir_all(&library).unwrap();
         Self {
