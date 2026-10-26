@@ -301,6 +301,10 @@ recoverable account deletion. Changes below are grouped by area.
   eligible member. Opaque continuations and unpaired results retain their owner
   unless validated local replay restores complete history. Both quota windows
   constrain selection; equal remaining percentages are not guaranteed.
+  Same-model handoff now restores saved tool/reasoning history behind
+  `previous_response_id`, instead of using the plaintext model-switch repair.
+  HTTP and WebSocket keep the cache key and current controls; missing history
+  remains owner-bound and provider cache hits are not fabricated.
 - Credit refresh is independent of response headers. Busy traffic cannot keep
   stale credits fresh, postpone polling indefinitely, or replace newer limits;
   shared ChatGPT credit totals count the newest provider ledger once.
@@ -972,6 +976,10 @@ recoverable account deletion. Changes below are grouped by area.
   более подходящему участнику. Непрозрачные продолжения и результаты без вызова
   сохраняют владельца, пока проверенное локальное восстановление не даст полную
   историю. Оба окна квоты ограничивают выбор; одинаковые остатки не гарантируются.
+  Передача той же модели теперь восстанавливает сохранённые вызовы инструментов
+  и reasoning по `previous_response_id`, а не использует текстовую ветку смены
+  модели. HTTP и WebSocket сохраняют ключ кеша и текущие настройки; без истории
+  владелец не меняется, попадания в кеш провайдера не подменяются.
 - Обновление кредитов отделено от заголовков ответов. Нагрузка не делает старые
   кредиты свежими, не откладывает опрос бесконечно и не отменяет новые лимиты.
   Общий баланс ChatGPT учитывает последнее состояние одного счёта провайдера один раз.

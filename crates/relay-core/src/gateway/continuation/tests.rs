@@ -381,6 +381,122 @@ fn owner_change_cannot_release_opaque_or_unpaired_state_even_with_a_soft_flag() 
 }
 
 #[test]
+fn owner_change_materializes_native_tool_history_without_resetting_cache_policy() {
+    for (call, result) in [
+        (
+            json!({"type":"function_call", "id":"fc_native", "call_id":"call_native",
+                "name":"lookup", "arguments":"{\"query\":\"synthetic\"}"}),
+            json!({"type":"function_call_output", "call_id":"call_native", "output":"result"}),
+        ),
+        (
+            json!({"type":"custom_tool_call", "id":"ctc_native", "call_id":"call_native",
+                "name":"lookup", "input":"synthetic"}),
+            json!({"type":"custom_tool_call_output", "call_id":"call_native", "output":"result"}),
+        ),
+    ] {
+        let runtime = runtime();
+        let initial = json!({"input":[{"role":"user", "content":"keep the initial constraint"}]});
+        let reasoning = json!({"type":"reasoning", "id":"rs_native", "summary":[],
+            "encrypted_content":"synthetic-completed-ciphertext"});
+        runtime.capture_native_responses_replay(
+            "key",
+            "source",
+            &initial,
+            "model",
+            &json!({"id":"resp_native", "status":"completed", "output":[reasoning, call]}),
+            10,
+        );
+        runtime.bind_response_affinity(Some("resp_native"), "source", 10);
+        let mut request = json!({
+            "model":"model", "previous_response_id":"resp_native", "input":[result],
+            "instructions":"current instructions", "prompt_cache_key":"synthetic-chat",
+            "prompt_cache_options":{"mode":"implicit", "ttl":"30m"},
+            "reasoning":{"effort":"high"}, "parallel_tool_calls":false,
+            "tools":[{"type":"function", "name":"current_tool", "parameters":{"type":"object"}}]
+        });
+        let original = request.clone();
+        assert!(prepare_response_owner_change(
+            &runtime,
+            "key",
+            &mut request,
+            "model",
+            true,
+            11,
+        ));
+        let mut expected = original;
+        expected
+            .as_object_mut()
+            .unwrap()
+            .remove("previous_response_id");
+        expected["stream"] = json!(false);
+        expected["input"] = json!([initial["input"][0], reasoning, call, result]);
+        assert_eq!(request, expected);
+    }
+}
+
+#[test]
+fn native_owner_change_keeps_unavailable_foreign_or_unpaired_history_bound() {
+    let runtime = runtime();
+    runtime.capture_native_responses_replay(
+        "key",
+        "source",
+        &json!({"input":"initial context"}),
+        "model",
+        &json!({"id":"resp_native", "status":"completed", "output":[
+            {"type":"reasoning", "encrypted_content":"synthetic-ciphertext", "summary":[]},
+            {"type":"function_call", "call_id":"call_native", "name":"lookup", "arguments":"{}"}
+        ]}),
+        10,
+    );
+    runtime.bind_response_affinity(Some("resp_native"), "source", 10);
+    let base = json!({"model":"model", "previous_response_id":"resp_native", "input":[
+        {"type":"function_call_output", "call_id":"call_native", "output":"result"}
+    ]});
+    let mut cases = vec![
+        ("other-key", "model", 11, base.clone()),
+        ("key", "different-model", 11, base.clone()),
+        (
+            "key",
+            "model",
+            11 + crate::RESPONSE_AFFINITY_TTL_MS,
+            base.clone(),
+        ),
+    ];
+    for (field, value) in [
+        ("previous_response_id", json!("resp_unknown")),
+        ("conversation", json!("conv_unknown")),
+        ("context_management", json!([])),
+        ("truncation", json!("auto")),
+        (
+            "input",
+            json!([{"type":"item_reference", "id":"item_unknown"}]),
+        ),
+        (
+            "input",
+            json!([{"type":"function_call_output", "call_id":"wrong", "output":"result"}]),
+        ),
+    ] {
+        let mut request = base.clone();
+        request[field] = value;
+        cases.push(("key", "model", 11, request));
+    }
+    // Run expiration last: the bounded store may evict expired entries.
+    cases.sort_by_key(|(_, _, now, _)| *now);
+    for (key, model, now, mut request) in cases {
+        let original = request.clone();
+        assert!(!prepare_response_owner_change(
+            &runtime,
+            key,
+            &mut request,
+            model,
+            true,
+            now
+        ));
+        assert_eq!(request, original);
+    }
+}
+
+#[test]
 fn unpaired_outputs_require_their_own_shared_owner() {
     let runtime = runtime();
     runtime.bind_tool_call_affinity("key", "historic", "source", 10);

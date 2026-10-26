@@ -1055,6 +1055,14 @@ refresh in the tooltip.
 An opaque continuation retains its physical owner unless validated local replay
 materializes the complete history before dispatch. Complete portable call/result
 pairs need only soft affinity; an opaque predecessor is validated separately.
+Automatic same-model owner yield uses the same native replay contract as hard
+quota recovery, not the plaintext-only model-switch repair. A locally retained
+predecessor restores ordered tool calls/results and original reasoning blocks;
+the current request keeps its instructions, tools, cache key and cache policy.
+Missing/foreign/expired replay, unresolved references and explicit context
+management or truncation cannot release this binding. Model changes still
+require plaintext replay. This transfers conversation history, not provider
+cache storage; reported cache usage and owner-scoped turn-state guards stay unchanged.
 Historic pairs from earlier owners do not override the predecessor's route.
 An unrelated tool-call affinity collision cannot override an exact owned
 Responses predecessor when caller-scoped completed-output ownership or saved

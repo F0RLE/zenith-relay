@@ -1,12 +1,52 @@
 use crate::GatewayRuntime;
 use serde_json::{Map, Value};
 
+enum ReplayPurpose {
+    ModelSwitch,
+    OwnerChange,
+}
+
 pub(in crate::gateway) fn drop_materialized_previous_response_id(
     runtime: &GatewayRuntime,
     local_key_id: &str,
     request: &mut Value,
     model: &str,
     now_ms: u64,
+) -> bool {
+    materialize_previous_response(
+        runtime,
+        local_key_id,
+        request,
+        model,
+        now_ms,
+        ReplayPurpose::ModelSwitch,
+    )
+}
+
+pub(super) fn materialize_response_owner_change(
+    runtime: &GatewayRuntime,
+    local_key_id: &str,
+    request: &mut Value,
+    model: &str,
+    now_ms: u64,
+) -> bool {
+    materialize_previous_response(
+        runtime,
+        local_key_id,
+        request,
+        model,
+        now_ms,
+        ReplayPurpose::OwnerChange,
+    )
+}
+
+fn materialize_previous_response(
+    runtime: &GatewayRuntime,
+    local_key_id: &str,
+    request: &mut Value,
+    model: &str,
+    now_ms: u64,
+    purpose: ReplayPurpose,
 ) -> bool {
     if super::compacted::reset_compacted_history(request) {
         return true;
@@ -35,11 +75,18 @@ pub(in crate::gateway) fn drop_materialized_previous_response_id(
     ) else {
         return false;
     };
-    if !has_materialized_plaintext_history(&materialized)
+    // Quota rotation is not a model switch. The same-model native replay has
+    // already restored the caller/owner-scoped history and checked tool-result
+    // pairs. Preserve its original reasoning and calls exactly, as the hard
+    // quota recovery does; never replace them with summaries or a cache hint.
+    let native_owner_change =
+        matches!(purpose, ReplayPurpose::OwnerChange) && replay.model().eq_ignore_ascii_case(model);
+    if (!native_owner_change && !has_materialized_plaintext_history(&materialized))
         || request
             .get("conversation")
             .is_some_and(|conversation_value| !conversation_value.is_null())
         || request.get("context_management").is_some()
+        || request.get("truncation").is_some()
     {
         return false;
     }

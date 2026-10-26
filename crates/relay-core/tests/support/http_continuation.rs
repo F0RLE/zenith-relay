@@ -782,24 +782,29 @@ fn set_account_remainder(runtime: &GatewayRuntime, account_id: &str, remaining: 
 #[tokio::test]
 async fn portable_tool_history_yields_to_fresh_quota_but_unpaired_outputs_keep_the_owner() {
     for endpoint in ["/v1/responses", "/v1/alpha/search"] {
-        for include_call in [true, false] {
+        for (include_call, use_predecessor) in [(true, false), (false, false), (false, true)] {
             let call = json!({
                 "type": "function_call", "id": "fc_quota", "call_id": "call_quota",
                 "name": "lookup", "arguments": "{}"
             });
+            let reasoning = json!({"type":"reasoning", "id":"rs_quota", "summary":[],
+                "encrypted_content":"synthetic-completed-reasoning"});
             let (owner_upstream, owner_state) = spawn_upstream(vec![
                 Reply::Json(
                     StatusCode::OK,
                     json!({
                         "id": "quota-tool-response", "status": "completed", "model": MODEL,
-                        "output": [call.clone()]
+                        "output": [reasoning.clone(), call.clone()]
                     }),
                 ),
                 success_reply("owner-stays"),
             ])
             .await;
-            let (other_upstream, other_state) =
-                spawn_upstream(vec![success_reply("quota-replacement")]).await;
+            let (other_upstream, other_state) = spawn_upstream(vec![
+                success_reply("quota-replacement"),
+                success_reply("continued-on-replacement"),
+            ])
+            .await;
             let authority = Arc::new(TokenAuthority::new(4).unwrap());
             register_ready(&authority, "owner-account", "owner-access").await;
             register_ready(&authority, "other-account", "other-access").await;
@@ -822,7 +827,14 @@ async fn portable_tool_history_yields_to_fresh_quota_but_unpaired_outputs_keep_t
                 .timeout(Duration::from_secs(5))
                 .build()
                 .unwrap();
-            let first = request(&gateway, false).await;
+            let first = client
+                .post(format!("{}/v1/responses", gateway.base_url))
+                .bearer_auth(LOCAL_KEY)
+                .json(&json!({"model":MODEL, "input":"synthetic initial context",
+                    "prompt_cache_key":"synthetic-chat"}))
+                .send()
+                .await
+                .unwrap();
             assert_eq!(first.status(), StatusCode::OK);
             let first: Value = first.json().await.unwrap();
             assert_eq!(first["id"], "quota-tool-response");
@@ -831,42 +843,93 @@ async fn portable_tool_history_yields_to_fresh_quota_but_unpaired_outputs_keep_t
             set_account_remainder(runtime, "other-account", 8_000);
             let mut input = Vec::new();
             if include_call {
-                input.push(call);
+                input.push(call.clone());
             }
             input.push(json!({
                 "type": "function_call_output", "call_id": "call_quota",
                 "output": "synthetic result"
             }));
+            let mut continuation = json!({"model":MODEL, "input":input,
+                "prompt_cache_key":"synthetic-chat"});
+            if use_predecessor {
+                continuation["previous_response_id"] = first["id"].clone();
+            }
             let response = client
                 .post(format!("{}{endpoint}", gateway.base_url))
                 .bearer_auth(LOCAL_KEY)
-                .json(&json!({"model": MODEL, "input": input}))
+                .json(&continuation)
                 .send()
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
-            let _: Value = response.json().await.unwrap();
-            let owner_requests = owner_state.requests.lock().unwrap();
-            let other_requests = other_state.requests.lock().unwrap();
-            assert_eq!(
-                other_requests.len(),
-                usize::from(include_call),
-                "endpoint={endpoint}, paired={include_call}"
-            );
-            assert_eq!(owner_requests.len(), if include_call { 1 } else { 2 });
-            let forwarded = if include_call {
-                &other_requests[0]
-            } else {
-                &owner_requests[1]
-            };
-            assert_eq!(forwarded.body["input"], json!(input));
-            assert!(forwarded.body.get("previous_response_id").is_none());
+            let continuation_response: Value = response.json().await.unwrap();
+            {
+                let owner_requests = owner_state.requests.lock().unwrap();
+                let other_requests = other_state.requests.lock().unwrap();
+                let portable = include_call || use_predecessor;
+                assert_eq!(
+                    other_requests.len(),
+                    usize::from(portable),
+                    "endpoint={endpoint}, paired={include_call}, previous={use_predecessor}"
+                );
+                assert_eq!(owner_requests.len(), if portable { 1 } else { 2 });
+                let forwarded = if portable {
+                    &other_requests[0]
+                } else {
+                    &owner_requests[1]
+                };
+                let expected_input = if use_predecessor {
+                    json!([
+                        {"role":"user", "content":[{"type":"input_text", "text":"synthetic initial context"}]},
+                        reasoning, call, input[0]
+                    ])
+                } else {
+                    json!(input)
+                };
+                assert_eq!(forwarded.body["input"], expected_input);
+                if endpoint == "/v1/responses" {
+                    assert_eq!(forwarded.body["prompt_cache_key"], "synthetic-chat");
+                } else {
+                    // The separate search endpoint strips Responses cache controls.
+                    assert!(forwarded.body.get("prompt_cache_key").is_none());
+                }
+                assert!(forwarded.body.get("previous_response_id").is_none());
+            }
+            if use_predecessor && endpoint == "/v1/responses" {
+                let next = client
+                    .post(format!("{}{endpoint}", gateway.base_url))
+                    .bearer_auth(LOCAL_KEY)
+                    .json(
+                        &json!({"model":MODEL, "previous_response_id":continuation_response["id"],
+                        "input":"continue on the new owner", "prompt_cache_key":"synthetic-chat"}),
+                    )
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(next.status(), StatusCode::OK);
+                let next: Value = next.json().await.unwrap();
+                assert_eq!(next["id"], "continued-on-replacement");
+                assert_eq!(owner_state.requests.lock().unwrap().len(), 1);
+                let forwarded = other_state.requests.lock().unwrap();
+                assert_eq!(forwarded.len(), 2);
+                assert_eq!(
+                    forwarded[1].body["previous_response_id"],
+                    continuation_response["id"]
+                );
+                assert_eq!(
+                    forwarded[1].body["input"],
+                    json!([{"role":"user", "content":[{
+                        "type":"input_text", "text":"continue on the new owner"
+                    }]}])
+                );
+                assert_eq!(forwarded[1].body["prompt_cache_key"], "synthetic-chat");
+            }
         }
     }
 }
 
 #[tokio::test]
-async fn websocket_plaintext_quota_handoff_reuses_opaque_owner_connections() {
+async fn websocket_quota_handoff_preserves_materialized_reasoning() {
     for opaque in [false, true] {
         let mut output = json!([{"type":"message", "role":"assistant", "content":[{
             "type":"output_text", "text":"synthetic answer"
@@ -939,35 +1002,34 @@ async fn websocket_plaintext_quota_handoff_reuses_opaque_owner_connections() {
         receive_websocket_completion(&mut socket).await;
         let owner_requests = owner_state.requests.lock().unwrap();
         let other_requests = other_state.requests.lock().unwrap();
-        assert_eq!(owner_requests.len(), if opaque { 2 } else { 1 });
-        assert_eq!(other_requests.len(), usize::from(!opaque));
+        assert_eq!(owner_requests.len(), 1);
+        assert_eq!(other_requests.len(), 1);
         assert_eq!(owner_state.headers.lock().unwrap().len(), 1);
-        if opaque {
-            assert_eq!(owner_requests[1]["previous_response_id"], "quota-response");
-            assert_eq!(owner_requests[1]["input"], next_input);
-        } else {
-            assert!(other_requests[0].get("previous_response_id").is_none());
-            assert_eq!(
-                other_requests[0]["input"],
-                json!([initial_input[0], output[0], next_input[0]])
-            );
-        }
+        assert!(other_requests[0].get("previous_response_id").is_none());
+        let mut expected_input = vec![initial_input[0].clone()];
+        expected_input.extend(output.as_array().unwrap().iter().cloned());
+        expected_input.push(next_input[0].clone());
+        assert_eq!(other_requests[0]["input"], json!(expected_input));
     }
 }
 
 #[tokio::test]
 async fn websocket_portable_tool_history_yields_to_fresh_quota_without_losing_the_input() {
-    for reconnect in [false, true] {
+    for (reconnect, use_predecessor) in [(false, false), (true, false), (false, true), (true, true)]
+    {
         let call = json!({
             "type":"function_call", "id":"fc_quota", "call_id":"call_quota",
             "name":"lookup", "arguments":"{}"
         });
+        let reasoning = json!({"type":"reasoning", "id":"rs_quota", "summary":[],
+            "encrypted_content":"synthetic-completed-reasoning"});
         let (owner_upstream, owner_state) =
             spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![
+                json!({"type":"response.output_item.done", "item":reasoning.clone()}),
                 json!({"type":"response.output_item.done", "item":call.clone()}),
                 json!({"type":"response.completed", "response":{
                     "id":"quota-tool-response", "status":"completed", "model":MODEL,
-                    "output":[call.clone()]
+                    "output":[reasoning.clone(), call.clone()]
                 }}),
             ])))
             .await;
@@ -1002,10 +1064,12 @@ async fn websocket_portable_tool_history_yields_to_fresh_quota_without_losing_th
             .into_websocket()
             .await
             .unwrap();
+        let initial_input = json!([{"role":"user", "content":"synthetic lookup"}]);
         socket
             .send(ClientWsMessage::Text(
                 json!({
-                    "type":"response.create", "model":MODEL, "input":"synthetic lookup"
+                    "type":"response.create", "model":MODEL, "input":initial_input,
+                    "prompt_cache_key":"synthetic-chat"
                 })
                 .to_string(),
             ))
@@ -1028,25 +1092,60 @@ async fn websocket_portable_tool_history_yields_to_fresh_quota_without_losing_th
                 .await
                 .unwrap();
         }
-        let input = json!([
-            call,
-            {"type":"function_call_output", "call_id":"call_quota", "output":"synthetic result"}
-        ]);
+        let result = json!({"type":"function_call_output", "call_id":"call_quota", "output":"synthetic result"});
+        let input = if use_predecessor {
+            json!([result])
+        } else {
+            json!([call, result])
+        };
+        let mut continuation = json!({
+            "type":"response.create", "model":MODEL, "input":input,
+            "prompt_cache_key":"synthetic-chat"
+        });
+        if use_predecessor {
+            continuation["previous_response_id"] = first["response"]["id"].clone();
+        }
+        socket
+            .send(ClientWsMessage::Text(continuation.to_string()))
+            .await
+            .unwrap();
+        let moved = receive_websocket_completion(&mut socket).await;
+        assert_eq!(owner_state.requests.lock().unwrap().len(), 1);
+        {
+            let requests = other_state.requests.lock().unwrap();
+            assert_eq!(
+                requests.len(),
+                1,
+                "reconnect={reconnect}, previous={use_predecessor}"
+            );
+            let expected_input = if use_predecessor {
+                json!([initial_input[0], reasoning, call, result])
+            } else {
+                input
+            };
+            assert_eq!(requests[0]["input"], expected_input);
+            assert_eq!(requests[0]["prompt_cache_key"], "synthetic-chat");
+            assert!(requests[0].get("previous_response_id").is_none());
+        }
+        let next_input = json!([{"role":"user", "content":"continue on the new owner"}]);
         socket
             .send(ClientWsMessage::Text(
                 json!({
-                    "type":"response.create", "model":MODEL, "input":input
+                    "type":"response.create", "model":MODEL,
+                    "previous_response_id":moved["response"]["id"], "input":next_input,
+                    "prompt_cache_key":"synthetic-chat"
                 })
                 .to_string(),
             ))
             .await
             .unwrap();
-        let _ = receive_websocket_completion(&mut socket).await;
+        receive_websocket_completion(&mut socket).await;
         assert_eq!(owner_state.requests.lock().unwrap().len(), 1);
         let requests = other_state.requests.lock().unwrap();
-        assert_eq!(requests.len(), 1, "reconnect={reconnect}");
-        assert_eq!(requests[0]["input"], input);
-        assert!(requests[0].get("previous_response_id").is_none());
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1]["previous_response_id"], moved["response"]["id"]);
+        assert_eq!(requests[1]["input"], next_input);
+        assert_eq!(requests[1]["prompt_cache_key"], "synthetic-chat");
     }
 }
 

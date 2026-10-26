@@ -30,7 +30,8 @@ pub(super) fn previous_response_id(request: &Value) -> Option<&str> {
 /// A paired tool history already carries its call and result, so its saved
 /// route is only a warm-cache preference. It needs no predecessor replay to
 /// yield to a healthier quota. Opaque references and unpaired results still
-/// require validated local replay before their owner can be released.
+/// require validated local replay before their owner can be released. Use the
+/// native same-model replay here, not the plaintext-only model-switch repair.
 pub(super) fn prepare_response_owner_change(
     runtime: &GatewayRuntime,
     local_key_id: &str,
@@ -59,7 +60,7 @@ pub(super) fn prepare_response_owner_change(
     {
         return true;
     }
-    drop_materialized_previous_response_id(runtime, local_key_id, request, model, now_ms)
+    replay::materialize_response_owner_change(runtime, local_key_id, request, model, now_ms)
 }
 
 /// Drops the opaque continuation binding after its history has been materialized.
