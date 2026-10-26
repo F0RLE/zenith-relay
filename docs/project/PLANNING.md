@@ -237,6 +237,9 @@ Routing previews prepare admission lazily and reuse it within that fixed
 snapshot; an ambiguous rank stops work without advancing live rotation.
 Pool and Connections share one routing observer across navigation, preserving
 its in-flight read and fallback deadline. Leaving both pages stops observation.
+Pool availability and next-member presentation normalize visible model IDs lazily
+once per projection, reusing that set across eligible members. Each projection
+uses current inventory and catalog data; live scheduler selection is unchanged.
 Model configuration reuses resolved reasoning capabilities, and Standard-only
 reference tiers need no executor-route scan. No eligibility result is cached
 across snapshots.
@@ -313,6 +316,9 @@ Queued background snapshots recheck visibility before starting. Pool/Connections
 routing reads debounce real activity; a change during a pending read queues one
 revalidation, whereas elapsed polling time does not. The five-second fallback is
 armed after each attempt, including failure, and pauses with a hidden window.
+Relative account, quota, sign-in and request-cache countdowns also pause while
+hidden and reconcile with wall time on return, including expired deadlines. Account date
+formatters are shared for the active locale rather than rebuilt on every tick.
 Overview and Usage can scope reports to conversations, memory, or other background
 work; the default includes all consumption. Scopes use retained explicit task
 markers, including blocked memory operations, not model names or prompt text.
@@ -684,17 +690,31 @@ Legacy global flags are ignored on read and omitted from settings, presets,
 and runtime snapshots. Per-account BPS facts remain credential-derived.
 
 Native Codex connections support direct account switching, explicitly linked
-SIWC plan/quota display, and explicit image-only Desktop pool membership.
+SIWC plan/quota display, and explicit Desktop pool membership, image-only by default.
 An account-card or pool-picker membership action persists `imagePoolEnabled`;
 sign-in, import and presets cannot grant this opt-in to a new connection.
 Reauthentication preserves existing explicit consent. Startup strips legacy
 Codex membership without consent, while retaining saved credentials and notes.
-Desktop sets the core host restriction `native_codex_images_only`: native
-executors publish only the image model and reject every text dispatch, including
-after catalog refresh or model-policy edits. Shared core defaults are unchanged.
+Desktop sets the core host restriction `native_codex_images_only` unless the
+persisted `codexTextModelsEnabled` opt-in is true (missing/legacy values default
+to false). Without it, native executors publish only the image model and reject
+every text dispatch, including after catalog refresh or model-policy edits.
+**Settings → Pool data → Text models through Codex sign-in** enables the opt-in
+only after an explicit risk dialog and a red confirmation button's 10-second
+delay. Cancelling or reopening does not grant consent; reopening resets the
+delay. Disabling needs no dialog. IPC requires the expected current value and
+explicit risk acceptance when enabling. The setup guard, dispatch fences and
+existing runtime-rebuild/rollback transaction publish the change; no accounts
+are enrolled, removed or reauthenticated, and image access and degraded-route
+blocking remain unchanged. The opt-in applies to existing and future explicitly
+added Codex members, not SIWC, BPS or API-source routes. Shared core defaults are
+unchanged. This is experimental Relay behavior, not an OpenAI support guarantee.
+The [official Codex sign-in guide](https://github.com/openai/codex#using-codex-with-your-chatgpt-plan)
+describes ChatGPT sign-in for Codex and separate API-key setup; it does not
+establish third-party pool support or a specific model-substitution policy.
 Leaving the pool, restoring from trash, or switching routes clears image consent.
 Selecting Codex removes the group's pool membership and routing policy;
-it can then be added explicitly for images only.
+it can then be added explicitly, with text subject to this separate opt-in.
 Enabled account-targeted automations must be edited or disabled first.
 SIWC and BPS are pool-only and have no direct-launch button. They do not write
 native Codex authentication. Plan names, including Free, do not block sign-in,
@@ -817,6 +837,11 @@ origins do not participate.
   historical request routes; unrelated quota timestamps never date model errors.
   An empty local ChatGPT catalog returns `pool_models_unavailable`, independently
   of quota availability, and does not install an empty client profile catalog.
+  Requests to `/v1/models` with `client_version` always retain the Codex
+  `models` envelope, including while BPS access is denied, throttled or not yet
+  ready; only ordinary OpenAI discovery uses `object`/`data`. The next successful
+  access probe restores the catalog in the same runtime, retaining the existing
+  bounded access cache and provider Retry-After policy.
 - Token refresh/invalidation is revision-bound. A late 401 or invalid grant
   cannot overwrite a newer login, delete replacement credentials, restore a
   deleted account, or change operator disable/drain/membership choices.
@@ -833,7 +858,8 @@ origins do not participate.
 `POST /v1/images/generations` and `/v1/images/edits` use the existing image
 lane, key scope, credential authority and physical-send usage pipeline.
 Desktop users first add the selected Codex connection to the pool for images;
-this does not require launching the Codex application or enable text requests.
+this does not require launching the Codex application. Membership alone does
+not enable text requests; the separate `codexTextModelsEnabled` opt-in does.
 Native Codex accounts call their `/images/*` endpoints directly with the image
 model; no text-model Responses tool request is inserted. Text-model inventory
 or pricing changes do not choose an image model. The legacy `imageBaseModel`
@@ -1050,9 +1076,18 @@ endpoint, or API-source credential. A new host/process starts empty: conversatio
 is not persisted to recover a restarted application.
 Native replay retains only input history and completed output, not prior tool
 catalogs or request options that replay never reuses. Current-turn instructions,
-tools and controls remain authoritative. Native replay entries may use the shared
+tools and controls remain authoritative. Lookups share immutable snapshots;
+only materializing an outgoing request copies their history. Shared ownership
+does not extend lookup TTL or discount serialized bytes from the store budget.
+Native replay entries may use the shared
 16 MiB serialized-history budget;
 the total budget, 64-entry cap, one-hour TTL and key/model/route isolation remain.
+Under either native replay limit, evict superseded full-history snapshots before
+unrelated conversations' latest responses. Supersession requires the same local
+key, candidate and model plus an exact prefix containing both the prior input
+and completed output; it is a retention hint, not permission to reuse another
+response ID. Rejected oversized snapshots do not retire retained state. Active
+histories that together exceed the budget still require explicit client recovery.
 The converted-adapter store retains its existing entry bound. BPS materializes an owned predecessor
 before route preparation, so its lack of provider-side response storage does not
 exclude the correct account. Missing local history fails before dispatch rather
@@ -1275,18 +1310,35 @@ or copying a frame buffer; only the incomplete tail is retained. Buffered
 fragments move the incomplete tail at most once per chunk. Shared frame consumers
 resume at the incomplete tail's last byte, preserving
 split CRLF and per-event limits.
+Line-delimiter search uses `memchr2` for CR/LF and skips the search for leading
+line endings without changing the
+[SSE framing rules](https://html.spec.whatwg.org/multipage/server-sent-events.html#parsing-an-event-stream):
+CR, LF and CRLF endings, blank-line dispatch and byte-exact frames remain intact.
+Differential tests retain an independent scalar scanner and cover fragmented
+input, unaligned slices and vector boundaries. This optimization is shared by
+native forwarding and converted streams; event and completion validation stay
+in their protocol owners.
 Native Responses forwarding uses the validated delta fast
 path, including escaped text and tool arguments; usage, model identity, terminal
 events, and opaque compaction stay on their full validation paths. These local
 optimizations do not change service tiers, reasoning, or client cancellation.
-Native WebSocket forwarding retains ordinary text/binary buffers when no error
-rewrite is needed. Committed output bypasses inapplicable retry parsing, not
-served-model checks. HTTP-to-WebSocket fallback consumes parsed JSON and opaque
-payloads without cloning them or decoding a serialized copy. Converted streams
+Native WebSocket forwarding shares decoded frame classification across served-model
+checks, late-event suppression, usage/replay observation and error rewriting.
+Message size is checked before forwarding inspection; ordinary text/binary buffers
+are retained when no error rewrite is needed. Committed output bypasses inapplicable
+retry parsing, not served-model checks. HTTP-to-WebSocket fallback consumes parsed
+JSON and opaque payloads without cloning them or decoding a serialized copy. Converted streams
 retain unchanged text, reasoning, refusal, and tool-call snapshots, including
 unchanged normalized argument strings; closed Messages blocks still close once
 and reject mutations. Deferred Gemini and tool-search calls stay behind their
 output barriers before argument snapshots are copied or normalized.
+Changed blocks validate append-only prefixes and tool identities against borrowed
+emitted snapshots rather than cloning the previous accumulated strings for each
+delta. Text, reasoning, refusal and function-argument suffixes extend retained
+snapshot buffers rather than copying accumulated content on each fragment. Argument
+normalization borrows the upstream buffer when unchanged. Snapshots change only after
+validation and successful delta emission; numeric normalization and Messages
+block-order/completion rules remain unchanged.
 The ChatGPT WebSocket setting controls client ingress and the managed profile,
 not provider transport. Catalog changes do not override it. BPS and converted
 routes use the HTTP executor behind the same client socket; usage records the
@@ -1346,6 +1398,11 @@ Terminal native output moves into the checkpoint without copying its opaque
 payload. Tool-argument normalization borrows unchanged input or an unchanged
 buffered prefix; its owning string is retained/truncated in place, and a new
 output buffer is allocated only when numeric spelling must change.
+Within quoted JSON strings, normalization uses vectorized quote/backslash search
+instead of visiting every payload byte. Existing escape handling, exact numeric
+bounds and withholding of unfinished numbers remain unchanged. Differential
+tests compare Unicode prefixes, escaped strings and malformed fragments against
+the previous scalar scanner; final JSON validation stays with its existing owner.
 The streaming gateway takes the completed translated response by ownership,
 without cloning its body or continuation. Taking the result does not reopen a
 terminal bridge or repeat its output.
@@ -1440,11 +1497,21 @@ fields, never provider keys or values.
   calls attached to tool-result messages fail instead of being silently discarded.
   Fresh calls to the same tool, including repeated stateful observations, are
   not suppressed by name or argument equality; replaying an old call is distinct.
-- An explicit client serial-call policy remains binding. Native Responses Lite
-  defaults an omitted policy to serial only after route selection and rejects
-  an explicit parallel policy before dispatch; its marker does not serialize
-  BPS or API-source calls. Ordinary tool support does not establish parallel
-  support. Native catalog transport exclusions and reference exclusions win.
+- An explicit client serial-call policy remains binding. HTTP, compaction and
+  WebSocket default to full Responses regardless of native catalog Lite flags.
+  Client-facing catalogs and managed Codex profiles publish
+  `use_responses_lite: false`, including compatible cached rows; original account
+  manifests stay unchanged. An upstream Lite preference does not disable full
+  Responses parallel calls: the owning native card must still confirm parallel
+  support, and explicit reference exclusions remain binding.
+  [Codex selects its request format from this flag](https://github.com/openai/codex/blob/5b792948f9414288b9196ae0559f218439affe20/codex-rs/core/src/client.rs#L1016-L1118).
+  Only an explicit client Lite header or WebSocket metadata selects Lite; its
+  omitted parallel policy defaults to serial after route selection, and a
+  conflicting parallel policy fails before dispatch. WebSocket reuse includes
+  the negotiated Lite/full mode; a changed mode reconnects before the next turn.
+  Its marker does not serialize BPS or API-source calls. Ordinary tool support
+  does not establish parallel support. Native catalog transport exclusions and
+  reference exclusions win.
 - Responses custom outputs accept strings and typed content lists, including
   representable images. Empty lists mean no content, not literal `[]`. Untyped
   custom results fail. Chat tool messages cannot carry images.
@@ -1494,8 +1561,11 @@ fields, never provider keys or values.
 - Metadata and advisory cache hints follow the target contract. Valid foreign
   cache hints do not promise equivalent TTLs, hits, or pricing. Required context
   edits and unsupported hosted tools are not advisory and must fail.
-- JSON, gzip, and zstd share bounded request decoding. Completed, Incomplete,
-  and Invalid remain separate across JSON and streaming. SSE/WS lifecycle and
+- JSON, gzip, and zstd share request decoding. Compressed bodies and identity
+  JSON above 64 KiB are decoded and parsed in blocking jobs bounded by available
+  CPUs; small identity JSON stays inline. Cancellation retains the worker permit
+  until parsing finishes. Encoding errors, field order and exact numbers are preserved.
+  Completed, Incomplete, and Invalid remain separate across JSON and streaming. SSE/WS lifecycle and
   terminal status must agree; EOF or bare `[DONE]` is not proof of completion.
 - Incomplete/refused/invalid responses retain known usage but do not establish
   reusable converted continuation or successful route health. Temporary native
@@ -1666,8 +1736,10 @@ Older Desktop hosts that omit model/member filter fields use an unfiltered,
 events-free aggregate read for the same period. This compatibility path does
 not substitute current inventory or one page of events; supported empty arrays
 remain empty, and concurrent fallback reads for the same period join in flight.
-Desktop report reads run in a blocking worker. Send-page selection sorts storage
-keys before decoding only the requested rows; counts, consumption totals, filter
+Desktop report reads run in a blocking worker. Send-page selection reads covering
+`(created_at, ABS(id))` order indexes before decoding only the requested rows.
+A complete attempt prefix supplies an inclusive lower key bound for legacy sends;
+short prefixes retain the complete legacy branch. Counts, consumption totals, filter
 choices, model/member groups, filtered
 prices and histogram buckets use narrow projections for sorting and aggregation.
 A bounded read-only WAL connection pins one snapshot and history revision under a
@@ -1677,12 +1749,22 @@ writer's 8 MiB pager share the previous 32 MiB configured budget. In-memory test
 databases retain their single connection. Cache publication cannot overwrite a
 newer writer revision or mix current totals with an older read snapshot. Filtered
 reports share two narrow scans for logical totals/groups and physical consumption,
-prices and send count. Price grouping retains member/model/tier/context boundaries;
-histogram rounding remains separate. Event pricing releases the read snapshot
+prices and send count. Logical reads compute request timings; physical reads
+compute send consumption. Both retain the shared aggregate column layout.
+Price grouping retains member/model/tier/context boundaries. Histograms share
+one physical consumption/pricing scan and a separate logical timing/count scan;
+per-bucket rounding remains separate from report totals. Event pricing releases the read snapshot
 after the complete page has been read. All paths
 retain the physical-send view's `(requestId, attempt)` legacy exclusion. Schema 37
 adds a covering history index and normally empty unaggregated-send indexes; it
 does not rewrite usage or replace the existing retention and pricing rules.
+Schema 43 shares two covering indexes across send-page keys, filter choices and
+aggregate reads, preserving every retained request and send.
+Schema 44 replaces the account/time indexes with two partial covering indexes
+for exact account quota windows. These aggregates share the report read snapshot
+and pager budget; pricing runs after releasing that snapshot. Cache publication
+retains the revision captured before reading cached account values, so a concurrent
+write cannot republish them under a newer snapshot revision.
 Deleting/expiring usage removes corresponding attempts; missing earlier history
 is not reconstructed. Actual retry/stop decisions are recorded when known.
 
@@ -1693,7 +1775,8 @@ batches. The worker skips a busy writer; aggregate
 totals survive expiration and caches are invalidated after a committed batch.
 
 SQLite reuses a bounded cache of eight prepared statements for fixed state/usage
-writes and identity lookups; dynamic report queries do not populate it. Attempt
+writes, identity lookups and account-window aggregates; dynamic report queries do
+not populate it. Attempt
 lookups use both `(request_id, attempt)` index columns. Completion-only events do
 not read physical-send history. Unchanged state JSON and identical already-recorded
 consumption skip redundant updates, without dropping request/attempt observations
@@ -1881,7 +1964,15 @@ ledger in each bucket/current estimate, then takes the median and empirical
 spread; it never averages model-group medians or combines Plus/Pro plans. Native
 plan summaries are built before the model-choice limit and ordered by their newest
 observation. The default view selects the latest observed pricing revision for
-the chosen plan; explicit model choices retain the separate workload comparisons.
+the chosen plan. The model selector contains each model name once, without
+workload ordinals or mixed-model labels. Explicit model views aggregate raw
+single-model observations across workload variants, keeping one latest vote per
+ledger and separating plan/pricing revisions. The latest observed revision is
+selected for that model; group medians are never averaged. Mixed-model intervals
+remain in All models and are not attributed to an individual model. Detailed
+workload groups remain available in the native report. New observations store
+model identities explicitly; legacy joined labels supply a model only when
+every recorded profile names the same one.
 
 SQLite keeps anchors across restarts (up to 512 ledgers) and at most 50,000 history
 rows/30 days. Existing maintenance and explicit usage-history clearing remove
@@ -1890,7 +1981,8 @@ estimates.
 History stores scalar estimates and workload metadata, not credentials, prompts
 or provider bodies. Collection and reports aggregate
 through the WAL reader; anchor commits are fenced against history clears. Reports
-return at most 32 newest model groups and 32 plan/pricing summaries. The chart after the speed charts refreshes on
+return at most 32 newest workload groups, 32 model series and 32 plan/pricing
+summaries. The chart after the speed charts refreshes on
 capacity revision/range changes or local evidence expiry.
 Selectors, range spread and observation details stay compact or in tooltips.
 

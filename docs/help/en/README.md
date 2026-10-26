@@ -43,7 +43,20 @@ to work in. Relay does not install ChatGPT, Claude Desktop, or OpenCode.
    Open **Usage → Requests** in Relay to see its result and selected member.
 
 Use **SIWC** or **Excel / BPS** for text; opt Codex into images with
-**Add to pool for images**. The client badge selects the route; **Connect**
+**Add to pool for images**. Experimental Codex text access is a separate opt-in
+under **Settings → Pool data → Text models through Codex sign-in**. Read the
+warning: the red confirmation button becomes available after 10 seconds.
+Cancelling changes nothing, reopening resets the countdown, and disabling
+needs no confirmation. The setting applies to existing and future explicitly
+added Codex pool members; it never adds accounts itself. Disabling preserves
+accounts and image access. Degraded-route blocking remains a separate setting.
+
+This is experimental Relay behavior, not official OpenAI API access. Errors,
+temporary restrictions, and reduced availability or response quality are
+possible. A requested model name is not independent proof of which model
+served the request; Relay cannot guarantee its actual identity.
+
+The client badge selects the route; **Connect**
 adds its separate sign-in/quota. Switching preserves sign-ins, **Notes** and
 weight/concurrency, but clears image-only opt-in. Finish active requests first
 and fix incompatible automation models: rules follow the selected route.
@@ -109,7 +122,8 @@ Filter by period and connection; open **Usage** for individual requests.
 **Weekly quota in $**, after the speed charts, estimates the full
 weekly allowance from your requests. **All models** of the selected subscription
 is the default. Each account counts once; Plus and Pro are estimated separately.
-Subscription and model
+The model menu lists each name once. A selected model uses observations for that
+model only; mixed-model intervals remain in **All models**. Subscription and model
 menus appear only when there are alternatives; hover or focus a point for its date,
 amount and estimate range when available. Subscription comparisons use measured quota consumption.
 
@@ -122,14 +136,10 @@ never beyond reset. History lasts up to 30 days; missing data appears as a gap.
 Resets and subscription/pricing changes are separate events. External account
 use and quota update lag can bias estimates.
 
-**Today** shows 24 hourly intervals including the current hour; **Week** shows
-7 days and **Month** 30 days. Times are local. The connection selector above
-the charts limits their data to that account or API source.
-
-The top **Requests** and **Errors** counters use the same filter; errors count
-all recorded unsuccessful requests. **Connections** counts enabled accounts and
-API sources. **Models** counts models
-published by the pool API.
+**Today** covers 24 hours including the current hour; **Week**, 7 days;
+**Month**, 30 days, in local time. The connection filter applies to charts and
+**Requests/Errors**. Errors count all recorded failures; **Connections** counts
+enabled accounts/API sources; **Models**, the pool's published models.
 
 | Chart | Meaning |
 | --- | --- |
@@ -139,9 +149,9 @@ published by the pool API.
 | **Generation speed** | Output tokens/s after the first token, excluding reported reasoning and initial waiting. |
 | **E2E speed** | Output tokens / full duration including initial waiting. |
 
-The legend labels colors. Dashed purple **Cache hit rate** is the cached share of input.
-Headers summarize the period; speed uses total tokens/time. Hover or focus points
-for exact values. Gaps and **—** mean unmeasured. Loading errors show a warning.
+Purple dashes show **Cache hit rate**, the cached share of input. Headers summarize
+the period; speed is total tokens/time. Hover or focus for exact values.
+Gaps/**—** mean unmeasured; warnings indicate loading errors.
 
 ### Balances and estimates
 
@@ -162,7 +172,7 @@ Account behavior settings are under **Access → Accounts**.
 
 Open **Connections → Accounts → Sign in** and choose a method:
 
-- **Codex** — the default; account switching, linked SIWC quota display, and explicit image-only pool use.
+- **Codex** — the default; account switching, linked SIWC quota display, and explicit pool membership. Images only by default; text requires separate consent in Settings.
 - **ChatGPT (SIWC)** — Relay sign-in window, for the pool.
 - **Excel / Basis Points** — pool use; access is checked with the provider (BPS).
 
@@ -201,7 +211,8 @@ The close button or Escape cancels sign-in before saving.
 then select those you want and confirm the import. You can also drop a file
 into Relay. Enable **Add selected to pool after import** only if wanted:
 it applies to eligible pool connections and API sources, not Codex. After
-importing Codex, use **Add to pool for images** on its account card if wanted.
+importing Codex, use **Add to pool for images** on its account card if wanted
+(**Add to pool** when text access is enabled).
 Free plans can be imported and added to the pool; actual access and quotas are
 determined by the provider, not the plan label.
 After a partial failure, you can retry only the failed records.
@@ -359,7 +370,7 @@ mode, or saved order otherwise. Selection accounts for model, load and session
 ownership. The view reflects current rotation state; ongoing requests retain their member.
 
 In **Pool rotation settings**, **How pool rotation works** opens this Help
-without closing your settings. The settings window keeps only the controls.
+without closing your settings.
 
 #### Modes
 
@@ -630,58 +641,47 @@ ID such as `degrade2`. Dated versions of the same model are accepted.
 
 ## 5. Usage
 
-This log contains requests through the local pool.
-Choose a period, status, model or member, then open a row in **Sends** or
-**Errors**. **24 hours** counts backwards from now. The selected page (up to
-50 records) loads with its period totals; other pages load on navigation and
-historical filter choices on opening a filter. **More filters** adds protocol,
-transport, error category and request ID; its **Reset** clears those filters only.
+Filter local pool requests by period, status, model or member; open a row in
+**Sends** or **Errors**. **24 hours** is a rolling period. Pages hold up to 50
+records. **More filters** adds protocol, transport, error category and request ID;
+its **Reset** clears only that group.
 
-Details show status, timing, cost, token/tool counters and copyable provider
-errors. **Technical details** adds IDs, routing and transport measurements.
-Requested, sent and provider-declared model names are distinct; the declared name
-comes from the provider response. Missing measurements appear as a dash, including
-WS handshake timing on reused sockets and token timing for buffered replies.
-SSE can stream during tool lookup.
+Details show status, timing, cost, tokens, tools and copyable provider errors.
+**Technical details** adds IDs, route, transport and requested/sent/provider-declared
+model names. A provider-declared name is not independent identity verification.
+`≈` marks an API-price estimate; `—` marks missing data, distinct from zero.
 
-**Sends** counts every model call, retry and tool lookup; **Client requests**
-and success rate count final outcomes once. Elapsed timings start at the client
-request. `≈` means an API-price estimate; `—` means unknown.
-Cache tokens already count in input, reasoning in output. Sends expire
-with the log; request/response text and secrets are not stored.
+**Sends** counts calls, retries and tool lookups; **Client requests** counts final
+outcomes once. Timings start with the client request. Cache tokens are included in
+input, reasoning in output. Logs exclude request/response text and secrets.
 
-**Cache reads/writes** measure cache tokens in this request. Reported zero
-differs from an absent counter; reusing a prefix need not write it again.
-**Cache retention (estimate)** uses the latest observed read/write for the same
-chat, connection and upstream model (the selected request in other reports).
-A miss does not renew it; expiry does not prove eviction. Unknown TTL stays
-unknown; mixed TTLs refer to separate prefixes. GPT names and public API TTLs
-do not establish retention for BPS or another compatible service.
+**Cache retention (estimate)** starts at the latest observed read/write for the
+same chat, connection and upstream model. Misses do not renew it; expiry does not
+prove eviction. Unknown TTL remains unknown; mixed TTLs belong to separate prefixes.
+Use the route's observed retention, not another service's advertised TTL.
 
-**Technical details → Context** compares JSON size in bytes. Even a greeting
-includes instructions, history and tools; BPS can add unobserved context, and
-cache hits do not free context space. [BPS catalog lookup](../../project/BASIS_POINTS.md)
-loads tool schemas on demand without dropping tools or constraints. Debug
-comparisons contain no chat text and do not prove a cache-miss cause.
+**Technical details → Context** compares JSON bytes, including instructions,
+history and tools; cache hits still occupy context. BPS can add unobserved context.
+[BPS catalog lookup](../../project/BASIS_POINTS.md) describes on-demand schemas.
+Structural differences alone do not establish a cache-miss cause.
 
-**Save diagnostics** exports local, redacted JSON; nothing is uploaded. TTFT
-comparisons group the same route by effective reasoning, with counts, median,
-p95 where sufficient, input size and cache fraction. Retries/multi-send discovery
-are excluded. The comparison uses existing request history and marks incomplete
-data. Reasoning settings are preserved; measurements come from recorded requests.
+**Save diagnostics** exports redacted JSON locally. TTFT comparisons use recorded
+single-send requests on the same route, grouped by effective reasoning. They show
+sample counts, median, p95 when sufficient, input/cache sizes and missing data.
 
-Optional `ZENITH_RELAY_HTTP_HEADERS_TIMEOUT_SECONDS=60` bounds native HTTP
-connection, upload and header waiting across attempts. Allowed: 1–1800 seconds;
-unset/zero/invalid disables it. It includes provider queueing, stops at headers
-and excludes response bodies, BPS and native WS. `http_headers_timeout` (504,
-Relay origin) may occur after execution starts: no automatic resend or account
-disable. Check the client outcome before resending; increase/disable for slow sources.
+`ZENITH_RELAY_HTTP_HEADERS_TIMEOUT_SECONDS` optionally limits native HTTP connection,
+upload and header waiting, including provider queueing, across attempts. Set 1–1800
+seconds; unset, zero or invalid disables it. Bodies, BPS and native WS are excluded.
+`http_headers_timeout` (504, Relay) can follow execution: Relay neither resends nor
+disables the account. Check the client outcome before retrying; increase the limit
+or disable it for slow sources.
 
 ### Image requests
 
 Select Codex in **Connections → Accounts → Add to pool for images**, or its
 **Images only** row in **Pool → Add member**. Sign-in alone does not add it.
-Relay must run, not the Codex application; this route cannot serve text.
+Relay must run, not the Codex application. This image route does not serve text;
+Codex text access requires the separate opt-in in Settings.
 
 Use `/v1/images/generations` or `/v1/images/edits`, the local API key and an
 image model from `/v1/models`. Native ChatGPT/Codex uses no extra text-model
@@ -759,7 +759,7 @@ checks below first; a reset is not reauthentication.
 
 | What happens | What to do |
 | --- | --- |
-| A saved account is missing from the member picker | The pool accepts SIWC with plan-use consent, BPS connections regardless of plan, and Codex for images only. Select the connection's route first. Accounts awaiting recovery and members already added are not listed. |
+| A saved account is missing from the member picker | The pool accepts SIWC with plan-use consent, BPS connections regardless of plan, and Codex for images only by default. Codex text requires the separate experimental opt-in in Settings. Select the connection's route first. Accounts awaiting recovery and members already added are not listed. |
 | **Connect** is unavailable | Start **Access → Local API** and check available pool members. |
 | The API is running but has no models | Check members, provider access, and model permissions both in the member policy and in **Model Rules**. Starting the API does not add models. |
 | The client cannot connect | Check the address, port, and Relay request key. `127.0.0.1` only works on the same computer. |
@@ -793,7 +793,7 @@ such as 429, explains why. More retries do not replenish quota.
 | `admission_queue_full` | Relay reached the waiting-request count or retained-memory limit for the pool or request key. No new provider request was sent. | Reduce concurrent waiting requests or their input size, let queued requests finish, then retry. |
 | `admission_wait_expired` | The logical request exhausted its total admission wait or retry deadline. | Retry as a new request after capacity recovers; review concurrency limits or the explicit wait-until-available setting. |
 | `no_eligible_source` · 503 · "no eligible source is available for this model" | No member currently qualifies for this model and format. | In **Pool**, check membership, pool and member model rules, sign-in, quota, pauses, and draining. Wait for busy members or add a compatible reserve. Test a new independent request and inspect its route in **Usage**. Removing unhealthy accounts is unnecessary for rotation. |
-| `exceeded retry limit`, `unexpected status` | The client reports a failed request or exhausted retries. | Check the last HTTP status and code in **Usage**. For 429, distinguish quota exhaustion from request frequency; for 503, inspect available routes. Resolve that cause before retrying. The retry limit itself is not the cause of a provider rejection. |
+| `exceeded retry limit`, `unexpected status` | The client reports a failed request or exhausted retries. | Check the last HTTP status and code in **Usage**. For 429, distinguish quota exhaustion from request frequency; for 503, inspect available routes. Resolve that cause before retrying. |
 | `all_sources_cooling_down`, `all_candidates_cooling_down` · 429 | Eligible routes are paused after rate limits. | Wait for `Retry-After` or the next attempt time. Reduce concurrent requests. A reserve must support the same model and format. |
 | `all_sources_temporarily_unavailable` · 503 | Eligible members are temporarily unavailable after failures. | Inspect each member's last error and wait for recovery. Fix network failures; follow the quota instructions for exhaustion. |
 | `model_not_found` · 404 | The model is absent from the pool's available catalog. | Refresh models in **Connections**, check the exact ID and both sets of **Pool** model permissions, and confirm client format compatibility. |
@@ -803,7 +803,7 @@ such as 429, explains why. More retries do not replenish quota.
 | `client_api_not_allowed` · 403 | The client key does not permit this API format. | Connect through the intended client profile and use an allowed endpoint with the Relay request key. |
 | `invalid_host` · 400 | The local API received an unsuitable Host. | Use the address shown in **Access → Local API** without a proxy rewriting Host. For another device, enable **Allow local network access** and use the displayed LAN address. |
 | `gateway_stopped`, `gateway_unavailable`, `runtime_unavailable` | The API is stopped, unreachable, or not ready. | Start the local API and check the address/port. Choose a free port if occupied, then reconnect the client. For LAN access, check the private network and firewall. |
-| `codex_background_blocked_activity_summary`, `codex_background_blocked_task_title` | A ChatGPT background request was disabled. | Enable **Access → Applications → ChatGPT → ChatGPT background tasks** when summaries/titles are wanted. This is not a main-request failure or exhausted quota. |
+| `codex_background_blocked_activity_summary`, `codex_background_blocked_task_title` | A ChatGPT background request was disabled. | Enable **Access → Applications → ChatGPT → ChatGPT background tasks** when summaries/titles are wanted. |
 | `codex_background_blocked_memory_extraction`, `codex_background_blocked_memory_consolidation` | Relay disabled this memory stage (403). | Enable **Memory extraction** or **Memory summaries** under **Access → Applications → ChatGPT**. No provider call or empty success is generated. |
 
 ### Quota, rate limits and provider permissions
@@ -817,7 +817,7 @@ such as 429, explains why. More retries do not replenish quota.
 | `upstream_siwc_not_eligible`, `subscription_sharing_user_not_eligible` · 403 | SIWC is unavailable for this user, workspace or policy. | Check SIWC eligibility and plan-use permission. Relay does not rotate accounts for this refusal. |
 | `upstream_unauthorized` · `invalid_api_key` from a provider | The provider rejected authentication. | Update an external API key in **Connections**, then refresh models. BPS with a saved refresh token renews access before the next request; the failed generation is not repeated automatically. Follow the account's recovery hint and sign in again when refresh is no longer possible. Changing the pool key does not fix provider authorization. |
 | `upstream_account_disabled`, `account_deactivated` · 403 | An account, workspace, or project is disabled. | Check its provider dashboard and restore access through that provider. Use another permitted member while it is unavailable. |
-| `upstream_account_verification_required`, `account_verification_required` | The provider requires account verification. | Complete it on the provider website, then refresh sign-in and account data. This is not a general Relay phone requirement; see [BPS sign-in requirements](#account-sign-in). |
+| `upstream_account_verification_required`, `account_verification_required` | The provider requires account verification. | Complete it on the provider website, then refresh sign-in and account data. See [BPS sign-in requirements](#account-sign-in). |
 | `upstream_forbidden`, `permission_denied` · 403 | The account or key lacks permission for the operation. | Check project, key, and model permissions. Reading a model list does not prove inference access. |
 | `upstream_region_unsupported`, `unsupported_country_region_territory` | The provider does not serve the connection's region. | Check the provider's supported regions and permitted network configuration. Use a connection available in your region. |
 | `upstream_edge_challenge`, `edge_security_challenge` | Edge security, including Cloudflare 1010, blocked API access. | Check the API address, proxy and provider access. Signing in again does not resolve this block. |
@@ -941,7 +941,7 @@ such as 429, explains why. More retries do not replenish quota.
 | Balance `rate_limited`, `unavailable`, `invalid_response`; `source_stats_unavailable` | Statistics were limited, unavailable, or malformed. | Wait after 429; otherwise check API/network and refresh. Retained values are stale, and an unknown balance is not zero. |
 | `pricing_catalog_refresh_failed` | The price reference could not refresh. | Check connectivity and retry later. Older prices may remain; missing prices do not remove models. |
 | `source_pricing_identity_invalid`, `model_price_invalid`, `source_model_price_invalid` | Price identity or amount is invalid. | Use an existing model ID and nonnegative USD prices per million tokens. A manual set needs input and output prices; do not confuse per-token and per-million rates. |
-| `account_purchase_cost_invalid` | The account purchase price is invalid or too large. | Correct the USD amount in **Pool member rules → Settings**. It estimates payback and is not the provider balance. |
+| `account_purchase_cost_invalid` | The account purchase price is invalid or too large. | Correct the USD amount in **Pool member rules → Settings**. The purchase price is used to calculate payback. |
 
 ### Imports and connection settings
 

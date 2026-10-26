@@ -494,6 +494,17 @@ bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --
 Preserve tool order, original schemas, malformed-declaration rejection and
 current-call permissions. Debug fingerprint timings do not describe debug-off work.
 
+#### BPS stream and batch probes
+
+Measure parallel stream normalization and passthrough output during batch expansion:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --lib -- parallel_stream_normalization_latency measure_bps_batch_passthrough --ignored --nocapture --test-threads=1
+~~~
+
+Preserve native call identity, output order, atomic batch validation and terminal
+barriers. These synthetic CPU probes do not measure provider generation or caching.
+
 ### BPS attachment preparation probe
 
 Compare in-place image resolution with the reference JSON-roundtrip path:
@@ -615,6 +626,11 @@ installers or publish artifacts. Pushing a <code>v*</code> tag builds the deskto
 installers and, after those checks pass, publishes the GitHub Release and updater
 manifest. A manual Build run retains desktop installers as Actions artifacts
 without publishing, even when started from a tag.
+
+Browser checks run in four independent Playwright shards, preserving the local
+file-level test ordering. The required <code>Check</code> status succeeds only
+when runtime checks and every browser shard pass. Installer builds run alongside
+checks; publication still requires all checks and all six platform builds.
 
 ### macOS distribution
 

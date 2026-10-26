@@ -13,13 +13,29 @@ recoverable account deletion. Changes below are grouped by area.
 
 ### Changed
 
+- Codex connections retain their catalog format during temporary BPS access
+  failures. Unavailable models no longer appear as an invalid catalog or an
+  unreachable API address; a fresh successful access check restores discovery
+  without restarting Relay.
+
+- HTTP, compaction and WebSocket default to full Responses without inferring Lite
+  from native model catalogs. Live catalogs and managed Codex profiles also select
+  full Responses so clients do not enable Lite themselves. Explicit client Lite
+  requests remain supported; tool schemas, reasoning and parallel-call policies
+  are preserved. WebSocket continuations reconnect when the explicitly selected
+  Lite/full mode changes.
+
 - Production builds group the eager workspace graph while keeping the native
   loader and deferred pages separate. Version lookup excludes development package
   metadata; obsolete translations are removed. Bundle-size limits stay unchanged.
+  Request diagnostics reuse field markup; unused frontend command wrappers and
+  duplicate reload explanations are removed. Usage displays Gemini Interactions
+  consistently in protocol and endpoint fields.
 
 - Desktop, web preview and Help use concise function and action descriptions.
   Documentation and code comments remove repetitive comparisons with rejected
   alternatives while preserving operational and security constraints.
+  The Codex text-access warning icon is vertically centered with its dialog title.
 
 - Overview adds weekly-quota API-equivalent history by subscription/workload,
   defaulting to all models within one subscription without duplicate ledger votes,
@@ -27,8 +43,42 @@ recoverable account deletion. Changes below are grouped by area.
   account routes, expire stale forecasts and avoid extra provider requests;
   subscription cost, routing and billing remain unchanged.
 
-- Pool and Connections reuse an inventory index for linked account lookups,
-  instead of rescanning every account per card; quota and routing are unchanged.
+- Native Responses replay shares immutable history on cache lookup and compares
+  string prefixes without temporary JSON copies. Memory limits, expiry, ownership
+  checks and outgoing conversation history remain unchanged.
+- Shared SSE parsing uses vectorized CR/LF search for native and converted
+  streams. Event bytes, ordering, terminal checks and per-event limits stay intact.
+- Large HTTP JSON requests and compressed bodies are parsed in bounded workers.
+  On a synthetic 1.72 MB debug probe, median longest async-worker occupation fell
+  from 58–59 ms to below 0.05 ms. Small uncompressed requests stay inline.
+- Native WebSocket model checks and forwarding reuse decoded frames. Original
+  text/binary bytes, usage, terminal errors and continuation ownership are preserved.
+  A synthetic debug probe reduced text/tool delta decoding time by about 49%.
+- Converted streams validate growing text and tool arguments without cloning
+  their previous emitted snapshots. Text, reasoning, refusal and function-argument
+  deltas extend retained buffers. Prefix, numeric-normalization, tool-identity
+  and completion checks remain unchanged.
+- Function-argument normalization skips quoted text with vectorized delimiter
+  search. Escaped strings, numeric precision and incomplete-number handling
+  retain their existing behavior.
+- Pool and Connections reuse linked-account indexes and timestamp formatters
+  when rendering cards. Pool availability shares visible-model normalization
+  across members within each check. Quota freshness and routing decisions remain live.
+- Account, sign-in and request-cache countdowns pause in hidden windows and catch up on return.
+  Date formatters are reused across cards and ticks, including after a language change.
+- Usage shares two covering read indexes across request pages, filters and
+  reports. Summary queries separate logical timings from send consumption;
+  database upgrades preserve history.
+- Account quota estimates use covering indexes and the shared read-only database
+  snapshot, freeing the writer during aggregation within the existing memory budget.
+  On a synthetic 100,000-send / eight-account probe, cold reads fell from 962 to
+  279 ms and one-account refreshes from 127 to 38 ms; the 512-event durable-write
+  median remained about 1.05 seconds.
+- Usage charts aggregate send consumption and pricing together. Six alternating
+  comparisons on the same synthetic 100,000-send database reduced histogram
+  calculation medians from 863 to 609 ms, or from 284 to 178 ms with a member
+  filter. Counts, retry attribution and per-bucket price rounding are preserved;
+  the separate bucket-pricing pass and its unused helper are removed.
 - Request timezone now follows the assigned proxy automatically, without account
   pickers, global switches, manual bindings or a default New York fallback.
   Shared background jobs discover exits independently of the UI, refresh before
@@ -615,21 +665,75 @@ recoverable account deletion. Changes below are grouped by area.
 
 ### Изменения
 
+- При временном отказе доступа BPS подключение Codex сохраняет формат каталога.
+  Недоступные модели больше не показываются как повреждённый каталог или
+  недоступный адрес API; после успешной проверки доступа каталог восстанавливается
+  без перезапуска Relay.
+
+- HTTP, сжатие контекста и WebSocket используют полный Responses по умолчанию,
+  без автоматического выбора Lite из каталога моделей. Каталог и сохраняемый
+  профиль Codex также выбирают полный Responses, чтобы клиент сам не включал Lite.
+  Явные запросы клиента на Lite поддерживаются; схемы инструментов, рассуждение
+  и политика параллельных вызовов сохранены. При явно выбранной смене режима
+  Lite/полный WebSocket
+  переподключается до отправки продолжения.
+
 - Сборка объединяет сразу нужные модули интерфейса, сохраняя отдельный нативный
   загрузчик и отложенные страницы. Ради номера версии больше не включается весь
   пакет разработки; удалены неиспользуемые переводы. Лимиты размера сохранены.
+  Диагностика запросов использует общую разметку полей; убраны неиспользуемые
+  обёртки команд и повторные пояснения кнопки перезагрузки. В Использовании
+  Gemini Interactions одинаково подписан в протоколе и конечной точке.
 
 - Тексты Desktop, веб-демо и справки описывают функцию и действие короче.
   Из документации и комментариев убраны повторы и сравнения с отвергнутыми
   вариантами; рабочие ограничения и предупреждения сохранены.
+  Значок предупреждения о текстовом доступе Codex выровнен по центру заголовка окна.
 
 - В Обзоре появилась история недельной квоты в API-эквиваленте по подпискам и
   профилям нагрузки: медиана, разброс и отметки сбросов. Фоновый сбор не создаёт
   запросов к провайдеру, не дублирует связанные аккаунты и убирает устаревшие
   оценки. Стоимость подписки, маршрутизация и биллинг не изменены.
 
-- Пул и Подключения используют индекс связанных аккаунтов вместо полного поиска
-  для каждой карточки; квоты и маршрутизация не меняются.
+- Кэш продолжений Responses использует общую неизменяемую историю вместо
+  копирования при каждом чтении; строковые префиксы сравниваются без временного JSON.
+  Лимиты памяти, срок хранения, проверка владельца и отправляемая история сохранены.
+- Общий SSE-парсер использует векторный поиск CR/LF для нативных и преобразованных
+  потоков. Байты и порядок событий, проверки завершения и лимиты сохранены.
+- Крупные HTTP-запросы JSON и сжатые тела разбираются в ограниченном пуле рабочих
+  потоков. В синтетическом debug-замере на 1,72 МБ медиана самой долгой блокировки
+  асинхронного потока снизилась с 58–59 мс до менее 0,05 мс.
+  Небольшие несжатые запросы обрабатываются без переключения потока.
+- Проверка модели и пересылка в нативном WebSocket используют общий результат разбора.
+  Исходные текстовые и бинарные кадры, расход, ошибки и владелец продолжения сохранены.
+  В синтетическом debug-замере время разбора текстовых и инструментальных дельт
+  сократилось примерно на 49%.
+- Преобразованные потоки проверяют растущий текст и аргументы инструментов без
+  копирования предыдущего отправленного состояния. Текст, рассуждения, отказы
+  и аргументы функций дополняют существующие буферы. Проверки префикса,
+  нормализация чисел, идентичность инструментов и завершение сохранены.
+- Нормализация аргументов функций пропускает текст в кавычках с векторным поиском
+  разделителей. Обработка экранирования, точных чисел и незавершённых числовых
+  значений сохранена.
+- Пул и Подключения повторно используют индексы связанных аккаунтов и форматтеры
+  времени при отрисовке карточек. Проверка доступности пула нормализует каталог
+  моделей один раз для всех участников. Актуальность квот и маршруты проверяются заново.
+- Отсчёты квот, подписок, входа и кэша запроса приостанавливаются в скрытом окне и обновляются
+  при возвращении. Форматтеры дат общие для карточек и повторных тиков;
+  смена языка учитывается сразу.
+- В Использовании список, фильтры и статистика используют два общих индекса.
+  Расчёт отдельно обрабатывает тайминги запросов и расход отправок.
+  Обновление локальной базы сохраняет историю.
+- Оценка квот аккаунтов использует покрывающие индексы и общий снимок базы для
+  чтения: запись освобождена на время расчёта, бюджет памяти сохранён.
+  На синтетических 100 000 отправках и восьми аккаунтах первый расчёт сократился
+  с 962 до 279 мс, обновление одного аккаунта — со 127 до 38 мс. Медиана записи
+  512 событий с прежними гарантиями сохранности осталась около 1,05 секунды.
+- Графики использования считают расход и стоимость отправок за один проход.
+  В шести чередующихся сравнениях на одной синтетической базе из 100 000 отправок
+  медиана расчёта графика снизилась с 863 до 609 мс, с фильтром участника — с 284
+  до 178 мс. Счётчики, учёт повторов и округление стоимости сохранены;
+  отдельный проход расчёта цены и неиспользуемая вспомогательная функция удалены.
 - Часовой пояс автоматически следует назначенному прокси: удалены выбор города,
   глобальные переключатели, ручные привязки и запасной Нью-Йорк. Общие фоновые
   задачи определяют выход без открытия UI, обновляют пояс до истечения 15 минут
@@ -969,7 +1073,7 @@ recoverable account deletion. Changes below are grouped by area.
 - Доступ объединяет Локальный API, Приложения и Аккаунты. Настройка приложения
   сохраняет путь без запуска и изменения пула; защищённое восстановление Claude
   находится в Восстановлении. Общие настройки аккаунтов сохраняют индивидуальные
-  исключения, необязательную привязку IANA-пояса и прежние отказы от автозапуска.
+  исключения и прежние отказы от автозапуска; часовой пояс автоматически следует прокси.
 - Страницы, выбор приложений, диалоги, карточки источников и прокси стали компактнее.
   Источники показывают готовность и баланс, а не ротацию аккаунтов; Запустить стоит
   рядом с Изменить. Проверки прокси сохраняют IP, страну, задержку и время проверки,
