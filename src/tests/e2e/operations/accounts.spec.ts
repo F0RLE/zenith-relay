@@ -925,7 +925,8 @@ test("pool economics follows membership and leaves Overview unchanged", async ({
   await expect(page.locator(".pool-economics")).toHaveCount(0);
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   const economics = page.locator(".pool-economics");
-  await expect(economics.locator("strong")).toHaveText(["≈$14.11", "≈$8.89", "78%"]);
+  // The shared weekly fixture is $10 at 64% remaining, not per-account extrapolation.
+  await expect(economics.locator("strong")).toHaveText(["≈$14.11", "≈$6.4", "78%"]);
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   const account = page.locator(".account-card").first();
   await account.getByRole("button", { name: "Remove from pool", exact: true }).click();

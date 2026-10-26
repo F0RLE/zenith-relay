@@ -228,7 +228,7 @@ test("an exhausted weekly quota makes the account effectively unavailable in con
   await expect(accountCard.locator('.relay-status-icon[aria-label="Waiting for quota"]')).toBeVisible();
 });
 
-test("direct account value remains controlled by the dollar toggle", async ({ page }) => {
+test("weekly calibrated account value remains controlled by the dollar toggle", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
@@ -236,8 +236,8 @@ test("direct account value remains controlled by the dollar toggle", async ({ pa
 
   await expect(connectionValue.first()).toBeVisible();
   await expect(connectionValue.first()).toHaveAttribute("data-columns", "3");
-  await expect(connectionValue.first().locator("dt")).toHaveText(["API equiv. used", "API equiv. left", "Payback"]);
-  await expect(connectionValue.first().locator("dd").nth(1)).toHaveText("≈$8.89");
+  await expect(connectionValue.first().locator("dt")).toHaveText(["API equiv. used", "Weekly remaining", "Payback"]);
+  await expect(connectionValue.first().locator("dd").nth(1)).toHaveText("≈$6.4");
   await expect(connectionValue.first().locator("dd small")).toHaveCount(0);
   await expect(page.locator(".account-provider-quota-strip")).toHaveCount(0);
   await expect(page.locator(".account-card .quota-meter").first()).toBeVisible();
