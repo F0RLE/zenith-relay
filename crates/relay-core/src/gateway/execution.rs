@@ -34,29 +34,6 @@ use axum::http::{HeaderValue, Response, StatusCode};
 use serde_json::Value;
 use std::collections::HashSet;
 
-/// Header shared by ordinary Responses routes and account execution.
-///
-/// The caller decides when the route is eligible. Ordinary routes pass this
-/// only for `WireApi::Responses`; account execution is already on that protocol.
-fn responses_lite_header(
-    responses_lite: &Option<HeaderValue>,
-    automatic_responses_lite: bool,
-    runtime: &GatewayRuntime,
-    resolved_model: &str,
-    account_id: Option<&str>,
-) -> Option<HeaderValue> {
-    responses_lite.clone().or_else(|| {
-        (automatic_responses_lite
-            && account_id.is_some_and(|candidate_id| {
-                runtime
-                    .codex_model_responses_lite_candidates(resolved_model)
-                    .iter()
-                    .any(|available_candidate_id| available_candidate_id == candidate_id)
-            }))
-        .then(|| HeaderValue::from_static("true"))
-    })
-}
-
 /// One-shot request repairs shared by ordinary and account execution.
 ///
 /// Each flag records that its repair already ran for this request. The attempt

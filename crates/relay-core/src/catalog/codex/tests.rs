@@ -110,7 +110,7 @@ fn routed_models_strip_native_only_selectors_from_template() {
     assert!(catalog_entry.get("default_reasoning_level").is_none());
     assert_eq!(catalog_entry["supported_reasoning_levels"], json!([]));
     assert_eq!(catalog_entry["web_search_tool_type"], "text");
-    assert!(catalog_entry.get("use_responses_lite").is_none());
+    assert_eq!(catalog_entry["use_responses_lite"], false);
     assert!(catalog_entry.get("service_tiers").is_none());
     assert_eq!(catalog_entry["supports_reasoning_summaries"], false);
     assert_eq!(catalog_entry["supports_parallel_tool_calls"], false);
@@ -173,7 +173,7 @@ fn api_models_do_not_inherit_ultra_when_medium_is_unavailable() {
 }
 
 #[test]
-fn native_models_keep_bare_slug_and_upstream_capabilities() {
+fn native_models_keep_bare_slug_and_capabilities_with_full_responses() {
     let template = json!({
         "slug": "gpt-5.6-sol",
         "display_name": "GPT-5.6 Sol",
@@ -221,7 +221,7 @@ fn native_models_keep_bare_slug_and_upstream_capabilities() {
     assert_eq!(catalog_entry["default_reasoning_level"], "high");
     assert_eq!(catalog_entry["service_tiers"], json!([]));
     assert_eq!(catalog_entry["supports_parallel_tool_calls"], true);
-    assert_eq!(catalog_entry["use_responses_lite"], true);
+    assert_eq!(catalog_entry["use_responses_lite"], false);
     assert_eq!(catalog_entry["input_modalities"], json!(["text"]));
     assert_eq!(catalog_entry["context_window"], 128_000);
     assert_eq!(catalog_entry["max_context_window"], 120_000);

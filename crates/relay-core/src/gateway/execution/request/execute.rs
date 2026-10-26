@@ -61,13 +61,6 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
     let mut last_preserved_upstream_error: Option<PreservedUpstreamError> = None;
     let mut last_failure_origin = crate::ErrorOrigin::Relay;
     let mut retry_window_expired = false;
-    // Automatic Lite is safe only when every configured route in this key
-    // scope is an official account with confirmed Lite support. Explicit
-    // client Lite headers remain authoritative, but a mixed or partly unknown
-    // pool must use full Responses so fallback preserves its tool/context
-    // contract.
-    let automatic_responses_lite = client_wire_api == WireApi::Responses
-        && runtime.codex_model_responses_routes_all_support_lite(&key, &resolved_model);
     let mut has_unpaired_tool_output = !unpaired_tool_output_ids(&request).is_empty();
     let mut prompt_affinity_key = runtime.prompt_affinity_key(
         &key.id,
@@ -272,7 +265,6 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
             client_wire_api,
             stream,
             responses_lite: &responses_lite,
-            automatic_responses_lite,
             service_tier_policy: &service_tier_policy,
             tool_policy: &mut tool_policy,
             client_context_id: &client_context_id,

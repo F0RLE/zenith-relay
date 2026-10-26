@@ -42,6 +42,7 @@ fn native_account_catalog_uses_reference_capabilities_despite_conflicting_accoun
         ("input_modalities".into(), json!(["text"])),
         ("output_modalities".into(), json!(["text"])),
         ("supports_parallel_tool_calls".into(), json!(true)),
+        ("use_responses_lite".into(), json!(true)),
         ("supports_search_tool".into(), json!(true)),
         (
             "supported_reasoning_levels".into(),
@@ -70,6 +71,7 @@ fn native_account_catalog_uses_reference_capabilities_despite_conflicting_accoun
     assert_eq!(model["input_modalities"], json!(["text"]));
     assert_eq!(model["output_modalities"], json!(["text"]));
     assert_eq!(model["supports_parallel_tool_calls"], true);
+    assert_eq!(model["use_responses_lite"], false);
     assert_eq!(model["supports_search_tool"], false);
     assert_eq!(
         model["supported_reasoning_levels"],
@@ -399,9 +401,8 @@ fn missing_native_card_keeps_identity_without_inheriting_capabilities() {
             assert_eq!(model["comp_hash"], crate::CODEX_RELAY_CATALOG_HASH);
             assert_eq!(model["supports_parallel_tool_calls"], false);
             assert_eq!(model["supported_reasoning_levels"], json!([]));
-            for field in ["use_responses_lite", "future_native_capability"] {
-                assert!(model.get(field).is_none(), "unexpected capability: {field}");
-            }
+            assert_eq!(model["use_responses_lite"], false);
+            assert!(model.get("future_native_capability").is_none());
             assert!(model.get("context_window").is_none());
             assert!(model.get("auto_compact_token_limit").is_none());
             assert!(crate::codex_catalog_entry_is_compatible(model));

@@ -56,9 +56,9 @@ async fn account_catalog_uses_reference_metadata_and_preserves_native_transport(
         .any(|model| model["slug"] == OFFICIAL_CODEX_MODEL));
     // Native ChatGPT rows retain account transport, with shared model semantics.
     assert!(catalog["models"][0].get("service_tiers").is_some());
-    assert_eq!(catalog["models"][0]["use_responses_lite"], true);
+    assert_eq!(catalog["models"][0]["use_responses_lite"], false);
     assert_eq!(catalog["models"][0]["supported_in_api"], true);
-    assert_eq!(catalog["models"][0]["supports_parallel_tool_calls"], false);
+    assert_eq!(catalog["models"][0]["supports_parallel_tool_calls"], true);
     assert_eq!(catalog["models"][0]["default_reasoning_level"], "low");
     assert_eq!(
         catalog["models"][0]["supported_reasoning_levels"],
@@ -139,11 +139,12 @@ async fn account_catalog_uses_reference_metadata_and_preserves_native_transport(
             request.body.get("service_tier").and_then(Value::as_str),
             expected_tier
         );
-        assert_eq!(request.responses_lite.as_deref(), Some("true"));
+        // Advertising native Lite support must not opt this request into Lite.
+        assert_eq!(request.responses_lite, None);
         assert_eq!(request.body["parallel_tool_calls"], false);
         assert_eq!(request.body["reasoning"]["effort"], "low");
         assert_eq!(request.body["reasoning"]["summary"], "detailed");
-        assert_eq!(request.body["reasoning"]["context"], "all_turns");
+        assert!(request.body["reasoning"].get("context").is_none());
     }
     drop(requests);
     let events = events.lock().unwrap();
@@ -314,8 +315,8 @@ async fn pool_catalog_keeps_transport_owned_and_model_semantics_stable_across_ac
             .len(),
         3
     );
-    assert_eq!(second_model["use_responses_lite"], true);
-    assert_eq!(second_model["supports_parallel_tool_calls"], false);
+    assert_eq!(second_model["use_responses_lite"], false);
+    assert_eq!(second_model["supports_parallel_tool_calls"], true);
     assert_eq!(
         second_model["supported_reasoning_levels"],
         first_model["supported_reasoning_levels"]
@@ -347,6 +348,7 @@ async fn pool_catalog_fetches_account_manifests_concurrently_without_changing_ra
                     }
                     let mut catalog = default_upstream_model_catalog();
                     catalog["models"][0]["use_responses_lite"] = Value::Bool(index == 0);
+                    catalog["models"][0]["native_rank_marker"] = json!(index);
                     Json(catalog)
                 }
             }),
@@ -389,7 +391,8 @@ async fn pool_catalog_fetches_account_manifests_concurrently_without_changing_ra
         .await
         .unwrap();
     assert_eq!(first_arrived.load(Ordering::SeqCst), 2);
-    assert_eq!(catalog["models"][0]["use_responses_lite"], true);
+    assert_eq!(catalog["models"][0]["use_responses_lite"], false);
+    assert_eq!(catalog["models"][0]["native_rank_marker"], 0);
 }
 
 #[tokio::test]
@@ -429,7 +432,7 @@ async fn pool_catalog_retains_unreachable_account_metadata_beside_live_account_c
         .await
         .unwrap();
     assert_eq!(live["models"][0]["default_reasoning_level"], "high");
-    assert_eq!(live["models"][0]["supports_parallel_tool_calls"], false);
+    assert_eq!(live["models"][0]["supports_parallel_tool_calls"], true);
 
     drop(second_upstream);
 
@@ -522,7 +525,7 @@ async fn pool_catalog_ignores_participant_capabilities_on_a_mixed_source_model()
         ["low", "high", "xhigh"]
     );
     assert!(model.get("service_tiers").is_some());
-    assert_eq!(model["use_responses_lite"], true);
+    assert_eq!(model["use_responses_lite"], false);
     assert_eq!(model["supports_reasoning_summaries"], false);
     assert_eq!(model["input_modalities"], json!(["text", "image"]));
     // Short preserves the native card's published default, capped by its

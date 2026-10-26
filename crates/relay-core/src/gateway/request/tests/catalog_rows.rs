@@ -96,7 +96,7 @@ fn api_gpt_picker_ids_stay_native_without_account_cards_or_extra_models() {
         assert_eq!(model["comp_hash"], crate::CODEX_RELAY_CATALOG_HASH);
         assert_eq!(model["supports_parallel_tool_calls"], false);
         assert_eq!(model["supported_reasoning_levels"], json!([]));
-        assert!(model.get("use_responses_lite").is_none());
+        assert_eq!(model["use_responses_lite"], false);
     }
     for id in ["provider/gpt-6-astra", "claude-future"] {
         assert!(models
@@ -365,7 +365,7 @@ fn codex_catalog_names_do_not_merge_routes_or_grant_native_transport() {
         );
         assert_eq!(row["supports_parallel_tool_calls"], false);
         assert_eq!(row["supported_reasoning_levels"], json!([]));
-        assert!(row.get("use_responses_lite").is_none());
+        assert_eq!(row["use_responses_lite"], false);
         assert_eq!(row["service_tiers"].as_array().map(Vec::len), Some(0));
     }
     assert_ne!(rows[1]["slug"], rows[2]["slug"]);

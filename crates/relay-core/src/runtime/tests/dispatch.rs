@@ -408,13 +408,9 @@ fn model_inventory_refresh_keeps_native_images_and_retires_old_transport_evidenc
         serde_json::json!({"models": [{"slug": "gpt-test"}]}),
         1,
     );
-    runtime.set_codex_model_uses_responses_lite("account-1", "gpt-test", true);
     assert!(runtime.update_account_models("account-1", &["gpt-5.6-sol".into()]));
     assert!(runtime
         .stale_codex_model_manifests(["account-1"])
-        .is_empty());
-    assert!(runtime
-        .codex_model_responses_lite_candidates("gpt-test")
         .is_empty());
     assert_eq!(
         runtime

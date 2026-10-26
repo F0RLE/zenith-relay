@@ -1,6 +1,6 @@
 use super::{AuthenticatedKey, GatewayRuntime};
 use crate::catalog::{normalize_model_reasoning_allowed_levels, reasoning_policy_levels};
-use crate::{CandidateKind, Error, Result, WireApi};
+use crate::{Error, Result, WireApi};
 use std::collections::{BTreeMap, HashSet};
 
 impl GatewayRuntime {
@@ -83,68 +83,6 @@ impl GatewayRuntime {
             })
             .map(|account| account.id.clone())
             .collect()
-    }
-
-    /// Responses Lite is a whole-request transport contract, not a property
-    /// of an individual fallback candidate. Automatic Lite is safe only when
-    /// every configured route in this key scope is an official Codex account
-    /// with confirmed Lite support for this exact model. Otherwise an attempt
-    /// could switch tools or reasoning context between Lite and full Responses.
-    ///
-    /// This deliberately checks configured routes rather than current health,
-    /// so a temporary cooldown cannot silently change the request contract.
-    pub(crate) fn codex_model_responses_routes_all_support_lite(
-        &self,
-        key: &AuthenticatedKey,
-        model: &str,
-    ) -> bool {
-        self.codex_model_configured_responses_routes_all_support_lite(key, model, false)
-    }
-
-    /// Equivalent to [`Self::codex_model_responses_routes_all_support_lite`]
-    /// for account-only endpoints. Generic API routes are intentionally
-    /// excluded because those endpoints never select them.
-    pub(crate) fn codex_model_account_responses_routes_all_support_lite(
-        &self,
-        key: &AuthenticatedKey,
-        model: &str,
-    ) -> bool {
-        self.codex_model_configured_responses_routes_all_support_lite(key, model, true)
-    }
-
-    fn codex_model_configured_responses_routes_all_support_lite(
-        &self,
-        key: &AuthenticatedKey,
-        model: &str,
-        account_only: bool,
-    ) -> bool {
-        let Some(resolved_model_id) = self.resolve_model(key, model) else {
-            return false;
-        };
-        let scope = key.scope_snapshot();
-        // Do not hold the scheduler lock while inspecting catalog metadata.
-        // Metadata can refresh independently, and a conservative false result
-        // is preferable to blocking route selection.
-        let configured = {
-            let scheduler = self.lock_scheduler();
-            scheduler
-                .candidates()
-                .filter(|candidate| {
-                    candidate.is_configured(&resolved_model_id, &[WireApi::Responses], &scope)
-                        && (!account_only || candidate.kind == CandidateKind::OAuthAccount)
-                })
-                .map(|candidate| (candidate.id.clone(), candidate.kind))
-                .collect::<Vec<_>>()
-        };
-        if configured.is_empty() {
-            return false;
-        }
-        let model_id = crate::model_id_key(&resolved_model_id);
-        let lite_models = crate::poison::mutex(&self.codex_responses_lite_models);
-        configured.into_iter().all(|(candidate_id, kind)| {
-            kind == CandidateKind::OAuthAccount
-                && lite_models.contains(&(candidate_id, model_id.clone()))
-        })
     }
 
     pub(crate) fn api_source_candidate_ids(&self) -> HashSet<String> {

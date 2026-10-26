@@ -185,6 +185,8 @@ async fn start_next_request(
             .ok_or_else(GatewayFailure::unavailable)?;
         runtime.set_route_streaming(&mut route, false);
         if route.binding_key() != state.upstream_route.binding_key()
+            || (route.account_id.is_some() && client_request.responses_lite)
+                != state.upstream_responses_lite
             || route.source_model != state.upstream_route.source_model
             || route.upstream_url != state.upstream_route.upstream_url
             || route.upstream_headers != state.upstream_route.upstream_headers

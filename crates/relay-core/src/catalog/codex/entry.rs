@@ -32,7 +32,6 @@ pub fn routed_codex_catalog_entry(
         "model_messages",
         "supports_websockets",
         "upgrade",
-        "use_responses_lite",
         "tool_mode",
         "multi_agent_version",
         "auto_review_model_override",
@@ -57,6 +56,7 @@ pub fn routed_codex_catalog_entry(
     catalog_entry.insert("shell_type".into(), Value::String("shell_command".into()));
     catalog_entry.insert("visibility".into(), Value::String("list".into()));
     catalog_entry.insert("supported_in_api".into(), Value::Bool(true));
+    catalog_entry.insert("use_responses_lite".into(), Value::Bool(false));
     catalog_entry.insert(
         "priority".into(),
         Value::Number(priority.min(i32::MAX as u64).into()),
@@ -233,7 +233,6 @@ pub fn normalize_upstream_codex_catalog_entry(
     prefer_medium_reasoning_default(&mut catalog_entry);
 
     for key in [
-        "use_responses_lite",
         "supports_parallel_tool_calls",
         "supports_search_tool",
         "supports_image_detail_original",

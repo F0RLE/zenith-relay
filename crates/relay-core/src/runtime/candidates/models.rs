@@ -62,11 +62,9 @@ impl GatewayRuntime {
         crate::poison::mutex(&self.registry).replace(account_id, published_models.iter());
         scheduler.upsert(candidate);
         if changed {
-            // Transport cards and Lite support describe the old inventory.
+            // Transport cards describe the old inventory.
             // A removed and later reintroduced slug needs fresh evidence.
             crate::poison::mutex(&self.model_metadata.codex_manifests).remove(account_id);
-            crate::poison::mutex(&self.codex_responses_lite_models)
-                .retain(|(id, _)| id != account_id);
         }
         drop(scheduler);
         self.candidate_availability.notify_waiters();

@@ -30,7 +30,6 @@ pub(super) struct ClientRequest {
     pub(super) stream_id: Option<String>,
     pub(super) responses_lite: bool,
     pub(in crate::gateway::websocket) service_tier_policy: ServiceTierPolicy,
-    responses_lite_candidates: Vec<String>,
     pub(super) response_affinity_key: Option<String>,
     pub(super) requires_affinity_owner: bool,
     pub(super) has_unpaired_tool_output: bool,
@@ -197,7 +196,7 @@ impl ClientRequest {
     ) -> Result<(Value, ToolUseDiagnostics), GatewayFailure> {
         if route.account_id.is_some()
             && route.account_transport == crate::runtime::AccountTransport::NativeResponses
-            && self.responses_lite_for(route)
+            && self.responses_lite
             && self.request_body.get("parallel_tool_calls") == Some(&Value::Bool(true))
         {
             return Err(GatewayFailure::invalid_request(
@@ -246,7 +245,7 @@ impl ClientRequest {
             "model".to_string(),
             Value::String(route.source_model.clone()),
         );
-        let responses_lite = self.responses_lite_for(route);
+        let responses_lite = self.responses_lite;
         if route.account_id.is_some()
             && route.account_transport == crate::runtime::AccountTransport::NativeResponses
         {
@@ -259,15 +258,6 @@ impl ClientRequest {
             );
         }
         routed_request
-    }
-
-    pub(super) fn responses_lite_for(&self, route: &ExecutorRoute) -> bool {
-        self.responses_lite
-            || route.account_id.as_deref().is_some_and(|candidate_id| {
-                self.responses_lite_candidates
-                    .iter()
-                    .any(|candidate_model_id| candidate_model_id == candidate_id)
-            })
     }
 
     pub(super) fn tool_use_for(&self, route: &ExecutorRoute) -> ToolUseDiagnostics {

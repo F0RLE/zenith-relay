@@ -500,7 +500,7 @@ fn websocket_lite_marker_preserves_parallel_policy_on_non_account_routes() {
         serde_json::from_str(&payload_bytes).expect("payload should be valid JSON");
 
     assert_eq!(payload["parallel_tool_calls"], true);
-    assert!(request.responses_lite_for(&route));
+    assert!(request.responses_lite);
     let mut native_route = route.clone();
     native_route.account_id = Some("synthetic-native-account".into());
     native_route.account_transport = crate::runtime::AccountTransport::NativeResponses;

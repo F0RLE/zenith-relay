@@ -132,7 +132,6 @@ pub struct GatewayRuntime {
     admission: Mutex<admission::AdmissionQueue>,
     admission_changed: tokio::sync::Notify,
     registry: Mutex<ModelRegistry>,
-    codex_responses_lite_models: Mutex<BTreeSet<(String, String)>>,
     official_codex_ultra: Mutex<BTreeMap<String, Value>>,
     websocket_http_only: Mutex<BTreeMap<(String, String), clients::WebsocketCapabilityObservation>>,
     model_metadata: SourceModelMetadataState,

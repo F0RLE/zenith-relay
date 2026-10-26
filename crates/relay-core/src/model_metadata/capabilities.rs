@@ -219,21 +219,16 @@ impl ModelCapabilities {
         let native_parallel = catalog_entry
             .get("supports_parallel_tool_calls")
             .and_then(Value::as_bool);
-        let native_lite = catalog_entry
-            .get("use_responses_lite")
-            .and_then(Value::as_bool)
-            == Some(true);
         self.apply_to_codex(catalog_entry);
         if let Some(object) = catalog_entry.as_object_mut() {
             object.extend(context);
-            // A validated native card describes its transport. Ordinary tool
-            // support is not parallel-call evidence, and a transport exclusion
-            // must not be widened by reference model metadata.
+            // Relay catalogs select full Responses. An upstream preference for
+            // Lite does not restrict that transport. Parallel support still
+            // needs its own native evidence and obeys reference exclusions.
             object.insert(
                 "supports_parallel_tool_calls".into(),
                 json!(
-                    !native_lite
-                        && native_parallel == Some(true)
+                    native_parallel == Some(true)
                         && self.parallel_tool_call != Some(false)
                         && self.tool_call != Some(false)
                 ),
@@ -356,10 +351,7 @@ mod tests {
                         capabilities.apply_to_native_codex(&mut entry);
                         assert_eq!(
                             entry["supports_parallel_tool_calls"],
-                            !lite
-                                && native_parallel
-                                && parallel != Some(false)
-                                && tool_call != Some(false)
+                            native_parallel && parallel != Some(false) && tool_call != Some(false)
                         );
                     }
                 }

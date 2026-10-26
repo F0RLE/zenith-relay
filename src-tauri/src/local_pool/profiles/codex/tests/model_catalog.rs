@@ -296,6 +296,8 @@ fn managed_catalog_preserves_native_model_settings() {
     native["max_context_window"] = 120_000.into();
     native["auto_compact_token_limit"] = 110_000.into();
     native["native_setting"] = Value::String("keep-me".into());
+    native["use_responses_lite"] = json!(true);
+    assert!(codex_catalog_entry_is_compatible(&native));
     let catalog = serde_json::to_string(&json!({"models": [native]})).unwrap();
 
     let managed = catalog::build_managed_model_catalog(&home, None, None, &catalog).unwrap();
@@ -317,6 +319,11 @@ fn managed_catalog_preserves_native_model_settings() {
     assert_eq!(model["max_context_window"], 120_000);
     assert_eq!(model["auto_compact_token_limit"], 110_000);
     assert_eq!(model["native_setting"], "keep-me");
+    assert_eq!(model["use_responses_lite"], false);
+    assert_eq!(
+        serde_json::from_str::<Value>(&catalog).unwrap()["models"][0]["use_responses_lite"],
+        true
+    );
     fs::remove_dir_all(root).unwrap();
 }
 #[test]
@@ -461,7 +468,7 @@ fn active_managed_catalog_refreshes_without_replacing_the_profile() {
     assert!(refresh_managed_model_catalog(
         &home,
         &backups,
-        r#"{"models":[{"slug":"new-model"}]}"#,
+        r#"{"models":[{"slug":"new-model","use_responses_lite":true}]}"#,
         None
     )
     .unwrap());
@@ -470,16 +477,18 @@ fn active_managed_catalog_refreshes_without_replacing_the_profile() {
     let catalog_path = managed_model_catalog_path(&backups).unwrap();
     let catalog: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(catalog_path).unwrap()).unwrap();
-    assert!(catalog["models"]
+    let refreshed = catalog["models"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|model| model["slug"] == "new-model"));
+        .find(|model| model["slug"] == "new-model")
+        .unwrap();
+    assert_eq!(refreshed["use_responses_lite"], false);
     assert!(!cache_path.exists());
     assert!(!refresh_managed_model_catalog(
         &home,
         &backups,
-        r#"{"models":[{"slug":"new-model"}]}"#,
+        r#"{"models":[{"slug":"new-model","use_responses_lite":true}]}"#,
         None,
     )
     .unwrap());

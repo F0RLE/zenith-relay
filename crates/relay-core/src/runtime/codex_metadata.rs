@@ -69,30 +69,6 @@ impl GatewayRuntime {
             .cloned()
     }
 
-    pub(crate) fn set_codex_model_uses_responses_lite(
-        &self,
-        candidate_id: &str,
-        model: &str,
-        enabled: bool,
-    ) {
-        let mut models = crate::poison::mutex(&self.codex_responses_lite_models);
-        let key = (candidate_id.to_string(), crate::model_id_key(model));
-        if enabled {
-            models.insert(key);
-        } else {
-            models.remove(&key);
-        }
-    }
-
-    pub(crate) fn codex_model_responses_lite_candidates(&self, model: &str) -> Vec<String> {
-        let model_id = crate::model_id_key(model);
-        crate::poison::mutex(&self.codex_responses_lite_models)
-            .iter()
-            .filter(|(_, candidate_model)| candidate_model == &model_id)
-            .map(|(candidate_id, _)| candidate_id.clone())
-            .collect()
-    }
-
     pub(crate) fn remember_codex_model_manifest(
         &self,
         candidate_id: &str,

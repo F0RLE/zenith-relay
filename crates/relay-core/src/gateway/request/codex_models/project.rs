@@ -147,19 +147,6 @@ pub(super) fn build_codex_models_response_from_manifests(
         {
             catalog_model["slug"] = Value::String(display_id.clone());
         }
-        for candidate_id in &native_account_ids {
-            let uses_responses_lite = upstream_by_model
-                .get(&normalized)
-                .and_then(|entries| entries.iter().find(|(owner, _)| owner == candidate_id))
-                .and_then(|(_, account_manifest)| account_manifest.get("use_responses_lite"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            runtime.set_codex_model_uses_responses_lite(
-                candidate_id,
-                &upstream_id,
-                uses_responses_lite,
-            );
-        }
         if native_catalog_model.is_some() {
             capabilities.apply_to_native_codex(&mut catalog_model);
         } else {

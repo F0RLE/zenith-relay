@@ -43,7 +43,6 @@ pub(super) struct RequestPrepareInput<'a> {
     pub(super) client_wire_api: WireApi,
     pub(super) stream: bool,
     pub(super) responses_lite: &'a Option<HeaderValue>,
-    pub(super) automatic_responses_lite: bool,
     pub(super) service_tier_policy: &'a ServiceTierPolicy,
     pub(super) tool_policy: &'a mut RequestToolPolicy,
     pub(super) candidate_id: &'a str,
@@ -69,7 +68,6 @@ pub(super) fn prepare_request_attempt(
         client_wire_api,
         stream,
         responses_lite,
-        automatic_responses_lite,
         service_tier_policy,
         tool_policy,
         candidate_id,
@@ -110,18 +108,12 @@ pub(super) fn prepare_request_attempt(
     }
     // Lite item catalogs can arrive on BPS too, but serial execution is a
     // native transport restriction, not a property of the client item format.
-    let route_responses_lite = if basis_points_route || siwc_route {
-        None
-    } else {
-        route_responses_lite_header(
-            client_wire_api,
-            responses_lite,
-            automatic_responses_lite,
-            runtime,
-            resolved_model,
-            route.account_id.as_deref(),
-        )
-    };
+    let route_responses_lite =
+        if basis_points_route || siwc_route || client_wire_api != WireApi::Responses {
+            None
+        } else {
+            responses_lite.clone()
+        };
     let normalize_responses_lite = route_responses_lite.is_some()
         || (basis_points_route
             && client_wire_api == WireApi::Responses
@@ -288,27 +280,6 @@ fn reject_basis_points_admission(
     )?;
     *last_adapter_error = Some(error);
     Some(RequestPrepare::Continue)
-}
-
-fn route_responses_lite_header(
-    client_wire_api: WireApi,
-    responses_lite: &Option<HeaderValue>,
-    automatic_responses_lite: bool,
-    runtime: &GatewayRuntime,
-    resolved_model: &str,
-    account_id: Option<&str>,
-) -> Option<HeaderValue> {
-    (client_wire_api == WireApi::Responses)
-        .then(|| {
-            super::super::responses_lite_header(
-                responses_lite,
-                automatic_responses_lite,
-                runtime,
-                resolved_model,
-                account_id,
-            )
-        })
-        .flatten()
 }
 
 fn validate_prepared_responses_lite(request: &Value, enabled: bool) -> Option<RequestPrepare> {

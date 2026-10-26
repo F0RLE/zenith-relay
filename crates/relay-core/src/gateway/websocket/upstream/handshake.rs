@@ -46,7 +46,7 @@ pub(super) async fn upgrade_with_authorization_refresh(
         let mut headers = upstream_headers(
             client_headers,
             prepared,
-            route.account_id.is_some() && request.responses_lite_for(route),
+            route.account_id.is_some() && request.responses_lite,
             &request.request_id,
         );
         for (name, value) in &route.upstream_headers {

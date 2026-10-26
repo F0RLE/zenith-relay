@@ -37,6 +37,7 @@ pub(super) struct BridgeState {
     in_flight: Option<InFlight>,
     stream_id: Option<String>,
     upstream_candidate_id: String,
+    upstream_responses_lite: bool,
     upstream_route: ExecutorRoute,
     upstream_origin: ErrorOrigin,
     last_response_id: Option<String>,
@@ -166,6 +167,8 @@ pub(super) async fn bridge(
         }),
         stream_id: connected.request.stream_id.clone(),
         upstream_candidate_id,
+        upstream_responses_lite: connected.route.account_id.is_some()
+            && connected.request.responses_lite,
         upstream_route: connected.route.clone(),
         upstream_origin,
         last_response_id: None,

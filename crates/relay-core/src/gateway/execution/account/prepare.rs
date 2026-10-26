@@ -42,7 +42,6 @@ pub(super) struct AccountPrepareInput<'a> {
     pub(super) endpoint: AccountEndpoint,
     pub(super) responses_lite: &'a Option<HeaderValue>,
     pub(super) rewrite_model: bool,
-    pub(super) automatic_responses_lite: bool,
     pub(super) service_tier_policy: &'a ServiceTierPolicy,
     pub(super) tool_policy: &'a mut RequestToolPolicy,
     pub(super) candidate_id: &'a str,
@@ -68,7 +67,6 @@ pub(super) fn prepare_account_attempt(
         endpoint,
         responses_lite,
         rewrite_model,
-        automatic_responses_lite,
         service_tier_policy,
         tool_policy,
         candidate_id,
@@ -134,13 +132,7 @@ pub(super) fn prepare_account_attempt(
     let route_responses_lite = if basis_points_route || siwc_route {
         None
     } else {
-        super::super::responses_lite_header(
-            responses_lite,
-            automatic_responses_lite,
-            runtime,
-            resolved_model,
-            route.account_id.as_deref(),
-        )
+        responses_lite.clone()
     };
     let normalize_responses_lite =
         route_responses_lite.is_some() || (basis_points_route && responses_lite.is_some());

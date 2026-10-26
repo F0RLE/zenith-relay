@@ -171,16 +171,6 @@ impl super::ClientRequest {
                 ));
             }
         }
-        // Keep automatic Lite consistent with HTTP: a pool that can fall back
-        // to a non-Lite or non-official Responses route must stay on full
-        // Responses for the whole request contract. An explicit client Lite
-        // signal is still preserved by `responses_lite` above.
-        let responses_lite_candidates =
-            if runtime.codex_model_responses_routes_all_support_lite(key, &resolved_model) {
-                runtime.codex_model_responses_lite_candidates(&resolved_model)
-            } else {
-                Default::default()
-            };
         let connection_affinity_key = connection_response
             .filter(|(id, _)| {
                 request_body
@@ -214,7 +204,6 @@ impl super::ClientRequest {
             stream_id,
             responses_lite,
             service_tier_policy,
-            responses_lite_candidates,
             response_affinity_key: continuation.response_affinity_key,
             requires_affinity_owner: continuation.requires_affinity_owner,
             has_unpaired_tool_output: continuation.has_unpaired_tool_output,

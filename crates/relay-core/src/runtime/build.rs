@@ -389,7 +389,6 @@ impl GatewayRuntime {
             admission: Mutex::default(),
             admission_changed: tokio::sync::Notify::new(),
             registry: Mutex::new(registry),
-            codex_responses_lite_models: Mutex::new(BTreeSet::new()),
             official_codex_ultra: Mutex::new(BTreeMap::new()),
             websocket_http_only: Mutex::new(BTreeMap::new()),
             model_metadata: SourceModelMetadataState::default(),

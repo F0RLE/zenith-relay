@@ -313,6 +313,9 @@ pub(in crate::local_pool::profiles::codex) fn build_managed_model_catalog_with_b
         if !slug.to_ascii_lowercase().starts_with("zenith/") {
             catalog_entry["slug"] = Value::String(slug.to_string());
         }
+        // Compatible rows may come from an older Relay or native cache. Only
+        // the managed copy selects full Responses; source profiles stay intact.
+        catalog_entry["use_responses_lite"] = Value::Bool(false);
         catalog_entry["comp_hash"] = Value::String(CODEX_RELAY_CATALOG_HASH.into());
         if let Some(display_name) = relay_model.get("display_name").and_then(Value::as_str) {
             catalog_entry["display_name"] = Value::String(display_name.to_string());

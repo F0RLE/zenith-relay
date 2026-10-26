@@ -80,7 +80,8 @@ pub(super) fn prefer_medium_reasoning_default(catalog_entry: &mut Map<String, Va
 /// conservative `routed_codex_catalog_entry` path.  A native OAuth model is
 /// different: Codex uses the bare upstream slug to select its native
 /// Responses contract. Semantic model fields are overlaid from the shared
-/// reference catalog by the caller; transport remains account-owned.
+/// reference catalog by the caller. Relay selects full Responses while retaining
+/// the account's other native transport settings.
 pub fn normalize_native_codex_catalog_entry(
     template: &Map<String, Value>,
     model: &str,
@@ -132,7 +133,14 @@ pub fn normalize_native_codex_catalog_entry(
         &mut catalog_value,
         &super::super::model_service_tiers(model, &[]),
     );
-    codex_catalog_entry_is_compatible(&catalog_value).then_some(catalog_value)
+    if !codex_catalog_entry_is_compatible(&catalog_value) {
+        return None;
+    }
+    // This is a client transport selector, not evidence of model support. The
+    // original account manifest stays unchanged; Relay catalogs select full
+    // Responses so Codex does not enable Lite and disable parallel calls.
+    catalog_value["use_responses_lite"] = Value::Bool(false);
+    Some(catalog_value)
 }
 
 pub fn codex_catalog_entry_is_compatible(catalog_entry_value: &Value) -> bool {

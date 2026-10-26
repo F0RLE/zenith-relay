@@ -124,7 +124,6 @@ pub async fn execute_account_wake(
         // open indefinitely when this one account is cooling down; the next
         // scheduled permit will retry after the scheduler's cooldown.
         wait_for_candidate_availability: false,
-        allow_automatic_responses_lite: false,
         request_origin: Some("wake"),
     })
     .await

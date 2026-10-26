@@ -76,7 +76,6 @@ pub(in crate::gateway) async fn responses_compact(
         responses_lite,
         rewrite_model: true,
         wait_for_candidate_availability,
-        allow_automatic_responses_lite: true,
         request_origin: None,
     })
     .await
@@ -226,7 +225,6 @@ pub(in crate::gateway) async fn alpha_search(
         responses_lite: None,
         rewrite_model: model_was_provided,
         wait_for_candidate_availability,
-        allow_automatic_responses_lite: true,
         request_origin: None,
     })
     .await
