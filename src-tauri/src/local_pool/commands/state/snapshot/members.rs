@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 
 use crate::local_pool::accounts::proxy::ProxyPool;
 use crate::local_pool::error::LocalPoolError;
-use crate::local_pool::models::LocalAccountRecord;
 use crate::local_pool::state::{DesktopState, SnapshotInputs};
 use crate::local_pool::store::telemetry_db::{TelemetryDb, UsageEquivalents};
 use zenith_relay_core::pricing::{PricingCatalog, PricingContext};
@@ -16,59 +15,23 @@ use super::summary::{
 use zenith_relay_core::protocol::{pooled_source_runtime_available, source_runtime_available};
 
 pub(super) fn project_quota_window_usages(
-    accounts: &[LocalAccountRecord],
+    inputs: &SnapshotInputs,
     telemetry: &TelemetryDb,
     catalog: &PricingCatalog,
-    pricing: &PricingContext,
+    now_ms: u64,
 ) -> Result<BTreeMap<String, QuotaWindowUsage>, LocalPoolError> {
-    let quota_windows = accounts
+    let ledgers = crate::local_pool::background::weekly_capacity::subscription_ledgers(
+        &inputs.accounts,
+        &inputs.account_facts,
+    );
+    // Account calibration shares the collector's pricing contract, not custom
+    // API-source overrides or a per-account lifetime usage extrapolation.
+    let revision = PricingContext::default().revision_key(catalog);
+    let observations = ledgers
         .iter()
-        .filter_map(|account_record| {
-            let window = zenith_relay_core::protocol::api_equivalent_projection_window(
-                &account_record.account.quota,
-            )?;
-            Some((
-                account_record.account.id.clone(),
-                window.window_start_ms.unwrap_or_default(),
-                window.observed_at_ms,
-            ))
-        })
+        .map(|ledger| ledger.observation(&revision, now_ms))
         .collect::<Vec<_>>();
-    let quota_equivalents =
-        telemetry.account_api_equivalents_with_pricing(&quota_windows, catalog, pricing)?;
-    let pricing_revision = pricing.revision_key(catalog);
-    Ok(accounts
-        .iter()
-        .filter_map(|account_record| {
-            let window = zenith_relay_core::protocol::api_equivalent_projection_window(
-                &account_record.account.quota,
-            )?;
-            let window_start_ms = window.window_start_ms.unwrap_or_default();
-            let window_minutes = window.window_minutes.unwrap_or_default();
-            let api_equivalent = quota_equivalents
-                .get(&account_record.account.id)
-                .copied()
-                .unwrap_or_default();
-            let recent = telemetry.sample_quota_window(
-                &account_record.account.id,
-                window,
-                api_equivalent,
-                &pricing_revision,
-            );
-            Some((
-                account_record.account.id.clone(),
-                QuotaWindowUsage {
-                    kind: window.kind,
-                    window_start_ms,
-                    observed_at_ms: window.observed_at_ms,
-                    window_minutes,
-                    api_equivalent,
-                    recent_consumed_basis_points: recent.map(|sample| sample.0),
-                    recent_api_equivalent: recent.map(|sample| sample.1),
-                },
-            ))
-        })
-        .collect())
+    telemetry.weekly_value_projections(&observations)
 }
 
 pub(super) fn project_source_summaries(

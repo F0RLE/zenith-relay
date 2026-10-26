@@ -85,6 +85,24 @@ fn weekly_capacity_persists_anchors_and_counts_linked_routes_as_one_ledger() {
     assert_eq!(value["groups"].as_array().unwrap().len(), 1);
     assert_eq!(value["groups"][0]["current"]["accountCount"], 1);
     assert_eq!(value["groups"][0]["current"]["medianMicroUsd"], 11_200);
+    let ids = vec!["a".into(), "b".into()];
+    let current = window(NOW + 60_000, 9_500);
+    let projected = |database: &TelemetryDb| {
+        database
+            .weekly_value_projections(&[CapacityObservation {
+                ledger: "synthetic-ledger",
+                account_ids: &ids,
+                plan: "plus",
+                window: &current,
+                pricing_revision: "v1",
+                now_ms: NOW + 60_000,
+            }])
+            .unwrap()
+    };
+    let before_restart = projected(&database);
+    assert_eq!(before_restart.len(), 2);
+    assert_eq!(before_restart["a"].calibration.median_micro_usd, 11_200);
+    assert_eq!(before_restart["a"], before_restart["b"]);
     let scoped = |id: &str| {
         database
             .weekly_capacity_report(
@@ -103,11 +121,13 @@ fn weekly_capacity_persists_anchors_and_counts_linked_routes_as_one_ledger() {
     assert_eq!(database.weekly_capacity_revision(), revision);
     drop(database);
     let database = TelemetryDb::open(&root.join("test.sqlite")).unwrap();
+    assert_eq!(projected(&database), before_restart);
     assert_eq!(
         report(&database, NOW + 60_000)["groups"][0]["current"]["medianMicroUsd"],
         11_200
     );
     database.clear().unwrap();
+    assert!(projected(&database).is_empty());
     assert!(report(&database, NOW + 60_000)["groups"]
         .as_array()
         .unwrap()

@@ -17,6 +17,12 @@ recoverable account deletion. Changes below are grouped by area.
   instead of copying them again. Diagnostics separate JSON serialization from
   catalog preparation and record the observed upstream HTTP version.
 
+- Weekly remaining values now use one persisted, workload-matched calibration
+  for comparable subscriptions instead of extrapolating each account's usage.
+  Linked connections count once in the pool total; missing evidence shows `—`.
+  Tooltips explain the profile and spread. Usage filters no longer change lifetime
+  account payback; actual request usage and routing stay unchanged.
+
 - Codex connections retain their catalog format during temporary BPS access
   failures. Unavailable models no longer appear as an invalid catalog or an
   unreachable API address; a fresh successful access check restores discovery
@@ -73,11 +79,8 @@ recoverable account deletion. Changes below are grouped by area.
 - Usage shares two covering read indexes across request pages, filters and
   reports. Summary queries separate logical timings from send consumption;
   database upgrades preserve history.
-- Account quota estimates use covering indexes and the shared read-only database
-  snapshot, freeing the writer during aggregation within the existing memory budget.
-  On a synthetic 100,000-send / eight-account probe, cold reads fell from 962 to
-  279 ms and one-account refreshes from 127 to 38 ms; the 512-event durable-write
-  median remained about 1.05 seconds.
+- Weekly card forecasts read indexed persisted measurements instead of
+  aggregating request history on each account-quota refresh.
 - Usage charts aggregate send consumption and pricing together. Six alternating
   comparisons on the same synthetic 100,000-send database reduced histogram
   calculation medians from 863 to 609 ms, or from 284 to 178 ms with a member
@@ -673,6 +676,12 @@ recoverable account deletion. Changes below are grouped by area.
   копирования. Диагностика отдельно измеряет сериализацию JSON и подготовку
   каталога, а также сохраняет фактическую версию HTTP ответа провайдера.
 
+- Остаток недели считается по общей сохраняемой калибровке сопоставимых подписок
+  и нагрузки, а не по отдельной истории каждого аккаунта. Связанные подключения
+  входят в итог пула один раз; без данных показано `—`. В подсказке видны профиль
+  и разброс. Фильтр периода больше не меняет общую окупаемость аккаунта;
+  фактическое использование и маршрутизация не изменены.
+
 - При временном отказе доступа BPS подключение Codex сохраняет формат каталога.
   Недоступные модели больше не показываются как повреждённый каталог или
   недоступный адрес API; после успешной проверки доступа каталог восстанавливается
@@ -732,11 +741,8 @@ recoverable account deletion. Changes below are grouped by area.
 - В Использовании список, фильтры и статистика используют два общих индекса.
   Расчёт отдельно обрабатывает тайминги запросов и расход отправок.
   Обновление локальной базы сохраняет историю.
-- Оценка квот аккаунтов использует покрывающие индексы и общий снимок базы для
-  чтения: запись освобождена на время расчёта, бюджет памяти сохранён.
-  На синтетических 100 000 отправках и восьми аккаунтах первый расчёт сократился
-  с 962 до 279 мс, обновление одного аккаунта — со 127 до 38 мс. Медиана записи
-  512 событий с прежними гарантиями сохранности осталась около 1,05 секунды.
+- Прогноз недели в карточках читает сохранённые замеры по индексам вместо
+  повторного подсчёта истории запросов при обновлении квот аккаунтов.
 - Графики использования считают расход и стоимость отправок за один проход.
   В шести чередующихся сравнениях на одной синтетической базе из 100 000 отправок
   медиана расчёта графика снизилась с 863 до 609 мс, с фильтром участника — с 284

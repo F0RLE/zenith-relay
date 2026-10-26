@@ -79,7 +79,7 @@ fn project_local_runtime_state(
         .api_equivalents_with_pricing(&catalog, &pricing)?;
     timing.mark("usage_totals");
     let quota_window_usages =
-        project_quota_window_usages(&inputs.accounts, &state.telemetry, &catalog, &pricing)?;
+        project_quota_window_usages(&inputs, &state.telemetry, &catalog, snapshot_at_ms)?;
     timing.mark("quota_windows");
     // The pool stores the stable proxy identity separately from account credentials.
     // Use it only for UI provenance; request dispatch still resolves the effective URL.

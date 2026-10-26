@@ -221,9 +221,6 @@ impl TelemetryDb {
             report_connection,
             usage_revision: AtomicU64::new(0),
             api_equivalent_cache: Mutex::new(None),
-            quota_equivalent_cache: Mutex::new(None),
-            #[cfg(test)]
-            quota_window_reads: AtomicU64::new(0),
             usage_filter_options_cache: Mutex::new(None),
             #[cfg(test)]
             usage_filter_option_reads: AtomicU64::new(0),
@@ -232,7 +229,6 @@ impl TelemetryDb {
             #[cfg(test)]
             usage_report_builds: AtomicU64::new(0),
             open_duration_ms: started.elapsed().as_secs_f64() * 1_000.0,
-            quota_samples: Mutex::new(forecast::QuotaSamples::default()),
             capacity_seen: Mutex::new(HashMap::new()),
             capacity_revision: AtomicU64::new(0),
         })

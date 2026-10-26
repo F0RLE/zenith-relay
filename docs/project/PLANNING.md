@@ -1925,16 +1925,29 @@ same query-time catalog snapshot and component rounding as the request total.
 Reasoning cost is included in output. Missing breakdowns or
 rates remain unavailable; a measured zero is distinct from an unknown cost.
 
-Desktop remaining-quota API-equivalent estimates prefer paired recent quota and
-priced-usage observations from the same weekly window. At least 5% measured
-consumption and 80% pricing coverage remain required. Up to four anchors per
-account retain three recent consumption blocks plus the current tail, with at
-most 512 accounts in memory. Cycle/pricing changes, quota increases and reversed
-counters reset the sample; stale observations cannot advance it. Until paired
-evidence exists the existing cumulative estimate remains available. These are
-display-only estimates.
-Remaining estimates expire at the reported reset or after 72 hours without a
-fresh observation; future observations cannot produce a displayed forecast.
+Desktop remaining-quota cards share the persisted weekly-capacity calibration
+below. Each current proven subscription ledger contributes at most its latest
+valid paired measurement (at least 5% consumption, fully priced usage). Within
+one plan, weekly-window duration and pricing revision, select the exact workload
+group represented by the most ledgers; equal-size ties use a stable workload key.
+Measurements wholly within 24 hours take precedence; fallback is limited to
+measurements wholly within 72 hours. The selected group's median full capacity
+is multiplied by each ledger's remaining weekly fraction, using the same base
+for every comparable account, including accounts without their own usage sample.
+Different workload groups are never averaged together for this card forecast.
+
+Current inventory, membership and quota evidence fence persisted samples before
+the collector catches up. Missing identity, unknown plan, reset, changed prices,
+quota corrections, expired or future observations cannot supply calibration.
+Linked SIWC routes use the Codex/BPS subscription window, not an app ceiling;
+credits-only SIWC routes are excluded. Snapshot projection performs bounded,
+indexed anchor/latest-measurement reads, not request-history aggregation. Anchors
+and history survive restart; there is no per-account cumulative fallback.
+Cards show an approximate weekly remaining value or `—`; tooltips identify the
+shared workload, cache/output bands, sample count and empirical P10–P90 spread.
+Forecasts expire at target reset, stale quota or the calibration's next expiry
+even without a new snapshot. Provider-reported dollar balances remain distinct.
+These display-only estimates do not change quota, admission, routing or billing.
 
 Overview's weekly-capacity history estimates the **full** weekly window.
 A native coalesced worker
@@ -1987,12 +2000,16 @@ capacity revision/range changes or local evidence expiry.
 Selectors, range spread and observation details stay compact or in tooltips.
 
 The Desktop Pool summary aggregates lifetime API-equivalent usage only for its
-current members. Remaining value sums known account estimates, not API-source
-wallets; partial coverage is marked as approximate. Total payback divides the
+current members. Remaining value sums known estimates once per proven provider
+ledger, not per linked connection and not API-source wallets; unknown identities
+remain separate. Coverage counts independent ledgers; partial coverage is marked
+as approximate. Actual per-connection usage is not discarded by deduplication.
+Total payback divides the
 usage of accounts with known purchase costs by the sum of those costs, never
 averaging percentages or including API-source usage. Unknown remaining values,
 zero total purchase cost, and wholly unpriced account usage stay unavailable.
-Coverage details remain in tooltips. Overview retains its four original counters.
+Coverage details remain in tooltips. Usage-period filters do not change lifetime
+account payback. Overview retains its four original counters and chart selection.
 
 Source editors receive source-scoped resolved quotes and provenance from the
 same query-time catalog and resolver as usage. A pool-wide model summary is

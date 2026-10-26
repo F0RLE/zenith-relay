@@ -2,7 +2,8 @@ import { Activity, CreditCard } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { AccountSummary, UsageTotals } from "../../api/types";
-import { buildAccountValueProjection, formatAccountPayback } from "../../accountEconomics";
+import { accountPaybackHint, buildAccountValueProjection, formatAccountPayback, remainingValueDeadlines, remainingValueHint } from "../../accountEconomics";
+import { useRelativeTimeClock } from "../../hooks/useRelativeTimeClock";
 import { formatAccountValueMicroUsd } from "../../poolFormatting";
 import { formatDetailedRemainingTime, formatQuotaRemaining, formatWindowDuration } from "../../quotaFormatting";
 import { UsageMetric } from "./UsageMetric";
@@ -13,19 +14,15 @@ export function AccountUsageSummary({ account, totals }: { account: AccountSumma
   const [calculationOpen, setCalculationOpen] = useState(false);
   const calculationRef = useRef<HTMLDetailsElement>(null);
   const locale = i18n.resolvedLanguage ?? i18n.language;
-  const nowMs = Date.now();
+  const nowMs = useRelativeTimeClock(remainingValueDeadlines(account.quotaWindowUsage));
   const { purchaseCostMicroUsd: purchaseCost, remainingApiEquivalent, payback, approximate } = buildAccountValueProjection(
-    totals.apiEquivalent,
+    account.apiEquivalent,
     account.quota,
     account.quotaWindowUsage,
     account.purchaseCostMicroUsd,
+    nowMs,
   );
-  const paybackTitle = purchaseCost == null
-    ? t("accounts.accountValue.purchaseMissing")
-    : t("accounts.accountValue.paybackHint", {
-      used: formatAccountValueMicroUsd(totals.apiEquivalent.microUsd, locale),
-      purchase: formatAccountValueMicroUsd(purchaseCost, locale),
-    });
+  const paybackTitle = accountPaybackHint(account.apiEquivalent, purchaseCost, locale, t);
   const windows = (["primary", "secondary"] as const)
     .map((kind) => ({ kind, quota: account.quota[kind] }))
     .filter(({ quota }) => Boolean(quota));
@@ -69,16 +66,14 @@ export function AccountUsageSummary({ account, totals }: { account: AccountSumma
         icon={<CreditCard aria-hidden />}
         label={t("accounts.accountValue.used")}
         value={formatUsageApiEquivalent(totals.apiEquivalent, locale)}
-        title={t("accounts.accountValue.usedHint", { count: totals.apiEquivalent.unpricedTokens })}
+        title={t("accounts.accountValue.usedPeriodHint", { count: totals.apiEquivalent.unpricedTokens })}
       />
-      {remainingApiEquivalent ? (
         <UsageMetric
           icon={<CreditCard aria-hidden />}
-          label={t("accounts.accountValue.remaining")}
-          value={formatAccountValueMicroUsd(remainingApiEquivalent.microUsd, locale, remainingApiEquivalent.approximate)}
-          title={t("accounts.accountValue.remainingHint")}
+          label={t(remainingApiEquivalent && !remainingApiEquivalent.approximate ? "accounts.accountValue.remainingDirect" : "accounts.accountValue.remaining")}
+          value={remainingApiEquivalent ? formatAccountValueMicroUsd(remainingApiEquivalent.microUsd, locale, remainingApiEquivalent.approximate) : "—"}
+          title={remainingValueHint(remainingApiEquivalent, locale, t)}
         />
-      ) : null}
       <UsageMetric
         icon={<CreditCard aria-hidden />}
         label={t("accounts.accountValue.purchaseCost")}

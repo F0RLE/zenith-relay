@@ -22,6 +22,7 @@ pub use account::{
     api_equivalent_projection_window, model_has_native_account_route, AccountRefreshState,
     AccountSummary, CredentialDiagnostics, CredentialRecovery, CredentialStatus, QuotaWindowUsage,
     RefreshStatus, RevealedAccountIdentity, SourceRefreshState, SourceSummary, SourceSummaryRecord,
+    WeeklyValueCalibration,
 };
 pub use desktop_capabilities::DesktopCapabilities;
 pub use model::{

@@ -125,7 +125,7 @@ impl TelemetryDb {
     }
 }
 
-fn point(at_ms: u64, values: &[&Measurement]) -> Option<WeeklyCapacityPoint> {
+pub(super) fn point(at_ms: u64, values: &[&Measurement]) -> Option<WeeklyCapacityPoint> {
     if values.is_empty() {
         return None;
     }

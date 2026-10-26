@@ -451,7 +451,6 @@ fn discovery_and_retries_keep_their_own_prices_members_and_quota_windows() {
     assert_eq!(errors.totals.total_tokens, 110);
     assert_eq!(errors.totals.requests, 0); // The client's final result succeeded.
     let context = PricingContext::default();
-    let now = zenith_relay_core::unix_time_ms();
     for multiplier in [1, 2] {
         let catalog = PricingCatalog::from_litellm_payload(
             &serde_json::json!({"model": {
@@ -491,25 +490,12 @@ fn discovery_and_retries_keep_their_own_prices_members_and_quota_windows() {
             .accounts;
         assert_eq!(accounts["lookup-account"].micro_usd, 600 * multiplier);
         assert_eq!(accounts["answer-account"].micro_usd, 600 * multiplier);
-        let windows = database
-            .account_api_equivalents_with_pricing(
-                &[(
-                    "lookup-account".into(),
-                    now.saturating_sub(60_000),
-                    now + 60_000,
-                )],
-                &catalog,
-                &context,
-            )
-            .unwrap();
-        assert_eq!(windows["lookup-account"].micro_usd, 600 * multiplier);
     }
-    // Corrections invalidate account and quota caches even for earlier sends.
+    // Corrections invalidate account usage even for earlier sends.
     lookup.input_tokens = Some(120);
     lookup.total_tokens = Some(130);
     database.record(&lookup).unwrap();
     assert!(database.api_equivalent_cache.lock().unwrap().is_none());
-    assert!(database.quota_equivalent_cache.lock().unwrap().is_none());
     assert_cache_matches_scan(&database);
     drop(database);
     std::fs::remove_dir_all(root).unwrap();

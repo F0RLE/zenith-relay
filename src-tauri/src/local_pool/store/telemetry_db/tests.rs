@@ -11,7 +11,6 @@ mod maintenance;
 mod performance;
 mod performance_samples;
 mod pricing;
-mod quota_cache;
 mod reader;
 mod report_performance;
 mod report_summary;

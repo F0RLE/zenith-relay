@@ -1,25 +1,38 @@
 use crate::quota::{QuotaSnapshot, QuotaWindow, QuotaWindowKind};
-use crate::ApiEquivalentSummary;
 use serde::{Deserialize, Serialize};
 
 const MIN_WEEKLY_WINDOW_MINUTES: u32 = 6 * 24 * 60;
 const MAX_WEEKLY_WINDOW_MINUTES: u32 = 8 * 24 * 60;
 
-/// API-price equivalent observed by Relay inside one provider quota window.
-/// This is projection evidence, not an upstream balance or allowance.
+/// Display-only weekly forecast, calibrated against one shared workload.
+/// The ledger's subscription window can come from another linked connection;
+/// an SIWC application ceiling is never substituted for the subscription.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaWindowUsage {
+    pub ledger_key: String,
     pub kind: QuotaWindowKind,
     pub window_start_ms: u64,
     pub observed_at_ms: u64,
     pub window_minutes: u32,
-    pub api_equivalent: ApiEquivalentSummary,
-    /// Optional paired recent observations from this exact quota window.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recent_consumed_basis_points: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recent_api_equivalent: Option<ApiEquivalentSummary>,
+    pub reset_at_ms: u64,
+    pub available_basis_points: u16,
+    pub calibration: WeeklyValueCalibration,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WeeklyValueCalibration {
+    pub profile_id: String,
+    pub workload: String,
+    pub cache_band: u8,
+    pub output_band: u8,
+    pub median_micro_usd: u64,
+    pub low_micro_usd: u64,
+    pub high_micro_usd: u64,
+    pub account_count: usize,
+    pub observed_at_ms: u64,
+    pub valid_until_ms: u64,
 }
 
 /// Chooses the provider's weekly window for a time-aligned value projection.

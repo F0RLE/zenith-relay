@@ -23,10 +23,6 @@ pub(in crate::local_pool::store::telemetry_db) struct UsageAggregate {
 }
 
 impl UsageAggregate {
-    pub(super) fn account_id(&self) -> Option<&str> {
-        (self.candidate_kind == "account").then_some(self.candidate_id.as_str())
-    }
-
     pub(in crate::local_pool::store::telemetry_db) fn with_context_band(
         mut self,
         band: &str,

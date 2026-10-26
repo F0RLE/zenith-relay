@@ -19,7 +19,6 @@ use zenith_relay_core::{
 use zenith_relay_core::{ApiModelPriceOverride, ResponseAffinityBinding};
 
 mod affinity;
-mod forecast;
 mod lifecycle;
 mod maintenance;
 mod migrations;
@@ -37,8 +36,8 @@ pub(crate) use weekly_capacity::{CapacityObservation, WeeklyCapacityQuery, Weekl
 use migrations::*;
 pub(crate) use performance::PerformanceSample;
 use usage::{
-    account_pricing_aggregates, apply_usage_totals_delta, is_unfiltered_all_time, sql_u64,
-    usage_buckets, usage_filter, usage_log_from_row, usage_totals,
+    apply_usage_totals_delta, is_unfiltered_all_time, sql_u64, usage_buckets, usage_filter,
+    usage_log_from_row, usage_totals,
 };
 
 #[cfg(test)]
@@ -49,9 +48,6 @@ pub struct TelemetryDb {
     report_connection: Option<Mutex<Connection>>,
     usage_revision: AtomicU64,
     api_equivalent_cache: Mutex<Option<CachedUsageEquivalents>>,
-    quota_equivalent_cache: Mutex<Option<CachedQuotaEquivalents>>,
-    #[cfg(test)]
-    quota_window_reads: AtomicU64,
     usage_filter_options_cache: Mutex<Option<CachedUsageFilterOptions>>,
     #[cfg(test)]
     usage_filter_option_reads: AtomicU64,
@@ -60,7 +56,6 @@ pub struct TelemetryDb {
     #[cfg(test)]
     usage_report_builds: AtomicU64,
     open_duration_ms: f64,
-    quota_samples: Mutex<forecast::QuotaSamples>,
     capacity_seen: Mutex<HashMap<String, (u64, String, String, String)>>,
     capacity_revision: AtomicU64,
 }
@@ -120,13 +115,6 @@ struct CachedUsageEquivalents {
     usage_revision: u64,
     pricing_revision: String,
     equivalents: UsageEquivalents,
-}
-
-#[derive(Clone)]
-struct CachedQuotaEquivalents {
-    pricing_revision: String,
-    windows: HashMap<String, (u64, u64)>,
-    equivalents_by_account: HashMap<String, ApiEquivalentSummary>,
 }
 
 #[derive(Clone, Debug, Serialize)]

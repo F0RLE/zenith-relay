@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { PoolMember } from "../src/features/relay/poolHelpers";
 import { poolEconomics } from "../src/features/relay/pages/pool/poolEconomics";
+import { calibratedWeek } from "./accountEconomics.fixture";
 
 type PoolAccount = Extract<PoolMember, { kind: "account" }>;
 type PoolSource = Extract<PoolMember, { kind: "source" }>;
@@ -27,6 +28,7 @@ const source = (overrides: Partial<PoolSource> = {}): PoolSource => ({
 describe("pool economics", () => {
   test("sums member usage and weights payback by account purchase costs", () => {
     expect(poolEconomics([account(), account({
+      id: "second-account",
       apiEquivalent: { microUsd: 30_000_000, pricedTokens: 150, unpricedTokens: 0 }, purchaseCostMicroUsd: 30_000_000,
     }), source()])).toMatchObject({
       used: { microUsd: 130_000_000, pricedTokens: 650, unpricedTokens: 0 },
@@ -43,7 +45,7 @@ describe("pool economics", () => {
   });
 
   test("marks partial coverage and excludes unknown-cost accounts from both sides of payback", () => {
-    expect(poolEconomics([account(), account({ purchaseCostMicroUsd: null, quota: { ...account().quota, directBalanceMicroUsd: null } })]))
+    expect(poolEconomics([account(), account({ id: "unknown-account", purchaseCostMicroUsd: null, quota: { ...account().quota, directBalanceMicroUsd: null } })]))
       .toMatchObject({ used: { microUsd: 40_000_000 }, remainingMicroUsd: 5_000_000,
         remainingCount: 1, remainingApproximate: true, purchaseCount: 1, payback: 2, paybackApproximate: true });
   });
@@ -69,9 +71,33 @@ describe("pool economics", () => {
     const now = Date.now();
     const secondary = { kind: "secondary" as const, availableBasisPoints: 5_000, explicitlyFull: false, resetAtMs: now + 6 * 86_400_000, windowStartMs: now - 86_400_000, windowMinutes: 10_080, observedAtMs: now };
     const quota = { ...account().quota, directBalanceMicroUsd: null, secondary };
-    const quotaWindowUsage = { kind: "secondary" as const, windowStartMs: secondary.windowStartMs, observedAtMs: now, windowMinutes: 10_080, apiEquivalent: { microUsd: 5_000_000, pricedTokens: 100, unpricedTokens: 0 } };
+    const quotaWindowUsage = calibratedWeek(now, { availableBasisPoints: 5_000 });
     expect(poolEconomics([account({ quota, quotaWindowUsage })])).toMatchObject({ remainingMicroUsd: 5_000_000, remainingApproximate: true });
     expect(poolEconomics([account({ quota, quotaWindowUsage: { ...quotaWindowUsage, observedAtMs: 9_999 } })]))
       .toMatchObject({ remainingMicroUsd: null });
+  });
+
+  test("linked connections contribute real usage but only one remaining subscription", () => {
+    const quotaWindowUsage = calibratedWeek(Date.now(), { availableBasisPoints: 8_400 });
+    const quota = { ...account().quota, directBalanceMicroUsd: null };
+    const members = ["codex", "bps", "siwc"].map((id) => account({ id, quota, quotaWindowUsage, creditBalanceKey: "synthetic-ledger" }));
+    expect(poolEconomics(members)).toMatchObject({ used: { microUsd: 60_000_000 }, remainingMicroUsd: 8_400_000,
+      remainingCount: 1, remainingTotalCount: 1, accountCount: 3 });
+  });
+
+  test("direct balances deduplicate only proven identities and use the freshest observation", () => {
+    const first = account({ id: "first", creditBalanceKey: "shared", quota: { ...account().quota, updatedAtMs: 1 } });
+    const next = account({ id: "next", creditBalanceKey: "shared", quota: { ...account().quota, updatedAtMs: 2, directBalanceMicroUsd: 3_000_000 } });
+    expect(poolEconomics([first, next])).toMatchObject({ remainingMicroUsd: 3_000_000, remainingTotalCount: 1 });
+    expect(poolEconomics([next, first])).toMatchObject({ remainingMicroUsd: 3_000_000 });
+    expect(poolEconomics([account({ id: "a" }), account({ id: "b" })])).toMatchObject({ remainingMicroUsd: 10_000_000, remainingTotalCount: 2 });
+  });
+
+  test("expires pool forecasts even if the member array has not changed", () => {
+    const now = Date.now();
+    const quotaWindowUsage = calibratedWeek(now);
+    const members = [account({ quota: { ...account().quota, directBalanceMicroUsd: null }, quotaWindowUsage })];
+    expect(poolEconomics(members, now).remainingMicroUsd).toBe(5_800_000);
+    expect(poolEconomics(members, quotaWindowUsage.calibration.validUntilMs).remainingMicroUsd).toBeNull();
   });
 });

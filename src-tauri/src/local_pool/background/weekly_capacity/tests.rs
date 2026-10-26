@@ -52,6 +52,12 @@ fn collector_uses_shared_weekly_evidence_not_siwc_ceiling_without_ui_snapshot() 
         ("bps".into(), facts(OAuthClientKind::ExcelBps)),
         ("siwc".into(), facts(OAuthClientKind::Siwc)),
     ]);
+    let ledgers = subscription_ledgers(&inventory, &facts);
+    assert_eq!(ledgers.len(), 1);
+    assert_eq!(ledgers[0].account_ids, ["bps", "codex", "siwc"]);
+    assert_eq!(ledgers[0].plan, "plus");
+    assert_eq!(ledgers[0].window.observed_at_ms, NOW + 1000);
+    assert!(subscription_ledgers(&inventory[2..], &facts).is_empty());
     let catalog = PricingCatalog::from_litellm_payload(&serde_json::json!({"model":{
         "litellm_provider":"openai", "input_cost_per_token":0.000002, "output_cost_per_token":0.00001,
     }}), Some("synthetic".into()), Some(1), false).unwrap();
@@ -89,6 +95,10 @@ fn collector_uses_shared_weekly_evidence_not_siwc_ceiling_without_ui_snapshot() 
         .as_mut()
         .unwrap()
         .plan_use_enabled = false;
+    assert_eq!(
+        subscription_ledgers(&inventory, &credits_only)[0].account_ids,
+        ["bps", "codex"]
+    );
     record_capacity(
         &inventory,
         &credits_only,

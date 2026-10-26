@@ -78,13 +78,25 @@ export type PricingMetadata = {
 };
 
 export type QuotaWindowUsage = {
-  recentConsumedBasisPoints?: number | null;
-  recentApiEquivalent?: ApiEquivalentSummary | null;
+  ledgerKey: string;
   kind: "primary" | "secondary";
   windowStartMs: number;
   observedAtMs: number;
   windowMinutes: number;
-  apiEquivalent: ApiEquivalentSummary;
+  resetAtMs: number;
+  availableBasisPoints: number;
+  calibration: {
+    profileId: string;
+    workload: string;
+    cacheBand: number;
+    outputBand: number;
+    medianMicroUsd: number;
+    lowMicroUsd: number;
+    highMicroUsd: number;
+    accountCount: number;
+    observedAtMs: number;
+    validUntilMs: number;
+  };
 };
 
 /** Published input-token price thresholds, independent of maximum context. */

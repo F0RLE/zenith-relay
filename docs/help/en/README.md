@@ -127,14 +127,12 @@ model only; mixed-model intervals remain in **All models**. Subscription and mod
 menus appear only when there are alternatives; hover or focus a point for its date,
 amount and estimate range when available. Subscription comparisons use measured quota consumption.
 
-Measurements appear after at least 5% observed weekly consumption with known
-token prices. Collection uses ordinary request data and continues while
-Relay is minimized. Linked Codex/BPS/SIWC routes count as one proven weekly ledger;
-SIWC requires that weekly evidence from Codex/BPS. Evidence
-from the last 24 hours is preferred, with fallback for at most 72 hours and
-never beyond reset. History lasts up to 30 days; missing data appears as a gap.
-Resets and subscription/pricing changes are separate events. External account
-use and quota update lag can bias estimates.
+Measurements require at least 5% paired weekly consumption and fully priced usage.
+Collection runs in the background without provider requests. Linked Codex/BPS/SIWC
+routes count once; only Codex/BPS establish subscription quota.
+Prefer the last 24 hours; expire after 72 hours or reset. History lasts 30 days.
+Missing data makes gaps; resets and plan/price changes are separate events.
+External use and delayed quota updates can bias estimates.
 
 **Today** covers 24 hours including the current hour; **Week**, 7 days;
 **Month**, 30 days, in local time. The connection filter applies to charts and
@@ -457,7 +455,8 @@ use actual tier/input size; missing prices show `—`, without Standard fallback
 
 Relay prefers the provider's price, then the reference catalog; a manual
 price is a fallback. Cache fields set read and write prices.
-**Purchase cost, USD** is only used to estimate payback.
+**Purchase cost, USD** estimates lifetime payback. **Weekly remaining** uses shared
+workload calibration, not cash; linked routes count once. Hover for details.
 **Drain** stops new assignments to a member.
 
 Use **Configuration preset** to save settings or import them with a preview

@@ -8,7 +8,7 @@ use zenith_relay_core::automations::{WakePermit, WakeVerificationOutcome};
 mod loops;
 mod wake_policy;
 mod wake_worker;
-mod weekly_capacity;
+pub(crate) mod weekly_capacity;
 
 pub(crate) use loops::refresh_account_models_in_background;
 use loops::{codex_release_loop, model_metadata_loop, pricing_loop};

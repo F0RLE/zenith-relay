@@ -3,11 +3,10 @@ use super::CatalogPriceResolver;
 use crate::local_pool::error::Result;
 use rusqlite::{params_from_iter, types::Value as SqlValue, Connection};
 use std::collections::HashMap;
-use std::sync::LazyLock;
 use zenith_relay_core::{
     pricing::PriceSource,
     protocol::{merge_model_equivalents, UsageGroup, UsageQuery, UsageTotals},
-    ApiEquivalentSummary, ApiEquivalentUsage,
+    ApiEquivalentSummary,
 };
 
 mod buckets;
@@ -67,59 +66,6 @@ pub(super) fn usage_totals(
         )
         .map_err(db_error)?;
     Ok(combine_totals(requests, consumption))
-}
-
-/// Load the minimal per-model aggregates needed for one account quota window.
-///
-/// Quota projections are an internal exact-id lookup, unlike the user-facing
-/// search filter. The covering account/time indexes supply pricing inputs
-/// without reading diagnostic rows or unrelated source history.
-pub(super) fn account_pricing_aggregates(
-    connection: &Connection,
-    account_id: &str,
-    from_ms: u64,
-    to_ms: u64,
-) -> Result<Vec<(String, ApiEquivalentUsage)>> {
-    let account_window_parameters = [
-        SqlValue::Text(account_id.to_string()),
-        SqlValue::Integer(sql_u64(from_ms)),
-        SqlValue::Integer(sql_u64(to_ms)),
-    ];
-    let mut statement = connection
-        .prepare_cached(account_pricing_sql())
-        .map_err(db_error)?;
-    let rows = statement
-        .query_map(
-            params_from_iter(
-                account_window_parameters
-                    .iter()
-                    .chain(account_window_parameters.iter()),
-            ),
-            |row| Ok((row.get(0)?, usage_pricing_usage_from_row(row, 3)?)),
-        )
-        .map_err(db_error)?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(db_error)
-}
-
-pub(super) fn account_pricing_sql() -> &'static str {
-    static SQL: LazyLock<String> = LazyLock::new(|| {
-        let sends = send_projection(
-            USAGE_PRICING_INPUT_COLUMNS,
-            " WHERE account_id = ?
-              AND created_at >= datetime(? / 1000, 'unixepoch')
-              AND created_at <= datetime(? / 1000, 'unixepoch')",
-        );
-        format!(
-            "SELECT COALESCE(resolved_model, requested_model, ''), \
-                {price_class}, {context_band}, \
-                {USAGE_PRICING_AGGREGATE_COLUMNS} \
-             FROM ({sends}) GROUP BY 1, 2, 3",
-            price_class = zenith_relay_core::usage::USAGE_PRICE_CLASS_SQL,
-            context_band = zenith_relay_core::usage::USAGE_CONTEXT_BAND_SQL
-        )
-    });
-    &SQL
 }
 
 pub(super) fn usage_groups(

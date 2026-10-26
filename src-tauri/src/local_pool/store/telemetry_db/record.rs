@@ -326,24 +326,7 @@ impl TelemetryDb {
             }
             self.update_cached_usage_totals(Some(previous_totals), incoming_totals)?;
         }
-        if retention_applied {
-            // Retention can remove sends belonging to any account.
-            self.invalidate_usage_cache();
-        } else {
-            self.invalidate_usage_cache_for_accounts(
-                [
-                    event.account_id.as_deref(),
-                    previous_usage
-                        .as_ref()
-                        .and_then(|old| old.aggregate.account_id()),
-                    previous_attempt
-                        .as_ref()
-                        .and_then(|old| old.aggregate.account_id()),
-                ]
-                .into_iter()
-                .flatten(),
-            );
-        }
+        self.invalidate_usage_cache();
         drop(connection);
         Ok(())
     }
@@ -354,7 +337,6 @@ impl TelemetryDb {
             .execute_batch("DELETE FROM request_logs; DELETE FROM request_attempts; DELETE FROM usage_candidate_rollups; DELETE FROM weekly_capacity_anchors; DELETE FROM weekly_capacity_history;")
             .map_err(db_error)?;
         self.clear_cached_usage_totals()?;
-        *self.quota_samples.lock().map_err(lock_error)? = Default::default();
         self.capacity_seen.lock().map_err(lock_error)?.clear();
         self.capacity_revision.fetch_add(1, Ordering::Release);
         self.invalidate_usage_cache();
@@ -368,32 +350,6 @@ impl TelemetryDb {
         }
         if let Ok(mut cached) = self.api_equivalent_cache.lock() {
             *cached = None;
-        }
-        if let Ok(mut cached) = self.quota_equivalent_cache.lock() {
-            *cached = None;
-        }
-    }
-
-    fn invalidate_usage_cache_for_accounts<'a>(
-        &self,
-        account_ids: impl IntoIterator<Item = &'a str>,
-    ) {
-        self.usage_revision.fetch_add(1, Ordering::AcqRel);
-        if let Ok(mut cached) = self.usage_report_cache.lock() {
-            *cached = None;
-        }
-        if let Ok(mut cached) = self.api_equivalent_cache.lock() {
-            *cached = None;
-        }
-        if let Ok(mut cached) = self.quota_equivalent_cache.lock() {
-            if let Some(values) = cached.as_mut() {
-                for id in account_ids {
-                    values.equivalents_by_account.remove(id);
-                }
-                if values.equivalents_by_account.is_empty() {
-                    *cached = None;
-                }
-            }
         }
     }
 }

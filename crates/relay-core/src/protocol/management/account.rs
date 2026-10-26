@@ -13,7 +13,7 @@ mod quota;
 mod source;
 
 pub use credential::{CredentialDiagnostics, CredentialRecovery, CredentialStatus};
-pub use quota::{api_equivalent_projection_window, QuotaWindowUsage};
+pub use quota::{api_equivalent_projection_window, QuotaWindowUsage, WeeklyValueCalibration};
 pub use source::{SourceRefreshState, SourceSummary, SourceSummaryRecord};
 
 /// Refresh evidence, not an inference eligibility or health decision. The

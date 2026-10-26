@@ -39,6 +39,7 @@ export type MockOptions = {
   accountOAuthClientKind?: AccountSummary["oauthClientKind"];
   accountPlanType?: AccountSummary["subscription"]["planType"];
   accountQuotaMissing?: boolean;
+  accountCalibrationMissing?: boolean;
   accountCredentialDiagnostics?: AccountSummary["credentialDiagnostics"];
   accountModels?: string[];
   accountAllowedModels?: string[];
@@ -343,11 +344,18 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       weight: 100,
       apiEquivalent: { microUsd: 14_100_000, pricedTokens: 2_800_000, unpricedTokens: 0 },
       quotaWindowUsage: {
+        ledgerKey: "synthetic-ledger",
         kind: "secondary" as const,
         windowStartMs: secondaryResetAtMs - 10_080 * 60_000,
         observedAtMs: quotaNowMs,
         windowMinutes: 10_080,
-        apiEquivalent: { microUsd: 5_000_000, pricedTokens: 1_000_000, unpricedTokens: 0 },
+        resetAtMs: secondaryResetAtMs,
+        availableBasisPoints: quota.secondary?.availableBasisPoints ?? 0,
+        calibration: {
+          profileId: "synthetic-profile", workload: "gpt-5.4 · default", cacheBand: 75, outputBand: 10,
+          medianMicroUsd: 10_000_000, lowMicroUsd: 8_000_000, highMicroUsd: 12_000_000,
+          accountCount: 3, observedAtMs: quotaNowMs, validUntilMs: quotaNowMs + 86_400_000,
+        },
       },
       purchaseCostMicroUsd: 18_000_000 as number | null,
       subscription: { planType: input.accountPlanType !== undefined ? input.accountPlanType : input.supplementalQuota ? "pro" : "plus", activeUntilMs: input.accountPlanType === null ? null : Date.now() + (input.subscriptionExpiresInMs ?? 37 * dayMs), status: "active", updatedAtMs: Date.now() },
@@ -373,7 +381,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       { label: "Free reserve", plan: "free", activeUntilMs: null, proxyMode: "direct", models: ["gpt-5.4-mini"], primary: 8800, primaryMinutes: 43_200, secondary: null, priority: 1, health: "healthy", error: null },
     ] as const;
     const accounts: AccountSummary[] = Array.from({ length: accountCount }, (_, index) => {
-      if (index === 0) return account;
+      if (index === 0) return { ...account, quotaWindowUsage: input.accountQuotaMissing || input.accountCalibrationMissing ? null : account.quotaWindowUsage };
       const variant = accountVariants[index % accountVariants.length];
       const item = structuredClone(account);
       item.id = `account_synthetic_${index + 1}`;
@@ -413,9 +421,14 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       }
       if (variant.secondary === null) item.quota.secondary = null;
       else if (item.quota.secondary) item.quota.secondary.availableBasisPoints = variant.secondary;
+      if (item.quota.secondary && !input.accountCalibrationMissing) {
+        item.quotaWindowUsage.ledgerKey = `synthetic-ledger-${index}`;
+        item.quotaWindowUsage.availableBasisPoints = item.quota.secondary.availableBasisPoints ?? 0;
+        item.quotaWindowUsage.calibration.profileId = `synthetic-profile-${variant.plan}`;
+      }
       item.quotaRefreshStatus = item.quota.error ? "failed" : item.quota.updatedAtMs == null ? "pending" : "updated";
       item.refreshState.quota = item.quota.error || item.quota.updatedAtMs == null ? "stale" : "fresh";
-      return item;
+      return { ...item, quotaWindowUsage: item.quota.secondary && !input.accountCalibrationMissing ? item.quotaWindowUsage : null };
     });
       const systemCredentialId = "key_system";
       const profileDir = input.canonicalProfilePath ? "\\\\?\\C:\\Users\\Test\\.codex" : "C:\\Users\\Test\\.codex";

@@ -236,37 +236,39 @@ fn first_entry_uses_narrow_count_and_unaggregated_indexes() {
 }
 
 #[test]
-fn quota_windows_use_covering_account_indexes() {
+fn weekly_value_projections_use_indexed_ledger_history() {
     let root = std::env::temp_dir().join(format!("relay-quota-plan-{}", uuid::Uuid::new_v4()));
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let connection = database.connection.lock().unwrap();
     let parameters = [
         SqlValue::Text("account-plan-test".into()),
-        SqlValue::Integer(0),
         SqlValue::Integer(i64::MAX),
     ];
     let plan = connection
         .prepare(&format!(
             "EXPLAIN QUERY PLAN {}",
-            super::super::usage::account_pricing_sql()
+            super::super::weekly_capacity::PROJECTION_SQL
         ))
         .unwrap()
-        .query_map(
-            params_from_iter(parameters.iter().chain(parameters.iter())),
-            |row| row.get::<_, String>(3),
-        )
+        .query_map(params_from_iter(parameters.iter()), |row| {
+            row.get::<_, String>(3)
+        })
         .unwrap()
         .collect::<std::result::Result<Vec<_>, _>>()
         .unwrap()
         .join("\n");
-    for table in ["request_logs", "request_attempts"] {
-        assert!(
-            plan.contains(&format!(
-                "SEARCH {table} USING COVERING INDEX {table}_account_usage_reads"
-            )),
-            "{plan}"
-        );
-    }
+    assert!(
+        plan.contains("SEARCH a USING PRIMARY KEY (account_id=?)"),
+        "{plan}"
+    );
+    assert!(
+        plan.contains("SEARCH h USING PRIMARY KEY (account_id=? AND observed_at_ms<?)"),
+        "{plan}"
+    );
+    assert!(
+        !plan.contains("SCAN") && !plan.contains("TEMP B-TREE"),
+        "{plan}"
+    );
     drop(connection);
     drop(database);
     std::fs::remove_dir_all(root).unwrap();

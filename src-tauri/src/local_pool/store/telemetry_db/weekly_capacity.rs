@@ -8,11 +8,14 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use zenith_relay_core::quota::QuotaWindow;
 
+mod projection;
 mod report;
 #[cfg(test)]
 mod tests;
 mod workload;
 
+#[cfg(test)]
+pub(super) use projection::PROJECTION_SQL;
 pub(crate) use report::{WeeklyCapacityQuery, WeeklyCapacityReport};
 
 pub(super) const HOUR_MS: u64 = 3_600_000;

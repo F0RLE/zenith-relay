@@ -76,6 +76,46 @@ fn record_capacity(
     pricing: &PricingContext,
     now_ms: u64,
 ) -> Result<()> {
+    let revision = pricing.revision_key(catalog);
+    for ledger in subscription_ledgers(inventory, account_facts) {
+        telemetry.observe_weekly_capacity(
+            ledger.observation(&revision, now_ms),
+            catalog,
+            pricing,
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) struct SubscriptionLedger<'a> {
+    pub ledger: String,
+    pub account_ids: Vec<String>,
+    pub plan: &'a str,
+    pub window: &'a zenith_relay_core::quota::QuotaWindow,
+}
+
+impl SubscriptionLedger<'_> {
+    pub(crate) fn observation<'a>(
+        &'a self,
+        revision: &'a str,
+        now_ms: u64,
+    ) -> CapacityObservation<'a> {
+        CapacityObservation {
+            ledger: &self.ledger,
+            account_ids: &self.account_ids,
+            plan: self.plan,
+            window: self.window,
+            pricing_revision: revision,
+            now_ms,
+        }
+    }
+}
+
+/// One subscription identity for collection and card projection alike.
+pub(crate) fn subscription_ledgers<'a>(
+    inventory: &'a [LocalAccountRecord],
+    account_facts: &HashMap<String, Option<AccountCredentialFacts>>,
+) -> Vec<SubscriptionLedger<'a>> {
     let mut ledgers = BTreeMap::<String, Vec<&LocalAccountRecord>>::new();
     for account in inventory {
         if account
@@ -96,7 +136,7 @@ fn record_capacity(
         };
         ledgers.entry(hex::encode(key)).or_default().push(account);
     }
-    let revision = pricing.revision_key(catalog);
+    let mut result = Vec::new();
     for (ledger, accounts) in ledgers {
         // SIWC can expose an application ceiling. Only Codex/BPS observations
         // establish the shared weekly window; all linked routes contribute usage.
@@ -132,18 +172,12 @@ fn record_capacity(
             .map(|account| account.account.id.clone())
             .collect::<Vec<_>>();
         ids.sort();
-        telemetry.observe_weekly_capacity(
-            CapacityObservation {
-                ledger: &ledger,
-                account_ids: &ids,
-                plan,
-                window,
-                pricing_revision: &revision,
-                now_ms,
-            },
-            catalog,
-            pricing,
-        )?;
+        result.push(SubscriptionLedger {
+            ledger,
+            account_ids: ids,
+            plan,
+            window,
+        });
     }
-    Ok(())
+    result
 }
