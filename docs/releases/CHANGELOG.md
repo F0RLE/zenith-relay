@@ -13,6 +13,40 @@ recoverable account deletion. Changes below are grouped by area.
 
 ### Changed
 
+- BPS preparation reuses owned text buffers for message normalization, generated
+  instructions and visible reasoning, removing redundant copies without changing
+  request bytes, conversation identity or validation.
+- Coding-tool output keeps its exact text when sent to Gemini, including
+  JSON-looking file contents and command errors. Responses/Chat conversion also
+  preserves distinct developer/system instructions and their history positions.
+- Added native Messages and Gemini token-count endpoints for API sources,
+  respecting local-key permissions without generating an answer or inventing
+  token estimates. Unsupported sources return an explicit error.
+- Responses web search can now run through Claude Messages, retaining search
+  sources, citations and follow-up history in JSON and streaming responses.
+  Domain allowlists and approximate location are supported; unsupported search
+  controls and unfinished server-tool loops return explicit errors.
+
+- Rust uses toolchain 1.99.1, Edition 2024 and the 2024 formatter style across
+  both packages. CI uses the same compiler and Bun 1.4.4; compatible dependency
+  updates include nanoid 3.3.20 and openssl-probe 0.2.2.
+
+- Enabled experimental HTTP/3 for direct HTTPS generation routes after a bounded,
+  credential-free background probe. Cold or unsupported origins keep TCP without
+  delaying the request; proxies and native WebSockets retain their transport.
+  Failed submitted generations are not replayed. `ZENITH_RELAY_HTTP3=0` disables
+  the experiment; diagnostics report the actual upstream HTTP version.
+- Updated Desktop, web preview, and Rust dependencies to current stable releases,
+  including Tauri, React, Tokio, HTTP/TLS libraries, schema validation, and SQLite.
+  Production JavaScript uses two-pass Terser minification to stay within the
+  existing bundle budgets, preserving lazy loading and the ES2020 WebView target.
+- Repeated optional WebSocket handshake timeouts now trigger a short,
+  route-scoped HTTP preference instead of repeating the two-second delay on
+  every request. A single timeout still permits immediate native recovery;
+  continuation ownership, account health, and generation retry rules are unchanged.
+  A synthetic five-request loopback run fell from 10.19 s to 4.16 s;
+  this measures stalled handshakes, not provider generation speed.
+
 - BPS preparation moves the request history and reuses parsed tool declarations
   instead of copying them again. Diagnostics separate JSON serialization from
   catalog preparation and record the observed upstream HTTP version.
@@ -20,7 +54,9 @@ recoverable account deletion. Changes below are grouped by area.
 - Weekly remaining values now use one persisted, workload-matched calibration
   for comparable subscriptions instead of extrapolating each account's usage.
   Linked connections count once in the pool total; missing evidence shows `—`.
-  Tooltips explain the profile and spread. Usage filters no longer change lifetime
+  Mixed workloads use the observed median, not a range or dominant profile. Cards
+  retain the 80% price-coverage threshold and show coverage; Overview remains
+  fully priced. Tooltips expose sample counts. Usage filters no longer change lifetime
   account payback; actual request usage and routing stay unchanged.
 
 - Codex connections retain their catalog format during temporary BPS access
@@ -301,10 +337,12 @@ recoverable account deletion. Changes below are grouped by area.
   eligible member. Opaque continuations and unpaired results retain their owner
   unless validated local replay restores complete history. Both quota windows
   constrain selection; equal remaining percentages are not guaranteed.
-  Same-model handoff now restores saved tool/reasoning history behind
+  Same-model handoff restores saved tool/reasoning history behind
   `previous_response_id`, instead of using the plaintext model-switch repair.
   HTTP and WebSocket keep the cache key and current controls; missing history
-  remains owner-bound and provider cache hits are not fabricated.
+  remains owner-bound. Original opaque reasoning is forwarded unchanged, not
+  discarded or used as a blanket rotation ban. Local replay tests do not establish
+  provider acceptance across accounts; provider cache hits are not fabricated.
 - Credit refresh is independent of response headers. Busy traffic cannot keep
   stale credits fresh, postpone polling indefinitely, or replace newer limits;
   shared ChatGPT credit totals count the newest provider ledger once.
@@ -444,6 +482,10 @@ recoverable account deletion. Changes below are grouped by area.
   ordinary text replies no longer warn about unused tools in automatic mode.
 
 ### Fixed
+
+- Windows client restarts no longer print garbled localized `taskkill` output.
+  Restart timeouts retain exit or OS error codes in diagnostics; process targets
+  and the existing force-stop fallback are unchanged.
 
 - Reused tool-call IDs from another conversation no longer reject an exact owned
   Responses continuation just because full materialized replay is unavailable.
@@ -676,6 +718,40 @@ recoverable account deletion. Changes below are grouped by area.
 
 ### Изменения
 
+- Подготовка BPS повторно использует буферы текста при нормализации сообщений,
+  добавлении инструкций и обработке видимого reasoning: без лишних копий,
+  изменения байтов запроса, идентичности диалога или проверок.
+- Вывод coding-инструментов сохраняется дословно при отправке в Gemini, включая
+  JSON из файлов и ошибки команд. Преобразование Responses/Chat также сохраняет
+  отдельные роли developer/system и положение инструкций в истории.
+- Добавлены нативные endpoints подсчёта токенов Messages и Gemini для API-источников:
+  с ограничениями локального ключа, без генерации ответа и выдуманных оценок.
+  Неподдерживаемые источники возвращают явную ошибку.
+- Веб-поиск Responses теперь работает через Claude Messages с сохранением
+  источников, цитат и истории продолжения в JSON и потоке. Поддерживаются списки
+  разрешённых доменов и примерное местоположение; неподдерживаемые настройки
+  поиска и незавершённые циклы серверных инструментов возвращают явную ошибку.
+
+- Оба Rust-пакета переведены на компилятор 1.99.1, Edition 2024 и стиль
+  форматирования 2024. CI использует тот же компилятор и Bun 1.4.4;
+  совместимые обновления зависимостей включают nanoid 3.3.20 и openssl-probe 0.2.2.
+
+- Включён экспериментальный HTTP/3 для прямых HTTPS-запросов после ограниченной
+  фоновой проверки без учётных данных. Первый запрос и неподдерживаемые адреса
+  используют TCP без ожидания проверки; прокси и WebSocket сохраняют транспорт.
+  Начатая генерация после ошибки не повторяется. `ZENITH_RELAY_HTTP3=0` отключает
+  эксперимент; в диагностике видна фактическая версия HTTP ответа провайдера.
+- Зависимости Desktop, веб-превью и Rust обновлены до актуальных стабильных
+  версий, включая Tauri, React, Tokio, HTTP/TLS, проверку схем и SQLite.
+  Двухпроходная минификация Terser сохраняет прежние лимиты размера JavaScript,
+  отложенную загрузку страниц и совместимость WebView с ES2020.
+- После повторных таймаутов необязательного WebSocket-подключения маршрут
+  временно использует HTTP без повторной двухсекундной задержки на каждом
+  запросе. Одиночный таймаут не мешает следующей попытке WebSocket;
+  владение продолжениями, состояние аккаунта и правила повторов генерации сохранены.
+  Пять запросов в синтетическом loopback-тесте ускорились с 10,19 до 4,16 с:
+  измеряется устранение зависших подключений, а не скорость генерации провайдера.
+
 - Подготовка BPS использует историю запроса и разобранный каталог без повторного
   копирования. Диагностика отдельно измеряет сериализацию JSON и подготовку
   каталога, а также сохраняет фактическую версию HTTP ответа провайдера.
@@ -683,7 +759,9 @@ recoverable account deletion. Changes below are grouped by area.
 - Остаток недели считается по общей сохраняемой калибровке сопоставимых подписок
   и нагрузки, а не по отдельной истории каждого аккаунта. Связанные подключения
   входят в итог пула один раз; без данных показано `—`. В подсказке видны профиль
-  и разброс. Фильтр периода больше не меняет общую окупаемость аккаунта;
+  и число замеров. Разные нагрузки используют общую медиану, без диапазона. В карточках
+  сохранён порог покрытия ценами 80%; показаны покрытие и число подписок. Обзор
+  по-прежнему требует полных цен. Фильтр периода не меняет общую окупаемость;
   фактическое использование и маршрутизация не изменены.
 
 - При временном отказе доступа BPS подключение Codex сохраняет формат каталога.
@@ -976,10 +1054,12 @@ recoverable account deletion. Changes below are grouped by area.
   более подходящему участнику. Непрозрачные продолжения и результаты без вызова
   сохраняют владельца, пока проверенное локальное восстановление не даст полную
   историю. Оба окна квоты ограничивают выбор; одинаковые остатки не гарантируются.
-  Передача той же модели теперь восстанавливает сохранённые вызовы инструментов
+  Передача той же модели восстанавливает сохранённые вызовы инструментов
   и reasoning по `previous_response_id`, а не использует текстовую ветку смены
   модели. HTTP и WebSocket сохраняют ключ кеша и текущие настройки; без истории
-  владелец не меняется, попадания в кеш провайдера не подменяются.
+  владелец не меняется. Исходный ciphertext передаётся без изменений: он не
+  удаляется и не служит общим запретом ротации. Локальные тесты не доказывают приём
+  между аккаунтами провайдера; попадания в кеш не подменяются.
 - Обновление кредитов отделено от заголовков ответов. Нагрузка не делает старые
   кредиты свежими, не откладывает опрос бесконечно и не отменяет новые лимиты.
   Общий баланс ChatGPT учитывает последнее состояние одного счёта провайдера один раз.
@@ -1122,6 +1202,10 @@ recoverable account deletion. Changes below are grouped by area.
   сортировки; обычный ответ без инструментов в автоматическом режиме не вызывает предупреждение.
 
 ### Исправления
+
+- При перезапуске клиентов в Windows больше не выводится искажённый текст
+  `taskkill`. При таймауте коды завершения или ошибки ОС сохраняются в диагностике;
+  выбор процессов и переход к принудительному завершению не изменены.
 
 - Повторный ID вызова из другого чата больше не блокирует подтверждённое
   продолжение Responses только из-за отсутствия полной материализованной истории.

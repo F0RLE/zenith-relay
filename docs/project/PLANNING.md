@@ -39,12 +39,30 @@ Rust uses `module.rs` with child files in `module/`; for example,
 imports, and tests aligned when moving a file. Compatibility readers and recovery
 backups remain with their owners; an old format is not proof of dead code.
 
+Desktop runtime assembly, live-policy synchronization and rollback live in
+`src-tauri/src/local_pool/runtime.rs` and `runtime/`, shared by commands,
+refresh readers and account operations. Gateway-key persistence lives in
+`store/gateway_keys.rs`, with secret cleanup in `store/secret_store.rs`.
+Call these owners directly outside `commands/`; runtime tests stay beside
+their implementation rather than under the IPC command tree.
+
+Client integrations live together under `local_pool/profiles/`: `codex/`,
+`opencode/`, and `claude_desktop/` own their configuration, recovery and tests;
+`profiles/catalog.rs` owns Codex catalog refresh and the shared refresh result.
+Runtime calls the profile refresh coordinator directly. Desktop command
+registration references the owning integration modules without changing IPC names.
+
 Desktop UI lives in `src/src/features/relay`: `pages/` owns page-specific views and
 models, `state/` owns shared state, `api/` owns typed IPC, and `shell/` owns
 navigation. Cross-page domain helpers stay at the feature root. `src/tests/`
 contains unit and browser tests; `web/src/` and `web/tests/` belong only to the
 independent preview. `scripts/{build,setup,check,release,maintenance}/` groups
 commands by purpose; helpers used only by one group stay in that group.
+
+Browser tests keep the public mock helpers in `src/tests/e2e/tauri-mock.ts`,
+scenario option domains in `tauri-mock/options.ts`, and the self-contained
+WebView initializer in `tauri-mock/runtime.ts`. The initializer must remain
+serializable without module closures; its imports are type-only.
 
 ## Core layout
 
@@ -84,6 +102,12 @@ The owning execution paths are `gateway/execution/request/`,
 `gateway/execution/account/`, and `gateway/websocket/`. They share runtime,
 protocol, authorization, and scheduler policy; transport-specific orchestration
 does not grant a different retry or ownership contract.
+
+`request/state.rs` owns request-local retry history and continuation/repair
+state; candidate attempts borrow that owner rather than assembling independent
+mutable flags. Identity, budget, leases and recorded outcomes keep their owners.
+`runtime/models.rs` owns model registry and editable model policy while retaining
+separate locks and the shared visibility handle observed by candidate leases.
 
 ## Desktop workspace
 
@@ -1057,8 +1081,11 @@ materializes the complete history before dispatch. Complete portable call/result
 pairs need only soft affinity; an opaque predecessor is validated separately.
 Automatic same-model owner yield uses the same native replay contract as hard
 quota recovery, not the plaintext-only model-switch repair. A locally retained
-predecessor restores ordered tool calls/results and original reasoning blocks;
-the current request keeps its instructions, tools, cache key and cache policy.
+predecessor restores ordered tool calls/results and original reasoning blocks,
+including opaque ciphertext without inspecting or removing it. The current
+request keeps its instructions, tools, cache key and cache policy. Local replay
+checks do not establish provider acceptance across credentials; upstream errors
+remain subject to the existing rejection and retry rules.
 Missing/foreign/expired replay, unresolved references and explicit context
 management or truncation cannot release this binding. Model changes still
 require plaintext replay. This transfers conversation history, not provider
@@ -1154,6 +1181,35 @@ response-affinity ownership, outside half-open health probes, may fall back to
 HTTP when that budget expires. No `response.create` has been sent: this is not
 a failed generation, account penalty, or permanent HTTP-only route decision.
 Required continuations and probes retain the existing connection budget.
+Two optional-handshake timeouts within 30 seconds defer further optional
+WebSocket attempts on that endpoint/model/authorization scope for 30 seconds.
+Requests use the existing HTTP bridge during this interval; a successful native
+handshake clears the observation. The bounded in-memory observation is separate
+from confirmed HTTP-only capability, account health, and provider quotas.
+
+Direct HTTPS generation requests with buffered bodies opportunistically use HTTP/3 after a successful
+background HEAD probe of the same origin. The first request keeps HTTP/2 or
+HTTP/1.1 without waiting for the probe. Probes have a 2-second deadline, carry no
+credentials or request content, and are bounded to four concurrent probes and
+256 candidate/origin pairs. Positive and negative observations expire after five
+minutes. QUIC reuses each route's HTTP client and preserves account pool isolation.
+Explicit and automatically selected proxies retain TCP; QUIC never bypasses
+them. WebSocket upgrades and metadata requests keep their existing clients.
+An HTTP/3 send failure or HTTP 421/505 disables it for later requests for five
+minutes; the submitted generation is not replayed on TCP. Authorization, cookies, payload
+compression, cache keys and dispatch budgets retain their existing owners.
+TLS verification stays enabled, 0-RTT is disabled, and Relay adds no QUIC idle
+deadline to quiet model generations. Because reqwest 0.13.5 does not apply its
+TCP connect timeout to H3, Relay separately bounds H3 startup to 10 seconds until
+the transport first polls the request body. The guard ends at that point; it is
+not an upload-completion measurement or a response/generation deadline. A startup
+timeout is terminal with unknown execution, never a replay or account penalty,
+and disables H3 for later requests through the existing failure observation.
+Diagnostics report the observed response
+HTTP version. `ZENITH_RELAY_HTTP3=0` disables the experiment on the next start.
+The current [reqwest HTTP/3 API](https://docs.rs/reqwest/0.13.5/reqwest/struct.ClientBuilder.html#method.http3_prior_knowledge)
+requires `--cfg reqwest_unstable`; provider support is established per origin,
+not inferred from a model or API name.
 
 WebSocket writes, including control frames and HTTP fallback output, have a
 60-second per-message deadline. This local I/O limit does not time out model
@@ -1457,9 +1513,32 @@ fields, never provider keys or values.
   become callable only after discovery or an explicit choice. Historical calls
   remain replayable but cannot reactivate a tool removed from discovery results.
   Exact schemas stay in the catalog/checkpoint; foreign search results carry
-  loaded names rather than a second schema copy. Provider-hosted search, MCP,
-  file search and code execution remain native service features, not fake
-  client functions.
+  loaded names rather than a second schema copy. MCP, file search and code
+  execution remain native service features, not fake client functions.
+- Responses `web_search` / `web_search_2025_08_26` can use the native Messages
+  `web_search_20250305` tool. JSON and SSE retain search IDs, queries, URL sources
+  and URL citations, including mixed hosted searches and client functions.
+  A citation covers its Messages text block; `cited_text` is a source quotation,
+  not an offset into the answer. Original results, encrypted handles and citation
+  blocks replay through the existing route-scoped continuation, for both
+  `previous_response_id` and full history. Public URLs cannot reconstruct missing
+  native state. Domain allowlists and approximate user location are mapped;
+  unsupported controls, non-direct callers, failed/incomplete results and other
+  server tools fail explicitly. Gemini/Chat search conversion remains unsupported.
+  This bridge does not emulate `pause_turn` (see below). Native routes are unchanged.
+  Endpoint references: [Responses web search](https://developers.openai.com/api/docs/guides/tools-web-search)
+  and [Messages web search](https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool).
+- `POST /v1/messages/count_tokens` and Gemini
+  `/v1beta/models/{model}:countTokens` (also `/v1/models/...`) forward to native
+  API sources only, under existing key, model and source permissions. They do not
+  generate a reply, estimate tokens locally, convert between tokenizers, use
+  account transports or record generation usage/health success. Request bodies
+  retain existing gateway bounds; upstream execution is bounded to 30 seconds
+  and count responses to 256 KiB. Missing/invalid counts fail, never become zero;
+  upstream error bodies are not exposed. Custom API prefixes and source-model
+  aliases are retained. The maintained official references are the
+  [Messages token-count API](https://platform.claude.com/docs/en/api/messages/count_tokens)
+  and [Gemini token-count API](https://ai.google.dev/api/tokens).
 - Base64 PDF inputs preserve bytes and labels across the twelve conversions.
   Responses/Messages also exchange HTTPS PDF URLs without Relay fetching them
   and preserve PDF tool results. Chat/Gemini URL conversion, provider file IDs,
@@ -1490,8 +1569,10 @@ fields, never provider keys or values.
 - Required or named tool choices need an actual call before a converted reply
   can complete normally. A plain-text success is rejected with `tool_choice`;
   refusals, content filtering and token-limit outcomes retain their own meaning.
-- Preserve instruction/block order and protocol-specific roles. For targets
-  with a top-level system field, initial system attachments before the first
+- Preserve instruction/block order and protocol-specific roles. Responses/Chat
+  conversion retains distinct `system` and `developer` roles in their original
+  positions, including continuation identity. For targets with a top-level
+  system field, initial system/developer attachments before the first
   assistant turn join that field in instruction order; user content order stays
   unchanged. Do not hoist instructions past an earlier assistant turn.
   Nullable aliases cannot erase explicit limits;
@@ -1523,6 +1604,12 @@ fields, never provider keys or values.
 - Responses custom outputs accept strings and typed content lists, including
   representable images. Empty lists mean no content, not literal `[]`. Untyped
   custom results fail. Chat tool messages cannot carry images.
+- Function and custom-tool output text stays literal when converted to Gemini:
+  JSON-looking stdout is wrapped under `output`, or `error` for an explicitly
+  failed Messages result. A source-file `error` key does not change execution
+  status, and whitespace, duplicate JSON keys and numeric spellings survive.
+  Native Gemini structured results and Relay-owned discovery remain structured,
+  following the [FunctionResponse contract](https://github.com/googleapis/googleapis/blob/bc7e3baa28fbb223fa93782e130260fab8205bfc/google/ai/generativelanguage/v1beta/content.proto).
 - Responses function-result names, when supplied, must match their recorded call; a
   name or item ID cannot replace `call_id`. Standalone outputs without a call
   have no foreign tool-history mapping and fail with `input.call_id`; matching
@@ -1935,14 +2022,18 @@ rates remain unavailable; a measured zero is distinct from an unknown cost.
 
 Desktop remaining-quota cards share the persisted weekly-capacity calibration
 below. Each current proven subscription ledger contributes at most its latest
-valid paired measurement (at least 5% consumption, fully priced usage). Within
-one plan, weekly-window duration and pricing revision, select the exact workload
-group represented by the most ledgers; equal-size ties use a stable workload key.
-Measurements wholly within 24 hours take precedence; fallback is limited to
-measurements wholly within 72 hours. The selected group's median full capacity
-is multiplied by each ledger's remaining weekly fraction, using the same base
-for every comparable account, including accounts without their own usage sample.
-Different workload groups are never averaged together for this card forecast.
+valid paired measurement (at least 5% consumption and 80% priced tokens). Only
+the priced component is used; missing prices are not extrapolated. Coverage is
+persisted and shown. Older records default to full coverage because their
+collector required it. Overview still excludes partially priced measurements.
+Within a plan, weekly duration and pricing revision, each exact workload is
+retained separately. Recent evidence is preferred within each profile, with the
+existing 72-hour fallback. The card uses one median across the retained ledger
+measurements, including mixed workloads, not a selected profile or the midpoint
+of range bounds. One-subscription evidence remains explicitly labelled by sample
+count, not promoted to a verified subscription allowance. This shared point is
+scaled by the same remaining weekly fraction for comparable cards. Five-hour
+quota observations and resets are not inputs to the weekly calibration.
 
 Current inventory, membership and quota evidence fence persisted samples before
 the collector catches up. Missing identity, unknown plan, reset, changed prices,
@@ -1951,8 +2042,8 @@ Linked SIWC routes use the Codex/BPS subscription window, not an app ceiling;
 credits-only SIWC routes are excluded. Snapshot projection performs bounded,
 indexed anchor/latest-measurement reads, not request-history aggregation. Anchors
 and history survive restart; there is no per-account cumulative fallback.
-Cards show an approximate weekly remaining value or `—`; tooltips identify the
-shared workload, cache/output bands, sample count and empirical P10–P90 spread.
+Cards show one approximate weekly remaining value or `—`; tooltips identify
+workload/profile count, sample count and pricing coverage.
 Forecasts expire at target reset, stale quota or the calibration's next expiry
 even without a new snapshot. Provider-reported dollar balances remain distinct.
 These display-only estimates do not change quota, admission, routing or billing.

@@ -123,13 +123,13 @@ token reuse alone does not establish the cause of TTFT or safe history reduction
 - Measure startup, page reads, saves, pool switches, history sizes, first-output
   latency, refresh work, and lock waits. Optimize the measured path, not a
   guessed protocol or assumed cache-hit benefit.
-- Reduce the many mutable attempt flags passed through
-  `gateway/execution/request/drive.rs` into cohesive typed execution state.
+- Extend typed retry/continuation ownership through remaining execution-stage
+  interfaces rather than adding independent mutable flags.
   Preserve one request identity, budget, lease, and recorded outcome across
   HTTP, account-only, and WS paths; add parity cases before extracting helpers.
-- Group unrelated `GatewayRuntime` model/session/provider state into internal
-  owners with explicit lock boundaries. Do not duplicate continuation stores
-  or replace locks with a new actor/cache layer without measurement.
+- Group remaining `GatewayRuntime` session/provider state into internal owners
+  with explicit lock boundaries. Preserve the model-policy owner; do not duplicate
+  continuation stores or replace locks with a new actor/cache layer without measurement.
 - Exercise policy-only updates without losing listeners, active streams,
   leases, affinity, or authorization provenance. Measure restart persistence
   needs for hard deadlines separately from disposable health hints.

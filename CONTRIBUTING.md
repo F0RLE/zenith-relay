@@ -117,7 +117,7 @@ Linux. Install Bun, Rust, and the native tools listed below before running
 
 - [Bun](https://bun.sh) 1.4.2 or newer.
 - [rustup](https://rustup.rs). The committed `rust-toolchain.toml` selects the
-  Rust version.
+  Rust 1.99.1 toolchain; both Rust packages use Edition 2024.
 - Native libraries for the desktop shell:
   - Windows: MSVC, Windows SDK, CMake, Ninja, and the WebView2 runtime.
     Relay supports a portable bundle and a regular Visual Studio Build Tools
@@ -136,6 +136,14 @@ bun scripts/setup/start-dev.mjs
 the desktop app. The setup, start, and `app:*` commands work from the repository
 root and from `src`. Use
 `bun run setup` when you only want to prepare the checkout.
+
+The repository Cargo configuration enables reqwest's experimental HTTP/3 API
+on stable Rust. Custom `RUSTFLAGS` override Cargo configuration, so retain
+`--cfg reqwest_unstable` when supplying your own flags, as CI does. Routed direct
+HTTPS requests try HTTP/3 only after a background transport probe succeeds;
+configured proxies and WebSockets retain their existing transport. Set
+`ZENITH_RELAY_HTTP3=0` before starting Relay to disable HTTP/3 for comparison.
+Request diagnostics expose the actual upstream HTTP version.
 
 For a prepared checkout, use `bun run app:dev`. Rust auto-restart is disabled
 by default, so editing backend code does not terminate pool requests made by
@@ -482,6 +490,7 @@ Historical catalog preparation:
 
 ~~~powershell
 bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --lib measure_catalog_history_preparation -- --ignored --nocapture --test-threads=1
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --lib measure_bps_large_history_preparation -- --ignored --nocapture --test-threads=1
 ~~~
 
 Prepared BPS prefix reuse and opt-in debug fingerprinting:

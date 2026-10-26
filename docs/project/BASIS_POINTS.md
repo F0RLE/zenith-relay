@@ -43,6 +43,10 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
   through a bounded buffer shared with cross-protocol continuation keys. Their
   serialized meaning and identifiers stay unchanged, without extra full-history
   clones or serialized copies.
+- After copying the client history for preparation, compact messages, generated
+  text prologues and visible reasoning move their owned text buffers instead of
+  cloning them again. Wire field order, extensions, metadata and provider-owned
+  ciphertext behavior remain unchanged; the caller's request is not mutated.
 
 ## Executable calls and stream validation
 
@@ -390,6 +394,11 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
   `compact`, `full`, or `discovery`; it never reaches the BPS endpoint. Converted
   clients use the same automatic policy after their existing typed conversion.
   Native routes keep their own tool-loading semantics unchanged.
+- Parsed declarations belong to the immutable prepared client request and are
+  reused for discovery and final JSON/SSE validation. This is not a cross-request
+  permission cache: selection, tool choice and argument validation still use the
+  current request. Account-only BPS preparation borrows unchanged history until
+  a model or timezone rewrite needs ownership, then builds the wire body once.
 - Discovery preserves upstream SSE for streaming inference clients. Ordinary
   text streams before terminal validation; executable calls remain withheld.
   After a withheld tool, later output whose index may shift waits for the

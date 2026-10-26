@@ -32,13 +32,10 @@ to work in. Relay does not install ChatGPT, Claude Desktop, or OpenCode.
 5. In **Access → Local API**, select **Start API**.
    The status should change to **API is running**.
 6. Open **Pool → Connect** and select ChatGPT, Claude Desktop, or OpenCode.
-   Claude Desktop uses the exact ordered pool model list and its third-party
-   inference profile. Relay validates the connection, closes a running Claude
-   Desktop and saves the profile before any optional launch.
-   The application opens after connecting by default. To turn this off, disable
-   **Settings → Application → Launch applications after connecting**.
-   For another client, use
-   [manual API setup](#local-api).
+   Relay validates and saves Claude Desktop's [inference profile](#claude-desktop),
+   closing the client first. Applications launch by default; disable
+   **Settings → Application → Launch applications after connecting** to prevent it.
+   Other clients use [manual API setup](#local-api).
 7. Select a model in the application and send a short request.
    Open **Usage → Requests** in Relay to see its result and selected member.
 
@@ -234,16 +231,13 @@ Retry network failures later; credential recovery preserves your enabled state
 and membership. Follow the card's sign-in hint. The shared visibility control
 reveals account details hidden by default.
 
-**Remove from pool** keeps the connection but stops new assignments.
-Left-click **Delete** in **Connections** to move the account to **Trash**, retaining its
-sign-in data while stopping pool participation and background tasks.
-Use **Connections → Trash → Restore** to return it disabled and outside the
-pool; enable it and add it to the pool separately when needed.
-Right-click the same button to open the **Delete permanently** menu. Selecting
-the action asks for confirmation, then removes the account and its sign-in
-data without recovery. In Trash, this action is at the bottom of each card.
-Exports from a card menu or selected accounts contain sign-in data:
-store them like passwords, and do not attach them to an error report.
+**Remove from pool** stops new assignments but keeps the connection.
+Left-click **Delete** in **Connections** to move an account to **Trash**: sign-in
+data stays, pool participation and background tasks stop. **Trash → Restore**
+returns it disabled and outside the pool; enable and add it separately.
+Right-click **Delete → Delete permanently** (or use the action below a Trash
+card), then confirm to irreversibly remove the account and sign-in data.
+Exports contain sign-in data: protect them like passwords, never attach them to reports.
 
 ### Account timezones
 
@@ -425,25 +419,18 @@ A model must be enabled at both levels and available from the provider.
 Permission in Relay does not unlock a restricted model or replenish quota.
 **API only** means the model is not shown in ChatGPT's model list.
 
-Models are grouped by developer, then family and class, with newer versions
-first. Accounts and API sources share Relay's order.
-Drag models within a group or move a whole group.
-**Reset model order** restores Relay's model order.
-Speed choices come from the model reference and compatible pool
-connections. **Fast** and **Ultrafast** appear only when both support them;
-they do not promise a response time. BPS uses **Standard**.
-Text models also have a **Context window** control. **Short context** preserves
-the model's published default window. Only when that window is unknown does it
-use 25% of a known maximum. **Long context** uses the full known window. The
-control shows tokens without percentage captions; hover to see the reference maximum.
-**Custom limit** accepts
-1,024–2,000,000 tokens, capped by a known hard maximum. Changes save automatically;
-a valid custom number saves after a short pause or on Enter. Escape cancels the draft.
-Relay updates without restarting the pool or interrupting requests. If Codex
-is running, a compact status icon explains that it needs a restart to reload
-its catalog. Refresh failures are also available by hovering or focusing the icon.
-OpenCode may need a new session. Claude Desktop manages its own history;
-Relay does not forcibly trim it to this budget.
+Models share an order across accounts and APIs: developer, family, class,
+newest version first. Drag models or groups; **Reset model order** restores it.
+**Fast/Ultrafast** require support in both the model reference and connection;
+they do not guarantee response times. BPS uses **Standard**.
+For text models, **Short context** uses the published default, or 25% of a known
+maximum only if that default is unknown. **Long context** uses the known maximum.
+Hover over the token count for the reference maximum. **Custom limit** accepts
+1,024–2,000,000 tokens within the hard maximum; saves after a pause or Enter,
+while Escape cancels the draft. Other changes save automatically.
+The pool and active requests keep running. Codex needs a restart to reload its
+catalog; hover or focus its status icon for restart/refresh details. OpenCode
+may need a new session. Claude Desktop manages its own history without forced trimming.
 
 ### Prices and additional settings
 
@@ -523,16 +510,12 @@ This does not fix a wrong key, an invalid format, or a response already started.
 
 Streaming Gemini uses `/v1beta/models/{model}:streamGenerateContent?alt=sse`.
 
-Interactions requires an explicitly configured Interactions API source, for
-example an endpoint ending in `/v1beta/interactions`; ordinary Gemini support
-does not enable it. Send `stream: true` for SSE. Continuations must use the same
-local key, model and source that created the interaction; unknown IDs are
-rejected. Other client protocols, account sign-in, agents and background or
-retrieval operations are not supplied by this native endpoint.
-This format needs the server root without a trailing `/v1`.
-Tools, images, and other features depend on the member and request format.
-Unsupported conversions return an error.
-Realtime and audio/video conversion are not provided.
+Interactions needs an explicit API source (e.g. `/v1beta/interactions`), not just
+Gemini support. Use the server root without `/v1`; `stream: true` enables SSE.
+Continuation requires the original local key, model and source; unknown IDs fail.
+This native endpoint provides no foreign conversion, account login, agents,
+background execution or retrieval. Tools and images depend on the member/format;
+unsupported conversions fail. Realtime and audio/video conversion are unavailable.
 
 ### Applications
 
@@ -858,6 +841,8 @@ such as 429, explains why. More retries do not replenish quota.
 | `adapter_compaction_unsupported` | This route cannot accept another provider's encrypted compaction checkpoint. | ChatGPT auto-compaction on any non-native model, including `/v1/responses/compact`, is handled by Relay. Use a native Responses route for a foreign checkpoint, or start a new task. |
 | `adapter_continuation_missing`, `adapter_continuation_mismatch` | Adapter continuation state is lost or belongs to another binding. | Restore the former source/adapter. Transfer complete history or start a new conversation when it is unavailable. |
 | `adapter_tool_unsupported`, `adapter_reasoning_unsupported` | The adapter cannot represent the tool or reasoning mode. | Choose a supported capability or native format. Allowing a mode in model rules does not add upstream support. |
+| `token_count_unsupported` | No native API count endpoint. | Use a Messages/Gemini API source, not account transports or cross-protocol estimates. |
+| `token_count_response_invalid` | Missing/invalid count or oversized response. | Check the provider endpoint. Failure never becomes zero or an estimate. |
 | `adapter_upstream_response_invalid`, `adapter_upstream_stream_invalid` | The provider response does not match a supported conversion. | Update Relay and check the source's API address and format. If reproducible, use a source with a native format and report the code and request ID. |
 | `invalid_image_model`, `image_generation_not_enabled` | The image model or capability is unavailable. | Check the image model, member inventory, and pool permissions. A normal text model is unsuitable for image endpoints. |
 | `image_generation_user_error` | The provider rejected image parameters. | Correct the prompt, size, format, or named parameter. Image edits require at least one nonempty input image. |
@@ -877,6 +862,7 @@ such as 429, explains why. More retries do not replenish quota.
 | `upstream_status`, `upstream_failure` | No more specific provider classification is available. | Use the actual status and redacted details: 401/403 access, 429 quota/frequency, 5xx service health. An unknown code is not success. |
 | `upstream_stream`, `stream_error`, `upstream_terminal` | A provider error event ended the stream. | Follow the embedded provider code in request details. Initial HTTP 200 does not prove successful completion. |
 | `http_headers_timeout` · 504 | The optional Relay native HTTP deadline expired before response headers; upstream execution may have started. | Check the client outcome before manually resending. Increase or unset `ZENITH_RELAY_HTTP_HEADERS_TIMEOUT_SECONDS` for slow sources. No automatic replay or account penalty occurs. |
+| `http_send_start_timeout` · 504 | HTTP/3 startup exceeded 10 seconds, not a generation timeout. | Check connectivity and the client outcome before resending. Later requests temporarily use TCP; no automatic replay or account penalty. To disable HTTP/3, restart with `ZENITH_RELAY_HTTP3=0`. |
 | `stream_invalid` | Invalid stream event. | Report the request ID and `relay_stream_parser` diagnostics from request details: category, position and frame sizes, without content. For missing diagnostics, reproduce on the current build. |
 | `stream_incomplete`, `upstream_websocket_closed`, `upstream_websocket` | The connection ended before completion. | Check network and proxy timeouts. Retry the unfinished step from the client; a partial answer is not a completed answer. |
 | `stream_first_output_timeout`, `stream_idle_timeout`, `websocket_idle_timeout`, `stream_semantic_timeout` | Legacy/external timeout; current Relay does not time out active generation. | Update Relay, check provider/proxy limits, or cancel a stuck request in the client. |
