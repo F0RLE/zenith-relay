@@ -4,14 +4,14 @@ mod client;
 pub(in crate::gateway) mod compatibility;
 mod request;
 
-pub(super) use account::{execute_account_endpoint, AccountExecution};
+pub(super) use account::{AccountExecution, execute_account_endpoint};
 pub(super) use client::execute_reserved_client_request;
-pub(super) use client::{execute_client_request, execute_gemini_client_request};
 pub(super) use client::{RoutedCompactionRequest, RoutedRequestIdentity};
+pub(super) use client::{execute_client_request, execute_gemini_client_request};
 pub(super) use request::ReservedCandidate;
 
 use super::errors::{
-    api_error_with_origin_and_category, cooldown_error, AttemptFailure, PreservedUpstreamError,
+    AttemptFailure, PreservedUpstreamError, api_error_with_origin_and_category, cooldown_error,
 };
 use super::errors::{
     responses_custom_tool_item_id_requires_ctc_prefix,
@@ -20,6 +20,8 @@ use super::errors::{
 use super::now_ms;
 use super::request::response_tool_call_ids;
 use super::response::response_id_from_bytes;
+use crate::ErrorOrigin;
+use crate::WireApi;
 use crate::error_codes;
 use crate::protocol::{
     remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
@@ -27,8 +29,6 @@ use crate::protocol::{
 };
 use crate::runtime::{AuthenticatedKey, GatewayRuntime};
 use crate::scheduler::rotation::RotationOperation;
-use crate::ErrorOrigin;
-use crate::WireApi;
 use axum::body::Body;
 use axum::http::{HeaderValue, Response, StatusCode};
 use serde_json::Value;
@@ -326,8 +326,7 @@ pub(super) fn finish_request_failure(
     } = request_failure_input;
     if failure.status == StatusCode::TOO_MANY_REQUESTS
         && super::errors::failure_category_requires_cooldown(failure.category)
-    {
-        if let Some((retry_at, reason)) = runtime.all_applicable_cooldown(
+        && let Some((retry_at, reason)) = runtime.all_applicable_cooldown(
             key,
             resolved_model,
             protocols,
@@ -335,14 +334,14 @@ pub(super) fn finish_request_failure(
             response_affinity_key,
             now_ms(),
             operation,
-        ) {
-            return cooldown_error(
-                retry_at,
-                Some(&failure),
-                reason == crate::scheduler::CooldownReason::RateLimit,
-                failure_origin,
-            );
-        }
+        )
+    {
+        return cooldown_error(
+            retry_at,
+            Some(&failure),
+            reason == crate::scheduler::CooldownReason::RateLimit,
+            failure_origin,
+        );
     }
     attempt_error_response(failure, preserved, failure_origin, request_id)
 }
@@ -381,21 +380,20 @@ pub(super) fn attempt_error_response(
         )
     };
     // A request-local limit can carry Retry-After without creating any pool cooldown.
-    if failure.status == StatusCode::TOO_MANY_REQUESTS {
-        if let Some(delay) = failure
+    if failure.status == StatusCode::TOO_MANY_REQUESTS
+        && let Some(delay) = failure
             .cooldown_hint
             .retry_after_for_account(failure_origin == ErrorOrigin::Account)
-        {
-            let seconds = delay
-                .saturating_add(999)
-                .checked_div(1_000)
-                .unwrap_or(0)
-                .max(1);
-            if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
-                response
-                    .headers_mut()
-                    .insert(axum::http::header::RETRY_AFTER, value);
-            }
+    {
+        let seconds = delay
+            .saturating_add(999)
+            .checked_div(1_000)
+            .unwrap_or(0)
+            .max(1);
+        if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
+            response
+                .headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, value);
         }
     }
     response

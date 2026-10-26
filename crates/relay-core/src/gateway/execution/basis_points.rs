@@ -66,11 +66,16 @@ pub(in crate::gateway) fn release_expired_cache_entries() {
 }
 pub(in crate::gateway::execution) mod structured_output;
 
-pub(in crate::gateway::execution) use attachments::{attach_input_images, AttachmentFailure};
+pub(in crate::gateway::execution) use attachments::{AttachmentFailure, attach_input_images};
+pub(in crate::gateway) use catalog::{PreparedClientRequest, RequestCatalog};
+#[cfg(test)]
+pub(in crate::gateway::execution) use prepare::prepare_request_with_timing;
 pub(in crate::gateway::execution) use prepare::{
-    output_format_error, prepare_request, prepare_request_with_timing,
+    output_format_error, prepare_request, prepare_request_with_catalog,
 };
-pub(in crate::gateway) use response::{synthetic_stream, translate_response};
+pub(in crate::gateway) use response::synthetic_stream;
+#[cfg(test)]
+pub(in crate::gateway) use response::translate_response;
 
 pub(super) const TRANSPORT_TOOL: &str = "run_officejs";
 pub(super) const TRANSPORT_TOOL_ALIAS: &str = "functions.run_officejs";

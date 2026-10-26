@@ -1,11 +1,11 @@
-use super::super::errors::{api_error_with_origin_and_category, cooldown_error, AttemptFailure};
+use super::super::errors::{AttemptFailure, api_error_with_origin_and_category, cooldown_error};
 use super::super::now_ms;
 use super::super::request::request_id;
-use super::{ImageEndpoint, PreparedImageRequest, IMAGE_PROTOCOLS};
+use super::{IMAGE_PROTOCOLS, ImageEndpoint, PreparedImageRequest};
 use crate::runtime::AuthenticatedKey;
 use crate::{ErrorOrigin, GatewayRuntime};
-use attempt::run_selected_attempt;
 use attempt::SelectedImageRoute;
+use attempt::run_selected_attempt;
 use axum::body::Body;
 use axum::http::{Response, StatusCode};
 use std::collections::HashSet;
@@ -105,8 +105,8 @@ pub(super) async fn execute_prepared(
         return error;
     }
     let failure = last_failure.unwrap_or_else(AttemptFailure::no_candidate);
-    if failure.status == StatusCode::TOO_MANY_REQUESTS {
-        if let Some((retry_at, reason)) = runtime.all_applicable_cooldown(
+    if failure.status == StatusCode::TOO_MANY_REQUESTS
+        && let Some((retry_at, reason)) = runtime.all_applicable_cooldown(
             &key,
             &prepared.resolved_model,
             IMAGE_PROTOCOLS,
@@ -114,14 +114,14 @@ pub(super) async fn execute_prepared(
             None,
             now_ms(),
             crate::scheduler::rotation::RotationOperation::Image,
-        ) {
-            return cooldown_error(
-                retry_at,
-                Some(&failure),
-                reason == crate::scheduler::CooldownReason::RateLimit,
-                last_failure_origin,
-            );
-        }
+        )
+    {
+        return cooldown_error(
+            retry_at,
+            Some(&failure),
+            reason == crate::scheduler::CooldownReason::RateLimit,
+            last_failure_origin,
+        );
     }
     let origin = last_failure_origin.for_category(failure.category);
     api_error_with_origin_and_category(

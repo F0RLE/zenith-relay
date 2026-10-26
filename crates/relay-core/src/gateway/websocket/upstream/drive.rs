@@ -3,12 +3,14 @@ use std::time::Instant;
 
 use super::super::super::execution::AttemptRepairs;
 use super::super::*;
-use super::handshake::{upgrade_with_authorization_refresh, AuthorizationUpgrade};
-use super::open::{open_upgraded_socket, OpenedSocket};
+use super::handshake::{
+    AuthorizationUpgrade, can_use_optional_fast_path, upgrade_with_authorization_refresh,
+};
+use super::open::{OpenedSocket, open_upgraded_socket};
 use super::telemetry::record_connect_failure;
-use super::upgrade_reject::{handle_upgrade_rejection, UpgradeAction};
+use super::upgrade_reject::{UpgradeAction, handle_upgrade_rejection};
 use super::{ConnectProgress, ConnectScope, ConnectTrace, Connected, HttpFallback};
-use crate::runtime::AccountTransport;
+use crate::runtime::{AccountTransport, WebsocketTransportPreference};
 
 #[allow(clippy::large_enum_variant)]
 pub(super) enum DrivenConnect {
@@ -114,12 +116,20 @@ pub(super) async fn drive_selected_candidate(
         }
     };
     let capability_scope = GatewayRuntime::websocket_capability_scope(&route, &prepared);
-    if runtime.websocket_is_http_only(
+    let transport_preference = runtime.websocket_transport_preference(
         &capability_scope,
         &request.resolved_model,
         &prepared.incarnation(),
         now_ms(),
-    ) {
+    );
+    if transport_preference == WebsocketTransportPreference::SlowHandshake
+        && can_use_optional_fast_path(&route, &request)
+    {
+        return Err(GatewayFailure::websocket_slow_handshake(
+            source_error_origin,
+        ));
+    }
+    if transport_preference == WebsocketTransportPreference::HttpOnly {
         drop(lease);
         *websocket_http_fallback_origin = Some(source_error_origin);
         *last_failure = Some(GatewayFailure::websocket_http_fallback(source_error_origin));

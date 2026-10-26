@@ -1,9 +1,9 @@
 use super::super::now_ms;
 use crate::runtime::{AccountTransport, ExecutorRoute};
-use crate::usage::{normalize_reported_cache_ttls, ReasoningEffortDiagnostics};
+use crate::usage::{ReasoningEffortDiagnostics, normalize_reported_cache_ttls};
 use crate::{
-    normalize_observed_service_tier, GatewayRuntime, ObservedServiceTier, ToolUseDiagnostics,
-    UsageEvent,
+    GatewayRuntime, ObservedServiceTier, ToolUseDiagnostics, UsageEvent,
+    normalize_observed_service_tier,
 };
 use serde_json::Value;
 
@@ -144,10 +144,11 @@ pub(in crate::gateway) fn emit_repair(runtime: &GatewayRuntime, event: &mut Usag
 }
 
 pub(in crate::gateway) fn emit_usage(runtime: &GatewayRuntime, mut event: UsageEvent) {
-    if event.success && event.error_category.is_none() {
-        if let Some(origin) = runtime.request_origin(&event.request_id) {
-            event.error_category = Some(format!("codex_{origin}"));
-        }
+    if event.success
+        && event.error_category.is_none()
+        && let Some(origin) = runtime.request_origin(&event.request_id)
+    {
+        event.error_category = Some(format!("codex_{origin}"));
     }
     if event
         .account_id
@@ -170,10 +171,10 @@ pub(in crate::gateway) fn emit_usage(runtime: &GatewayRuntime, mut event: UsageE
 
 pub(in crate::gateway) fn emit_callback(callback: &crate::UsageCallback, event: UsageEvent) {
     let mut event = event;
-    if let Some(routing) = event.routing.as_mut() {
-        if event.success {
-            routing.attempt_outcome = Some(crate::AttemptOutcome::Completed);
-        }
+    if let Some(routing) = event.routing.as_mut()
+        && event.success
+    {
+        routing.attempt_outcome = Some(crate::AttemptOutcome::Completed);
     }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(event)));
 }
@@ -376,10 +377,9 @@ pub(in crate::gateway::response) fn cache_write_ttl_from_usage(usage: &Value) ->
                 if usage_token_value
                     .as_u64()
                     .is_some_and(|token_count| token_count > 0)
+                    && let Some(window) = cache_window_from_token_field(usage_field_name)
                 {
-                    if let Some(window) = cache_window_from_token_field(usage_field_name) {
-                        windows.push(window);
-                    }
+                    windows.push(window);
                 }
             }
         }
@@ -396,10 +396,9 @@ pub(in crate::gateway::response) fn cache_write_ttl_from_usage(usage: &Value) ->
                 if cache_token_value
                     .as_u64()
                     .is_some_and(|token_count| token_count > 0)
+                    && let Some(window) = window
                 {
-                    if let Some(window) = window {
-                        windows.push(window.to_string());
-                    }
+                    windows.push(window.to_string());
                 }
             }
         }

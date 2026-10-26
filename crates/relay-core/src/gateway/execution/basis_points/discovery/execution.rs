@@ -1,11 +1,11 @@
 use super::super::structured_output::requires_buffering;
-use super::{capture, DiscoverySession};
-use crate::gateway::errors::{apply_failure_state, settle_route_failure, AttemptFailure};
+use super::{DiscoverySession, capture};
+use crate::gateway::errors::{AttemptFailure, apply_failure_state, settle_route_failure};
 use crate::gateway::execution::{
     attempt_error_response, request::adapter_error_response_for_origin,
 };
 use crate::gateway::response::{
-    completed_upstream_response, emit_usage, populate_tokens, usage_event, UsageAttempt,
+    UsageAttempt, completed_upstream_response, emit_usage, populate_tokens, usage_event,
 };
 use crate::runtime::{
     AuthenticatedKey, AuthorizationDispatch, AuthorizationIdentityPolicy, AuthorizedResponse,
@@ -15,7 +15,7 @@ use crate::scheduler::rotation::SharedRequestBudget;
 use crate::usage::{ReasoningEffortDiagnostics, ToolUseDiagnostics, UsageEvent};
 use crate::{ErrorOrigin, GatewayRuntime};
 use axum::body::{Body, Bytes};
-use axum::http::{header, Response, StatusCode};
+use axum::http::{Response, StatusCode, header};
 use serde_json::Value;
 use std::time::Instant;
 
@@ -42,8 +42,29 @@ impl From<reqwest::Response> for DiscoveryResponse {
     }
 }
 
+#[cfg(test)]
 pub(in crate::gateway::execution) fn prepare_dispatch(
     original: &Value,
+    upstream: Value,
+    budget: &SharedRequestBudget,
+    tool_use: &mut ToolUseDiagnostics,
+    runtime: &GatewayRuntime,
+    local_key_id: &str,
+    client_context_id: Option<&str>,
+) -> Result<(Value, Option<DiscoverySession>), crate::AdapterError> {
+    prepare_dispatch_with_catalog(
+        (original, super::super::RequestCatalog::default()),
+        upstream,
+        budget,
+        tool_use,
+        runtime,
+        local_key_id,
+        client_context_id,
+    )
+}
+
+pub(in crate::gateway::execution) fn prepare_dispatch_with_catalog(
+    original: (&Value, super::super::RequestCatalog),
     mut upstream: Value,
     budget: &SharedRequestBudget,
     tool_use: &mut ToolUseDiagnostics,
@@ -51,7 +72,8 @@ pub(in crate::gateway::execution) fn prepare_dispatch(
     local_key_id: &str,
     client_context_id: Option<&str>,
 ) -> Result<(Value, Option<DiscoverySession>), crate::AdapterError> {
-    let mut session = DiscoverySession::prepare(original, tool_use)?;
+    let (original, catalog) = original;
+    let mut session = DiscoverySession::prepare(original, tool_use, catalog)?;
     if session.is_some() && budget.with_budget(|budget| budget.remaining()) < 2 {
         let mut fallback = original.clone();
         fallback[super::super::presentation::OPTION] = serde_json::json!("compact");
@@ -81,8 +103,8 @@ pub(in crate::gateway::execution) fn prepare_dispatch(
         );
         session.preload(&loaded, &mut upstream)?;
         session.record(tool_use);
-    } else if original["tools"].as_array().is_none_or(Vec::is_empty) {
-        if let Some(prefix) = prefix_scope.and_then(|scope| {
+    } else if original["tools"].as_array().is_none_or(Vec::is_empty)
+        && let Some(prefix) = prefix_scope.and_then(|scope| {
             runtime.basis_points_catalog_store.load_prefix(
                 local_key_id,
                 model,
@@ -90,9 +112,9 @@ pub(in crate::gateway::execution) fn prepare_dispatch(
                 &scope,
                 crate::gateway::now_ms(),
             )
-        }) {
-            super::super::prepare::restore_text_only_prefix(original, &mut upstream, prefix);
-        }
+        })
+    {
+        super::super::prepare::restore_text_only_prefix(original, &mut upstream, prefix);
     }
     Ok((upstream, session))
 }
@@ -220,7 +242,7 @@ pub(in crate::gateway::execution) async fn resolve(
             Ok(value) => value,
             Err(_) => {
                 return Err(context
-                    .adapter_failure(event, crate::AdapterError::upstream_response_invalid()))
+                    .adapter_failure(event, crate::AdapterError::upstream_response_invalid()));
             }
         };
         event.tool_use.observe_upstream_response(&terminal);

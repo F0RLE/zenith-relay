@@ -1,6 +1,6 @@
 //! Encode only after ownership guards. Compression never creates a retry path.
 use crate::usage::{RequestContentEncoding, RequestPayloadDiagnostics, TransportMode};
-use reqwest::{header, Method, Request};
+use reqwest::{Method, Request, header};
 use std::time::Instant;
 
 const MIN_COMPRESS_BYTES: usize = 64 * 1024;
@@ -79,24 +79,23 @@ pub(super) async fn encode(
         observed.compression_ms = Some(elapsed.as_millis() as u64);
         observed.compression_us = Some(elapsed.as_micros() as u64);
     }
-    if let Ok(Ok(encoded)) = encoded {
-        if encoded.len()
+    if let Ok(Ok(encoded)) = encoded
+        && encoded.len()
             < request
                 .body()
                 .and_then(|body| body.as_bytes())
                 .map_or(0, <[u8]>::len)
-        {
-            if let Some(observed) = observed.as_mut() {
-                observed.body_bytes = encoded.len() as u64;
-                observed.content_encoding = RequestContentEncoding::Zstd;
-            }
-            *request.body_mut() = Some(encoded.into());
-            request.headers_mut().insert(
-                header::CONTENT_ENCODING,
-                header::HeaderValue::from_static("zstd"),
-            );
-            request.headers_mut().remove(header::CONTENT_LENGTH);
+    {
+        if let Some(observed) = observed.as_mut() {
+            observed.body_bytes = encoded.len() as u64;
+            observed.content_encoding = RequestContentEncoding::Zstd;
         }
+        *request.body_mut() = Some(encoded.into());
+        request.headers_mut().insert(
+            header::CONTENT_ENCODING,
+            header::HeaderValue::from_static("zstd"),
+        );
+        request.headers_mut().remove(header::CONTENT_LENGTH);
     }
     (request, observed)
 }

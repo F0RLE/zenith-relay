@@ -73,35 +73,31 @@ impl StreamCompletionSettlement {
         if self.route.client_wire_api == crate::WireApi::Gemini
             && self.route.adapter.is_passthrough()
             && event.error_category.as_deref() == Some(error_codes::RESPONSE_INCOMPLETE)
+            && let Some(shared) = &self.native_response
+            && let Some(response) = crate::poison::mutex(shared).take()
         {
-            if let Some(shared) = &self.native_response {
-                if let Some(response) = crate::poison::mutex(shared).take() {
-                    crate::gateway::continuation::gemini::bind_response(
-                        &self.runtime,
-                        &self.local_key,
-                        &self.route,
-                        &self.native_template,
-                        &response,
-                        now_ms(),
-                    );
-                }
-            }
+            crate::gateway::continuation::gemini::bind_response(
+                &self.runtime,
+                &self.local_key,
+                &self.route,
+                &self.native_template,
+                &response,
+                now_ms(),
+            );
         }
         if event.success
             && self.route.client_wire_api == crate::WireApi::GeminiInteractions
             && self.route.adapter.is_passthrough()
+            && let Some(shared) = &self.native_response
+            && let Some(response) = crate::poison::mutex(shared).take()
         {
-            if let Some(shared) = &self.native_response {
-                if let Some(response) = crate::poison::mutex(shared).take() {
-                    crate::gateway::continuation::interactions::bind_response(
-                        &self.runtime,
-                        &self.local_key,
-                        &self.route,
-                        &response,
-                        now_ms(),
-                    );
-                }
-            }
+            crate::gateway::continuation::interactions::bind_response(
+                &self.runtime,
+                &self.local_key,
+                &self.route,
+                &response,
+                now_ms(),
+            );
         }
         if event.success {
             let recovered = self
@@ -170,25 +166,25 @@ impl StreamCompletionSettlement {
                 self.runtime
                     .bind_response_route_affinity(response_id, &self.route, now_ms());
             }
-            if let Some(shared) = self.native_response.as_ref() {
-                if let Some(native_response_payload) = crate::poison::mutex(shared).take() {
-                    for call_id in response_tool_call_ids(&native_response_payload) {
-                        self.runtime.bind_tool_call_route_affinity(
-                            &self.local_key,
-                            &call_id,
-                            &self.route,
-                            now_ms(),
-                        );
-                    }
-                    self.runtime.capture_native_responses_replay(
+            if let Some(shared) = self.native_response.as_ref()
+                && let Some(native_response_payload) = crate::poison::mutex(shared).take()
+            {
+                for call_id in response_tool_call_ids(&native_response_payload) {
+                    self.runtime.bind_tool_call_route_affinity(
                         &self.local_key,
-                        &self.candidate_id,
-                        &self.native_template,
-                        &self.model,
-                        &native_response_payload,
+                        &call_id,
+                        &self.route,
                         now_ms(),
                     );
                 }
+                self.runtime.capture_native_responses_replay(
+                    &self.local_key,
+                    &self.candidate_id,
+                    &self.native_template,
+                    &self.model,
+                    &native_response_payload,
+                    now_ms(),
+                );
             }
         } else if event
             .error_category

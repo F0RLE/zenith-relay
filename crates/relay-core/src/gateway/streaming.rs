@@ -1,16 +1,16 @@
 use super::errors::{
-    api_error_type, apply_failure_state, canonical_upstream_status, current_failure_state,
+    AttemptFailure, CooldownInput, PreservedUpstreamError, RateLimitBodyHint, api_error_type,
+    apply_failure_state, canonical_upstream_status, current_failure_state,
     failure_category_requires_cooldown, failure_cooldown, preserved_upstream_error_value,
     rate_limit_body_hint_value, upstream_event_failure_category, upstream_failure_status,
-    upstream_status_from_value, AttemptFailure, CooldownInput, PreservedUpstreamError,
-    RateLimitBodyHint,
+    upstream_status_from_value,
 };
 use super::now_ms;
 use super::request::response_tool_call_ids;
 use super::response::{
-    apply_usage, attach_stream_diagnostics, emit_callback, emit_usage, find_usage,
-    proxy_sse_response, response_id, response_service_tier, route_error_origin, usage_event,
-    CompletionCallback, UsageAttempt,
+    CompletionCallback, UsageAttempt, apply_usage, attach_stream_diagnostics, emit_callback,
+    emit_usage, find_usage, proxy_sse_response, response_id, response_service_tier,
+    route_error_origin, usage_event,
 };
 use crate::error_codes;
 use crate::runtime::{CandidateLease, ExecutorRoute};
@@ -18,15 +18,15 @@ use crate::usage::ReasoningEffortDiagnostics;
 use crate::{GatewayRuntime, PreparedAdapterRequest, ToolUseDiagnostics, UsageEvent, WireApi};
 use axum::body::{Body, Bytes};
 use axum::http::{Response, StatusCode};
-use futures_util::{stream, Stream, StreamExt};
-use serde_json::{json, Value};
+use futures_util::{Stream, StreamExt, stream};
+use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
-use tokio::time::{sleep, Instant as TokioInstant, Sleep};
+use tokio::time::{Instant as TokioInstant, Sleep, sleep};
 
 const SSE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -43,23 +43,23 @@ mod fast_delta;
 mod replay;
 mod upstream_usage;
 
-pub(in crate::gateway) use fast_delta::{fast_response_delta_json, FastResponseDelta};
+pub(in crate::gateway) use fast_delta::{FastResponseDelta, fast_response_delta_json};
 
 use bridge::bridge_adapter_stream;
 
 pub(super) use replay::NativeReplayCapture;
 
 pub(super) use events::{
-    has_generation_evidence, has_output_delta, has_semantic_output, is_compaction_payload,
-    is_empty_responses_terminal, is_known_non_output_event, is_responses_output_delta_type,
-    parse_sse_event, preserved_stream_error, rewrite_bridge_failure, served_model_is_rejected,
-    TerminalEvent, TerminalOutcome,
+    TerminalEvent, TerminalOutcome, has_generation_evidence, has_output_delta, has_semantic_output,
+    is_compaction_payload, is_empty_responses_terminal, is_known_non_output_event,
+    is_responses_output_delta_type, parse_sse_event, preserved_stream_error,
+    rewrite_bridge_failure, served_model_is_rejected,
 };
 
 mod bootstrap;
 pub(super) use bootstrap::{
-    bootstrap_basis_points_stream, bootstrap_prewarm_stream, bootstrap_stream,
-    degraded_route_stream_failure, StreamBootstrapFailure,
+    StreamBootstrapFailure, bootstrap_basis_points_stream, bootstrap_prewarm_stream,
+    bootstrap_stream, degraded_route_stream_failure,
 };
 
 /// Owns the work after an upstream stream has emitted client-visible output.
@@ -99,7 +99,9 @@ impl StreamExecution {
         headers: reqwest::header::HeaderMap,
         first: Bytes,
         remaining: UpstreamStream,
-        basis_points_request: Option<Value>,
+        basis_points_request: Option<
+            crate::gateway::execution::basis_points::PreparedClientRequest,
+        >,
         discovery: Option<
             crate::gateway::execution::basis_points::discovery::execution::StreamingDiscovery,
         >,

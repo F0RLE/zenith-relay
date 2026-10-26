@@ -1,17 +1,17 @@
 //! Bounded, request-owned catalog lookup. Never executes a client tool.
-use super::catalog::{client_tools, selected_tools, ClientTool};
+use super::catalog::{ClientTool, client_tools, selected_tools};
 use super::presentation::{
-    diagnostics, loaded_names, loaded_schema_bytes, uses_discovery, LOOKUP_TOOL,
+    LOOKUP_TOOL, diagnostics, loaded_names, loaded_schema_bytes, uses_discovery,
 };
 use super::response::{invalid_tool_output, parse_transport_envelope, validate_tool_completion};
 use crate::protocol::AdapterError;
 use crate::usage::ToolUseDiagnostics;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(in crate::gateway) mod execution;
 pub(in crate::gateway) mod native;
-pub(in crate::gateway::execution) use execution::{resolve, DiscoveryExecution};
+pub(in crate::gateway::execution) use execution::{DiscoveryExecution, resolve};
 
 const MAX_LOOKUP_ROUNDS: u8 = 8;
 const MAX_LOOKUP_TOOLS: usize = 8;
@@ -61,8 +61,9 @@ impl DiscoverySession {
     fn prepare(
         request: &Value,
         tool_use: &mut ToolUseDiagnostics,
+        mut catalog: super::catalog::RequestCatalog,
     ) -> Result<Option<Self>, AdapterError> {
-        let tools = client_tools(request)?;
+        let tools = catalog.tools(request)?.to_vec();
         capture_catalog(&tools, request, tool_use);
         Self::from_catalog(request, tools, tool_use.client_context.is_some())
     }

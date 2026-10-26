@@ -36,8 +36,8 @@ fn saved_automatic_policy_does_not_defer_native_responses() {
     let original = two_function_tools();
     let mut policy = RequestToolPolicy::new(&runtime, &original);
 
-    let mut body = original.clone();
-    policy.apply_value(&mut body).unwrap();
+    let body = original.clone();
+    policy.apply_value(&body).unwrap();
     assert_eq!(body, original);
     assert!(!policy.diagnostics.deferred_tool_search);
     assert_eq!(
@@ -51,8 +51,8 @@ fn direct_non_responses_account_endpoint_keeps_the_catalog_unchanged() {
     let runtime = automatic_tool_policy_test_runtime();
     let original = two_function_tools();
     let mut policy = RequestToolPolicy::new(&runtime, &original);
-    let mut body = original.clone();
-    policy.apply_value(&mut body).unwrap();
+    let body = original.clone();
+    policy.apply_value(&body).unwrap();
     assert_eq!(body, original);
     assert!(!policy.diagnostics.deferred_tool_search);
 }
@@ -85,9 +85,11 @@ fn tool_diagnostics_count_codex_tool_definitions_without_names() {
     assert_eq!(diagnostics.client_tool_count, 5);
     assert_eq!(diagnostics.tool_choice, ToolChoiceMode::AllowedTools);
     assert_eq!(forwarded.forwarded_tool_count, 5);
-    assert!(!serde_json::to_string(&forwarded)
-        .unwrap()
-        .contains("read_private_file"));
+    assert!(
+        !serde_json::to_string(&forwarded)
+            .unwrap()
+            .contains("read_private_file")
+    );
 }
 #[test]
 fn responses_lite_keeps_provider_owned_tools_and_choices_opaque_and_serializes_tools() {
@@ -227,8 +229,10 @@ fn detailed_capture_follows_debug_setting_without_changing_admitted_requests() {
         assert_eq!(policy.diagnostics.upstream_context.is_some(), enabled);
     }
     ENABLED.store(false, Ordering::Relaxed);
-    assert!(RequestToolPolicy::new(&runtime, &request)
-        .diagnostics
-        .client_context
-        .is_none());
+    assert!(
+        RequestToolPolicy::new(&runtime, &request)
+            .diagnostics
+            .client_context
+            .is_none()
+    );
 }

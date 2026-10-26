@@ -1,4 +1,4 @@
-use crate::gateway::request::{candidate_protocols, requested_reasoning_effort, ServiceTierPolicy};
+use crate::gateway::request::{ServiceTierPolicy, candidate_protocols, requested_reasoning_effort};
 use crate::runtime::{AccountTransport, AuthenticatedKey, DefaultServiceTier, ExecutorRoute};
 use crate::{
     AdapterError, AdapterRequestContext, CapabilityStatus, GatewayRuntime, ProtocolFeature, WireApi,
@@ -68,12 +68,11 @@ pub(in crate::gateway) fn incompatible_routes(
             if !GatewayRuntime::route_supports_service_tier(&route, selected) {
                 return Err(AdapterError::parameter_unsupported_for("service_tier"));
             }
-            if route.account_transport == AccountTransport::ExcelBasisPoints {
-                if let Some(error) =
+            if route.account_transport == AccountTransport::ExcelBasisPoints
+                && let Some(error) =
                     basis_points_route_error(request, stream, tier_policy, selected)
-                {
-                    return Err(error);
-                }
+            {
+                return Err(error);
             }
 
             // Reference model capabilities and exact source-route evidence
@@ -155,12 +154,11 @@ pub(in crate::gateway) fn incompatible_routes(
                 },
                 &capability,
             )?;
-            if route.account_transport == AccountTransport::ExcelBasisPoints {
-                if let Some(error) =
+            if route.account_transport == AccountTransport::ExcelBasisPoints
+                && let Some(error) =
                     super::basis_points::output_format_error(prepared.upstream_body())
-                {
-                    return Err(error);
-                }
+            {
+                return Err(error);
             }
             Ok(())
         };
@@ -490,13 +488,10 @@ mod tests {
                 "required":["approved"],"additionalProperties":false}
         }}});
         for stream in [false, true] {
-            assert!(basis_points_route_error(
-                &request,
-                stream,
-                &tier,
-                DefaultServiceTier::Standard
-            )
-            .is_none());
+            assert!(
+                basis_points_route_error(&request, stream, &tier, DefaultServiceTier::Standard)
+                    .is_none()
+            );
         }
         request["relay_bps_output_validation"] = json!(false);
         assert_eq!(
@@ -515,25 +510,29 @@ mod tests {
                 .and_then(|error| error.parameter()),
             Some("text.format.strict")
         );
-        assert!(basis_points_route_error(
-            &json!({"text":{"format":{"type":"text"}}}),
-            false,
-            &tier,
-            DefaultServiceTier::Standard,
-        )
-        .is_none());
+        assert!(
+            basis_points_route_error(
+                &json!({"text":{"format":{"type":"text"}}}),
+                false,
+                &tier,
+                DefaultServiceTier::Standard,
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn basis_points_rejects_unverified_speed_but_keeps_images_and_tool_bridge_eligible() {
         let implicit = ServiceTierPolicy::pool_owned(&json!({}));
-        assert!(basis_points_route_error(
-            &json!({"input": "hello"}),
-            false,
-            &implicit,
-            DefaultServiceTier::Standard,
-        )
-        .is_none());
+        assert!(
+            basis_points_route_error(
+                &json!({"input": "hello"}),
+                false,
+                &implicit,
+                DefaultServiceTier::Standard,
+            )
+            .is_none()
+        );
         for tier in ["auto", "default", "standard"] {
             let ordinary = ServiceTierPolicy::pool_owned(&json!({"service_tier": tier}));
             assert!(
@@ -578,12 +577,14 @@ mod tests {
             DefaultServiceTier::Standard,
         )
         .is_none());
-        assert!(basis_points_route_error(
-            &json!({"tools": [{"type": "function", "name": "lookup"}]}),
-            false,
-            &implicit,
-            DefaultServiceTier::Standard,
-        )
-        .is_none());
+        assert!(
+            basis_points_route_error(
+                &json!({"tools": [{"type": "function", "name": "lookup"}]}),
+                false,
+                &implicit,
+                DefaultServiceTier::Standard,
+            )
+            .is_none()
+        );
     }
 }

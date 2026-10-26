@@ -2,6 +2,19 @@ use super::*;
 
 #[tokio::test]
 async fn slow_optional_handshake_falls_back_once_without_disabling_native_websocket() {
+    check_slow_handshake_fallback(1, &["safe-http-fallback", "native-after-slow"], 2).await;
+}
+
+#[tokio::test]
+async fn repeated_slow_handshakes_back_off_without_replaying_generations() {
+    check_slow_handshake_fallback(usize::MAX, &["safe-http-fallback"; 5], 2).await;
+}
+
+async fn check_slow_handshake_fallback(
+    slow_connections: usize,
+    expected_ids: &[&str],
+    expected_connects: usize,
+) {
     let connects = Arc::new(AtomicUsize::new(0));
     let http_sends = Arc::new(AtomicUsize::new(0));
     let ws_sends = Arc::new(AtomicUsize::new(0));
@@ -12,7 +25,7 @@ async fn slow_optional_handshake_falls_back_once_without_disabling_native_websoc
         let connects = get_connects.clone();
         let sends = get_sends.clone();
         async move {
-            if connects.fetch_add(1, Ordering::SeqCst) == 0 {
+            if connects.fetch_add(1, Ordering::SeqCst) < slow_connections {
                 tokio::time::sleep(Duration::from_secs(3)).await;
             }
             upgrade.on_upgrade(move |mut socket| async move {
@@ -46,7 +59,9 @@ async fn slow_optional_handshake_falls_back_once_without_disabling_native_websoc
         },
     )
     .await;
-    for expected_id in ["safe-http-fallback", "native-after-slow"] {
+    let mut durations = Vec::new();
+    for expected_id in expected_ids {
+        let started = std::time::Instant::now();
         let upgraded = reqwest::Client::new()
             .get(format!("{}/v1/responses", gateway.base_url))
             .bearer_auth(LOCAL_KEY)
@@ -63,16 +78,25 @@ async fn slow_optional_handshake_falls_back_once_without_disabling_native_websoc
             .unwrap();
         let completion =
             receive_websocket_completion_with_timeout(&mut socket, Duration::from_secs(8)).await;
-        assert_eq!(completion["response"]["id"], expected_id);
+        durations.push(started.elapsed().as_millis());
+        assert_eq!(completion["response"]["id"], *expected_id);
     }
+    eprintln!("loopback slow-handshake request durations (ms): {durations:?}");
     tokio::time::sleep(Duration::from_millis(30)).await;
-    assert_eq!(http_sends.load(Ordering::SeqCst), 1);
-    assert_eq!(ws_sends.load(Ordering::SeqCst), 1);
-    assert_eq!(connects.load(Ordering::SeqCst), 2);
+    let expected_http = expected_ids
+        .iter()
+        .filter(|id| **id == "safe-http-fallback")
+        .count();
+    assert_eq!(http_sends.load(Ordering::SeqCst), expected_http);
+    assert_eq!(
+        ws_sends.load(Ordering::SeqCst),
+        expected_ids.len() - expected_http
+    );
+    assert_eq!(connects.load(Ordering::SeqCst), expected_connects);
     let events = events.lock().unwrap();
     assert_eq!(
         events.len(),
-        2,
+        expected_ids.len(),
         "an unsent optional handshake is not a failed generation"
     );
     assert!(events.iter().all(|event| event.success));
@@ -582,9 +606,11 @@ async fn disconnect_before_first_websocket_response_releases_lease_without_fallb
     assert_eq!(state.requests.lock().unwrap().len(), 1);
     assert!(reserve_state.requests.lock().unwrap().is_empty());
     let snapshots = gateway.runtime.as_ref().unwrap().candidate_runtime_order();
-    assert!(snapshots
-        .iter()
-        .all(|member| member.next_retry_at_ms.is_none()));
+    assert!(
+        snapshots
+            .iter()
+            .all(|member| member.next_retry_at_ms.is_none())
+    );
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 1);
     assert!(!events[0].success);

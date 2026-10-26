@@ -1,7 +1,7 @@
 use super::super::super::now_ms;
 use super::super::super::request::AccountEndpoint;
 use super::super::super::response::{
-    emit_usage, populate_tokens, proxy_response, proxy_sse_response, usage_event, UsageAttempt,
+    UsageAttempt, emit_usage, populate_tokens, proxy_response, proxy_sse_response, usage_event,
 };
 use super::super::super::turn_state::relay_account_response_header;
 use super::super::bind_responses_turn;
@@ -16,6 +16,7 @@ use serde_json::Value;
 use std::time::Instant;
 
 pub(super) struct AccountSuccessInput<'a> {
+    pub(super) bps_catalog: super::super::basis_points::RequestCatalog,
     pub(super) endpoint: AccountEndpoint,
     pub(super) status: StatusCode,
     pub(super) bytes: Vec<u8>,
@@ -43,6 +44,7 @@ pub(super) fn complete_account_response(
     account_success_input: AccountSuccessInput<'_>,
 ) -> Response<Body> {
     let AccountSuccessInput {
+        mut bps_catalog,
         endpoint,
         status,
         bytes,
@@ -120,7 +122,11 @@ pub(super) fn complete_account_response(
     event.error_category =
         (!completed).then(|| crate::error_codes::RESPONSE_INCOMPLETE.to_string());
     let client_bytes = if basis_points_route {
-        match super::super::basis_points::translate_response(&bytes, request) {
+        match super::super::basis_points::response::translate_response_bytes_with_catalog(
+            &bytes,
+            request,
+            &mut bps_catalog,
+        ) {
             Ok(bytes) => bytes,
             Err(error) => {
                 emit_usage(runtime, mark_adapter_failure(event, &error));

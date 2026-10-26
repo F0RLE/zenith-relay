@@ -21,10 +21,9 @@ impl RotationEngine {
     pub(super) fn release_capacity(&mut self, lease: &LeaseRuntime) {
         if self.candidate_generations.get(&lease.candidate_id).copied()
             == Some(lease.candidate_generation)
+            && let Some(runtime) = self.candidates.get_mut(&lease.candidate_id)
         {
-            if let Some(runtime) = self.candidates.get_mut(&lease.candidate_id) {
-                runtime.in_flight = runtime.in_flight.saturating_sub(1);
-            }
+            runtime.in_flight = runtime.in_flight.saturating_sub(1);
         }
         let remove_capacity =
             if let Some(count) = self.capacity_in_flight.get_mut(&lease.capacity_key) {
@@ -41,11 +40,10 @@ impl RotationEngine {
             if let Some(circuit) = self
                 .circuits
                 .get_mut(&(lease.candidate_id.clone(), lease.route_key.clone()))
+                && circuit.half_open_lease == Some(lease.lease_id)
             {
-                if circuit.half_open_lease == Some(lease.lease_id) {
-                    circuit.half_open_lease = None;
-                    circuit.state = CircuitState::Open;
-                }
+                circuit.half_open_lease = None;
+                circuit.state = CircuitState::Open;
             }
         }
     }
@@ -327,15 +325,15 @@ impl RotationEngine {
         // of possibly accepted work.
         if health_counted {
             self.observe_health(&lease.candidate_id, &lease.route_key, health, now_ms);
-            if health == HealthObservation::Success {
-                if let Some(latency_ms) = first_output_latency_ms {
-                    self.observe_first_output_latency(
-                        &lease.candidate_id,
-                        &lease.route_key,
-                        latency_ms,
-                        now_ms,
-                    );
-                }
+            if health == HealthObservation::Success
+                && let Some(latency_ms) = first_output_latency_ms
+            {
+                self.observe_first_output_latency(
+                    &lease.candidate_id,
+                    &lease.route_key,
+                    latency_ms,
+                    now_ms,
+                );
             }
         }
         let retry = match health {

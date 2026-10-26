@@ -148,14 +148,14 @@ impl CodexTurnStateStore {
         };
         let mut origins = crate::poison::mutex(&self.origins);
         origins.retain(|_, origin| origin.expires_at_ms > now_ms);
-        if origins.len() >= 4096 && !origins.contains_key(&key) {
-            if let Some(oldest) = origins
+        if origins.len() >= 4096
+            && !origins.contains_key(&key)
+            && let Some(oldest) = origins
                 .iter()
                 .min_by_key(|(_, origin)| origin.expires_at_ms)
                 .map(|(key, _)| key.clone())
-            {
-                origins.remove(&oldest);
-            }
+        {
+            origins.remove(&oldest);
         }
         origins.insert(
             key,

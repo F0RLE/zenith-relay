@@ -196,10 +196,10 @@ impl GatewayRuntime {
     /// Resolve the transport for the already selected binding. Compaction can
     /// change streaming, but cannot select another protocol mid-request.
     pub(crate) fn set_route_streaming(&self, route: &mut ExecutorRoute, stream: bool) {
-        if let Some(source) = self.sources.get(&route.source_id) {
-            if let Some(url) = source.endpoint(route.binding_key(), &route.source_model, stream) {
-                route.upstream_url = url;
-            }
+        if let Some(source) = self.sources.get(&route.source_id)
+            && let Some(url) = source.endpoint(route.binding_key(), &route.source_model, stream)
+        {
+            route.upstream_url = url;
         }
     }
 

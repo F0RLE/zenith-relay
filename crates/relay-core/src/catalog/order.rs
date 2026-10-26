@@ -163,11 +163,11 @@ where
     let mut saved = vec![false; catalog.len()];
     let mut ordered = Vec::with_capacity(catalog.len());
     for model in saved_order {
-        if let Some(&position) = catalog_positions.get(&model_id_key(model)) {
-            if !saved[position] {
-                saved[position] = true;
-                ordered.push(position);
-            }
+        if let Some(&position) = catalog_positions.get(&model_id_key(model))
+            && !saved[position]
+        {
+            saved[position] = true;
+            ordered.push(position);
         }
     }
     if ordered.is_empty() {

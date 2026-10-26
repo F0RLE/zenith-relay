@@ -99,24 +99,22 @@ impl RefreshCoordinator {
             if key.kind == RefreshKind::Quota
                 && refresh_entry.automatic
                 && !refresh_entry.unsupported
+                && let Some((received_ms, age_ms)) = refresh_entry.passive_age_at_receive
             {
-                if let Some((received_ms, age_ms)) = refresh_entry.passive_age_at_receive {
-                    let age_ms = age_ms.saturating_add(now_ms.saturating_sub(received_ms));
-                    let interval = RefreshKind::Quota
-                        .interval_ms(active)
-                        .expect("quota has a cadence");
-                    let due_ms = now_ms.saturating_add(interval.saturating_sub(age_ms));
-                    refresh_entry.passive_fresh_until_ms = Some(due_ms);
-                    if refresh_entry.in_flight.is_some() {
-                        refresh_entry.passive_during_job_due_ms = Some(due_ms);
-                    } else if !refresh_entry.manual {
-                        refresh_entry.next_due_ms =
-                            earliest(refresh_entry.event_due_ms, Some(due_ms));
-                    }
-                    refresh_entry.active = active;
-                    changed = true;
-                    continue;
+                let age_ms = age_ms.saturating_add(now_ms.saturating_sub(received_ms));
+                let interval = RefreshKind::Quota
+                    .interval_ms(active)
+                    .expect("quota has a cadence");
+                let due_ms = now_ms.saturating_add(interval.saturating_sub(age_ms));
+                refresh_entry.passive_fresh_until_ms = Some(due_ms);
+                if refresh_entry.in_flight.is_some() {
+                    refresh_entry.passive_during_job_due_ms = Some(due_ms);
+                } else if !refresh_entry.manual {
+                    refresh_entry.next_due_ms = earliest(refresh_entry.event_due_ms, Some(due_ms));
                 }
+                refresh_entry.active = active;
+                changed = true;
+                continue;
             }
             // Only the idle -> active transition can accelerate a periodic job.
             if active && !refresh_entry.active && refresh_entry.automatic {

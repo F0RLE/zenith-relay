@@ -5,6 +5,36 @@
 use super::*;
 use crate::DefaultServiceTier;
 
+/// Model identity and editable model policy share an owner, not a lock.
+/// Keep the existing lock granularity and shared visibility handle: active
+/// candidate leases must observe policy changes without replacing the runtime.
+pub(super) struct RuntimeModelState {
+    pub(super) registry: Mutex<ModelRegistry>,
+    pub(super) hidden_models: Arc<RwLock<BTreeSet<String>>>,
+    pub(super) reasoning_allowed_levels: Mutex<BTreeMap<String, Vec<String>>>,
+    pub(super) context_policies: Mutex<BTreeMap<String, ModelContextPolicy>>,
+    pub(super) service_tier_overrides: Mutex<BTreeMap<String, DefaultServiceTier>>,
+    pub(super) display_order: Mutex<Vec<String>>,
+}
+
+impl RuntimeModelState {
+    pub(super) fn new(
+        registry: ModelRegistry,
+        hidden_models: BTreeSet<String>,
+        reasoning_allowed_levels: BTreeMap<String, Vec<String>>,
+        context_policies: BTreeMap<String, ModelContextPolicy>,
+    ) -> Self {
+        Self {
+            registry: Mutex::new(registry),
+            hidden_models: Arc::new(RwLock::new(hidden_models)),
+            reasoning_allowed_levels: Mutex::new(reasoning_allowed_levels),
+            context_policies: Mutex::new(context_policies),
+            service_tier_overrides: Mutex::new(BTreeMap::new()),
+            display_order: Mutex::new(Vec::new()),
+        }
+    }
+}
+
 impl GatewayRuntime {
     /// Resolve Desktop's reserved client namespace against configured model
     /// identities only. Callers still apply key scope, rules, visibility and
@@ -50,7 +80,7 @@ impl GatewayRuntime {
     ) -> crate::Result<()> {
         let policies = crate::normalize_model_context_policies(policies)
             .map_err(|message| crate::Error::Validation(message.to_string()))?;
-        *crate::poison::mutex(&self.model_context_policies) = policies;
+        *crate::poison::mutex(&self.model_state.context_policies) = policies;
         Ok(())
     }
 
@@ -61,7 +91,7 @@ impl GatewayRuntime {
         native: bool,
         native_card: bool,
     ) {
-        let selected = crate::poison::mutex(&self.model_context_policies)
+        let selected = crate::poison::mutex(&self.model_state.context_policies)
             .get(&crate::model_id_key(model))
             .copied()
             .unwrap_or_default();
@@ -116,7 +146,7 @@ impl GatewayRuntime {
     }
 
     pub(super) fn model_enabled(&self, model: &str) -> bool {
-        !crate::poison::read(&self.hidden_models).contains(&crate::model_id_key(model))
+        !crate::poison::read(&self.model_state.hidden_models).contains(&crate::model_id_key(model))
     }
 
     /// Apply global visibility without replacing the scheduler or interrupting
@@ -127,7 +157,7 @@ impl GatewayRuntime {
             .map(|model| crate::model_id_key(model))
             .filter(|model| !model.is_empty())
             .collect();
-        *crate::poison::write(&self.hidden_models) = hidden;
+        *crate::poison::write(&self.model_state.hidden_models) = hidden;
         self.candidate_availability.notify_waiters();
         self.admission_changed.notify_waiters();
     }
@@ -223,7 +253,7 @@ impl GatewayRuntime {
         let scope = key.scope_snapshot();
         let basis_points_models = self.basis_points_model_snapshot();
         let scheduler = self.lock_scheduler();
-        let mut models = crate::poison::mutex(&self.registry)
+        let mut models = crate::poison::mutex(&self.model_state.registry)
             .visible_models(&scheduler, &scope, allowed_protocols, now_ms)
             .into_iter()
             .filter(|model| {
@@ -236,7 +266,7 @@ impl GatewayRuntime {
                     })
             })
             .collect::<Vec<_>>();
-        let order = crate::poison::mutex(&self.model_display_order);
+        let order = crate::poison::mutex(&self.model_state.display_order);
         let catalog = self.model_metadata_catalog.as_ref().map_or_else(
             || Arc::new(crate::model_metadata::ModelMetadataCatalog::empty()),
             |catalog| catalog.snapshot(),

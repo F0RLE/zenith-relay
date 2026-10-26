@@ -5,10 +5,10 @@ use super::shape::{
     valid_truncation_policy,
 };
 use super::{
-    codex_catalog_entry_is_compatible, codex_model_alias, codex_model_display_name,
-    set_codex_service_tiers, CODEX_CATALOG_PRIORITY_BASE, CODEX_RELAY_CATALOG_HASH,
+    CODEX_CATALOG_PRIORITY_BASE, CODEX_RELAY_CATALOG_HASH, codex_catalog_entry_is_compatible,
+    codex_model_alias, codex_model_display_name, set_codex_service_tiers,
 };
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 pub(super) const ROUTED_CODEX_BASE_INSTRUCTIONS: &str = concat!(
     "You are a coding agent. Follow the user's instructions and use the available tools. ",
@@ -215,13 +215,13 @@ pub fn normalize_upstream_codex_catalog_entry(
         );
     }
 
-    if let Some(default_reasoning_level) = template.get("default_reasoning_level") {
-        if optional_non_empty_string(template, "default_reasoning_level") {
-            catalog_entry.insert(
-                "default_reasoning_level".into(),
-                default_reasoning_level.clone(),
-            );
-        }
+    if let Some(default_reasoning_level) = template.get("default_reasoning_level")
+        && optional_non_empty_string(template, "default_reasoning_level")
+    {
+        catalog_entry.insert(
+            "default_reasoning_level".into(),
+            default_reasoning_level.clone(),
+        );
     }
 
     if let Some(reasoning_levels) = upstream_reasoning_levels(template) {
@@ -281,16 +281,15 @@ pub fn normalize_upstream_codex_catalog_entry(
         }
     }
 
-    if advertised_context_window.is_none() {
-        if let Some(upstream_context_window) =
+    if advertised_context_window.is_none()
+        && let Some(upstream_context_window) =
             template.get("context_window").and_then(context_window)
+    {
+        catalog_entry.insert("context_window".into(), upstream_context_window.into());
+        if let Some(max_context_window) =
+            template.get("max_context_window").and_then(context_window)
         {
-            catalog_entry.insert("context_window".into(), upstream_context_window.into());
-            if let Some(max_context_window) =
-                template.get("max_context_window").and_then(context_window)
-            {
-                catalog_entry.insert("max_context_window".into(), max_context_window.into());
-            }
+            catalog_entry.insert("max_context_window".into(), max_context_window.into());
         }
     }
 

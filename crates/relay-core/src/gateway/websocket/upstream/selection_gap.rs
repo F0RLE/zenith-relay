@@ -94,36 +94,35 @@ pub(super) async fn recover_without_candidate(gap: &mut SelectionGap<'_>) -> Gap
     // cooldown changed after the previous turn. Use the bounded native
     // replay before waiting, then let the next selection choose any
     // compatible candidate (OAuth or API source).
-    if client_request.has_previous_response_id() && client_request.requires_affinity_owner {
-        if let Some(affinity_key) = client_request.response_affinity_key.clone() {
-            if let Some(owner_candidate_id) =
-                runtime.response_affinity_candidate(&affinity_key, now_ms())
-            {
-                let owner_model = runtime
-                    .executor_route(
-                        &owner_candidate_id,
-                        &client_request.resolved_model,
-                        &key.scope_snapshot(),
-                        WEBSOCKET_PROTOCOLS,
-                        false,
-                    )
-                    .map(|route| route.source_model)
-                    .unwrap_or_else(|| client_request.resolved_model.clone());
-                match client_request.replay_native_continuation(
-                    runtime,
-                    &key.id,
-                    &owner_candidate_id,
-                    &owner_model,
-                ) {
-                    Ok(true) => {
-                        *native_replay_attempted = true;
-                        tried.clear();
-                        return GapAction::Continue;
-                    }
-                    Ok(false) => {}
-                    Err(failure) => return GapAction::Fail(failure),
-                }
+    if client_request.has_previous_response_id()
+        && client_request.requires_affinity_owner
+        && let Some(affinity_key) = client_request.response_affinity_key.clone()
+        && let Some(owner_candidate_id) =
+            runtime.response_affinity_candidate(&affinity_key, now_ms())
+    {
+        let owner_model = runtime
+            .executor_route(
+                &owner_candidate_id,
+                &client_request.resolved_model,
+                &key.scope_snapshot(),
+                WEBSOCKET_PROTOCOLS,
+                false,
+            )
+            .map(|route| route.source_model)
+            .unwrap_or_else(|| client_request.resolved_model.clone());
+        match client_request.replay_native_continuation(
+            runtime,
+            &key.id,
+            &owner_candidate_id,
+            &owner_model,
+        ) {
+            Ok(true) => {
+                *native_replay_attempted = true;
+                tried.clear();
+                return GapAction::Continue;
             }
+            Ok(false) => {}
+            Err(failure) => return GapAction::Fail(failure),
         }
     }
     if client_request.requires_affinity_owner

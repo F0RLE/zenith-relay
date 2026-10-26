@@ -84,19 +84,19 @@ pub(super) fn apply_prepared_authorization(
     request
         .headers_mut()
         .insert(prepared.header_name.clone(), prepared.authorization.clone());
-    if identity_policy == AuthorizationIdentityPolicy::RelayCodex {
-        if let Some(identity) = prepared.identity.as_ref() {
-            // A model-catalog request has no forwarded client headers, so its
-            // requested version is a useful fallback. For normal routed requests
-            // the explicit downstream identity remains authoritative.
-            let identity = match client_version {
-                Some(version) => identity
-                    .with_client_version(version)
-                    .map_err(|_| AuthorizedRequestError::NotReplayable)?,
-                None => identity.clone(),
-            };
-            identity.insert(request.headers_mut());
-        }
+    if identity_policy == AuthorizationIdentityPolicy::RelayCodex
+        && let Some(identity) = prepared.identity.as_ref()
+    {
+        // A model-catalog request has no forwarded client headers, so its
+        // requested version is a useful fallback. For normal routed requests
+        // the explicit downstream identity remains authoritative.
+        let identity = match client_version {
+            Some(version) => identity
+                .with_client_version(version)
+                .map_err(|_| AuthorizedRequestError::NotReplayable)?,
+            None => identity.clone(),
+        };
+        identity.insert(request.headers_mut());
     }
     Ok((client, request))
 }

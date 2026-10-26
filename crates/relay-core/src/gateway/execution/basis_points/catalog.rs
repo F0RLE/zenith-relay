@@ -6,6 +6,92 @@ use std::sync::{Arc, OnceLock};
 mod prepared;
 pub(super) use prepared::{cache_memory_diagnostics, release_expired_cache_entries};
 
+/// Parsed declarations for one immutable client request, never a permission cache.
+/// Selection and argument validation still use that request at every boundary.
+#[derive(Clone, Default)]
+pub(in crate::gateway) struct RequestCatalog {
+    tools: Option<Arc<[ClientTool]>>,
+}
+
+impl RequestCatalog {
+    pub(super) fn tools(&mut self, request: &Value) -> Result<&[ClientTool], AdapterError> {
+        if self.tools.is_none() {
+            self.tools = Some(client_tools(request)?.into());
+        }
+        Ok(self.tools.as_deref().expect("catalog was prepared"))
+    }
+}
+
+/// Owns the exact body from which the catalog was prepared. Only immutable
+/// access is exposed, so discovery and final validation cannot see stale tools.
+pub(in crate::gateway) struct PreparedClientRequest {
+    body: Value,
+    catalog: RequestCatalog,
+}
+
+impl PreparedClientRequest {
+    pub(in crate::gateway::execution) fn prepare(
+        body: Value,
+        schema_validation_ms: &mut Option<u64>,
+        diagnostics_enabled: bool,
+    ) -> Result<(Self, Value), AdapterError> {
+        let mut catalog = RequestCatalog::default();
+        let upstream = super::prepare::prepare_request_with_catalog(
+            &body,
+            schema_validation_ms,
+            diagnostics_enabled,
+            &mut catalog,
+        )?;
+        Ok((Self { body, catalog }, upstream))
+    }
+
+    pub(in crate::gateway) fn translate_value(
+        &self,
+        response: Value,
+    ) -> Result<Value, AdapterError> {
+        super::response::translate_response_with_catalog(
+            response,
+            &self.body,
+            &mut self.catalog.clone(),
+        )
+    }
+
+    /// Share immutable declarations with dispatch without exposing the cached
+    /// catalog for replacement independently of its owning request body.
+    pub(in crate::gateway::execution) fn catalog_snapshot(&self) -> RequestCatalog {
+        self.catalog.clone()
+    }
+
+    pub(in crate::gateway::execution) fn translate_bytes(
+        &self,
+        response: &[u8],
+    ) -> Result<Vec<u8>, AdapterError> {
+        super::response::translate_response_bytes_with_catalog(
+            response,
+            &self.body,
+            &mut self.catalog.clone(),
+        )
+    }
+}
+
+impl std::ops::Deref for PreparedClientRequest {
+    type Target = Value;
+
+    fn deref(&self) -> &Value {
+        &self.body
+    }
+}
+
+#[cfg(test)]
+impl From<Value> for PreparedClientRequest {
+    fn from(body: Value) -> Self {
+        Self {
+            body,
+            catalog: RequestCatalog::default(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct ClientTool {
     pub(super) name: String,

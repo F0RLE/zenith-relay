@@ -3,9 +3,9 @@ use std::time::Instant;
 use reqwest_websocket::UpgradeResponse;
 
 use super::super::*;
+use super::ConnectTrace;
 use super::connect::upstream_headers;
 use super::telemetry::record_connect_failure;
-use super::ConnectTrace;
 use crate::runtime::PreparedAuthorization;
 
 #[allow(clippy::large_enum_variant)]
@@ -14,6 +14,12 @@ pub(super) enum AuthorizationUpgrade {
     BudgetExhausted,
     FastPathMissed,
     Upgraded(UpgradeResponse),
+}
+
+pub(super) fn can_use_optional_fast_path(route: &ExecutorRoute, request: &ClientRequest) -> bool {
+    !request.has_previous_response_id()
+        && request.response_affinity_key.is_none()
+        && !route.half_open_probe
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -33,9 +39,7 @@ pub(super) async fn upgrade_with_authorization_refresh(
     let mut refresh_fence = None;
     // Optional transport optimization only: never move an opaque continuation
     // or an active health probe to another transport on a short deadline.
-    let fast_path = !request.has_previous_response_id()
-        && request.response_affinity_key.is_none()
-        && !route.half_open_probe;
+    let fast_path = can_use_optional_fast_path(route, request);
     let fast_deadline = started + Duration::from_secs(2);
     loop {
         // Every upgrade, including an authorization retry, spends the shared
@@ -91,6 +95,13 @@ pub(super) async fn upgrade_with_authorization_refresh(
             // Only GET/Upgrade was attempted, never response.create. Dropping
             // the handshake cancels it; do not penalize the account/circuit or
             // mark the endpoint permanently HTTP-only for being slow once.
+            route.observe_websocket_handshake(elapsed_ms, false);
+            runtime.observe_slow_websocket_handshake(
+                &GatewayRuntime::websocket_capability_scope(route, prepared),
+                &request.resolved_model,
+                &prepared.incarnation(),
+                now_ms(),
+            );
             return AuthorizationUpgrade::FastPathMissed;
         }
         let Ok(Ok(upgrade)) = upgrade else {

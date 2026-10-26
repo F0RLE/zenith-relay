@@ -19,7 +19,7 @@ pub fn token_refresh_failure_kind(code: &str) -> TokenRefreshFailureKind {
 
 pub fn token_refresh_provider_error_code(response_body: &[u8]) -> Option<String> {
     let error_payload: Value = serde_json::from_slice(response_body).ok()?;
-    let code = [
+    [
         error_payload.pointer("/error/code").and_then(Value::as_str),
         error_payload.get("code").and_then(Value::as_str),
         error_payload.get("error").and_then(Value::as_str),
@@ -27,8 +27,7 @@ pub fn token_refresh_provider_error_code(response_body: &[u8]) -> Option<String>
     ]
     .into_iter()
     .flatten()
-    .find_map(normalize_error_code);
-    code
+    .find_map(normalize_error_code)
 }
 
 #[cfg(test)]

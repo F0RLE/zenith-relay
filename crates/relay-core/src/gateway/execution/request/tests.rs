@@ -13,6 +13,58 @@ use axum::{body::to_bytes, http::StatusCode};
 use serde_json::json;
 
 #[test]
+fn attempt_state_preserves_offset_and_opaque_continuation_ownership() {
+    let state = super::state::AttemptState::new(
+        7,
+        Some("response-owner".into()),
+        true,
+        &json!({
+            "previous_response_id": "response-owner",
+            "input": [{"type": "function_call_output", "call_id": "call-test", "output": "ok"}]
+        }),
+    );
+    assert_eq!(state.retry.attempt, 7);
+    assert_eq!(state.retry.last_failure_origin, ErrorOrigin::Relay);
+    assert!(state.retry.last_failure.is_none());
+    assert!(!state.retry.window_expired);
+    assert_eq!(
+        state.continuation.response_affinity_key.as_deref(),
+        Some("response-owner")
+    );
+    assert!(state.continuation.requires_affinity_owner);
+    assert!(state.continuation.has_unpaired_tool_output);
+    assert!(!state.continuation.confirmed_response_missing);
+}
+
+#[test]
+fn materializing_continuation_keeps_retry_history_and_preparation_exclusions() {
+    let mut state = super::state::AttemptState::new(
+        3,
+        Some("response-owner".into()),
+        true,
+        &json!({"input": [{"type": "function_call_output", "call_id": "call-test", "output": "ok"}]}),
+    );
+    state.retry.tried.insert("dispatched-route".into());
+    state
+        .retry
+        .preparation_exclusions
+        .insert("unprepared-route".into());
+    let continuation = &mut state.continuation;
+    continuation.clear_materialized();
+    assert!(continuation.response_affinity_key.is_none());
+    assert!(!continuation.requires_affinity_owner);
+    assert!(!continuation.has_unpaired_tool_output);
+    assert_eq!(state.retry.attempt, 3);
+    assert!(state.retry.tried.contains("dispatched-route"));
+    assert!(
+        state
+            .retry
+            .preparation_exclusions
+            .contains("unprepared-route")
+    );
+}
+
+#[test]
 fn basis_points_completed_json_and_stream_use_the_client_protocol() {
     let upstream = serde_json::to_vec(&json!({
         "id": "resp_1", "model": "test", "status": "completed",
@@ -48,7 +100,7 @@ fn basis_points_completed_json_and_stream_use_the_client_protocol() {
                     response_id_seed: "test-request",
                 })
                 .unwrap();
-            let responses_request = prepared.upstream_body().clone();
+            let responses_request = prepared.upstream_body().clone().into();
             let result =
                 translate_basis_points_completed(prepared, &upstream, &responses_request, stream)
                     .unwrap();
@@ -119,7 +171,7 @@ fn basis_points_messages_tool_call_is_unwrapped_before_protocol_translation() {
                 response_id_seed: "test-request",
             })
             .unwrap();
-        let responses_request = prepared.upstream_body().clone();
+        let responses_request = prepared.upstream_body().clone().into();
         let result =
             translate_basis_points_completed(prepared, &upstream, &responses_request, stream)
                 .unwrap();
@@ -193,10 +245,12 @@ async fn adapter_error_response_exposes_safe_parameter_name() {
         .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(body["error"]["param"], "text.verbosity");
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("text.verbosity"));
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("text.verbosity")
+    );
     assert_eq!(body["error"]["code"], "adapter_parameter_unsupported");
     assert_eq!(
         body["error"]["zenith_relay"]["request_id"],

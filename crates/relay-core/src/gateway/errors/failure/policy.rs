@@ -103,6 +103,7 @@ pub(crate) fn failure_category_is_request_terminal(category: &str) -> bool {
         category,
         error_codes::UPSTREAM_TOOL_CALL_MISMATCH
             | error_codes::HTTP_HEADERS_TIMEOUT
+            | error_codes::HTTP_SEND_START_TIMEOUT
             | error_codes::STREAM_EVENT_TOO_LARGE
             | error_codes::UPSTREAM_TURN_RATE_LIMITED
             | error_codes::UPSTREAM_SIWC_NOT_ELIGIBLE

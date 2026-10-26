@@ -19,15 +19,13 @@ impl GatewayRuntime {
             (response_affinity_key, self.response_affinity_store.as_ref())
         {
             let cached = self.lock_scheduler().has_response_affinity(key, now_ms);
-            if !cached {
-                if let Ok(Some(binding)) = store.find(key, now_ms) {
-                    self.lock_scheduler().restore_response_affinity(
-                        binding.key,
-                        &binding.candidate_id,
-                        binding.expires_at_ms,
-                        now_ms,
-                    );
-                }
+            if !cached && let Ok(Some(binding)) = store.find(key, now_ms) {
+                self.lock_scheduler().restore_response_affinity(
+                    binding.key,
+                    &binding.candidate_id,
+                    binding.expires_at_ms,
+                    now_ms,
+                );
             }
         }
         if let Some(key) = prompt_affinity_key {
@@ -82,7 +80,7 @@ impl GatewayRuntime {
         // Live principal scope stays locked through selection and reservation.
         let scope = key.scope_read();
         let mut scheduler = self.lock_scheduler();
-        let hidden = crate::poison::read(&self.hidden_models);
+        let hidden = crate::poison::read(&self.model_state.hidden_models);
         if hidden.contains(&crate::model_id_key(model)) {
             return (None, false);
         }
@@ -123,7 +121,7 @@ impl GatewayRuntime {
                     });
                 let lease = CandidateLease {
                     scheduler: self.scheduler.clone(),
-                    hidden_models: self.hidden_models.clone(),
+                    hidden_models: self.model_state.hidden_models.clone(),
                     availability: self.candidate_availability.clone(),
                     candidate_id: selection.candidate_id.clone(),
                     candidate_permission_revision: scheduler
@@ -188,10 +186,10 @@ impl GatewayRuntime {
             }
         };
         self.emit_activity_changed(activity);
-        if let Some(key) = &request.response_affinity {
-            if selection.response_affinity_hit {
-                self.persist_response_affinity(key, &selection.candidate_id, now_ms);
-            }
+        if let Some(key) = &request.response_affinity
+            && selection.response_affinity_hit
+        {
+            self.persist_response_affinity(key, &selection.candidate_id, now_ms);
         }
     }
 

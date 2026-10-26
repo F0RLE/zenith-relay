@@ -1,14 +1,14 @@
 use super::{
-    enrich_reasoning_metadata_with_models_dev_details, metadata_payload_hash,
-    validate_metadata_payload, MetadataSourceStatus, ModelMetadataCatalog,
-    ModelMetadataCatalogHandle, LITELLM_MODELS_SOURCE_URL, MODELS_DEV_DETAILS_SOURCE_URL,
-    MODELS_DEV_SOURCE_URL, OPENROUTER_MODELS_SOURCE_URL,
+    LITELLM_MODELS_SOURCE_URL, MODELS_DEV_DETAILS_SOURCE_URL, MODELS_DEV_SOURCE_URL,
+    MetadataSourceStatus, ModelMetadataCatalog, ModelMetadataCatalogHandle,
+    OPENROUTER_MODELS_SOURCE_URL, enrich_reasoning_metadata_with_models_dev_details,
+    metadata_payload_hash, validate_metadata_payload,
 };
 use crate::{
     catalog_io::{self, CatalogIoError},
     pricing::{CatalogRefreshDeadline, CatalogRefreshOutcome, CatalogStatus},
 };
-use reqwest::{header, Client, StatusCode};
+use reqwest::{Client, StatusCode, header};
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
@@ -19,8 +19,8 @@ mod cache;
 mod source;
 
 use source::{
-    catalog_from_payload, merge_payloads, refresh_catalog_status, PreparedCatalog, SourceEnvelope,
-    SourceState,
+    PreparedCatalog, SourceEnvelope, SourceState, catalog_from_payload, merge_payloads,
+    refresh_catalog_status,
 };
 
 const REFRESH_INTERVAL_MS: u64 = 60 * 60 * 1_000;
@@ -243,10 +243,10 @@ impl ModelMetadataCatalogLoader {
             }
             // Refresh timestamps and health, not immutable model/index trees.
             self.publish(updated_states, None);
-            if successes == 0 {
-                if let Some(error) = first_error {
-                    return Err(error);
-                }
+            if successes == 0
+                && let Some(error) = first_error
+            {
+                return Err(error);
             }
             return Ok(CatalogRefreshOutcome::NotModified { revision });
         }
@@ -281,10 +281,10 @@ impl ModelMetadataCatalogLoader {
         let previous_revision = self.snapshot().revision.clone();
         let revision = prepared.revision.clone();
         self.publish(updated_states, Some(&prepared));
-        if successes == 0 {
-            if let Some(error) = first_error {
-                return Err(error);
-            }
+        if successes == 0
+            && let Some(error) = first_error
+        {
+            return Err(error);
         }
         Ok(if previous_revision.as_ref() == Some(&revision) {
             CatalogRefreshOutcome::NotModified { revision }

@@ -26,11 +26,11 @@ impl ClientTool {
     fn presentation(&self) -> &Presentation {
         self.presentation.get_or_init(|| {
             let mut line = format!("- {} ({})", self.key(), self.kind);
-            if let Some(description) = self.spec.get("description").and_then(Value::as_str) {
-                if !description.is_empty() {
-                    line.push_str(": ");
-                    line.push_str(description);
-                }
+            if let Some(description) = self.spec.get("description").and_then(Value::as_str)
+                && !description.is_empty()
+            {
+                line.push_str(": ");
+                line.push_str(description);
             }
             if self.kind == "custom" {
                 line.push_str(". It receives raw text in input.");
@@ -108,8 +108,8 @@ pub(in crate::gateway::execution::basis_points) fn release_expired_cache_entries
     }));
 }
 
-pub(in crate::gateway::execution::basis_points) fn cache_memory_diagnostics(
-) -> CacheMemoryDiagnostics {
+pub(in crate::gateway::execution::basis_points) fn cache_memory_diagnostics()
+-> CacheMemoryDiagnostics {
     describe_cache(
         &CACHE,
         "tool_presentations",

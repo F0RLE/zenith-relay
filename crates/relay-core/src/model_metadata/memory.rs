@@ -43,10 +43,10 @@ impl PayloadBytes {
     }
 
     fn revision(&mut self, value: &Option<Arc<str>>) {
-        if let Some(value) = value {
-            if self.shared.insert(value.as_ptr()) {
-                self.string(value);
-            }
+        if let Some(value) = value
+            && self.shared.insert(value.as_ptr())
+        {
+            self.string(value);
         }
     }
 
@@ -232,8 +232,10 @@ mod tests {
         let snapshot = catalog.memory_diagnostics();
         assert_eq!(snapshot.len(), 3);
         assert!(snapshot.iter().all(|region| region.bytes.unwrap() > 0));
-        assert!(!serde_json::to_string(&snapshot)
-            .unwrap()
-            .contains("private-model-label"));
+        assert!(
+            !serde_json::to_string(&snapshot)
+                .unwrap()
+                .contains("private-model-label")
+        );
     }
 }

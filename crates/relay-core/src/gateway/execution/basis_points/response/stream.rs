@@ -279,30 +279,14 @@ fn emit_call(
             (String::from("item"), Value::Object(added_item)),
         ]),
     );
-    if let Some(field) = argument_field {
-        if let Some(argument_text) = tool_call_item.get(field).and_then(Value::as_str) {
-            if !argument_text.is_empty() {
-                let event = if field == "arguments" {
-                    "response.function_call_arguments.delta"
-                } else {
-                    "response.custom_tool_call_input.delta"
-                };
-                cursor.emit(
-                    event,
-                    Map::from_iter([
-                        (String::from("output_index"), output_index.clone()),
-                        (String::from("item_id"), item_id.clone()),
-                        (
-                            String::from("delta"),
-                            Value::String(argument_text.to_string()),
-                        ),
-                    ]),
-                );
-            }
+    if let Some(field) = argument_field
+        && let Some(argument_text) = tool_call_item.get(field).and_then(Value::as_str)
+    {
+        if !argument_text.is_empty() {
             let event = if field == "arguments" {
-                "response.function_call_arguments.done"
+                "response.function_call_arguments.delta"
             } else {
-                "response.custom_tool_call_input.done"
+                "response.custom_tool_call_input.delta"
             };
             cursor.emit(
                 event,
@@ -310,11 +294,27 @@ fn emit_call(
                     (String::from("output_index"), output_index.clone()),
                     (String::from("item_id"), item_id.clone()),
                     (
-                        String::from(field),
+                        String::from("delta"),
                         Value::String(argument_text.to_string()),
                     ),
                 ]),
             );
         }
+        let event = if field == "arguments" {
+            "response.function_call_arguments.done"
+        } else {
+            "response.custom_tool_call_input.done"
+        };
+        cursor.emit(
+            event,
+            Map::from_iter([
+                (String::from("output_index"), output_index.clone()),
+                (String::from("item_id"), item_id.clone()),
+                (
+                    String::from(field),
+                    Value::String(argument_text.to_string()),
+                ),
+            ]),
+        );
     }
 }

@@ -70,10 +70,10 @@ fn observe_reservations(runtime: &Arc<GatewayRuntime>) -> Arc<AtomicUsize> {
     let captured = events.clone();
     let weak = Arc::downgrade(runtime);
     runtime.set_activity_callback(move |_| {
-        if captured.fetch_add(1, Ordering::SeqCst) >= 16 {
-            if let Some(runtime) = weak.upgrade() {
-                runtime.retire_for_replacement();
-            }
+        if captured.fetch_add(1, Ordering::SeqCst) >= 16
+            && let Some(runtime) = weak.upgrade()
+        {
+            runtime.retire_for_replacement();
         }
     });
     events

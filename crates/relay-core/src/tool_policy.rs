@@ -99,7 +99,7 @@ pub(crate) struct ToolPolicyResult {
 
 /// Records policy counters and optional sizes without rewriting the request.
 pub(crate) fn apply_tool_policy(
-    request: &mut Value,
+    request: &Value,
     policy: &ToolPolicy,
     diagnostics_enabled: bool,
 ) -> Result<ToolPolicyResult, &'static str> {

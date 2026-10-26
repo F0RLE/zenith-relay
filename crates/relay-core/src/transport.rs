@@ -21,6 +21,7 @@ fn parse_http_headers_timeout(value: Option<&str>) -> Option<Duration> {
         .map(Duration::from_secs)
 }
 
+#[cfg(test)]
 pub(crate) async fn execute_with_headers_deadline(
     client: &reqwest::Client,
     request: reqwest::Request,
@@ -117,7 +118,7 @@ pub(crate) async fn collect_with_progress_limit(
                     return Err(BodyReadFailure {
                         bytes,
                         timed_out: true,
-                    })
+                    });
                 }
             },
             None => stream.next().await,
@@ -131,7 +132,7 @@ pub(crate) async fn collect_with_progress_limit(
                 return Err(BodyReadFailure {
                     bytes,
                     timed_out: false,
-                })
+                });
             }
         };
         if chunk.len() > max_bytes.saturating_sub(bytes.len()) {

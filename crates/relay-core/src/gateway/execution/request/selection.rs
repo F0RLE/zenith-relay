@@ -240,10 +240,10 @@ fn first_attempt_cooldown(selection_context: &SelectionMissInput<'_>) -> Option<
 }
 
 fn stop_without_candidate(selection_context: &mut SelectionMissInput<'_>) -> SelectionMiss {
-    if selection_context.last_failure.is_none() {
-        if let Some(error) = selection_context.last_adapter_error.take() {
-            return SelectionMiss::AdapterError(error);
-        }
+    if selection_context.last_failure.is_none()
+        && let Some(error) = selection_context.last_adapter_error.take()
+    {
+        return SelectionMiss::AdapterError(error);
     }
     SelectionMiss::Stop {
         retry_window_expired: selection_context.retry_window_expired,

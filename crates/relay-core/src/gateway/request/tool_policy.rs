@@ -76,10 +76,7 @@ impl RequestToolPolicy {
         self.apply_value(request)
     }
 
-    pub(in crate::gateway) fn apply_value(
-        &mut self,
-        request: &mut Value,
-    ) -> Result<(), &'static str> {
+    pub(in crate::gateway) fn apply_value(&mut self, request: &Value) -> Result<(), &'static str> {
         let policy_result = crate::tool_policy::apply_tool_policy(
             request,
             &self.policy,

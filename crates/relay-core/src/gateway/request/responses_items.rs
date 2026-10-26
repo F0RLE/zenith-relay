@@ -37,12 +37,10 @@ pub(in crate::gateway) fn tool_call_output_ids(response_payload: &Value) -> Vec<
         let item_type = response_object.get("type").and_then(Value::as_str);
         if item_type.is_some_and(|item_type| {
             item_type == "tool_search_output" || item_type.ends_with("_call_output")
-        }) {
-            if let Some(call_id) = bounded_tool_call_id(response_object.get("call_id")) {
-                if seen.insert(call_id.clone()) {
-                    tool_call_ids.push(call_id);
-                }
-            }
+        }) && let Some(call_id) = bounded_tool_call_id(response_object.get("call_id"))
+            && seen.insert(call_id.clone())
+        {
+            tool_call_ids.push(call_id);
         }
     });
     tool_call_ids
@@ -58,10 +56,10 @@ pub(in crate::gateway) fn response_tool_call_ids(response_payload: &Value) -> Ve
         let item_type = response_object.get("type").and_then(Value::as_str);
         if item_type.is_some_and(|item_type| item_type.ends_with("_call")) {
             for field in ["call_id", "id"] {
-                if let Some(call_id) = bounded_tool_call_id(response_object.get(field)) {
-                    if seen.insert(call_id.clone()) {
-                        tool_call_ids.push(call_id);
-                    }
+                if let Some(call_id) = bounded_tool_call_id(response_object.get(field))
+                    && seen.insert(call_id.clone())
+                {
+                    tool_call_ids.push(call_id);
                 }
             }
         }

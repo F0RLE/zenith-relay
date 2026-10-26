@@ -2,11 +2,11 @@
 use super::{AuthenticatedKey, GatewayRuntime, PreparedAuthorization};
 use crate::accounts::TokenDispatchRevision;
 use crate::providers::chatgpt::{
-    basis_points_access_url, basis_points_headers, parse_basis_points_model_access,
-    BasisPointsModelAccess, ModelDiscoveryFailure, ModelDiscoveryFailureCode, OAuthClientKind,
-    BASIS_POINTS_RATE_LIMIT_COOLDOWN_MS, MAX_BASIS_POINTS_ACCESS_BYTES,
+    BASIS_POINTS_RATE_LIMIT_COOLDOWN_MS, BasisPointsModelAccess, MAX_BASIS_POINTS_ACCESS_BYTES,
+    ModelDiscoveryFailure, ModelDiscoveryFailureCode, OAuthClientKind, basis_points_access_url,
+    basis_points_headers, parse_basis_points_model_access,
 };
-use futures_util::{stream, StreamExt};
+use futures_util::{StreamExt, stream};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -102,13 +102,12 @@ impl GatewayRuntime {
             return None;
         }
         drop(cached.revision.guard()?);
-        if let Err(error) = &mut cached.result {
-            if error.code == ModelDiscoveryFailureCode::RateLimited
-                || error.retry_after_ms.is_some()
-            {
-                // Reusing a failed read must not restart its original Retry-After.
-                error.retry_after_ms = Some(remaining.as_millis().min(u128::from(u64::MAX)) as u64);
-            }
+        if let Err(error) = &mut cached.result
+            && (error.code == ModelDiscoveryFailureCode::RateLimited
+                || error.retry_after_ms.is_some())
+        {
+            // Reusing a failed read must not restart its original Retry-After.
+            error.retry_after_ms = Some(remaining.as_millis().min(u128::from(u64::MAX)) as u64);
         }
         Some(cached)
     }
@@ -417,10 +416,9 @@ impl GatewayRuntime {
             .as_ref()
             .and_then(|body| body.get("reasoning_effort"))
             .and_then(Value::as_str)
+            && !available.supports_reasoning_effort(effort)
         {
-            if !available.supports_reasoning_effort(effort) {
-                return Err(super::AuthorizedRequestError::ReasoningUnavailable);
-            }
+            return Err(super::AuthorizedRequestError::ReasoningUnavailable);
         }
         Ok(())
     }

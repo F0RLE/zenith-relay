@@ -1,17 +1,18 @@
 use super::super::super::request::ServiceTierPolicy;
 use super::super::basis_points::structured_output::requires_buffering;
-use super::super::compatibility::{record_adapter_rejection, AdapterRejection};
-use super::completion::{complete_buffered_response, BufferedCompletionInput, CompletionStep};
+use super::super::compatibility::{AdapterRejection, record_adapter_rejection};
+use super::completion::{BufferedCompletionInput, CompletionStep, complete_buffered_response};
 use super::dispatch::{
-    dispatch_request_attempt, DispatchedRequestAttempt, RequestDispatch, RequestDispatchInput,
+    DispatchedRequestAttempt, RequestDispatch, RequestDispatchInput, dispatch_request_attempt,
 };
-use super::failure::{handle_upstream_failure, FailureStep, RejectionCarry, UpstreamFailureInput};
+use super::failure::{FailureStep, RejectionCarry, UpstreamFailureInput, handle_upstream_failure};
 use super::prelude::*;
 use super::prepare::{
-    prepare_request_attempt, PreparedRequestAttempt, RequestPrepare, RequestPrepareInput,
+    PreparedRequestAttempt, RequestPrepare, RequestPrepareInput, prepare_request_attempt,
 };
 use super::recovery::{adapter_error_response, replay_native_tool_continuation};
-use super::stream::{open_response_stream, OpenStreamInput, OpenedStream};
+use super::state::{AttemptState, ContinuationState, RetryState};
+use super::stream::{OpenStreamInput, OpenedStream, open_response_stream};
 use std::sync::Arc;
 
 pub(super) enum DrivenAttempt {
@@ -49,21 +50,10 @@ pub(super) struct DriveAttemptInput<'a> {
     pub(super) service_tier_policy: &'a ServiceTierPolicy,
     pub(super) tool_policy: &'a mut RequestToolPolicy,
     pub(super) client_context_id: &'a Option<String>,
-    pub(super) last_adapter_error: &'a mut Option<AdapterError>,
     pub(super) forwarded_headers: &'a HeaderMap,
-    pub(super) attempt: &'a mut u16,
-    pub(super) last_failure: &'a mut Option<AttemptFailure>,
-    pub(super) last_failure_origin: &'a mut ErrorOrigin,
-    pub(super) tried: &'a mut HashSet<String>,
-    pub(super) preparation_exclusions: &'a mut HashSet<String>,
+    pub(super) state: &'a mut AttemptState,
     pub(super) has_previous_response_id: bool,
-    pub(super) has_unpaired_tool_output: &'a mut bool,
-    pub(super) requires_affinity_owner: &'a mut bool,
-    pub(super) repairs: &'a mut AttemptRepairs,
-    pub(super) last_preserved_upstream_error: &'a mut Option<PreservedUpstreamError>,
-    pub(super) response_affinity_key: &'a mut Option<String>,
     pub(super) allow_previous_response_reset: bool,
-    pub(super) confirmed_response_missing: &'a mut bool,
 }
 
 fn carry(
@@ -103,22 +93,32 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
         service_tier_policy,
         tool_policy,
         client_context_id,
-        last_adapter_error,
         forwarded_headers,
+        state,
+        mut has_previous_response_id,
+        allow_previous_response_reset,
+    } = drive_input;
+    let AttemptState {
+        retry,
+        continuation,
+    } = state;
+    let RetryState {
         attempt,
-        last_failure,
-        last_failure_origin,
         tried,
         preparation_exclusions,
-        mut has_previous_response_id,
-        has_unpaired_tool_output,
-        requires_affinity_owner,
-        repairs,
+        last_failure,
+        last_failure_origin,
+        last_adapter_error,
         last_preserved_upstream_error,
+        window_expired: _,
+    } = retry;
+    let ContinuationState {
         response_affinity_key,
-        allow_previous_response_reset,
+        requires_affinity_owner,
+        has_unpaired_tool_output,
         confirmed_response_missing,
-    } = drive_input;
+        repairs,
+    } = continuation;
     if matches!(
         route.account_transport,
         AccountTransport::ExcelBasisPoints | AccountTransport::Siwc
@@ -365,7 +365,7 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
     // expose invalid text through incremental deltas before terminal validation.
     let validate_output = basis_points_request
         .as_ref()
-        .is_some_and(requires_buffering);
+        .is_some_and(|request| requires_buffering(request));
     if !stream || (basis_points_route && (!upstream_sse || validate_output)) {
         match complete_buffered_response(BufferedCompletionInput {
             upstream,

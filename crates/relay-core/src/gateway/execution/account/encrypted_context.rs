@@ -102,10 +102,9 @@ fn rejected_reasoning_index(input: &[Value], error: &EncryptedRejection) -> Opti
             .get("id")
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
+            && !ids.insert(id)
         {
-            if !ids.insert(id) {
-                return None;
-            }
+            return None;
         }
     }
     let candidates: Vec<_> = input
@@ -151,7 +150,9 @@ fn rejected_reasoning_index(input: &[Value], error: &EncryptedRejection) -> Opti
             .split_once("...")?;
         if ![prefix, suffix].into_iter().all(|part| {
             part.len() == 4
-                && part.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
         }) {
             return None;
         }
@@ -173,15 +174,14 @@ fn rejected_reasoning_index(input: &[Value], error: &EncryptedRejection) -> Opti
         selected = Some(matches[0]);
     }
     let selected = selected.or_else(|| (candidates.len() == 1).then(|| candidates[0]))?;
-    if let Some(ciphertext) = input[selected].get("encrypted_content") {
-        if candidates
+    if let Some(ciphertext) = input[selected].get("encrypted_content")
+        && candidates
             .iter()
             .filter(|&&index| input[index].get("encrypted_content") == Some(ciphertext))
             .count()
             != 1
-        {
-            return None;
-        }
+    {
+        return None;
     }
     Some(selected)
 }

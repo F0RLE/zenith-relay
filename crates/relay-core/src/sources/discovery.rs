@@ -1,8 +1,8 @@
 use super::observations::{SourceRead, SourceReadHints};
 use super::{
-    capabilities::catalog_capabilities, normalize_source_protocol_bindings, service_protocol,
     ModelEndpointCapability, ProviderSource, SourceAdapter, SourceConnector, SourceProtocolBinding,
-    SourceProtocolBindingKey, SourceProtocolConfig,
+    SourceProtocolBindingKey, SourceProtocolConfig, capabilities::catalog_capabilities,
+    normalize_source_protocol_bindings, service_protocol,
 };
 use crate::scheduler::refresh::http::ManagementHttpScope;
 use crate::{ApiModelPriceOverride, Result};
@@ -229,10 +229,11 @@ async fn read_bindings(
         scope,
     )
     .await?;
-    if bindings.len() == 1 && automatic_catalog_routes.contains(&bindings[0].key()) {
-        if let Some(binding) = discovery.protocol_bindings.first_mut() {
-            binding.model_ids.clear();
-        }
+    if bindings.len() == 1
+        && automatic_catalog_routes.contains(&bindings[0].key())
+        && let Some(binding) = discovery.protocol_bindings.first_mut()
+    {
+        binding.model_ids.clear();
     }
     Ok(discovery)
 }

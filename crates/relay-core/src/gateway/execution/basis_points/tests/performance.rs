@@ -80,6 +80,78 @@ async fn measure_bps_dispatch_preparation() {
 }
 
 #[tokio::test]
+#[ignore = "manual local catalog reuse benchmark; no provider or TTFT measurement"]
+async fn measure_bps_request_catalog_reuse() {
+    use super::super::{
+        PreparedClientRequest, discovery::execution, response::translate_response_value,
+    };
+    use crate::{scheduler::rotation::SharedRequestBudget, usage::ToolUseDiagnostics};
+    use std::time::Instant;
+
+    let runtime = dispatch_runtime();
+    let tools = (0..313).map(|index| json!({"type":"function","name":format!("tool_{index}"),
+        "description":"Synthetic description. ".repeat(16),
+        "parameters":{"type":"object","properties":{"path":{"type":"string"},"count":{"type":"integer"}},
+            "required":["path"],"additionalProperties":false}})).collect::<Vec<_>>();
+    let request = json!({"model":"synthetic-model","relay_bps_tool_catalog":"discovery",
+        "input":"Synthetic stable history. ".repeat(40_000),"tools":tools});
+    let expected = prepare_request(&request).unwrap();
+    for cached in [false, true] {
+        let mut samples = Vec::new();
+        for trial in 0..12 {
+            let request = request.clone();
+            let response = json!({"id":"resp_synthetic","status":"completed","output":[]});
+            let budget = SharedRequestBudget::for_incoming_request(8);
+            let mut diagnostics = ToolUseDiagnostics::default();
+            let started = Instant::now();
+            let (body, translated) = if cached {
+                let (context, body) =
+                    PreparedClientRequest::prepare(request, &mut None, false).unwrap();
+                let (body, _) = execution::prepare_dispatch_with_catalog(
+                    (&context, context.catalog_snapshot()),
+                    body,
+                    &budget,
+                    &mut diagnostics,
+                    &runtime,
+                    "synthetic-key",
+                    None,
+                )
+                .unwrap();
+                let translated = context.translate_value(response).unwrap();
+                (body, translated)
+            } else {
+                let body = prepare_request(&request).unwrap();
+                let (body, _) = execution::prepare_dispatch(
+                    &request,
+                    body,
+                    &budget,
+                    &mut diagnostics,
+                    &runtime,
+                    "synthetic-key",
+                    None,
+                )
+                .unwrap();
+                let translated = translate_response_value(response, &request).unwrap();
+                (body, translated)
+            };
+            let elapsed = started.elapsed().as_nanos();
+            assert_eq!(body, expected);
+            assert_eq!(translated["status"], "completed");
+            if trial > 0 {
+                samples.push(elapsed);
+            }
+        }
+        samples.sort_unstable();
+        eprintln!(
+            "bps-request-catalog reused={cached} tools=313 history_bytes={} median_ns={} p90_ns={}",
+            request["input"].as_str().unwrap().len(),
+            samples[5],
+            samples[9]
+        );
+    }
+}
+
+#[tokio::test]
 async fn bps_dispatch_moves_history_without_changing_wire_or_catalog_diagnostics() {
     use super::super::discovery::{capture, execution};
     use crate::scheduler::rotation::SharedRequestBudget;
@@ -275,8 +347,12 @@ fn measure_bps_tool_history_replay() {
             legacy.sort_unstable();
             direct.sort_unstable();
             assert_eq!(transport_call(call, &tools[0]).unwrap(), expected);
-            eprintln!("bps-tool-history bytes={} json_string={encoded} warmup=1 paired_trials=9 iterations=10 legacy_median_us={} direct_median_us={}",
-                script.len(), legacy[4], direct[4]);
+            eprintln!(
+                "bps-tool-history bytes={} json_string={encoded} warmup=1 paired_trials=9 iterations=10 legacy_median_us={} direct_median_us={}",
+                script.len(),
+                legacy[4],
+                direct[4]
+            );
         }
     }
 }
@@ -340,8 +416,60 @@ fn measure_bps_turn_prefix_reuse() {
             samples.sort_unstable();
             eprintln!(
                 "bps mode={mode} choice={choice_name} warmup=5 trials=7 iterations=25 shared_items={shared}/{} shared_bytes={shared_bytes} median_ns={} min_ns={} max_ns={}",
-                prefix.len(), samples[3], samples[0], samples[6]
+                prefix.len(),
+                samples[3],
+                samples[0],
+                samples[6]
             );
         }
+    }
+}
+
+#[test]
+#[ignore = "manual synthetic large-history preparation; no provider or TTFT measurement"]
+fn measure_bps_large_history_preparation() {
+    use std::{hint::black_box, time::Instant};
+
+    for size in [4096_usize, 256 * 1024, 1024 * 1024] {
+        let seed = "Synthetic coding history: Привет, \"quoted\" \\path\r\n";
+        let text = seed.repeat(size.div_ceil(seed.len()));
+        let request = json!({"model":"synthetic-model","input":[
+            {"role":"user","content":text},
+            {"type":"reasoning","id":"rs_synthetic",
+                "summary":[{"type":"summary_text","text":text}]},
+            {"type":"function_call","call_id":"call_read","name":"read_file",
+                "arguments":"{\"path\":\"synthetic.rs\"}"},
+            {"type":"function_call_output","call_id":"call_read","output":text},
+            {"role":"user","content":text}
+        ],"tools":[{"type":"function","name":"read_file",
+            "parameters":{"type":"object","properties":{"path":{"type":"string"}},
+                "required":["path"]}}]});
+        let original = serde_json::to_vec(&request).unwrap();
+        let expected = serde_json::to_vec(&prepare_request(&request).unwrap()).unwrap();
+        for _ in 0..5 {
+            black_box(prepare_request(black_box(&request)).unwrap());
+        }
+        let mut samples = Vec::new();
+        for _ in 0..9 {
+            let started = Instant::now();
+            for _ in 0..10 {
+                black_box(prepare_request(black_box(&request)).unwrap());
+            }
+            samples.push(started.elapsed().as_nanos() / 10);
+        }
+        samples.sort_unstable();
+        assert_eq!(serde_json::to_vec(&request).unwrap(), original);
+        assert_eq!(
+            serde_json::to_vec(&prepare_request(&request).unwrap()).unwrap(),
+            expected
+        );
+        eprintln!(
+            "bps-large-history input_bytes={} output_bytes={} warmup=5 trials=9 iterations=10 median_ns={} min_ns={} max_ns={}",
+            original.len(),
+            expected.len(),
+            samples[4],
+            samples[0],
+            samples[8]
+        );
     }
 }

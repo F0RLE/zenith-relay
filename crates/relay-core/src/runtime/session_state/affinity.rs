@@ -132,10 +132,8 @@ impl GatewayRuntime {
             let invalidated = self
                 .lock_scheduler()
                 .invalidate_prompt_affinity_for_candidate(key, candidate_id);
-            if invalidated {
-                if let Some(store) = self.response_affinity_store.as_ref() {
-                    let _ = store.delete(key);
-                }
+            if invalidated && let Some(store) = self.response_affinity_store.as_ref() {
+                let _ = store.delete(key);
             }
             invalidated
         })

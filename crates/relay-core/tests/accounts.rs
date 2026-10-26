@@ -5,11 +5,11 @@ use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, Response, StatusCode, Uri};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use futures_util::future::{join_all, BoxFuture};
+use futures_util::future::{BoxFuture, join_all};
 use futures_util::stream;
 use futures_util::{SinkExt, StreamExt};
 use reqwest_websocket::{Message as ClientWsMessage, Upgrade};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::io;
 use std::net::SocketAddr;
@@ -891,16 +891,16 @@ async fn upstream_websocket(
     websocket: WebSocketUpgrade,
 ) -> Response<Body> {
     state.headers.lock().unwrap().push(headers);
-    if let WebSocketBehavior::UnauthorizedOnce(attempts) = &state.behavior {
-        if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-            return Response::builder()
-                .status(StatusCode::UNAUTHORIZED)
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    json!({"error":{"code":"token_expired"}}).to_string(),
-                ))
-                .unwrap();
-        }
+    if let WebSocketBehavior::UnauthorizedOnce(attempts) = &state.behavior
+        && attempts.fetch_add(1, Ordering::SeqCst) == 0
+    {
+        return Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({"error":{"code":"token_expired"}}).to_string(),
+            ))
+            .unwrap();
     }
     websocket.on_upgrade(move |mut socket| async move {
         while let Some(Ok(message)) = socket.recv().await {
@@ -1194,9 +1194,7 @@ fn compaction_reply(id: &str) -> Reply {
 
 fn successful_sse_reply() -> Reply {
     Reply::Stream(vec![
-        StreamChunk::Data(
-            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n",
-        ),
+        StreamChunk::Data("data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n"),
         StreamChunk::Data(
             "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
         ),

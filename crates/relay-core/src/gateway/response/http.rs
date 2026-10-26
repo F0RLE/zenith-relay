@@ -77,12 +77,12 @@ pub(in crate::gateway) fn attach_error_diagnostics(
             .headers_mut()
             .insert("x-zenith-relay-error-category", category_header);
     }
-    if let Some(request_id) = request_id.and_then(safe_request_id) {
-        if let Ok(request_id_header) = HeaderValue::from_str(request_id) {
-            outgoing_response
-                .headers_mut()
-                .insert("x-zenith-relay-request-id", request_id_header);
-        }
+    if let Some(request_id) = request_id.and_then(safe_request_id)
+        && let Ok(request_id_header) = HeaderValue::from_str(request_id)
+    {
+        outgoing_response
+            .headers_mut()
+            .insert("x-zenith-relay-request-id", request_id_header);
     }
 }
 
@@ -95,12 +95,12 @@ pub(in crate::gateway) fn attach_stream_diagnostics(
         "x-zenith-relay-upstream-origin",
         HeaderValue::from_static(origin.as_str()),
     );
-    if let Some(request_id) = safe_request_id(request_id) {
-        if let Ok(request_id_header) = HeaderValue::from_str(request_id) {
-            outgoing_response
-                .headers_mut()
-                .insert("x-zenith-relay-request-id", request_id_header);
-        }
+    if let Some(request_id) = safe_request_id(request_id)
+        && let Ok(request_id_header) = HeaderValue::from_str(request_id)
+    {
+        outgoing_response
+            .headers_mut()
+            .insert("x-zenith-relay-request-id", request_id_header);
     }
 }
 

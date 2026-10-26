@@ -56,10 +56,10 @@ async fn resolved_images_survive_json_sse_discovery_and_warm_requests() {
                     let mut completed = None;
                     while let Some(frame) = crate::protocol::take_sse_event(&mut pending) {
                         let data = crate::protocol::sse_data(&frame);
-                        if let Ok(event) = serde_json::from_slice::<Value>(&data) {
-                            if event["type"] == "response.completed" {
-                                completed = Some(event["response"].clone());
-                            }
+                        if let Ok(event) = serde_json::from_slice::<Value>(&data)
+                            && event["type"] == "response.completed"
+                        {
+                            completed = Some(event["response"].clone());
                         }
                     }
                     completed.expect("validated response completes")

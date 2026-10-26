@@ -8,6 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 use url::Url;
 
+pub(in crate::runtime) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub(in crate::runtime) fn normalize_client_wire_api(wire_api: ClientWireApi) -> ClientWireApi {
     // Older key records could carry `images` as if it were an independent
     // client protocol. Image requests are authorized by the
@@ -117,7 +119,7 @@ pub(in crate::runtime) fn runtime_client_builder(
     proxy: Option<&ProxyConfig>,
 ) -> reqwest::ClientBuilder {
     let builder = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
+        .connect_timeout(CONNECT_TIMEOUT)
         .pool_max_idle_per_host(MAX_IDLE_CONNECTIONS_PER_HOST)
         .pool_idle_timeout(Duration::from_secs(90))
         .tcp_nodelay(true)
@@ -136,6 +138,10 @@ pub(in crate::runtime) fn runtime_client(proxy: Option<&ProxyConfig>) -> Result<
     // Metadata and credential operations set their own request-level timeout.
     runtime_client_builder(proxy)
         .http2_adaptive_window(true)
+        .tls_early_data(false)
+        // Zero disables our QUIC idle deadline, not the peer's. A quiet
+        // reasoning phase must not gain a local time limit on this transport.
+        .http3_max_idle_timeout(Duration::ZERO)
         .build()
         .map_err(Error::from)
 }

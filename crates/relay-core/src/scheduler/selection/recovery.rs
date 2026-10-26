@@ -11,11 +11,10 @@ impl PoolScheduler {
                 !applies || *retry_at_ms > now_ms
             });
             candidate.last_used_at = Some(now_ms);
-            let recovered = !candidate
+            !candidate
                 .cooldowns
                 .values()
-                .any(|retry_at_ms| *retry_at_ms > now_ms);
-            recovered
+                .any(|retry_at_ms| *retry_at_ms > now_ms)
         };
         if let Some(candidate) = self.candidates.get(candidate_id) {
             self.cooldown_reasons

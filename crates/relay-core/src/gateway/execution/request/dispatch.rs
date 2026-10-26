@@ -36,7 +36,7 @@ pub(super) struct RequestDispatchInput<'a> {
     pub(super) request_body: Option<Vec<u8>>,
     pub(super) reasoning_effort: &'a ReasoningEffortDiagnostics,
     pub(super) tool_use: &'a mut ToolUseDiagnostics,
-    pub(super) basis_points_request: Option<&'a Value>,
+    pub(super) basis_points_request: Option<&'a super::super::basis_points::PreparedClientRequest>,
     pub(super) siwc_catalog_request: Option<&'a Value>,
     pub(super) request_id: &'a str,
     pub(super) requested_model: &'a str,
@@ -87,8 +87,8 @@ pub(super) async fn dispatch_request_attempt(
     let mut discovery_session = None;
     if let Some(original) = basis_points_request {
         let (body, session) =
-            match super::super::basis_points::discovery::execution::prepare_dispatch(
-                original,
+            match super::super::basis_points::discovery::execution::prepare_dispatch_with_catalog(
+                (original, original.catalog_snapshot()),
                 // Response conversion retains its codec/continuation state, not
                 // a second copy of the already prepared upstream request body.
                 std::mem::take(adapter_request.upstream_body_mut()),
@@ -104,7 +104,7 @@ pub(super) async fn dispatch_request_attempt(
                         error,
                         selected_error_origin,
                         Some(request_id),
-                    ))
+                    ));
                 }
             };
         tool_use.capture_upstream_context(&body);
@@ -131,7 +131,7 @@ pub(super) async fn dispatch_request_attempt(
                     error,
                     selected_error_origin,
                     Some(request_id),
-                ))
+                ));
             }
         }
     }
@@ -233,11 +233,12 @@ pub(super) async fn dispatch_request_attempt(
         // explicit JSON response preference for buffered requests.
         upstream_request = upstream_request.header(ACCEPT, "application/json");
     }
-    if account_route && !basis_points_route {
-        if let Some(responses_lite_header) = route_responses_lite.as_ref() {
-            upstream_request =
-                upstream_request.header(CODEX_RESPONSES_LITE_HEADER, responses_lite_header);
-        }
+    if account_route
+        && !basis_points_route
+        && let Some(responses_lite_header) = route_responses_lite.as_ref()
+    {
+        upstream_request =
+            upstream_request.header(CODEX_RESPONSES_LITE_HEADER, responses_lite_header);
     }
     let authorization_event = usage_event(
         UsageAttempt {
@@ -287,7 +288,9 @@ pub(super) async fn dispatch_request_attempt(
                 started.elapsed().as_millis() as u64,
             );
             if let (Some(original), Some(body)) = (
-                basis_points_request.or(siwc_catalog_request),
+                basis_points_request
+                    .map(|request| &**request)
+                    .or(siwc_catalog_request),
                 discovery_body,
             ) {
                 match super::super::basis_points::discovery::resolve(

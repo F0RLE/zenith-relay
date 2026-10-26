@@ -1,6 +1,6 @@
-use super::catalog::{client_tool_call_name, history_tool, tool_spec, ClientTool};
+use super::catalog::{ClientTool, client_tool_call_name, history_tool, tool_spec};
 use super::codec::{encode_function_arguments, parse_function_arguments};
-use super::{is_transport_tool, TRANSPORT_TOOL};
+use super::{TRANSPORT_TOOL, is_transport_tool};
 use crate::gateway::request::responses_item_has_ciphertext as has_item_ciphertext;
 use crate::protocol::AdapterError;
 use serde_json::{Map, Value};
@@ -186,7 +186,7 @@ pub(super) fn translate_input_items_with_catalog(
                 // bound ID while retaining any visible summary.
                 if has_item_ciphertext(input_object.get("encrypted_content")) {
                     translated_items.push(input_item);
-                } else if let Some(visible_item) = visible_item_without_ciphertext(input_object) {
+                } else if let Some(visible_item) = visible_item_without_ciphertext(input_item) {
                     translated_items.push(visible_item);
                 }
             }
@@ -211,15 +211,11 @@ pub(super) fn translate_input_items_with_catalog(
 }
 
 /// Drop a ciphertext blob and the id bound to it. Visible summary text stays.
-fn visible_item_without_ciphertext(item_object: &Map<String, Value>) -> Option<Value> {
-    let mut kept = item_object.clone();
+fn visible_item_without_ciphertext(mut item: Value) -> Option<Value> {
+    let kept = item.as_object_mut()?;
     kept.remove("encrypted_content");
     kept.remove("id");
-    if has_visible_text(&kept) {
-        Some(Value::Object(kept))
-    } else {
-        None
-    }
+    has_visible_text(kept).then_some(item)
 }
 
 fn has_visible_text(item_object: &Map<String, Value>) -> bool {

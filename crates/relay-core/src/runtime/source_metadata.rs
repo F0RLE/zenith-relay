@@ -113,7 +113,7 @@ impl GatewayRuntime {
     }
 
     pub(crate) fn model_reasoning_policy_levels(&self, model: &str) -> Option<Vec<String>> {
-        let configured = crate::poison::mutex(&self.model_reasoning_allowed_levels);
+        let configured = crate::poison::mutex(&self.model_state.reasoning_allowed_levels);
         reasoning_policy_levels(&configured, model).map(ToOwned::to_owned)
     }
 
@@ -155,7 +155,7 @@ impl GatewayRuntime {
     ) -> Result<()> {
         let allowed_levels = normalize_model_reasoning_allowed_levels(allowed_levels)
             .map_err(|message| Error::Validation(message.to_string()))?;
-        *crate::poison::mutex(&self.model_reasoning_allowed_levels) = allowed_levels;
+        *crate::poison::mutex(&self.model_state.reasoning_allowed_levels) = allowed_levels;
         Ok(())
     }
 }

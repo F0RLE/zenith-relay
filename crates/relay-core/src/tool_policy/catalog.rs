@@ -18,10 +18,10 @@ fn arrays(request_payload: &Value, visit_array: &mut impl FnMut(&Value)) {
     }
     if let Some(input_items) = request_payload.get("input").and_then(Value::as_array) {
         for input_item in input_items {
-            if input_item.get("type").and_then(Value::as_str) == Some("additional_tools") {
-                if let Some(tool_array) = input_item.get("tools") {
-                    visit_array(tool_array);
-                }
+            if input_item.get("type").and_then(Value::as_str) == Some("additional_tools")
+                && let Some(tool_array) = input_item.get("tools")
+            {
+                visit_array(tool_array);
             }
         }
     }

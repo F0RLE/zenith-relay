@@ -1,6 +1,6 @@
 use super::{AccountSelector, WakeModelPolicy, WakeTask};
-use crate::providers::chatgpt::OAuthClientKind;
 use crate::ModelRules;
+use crate::providers::chatgpt::OAuthClientKind;
 
 pub fn select_automation_route(
     tasks: &mut [WakeTask],
@@ -20,16 +20,19 @@ pub fn select_automation_route(
     // Validate the full batch before mutating any task.
     for task in tasks.iter().filter(|task| task.enabled && affected(task)) {
         if next_kind == OAuthClientKind::Codex {
-            return Err("Codex is not a pool connection; edit or disable this account's automations before switching");
+            return Err(
+                "Codex is not a pool connection; edit or disable this account's automations before switching",
+            );
         }
-        if let WakeModelPolicy::Explicit(model) = &task.model_policy {
-            if !destination_models
+        if let WakeModelPolicy::Explicit(model) = &task.model_policy
+            && (!destination_models
                 .iter()
                 .any(|candidate| candidate.eq_ignore_ascii_case(model))
-                || !destination_rules.allows(model)
-            {
-                return Err("The selected route does not support an enabled automation model; edit or disable the automation first");
-            }
+                || !destination_rules.allows(model))
+        {
+            return Err(
+                "The selected route does not support an enabled automation model; edit or disable the automation first",
+            );
         }
     }
     for task in tasks.iter_mut().filter(|task| affected(task)) {

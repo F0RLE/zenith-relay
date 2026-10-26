@@ -1,6 +1,6 @@
 use super::*;
-use crate::error_codes;
 use crate::ErrorOrigin;
+use crate::error_codes;
 
 pub(crate) fn cooldown_error(
     retry_at_ms: u64,
@@ -226,10 +226,10 @@ pub(crate) fn prefix_error_body(response_body: &[u8], origin: ErrorOrigin) -> Ve
                 return serialized_body;
             }
         }
-        if prefix_error_value(&mut error_payload, origin) {
-            if let Ok(serialized_body) = serde_json::to_vec(&error_payload) {
-                return serialized_body;
-            }
+        if prefix_error_value(&mut error_payload, origin)
+            && let Ok(serialized_body) = serde_json::to_vec(&error_payload)
+        {
+            return serialized_body;
         }
         return response_body.to_vec();
     }

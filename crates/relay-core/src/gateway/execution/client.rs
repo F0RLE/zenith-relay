@@ -1,17 +1,17 @@
 use super::super::auth::{client_api_forbidden, invalid_host, unauthorized, valid_local_host};
 use super::super::continuation::{
-    prepare_response_continuation, RESPONSE_CONTINUATION_UNAVAILABLE_CODE,
-    RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
+    RESPONSE_CONTINUATION_UNAVAILABLE_CODE, RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
+    prepare_response_continuation,
 };
 use super::super::errors::api_error;
 use super::super::now_ms;
 use super::super::request::{
-    candidate_protocols, chat_request_has_supported_content, client_request_identity,
-    codex_background_request_kind, forwarded_codex_headers, forwarded_messages_headers,
-    is_managed_codex_client, normalize_codex_reasoning_placeholder, request_id, ServiceTierPolicy,
-    CODEX_RESPONSES_LITE_HEADER,
+    CODEX_RESPONSES_LITE_HEADER, ServiceTierPolicy, candidate_protocols,
+    chat_request_has_supported_content, client_request_identity, codex_background_request_kind,
+    forwarded_codex_headers, forwarded_messages_headers, is_managed_codex_client,
+    normalize_codex_reasoning_placeholder, request_id,
 };
-use super::request::{execute_request, RequestExecution, ReservedCandidate};
+use super::request::{RequestExecution, ReservedCandidate, execute_request};
 use crate::error_codes;
 use crate::protocol::ClientWireApi;
 use crate::scheduler::rotation::SharedRequestBudget;
@@ -113,14 +113,14 @@ async fn execute_client_request_inner(
             Ok(request_object) => Value::Object(request_object),
             Err(error_response) => return *error_response,
         };
-    if client_wire_api == WireApi::GeminiInteractions {
-        if let Err(message) = crate::protocol::interactions::validate_request(&request_json) {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                message,
-                error_codes::INVALID_REQUEST,
-            );
-        }
+    if client_wire_api == WireApi::GeminiInteractions
+        && let Err(message) = crate::protocol::interactions::validate_request(&request_json)
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            message,
+            error_codes::INVALID_REQUEST,
+        );
     }
     runtime.refresh_basis_points_access(&key).await;
     let mut tool_policy = parts
@@ -157,14 +157,14 @@ async fn execute_client_request_inner(
         .and_then(Value::as_str)
         .filter(|model| !model.trim().is_empty())
         .map(str::to_string);
-    if let (Some(path_model), Some(body_model)) = (path_model.as_deref(), body_model.as_deref()) {
-        if !path_model.eq_ignore_ascii_case(body_model) {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "model in the path must match model in the request body",
-                error_codes::INVALID_REQUEST,
-            );
-        }
+    if let (Some(path_model), Some(body_model)) = (path_model.as_deref(), body_model.as_deref())
+        && !path_model.eq_ignore_ascii_case(body_model)
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "model in the path must match model in the request body",
+            error_codes::INVALID_REQUEST,
+        );
     }
     let Some(requested_model) = path_model.or(body_model) else {
         return api_error(
@@ -204,7 +204,7 @@ async fn execute_client_request_inner(
                 StatusCode::BAD_REQUEST,
                 "stream must be a boolean",
                 error_codes::INVALID_REQUEST,
-            )
+            );
         }
         None => false,
     } || force_stream;
@@ -275,7 +275,7 @@ async fn execute_client_request_inner(
                 StatusCode::CONFLICT,
                 RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
                 RESPONSE_CONTINUATION_UNAVAILABLE_CODE,
-            )
+            );
         }
     };
 

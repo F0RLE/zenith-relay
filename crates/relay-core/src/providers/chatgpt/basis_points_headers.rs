@@ -295,14 +295,14 @@ pub(crate) fn basis_points_headers(
             account_header_value,
         );
     }
-    if let Some(account_user_id) = account_user_id {
-        if let Ok(mut account_user_header_value) = HeaderValue::from_str(account_user_id) {
-            account_user_header_value.set_sensitive(true);
-            headers.insert(
-                HeaderName::from_static("x-openai-account-user-id"),
-                account_user_header_value,
-            );
-        }
+    if let Some(account_user_id) = account_user_id
+        && let Ok(mut account_user_header_value) = HeaderValue::from_str(account_user_id)
+    {
+        account_user_header_value.set_sensitive(true);
+        headers.insert(
+            HeaderName::from_static("x-openai-account-user-id"),
+            account_user_header_value,
+        );
     }
     headers.insert(
         HeaderName::from_static("origin"),

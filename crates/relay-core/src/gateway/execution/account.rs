@@ -10,21 +10,21 @@ mod selection;
 mod success;
 
 use super::super::continuation::{
+    RESPONSE_CONTINUATION_UNAVAILABLE_CODE, RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
     clear_materialized_continuation, prepare_response_continuation, prepare_response_owner_change,
-    previous_response_id, RESPONSE_CONTINUATION_UNAVAILABLE_CODE,
-    RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
+    previous_response_id,
 };
-use super::super::errors::{api_error, AttemptFailure, PreservedUpstreamError};
+use super::super::errors::{AttemptFailure, PreservedUpstreamError, api_error};
 use super::super::now_ms;
 use super::super::request::{
-    client_request_identity, request_id, AccountEndpoint, RequestToolPolicy, ServiceTierPolicy,
+    AccountEndpoint, RequestToolPolicy, ServiceTierPolicy, client_request_identity, request_id,
 };
-use super::request::adapter_error_response;
 use super::AttemptRepairs;
 use super::CandidateRetryContext;
+use super::request::adapter_error_response;
 use super::{
-    detach_encrypted_context_repair_owner, finish_request_failure,
-    release_encrypted_context_repair_owner, RequestFailureInput,
+    RequestFailureInput, detach_encrypted_context_repair_owner, finish_request_failure,
+    release_encrypted_context_repair_owner,
 };
 use crate::runtime::AuthenticatedKey;
 use crate::scheduler::rotation::{RotationOperation, SharedRequestBudget};
@@ -32,16 +32,16 @@ use crate::{GatewayRuntime, WireApi};
 use axum::body::Body;
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use dispatch::{
-    dispatch_account_attempt, AccountDispatch, AccountDispatchInput, DispatchedAccountAttempt,
+    AccountDispatch, AccountDispatchInput, DispatchedAccountAttempt, dispatch_account_attempt,
 };
-use failure::{handle_account_status_failure, AccountStatusFailure, AccountStatusFailureInput};
+use failure::{AccountStatusFailure, AccountStatusFailureInput, handle_account_status_failure};
 use prepare::{
-    prepare_account_attempt, AccountPrepare, AccountPrepareInput, PreparedAccountAttempt,
+    AccountPrepare, AccountPrepareInput, PreparedAccountAttempt, prepare_account_attempt,
 };
-use selection::{handle_account_selection_miss, AccountSelectionMiss, AccountSelectionMissInput};
+use selection::{AccountSelectionMiss, AccountSelectionMissInput, handle_account_selection_miss};
 use serde_json::Value;
 use std::sync::Arc;
-use success::{complete_account_response, AccountSuccessInput};
+use success::{AccountSuccessInput, complete_account_response};
 
 pub(in crate::gateway::execution) use encrypted_context::drop_rejected_encrypted_context;
 
@@ -105,7 +105,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                     StatusCode::CONFLICT,
                     RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
                     RESPONSE_CONTINUATION_UNAVAILABLE_CODE,
-                )
+                );
             }
         };
     let mut response_affinity_key = continuation.response_affinity_key;
@@ -142,30 +142,30 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         // another physical member and the saved history can be resent.
         if !repairs.quota_yield {
             repairs.quota_yield = true;
-            if endpoint != AccountEndpoint::Wake {
-                if let Some(affinity_key) = response_affinity_key.clone() {
-                    if runtime.automatic_response_owner_should_yield(
-                        &key,
-                        &affinity_key,
-                        &resolved_model,
-                        &[WireApi::Responses],
-                        &tried,
-                        now_ms(),
-                    ) && prepare_response_owner_change(
-                        &runtime,
-                        &key.id,
-                        &mut request,
-                        &resolved_model,
-                        requires_affinity_owner,
-                        now_ms(),
-                    ) {
-                        clear_materialized_continuation(
-                            &mut response_affinity_key,
-                            &mut requires_affinity_owner,
-                            &mut has_unpaired_tool_output,
-                        );
-                    }
-                }
+            if endpoint != AccountEndpoint::Wake
+                && let Some(affinity_key) = response_affinity_key.clone()
+                && runtime.automatic_response_owner_should_yield(
+                    &key,
+                    &affinity_key,
+                    &resolved_model,
+                    &[WireApi::Responses],
+                    &tried,
+                    now_ms(),
+                )
+                && prepare_response_owner_change(
+                    &runtime,
+                    &key.id,
+                    &mut request,
+                    &resolved_model,
+                    requires_affinity_owner,
+                    now_ms(),
+                )
+            {
+                clear_materialized_continuation(
+                    &mut response_affinity_key,
+                    &mut requires_affinity_owner,
+                    &mut has_unpaired_tool_output,
+                );
             }
         }
         // A model-switch or stale-tool recovery can remove the opaque
@@ -289,6 +289,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         };
         let PreparedAccountAttempt {
             preparation,
+            bps_catalog,
             route,
             basis_points_route,
             route_responses_lite,
@@ -304,6 +305,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         let dispatched_attempt = match dispatch_account_attempt(AccountDispatchInput {
             preparation_started,
             preparation,
+            bps_catalog,
             runtime: &runtime,
             key: &key,
             lease: &lease,
@@ -357,6 +359,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             AccountDispatch::Ready(dispatched) => *dispatched,
         };
         let DispatchedAccountAttempt {
+            bps_catalog,
             route,
             status,
             response_headers,
@@ -413,6 +416,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             }
         }
         let response = complete_account_response(AccountSuccessInput {
+            bps_catalog,
             endpoint,
             status,
             bytes,

@@ -446,10 +446,10 @@ impl RotationEngine {
         match runtime.candidate.auth {
             AuthState::Ready => {}
             AuthState::NeedsRefresh => {
-                return CandidateAvailability::Blocked(CandidateBlockReason::AuthRequired)
+                return CandidateAvailability::Blocked(CandidateBlockReason::AuthRequired);
             }
             AuthState::Blocked => {
-                return CandidateAvailability::Blocked(CandidateBlockReason::AuthBlocked)
+                return CandidateAvailability::Blocked(CandidateBlockReason::AuthBlocked);
             }
         }
         let mut earliest_wait = None;
@@ -469,7 +469,7 @@ impl RotationEngine {
                 earliest_wait = Some((reset_at_ms, CandidateBlockReason::QuotaExhausted));
             }
             QuotaState::Exhausted { .. } | QuotaState::CreditFallback { .. } => {
-                return CandidateAvailability::Blocked(CandidateBlockReason::QuotaExhausted)
+                return CandidateAvailability::Blocked(CandidateBlockReason::QuotaExhausted);
             }
             QuotaState::Unknown | QuotaState::Available | QuotaState::Stale => {}
         }
@@ -480,11 +480,11 @@ impl RotationEngine {
             .copied()
             .unwrap_or(runtime.candidate.rate);
         for rate in [runtime.candidate.rate, model_route_rate] {
-            if let RateState::Limited { not_before_ms } = rate {
-                if not_before_ms > now_ms && earliest_wait.is_none_or(|(at, _)| not_before_ms > at)
-                {
-                    earliest_wait = Some((not_before_ms, CandidateBlockReason::RateLimited));
-                }
+            if let RateState::Limited { not_before_ms } = rate
+                && not_before_ms > now_ms
+                && earliest_wait.is_none_or(|(at, _)| not_before_ms > at)
+            {
+                earliest_wait = Some((not_before_ms, CandidateBlockReason::RateLimited));
             }
         }
         let circuit_state = self
@@ -492,12 +492,11 @@ impl RotationEngine {
             .get(&(runtime.candidate.id.clone(), route_key.to_owned()))
             .cloned()
             .unwrap_or_default();
-        if let Some(not_before_ms) = circuit_state.not_before_ms.filter(|at| *at > now_ms) {
-            if earliest_wait
+        if let Some(not_before_ms) = circuit_state.not_before_ms.filter(|at| *at > now_ms)
+            && earliest_wait
                 .is_none_or(|(previous_deadline_ms, _)| not_before_ms > previous_deadline_ms)
-            {
-                earliest_wait = Some((not_before_ms, CandidateBlockReason::CircuitOpen));
-            }
+        {
+            earliest_wait = Some((not_before_ms, CandidateBlockReason::CircuitOpen));
         }
         if let Some((at_ms, reason)) = earliest_wait {
             return CandidateAvailability::WaitUntil { at_ms, reason };
@@ -530,7 +529,7 @@ impl RotationEngine {
                 return CandidateAvailability::Ready { recovery: true };
             }
             CircuitState::HalfOpen => {
-                return CandidateAvailability::Busy(CandidateBlockReason::RecoveryBusy)
+                return CandidateAvailability::Busy(CandidateBlockReason::RecoveryBusy);
             }
         }
         if runtime.candidate.max_concurrency > 0
@@ -663,20 +662,19 @@ impl RotationEngine {
         advance_round_robin_cursor: bool,
     ) {
         if self.mode == RotationMode::RoundRobin {
-            if advance_round_robin_cursor {
-                if let Some(candidate) = candidates
+            if advance_round_robin_cursor
+                && let Some(candidate) = candidates
                     .iter()
                     .find(|candidate| candidate.id == selected_candidate_id)
-                {
-                    self.round_robin_cursor.insert(
-                        route_key.to_owned(),
-                        RoundRobinCursor {
-                            capacity_key: candidate.capacity_key.clone(),
-                            candidate_id: candidate.id.clone(),
-                            priority: candidate.priority,
-                        },
-                    );
-                }
+            {
+                self.round_robin_cursor.insert(
+                    route_key.to_owned(),
+                    RoundRobinCursor {
+                        capacity_key: candidate.capacity_key.clone(),
+                        candidate_id: candidate.id.clone(),
+                        priority: candidate.priority,
+                    },
+                );
             }
             return;
         }

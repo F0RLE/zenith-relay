@@ -1,13 +1,13 @@
 use super::{
-    all_native_wire_apis, client_wire_apis_to_native, model_rules, normalize_client_wire_api,
-    normalize_prefix, normalized_set, source_candidate_id, ChatGptAccountExecutor,
-    GatewayRuntimeOptions, PassiveQuotaState, RuntimeHttpClients, RuntimeKey, RuntimeSource,
-    SourceCandidateBinding, SourceCandidateRoute,
+    ChatGptAccountExecutor, GatewayRuntimeOptions, PassiveQuotaState, RuntimeHttpClients,
+    RuntimeKey, RuntimeSource, SourceCandidateBinding, SourceCandidateRoute, all_native_wire_apis,
+    client_wire_apis_to_native, model_rules, normalize_client_wire_api, normalize_prefix,
+    normalized_set, source_candidate_id,
 };
 use super::{
-    normalize_image_base_model, runtime_now_ms, CodexTurnStateStore, GatewayRuntime,
-    LocalGatewayKey, ProviderSource, RuntimeControl, RuntimeLocalKey, SourceModelMetadataState,
-    UsageCallback, NEXT_ACTIVITY_RUNTIME_ID,
+    CodexTurnStateStore, GatewayRuntime, LocalGatewayKey, NEXT_ACTIVITY_RUNTIME_ID, ProviderSource,
+    RuntimeControl, RuntimeLocalKey, SourceModelMetadataState, UsageCallback,
+    normalize_image_base_model, runtime_now_ms,
 };
 use crate::catalog::normalize_model_reasoning_allowed_levels;
 use crate::protocol::ClientWireApi;
@@ -18,9 +18,9 @@ use crate::{
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Mutex;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -371,6 +371,7 @@ impl GatewayRuntime {
             diagnostics_enabled: options.diagnostics_enabled,
             tool_policy: RwLock::new(options.tool_policy.clone()),
             clients,
+            http3: super::http3::Http3Transport::new(),
             discovery_client,
             sources: source_parts.executors,
             source_http_clients,
@@ -383,19 +384,19 @@ impl GatewayRuntime {
             chatgpt_team_members: account_parts.team_members,
             chatgpt_team_breaker_recent: Mutex::new(BTreeMap::new()),
             keys: key_parts.runtime_keys,
-            hidden_models: Arc::new(RwLock::new(hidden_models)),
+            model_state: super::models::RuntimeModelState::new(
+                registry,
+                hidden_models,
+                model_reasoning_allowed_levels,
+                model_context_policies,
+            ),
             scheduler: Arc::new(Mutex::new(scheduler)),
             candidate_availability: Arc::new(tokio::sync::Notify::new()),
             admission: Mutex::default(),
             admission_changed: tokio::sync::Notify::new(),
-            registry: Mutex::new(registry),
             official_codex_ultra: Mutex::new(BTreeMap::new()),
-            websocket_http_only: Mutex::new(BTreeMap::new()),
+            websocket_transport_observations: Mutex::new(BTreeMap::new()),
             model_metadata: SourceModelMetadataState::default(),
-            model_reasoning_allowed_levels: Mutex::new(model_reasoning_allowed_levels),
-            model_context_policies: Mutex::new(model_context_policies),
-            model_service_tier_overrides: Mutex::new(BTreeMap::new()),
-            model_display_order: Mutex::new(Vec::new()),
             model_metadata_catalog: options.model_metadata_catalog.clone(),
             passive_quotas: Mutex::new(account_parts.passive_quotas),
             adapter_continuation_store: continuation_state.adapters.clone(),

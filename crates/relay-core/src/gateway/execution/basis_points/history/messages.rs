@@ -1,8 +1,8 @@
 //! BPS-only message lowering. Tool arguments and native provider paths are untouched.
 
-use super::super::codec::{explicit_input_message, text_message};
+use super::super::codec::{explicit_input_message, text_message, text_part};
 use crate::protocol::AdapterError;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 pub(super) fn normalize_message(mut item: Value) -> Result<Value, AdapterError> {
     if let Some(context) = super::handoff::thread_context(&item)? {
@@ -44,7 +44,7 @@ pub(super) fn normalize_message(mut item: Value) -> Result<Value, AdapterError> 
         "input_text"
     };
     let mut content = match fields.remove("content") {
-        Some(Value::String(text)) => vec![json!({"type":kind,"text":text})],
+        Some(Value::String(text)) => vec![text_part(kind, text)],
         Some(Value::Array(parts)) => parts,
         _ => return Err(AdapterError::invalid_request().with_parameter("input.content")),
     };
@@ -55,7 +55,7 @@ pub(super) fn normalize_message(mut item: Value) -> Result<Value, AdapterError> 
     };
     content.insert(
         0,
-        json!({"type":kind,"text":format!("{label}{}", Value::Object(attribution))}),
+        text_part(kind, format!("{label}{}", Value::Object(attribution))),
     );
     if agent {
         fields.clear();

@@ -9,10 +9,10 @@ fn completed_response(text: &str, stream: bool) -> Value {
     }
     let mut pending = text.as_bytes().to_vec();
     while let Some(frame) = crate::protocol::take_sse_event(&mut pending) {
-        if let Ok(event) = serde_json::from_slice::<Value>(&crate::protocol::sse_data(&frame)) {
-            if event["type"] == "response.completed" {
-                return event["response"].clone();
-            }
+        if let Ok(event) = serde_json::from_slice::<Value>(&crate::protocol::sse_data(&frame))
+            && event["type"] == "response.completed"
+        {
+            return event["response"].clone();
         }
     }
     panic!("synthetic BPS stream must complete: {text}");

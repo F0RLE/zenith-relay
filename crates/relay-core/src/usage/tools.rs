@@ -126,10 +126,10 @@ impl ToolUseDiagnostics {
             self.set_terminal_response(response_payload);
             return;
         }
-        if event_payload.get("type").and_then(Value::as_str) == Some("response.output_item.done") {
-            if let Some(output_item) = event_payload.get("item") {
-                self.observe_output_item(output_item);
-            }
+        if event_payload.get("type").and_then(Value::as_str) == Some("response.output_item.done")
+            && let Some(output_item) = event_payload.get("item")
+        {
+            self.observe_output_item(output_item);
         }
         if let Some(content_block) = event_payload.get("content_block") {
             self.observe_output_item(content_block);

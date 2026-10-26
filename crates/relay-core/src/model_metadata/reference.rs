@@ -1,6 +1,6 @@
 use super::order::normalize;
-use super::{validate_metadata_payload, MAX_RECORDS};
-use serde_json::{json, Map, Value};
+use super::{MAX_RECORDS, validate_metadata_payload};
+use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
 const IDENTITY_PRIORITY: &str = "_relay_identity_priority";
@@ -65,13 +65,12 @@ pub(super) fn merge_reference_records(
                     .expect("validated catalog record")
                     .entry("aliases")
                     .or_insert_with(|| json!([]));
-                if let Some(aliases) = aliases.as_array_mut() {
-                    if !aliases
+                if let Some(aliases) = aliases.as_array_mut()
+                    && !aliases
                         .iter()
                         .any(|existing| existing.as_str() == Some(&alias))
-                    {
-                        aliases.push(json!(alias));
-                    }
+                {
+                    aliases.push(json!(alias));
                 }
             }
             insert(&mut merged_records, &qualified_id, projected, 3);

@@ -80,10 +80,8 @@ impl PricingContext {
                 .cache_write_models
                 .contains(&super::normalize(model))
         });
-        if !cache_write_allowed {
-            if let Some(quote) = resolved.quote.as_mut() {
-                *quote = quote.clear_messages_cache_writes();
-            }
+        if !cache_write_allowed && let Some(quote) = resolved.quote.as_mut() {
+            *quote = quote.clear_messages_cache_writes();
         }
         resolved
     }

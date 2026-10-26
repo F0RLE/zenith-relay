@@ -4,7 +4,7 @@ use super::recovery::{
     adapter_error_response, adapter_error_response_for_origin, replay_native_tool_continuation,
 };
 use super::translate::{
-    translate_basis_points_completed, translate_completed_response, CompletedBasisPointsResponse,
+    CompletedBasisPointsResponse, translate_basis_points_completed, translate_completed_response,
 };
 use crate::gateway::errors::current_failure_state;
 
@@ -39,7 +39,7 @@ pub(super) struct BufferedCompletionInput<'a> {
     pub(super) last_failure_origin: &'a mut ErrorOrigin,
     pub(super) last_preserved_upstream_error: &'a mut Option<PreservedUpstreamError>,
     pub(super) has_previous_response_id: bool,
-    pub(super) basis_points_request: &'a Option<Value>,
+    pub(super) basis_points_request: &'a Option<super::super::basis_points::PreparedClientRequest>,
     pub(super) stream: bool,
     pub(super) adapter_request: PreparedAdapterRequest,
     pub(super) tried: &'a mut HashSet<String>,
@@ -167,10 +167,11 @@ pub(super) async fn complete_buffered_response(
         status.as_u16(),
         (!completed).then(|| error_codes::RESPONSE_INCOMPLETE.to_string()),
     );
-    if let Some(body) = completion_body {
-        if basis_points_request.is_some() && event.tool_use.upstream_tool_call_count.is_none() {
-            event.tool_use.observe_upstream_response(&body);
-        }
+    if let Some(body) = completion_body
+        && basis_points_request.is_some()
+        && event.tool_use.upstream_tool_call_count.is_none()
+    {
+        event.tool_use.observe_upstream_response(&body);
     }
     if !route.basis_points_discovery {
         // Catalog discovery has already buffered upstream bytes. A synthetic
@@ -222,33 +223,30 @@ pub(super) async fn complete_buffered_response(
             ));
         }
     };
-    if summarize {
-        if let Err(error) = crate::protocol::wrap_compaction_response_bytes(&mut bytes) {
-            emit_usage(runtime, mark_adapter_failure(event, &error));
-            lease.settle_rotation_terminal(now_ms());
-            return CompletionStep::Respond(adapter_error_response_for_origin(
-                error,
-                selected_error_origin,
-                Some(request_id),
-            ));
-        }
+    if summarize && let Err(error) = crate::protocol::wrap_compaction_response_bytes(&mut bytes) {
+        emit_usage(runtime, mark_adapter_failure(event, &error));
+        lease.settle_rotation_terminal(now_ms());
+        return CompletionStep::Respond(adapter_error_response_for_origin(
+            error,
+            selected_error_origin,
+            Some(request_id),
+        ));
     }
-    if basis_points_request.is_some() {
-        if let Ok(response) = serde_json::from_slice::<Value>(&bytes) {
-            event.tool_use.set_terminal_response(&response);
-            event
-                .tool_use
-                .observe_tool_calls_ready(started.elapsed().as_millis() as u64);
-        }
+    if basis_points_request.is_some()
+        && let Ok(response) = serde_json::from_slice::<Value>(&bytes)
+    {
+        event.tool_use.set_terminal_response(&response);
+        event
+            .tool_use
+            .observe_tool_calls_ready(started.elapsed().as_millis() as u64);
     }
-    if completed {
-        if let Some(transport) = event
+    if completed
+        && let Some(transport) = event
             .routing
             .as_mut()
             .and_then(|routing| routing.transport.as_mut())
-        {
-            transport.client_response_ready_ms = Some(started.elapsed().as_millis() as u64);
-        }
+    {
+        transport.client_response_ready_ms = Some(started.elapsed().as_millis() as u64);
     }
     if completed {
         let recovered = lease.settle_rotation_success_with_latency(now_ms(), event.ttft_ms);
@@ -282,28 +280,31 @@ pub(super) async fn complete_buffered_response(
             now_ms(),
         );
     }
-    if adapter_is_passthrough && client_wire_api == WireApi::Gemini {
-        if let Ok(response) = serde_json::from_slice::<Value>(&bytes) {
-            crate::gateway::continuation::gemini::bind_response(
-                runtime,
-                &key.id,
-                route,
-                request,
-                &response,
-                now_ms(),
-            );
-        }
+    if adapter_is_passthrough
+        && client_wire_api == WireApi::Gemini
+        && let Ok(response) = serde_json::from_slice::<Value>(&bytes)
+    {
+        crate::gateway::continuation::gemini::bind_response(
+            runtime,
+            &key.id,
+            route,
+            request,
+            &response,
+            now_ms(),
+        );
     }
-    if completed && adapter_is_passthrough && client_wire_api == WireApi::GeminiInteractions {
-        if let Ok(response) = serde_json::from_slice::<Value>(&bytes) {
-            crate::gateway::continuation::interactions::bind_response(
-                runtime,
-                &key.id,
-                route,
-                &response,
-                now_ms(),
-            );
-        }
+    if completed
+        && adapter_is_passthrough
+        && client_wire_api == WireApi::GeminiInteractions
+        && let Ok(response) = serde_json::from_slice::<Value>(&bytes)
+    {
+        crate::gateway::continuation::interactions::bind_response(
+            runtime,
+            &key.id,
+            route,
+            &response,
+            now_ms(),
+        );
     }
     if completed && client_wire_api == WireApi::Responses {
         bind_responses_turn(
@@ -315,12 +316,10 @@ pub(super) async fn complete_buffered_response(
             &bytes,
             adapter_is_passthrough,
         );
-    } else if completed {
-        if let Ok(response) = serde_json::from_slice::<Value>(&bytes) {
-            let mut calls = crate::gateway::request::ToolCallCapture::default();
-            calls.observe(&response, client_wire_api);
-            calls.bind(runtime, &key.id, route, now_ms());
-        }
+    } else if completed && let Ok(response) = serde_json::from_slice::<Value>(&bytes) {
+        let mut calls = crate::gateway::request::ToolCallCapture::default();
+        calls.observe(&response, client_wire_api);
+        calls.bind(runtime, &key.id, route, now_ms());
     }
     buffered_client_response(BufferedClientResponse {
         status,

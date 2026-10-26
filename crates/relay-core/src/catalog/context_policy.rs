@@ -1,5 +1,5 @@
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 use super::is_valid_model_id;
@@ -135,10 +135,10 @@ impl ModelContextPolicy {
     }
 
     pub fn validate(self) -> Result<(), &'static str> {
-        if let Self::Custom { tokens } = self {
-            if !(1_024..=2_000_000).contains(&tokens) {
-                return Err("custom context must be between 1024 and 2000000 tokens");
-            }
+        if let Self::Custom { tokens } = self
+            && !(1_024..=2_000_000).contains(&tokens)
+        {
+            return Err("custom context must be between 1024 and 2000000 tokens");
         }
         Ok(())
     }
@@ -529,15 +529,21 @@ mod tests {
 
     #[test]
     fn custom_validation_rejects_out_of_range() {
-        assert!(ModelContextPolicy::Custom { tokens: 500 }
-            .validate()
-            .is_err());
-        assert!(ModelContextPolicy::Custom { tokens: 3_000_000 }
-            .validate()
-            .is_err());
-        assert!(ModelContextPolicy::Custom { tokens: 100_000 }
-            .validate()
-            .is_ok());
+        assert!(
+            ModelContextPolicy::Custom { tokens: 500 }
+                .validate()
+                .is_err()
+        );
+        assert!(
+            ModelContextPolicy::Custom { tokens: 3_000_000 }
+                .validate()
+                .is_err()
+        );
+        assert!(
+            ModelContextPolicy::Custom { tokens: 100_000 }
+                .validate()
+                .is_ok()
+        );
         assert!(ModelContextPolicy::Short.validate().is_ok());
     }
 

@@ -1,7 +1,7 @@
 //! Per-field evidence is built with the normalized merge, not raw export.
 use super::MetadataFieldProvenance;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{borrow::Cow, collections::BTreeMap};
 
 pub(super) const MARKER: &str = "_relay_field_provenance";
@@ -114,10 +114,11 @@ pub(super) fn merge(target: &mut Value, fallback: &Value) {
             let conflict = json!({
                 "source": origin_source(origin), "revision": null, "value": incoming
             });
-            if let Some(conflicts) = winner.get_mut("conflicts").and_then(Value::as_array_mut) {
-                if !conflicts.contains(&conflict) && conflicts.len() < 4 {
-                    conflicts.push(conflict);
-                }
+            if let Some(conflicts) = winner.get_mut("conflicts").and_then(Value::as_array_mut)
+                && !conflicts.contains(&conflict)
+                && conflicts.len() < 4
+            {
+                conflicts.push(conflict);
             }
         }
     }
@@ -144,14 +145,14 @@ pub(super) fn set_field(
         .cloned()
         .unwrap_or_default();
     conflicts.retain(|conflict| conflict["source"] != source || conflict["value"] != value);
-    if let (Some(previous), Some(origin)) = (previous, old_origin.as_ref()) {
-        if previous != value {
-            let conflict = json!({
-                "source": origin_source(origin), "revision": origin["revision"], "value": previous
-            });
-            if !conflicts.contains(&conflict) {
-                conflicts.insert(0, conflict);
-            }
+    if let (Some(previous), Some(origin)) = (previous, old_origin.as_ref())
+        && previous != value
+    {
+        let conflict = json!({
+            "source": origin_source(origin), "revision": origin["revision"], "value": previous
+        });
+        if !conflicts.contains(&conflict) {
+            conflicts.insert(0, conflict);
         }
     }
     conflicts.truncate(4);
@@ -474,11 +475,13 @@ mod tests {
     fn compact_origins_preserve_conflicts_and_legacy_normalization() {
         let mut target = json!({"reasoning":false,"tool_call":true});
         initialize(&mut target, 0);
-        assert!(target[MARKER]
-            .as_object()
-            .unwrap()
-            .values()
-            .all(Value::is_string));
+        assert!(
+            target[MARKER]
+                .as_object()
+                .unwrap()
+                .values()
+                .all(Value::is_string)
+        );
         let mut fallback = json!({"reasoning":true,"attachment":true});
         initialize(&mut fallback, 2);
         merge(&mut target, &fallback);

@@ -1,7 +1,7 @@
 //! Route ownership shares the existing bounded affinity and persistence
 //! infrastructure. Only fingerprints are durable; conversation state is not.
 use crate::runtime::{ExecutorRoute, GatewayRuntime, ResponseAffinityBinding};
-use crate::{AdapterError, AdapterResult, WireApi, RESPONSE_AFFINITY_TTL_MS};
+use crate::{AdapterError, AdapterResult, RESPONSE_AFFINITY_TTL_MS, WireApi};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -219,18 +219,17 @@ impl GatewayRuntime {
         let fingerprint = self
             .continuation_route_fingerprint(route)
             .ok_or_else(AdapterError::continuation_mismatch)?;
-        if route.client_wire_api == WireApi::GeminiInteractions {
-            if let Some(previous) = crate::protocol::interactions::previous_id(request)
+        if route.client_wire_api == WireApi::GeminiInteractions
+            && let Some(previous) = crate::protocol::interactions::previous_id(request)
                 .map_err(|_| AdapterError::continuation_mismatch())?
-            {
-                let reference = crate::protocol::interactions::reference(local_key_id, previous)
-                    .map_err(|_| AdapterError::continuation_mismatch())?;
-                let key = self
-                    .response_affinity_key(Some(&reference))
-                    .ok_or_else(AdapterError::continuation_missing)?;
-                if self.route_affinity(&key, now_ms).as_deref() != Some(fingerprint.as_str()) {
-                    return Err(AdapterError::continuation_mismatch());
-                }
+        {
+            let reference = crate::protocol::interactions::reference(local_key_id, previous)
+                .map_err(|_| AdapterError::continuation_mismatch())?;
+            let key = self
+                .response_affinity_key(Some(&reference))
+                .ok_or_else(AdapterError::continuation_missing)?;
+            if self.route_affinity(&key, now_ms).as_deref() != Some(fingerprint.as_str()) {
+                return Err(AdapterError::continuation_mismatch());
             }
         }
         let previous = request
@@ -239,114 +238,112 @@ impl GatewayRuntime {
             .map(str::trim)
             .filter(|id| !id.is_empty());
         let mut predecessor_route_validated = false;
-        if route.client_wire_api == WireApi::Responses {
-            if let Some(previous) = previous {
-                let key = self
-                    .response_affinity_key(Some(previous))
-                    .expect("nonempty id");
-                if let Some(owner) = self.route_affinity(&key, now_ms) {
-                    if owner != fingerprint {
-                        return Err(AdapterError::continuation_mismatch());
-                    }
-                    predecessor_route_validated = true;
-                } else if previous.starts_with("resp_bridge_")
-                    || previous.starts_with("gemini_bridge_")
-                    || previous.starts_with("chat_bridge_")
-                {
-                    let state = self.load_adapter_continuation_state(
-                        local_key_id,
-                        previous,
-                        &route.candidate_id,
-                        now_ms,
-                    )?;
-                    if state.upstream_wire_api()
-                        != route
-                            .adapter
-                            .upstream_protocol(route.client_wire_api)
-                            .wire_api()
-                    {
-                        return Err(AdapterError::continuation_mismatch());
-                    }
-                } else if self
-                    .source_candidate_bindings
-                    .get(&route.candidate_id)
-                    .is_some_and(|binding| {
-                        binding.routes.iter().any(|other| {
-                            other.adapter.upstream_protocol(other.wire_api)
-                                != route.adapter.upstream_protocol(route.client_wire_api)
-                        })
-                    })
-                {
-                    // Legacy opaque IDs on multi-endpoint sources have no
-                    // exact owner metadata. They cannot follow a preference.
-                    return Err(AdapterError::continuation_missing());
+        if route.client_wire_api == WireApi::Responses
+            && let Some(previous) = previous
+        {
+            let key = self
+                .response_affinity_key(Some(previous))
+                .expect("nonempty id");
+            if let Some(owner) = self.route_affinity(&key, now_ms) {
+                if owner != fingerprint {
+                    return Err(AdapterError::continuation_mismatch());
                 }
+                predecessor_route_validated = true;
+            } else if previous.starts_with("resp_bridge_")
+                || previous.starts_with("gemini_bridge_")
+                || previous.starts_with("chat_bridge_")
+            {
+                let state = self.load_adapter_continuation_state(
+                    local_key_id,
+                    previous,
+                    &route.candidate_id,
+                    now_ms,
+                )?;
+                if state.upstream_wire_api()
+                    != route
+                        .adapter
+                        .upstream_protocol(route.client_wire_api)
+                        .wire_api()
+                {
+                    return Err(AdapterError::continuation_mismatch());
+                }
+            } else if self
+                .source_candidate_bindings
+                .get(&route.candidate_id)
+                .is_some_and(|binding| {
+                    binding.routes.iter().any(|other| {
+                        other.adapter.upstream_protocol(other.wire_api)
+                            != route.adapter.upstream_protocol(route.client_wire_api)
+                    })
+                })
+            {
+                // Legacy opaque IDs on multi-endpoint sources have no
+                // exact owner metadata. They cannot follow a preference.
+                return Err(AdapterError::continuation_missing());
             }
         }
         let paired_tool_results = paired_tool_result_ids(request, route.client_wire_api);
         let mut restored_pairs: Option<HashSet<String>> = None;
         for call_id in tool_result_ids(request, route.client_wire_api) {
-            if let Some(key) = self.tool_call_affinity_key(local_key_id, call_id) {
-                if self
+            if let Some(key) = self.tool_call_affinity_key(local_key_id, call_id)
+                && self
                     .route_affinity(&key, now_ms)
                     .is_some_and(|owner| owner != fingerprint)
-                    && !paired_tool_results.contains(call_id)
+                && !paired_tool_results.contains(call_id)
+            {
+                if predecessor_route_validated
+                    && previous
+                        .and_then(|previous| {
+                            response_tool_ownership_scope(
+                                local_key_id,
+                                previous,
+                                &route.candidate_id,
+                                &route.source_model,
+                            )
+                        })
+                        .is_some_and(|scope| {
+                            let mut ownership = crate::poison::mutex(&self.response_route_affinity);
+                            let key = ownership.get(&scope, now_ms).map(|generation| {
+                                response_tool_ownership_key(&scope, generation, call_id)
+                            });
+                            key.is_some_and(|key| ownership.get(&key, now_ms).is_some())
+                        })
                 {
-                    if predecessor_route_validated
-                        && previous
-                            .and_then(|previous| {
-                                response_tool_ownership_scope(
-                                    local_key_id,
-                                    previous,
-                                    &route.candidate_id,
-                                    &route.source_model,
-                                )
-                            })
-                            .is_some_and(|scope| {
-                                let mut ownership =
-                                    crate::poison::mutex(&self.response_route_affinity);
-                                let key = ownership.get(&scope, now_ms).map(|generation| {
-                                    response_tool_ownership_key(&scope, generation, call_id)
-                                });
-                                key.is_some_and(|key| ownership.get(&key, now_ms).is_some())
-                            })
-                    {
-                        continue;
+                    continue;
+                }
+                // Provider call IDs can collide across conversations. A
+                // caller-scoped predecessor with this exact route remains
+                // authoritative only if its retained history proves the
+                // call/result pair. Recover lazily on a conflicting hint;
+                // ordinary turns do not clone the saved conversation.
+                let restored_pairs = restored_pairs.get_or_insert_with(|| {
+                    if !predecessor_route_validated {
+                        return HashSet::new();
                     }
-                    // Provider call IDs can collide across conversations. A
-                    // caller-scoped predecessor with this exact route remains
-                    // authoritative only if its retained history proves the
-                    // call/result pair. Recover lazily on a conflicting hint;
-                    // ordinary turns do not clone the saved conversation.
-                    let restored_pairs = restored_pairs.get_or_insert_with(|| {
-                        if !predecessor_route_validated {
-                            return HashSet::new();
-                        }
-                        previous
-                            .and_then(|id| {
-                                self.load_native_responses_replay(
-                                    local_key_id,
-                                    id,
-                                    &route.candidate_id,
-                                    now_ms,
-                                )
-                            })
-                            .and_then(|state| {
-                                state
-                                    .replay_request(request, &route.source_model, false)
-                                    .ok()
-                            })
-                            .map(|replayed| {
-                                paired_tool_result_ids(&replayed, WireApi::Responses)
-                                    .into_iter()
-                                    .map(str::to_owned)
-                                    .collect()
-                            })
-                            .unwrap_or_default()
-                    });
-                    if !restored_pairs.contains(call_id) {
-                        return Err(AdapterError::continuation_mismatch());
-                    }
+                    previous
+                        .and_then(|id| {
+                            self.load_native_responses_replay(
+                                local_key_id,
+                                id,
+                                &route.candidate_id,
+                                now_ms,
+                            )
+                        })
+                        .and_then(|state| {
+                            state
+                                .replay_request(request, &route.source_model, false)
+                                .ok()
+                        })
+                        .map(|replayed| {
+                            paired_tool_result_ids(&replayed, WireApi::Responses)
+                                .into_iter()
+                                .map(str::to_owned)
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                });
+                if !restored_pairs.contains(call_id) {
+                    return Err(AdapterError::continuation_mismatch());
                 }
             }
         }
@@ -362,10 +359,10 @@ impl GatewayRuntime {
         let key = self
             .response_affinity_key(Some(history_key))
             .ok_or_else(AdapterError::continuation_mismatch)?;
-        if let Some(owner) = self.route_affinity(&key, now_ms) {
-            if self.continuation_route_fingerprint(route).as_deref() != Some(&owner) {
-                return Err(AdapterError::continuation_mismatch());
-            }
+        if let Some(owner) = self.route_affinity(&key, now_ms)
+            && self.continuation_route_fingerprint(route).as_deref() != Some(&owner)
+        {
+            return Err(AdapterError::continuation_mismatch());
         }
         Ok(())
     }

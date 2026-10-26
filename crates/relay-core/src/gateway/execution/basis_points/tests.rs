@@ -16,13 +16,14 @@ fn cache_maintenance_does_not_initialize_or_wait_on_busy_caches() {
     drop(guard);
     assert_eq!(try_with_cache(&cache, |value| value.len()), Some(3));
 }
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 mod catalog_prefix;
 mod history_messages;
 mod performance;
 mod preparation;
 mod reasoning_stream;
+mod request_catalog;
 mod structured_output;
 mod tool_identity;
 mod tool_responses;

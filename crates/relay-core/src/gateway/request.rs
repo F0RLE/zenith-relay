@@ -24,16 +24,16 @@ pub(super) use responses_items::{
 pub(super) use routing::{
     candidate_protocols, chat_request_has_supported_content, request_id, requested_reasoning_effort,
 };
+pub(in crate::gateway) use tool_policy::RequestToolPolicy;
 #[cfg(test)]
 pub(super) use tool_policy::tool_use_diagnostics;
-pub(in crate::gateway) use tool_policy::RequestToolPolicy;
 
 #[cfg(test)]
 mod tests;
 
 #[cfg(test)]
 use super::now_ms;
-pub(super) use account::{account_endpoint_url, alpha_search, responses_compact, AccountEndpoint};
+pub(super) use account::{AccountEndpoint, account_endpoint_url, alpha_search, responses_compact};
 #[cfg(test)]
 use codex_models::build_codex_models_response;
 pub(super) use codex_models::models;
@@ -48,8 +48,8 @@ mod codex_reasoning;
 pub(in crate::gateway) use codex_reasoning::normalize_codex_reasoning_placeholder;
 pub(in crate::gateway) use normalization::coerce_responses_input_array;
 pub(super) use normalization::{
-    apply_account_prompt_cache_key, normalize_account_request, normalize_basis_points_request,
-    normalize_compact_account_request, responses_lite_parallel_tool_calls_valid, ServiceTierPolicy,
+    ServiceTierPolicy, apply_account_prompt_cache_key, normalize_account_request,
+    normalize_compact_account_request, responses_lite_parallel_tool_calls_valid,
 };
 #[cfg(test)]
 pub(super) use normalization::{apply_default_service_tier_if_missing, request_service_tier};
@@ -61,12 +61,12 @@ use crate::{GatewayRuntime, ToolChoiceMode, ToolUseDiagnostics, WireApi};
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, Request, Response};
+use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
-use serde_json::Value;
 use std::collections::HashSet;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 

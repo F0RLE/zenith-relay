@@ -1,5 +1,5 @@
 use super::CODEX_TOOL_CONST_UNION_THRESHOLD;
-use serde_json::{json, Map, Number, Value};
+use serde_json::{Map, Number, Value, json};
 
 pub(super) fn normalize_account_request_common(
     request_fields: &mut Map<String, Value>,
@@ -64,10 +64,6 @@ pub(in crate::gateway) fn coerce_responses_input_array(
 /// Basis Points accepts the normal Responses body, but rejects an explicitly
 /// empty context policy. Keep a non-empty policy client-owned and omit only
 /// null/empty values so an absent policy remains the provider default.
-pub(in crate::gateway) fn normalize_basis_points_request(request_fields: &mut Map<String, Value>) {
-    normalize_empty_context_management(request_fields);
-}
-
 pub(super) fn normalize_empty_context_management(request_fields: &mut Map<String, Value>) {
     let empty = request_fields
         .get("context_management")

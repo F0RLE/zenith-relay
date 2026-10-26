@@ -1,24 +1,24 @@
+use crate::ProxyConfig;
+#[cfg(test)]
+use crate::SourceProtocolBinding;
 use crate::accounts::{
     TokenAuthority, TokenDispatchRevision, TokenPersistenceAdapter, TokenRefreshAdapter,
 };
 use crate::model_metadata::ModelMetadataCatalogHandle;
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::{
-    basis_points_headers, AgentIdentityCredential, CodexIdentityEnvelope,
+    AgentIdentityCredential, CodexIdentityEnvelope, basis_points_headers,
 };
 #[cfg(test)]
 use crate::providers::chatgpt::{RuntimeChatGptAccount, RuntimeChatGptAuth};
 use crate::quota::QuotaSnapshot;
 use crate::scheduler::CooldownRequest;
 use crate::sources::discover_models_with_client;
-use crate::ProxyConfig;
-#[cfg(test)]
-use crate::SourceProtocolBinding;
 use crate::{
-    decode_codex_model_alias, CacheWriteTtl, CandidateScope, Error, LocalGatewayKey,
-    MessagesReasoningMode, ModelRegistry, ModelRules, NativeResponsesReplayStore, PoolScheduler,
-    ProviderSource, Result, RoutingDiagnostics, SourceAdapter, SourceConnector,
-    SourceProtocolBindingKey, UsageCallback, WireApi,
+    CacheWriteTtl, CandidateScope, Error, LocalGatewayKey, MessagesReasoningMode, ModelRegistry,
+    ModelRules, NativeResponsesReplayStore, PoolScheduler, ProviderSource, Result,
+    RoutingDiagnostics, SourceAdapter, SourceConnector, SourceProtocolBindingKey, UsageCallback,
+    WireApi, decode_codex_model_alias,
 };
 #[cfg(test)]
 use build::ReachabilityRequirement;
@@ -30,7 +30,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 use subtle::ConstantTimeEq;
@@ -48,9 +48,11 @@ pub(crate) mod cache_context;
 mod candidates;
 pub(crate) mod catalog_hints;
 mod clients;
+pub(crate) use clients::WebsocketTransportPreference;
 mod codex_metadata;
 mod config;
 mod control;
+mod http3;
 mod images;
 mod models;
 mod routing_cookies;
@@ -70,27 +72,28 @@ pub(in crate::runtime) use support::{
 
 use config::source_candidate_id;
 pub use config::{
-    changed_runtime_source_policy_updates, normalize_model_service_tier_overrides,
-    pool_catalog_visibility_changed, pool_dispatch_permission_changed, DefaultServiceTier,
-    GatewayRuntimeOptions, ModelContextPolicy, PoolAccess, PoolParticipant,
+    DefaultServiceTier, GatewayRuntimeOptions, ModelContextPolicy, PoolAccess, PoolParticipant,
+    RESPONSE_AFFINITY_DELETE_CANDIDATE_SQL, RESPONSE_AFFINITY_DELETE_EXPIRED_SQL,
+    RESPONSE_AFFINITY_DELETE_SQL, RESPONSE_AFFINITY_FIND_SQL, RESPONSE_AFFINITY_UPSERT_SQL,
     ResponseAffinityBinding, ResponseAffinityStore, RuntimeActivitySnapshot,
     RuntimeCandidatePolicy, RuntimeLocalKey, RuntimeMixedLocalKey, RuntimeSource,
-    RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate, RESPONSE_AFFINITY_DELETE_CANDIDATE_SQL,
-    RESPONSE_AFFINITY_DELETE_EXPIRED_SQL, RESPONSE_AFFINITY_DELETE_SQL, RESPONSE_AFFINITY_FIND_SQL,
-    RESPONSE_AFFINITY_UPSERT_SQL,
+    RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate, changed_runtime_source_policy_updates,
+    normalize_model_service_tier_overrides, pool_catalog_visibility_changed,
+    pool_dispatch_permission_changed,
 };
 
 pub(crate) use attempt::CandidateLease;
 use attempt::CandidateLeaseLane;
 pub use attempt::ExecutionFence;
 use control::RuntimeControl;
+use models::RuntimeModelState;
 pub(crate) use session_state::CodexTurnStateScope;
 use session_state::CodexTurnStateStore;
 pub use session_state::RuntimeContinuationStores;
 
 #[cfg(test)]
 use crate::{
-    normalize_source_protocol_bindings, unix_time_ms as current_time_ms, CandidateKind, UsageEvent,
+    CandidateKind, UsageEvent, normalize_source_protocol_bindings, unix_time_ms as current_time_ms,
 };
 pub(crate) use images::is_image_model_id;
 pub use images::normalize_image_base_model;
@@ -105,6 +108,7 @@ pub use images::normalize_image_base_model;
 pub const IMAGE_API_MODEL: &str = "gpt-image-2.5-sunburst";
 const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 256;
 pub(crate) const WEBSOCKET_CAPABILITY_TTL_MS: u64 = 5 * 60 * 1_000;
+pub(crate) const WEBSOCKET_FAST_PATH_BACKOFF_MS: u64 = 30 * 1_000;
 const CHATGPT_TEAM_BREAKER_DEDUP_MS: u64 = 60 * 1_000;
 static NEXT_ACTIVITY_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -112,6 +116,7 @@ pub struct GatewayRuntime {
     diagnostics_enabled: fn() -> bool,
     tool_policy: RwLock<crate::ToolPolicy>,
     clients: RuntimeHttpClients,
+    http3: http3::Http3Transport,
     discovery_client: reqwest::Client,
     sources: BTreeMap<String, SourceConnector>,
     /// Per-source HTTP clients for sources that configure a proxy. Sources
@@ -126,19 +131,15 @@ pub struct GatewayRuntime {
     chatgpt_team_members: BTreeMap<String, BTreeSet<String>>,
     chatgpt_team_breaker_recent: Mutex<BTreeMap<String, u64>>,
     keys: Vec<RuntimeKey>,
-    hidden_models: Arc<RwLock<BTreeSet<String>>>,
+    model_state: RuntimeModelState,
     scheduler: Arc<Mutex<PoolScheduler>>,
     candidate_availability: Arc<tokio::sync::Notify>,
     admission: Mutex<admission::AdmissionQueue>,
     admission_changed: tokio::sync::Notify,
-    registry: Mutex<ModelRegistry>,
     official_codex_ultra: Mutex<BTreeMap<String, Value>>,
-    websocket_http_only: Mutex<BTreeMap<(String, String), clients::WebsocketCapabilityObservation>>,
+    websocket_transport_observations:
+        Mutex<BTreeMap<(String, String), clients::WebsocketTransportObservation>>,
     model_metadata: SourceModelMetadataState,
-    model_reasoning_allowed_levels: Mutex<BTreeMap<String, Vec<String>>>,
-    model_context_policies: Mutex<BTreeMap<String, ModelContextPolicy>>,
-    model_service_tier_overrides: Mutex<BTreeMap<String, DefaultServiceTier>>,
-    model_display_order: Mutex<Vec<String>>,
     model_metadata_catalog: Option<ModelMetadataCatalogHandle>,
     passive_quotas: Mutex<BTreeMap<String, PassiveQuotaState>>,
     adapter_continuation_store: Arc<Mutex<crate::AdapterContinuationStore>>,
@@ -334,6 +335,7 @@ pub(crate) enum AuthorizedRequestError {
     ReasoningUnavailable,
     ProgressTimeout,
     HeadersTimeout,
+    SendStartTimeout,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -360,6 +362,7 @@ struct RuntimeKey {
 struct RuntimeHttpClients {
     http: reqwest::Client,
     websocket: reqwest::Client,
+    direct: bool,
 }
 
 impl RuntimeHttpClients {
@@ -367,6 +370,7 @@ impl RuntimeHttpClients {
         Ok(Self {
             http: runtime_client(proxy)?,
             websocket: runtime_websocket_client(proxy)?,
+            direct: proxy.is_none(),
         })
     }
 }

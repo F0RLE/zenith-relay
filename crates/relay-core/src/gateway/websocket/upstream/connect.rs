@@ -2,9 +2,9 @@ use std::collections::HashSet;
 
 use super::super::super::execution::AttemptRepairs;
 use super::super::*;
-use super::drive::{drive_selected_candidate, DriveCandidateInput, DrivenConnect};
-use super::selection_gap::{recover_without_candidate, GapAction, SelectionGap};
 use super::ConnectedTransport;
+use super::drive::{DriveCandidateInput, DrivenConnect, drive_selected_candidate};
+use super::selection_gap::{GapAction, SelectionGap, recover_without_candidate};
 
 pub(super) async fn connect_upstream(
     runtime: &GatewayRuntime,
@@ -36,17 +36,17 @@ pub(super) async fn connect_upstream(
         let wait_for_candidate_availability = runtime.route_recovery_enabled();
         if !repairs.quota_yield {
             repairs.quota_yield = true;
-            if let Some(affinity_key) = request.response_affinity_key.clone() {
-                if runtime.automatic_response_owner_should_yield(
+            if let Some(affinity_key) = request.response_affinity_key.clone()
+                && runtime.automatic_response_owner_should_yield(
                     key,
                     &affinity_key,
                     &request.resolved_model,
                     WEBSOCKET_PROTOCOLS,
                     &tried,
                     now_ms(),
-                ) {
-                    request.yield_response_owner(runtime, &key.id);
-                }
+                )
+            {
+                request.yield_response_owner(runtime, &key.id);
             }
         }
         let (incompatible, mut admitted) = request.compatible_routes(runtime, key)?;

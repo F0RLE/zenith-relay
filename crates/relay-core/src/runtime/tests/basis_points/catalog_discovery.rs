@@ -112,10 +112,9 @@ async fn catalog_discovery_uses_one_budget_and_preserves_client_tool_roundtrip()
             while let Some(frame) = crate::protocol::take_sse_event(&mut pending) {
                 if let Ok(event) =
                     serde_json::from_slice::<Value>(&crate::protocol::sse_data(&frame))
+                    && event["type"] == "response.completed"
                 {
-                    if event["type"] == "response.completed" {
-                        completed = Some(event["response"].clone());
-                    }
+                    completed = Some(event["response"].clone());
                 }
             }
             completed.expect("the client receives an authoritative completed event")
@@ -421,13 +420,15 @@ async fn parallel_call_diagnostics_separate_native_calls_from_validated_client_c
                 parallel != Some(false)
             );
             assert_eq!(event.success, parallel != Some(false));
-            assert!(event
-                .tool_use
-                .upstream_context
-                .as_ref()
-                .is_some_and(|context| {
-                    context.body_bytes > 0 && context.instruction_bytes > 0
-                }));
+            assert!(
+                event
+                    .tool_use
+                    .upstream_context
+                    .as_ref()
+                    .is_some_and(|context| {
+                        context.body_bytes > 0 && context.instruction_bytes > 0
+                    })
+            );
             if parallel == Some(false) {
                 assert!(!event.tool_use.text_output);
                 assert_eq!(

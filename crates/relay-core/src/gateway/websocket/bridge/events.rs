@@ -1,6 +1,6 @@
 use super::super::*;
-use super::terminal::{finish_incomplete, finish_terminal};
 use super::BridgeState;
+use super::terminal::{finish_incomplete, finish_terminal};
 
 enum UpstreamPayload {
     Delta(crate::gateway::streaming::FastResponseDelta),
@@ -85,10 +85,8 @@ pub(super) async fn handle_upstream_message(
         let Some((terminal, has_visible_output)) = prepare_upstream_forward(&payload, state) else {
             return true;
         };
-        if has_visible_output {
-            if let Some(in_flight) = state.in_flight.as_mut() {
-                in_flight.client_visible_output = true;
-            }
+        if has_visible_output && let Some(in_flight) = state.in_flight.as_mut() {
+            in_flight.client_visible_output = true;
         }
         let replacement = prefix_websocket_error_payload(payload, &terminal, state.upstream_origin);
         (terminal, replacement)
@@ -321,16 +319,13 @@ fn inspect_parsed_event(event_payload: &Value, state: &mut BridgeState) -> Event
             && crate::runtime::catalog_hints::native_codex_responses_url(
                 &in_flight.route.upstream_url,
             )
-        {
-            if let Some(transport) = in_flight
+            && let Some(transport) = in_flight
                 .event
                 .routing
                 .as_mut()
                 .and_then(|routing| routing.transport.as_mut())
-            {
-                transport
-                    .observe_codex_server_timing(event_payload, in_flight.response_id.as_deref());
-            }
+        {
+            transport.observe_codex_server_timing(event_payload, in_flight.response_id.as_deref());
         }
         // A timing notification is not a response event. In particular, a late
         // notification must never replace the active response's identity.
@@ -392,12 +387,14 @@ mod tests {
     #[test]
     fn ordinary_frames_do_not_build_replacement_payloads() {
         let original = br#"{ "type":"response.output_text.delta", "delta":"hello", "extension":123456789012345678901234567890 }"#;
-        assert!(prefix_websocket_error_payload(
-            UpstreamPayload::parse(original),
-            &EventTerminal::default(),
-            crate::ErrorOrigin::Account,
-        )
-        .is_none());
+        assert!(
+            prefix_websocket_error_payload(
+                UpstreamPayload::parse(original),
+                &EventTerminal::default(),
+                crate::ErrorOrigin::Account,
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -451,12 +448,14 @@ mod tests {
             let decoded = UpstreamPayload::parse(bytes);
             assert_eq!(decoded.is_response(), is_response);
             assert!(!decoded.serves_rejected_model("gpt-test"));
-            assert!(prefix_websocket_error_payload(
-                decoded,
-                &EventTerminal::default(),
-                crate::ErrorOrigin::Account,
-            )
-            .is_none());
+            assert!(
+                prefix_websocket_error_payload(
+                    decoded,
+                    &EventTerminal::default(),
+                    crate::ErrorOrigin::Account,
+                )
+                .is_none()
+            );
         }
     }
 }

@@ -72,12 +72,11 @@ pub(in crate::gateway) fn bind_response(
         .into_iter()
         .flatten()
     {
-        if candidate["finishReason"] == "CONTINUATION" {
-            if let Some(token) = candidate.get("continuationToken").and_then(Value::as_str) {
-                if let Ok(reference) = reference(local_key, request, token) {
-                    runtime.bind_response_route_affinity(Some(&reference), route, now_ms);
-                }
-            }
+        if candidate["finishReason"] == "CONTINUATION"
+            && let Some(token) = candidate.get("continuationToken").and_then(Value::as_str)
+            && let Ok(reference) = reference(local_key, request, token)
+        {
+            runtime.bind_response_route_affinity(Some(&reference), route, now_ms);
         }
     }
 }

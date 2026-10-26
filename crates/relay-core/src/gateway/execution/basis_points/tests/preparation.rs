@@ -2,6 +2,71 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn bps_owned_text_messages_keep_the_original_allocation_and_wire_bytes() {
+    use super::super::codec::{explicit_input_message, text_message};
+
+    for role in ["user", "assistant", "system", "developer"] {
+        let content_type = if role == "assistant" {
+            "output_text"
+        } else {
+            "input_text"
+        };
+        let text = "Synthetic text: Привет, \"quoted\" \\path\r\n\0".repeat(1024);
+        let pointer = text.as_ptr();
+        let expected = json!({"type":"message","role":role,
+            "content":[{"type":content_type,"text":text}]});
+        let message = text_message(role, content_type, text);
+        assert_eq!(
+            serde_json::to_vec(&message).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+        assert_eq!(
+            message["content"][0]["text"].as_str().unwrap().as_ptr(),
+            pointer
+        );
+
+        let mut compact = json!({"role":role,"content":"","synthetic_extension":{"keep":true}});
+        compact["content"] = Value::String("Synthetic compact history. ".repeat(1024));
+        let pointer = compact["content"].as_str().unwrap().as_ptr();
+        let expanded = explicit_input_message(compact);
+        assert_eq!(
+            expanded["content"][0]["text"].as_str().unwrap().as_ptr(),
+            pointer
+        );
+        assert_eq!(expanded["content"][0]["type"], content_type);
+        assert_eq!(expanded["synthetic_extension"], json!({"keep":true}));
+    }
+}
+
+#[test]
+fn bps_owned_reasoning_history_keeps_visible_text_without_copying_or_changing_state() {
+    use super::super::history::translate_input_items;
+
+    for encrypted in [false, true] {
+        let mut item = json!({"type":"reasoning","id":"rs_synthetic",
+            "summary":[{"type":"summary_text","text":"Synthetic visible summary. ".repeat(1024)}],
+            "synthetic_extension":{"keep":true}});
+        if encrypted {
+            item["encrypted_content"] = "synthetic-provider-state".into();
+        }
+        let pointer = item["summary"][0]["text"].as_str().unwrap().as_ptr();
+        let mut expected = item.clone();
+        if !encrypted {
+            expected.as_object_mut().unwrap().remove("id");
+        }
+        let translated = translate_input_items(vec![item], &[]).unwrap();
+        assert_eq!(translated, vec![expected]);
+        assert_eq!(
+            translated[0]["summary"][0]["text"]
+                .as_str()
+                .unwrap()
+                .as_ptr(),
+            pointer
+        );
+    }
+}
+
+#[test]
 fn tool_prompt_is_compact_but_keeps_the_original_schema_for_validation() {
     let schema = json!({"type":"object","properties":{
         "path":{"type":"string","description":"File path","minLength":1},
@@ -215,8 +280,10 @@ fn turn_tool_controls_preserve_the_prepared_history_prefix() {
     let baseline = prepare_request(&request).unwrap();
     let prefix = baseline["input"].as_array().unwrap();
     let instructions = prefix[0]["content"][0]["text"].as_str().unwrap();
-    assert!(instructions
-        .contains("related read-only shell inspections in one declared shell-tool invocation"));
+    assert!(
+        instructions
+            .contains("related read-only shell inspections in one declared shell-tool invocation")
+    );
     assert!(instructions.contains("preserve each command's output and failure"));
     assert!(instructions.contains("Do not batch across approval boundaries"));
     for choice in ["auto", "required"] {
@@ -271,10 +338,12 @@ fn text_only_prefix_keeps_history_but_never_restores_callable_tools() {
         &items[..items.len() - 1],
         regular["input"].as_array().unwrap()
     );
-    assert!(items.last().unwrap()["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("No client tools are available"));
+    assert!(
+        items.last().unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("No client tools are available")
+    );
     assert_eq!(summary["reasoning_effort"], regular["reasoning_effort"]);
     assert_eq!(summary["metadata"], regular["metadata"]);
     assert_eq!(summary["prompt_cache_key"], regular["prompt_cache_key"]);
@@ -362,10 +431,12 @@ fn tool_examples_follow_the_declared_tool_instead_of_a_fixed_patch() {
         .next()
         .unwrap()
         .unwrap();
-    assert!(example["code"]
-        .as_str()
-        .unwrap()
-        .starts_with(super::super::FUNCTION_STRING_PREFIX));
+    assert!(
+        example["code"]
+            .as_str()
+            .unwrap()
+            .starts_with(super::super::FUNCTION_STRING_PREFIX)
+    );
     let arguments = super::super::codec::function_arguments(&example["code"]).unwrap();
     assert_eq!(arguments["cmd"], "echo \"hello\"\necho \"world\"");
     assert_eq!(example["references"], json!(["exec_command"]));

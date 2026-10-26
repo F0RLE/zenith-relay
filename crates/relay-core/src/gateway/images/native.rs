@@ -1,8 +1,8 @@
 //! Native Images wire validation. Borrow image strings; never persist image data.
-use crate::gateway::response::apply_usage;
 use crate::UsageEvent;
+use crate::gateway::response::apply_usage;
 use serde::Deserialize;
-use serde_json::{value::RawValue, Value};
+use serde_json::{Value, value::RawValue};
 use std::borrow::Cow;
 
 #[derive(Default, Deserialize)]
@@ -73,13 +73,13 @@ pub(super) fn normalize_response(bytes: Vec<u8>, response_format: &str) -> Vec<u
     };
     if let Some(data) = payload.get_mut("data").and_then(Value::as_array_mut) {
         for image in data {
-            if let Some(object) = image.as_object_mut() {
-                if let Some(Value::String(base64)) = object.remove("b64_json") {
-                    object.insert(
-                        "url".into(),
-                        Value::String(format!("data:{mime};base64,{base64}")),
-                    );
-                }
+            if let Some(object) = image.as_object_mut()
+                && let Some(Value::String(base64)) = object.remove("b64_json")
+            {
+                object.insert(
+                    "url".into(),
+                    Value::String(format!("data:{mime};base64,{base64}")),
+                );
             }
         }
     }

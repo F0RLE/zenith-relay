@@ -1,4 +1,4 @@
-use super::{request_scope, ExecutorRoute, GatewayFailure};
+use super::{ExecutorRoute, GatewayFailure, request_scope};
 use crate::error_codes;
 use crate::gateway::request::{RequestToolPolicy, ServiceTierPolicy};
 use crate::scheduler::rotation::SharedRequestBudget;
@@ -76,7 +76,7 @@ impl ClientRequest {
         runtime: &GatewayRuntime,
         key: &crate::runtime::AuthenticatedKey,
     ) -> Result<(HashSet<String>, BTreeMap<String, ExecutorRoute>), GatewayFailure> {
-        use crate::gateway::execution::compatibility::{incompatible_routes, RouteCompatibility};
+        use crate::gateway::execution::compatibility::{RouteCompatibility, incompatible_routes};
         let started = Instant::now();
         let mut request = self.request_body.clone();
         if let Some(object) = request.as_object_mut() {
@@ -93,13 +93,13 @@ impl ClientRequest {
             tier_policy: &self.service_tier_policy,
             now_ms: crate::unix_time_ms(),
         });
-        if admitted.is_empty() {
-            if let Some(error) = error.filter(|error| {
+        if admitted.is_empty()
+            && let Some(error) = error.filter(|error| {
                 !(self.has_previous_response_id()
                     && error.code() == error_codes::ADAPTER_CONTINUATION_MISMATCH)
-            }) {
-                return Err(self.reject_adapter_request(runtime, error, started));
-            }
+            })
+        {
+            return Err(self.reject_adapter_request(runtime, error, started));
         }
         Ok((excluded, admitted))
     }
@@ -111,7 +111,7 @@ impl ClientRequest {
         started: Instant,
     ) -> GatewayFailure {
         use crate::gateway::execution::compatibility::{
-            record_adapter_rejection, AdapterRejection,
+            AdapterRejection, record_adapter_rejection,
         };
 
         record_adapter_rejection(

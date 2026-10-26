@@ -53,15 +53,13 @@ impl PoolScheduler {
         let key = (candidate_id.to_string(), model.clone());
         if self.shared_rate_limits.len() >= MAX_OBSERVATIONS
             && !self.shared_rate_limits.contains_key(&key)
-        {
-            if let Some(oldest) = self
+            && let Some(oldest) = self
                 .shared_rate_limits
                 .iter()
                 .min_by_key(|(_, observation)| observation.observed_at_ms)
                 .map(|(key, _)| key.clone())
-            {
-                self.shared_rate_limits.remove(&oldest);
-            }
+        {
+            self.shared_rate_limits.remove(&oldest);
         }
         self.shared_rate_limits.insert(
             key,

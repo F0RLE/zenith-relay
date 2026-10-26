@@ -6,12 +6,12 @@
 //! Image bytes, file IDs and credentials stay out of errors and logs.
 
 use super::super::super::errors::AttemptFailure;
-use crate::runtime::AuthorizationIdentityPolicy;
 use crate::GatewayRuntime;
-use base64::{engine::general_purpose::STANDARD, Engine as _};
-use futures_util::{stream, StreamExt};
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE};
+use crate::runtime::AuthorizationIdentityPolicy;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use futures_util::{StreamExt, stream};
 use reqwest::StatusCode;
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -161,10 +161,8 @@ where
         }
         // Once any failure is known, only finish earlier pending jobs to select
         // the input-ordered error. Dropping this request drops all upload futures.
-        if !failed {
-            if let Some(job) = jobs.next() {
-                pending.push(job);
-            }
+        if !failed && let Some(job) = jobs.next() {
+            pending.push(job);
         }
     }
     Ok(())
@@ -572,10 +570,10 @@ where
 fn cached_file_id(key: &[u8; 32]) -> Option<String> {
     let mut cache = crate::poison::mutex(attachment_cache());
     let file_id = cache.entries.get(key)?.clone();
-    if let Some(position) = cache.order.iter().position(|cache_key| cache_key == key) {
-        if let Some(cache_key) = cache.order.remove(position) {
-            cache.order.push_front(cache_key);
-        }
+    if let Some(position) = cache.order.iter().position(|cache_key| cache_key == key)
+        && let Some(cache_key) = cache.order.remove(position)
+    {
+        cache.order.push_front(cache_key);
     }
     Some(file_id)
 }
@@ -584,10 +582,10 @@ fn remember_file_id(key: [u8; 32], file_id: String) {
     let mut cache = crate::poison::mutex(attachment_cache());
     if let std::collections::hash_map::Entry::Occupied(mut entry) = cache.entries.entry(key) {
         entry.insert(file_id);
-        if let Some(position) = cache.order.iter().position(|cache_key| *cache_key == key) {
-            if let Some(cache_key) = cache.order.remove(position) {
-                cache.order.push_front(cache_key);
-            }
+        if let Some(position) = cache.order.iter().position(|cache_key| *cache_key == key)
+            && let Some(cache_key) = cache.order.remove(position)
+        {
+            cache.order.push_front(cache_key);
         }
         return;
     }

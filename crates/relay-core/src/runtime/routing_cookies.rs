@@ -1,5 +1,5 @@
 use cookie_store::{Cookie, CookieStore};
-use reqwest::header::{HeaderMap, HeaderValue, COOKIE, SET_COOKIE};
+use reqwest::header::{COOKIE, HeaderMap, HeaderValue, SET_COOKIE};
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 use url::Url;
@@ -15,10 +15,10 @@ impl RoutingCookies {
     pub(super) fn for_credential(&self, credential: &[u8]) -> Arc<RoutingCookieJar> {
         let owner: [u8; 32] = Sha256::digest(credential).into();
         let mut active_credential_jar = crate::poison::mutex(&self.active_credential_jar);
-        if let Some((previous_credential, jar)) = active_credential_jar.as_ref() {
-            if *previous_credential == owner {
-                return jar.clone();
-            }
+        if let Some((previous_credential, jar)) = active_credential_jar.as_ref()
+            && *previous_credential == owner
+        {
+            return jar.clone();
         }
         let jar = Arc::new(RoutingCookieJar::default());
         *active_credential_jar = Some((owner, jar.clone()));
@@ -50,11 +50,11 @@ impl RoutingCookieJar {
             .map(|(name, cookie_value)| format!("{name}={cookie_value}"))
             .collect::<Vec<_>>()
             .join("; ");
-        if !cookie_header.is_empty() {
-            if let Ok(mut cookie_header_value) = HeaderValue::from_str(&cookie_header) {
-                cookie_header_value.set_sensitive(true);
-                headers.insert(COOKIE, cookie_header_value);
-            }
+        if !cookie_header.is_empty()
+            && let Ok(mut cookie_header_value) = HeaderValue::from_str(&cookie_header)
+        {
+            cookie_header_value.set_sensitive(true);
+            headers.insert(COOKIE, cookie_header_value);
         }
     }
 
@@ -157,11 +157,13 @@ mod tests {
         let new_cookie_jar = account.for_credential(b"synthetic-new");
         observe(&previous_cookie_jar, "__oailb=late; Path=/; Secure");
         assert!(sent(&new_cookie_jar, &url("/backend-api/codex/models")).is_none());
-        assert!(sent(
-            &other_account.for_credential(b"synthetic-old"),
-            &url("/backend-api/codex/models")
-        )
-        .is_none());
+        assert!(
+            sent(
+                &other_account.for_credential(b"synthetic-old"),
+                &url("/backend-api/codex/models")
+            )
+            .is_none()
+        );
         observe(&new_cookie_jar, "__oailb=new; Path=/; Secure");
         assert_eq!(
             sent(

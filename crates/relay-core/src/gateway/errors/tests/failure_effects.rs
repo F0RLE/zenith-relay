@@ -1,6 +1,25 @@
 use super::*;
 
 #[test]
+fn http3_send_start_timeout_is_terminal_without_account_penalty_or_replay() {
+    let error = AuthorizedRequestError::SendStartTimeout;
+    assert_eq!(
+        error.execution_certainty(),
+        crate::scheduler::rotation::ExecutionCertainty::Unknown
+    );
+    let failure = AttemptFailure::authorized_request(error);
+    assert_eq!(failure.status, StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(failure.category, error_codes::HTTP_SEND_START_TIMEOUT);
+    assert!(!failure_category_requires_cooldown(failure.category));
+    assert!(!failure_category_affects_account_state(failure.category));
+    assert!(!retryable_failure(failure.status, failure.category, false));
+    assert_eq!(
+        crate::ErrorOrigin::Account.for_category(failure.category),
+        crate::ErrorOrigin::Relay
+    );
+}
+
+#[test]
 fn local_http_headers_deadline_keeps_unknown_execution_without_account_penalty_or_replay() {
     let error = AuthorizedRequestError::HeadersTimeout;
     assert_eq!(

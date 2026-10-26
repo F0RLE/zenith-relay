@@ -93,23 +93,20 @@ pub(in crate::gateway) fn client_request_identity(
             ],
         )
         .is_none()
-    {
-        if let Some(metadata) = request
+        && let Some(metadata) = request
             .pointer("/metadata/user_id")
             .and_then(Value::as_str)
             .and_then(turn_metadata)
-        {
-            if let (Some(child), Some(parent)) = (
-                identity_field(&metadata, "session_id"),
-                identity_field(&metadata, "parent_session_id"),
-            ) {
-                let header_child =
-                    single_header(headers, "x-claude-code-session-id").and_then(valid_identity);
-                if child != parent && header_child.is_none_or(|header| header == child) {
-                    context_id = Some(fingerprint("x-claude-code-session-id", child));
-                    affinity_id = Some(fingerprint("x-claude-code-session-id", parent));
-                }
-            }
+        && let (Some(child), Some(parent)) = (
+            identity_field(&metadata, "session_id"),
+            identity_field(&metadata, "parent_session_id"),
+        )
+    {
+        let header_child =
+            single_header(headers, "x-claude-code-session-id").and_then(valid_identity);
+        if child != parent && header_child.is_none_or(|header| header == child) {
+            context_id = Some(fingerprint("x-claude-code-session-id", child));
+            affinity_id = Some(fingerprint("x-claude-code-session-id", parent));
         }
     }
     ClientRequestIdentity {

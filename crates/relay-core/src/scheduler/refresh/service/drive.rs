@@ -2,17 +2,17 @@ use super::super::RefreshCompletion;
 use super::*;
 use futures_util::FutureExt;
 use std::panic::AssertUnwindSafe;
-use std::sync::{atomic::Ordering, Arc, Weak};
+use std::sync::{Arc, Weak, atomic::Ordering};
 use std::time::Duration;
 use tokio::{sync::watch, task::JoinSet};
 
 impl<T: Send + Sync + 'static> RefreshService<T> {
     pub(super) fn remove_entry(state: &mut State<T>, key: &RefreshKey) {
         state.coordinator.remove_kind(&key.identity, key.kind);
-        if let Some(refresh_entry) = state.entries.remove(key) {
-            if let Some(completion_sender) = refresh_entry.completion_sender {
-                completion_sender.send_replace(Some(Err(RefreshWaitError::Stale)));
-            }
+        if let Some(refresh_entry) = state.entries.remove(key)
+            && let Some(completion_sender) = refresh_entry.completion_sender
+        {
+            completion_sender.send_replace(Some(Err(RefreshWaitError::Stale)));
         }
     }
 
@@ -119,10 +119,10 @@ impl<T: Send + Sync + 'static> RefreshService<T> {
         if let Some(refresh_entry) = service_state.entries.get_mut(&key) {
             let observation =
                 job_result.map(|refresh_result| Arc::new(refresh_result.refresh_value));
-            if let Ok(cached_value) = &observation {
-                if (self.is_cacheable)(cached_value) {
-                    refresh_entry.cached = Some(cached_value.clone());
-                }
+            if let Ok(cached_value) = &observation
+                && (self.is_cacheable)(cached_value)
+            {
+                refresh_entry.cached = Some(cached_value.clone());
             }
             if let Some(completion_sender) = refresh_entry.completion_sender.take() {
                 completion_sender.send_replace(Some(observation));

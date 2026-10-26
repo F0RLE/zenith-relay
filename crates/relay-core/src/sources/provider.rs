@@ -32,11 +32,11 @@ impl ProviderSource {
                 "source base URL must not contain a query or fragment".to_string(),
             ));
         }
-        if let Some(proxy_url) = &self.proxy_url {
-            if !proxy_url.trim().is_empty() {
-                crate::proxy::normalize_proxy_url(proxy_url)
-                    .map_err(|message| Error::Validation(message.to_string()))?;
-            }
+        if let Some(proxy_url) = &self.proxy_url
+            && !proxy_url.trim().is_empty()
+        {
+            crate::proxy::normalize_proxy_url(proxy_url)
+                .map_err(|message| Error::Validation(message.to_string()))?;
         }
         HeaderValue::from_str(&format!("Bearer {}", self.api_key)).map_err(|_| {
             Error::Validation("source API key contains invalid header characters".to_string())

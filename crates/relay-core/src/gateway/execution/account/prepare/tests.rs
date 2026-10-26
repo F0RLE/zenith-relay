@@ -2,6 +2,57 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn bps_account_borrows_history_until_a_route_rewrite_is_needed() {
+    let request = json!({"model":"synthetic", "input":"Synthetic history. ".repeat(65536),
+        "context_management":[], "metadata":{"synthetic":"preserve"}});
+    for rewrite in [false, true] {
+        let body = match prepare_account_upstream_body(
+            &request,
+            "synthetic",
+            rewrite,
+            AccountEndpoint::Wake,
+            true,
+            true,
+        ) {
+            Ok(body) => body,
+            Err(_) => panic!("valid BPS request was rejected"),
+        };
+        assert!(matches!(body, Cow::Borrowed(_)));
+        assert!(std::ptr::eq(
+            body["input"].as_str().unwrap().as_ptr(),
+            request["input"].as_str().unwrap().as_ptr()
+        ));
+        let wire = super::super::super::basis_points::prepare_request(&body).unwrap();
+        assert!(wire.get("context_management").is_none());
+        assert_eq!(request["metadata"]["synthetic"], "preserve");
+    }
+    let mut body = match prepare_account_upstream_body(
+        &request,
+        "other",
+        true,
+        AccountEndpoint::Wake,
+        false,
+        true,
+    ) {
+        Ok(body) => body,
+        Err(_) => panic!("valid model rewrite was rejected"),
+    };
+    assert!(matches!(body, Cow::Owned(_)));
+    assert_eq!(body["model"], "other");
+    body.to_mut()["input"] =
+        json!("<environment_context><timezone>UTC</timezone></environment_context>");
+    crate::request_timezone::rewrite_request_timezone(body.to_mut(), "Europe/Minsk");
+    assert!(body["input"].as_str().unwrap().contains("Europe/Minsk"));
+    assert_eq!(request["model"], "synthetic");
+    assert!(
+        request["input"]
+            .as_str()
+            .unwrap()
+            .starts_with("Synthetic history.")
+    );
+}
+
+#[test]
 fn basis_points_accepts_lite_items_without_inheriting_serial_transport_policy() {
     let request = json!({
         "model": "test-model",
@@ -21,14 +72,16 @@ fn basis_points_accepts_lite_items_without_inheriting_serial_transport_policy() 
     let service_tier_policy = ServiceTierPolicy::pool_owned(&request);
     let mut last_adapter_error = None;
 
-    assert!(reject_account_basis_points(
-        &request,
-        &service_tier_policy,
-        DefaultServiceTier::Standard,
-        AccountEndpoint::Wake,
-        &mut last_adapter_error,
-    )
-    .is_none());
+    assert!(
+        reject_account_basis_points(
+            &request,
+            &service_tier_policy,
+            DefaultServiceTier::Standard,
+            AccountEndpoint::Wake,
+            &mut last_adapter_error,
+        )
+        .is_none()
+    );
     assert!(last_adapter_error.is_none());
 
     let normalized = match prepare_account_upstream_body(
@@ -51,6 +104,7 @@ fn basis_points_accepts_lite_items_without_inheriting_serial_transport_policy() 
         &mut last_adapter_error,
         &mut schema_validation_ms,
         true,
+        &mut super::super::super::basis_points::RequestCatalog::default(),
     ) {
         Ok(body) => body,
         Err(_) => panic!("valid tool catalog should translate for Basis Points"),

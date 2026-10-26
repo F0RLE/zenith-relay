@@ -1,6 +1,6 @@
-use super::super::{normalized_set, AccountModelInventory, GatewayRuntime, IMAGE_API_MODEL};
-use crate::error_codes;
+use super::super::{AccountModelInventory, GatewayRuntime, IMAGE_API_MODEL, normalized_set};
 use crate::CandidateKind;
+use crate::error_codes;
 use std::sync::atomic::Ordering;
 
 impl GatewayRuntime {
@@ -59,7 +59,8 @@ impl GatewayRuntime {
             // The native image model itself never changes with a text model.
             account.image_bridge_revision.fetch_add(1, Ordering::AcqRel);
         }
-        crate::poison::mutex(&self.registry).replace(account_id, published_models.iter());
+        crate::poison::mutex(&self.model_state.registry)
+            .replace(account_id, published_models.iter());
         scheduler.upsert(candidate);
         if changed {
             // Transport cards describe the old inventory.

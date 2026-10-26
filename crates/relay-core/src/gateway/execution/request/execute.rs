@@ -1,11 +1,12 @@
 use super::super::compatibility::{
-    incompatible_routes, record_adapter_rejection, AdapterRejection, RouteCompatibility,
+    AdapterRejection, RouteCompatibility, incompatible_routes, record_adapter_rejection,
 };
-use super::drive::{drive_selected_attempt, AttemptCarry, DriveAttemptInput, DrivenAttempt};
+use super::RequestExecution;
+use super::drive::{AttemptCarry, DriveAttemptInput, DrivenAttempt, drive_selected_attempt};
 use super::prelude::*;
 use super::recovery::{adapter_error_response, request_has_previous_response_id};
-use super::selection::{handle_selection_miss, SelectionMiss, SelectionMissInput};
-use super::RequestExecution;
+use super::selection::{SelectionMiss, SelectionMissInput, handle_selection_miss};
+use super::state::AttemptState;
 
 pub(in crate::gateway::execution) async fn execute_request(
     context: RequestExecution,
@@ -37,8 +38,8 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
         forwarded_headers,
         client_context_id,
         client_affinity_id,
-        mut response_affinity_key,
-        mut requires_affinity_owner,
+        response_affinity_key,
+        requires_affinity_owner,
         client_wire_api,
         responses_lite,
         allow_previous_response_reset,
@@ -48,20 +49,12 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
         transport_fallback,
         mut reserved_candidate,
     } = context;
-    let mut tried: HashSet<String> = Default::default();
-    // Local preparation failures belong to this request, not provider health.
-    // Recovery may revisit dispatched members after their cooldown, but it
-    // must never recycle a route that cannot prepare the unchanged request.
-    let mut preparation_exclusions = HashSet::new();
-    let mut attempt = attempt_offset;
-    let mut confirmed_response_missing = false;
-    let mut repairs = AttemptRepairs::default();
-    let mut last_failure: Option<AttemptFailure> = None;
-    let mut last_adapter_error: Option<AdapterError> = None;
-    let mut last_preserved_upstream_error: Option<PreservedUpstreamError> = None;
-    let mut last_failure_origin = crate::ErrorOrigin::Relay;
-    let mut retry_window_expired = false;
-    let mut has_unpaired_tool_output = !unpaired_tool_output_ids(&request).is_empty();
+    let mut state = AttemptState::new(
+        attempt_offset,
+        response_affinity_key,
+        requires_affinity_owner,
+        &request,
+    );
     let mut prompt_affinity_key = runtime.prompt_affinity_key(
         &key.id,
         &resolved_model,
@@ -79,30 +72,27 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
         if !budget.can_dispatch() {
             break;
         }
-        if !repairs.quota_yield {
-            repairs.quota_yield = true;
-            if let Some(affinity_key) = response_affinity_key.clone() {
-                if runtime.automatic_response_owner_should_yield(
+        if !state.continuation.repairs.quota_yield {
+            state.continuation.repairs.quota_yield = true;
+            if let Some(affinity_key) = state.continuation.response_affinity_key.clone()
+                && runtime.automatic_response_owner_should_yield(
                     &key,
                     &affinity_key,
                     &resolved_model,
                     candidate_protocols(client_wire_api),
-                    &tried,
+                    &state.retry.tried,
                     now_ms(),
-                ) && prepare_response_owner_change(
+                )
+                && prepare_response_owner_change(
                     &runtime,
                     &key.id,
                     &mut request,
                     &resolved_model,
-                    requires_affinity_owner,
+                    state.continuation.requires_affinity_owner,
                     now_ms(),
-                ) {
-                    clear_materialized_continuation(
-                        &mut response_affinity_key,
-                        &mut requires_affinity_owner,
-                        &mut has_unpaired_tool_output,
-                    );
-                }
+                )
+            {
+                state.continuation.clear_materialized();
             }
         }
         // Recovery can deliberately remove an unusable opaque response id.
@@ -116,12 +106,14 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
         // release a replayable request's optional tool affinity. Otherwise
         // selection stops at its already-tried owner despite healthy routes.
         // Opaque response references and unpaired tool outputs stay pinned.
-        if !requires_affinity_owner
-            && last_failure
+        if !state.continuation.requires_affinity_owner
+            && state
+                .retry
+                .last_failure
                 .as_ref()
                 .is_some_and(|failure| failure_category_requires_cooldown(failure.category))
         {
-            response_affinity_key = None;
+            state.continuation.response_affinity_key = None;
         }
         let (mut incompatible, mut admitted, admission_error) =
             incompatible_routes(RouteCompatibility {
@@ -134,7 +126,7 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
                 tier_policy: &service_tier_policy,
                 now_ms: now_ms(),
             });
-        incompatible.extend(preparation_exclusions.iter().cloned());
+        incompatible.extend(state.retry.preparation_exclusions.iter().cloned());
         let retry_context = CandidateRetryContext {
             runtime: &runtime,
             key: &key,
@@ -143,10 +135,10 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
             operation: crate::scheduler::rotation::RotationOperation::Text,
             exclusions: &incompatible,
         };
-        let mut selection_exclusions = tried.clone();
+        let mut selection_exclusions = state.retry.tried.clone();
         selection_exclusions.extend(incompatible.iter().cloned());
         if admission_error.is_some() {
-            last_adapter_error = admission_error;
+            state.retry.last_adapter_error = admission_error;
         }
         // Revalidate HTTP compatibility and identity, but keep the existing
         // reservation. Releasing it and selecting again advances rotation twice
@@ -168,7 +160,7 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
                     candidate_protocols(client_wire_api),
                     &selection_exclusions,
                     (
-                        response_affinity_key.as_deref(),
+                        state.continuation.response_affinity_key.as_deref(),
                         prompt_affinity_key.as_deref(),
                     ),
                     now_ms(),
@@ -177,12 +169,7 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
                 .await
         };
         let Some((selected, lease)) = selected else {
-            release_encrypted_context_repair_owner(
-                &mut repairs,
-                &mut response_affinity_key,
-                &mut requires_affinity_owner,
-                &runtime,
-            );
+            state.continuation.release_repair_owner(&runtime);
             match handle_selection_miss(SelectionMissInput {
                 budget: &budget,
                 runtime: &runtime,
@@ -191,20 +178,20 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
                 client_wire_api,
                 stream,
                 request_json: &mut request,
-                response_affinity_key: &mut response_affinity_key,
-                requires_affinity_owner: &mut requires_affinity_owner,
+                response_affinity_key: &mut state.continuation.response_affinity_key,
+                requires_affinity_owner: &mut state.continuation.requires_affinity_owner,
                 allow_previous_response_reset,
                 has_previous_response_id,
-                has_unpaired_tool_output: &mut has_unpaired_tool_output,
-                repairs: &mut repairs,
-                tried: &mut tried,
+                has_unpaired_tool_output: &mut state.continuation.has_unpaired_tool_output,
+                repairs: &mut state.continuation.repairs,
+                tried: &mut state.retry.tried,
                 retry_context: &retry_context,
-                last_failure: &last_failure,
-                has_preparation_error: !preparation_exclusions.is_empty(),
-                last_adapter_error: &mut last_adapter_error,
+                last_failure: &state.retry.last_failure,
+                has_preparation_error: !state.retry.preparation_exclusions.is_empty(),
+                last_adapter_error: &mut state.retry.last_adapter_error,
                 retry_until_available,
-                attempt,
-                retry_window_expired,
+                attempt: state.retry.attempt,
+                retry_window_expired: state.retry.window_expired,
             })
             .await
             {
@@ -212,7 +199,7 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
                 SelectionMiss::Stop {
                     retry_window_expired: expired,
                 } => {
-                    retry_window_expired = expired;
+                    state.retry.window_expired = expired;
                     break;
                 }
                 SelectionMiss::AdapterError(error) => {
@@ -220,7 +207,7 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
                         &runtime,
                         AdapterRejection {
                             request_id: &request_id,
-                            attempt,
+                            attempt: state.retry.attempt,
                             local_key_id: &key.id,
                             requested_model: &requested_model,
                             resolved_model: &resolved_model,
@@ -237,14 +224,13 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
                 SelectionMiss::Respond(response) => return response,
             }
         };
-        detach_encrypted_context_repair_owner(
-            &repairs,
-            &mut response_affinity_key,
-            &mut requires_affinity_owner,
-        );
+        state.continuation.detach_repair_owner();
         let Some(route) = admitted.remove(&selected.candidate_id) else {
-            preparation_exclusions.insert(selected.candidate_id.clone());
-            tried.insert(selected.candidate_id.clone());
+            state
+                .retry
+                .preparation_exclusions
+                .insert(selected.candidate_id.clone());
+            state.retry.tried.insert(selected.candidate_id.clone());
             drop(lease);
             continue;
         };
@@ -268,31 +254,15 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
             service_tier_policy: &service_tier_policy,
             tool_policy: &mut tool_policy,
             client_context_id: &client_context_id,
-            last_adapter_error: &mut last_adapter_error,
             forwarded_headers: &forwarded_headers,
-            attempt: &mut attempt,
-            last_failure: &mut last_failure,
-            last_failure_origin: &mut last_failure_origin,
-            tried: &mut tried,
-            preparation_exclusions: &mut preparation_exclusions,
+            state: &mut state,
             has_previous_response_id,
-            has_unpaired_tool_output: &mut has_unpaired_tool_output,
-            requires_affinity_owner: &mut requires_affinity_owner,
-            repairs: &mut repairs,
-            last_preserved_upstream_error: &mut last_preserved_upstream_error,
-            response_affinity_key: &mut response_affinity_key,
             allow_previous_response_reset,
-            confirmed_response_missing: &mut confirmed_response_missing,
         })
         .await;
         let kept = match driven {
             DrivenAttempt::Respond(response) => {
-                release_encrypted_context_repair_owner(
-                    &mut repairs,
-                    &mut response_affinity_key,
-                    &mut requires_affinity_owner,
-                    &runtime,
-                );
+                state.continuation.release_repair_owner(&runtime);
                 return response;
             }
             DrivenAttempt::Continue(kept) => kept,
@@ -302,12 +272,7 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
                 requested_model: next_requested_model,
                 prompt_affinity_key: _,
             }) => {
-                release_encrypted_context_repair_owner(
-                    &mut repairs,
-                    &mut response_affinity_key,
-                    &mut requires_affinity_owner,
-                    &runtime,
-                );
+                state.continuation.release_repair_owner(&runtime);
                 request = next_request;
                 request_id = next_request_id;
                 requested_model = next_requested_model;
@@ -320,16 +285,11 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
         prompt_affinity_key = kept.prompt_affinity_key;
     }
 
-    release_encrypted_context_repair_owner(
-        &mut repairs,
-        &mut response_affinity_key,
-        &mut requires_affinity_owner,
-        &runtime,
-    );
+    state.continuation.release_repair_owner(&runtime);
 
     if allow_previous_response_reset
         && request_has_previous_response_id(client_wire_api, &request)
-        && confirmed_response_missing
+        && state.continuation.confirmed_response_missing
     {
         let mut reset_request = request;
         if drop_materialized_previous_response_id(
@@ -357,7 +317,7 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
                 client_wire_api,
                 responses_lite,
                 allow_previous_response_reset: false,
-                attempt_offset: attempt,
+                attempt_offset: state.retry.attempt,
                 budget,
                 transport,
                 transport_fallback,
@@ -372,31 +332,34 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
         );
     }
 
-    if last_failure.is_none() {
-        if let Some(error) = last_adapter_error {
-            record_adapter_rejection(
-                &runtime,
-                AdapterRejection {
-                    request_id: &request_id,
-                    attempt,
-                    local_key_id: &key.id,
-                    requested_model: &requested_model,
-                    resolved_model: &resolved_model,
-                    client_context_id: client_context_id.as_deref(),
-                    wire_api: client_wire_api,
-                    transport,
-                    service_tier: service_tier_policy.selected_tier(),
-                },
-                &error,
-                started.elapsed().as_millis() as u64,
-            );
-            return adapter_error_response(error, Some(&request_id));
-        }
+    if state.retry.last_failure.is_none()
+        && let Some(error) = state.retry.last_adapter_error
+    {
+        record_adapter_rejection(
+            &runtime,
+            AdapterRejection {
+                request_id: &request_id,
+                attempt: state.retry.attempt,
+                local_key_id: &key.id,
+                requested_model: &requested_model,
+                resolved_model: &resolved_model,
+                client_context_id: client_context_id.as_deref(),
+                wire_api: client_wire_api,
+                transport,
+                service_tier: service_tier_policy.selected_tier(),
+            },
+            &error,
+            started.elapsed().as_millis() as u64,
+        );
+        return adapter_error_response(error, Some(&request_id));
     }
     if let Some(error) = crate::gateway::errors::admission_error(&budget) {
         return error;
     }
-    let failure = AttemptFailure::after_exhausted_attempts(retry_window_expired, last_failure);
+    let failure = AttemptFailure::after_exhausted_attempts(
+        state.retry.window_expired,
+        state.retry.last_failure,
+    );
     finish_request_failure(RequestFailureInput {
         runtime: &runtime,
         key: &key,
@@ -404,10 +367,10 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
         protocols: candidate_protocols(client_wire_api),
         operation: crate::scheduler::rotation::RotationOperation::Text,
         exclusions: &HashSet::new(),
-        response_affinity_key: response_affinity_key.as_deref(),
+        response_affinity_key: state.continuation.response_affinity_key.as_deref(),
         failure,
-        preserved: last_preserved_upstream_error.as_ref(),
-        failure_origin: last_failure_origin,
+        preserved: state.retry.last_preserved_upstream_error.as_ref(),
+        failure_origin: state.retry.last_failure_origin,
         request_id: &request_id,
     })
 }

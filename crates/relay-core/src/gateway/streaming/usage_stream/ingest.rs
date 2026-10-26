@@ -1,4 +1,4 @@
-use super::super::fast_delta::{fast_response_delta, FastResponseDelta};
+use super::super::fast_delta::{FastResponseDelta, fast_response_delta};
 use super::*;
 
 impl<S> UsageStream<S> {
@@ -15,16 +15,16 @@ impl<S> UsageStream<S> {
         if event.success {
             event.tool_use.finish();
         }
-        if !event.success {
-            if let Some(routing) = event.routing.as_mut() {
-                routing.attempt_outcome = Some(
-                    if event.error_category.as_deref() == Some(error_codes::CLIENT_CANCELLED) {
-                        crate::AttemptOutcome::ClientDisconnected
-                    } else {
-                        crate::AttemptOutcome::ReturnedFailure
-                    },
-                );
-            }
+        if !event.success
+            && let Some(routing) = event.routing.as_mut()
+        {
+            routing.attempt_outcome = Some(
+                if event.error_category.as_deref() == Some(error_codes::CLIENT_CANCELLED) {
+                    crate::AttemptOutcome::ClientDisconnected
+                } else {
+                    crate::AttemptOutcome::ReturnedFailure
+                },
+            );
         }
         if !event.success
             && event.http_status < 400
@@ -44,15 +44,13 @@ impl<S> UsageStream<S> {
             .map(|ttft_ms| event.latency_ms.saturating_sub(ttft_ms))
             .filter(|duration| *duration > 0);
         (self.completion)(&mut event, self.response_id.as_deref(), self.cooldown_hint);
-        if event.success {
-            if let Some(transport) = event
+        if event.success
+            && let Some(transport) = event
                 .routing
                 .as_mut()
                 .and_then(|routing| routing.transport.as_mut())
-            {
-                transport.client_response_ready_ms =
-                    Some(self.started.elapsed().as_millis() as u64);
-            }
+        {
+            transport.client_response_ready_ms = Some(self.started.elapsed().as_millis() as u64);
         }
         if let Some(runtime) = self.runtime.as_deref() {
             emit_usage(runtime, event);
@@ -316,10 +314,10 @@ impl<S> UsageStream<S> {
         if let Some(usage) = terminal.usage {
             self.merge_usage_snapshot(&usage);
         }
-        if let Some(service_tier) = terminal.applied_service_tier {
-            if let Some(usage_event) = self.event.as_mut() {
-                usage_event.applied_service_tier = Some(service_tier);
-            }
+        if let Some(service_tier) = terminal.applied_service_tier
+            && let Some(usage_event) = self.event.as_mut()
+        {
+            usage_event.applied_service_tier = Some(service_tier);
         }
         if self.expected_model.as_deref().is_some_and(|expected| {
             terminal
@@ -627,10 +625,10 @@ fn classify_sse_prefix(bytes: &[u8]) -> Option<bool> {
             if line.starts_with(b":") {
                 return Some(false);
             }
-            if let Some(event_name) = line.strip_prefix(b"event:") {
-                if is_terminal_sse_event(event_name.trim_ascii()) {
-                    return Some(true);
-                }
+            if let Some(event_name) = line.strip_prefix(b"event:")
+                && is_terminal_sse_event(event_name.trim_ascii())
+            {
+                return Some(true);
             }
             if let Some(data_line) = line.strip_prefix(b"data:") {
                 if !data_bytes.is_empty() {

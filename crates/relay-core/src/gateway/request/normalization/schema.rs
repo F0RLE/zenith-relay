@@ -30,11 +30,11 @@ pub(super) fn inline_local_refs(schema_value: &mut Value) {
     {
         return;
     }
-    if !contains_ref(&expanded_schema) {
-        if let Some(schema_object) = expanded_schema.as_object_mut() {
-            schema_object.shift_remove("$defs");
-            schema_object.shift_remove("definitions");
-        }
+    if !contains_ref(&expanded_schema)
+        && let Some(schema_object) = expanded_schema.as_object_mut()
+    {
+        schema_object.shift_remove("$defs");
+        schema_object.shift_remove("definitions");
     }
     *schema_value = expanded_schema;
 }
@@ -106,31 +106,30 @@ fn expand(
                 .all(|key| matches!(key.as_str(), "$ref" | "title" | "description"))
         })
         .map(str::to_owned);
-    if let Some(reference) = reference {
-        if !stack.contains(&reference) {
-            if let Some(referenced_schema) = root_schema.pointer(&reference[1..]) {
-                if !charge(referenced_schema, budget) {
-                    return None;
-                }
-                // Boolean schemas with annotations retain their reference.
-                if referenced_schema.is_object()
-                    || (referenced_schema.is_boolean() && schema_object.len() == 1)
-                {
-                    stack.push(reference);
-                    let mut resolved_schema = referenced_schema.clone();
-                    expand(&mut resolved_schema, root_schema, stack, budget, depth + 1)?;
-                    stack.pop();
-                    if let Some(resolved_object) = resolved_schema.as_object_mut() {
-                        for (key, sibling) in std::mem::take(schema_object) {
-                            if key != "$ref" {
-                                resolved_object.insert(key, sibling);
-                            }
-                        }
+    if let Some(reference) = reference
+        && !stack.contains(&reference)
+        && let Some(referenced_schema) = root_schema.pointer(&reference[1..])
+    {
+        if !charge(referenced_schema, budget) {
+            return None;
+        }
+        // Boolean schemas with annotations retain their reference.
+        if referenced_schema.is_object()
+            || (referenced_schema.is_boolean() && schema_object.len() == 1)
+        {
+            stack.push(reference);
+            let mut resolved_schema = referenced_schema.clone();
+            expand(&mut resolved_schema, root_schema, stack, budget, depth + 1)?;
+            stack.pop();
+            if let Some(resolved_object) = resolved_schema.as_object_mut() {
+                for (key, sibling) in std::mem::take(schema_object) {
+                    if key != "$ref" {
+                        resolved_object.insert(key, sibling);
                     }
-                    *schema_value = resolved_schema;
-                    return Some(());
                 }
             }
+            *schema_value = resolved_schema;
+            return Some(());
         }
     }
     visit_subschemas(schema_object, |child_schema| {

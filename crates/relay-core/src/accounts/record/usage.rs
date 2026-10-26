@@ -1,4 +1,4 @@
-use super::auth::{explicit_account_disable, AccountAuthState, AccountHealthState};
+use super::auth::{AccountAuthState, AccountHealthState, explicit_account_disable};
 use crate::error_codes;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,10 +45,9 @@ pub fn reduce_account_usage(
         if matches!(
             state.auth_state,
             AccountAuthState::Error | AccountAuthState::RequiresReauth(_)
-        ) {
-            if let Some(auth_state) = successful_auth_state {
-                state.auth_state = auth_state;
-            }
+        ) && let Some(auth_state) = successful_auth_state
+        {
+            state.auth_state = auth_state;
         }
         return AccountUsageUpdate {
             state,

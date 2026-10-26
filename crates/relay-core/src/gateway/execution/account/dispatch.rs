@@ -1,16 +1,16 @@
 use super::super::super::errors::{
-    apply_failure_state, current_failure_state, settle_route_failure, AttemptFailure,
+    AttemptFailure, apply_failure_state, current_failure_state, settle_route_failure,
 };
 use super::super::super::now_ms;
 use super::super::super::request::{
-    apply_codex_routing_hint, codex_client_version, forwarded_codex_headers, AccountEndpoint,
-    CODEX_RESPONSES_LITE_HEADER,
+    AccountEndpoint, CODEX_RESPONSES_LITE_HEADER, apply_codex_routing_hint, codex_client_version,
+    forwarded_codex_headers,
 };
 use super::super::super::response::{
-    emit_usage, populate_tokens, stop_basis_points_event, usage_event, UsageAttempt,
+    UsageAttempt, emit_usage, populate_tokens, stop_basis_points_event, usage_event,
 };
 use super::super::super::turn_state::request_scope;
-use super::super::{attempt_error_response, finish_request_failure, RequestFailureInput};
+use super::super::{RequestFailureInput, attempt_error_response, finish_request_failure};
 use crate::runtime::{
     AuthenticatedKey, AuthorizationIdentityPolicy, AuthorizedRequestError, CandidateLease,
     ExecutorRoute,
@@ -33,6 +33,7 @@ pub(super) enum AccountDispatch {
 }
 
 pub(super) struct DispatchedAccountAttempt {
+    pub(super) bps_catalog: super::super::basis_points::RequestCatalog,
     pub(super) route: ExecutorRoute,
     pub(super) status: StatusCode,
     pub(super) response_headers: HeaderMap,
@@ -48,6 +49,7 @@ pub(super) struct DispatchedAccountAttempt {
 pub(super) struct AccountDispatchInput<'a> {
     pub(super) preparation_started: Option<Instant>,
     pub(super) preparation: RequestPreparationDiagnostics,
+    pub(super) bps_catalog: super::super::basis_points::RequestCatalog,
     pub(super) runtime: &'a GatewayRuntime,
     pub(super) key: &'a AuthenticatedKey,
     pub(super) lease: &'a CandidateLease,
@@ -82,6 +84,7 @@ pub(super) async fn dispatch_account_attempt(
     let AccountDispatchInput {
         preparation_started,
         mut preparation,
+        bps_catalog,
         runtime,
         key,
         lease,
@@ -114,8 +117,8 @@ pub(super) async fn dispatch_account_attempt(
     let mut discovery_session = None;
     if basis_points_route {
         let (body, session) =
-            match super::super::basis_points::discovery::execution::prepare_dispatch(
-                original_request,
+            match super::super::basis_points::discovery::execution::prepare_dispatch_with_catalog(
+                (original_request, bps_catalog.clone()),
                 upstream_body,
                 budget,
                 &mut tool_use,
@@ -131,7 +134,7 @@ pub(super) async fn dispatch_account_attempt(
                             selected_error_origin,
                             Some(request_id),
                         ),
-                    )
+                    );
                 }
             };
         upstream_body = body;
@@ -229,11 +232,12 @@ pub(super) async fn dispatch_account_attempt(
         .header(CONTENT_TYPE, "application/json")
         .header(ACCEPT, "application/json")
         .headers(request_headers);
-    if endpoint == AccountEndpoint::Compact && !basis_points_route {
-        if let Some(responses_lite_header) = route_responses_lite.as_ref() {
-            upstream_request =
-                upstream_request.header(CODEX_RESPONSES_LITE_HEADER, responses_lite_header.clone());
-        }
+    if endpoint == AccountEndpoint::Compact
+        && !basis_points_route
+        && let Some(responses_lite_header) = route_responses_lite.as_ref()
+    {
+        upstream_request =
+            upstream_request.header(CODEX_RESPONSES_LITE_HEADER, responses_lite_header.clone());
     }
     route.observe_http_dispatch(None);
     if let Some(preparation_started) = preparation_started {
@@ -399,6 +403,7 @@ pub(super) async fn dispatch_account_attempt(
         }
     }
     AccountDispatch::Ready(Box::new(DispatchedAccountAttempt {
+        bps_catalog,
         route,
         status,
         response_headers,

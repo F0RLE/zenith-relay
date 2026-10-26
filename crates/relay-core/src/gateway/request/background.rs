@@ -137,10 +137,8 @@ fn metadata_kind_value(metadata_value: &Value) -> Option<&'static str> {
         }
         Value::Object(object) => object.iter().find_map(|(key, nested_value)| {
             let relevant = metadata_operation_key(key);
-            if relevant {
-                if let Some(kind) = metadata_kind(nested_value) {
-                    return Some(kind);
-                }
+            if relevant && let Some(kind) = metadata_kind(nested_value) {
+                return Some(kind);
             }
             if nested_value.is_object() || nested_value.is_array() {
                 metadata_kind_value(nested_value)

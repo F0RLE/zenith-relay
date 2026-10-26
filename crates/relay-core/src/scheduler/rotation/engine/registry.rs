@@ -123,10 +123,10 @@ impl RotationEngine {
             );
         }
         self.recompute_capacity_limit(&capacity_key);
-        if let Some(previous_capacity_key) = previous_capacity_key {
-            if previous_capacity_key != capacity_key {
-                self.recompute_capacity_limit(&previous_capacity_key);
-            }
+        if let Some(previous_capacity_key) = previous_capacity_key
+            && previous_capacity_key != capacity_key
+        {
+            self.recompute_capacity_limit(&previous_capacity_key);
         }
         if routes_changed {
             self.prune_round_robin_cursors();

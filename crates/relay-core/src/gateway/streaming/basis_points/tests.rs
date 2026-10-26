@@ -38,7 +38,7 @@ async fn text_arrives_before_terminal_tools_are_withheld_and_drop_cancels_reader
     let inner: UpstreamStream = Box::pin(stream::unfold(receiver, |mut receiver| async {
         receiver.recv().await.map(|bytes| (Ok(bytes), receiver))
     }));
-    let mut body = translate_stream(Bytes::new(), inner, request());
+    let mut body = translate_stream(Bytes::new(), inner, request().into());
     sender
         .send(frame(
             json!({"type":"response.output_text.delta","output_index":0,"delta":"Working"}),
@@ -57,9 +57,11 @@ async fn text_arrives_before_terminal_tools_are_withheld_and_drop_cancels_reader
         ))
         .await
         .unwrap();
-    assert!(tokio::time::timeout(Duration::from_millis(10), body.next())
-        .await
-        .is_err());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), body.next())
+            .await
+            .is_err()
+    );
     sender.send(frame(completed(json!([{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"Working"}]},call("inspect")])))).await.unwrap();
     let mut tail = Vec::new();
     while let Some(chunk) = body.next().await {
@@ -311,10 +313,12 @@ fn tool_validation_failures_keep_safe_parameter_in_persisted_diagnostics() {
         details.code.as_deref(),
         Some(crate::error_codes::ADAPTER_UPSTREAM_RESPONSE_INVALID)
     );
-    assert!(details
-        .message
-        .unwrap()
-        .contains("parameter: output.run_officejs.args"));
+    assert!(
+        details
+            .message
+            .unwrap()
+            .contains("parameter: output.run_officejs.args")
+    );
 }
 
 #[test]
@@ -549,10 +553,12 @@ fn schema_failure_reports_safe_cause_in_persisted_diagnostics() {
         Some(crate::error_codes::ADAPTER_UPSTREAM_STREAM_INVALID)
     );
     let details = parsed.upstream_error.unwrap();
-    assert!(details
-        .message
-        .unwrap()
-        .contains("do not match the declared JSON Schema"));
+    assert!(
+        details
+            .message
+            .unwrap()
+            .contains("do not match the declared JSON Schema")
+    );
     assert_eq!(
         details.code.as_deref(),
         Some(crate::error_codes::ADAPTER_UPSTREAM_STREAM_INVALID)
@@ -583,9 +589,11 @@ fn streamed_schema_diagnostics_withhold_tools_and_preserve_the_safe_constraint()
             json_error.parameter(),
             Some("output.run_officejs.args.schema")
         );
-        assert!(json_error
-            .to_string()
-            .contains(&format!("schema_keyword={keyword}")));
+        assert!(
+            json_error
+                .to_string()
+                .contains(&format!("schema_keyword={keyword}"))
+        );
 
         let wire = frame(event);
         for size in [1, 7, wire.len()] {
@@ -602,12 +610,14 @@ fn streamed_schema_diagnostics_withhold_tools_and_preserve_the_safe_constraint()
             assert!(!body.contains("synthetic-private"));
             assert!(translator.terminal);
             let parsed = super::super::parse_sse_event(body.as_bytes());
-            assert!(parsed
-                .upstream_error
-                .unwrap()
-                .message
-                .unwrap()
-                .contains(&format!("schema_keyword={keyword}")));
+            assert!(
+                parsed
+                    .upstream_error
+                    .unwrap()
+                    .message
+                    .unwrap()
+                    .contains(&format!("schema_keyword={keyword}"))
+            );
         }
     }
 }
@@ -659,7 +669,7 @@ fn unfinished_or_conflicting_call_identity_never_becomes_success() {
 
 #[tokio::test]
 async fn eof_fails_closed_and_terminal_only_text_is_emitted_once() {
-    let mut body = translate_stream(Bytes::new(), Box::pin(stream::empty()), request());
+    let mut body = translate_stream(Bytes::new(), Box::pin(stream::empty()), request().into());
     let eof = body.next().await.unwrap().unwrap();
     assert!(
         String::from_utf8_lossy(&eof).contains(crate::error_codes::ADAPTER_UPSTREAM_STREAM_INVALID)

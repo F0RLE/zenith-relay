@@ -118,13 +118,14 @@ fn client_reasoning_projection_respects_source_scope_and_adapter_limits() {
         runtime.client_reasoning_levels(&key, "test", WireApi::Responses),
         ["low", "xhigh"]
     );
-    assert!(runtime
-        .client_reasoning_levels(&key, "missing", WireApi::Responses)
-        .is_empty());
+    assert!(
+        runtime
+            .client_reasoning_levels(&key, "missing", WireApi::Responses)
+            .is_empty()
+    );
 }
-#[test]
-fn websocket_transport_capability_is_model_scoped_and_expires() {
-    let runtime = GatewayRuntime::from_pool(
+fn websocket_capability_runtime() -> GatewayRuntime {
+    GatewayRuntime::from_pool(
         vec![RuntimeSource::unrestricted(source(
             "source",
             "provider",
@@ -134,19 +135,129 @@ fn websocket_transport_capability_is_model_scoped_and_expires() {
         GatewayRuntimeOptions::default(),
         Arc::new(|_| {}),
     )
+    .unwrap()
+}
+
+#[test]
+fn http3_respects_runtime_source_and_account_proxy_boundaries() {
+    let mut proxied = source("proxied", "synthetic", &["model-a"]);
+    proxied.proxy_url = Some("http://127.0.0.1:8080".to_string());
+    let runtime = GatewayRuntime::from_pool(
+        vec![
+            RuntimeSource::unrestricted(source("direct", "synthetic", &["model-a"])),
+            RuntimeSource::unrestricted(proxied),
+        ],
+        vec![RuntimeLocalKey::unrestricted(key("key", "secret"))],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
     .unwrap();
+    assert!(runtime.direct_http_route("direct"));
+    assert!(!runtime.direct_http_route("proxied"));
+    assert!(!runtime.direct_http_route("missing"));
+    let account = quota_runtime(QuotaSnapshot::default());
+    assert!(account.direct_http_route("account-1"));
+    assert!(
+        !RuntimeHttpClients::new(Some(&ProxyConfig::parse("http://127.0.0.1:8080").unwrap()))
+            .unwrap()
+            .direct
+    );
+}
+
+#[test]
+fn websocket_transport_capability_is_model_scoped_and_expires() {
+    let runtime = websocket_capability_runtime();
     let authorization = AuthorizationIncarnation::Source;
     runtime.mark_websocket_http_only("source", "model-a", &authorization, 1_000);
-    assert!(runtime.websocket_is_http_only("source", "model-a", &authorization, 1_001));
-    assert!(!runtime.websocket_is_http_only("source", "model-b", &authorization, 1_001));
-    assert!(!runtime.websocket_is_http_only(
-        "source",
-        "model-a",
-        &authorization,
-        1_000 + WEBSOCKET_CAPABILITY_TTL_MS
-    ));
+    assert_eq!(
+        runtime.websocket_transport_preference("source", "model-a", &authorization, 1_001),
+        WebsocketTransportPreference::HttpOnly
+    );
+    assert_eq!(
+        runtime.websocket_transport_preference("source", "model-b", &authorization, 1_001),
+        WebsocketTransportPreference::Native
+    );
+    assert_eq!(
+        runtime.websocket_transport_preference(
+            "source",
+            "model-a",
+            &authorization,
+            1_000 + WEBSOCKET_CAPABILITY_TTL_MS
+        ),
+        WebsocketTransportPreference::Native
+    );
     runtime.mark_websocket_supported("source", "model-a", &authorization);
-    assert!(!runtime.websocket_is_http_only("source", "model-a", &authorization, 1_001));
+    assert_eq!(
+        runtime.websocket_transport_preference("source", "model-a", &authorization, 1_001),
+        WebsocketTransportPreference::Native
+    );
+}
+
+#[test]
+fn repeated_slow_handshakes_defer_only_the_same_route_and_authorization_briefly() {
+    let runtime = websocket_capability_runtime();
+    let authorization = AuthorizationIncarnation::Agent(1);
+    runtime.observe_slow_websocket_handshake("route", "model-a", &authorization, 1_000);
+    assert_eq!(
+        runtime.websocket_transport_preference("route", "model-a", &authorization, 1_001),
+        WebsocketTransportPreference::Native,
+        "one slow handshake must not suppress the next native attempt"
+    );
+    runtime.observe_slow_websocket_handshake("route", "model-a", &authorization, 2_000);
+    assert_eq!(
+        runtime.websocket_transport_preference("route", "model-a", &authorization, 2_001),
+        WebsocketTransportPreference::SlowHandshake
+    );
+    for (scope, model, incarnation) in [
+        ("other-route", "model-a", authorization.clone()),
+        ("route", "model-b", authorization.clone()),
+        ("route", "model-a", AuthorizationIncarnation::Agent(2)),
+    ] {
+        assert_eq!(
+            runtime.websocket_transport_preference(scope, model, &incarnation, 2_001),
+            WebsocketTransportPreference::Native
+        );
+    }
+    assert_eq!(
+        runtime.websocket_transport_preference(
+            "route",
+            "model-a",
+            &authorization,
+            2_000 + WEBSOCKET_FAST_PATH_BACKOFF_MS
+        ),
+        WebsocketTransportPreference::Native,
+        "native transport is eligible again after the short backoff"
+    );
+}
+
+#[test]
+fn websocket_success_clears_slow_observations_without_weakening_confirmed_rejections() {
+    let runtime = websocket_capability_runtime();
+    let authorization = AuthorizationIncarnation::Source;
+    for at in [1_000, 2_000] {
+        runtime.observe_slow_websocket_handshake("route", "model-a", &authorization, at);
+    }
+    runtime.mark_websocket_supported("route", "model-a", &AuthorizationIncarnation::Agent(2));
+    assert_eq!(
+        runtime.websocket_transport_preference("route", "model-a", &authorization, 2_001),
+        WebsocketTransportPreference::SlowHandshake
+    );
+    runtime.mark_websocket_supported("route", "model-a", &authorization);
+    assert_eq!(
+        runtime.websocket_transport_preference("route", "model-a", &authorization, 2_001),
+        WebsocketTransportPreference::Native
+    );
+    runtime.mark_websocket_http_only("route", "model-a", &authorization, 3_000);
+    runtime.observe_slow_websocket_handshake("route", "model-a", &authorization, 4_000);
+    assert_eq!(
+        runtime.websocket_transport_preference(
+            "route",
+            "model-a",
+            &authorization,
+            4_000 + WEBSOCKET_FAST_PATH_BACKOFF_MS
+        ),
+        WebsocketTransportPreference::HttpOnly
+    );
 }
 #[test]
 fn messages_source_models_are_automatically_available_to_responses_clients() {
@@ -305,10 +416,12 @@ fn source_connector_preserves_normalized_binding_and_model_order() {
             .as_deref(),
         Some("gpt-5.4-mini")
     );
-    assert!(!connector
-        .protocol_bindings()
-        .iter()
-        .any(|binding| binding.wire_api == WireApi::ChatCompletions));
+    assert!(
+        !connector
+            .protocol_bindings()
+            .iter()
+            .any(|binding| binding.wire_api == WireApi::ChatCompletions)
+    );
 }
 #[test]
 fn reference_speed_choices_survive_temporary_route_health_changes() {
@@ -473,9 +586,11 @@ fn key_scope_and_prefix_filter_visible_models_without_scope_escalation() {
         runtime.visible_models_for_secret("secret", &[WireApi::Responses], current_time_ms()),
         vec!["team/gpt-a"]
     );
-    assert!(runtime
-        .visible_models_for_secret("wrong", &[WireApi::Responses], current_time_ms())
-        .is_empty());
+    assert!(
+        runtime
+            .visible_models_for_secret("wrong", &[WireApi::Responses], current_time_ms())
+            .is_empty()
+    );
     assert_eq!(
         runtime
             .resolve_model(&authenticated, "TEAM/gpt-a")
@@ -558,23 +673,27 @@ fn configured_model_resolution_accepts_temporary_health_outage_but_not_unknown_m
         .unwrap();
     assert!(runtime.set_candidate_health("source", CandidateHealth::Unhealthy));
 
-    assert!(runtime
-        .resolve_visible_model(
-            &authenticated,
-            "gpt-test",
-            &[WireApi::Responses],
-            current_time_ms(),
-        )
-        .is_none());
+    assert!(
+        runtime
+            .resolve_visible_model(
+                &authenticated,
+                "gpt-test",
+                &[WireApi::Responses],
+                current_time_ms(),
+            )
+            .is_none()
+    );
     assert_eq!(
         runtime
             .resolve_configured_model(&authenticated, "gpt-test", &[WireApi::Responses])
             .as_deref(),
         Some("gpt-test")
     );
-    assert!(runtime
-        .resolve_configured_model(&authenticated, "unknown", &[WireApi::Responses])
-        .is_none());
+    assert!(
+        runtime
+            .resolve_configured_model(&authenticated, "unknown", &[WireApi::Responses])
+            .is_none()
+    );
 }
 #[test]
 fn global_hidden_models_apply_to_listing_and_requests() {

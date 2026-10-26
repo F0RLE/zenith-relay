@@ -16,21 +16,20 @@ impl PricingCatalog {
         if let Some(price) = provider_price {
             return self.resolved(price, PriceSource::Provider);
         }
-        if let Some(pricing_entry) = self.exact_entry(model, pricing_provider) {
-            if let Some(price) = pricing_entry.token {
-                return self.resolved(price, PriceSource::LiteLlmExact);
-            }
+        if let Some(pricing_entry) = self.exact_entry(model, pricing_provider)
+            && let Some(price) = pricing_entry.token
+        {
+            return self.resolved(price, PriceSource::LiteLlmExact);
         }
         // A recognized model keeps its own official family even when the
         // source declared a different one. Unrecognized models can still use
         // that explicit declaration. Neither choice reads a source label or URL.
         let family = Self::official_model_family(model).or(official_provider_family);
-        if let Some(family) = family {
-            if let Some(pricing_entry) = self.canonical_entry(model, family) {
-                if let Some(price) = pricing_entry.token {
-                    return self.resolved(price, PriceSource::LiteLlmCanonical);
-                }
-            }
+        if let Some(family) = family
+            && let Some(pricing_entry) = self.canonical_entry(model, family)
+            && let Some(price) = pricing_entry.token
+        {
+            return self.resolved(price, PriceSource::LiteLlmCanonical);
         }
         manual_price.map_or_else(
             || ResolvedPrice::unpriced(self.metadata()),
@@ -79,22 +78,21 @@ impl PricingCatalog {
             // id. Build the qualified lookup from the unqualified component so
             // both forms address the same LiteLLM record.
             let qualified = format!("{provider}/{}", super::unqualified(&normalized_model_id));
-            if let Some(pricing_entry) = self.unique_entry(&qualified) {
-                if pricing_entry.provider.as_deref() == Some(provider.as_str()) {
-                    return Some(pricing_entry);
-                }
+            if let Some(pricing_entry) = self.unique_entry(&qualified)
+                && pricing_entry.provider.as_deref() == Some(provider.as_str())
+            {
+                return Some(pricing_entry);
             }
-            if let Some(pricing_entry) = self.unique_entry(&normalized_model_id) {
-                if pricing_entry.provider.as_deref() == Some(provider.as_str()) {
-                    return Some(pricing_entry);
-                }
+            if let Some(pricing_entry) = self.unique_entry(&normalized_model_id)
+                && pricing_entry.provider.as_deref() == Some(provider.as_str())
+            {
+                return Some(pricing_entry);
             }
             if let Some(pricing_entry) =
                 self.unique_entry(&super::unqualified(&normalized_model_id))
+                && pricing_entry.provider.as_deref() == Some(provider.as_str())
             {
-                if pricing_entry.provider.as_deref() == Some(provider.as_str()) {
-                    return Some(pricing_entry);
-                }
+                return Some(pricing_entry);
             }
             // A provider was explicitly requested. Do not silently select a
             // similarly named record belonging to another provider.

@@ -2,13 +2,13 @@
 //! Leading text is incremental; tools and their tail wait for atomic validation.
 
 use super::UpstreamStream;
+use crate::gateway::execution::basis_points::PreparedClientRequest;
 use crate::gateway::execution::basis_points::response::stream::emit_unseen_output;
-use crate::gateway::execution::basis_points::response::translate_response_value;
 use crate::protocol::completion::ResponseCompletion;
 use crate::protocol::sse_data as sse_event_data;
 use axum::body::Bytes;
-use futures_util::{stream, StreamExt};
-use serde_json::{json, Value};
+use futures_util::{StreamExt, stream};
+use serde_json::{Value, json};
 use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
 
@@ -53,10 +53,12 @@ fn failure(code: &str, parameter: Option<&str>) -> Bytes {
 
 fn adapter_failure_event(error: crate::AdapterError) -> Value {
     let mut body = failure_event(error.code(), error.parameter());
-    body["message"] = json!(error
-        .parameter()
-        .map(|parameter| format!("{error} (parameter: {parameter})"))
-        .unwrap_or_else(|| error.to_string()));
+    body["message"] = json!(
+        error
+            .parameter()
+            .map(|parameter| format!("{error} (parameter: {parameter})"))
+            .unwrap_or_else(|| error.to_string())
+    );
     body
 }
 
@@ -108,7 +110,7 @@ pub(super) fn guard_progress(inner: UpstreamStream, timeout: Option<Duration>) -
 }
 
 struct Translator {
-    request: Value,
+    request: PreparedClientRequest,
     pending: Vec<u8>,
     output: VecDeque<Bytes>,
     tools: NativeTools,
@@ -119,9 +121,9 @@ struct Translator {
 }
 
 impl Translator {
-    fn new(request: Value) -> Self {
+    fn new(request: impl Into<PreparedClientRequest>) -> Self {
         Self {
-            request,
+            request: request.into(),
             pending: Vec::new(),
             output: VecDeque::new(),
             tools: NativeTools::default(),
@@ -219,7 +221,7 @@ impl Translator {
                 .map(|&index| (index, items.get(index).cloned()))
                 .collect();
             let response = event["response"].take();
-            let translated = match translate_response_value(response, &self.request) {
+            let translated = match self.request.translate_value(response) {
                 Ok(translated) => translated,
                 Err(error) => {
                     self.emit(adapter_failure_event(error));
@@ -330,7 +332,7 @@ impl Translator {
 pub(super) fn translate_stream(
     first: Bytes,
     remaining: UpstreamStream,
-    request: Value,
+    request: PreparedClientRequest,
 ) -> UpstreamStream {
     let mut translator = Translator::new(request);
     translator.push(&first);

@@ -181,15 +181,14 @@ impl UsageEvent {
             for response in
                 std::iter::successors(Some(payload), |item| item.get("response")).take(3)
             {
-                if let Some(diagnostics) = response.get("prompt_cache_diagnostics") {
-                    if let Ok(diagnostics) =
+                if let Some(diagnostics) = response.get("prompt_cache_diagnostics")
+                    && let Ok(diagnostics) =
                         super::ProviderCacheDiagnostics::deserialize(diagnostics)
-                    {
-                        cache.provider = Some(diagnostics);
-                    }
+                {
+                    cache.provider = Some(diagnostics);
                 }
-                if response.get("status").and_then(serde_json::Value::as_str) == Some("completed") {
-                    if let Some(id) = response
+                if response.get("status").and_then(serde_json::Value::as_str) == Some("completed")
+                    && let Some(id) = response
                         .get("id")
                         .and_then(serde_json::Value::as_str)
                         .filter(|id| {
@@ -199,9 +198,8 @@ impl UsageEvent {
                                     byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
                                 })
                         })
-                    {
-                        cache.provider_response_id = Some(id.to_owned());
-                    }
+                {
+                    cache.provider_response_id = Some(id.to_owned());
                 }
             }
         }
@@ -285,6 +283,7 @@ fn relay_error_category(category: &str) -> bool {
         category,
         error_codes::INVALID_REQUEST
             | error_codes::HTTP_HEADERS_TIMEOUT
+            | error_codes::HTTP_SEND_START_TIMEOUT
             | error_codes::MODEL_NOT_FOUND
             | error_codes::NO_ELIGIBLE_SOURCE
             | error_codes::ALL_SOURCES_TEMPORARILY_UNAVAILABLE

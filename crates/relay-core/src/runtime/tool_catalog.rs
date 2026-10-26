@@ -138,10 +138,10 @@ impl ToolCatalogStore {
             ) {
                 continue;
             }
-            if let Some(call_id) = item["call_id"].as_str() {
-                if let Some(entry) = entries.get(&key(local_key_id, model, call_id)) {
-                    return Some(entry.clone());
-                }
+            if let Some(call_id) = item["call_id"].as_str()
+                && let Some(entry) = entries.get(&key(local_key_id, model, call_id))
+            {
+                return Some(entry.clone());
             }
         }
         None
@@ -206,14 +206,14 @@ impl ToolCatalogStore {
         let mut entries = crate::poison::mutex(&self.entries);
         entries.retain(|_, entry| entry.expires_at > now_ms);
         for &key in checkpoints {
-            if entries.len() >= MAX_ENTRIES && !entries.contains_key(&key) {
-                if let Some(oldest) = entries
+            if entries.len() >= MAX_ENTRIES
+                && !entries.contains_key(&key)
+                && let Some(oldest) = entries
                     .iter()
                     .min_by_key(|(_, entry)| entry.expires_at)
                     .map(|(key, _)| *key)
-                {
-                    entries.remove(&oldest);
-                }
+            {
+                entries.remove(&oldest);
             }
             entries.insert(
                 key,
@@ -251,15 +251,19 @@ mod tests {
             {"type":"function_call_output","call_id":"call_other","output":"done"}
         ]);
         assert!(store.load("client-a", "model-a", &foreign, 2).is_empty());
-        assert!(store
-            .load("client-a", "model-a", &input, TTL_MS + 1)
-            .is_empty());
+        assert!(
+            store
+                .load("client-a", "model-a", &input, TTL_MS + 1)
+                .is_empty()
+        );
         let no_history = json!([
             {"role":"user","content":"No tool checkpoint"}
         ]);
-        assert!(store
-            .checkpoint_for_history("client-a", "model-a", &no_history)
-            .is_none());
+        assert!(
+            store
+                .checkpoint_for_history("client-a", "model-a", &no_history)
+                .is_none()
+        );
     }
 
     #[test]
@@ -286,26 +290,32 @@ mod tests {
                 .as_deref(),
             Some("synthetic prefix")
         );
-        assert!(store
-            .load_prefix("client-b", "synthetic", &request["input"], &scope, 2)
-            .is_none());
+        assert!(
+            store
+                .load_prefix("client-b", "synthetic", &request["input"], &scope, 2)
+                .is_none()
+        );
         let other_scope = store.prefix_scope(&request, Some("thread-b")).unwrap();
-        assert!(store
-            .load_prefix("client-a", "synthetic", &request["input"], &other_scope, 2)
-            .is_none());
+        assert!(
+            store
+                .load_prefix("client-a", "synthetic", &request["input"], &other_scope, 2)
+                .is_none()
+        );
         assert!(store.prefix_scope(&request, None).is_none());
         for (field, value) in [("model", json!("other")), ("input", json!([]))] {
             let mut changed = request.clone();
             changed[field] = value;
-            assert!(store
-                .load_prefix(
-                    "client-a",
-                    changed["model"].as_str().unwrap(),
-                    &changed["input"],
-                    &scope,
-                    2,
-                )
-                .is_none());
+            assert!(
+                store
+                    .load_prefix(
+                        "client-a",
+                        changed["model"].as_str().unwrap(),
+                        &changed["input"],
+                        &scope,
+                        2,
+                    )
+                    .is_none()
+            );
         }
         let mut changed = request.clone();
         changed["instructions"] = json!("Different instructions");
@@ -313,15 +323,17 @@ mod tests {
         changed = request.clone();
         changed["input"][0]["content"] = json!("Different project rules");
         assert_ne!(store.prefix_scope(&changed, Some("thread-a")), Some(scope));
-        assert!(store
-            .load_prefix(
-                "client-a",
-                "synthetic",
-                &request["input"],
-                &scope,
-                TTL_MS + 1
-            )
-            .is_none());
+        assert!(
+            store
+                .load_prefix(
+                    "client-a",
+                    "synthetic",
+                    &request["input"],
+                    &scope,
+                    TTL_MS + 1
+                )
+                .is_none()
+        );
     }
 
     #[test]
@@ -339,9 +351,11 @@ mod tests {
             Some((&scope, "prefix")),
             1,
         );
-        assert!(store
-            .load_prefix("client", "synthetic", &request["input"], &scope, 2)
-            .is_none());
+        assert!(
+            store
+                .load_prefix("client", "synthetic", &request["input"], &scope, 2)
+                .is_none()
+        );
         response["status"] = json!("completed");
         store.remember(
             "client",
@@ -351,9 +365,11 @@ mod tests {
             Some((&scope, &"x".repeat(MAX_PREFIX_BYTES + 1))),
             2,
         );
-        assert!(store
-            .load_prefix("client", "synthetic", &request["input"], &scope, 3)
-            .is_none());
+        assert!(
+            store
+                .load_prefix("client", "synthetic", &request["input"], &scope, 3)
+                .is_none()
+        );
         assert_eq!(
             store.load("client", "synthetic", &request["input"], 3),
             names
@@ -371,32 +387,40 @@ mod tests {
             store.load("client-a", "synthetic", &request["input"], 2),
             names
         );
-        assert!(store
-            .load("client-b", "synthetic", &request["input"], 2)
-            .is_empty());
+        assert!(
+            store
+                .load("client-b", "synthetic", &request["input"], 2)
+                .is_empty()
+        );
         let mut other = request.clone();
         other["model"] = json!("other");
-        assert!(store
-            .load(
-                "client-a",
-                other["model"].as_str().unwrap(),
-                &other["input"],
-                2
-            )
-            .is_empty());
+        assert!(
+            store
+                .load(
+                    "client-a",
+                    other["model"].as_str().unwrap(),
+                    &other["input"],
+                    2
+                )
+                .is_empty()
+        );
         other["model"] = json!("synthetic");
         other["input"][0]["call_id"] = json!("different_chat");
-        assert!(store
-            .load(
-                "client-a",
-                other["model"].as_str().unwrap(),
-                &other["input"],
-                2
-            )
-            .is_empty());
-        assert!(store
-            .load("client-a", "synthetic", &request["input"], TTL_MS + 1)
-            .is_empty());
+        assert!(
+            store
+                .load(
+                    "client-a",
+                    other["model"].as_str().unwrap(),
+                    &other["input"],
+                    2
+                )
+                .is_empty()
+        );
+        assert!(
+            store
+                .load("client-a", "synthetic", &request["input"], TTL_MS + 1)
+                .is_empty()
+        );
     }
 
     #[test]

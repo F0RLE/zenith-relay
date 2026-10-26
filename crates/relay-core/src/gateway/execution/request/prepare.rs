@@ -24,7 +24,7 @@ pub(super) struct PreparedRequestAttempt {
     pub(super) stream: bool,
     pub(super) summarize: bool,
     pub(super) adapter_request: PreparedAdapterRequest,
-    pub(super) basis_points_request: Option<Value>,
+    pub(super) basis_points_request: Option<super::super::basis_points::PreparedClientRequest>,
     pub(super) siwc_catalog_request: Option<Value>,
     pub(super) reasoning_effort: ReasoningEffortDiagnostics,
     pub(super) adapter_is_passthrough: bool,
@@ -95,16 +95,16 @@ pub(super) fn prepare_request_attempt(
     let account_route = route.account_id.is_some();
     let basis_points_route = route.account_transport == AccountTransport::ExcelBasisPoints;
     let siwc_route = route.account_transport == AccountTransport::Siwc;
-    if basis_points_route {
-        if let Some(step) = reject_basis_points_admission(
+    if basis_points_route
+        && let Some(step) = reject_basis_points_admission(
             request,
             stream,
             service_tier_policy,
             selected_service_tier,
             last_adapter_error,
-        ) {
-            return step;
-        }
+        )
+    {
+        return step;
     }
     // Lite item catalogs can arrive on BPS too, but serial execution is a
     // native transport restriction, not a property of the client item format.
@@ -425,11 +425,11 @@ fn rewrite_basis_points_body(
     adapter_request: &mut PreparedAdapterRequest,
     schema_validation_ms: &mut Option<u64>,
     diagnostics_enabled: bool,
-) -> Result<Value, AdapterError> {
+) -> Result<super::super::basis_points::PreparedClientRequest, AdapterError> {
     // The original is needed by response validation, but need not be copied.
     let original = std::mem::take(adapter_request.upstream_body_mut());
-    let prepared = super::super::basis_points::prepare_request_with_timing(
-        &original,
+    let (original, prepared) = super::super::basis_points::PreparedClientRequest::prepare(
+        original,
         schema_validation_ms,
         diagnostics_enabled,
     )?;

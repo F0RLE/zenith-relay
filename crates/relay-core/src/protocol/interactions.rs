@@ -115,10 +115,10 @@ pub(crate) struct InteractionsStreamCompletion {
 
 impl InteractionsStreamCompletion {
     pub(crate) fn observe(&mut self, event: &Value) -> Option<ResponseCompletion> {
-        if event.get("event_type").and_then(Value::as_str) == Some("content.start") {
-            if let Some(content) = event.get("content") {
-                self.saw_function_call |= valid_function_call(content);
-            }
+        if event.get("event_type").and_then(Value::as_str) == Some("content.start")
+            && let Some(content) = event.get("content")
+        {
+            self.saw_function_call |= valid_function_call(content);
         }
         terminal_event(event).map(|completion| {
             if completion == ResponseCompletion::Completed

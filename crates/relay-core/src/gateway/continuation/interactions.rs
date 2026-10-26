@@ -47,9 +47,8 @@ pub(in crate::gateway) fn bind_response(
     if let Some(id) = crate::protocol::interactions::resource(response)
         .get("id")
         .and_then(Value::as_str)
+        && let Ok(reference) = reference(local_key, id)
     {
-        if let Ok(reference) = reference(local_key, id) {
-            runtime.bind_response_route_affinity(Some(&reference), route, now_ms);
-        }
+        runtime.bind_response_route_affinity(Some(&reference), route, now_ms);
     }
 }

@@ -1,13 +1,13 @@
 use super::super::errors::api_error;
 use super::super::now_ms;
 use super::super::request::client_context_fingerprint;
-use super::{ImageEndpoint, ParsedImageFields, PreparedImageRequest, IMAGE_PROTOCOLS};
+use super::{IMAGE_PROTOCOLS, ImageEndpoint, ParsedImageFields, PreparedImageRequest};
 use crate::error_codes;
-use crate::runtime::{is_image_model_id, AuthenticatedKey, GatewayRuntime, IMAGE_API_MODEL};
+use crate::runtime::{AuthenticatedKey, GatewayRuntime, IMAGE_API_MODEL, is_image_model_id};
 use axum::body::{Body, Bytes};
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures_util::stream;
 use multer::Multipart;
 use serde_json::{Map, Value};
@@ -103,7 +103,7 @@ pub(super) async fn prepare_request(
                 StatusCode::BAD_REQUEST,
                 "stream must be a boolean",
                 error_codes::INVALID_REQUEST,
-            ))
+            ));
         }
         None => false,
     };
@@ -128,14 +128,14 @@ pub(super) async fn prepare_request(
             error_codes::INVALID_REQUEST,
         ));
     }
-    if let Some(count) = request_fields.get("n") {
-        if count.as_u64().is_none_or(|count| count == 0 || count > 10) {
-            return Err(api_error(
-                StatusCode::BAD_REQUEST,
-                "n must be an integer from 1 to 10",
-                error_codes::INVALID_REQUEST,
-            ));
-        }
+    if let Some(count) = request_fields.get("n")
+        && count.as_u64().is_none_or(|count| count == 0 || count > 10)
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "n must be an integer from 1 to 10",
+            error_codes::INVALID_REQUEST,
+        ));
     }
 
     Ok(PreparedImageRequest {
@@ -284,7 +284,7 @@ pub(super) async fn parse_multipart(
                         StatusCode::BAD_REQUEST,
                         "stream must be a boolean",
                         error_codes::INVALID_REQUEST,
-                    ))
+                    ));
                 }
             };
             multipart_fields.insert(field_name, Value::Bool(parsed));

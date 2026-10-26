@@ -54,10 +54,9 @@ pub(crate) fn rewrite_request_timezone(body: &mut Value, timezone: &str) {
                                 if matches!(
                                     part.get("type").and_then(Value::as_str),
                                     Some("input_text" | "text")
-                                ) {
-                                    if let Some(Value::String(text)) = part.get_mut("text") {
-                                        rewrite_environment(text, timezone);
-                                    }
+                                ) && let Some(Value::String(text)) = part.get_mut("text")
+                                {
+                                    rewrite_environment(text, timezone);
                                 }
                             }
                         }
@@ -73,10 +72,9 @@ pub(crate) fn rewrite_request_timezone(body: &mut Value, timezone: &str) {
             if matches!(
                 tool.get("type").and_then(Value::as_str),
                 Some("web_search" | "web_search_preview" | "web_search_preview_2025_03_11")
-            ) {
-                if let Some(Value::String(zone)) = tool.pointer_mut("/user_location/timezone") {
-                    *zone = timezone.to_string();
-                }
+            ) && let Some(Value::String(zone)) = tool.pointer_mut("/user_location/timezone")
+            {
+                *zone = timezone.to_string();
             }
         }
     }

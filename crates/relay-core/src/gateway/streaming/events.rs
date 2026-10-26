@@ -240,74 +240,68 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
             };
         }
     };
-    if event_json.get("type").is_none() {
-        if let Some(kind) = event_json
+    if event_json.get("type").is_none()
+        && let Some(kind) = event_json
             .get("event_type")
             .and_then(Value::as_str)
             .filter(|kind| {
                 kind.starts_with("interaction.") || kind.starts_with("content.") || *kind == "error"
             })
-        {
-            let completion = crate::protocol::interactions::terminal_event(&event_json);
-            let failure_category = upstream_event_failure_category(Some(kind), &event_json);
-            let preserved_error = preserved_stream_error(&event_json);
-            let upstream_error = (completion
-                == Some(crate::protocol::completion::ResponseCompletion::Invalid))
-            .then(|| crate::usage::UpstreamErrorDetails::from_value(None, &event_json));
-            let semantic_output = (kind == "content.delta"
-                && event_json.get("delta").is_some_and(|delta| {
-                    ["text", "arguments", "data", "thought"]
-                        .iter()
-                        .any(|field| {
-                            delta
-                                .get(*field)
-                                .and_then(Value::as_str)
-                                .is_some_and(|value| !value.is_empty())
-                        })
-                }))
-                || (kind == "content.start"
-                    && event_json.pointer("/content/type").and_then(Value::as_str)
-                        == Some("function_call"));
-            let outcome = completion.map(|completion| match completion {
-                crate::protocol::completion::ResponseCompletion::Completed => {
-                    TerminalOutcome::Success
-                }
-                crate::protocol::completion::ResponseCompletion::Incomplete => {
-                    TerminalOutcome::Incomplete
-                }
-                crate::protocol::completion::ResponseCompletion::Invalid => {
-                    TerminalOutcome::Failure
-                }
-            });
-            return TerminalEvent {
-                has_data: true,
-                valid: true,
-                has_output_delta: semantic_output,
-                semantic_output,
-                usage: find_usage(&event_json).cloned(),
-                response_id: response_id(&event_json).map(str::to_owned),
-                response: completion.map(|_| event_json.clone()),
-                event_payload: Some(event_json),
-                outcome,
-                upstream_error,
-                preserved_error,
-                error_category: failure_category.or_else(|| {
-                    completion
-                        .filter(|state| {
-                            *state != crate::protocol::completion::ResponseCompletion::Completed
-                        })
-                        .map(|state| {
-                            if state == crate::protocol::completion::ResponseCompletion::Incomplete
-                            {
-                                error_codes::RESPONSE_INCOMPLETE
-                            } else {
-                                error_codes::STREAM_INVALID
-                            }
-                        })
-                }),
-                ..TerminalEvent::default()
-            };
-        }
+    {
+        let completion = crate::protocol::interactions::terminal_event(&event_json);
+        let failure_category = upstream_event_failure_category(Some(kind), &event_json);
+        let preserved_error = preserved_stream_error(&event_json);
+        let upstream_error = (completion
+            == Some(crate::protocol::completion::ResponseCompletion::Invalid))
+        .then(|| crate::usage::UpstreamErrorDetails::from_value(None, &event_json));
+        let semantic_output = (kind == "content.delta"
+            && event_json.get("delta").is_some_and(|delta| {
+                ["text", "arguments", "data", "thought"]
+                    .iter()
+                    .any(|field| {
+                        delta
+                            .get(*field)
+                            .and_then(Value::as_str)
+                            .is_some_and(|value| !value.is_empty())
+                    })
+            }))
+            || (kind == "content.start"
+                && event_json.pointer("/content/type").and_then(Value::as_str)
+                    == Some("function_call"));
+        let outcome = completion.map(|completion| match completion {
+            crate::protocol::completion::ResponseCompletion::Completed => TerminalOutcome::Success,
+            crate::protocol::completion::ResponseCompletion::Incomplete => {
+                TerminalOutcome::Incomplete
+            }
+            crate::protocol::completion::ResponseCompletion::Invalid => TerminalOutcome::Failure,
+        });
+        return TerminalEvent {
+            has_data: true,
+            valid: true,
+            has_output_delta: semantic_output,
+            semantic_output,
+            usage: find_usage(&event_json).cloned(),
+            response_id: response_id(&event_json).map(str::to_owned),
+            response: completion.map(|_| event_json.clone()),
+            event_payload: Some(event_json),
+            outcome,
+            upstream_error,
+            preserved_error,
+            error_category: failure_category.or_else(|| {
+                completion
+                    .filter(|state| {
+                        *state != crate::protocol::completion::ResponseCompletion::Completed
+                    })
+                    .map(|state| {
+                        if state == crate::protocol::completion::ResponseCompletion::Incomplete {
+                            error_codes::RESPONSE_INCOMPLETE
+                        } else {
+                            error_codes::STREAM_INVALID
+                        }
+                    })
+            }),
+            ..TerminalEvent::default()
+        };
     }
     let event_type = event_json.get("type").and_then(Value::as_str).or_else(|| {
         event_name.filter(|event_name_value| {

@@ -102,15 +102,14 @@ impl SourceProviderStats {
             self.as_of_ms = Some(now_ms);
             self.stale = false;
             self.refresh_error = None;
-        } else if self.status != SourceStatsStatus::Unsupported {
-            if let Some(previous_stats) = previous_stats
+        } else if self.status != SourceStatsStatus::Unsupported
+            && let Some(previous_stats) = previous_stats
                 .filter(|previous_stats| previous_stats.status == SourceStatsStatus::Available)
-            {
-                let mut retained = previous_stats.clone();
-                retained.stale = true;
-                retained.refresh_error = Some(self.status);
-                return retained;
-            }
+        {
+            let mut retained = previous_stats.clone();
+            retained.stale = true;
+            retained.refresh_error = Some(self.status);
+            return retained;
         }
         self
     }
@@ -205,7 +204,7 @@ pub async fn read_source_provider_stats_with_scope_and_proxy(
             return super::SourceRead {
                 read_value: Err(error),
                 retry_after_ms: None,
-            }
+            };
         }
     };
     let provider = source_stats_provider(base_url);
@@ -238,10 +237,10 @@ async fn fetch_stats(
                 == Some(true)
             {
                 // Ordinary inference keys cannot query account-wide credits.
-                if let Ok(wallet) = client.get("credits", false, true).await {
-                    if let Ok(stats) = formats::openrouter_stats(&wallet) {
-                        return Ok(stats);
-                    }
+                if let Ok(wallet) = client.get("credits", false, true).await
+                    && let Ok(stats) = formats::openrouter_stats(&wallet)
+                {
+                    return Ok(stats);
                 }
             }
             Ok(key_stats)
@@ -280,7 +279,7 @@ async fn autodetect(client: &StatsClient) -> StatsResult<SourceProviderStats> {
                 return Ok(SourceProviderStats::empty(
                     SourceStatsProvider::Sub2Api,
                     status,
-                ))
+                ));
             }
         },
         Err(S::RateLimited) => return Err(S::RateLimited),

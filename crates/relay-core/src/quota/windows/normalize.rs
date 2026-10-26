@@ -1,6 +1,6 @@
 use super::{
-    QuotaNormalizationError, QuotaTransition, QuotaWindow, QuotaWindowInput, QuotaWindowKind,
-    DEFAULT_FULL_THRESHOLD_BASIS_POINTS,
+    DEFAULT_FULL_THRESHOLD_BASIS_POINTS, QuotaNormalizationError, QuotaTransition, QuotaWindow,
+    QuotaWindowInput, QuotaWindowKind,
 };
 use sha2::{Digest, Sha256};
 
@@ -183,14 +183,12 @@ fn full_cycle_changed(
         .provider_cycle_id
         .as_deref()
         .zip(input.provider_cycle_id.as_deref())
+        && !previous_cycle.trim().is_empty()
+        && !current_cycle.trim().is_empty()
+        && previous_cycle != current_cycle
+        && input.observed_at_ms >= previous.observed_at_ms
     {
-        if !previous_cycle.trim().is_empty()
-            && !current_cycle.trim().is_empty()
-            && previous_cycle != current_cycle
-            && input.observed_at_ms >= previous.observed_at_ms
-        {
-            return true;
-        }
+        return true;
     }
     // Relative reset values may drift between reads, and a wake itself may
     // advance the deadline. Neither is another cycle before the old deadline.

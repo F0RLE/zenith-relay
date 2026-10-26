@@ -75,10 +75,9 @@ fn materialize_previous_response(
     ) else {
         return false;
     };
-    // Quota rotation is not a model switch. The same-model native replay has
-    // already restored the caller/owner-scoped history and checked tool-result
-    // pairs. Preserve its original reasoning and calls exactly, as the hard
-    // quota recovery does; never replace them with summaries or a cache hint.
+    // Owner changes on the same model replay the original native history,
+    // including opaque reasoning. Local replay validates ownership and tool
+    // pairs; upstream acceptance is not inferred from the ciphertext or model.
     let native_owner_change =
         matches!(purpose, ReplayPurpose::OwnerChange) && replay.model().eq_ignore_ascii_case(model);
     if (!native_owner_change && !has_materialized_plaintext_history(&materialized))

@@ -1,15 +1,15 @@
 use super::super::{
-    runtime_now_ms, AuthorizationIdentityPolicy, AuthorizationIncarnation, AuthorizedRequestError,
+    AuthorizationIdentityPolicy, AuthorizationIncarnation, AuthorizedRequestError,
     AuthorizedResponse, CodexTurnStateScope, ExecutorPrepareError, GatewayRuntime,
-    PreparedAuthorization,
+    PreparedAuthorization, runtime_now_ms,
 };
-use super::prepare::{agent_credential_fingerprint, inspect_agent_identity_unauthorized};
 use super::AuthorizationDispatch;
+use super::prepare::{agent_credential_fingerprint, inspect_agent_identity_unauthorized};
 use crate::accounts::TokenDispatchRevisionGuard;
 use crate::providers::chatgpt::AgentIdentityCredential;
 use reqwest::StatusCode;
-use std::sync::atomic::Ordering;
 use std::sync::RwLockReadGuard;
+use std::sync::atomic::Ordering;
 
 pub(in crate::runtime) struct PreparedAuthorizationDispatchGuard<'a> {
     _token: Option<TokenDispatchRevisionGuard<'a>>,
@@ -97,53 +97,53 @@ impl GatewayRuntime {
         let upstream_response = self
             .send_prepared_authorization(candidate_id, first_request, &prepared, dispatch)
             .await?;
-        if upstream_response.status() == StatusCode::UNAUTHORIZED {
-            if let Some(task_id) = prepared.agent_task_id.as_deref() {
-                let (unauthorized_response, invalid_task) =
-                    inspect_agent_identity_unauthorized(upstream_response).await?;
-                if !invalid_task {
-                    return Ok(self.accept_authorized_response(
-                        candidate_id,
-                        unauthorized_response,
-                        &prepared,
-                    ));
-                }
-                // Preserve the real 401 when there is no room for a second
-                // generation. A hidden auth retry must never bypass the
-                // outer request's dispatch budget.
-                if budget.is_some_and(|budget| !budget.can_dispatch()) {
-                    return Ok(AuthorizedResponse {
-                        response: unauthorized_response,
-                        account_token_generation: prepared.token_generation,
-                        authorization_incarnation: prepared.incarnation(),
-                    });
-                }
-                self.record_authorization_replay(
-                    dispatch,
-                    prepared.token_generation,
-                    &unauthorized_response,
-                );
-                drop(unauthorized_response);
-                if let Some(budget) = budget {
-                    budget.observe_rejection();
-                }
-                let refreshed = self
-                    .refresh_agent_identity_task_after_unauthorized(
-                        candidate_id,
-                        task_id,
-                        runtime_now_ms(),
-                    )
-                    .await
-                    .map_err(AuthorizedRequestError::Prepare)?;
-                let refreshed_response = self
-                    .send_prepared_authorization(candidate_id, request, &refreshed, dispatch)
-                    .await?;
+        if upstream_response.status() == StatusCode::UNAUTHORIZED
+            && let Some(task_id) = prepared.agent_task_id.as_deref()
+        {
+            let (unauthorized_response, invalid_task) =
+                inspect_agent_identity_unauthorized(upstream_response).await?;
+            if !invalid_task {
                 return Ok(self.accept_authorized_response(
                     candidate_id,
-                    refreshed_response,
-                    &refreshed,
+                    unauthorized_response,
+                    &prepared,
                 ));
             }
+            // Preserve the real 401 when there is no room for a second
+            // generation. A hidden auth retry must never bypass the
+            // outer request's dispatch budget.
+            if budget.is_some_and(|budget| !budget.can_dispatch()) {
+                return Ok(AuthorizedResponse {
+                    response: unauthorized_response,
+                    account_token_generation: prepared.token_generation,
+                    authorization_incarnation: prepared.incarnation(),
+                });
+            }
+            self.record_authorization_replay(
+                dispatch,
+                prepared.token_generation,
+                &unauthorized_response,
+            );
+            drop(unauthorized_response);
+            if let Some(budget) = budget {
+                budget.observe_rejection();
+            }
+            let refreshed = self
+                .refresh_agent_identity_task_after_unauthorized(
+                    candidate_id,
+                    task_id,
+                    runtime_now_ms(),
+                )
+                .await
+                .map_err(AuthorizedRequestError::Prepare)?;
+            let refreshed_response = self
+                .send_prepared_authorization(candidate_id, request, &refreshed, dispatch)
+                .await?;
+            return Ok(self.accept_authorized_response(
+                candidate_id,
+                refreshed_response,
+                &refreshed,
+            ));
         }
         if upstream_response.status() != StatusCode::UNAUTHORIZED
             || prepared.token_generation.is_none()
@@ -462,25 +462,49 @@ impl GatewayRuntime {
         }
         // This boundary deliberately excludes authorization and body encoding.
         // reqwest does not expose upload completion: do not label this upload time.
+        let http3_client = self.http3.select_client(
+            &mut authorized_request,
+            budget.is_some() && self.direct_http_route(candidate_id),
+            candidate_id,
+            &client,
+        );
+        let using_http3 = http3_client.is_some();
+        let client = http3_client.unwrap_or(client);
         let send_started = payload_diagnostics
             .as_ref()
             .map(|_| std::time::Instant::now());
-        let mut upstream_response = if let Some(deadline) = headers_deadline {
-            crate::transport::execute_with_headers_deadline(&client, authorized_request, deadline)
-                .await?
+        let send = crate::runtime::http3::execute(&client, authorized_request);
+        let upstream_result = if let Some(deadline) = headers_deadline {
+            // Selection and dispatch bookkeeping may have consumed the last
+            // budget. Do not poll the send future after an already expired limit.
+            if deadline <= tokio::time::Instant::now() {
+                Err(AuthorizedRequestError::HeadersTimeout)
+            } else {
+                tokio::time::timeout_at(deadline, send)
+                    .await
+                    .map_err(|_| AuthorizedRequestError::HeadersTimeout)
+                    .and_then(|result| result)
+            }
         } else {
             match self
                 .is_basis_points_account(candidate_id)
                 .then(crate::transport::basis_points_progress_timeout)
                 .flatten()
             {
-                Some(timeout) => tokio::time::timeout(timeout, client.execute(authorized_request))
+                Some(timeout) => tokio::time::timeout(timeout, send)
                     .await
-                    .map_err(|_| AuthorizedRequestError::ProgressTimeout)?,
-                None => client.execute(authorized_request).await,
+                    .map_err(|_| AuthorizedRequestError::ProgressTimeout)
+                    .and_then(|result| result),
+                None => send.await,
             }
-            .map_err(AuthorizedRequestError::Transport)?
         };
+        let http3_unavailable = upstream_result.as_ref().map_or(true, |response| {
+            matches!(response.status().as_u16(), 421 | 505)
+        });
+        if using_http3 && http3_unavailable {
+            self.http3.failed(candidate_id, &url);
+        }
+        let mut upstream_response = upstream_result?;
         let send_to_headers_ms = send_started.map(|start| start.elapsed().as_millis() as u64);
         if let Some(cookies) = cookies {
             cookies.observe(&url, upstream_response.headers());

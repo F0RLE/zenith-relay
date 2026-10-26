@@ -1,6 +1,6 @@
 use super::{
-    order, parsing, reference, ModelCapabilities, ModelMetadata, ModelMetadataCatalog,
-    ModelMetadataError,
+    ModelCapabilities, ModelMetadata, ModelMetadataCatalog, ModelMetadataError, order, parsing,
+    reference,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -95,24 +95,24 @@ impl ModelMetadataCatalog {
             // Only the primary identity catalog can establish the owner of a
             // family. Hosting records may supply a canonical ID for their own
             // model, but must not redefine a whole family's manufacturer.
-            if priority == 0 {
-                if let (Some(family), Some(provider)) = (
+            if priority == 0
+                && let (Some(family), Some(provider)) = (
                     metadata.family.as_deref().map(order::normalize),
                     metadata
                         .canonical_model_id
                         .as_deref()
                         .and_then(order::canonical_namespace)
                         .or_else(|| order::provider_key(&metadata.provider)),
-                ) {
-                    family_providers
-                        .entry(family)
-                        .and_modify(|existing| {
-                            if existing.as_ref() != Some(&provider) {
-                                *existing = None;
-                            }
-                        })
-                        .or_insert(Some(provider));
-                }
+                )
+            {
+                family_providers
+                    .entry(family)
+                    .and_modify(|existing| {
+                        if existing.as_ref() != Some(&provider) {
+                            *existing = None;
+                        }
+                    })
+                    .or_insert(Some(provider));
             }
             metadata_entries.insert(normalized_model_id.clone(), metadata);
 
@@ -135,27 +135,26 @@ impl ModelMetadataCatalog {
             }
             if let Some(previous_model_id) =
                 leaf_matches.insert(leaf.clone(), normalized_model_id.clone())
+                && previous_model_id != normalized_model_id
             {
-                if previous_model_id != normalized_model_id {
-                    // Share metadata only when descriptive identity and every
-                    // semantic field agree. The reference source ID is kept
-                    // for identity/provenance, but is not a semantic
-                    // capability field. Exact provider IDs remain separate;
-                    // this never merges routes or participant inventories.
-                    let current_metadata = &metadata_entries[&normalized_model_id];
-                    if current_metadata.name.is_some()
-                        && (current_metadata.family.is_some()
-                            || current_metadata.release_date.is_some())
-                        && equivalent_reference_metadata(
-                            &metadata_entries[&previous_model_id],
-                            current_metadata,
-                        )
-                    {
-                        leaf_matches.insert(leaf, previous_model_id);
-                    } else {
-                        leaf_matches.remove(&leaf);
-                        ambiguous_leaves.insert(leaf);
-                    }
+                // Share metadata only when descriptive identity and every
+                // semantic field agree. The reference source ID is kept
+                // for identity/provenance, but is not a semantic
+                // capability field. Exact provider IDs remain separate;
+                // this never merges routes or participant inventories.
+                let current_metadata = &metadata_entries[&normalized_model_id];
+                if current_metadata.name.is_some()
+                    && (current_metadata.family.is_some()
+                        || current_metadata.release_date.is_some())
+                    && equivalent_reference_metadata(
+                        &metadata_entries[&previous_model_id],
+                        current_metadata,
+                    )
+                {
+                    leaf_matches.insert(leaf, previous_model_id);
+                } else {
+                    leaf_matches.remove(&leaf);
+                    ambiguous_leaves.insert(leaf);
                 }
             }
         }
@@ -201,10 +200,10 @@ impl ModelMetadataCatalog {
         if let Some(metadata) = self.entries.get(&normalized_model_id) {
             return Some(metadata);
         }
-        if let Some(owner) = self.alias_matches.get(&normalized_model_id) {
-            if normalized_model_id.contains('/') {
-                return owner.as_ref().and_then(|id| self.entries.get(id));
-            }
+        if let Some(owner) = self.alias_matches.get(&normalized_model_id)
+            && normalized_model_id.contains('/')
+        {
+            return owner.as_ref().and_then(|id| self.entries.get(id));
         }
         let leaf = order::model_leaf(&normalized_model_id);
         if self.ambiguous_leaves.contains(leaf) {

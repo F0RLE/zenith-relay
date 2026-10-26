@@ -1,9 +1,9 @@
-use super::catalog::{client_tools, requires_tool_call, selected_tools, tool_spec, ClientTool};
+use super::catalog::{ClientTool, requires_tool_call, selected_tools, tool_spec};
 use super::codec::{json_text, parse_json_object};
 use super::history::fit_item_id;
 use super::is_transport_tool;
 use crate::protocol::AdapterError;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 pub(super) fn invalid_tool_output(parameter: &'static str) -> AdapterError {
     let error = match parameter {
@@ -221,19 +221,32 @@ pub(super) fn parse_transport_envelope(
     // never infer a tool name or inspect referenced/custom payload contents here.
     let name = transport_tool_name(&inner)?.to_string();
     inner.insert("tool".to_string(), Value::String(name));
-    if !inner.contains_key("args") {
-        if let Some(arguments) = inner.get("arguments").cloned() {
-            inner.insert("args".to_string(), arguments);
-        }
+    if !inner.contains_key("args")
+        && let Some(arguments) = inner.get("arguments").cloned()
+    {
+        inner.insert("args".to_string(), arguments);
     }
     Ok((inner, direct_call))
 }
 
 /// Convert a completed Basis Points response back to the client Responses
 /// tool-call shape. The returned body is still ordinary Responses JSON.
+#[cfg(test)]
 pub(in crate::gateway) fn translate_response(
     upstream_response_body: &[u8],
     request_body: &Value,
+) -> Result<Vec<u8>, AdapterError> {
+    translate_response_bytes_with_catalog(
+        upstream_response_body,
+        request_body,
+        &mut super::catalog::RequestCatalog::default(),
+    )
+}
+
+pub(in crate::gateway::execution) fn translate_response_bytes_with_catalog(
+    upstream_response_body: &[u8],
+    request_body: &Value,
+    catalog: &mut super::catalog::RequestCatalog,
 ) -> Result<Vec<u8>, AdapterError> {
     let upstream_response: Value =
         serde_json::from_slice(upstream_response_body).map_err(|error| {
@@ -251,7 +264,7 @@ pub(in crate::gateway) fn translate_response(
                     upstream_response_body.len(),
                 )
         })?;
-    let translated = translate_response_value(upstream_response, request_body)?;
+    let translated = translate_response_with_catalog(upstream_response, request_body, catalog)?;
     serde_json::to_vec(&translated).map_err(|_| {
         AdapterError::upstream_response_invalid().with_parameter("response.serialization")
     })
@@ -259,9 +272,22 @@ pub(in crate::gateway) fn translate_response(
 
 /// Streaming already owns the parsed terminal response. Do not serialize and
 /// parse its complete output a second time just to validate client tools.
+#[cfg(test)]
 pub(in crate::gateway) fn translate_response_value(
+    upstream_response: Value,
+    request_body: &Value,
+) -> Result<Value, AdapterError> {
+    translate_response_with_catalog(
+        upstream_response,
+        request_body,
+        &mut super::catalog::RequestCatalog::default(),
+    )
+}
+
+pub(in crate::gateway) fn translate_response_with_catalog(
     mut upstream_response: Value,
     request_body: &Value,
+    catalog: &mut super::catalog::RequestCatalog,
 ) -> Result<Value, AdapterError> {
     if !matches!(
         upstream_response.get("status").and_then(Value::as_str),
@@ -293,9 +319,9 @@ pub(in crate::gateway) fn translate_response_value(
             )
         });
     }
-    let all_tools = client_tools(request_body)?;
-    super::batch::expand_output(output_items, request_body, &all_tools)?;
-    let tools = selected_tools(request_body, &all_tools);
+    let all_tools = catalog.tools(request_body)?;
+    super::batch::expand_output(output_items, request_body, all_tools)?;
+    let tools = selected_tools(request_body, all_tools);
     let mut call_ids = std::collections::HashSet::new();
     let history_call_ids = request_body
         .get("input")
@@ -322,7 +348,7 @@ pub(in crate::gateway) fn translate_response_value(
         let tool_name = transport_tool_name(&inner)?;
         let tool = if let Some(tool) = tool_spec(&tools, tool_name) {
             tool
-        } else if tool_spec(&all_tools, tool_name).is_some() {
+        } else if tool_spec(all_tools, tool_name).is_some() {
             return Err(invalid_tool_output("output.run_officejs.tool_choice"));
         } else {
             let reason = if all_tools

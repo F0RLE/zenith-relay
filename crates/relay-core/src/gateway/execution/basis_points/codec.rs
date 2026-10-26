@@ -1,15 +1,11 @@
 use crate::protocol::AdapterError;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 
 pub(super) fn as_input_items(request_input: Option<&Value>) -> Vec<Value> {
     match request_input {
-        Some(Value::String(text)) => vec![json!({
-            "type": "message",
-            "role": "user",
-            "content": [{"type": "input_text", "text": text}],
-        })],
+        Some(Value::String(text)) => vec![text_message("user", "input_text", text.clone())],
         Some(Value::Object(input_fields)) => vec![Value::Object(input_fields.clone())],
         Some(Value::Array(items)) => items.clone(),
         _ => Vec::new(),
@@ -17,11 +13,23 @@ pub(super) fn as_input_items(request_input: Option<&Value>) -> Vec<Value> {
 }
 
 pub(super) fn text_message(role: &str, content_type: &str, text: String) -> Value {
-    json!({
-        "type": "message",
-        "role": role,
-        "content": [{"type": content_type, "text": text}],
-    })
+    // Preserve the wire field order while moving the already-owned text. The
+    // json! serialization path would allocate another copy of large histories.
+    Value::Object(Map::from_iter([
+        ("type".into(), Value::String("message".into())),
+        ("role".into(), Value::String(role.into())),
+        (
+            "content".into(),
+            Value::Array(vec![text_part(content_type, text)]),
+        ),
+    ]))
+}
+
+pub(super) fn text_part(content_type: &str, text: String) -> Value {
+    Value::Object(Map::from_iter([
+        ("type".into(), Value::String(content_type.into())),
+        ("text".into(), Value::String(text)),
+    ]))
 }
 
 pub(super) fn explicit_input_message(mut item: Value) -> Value {
@@ -48,8 +56,11 @@ pub(super) fn explicit_input_message(mut item: Value) -> Value {
     // Responses accepts compact messages without a discriminator and with
     // string content. BPS needs explicit message/content variants, including
     // for histories emitted by the shared cross-protocol codec.
-    if let Some(Value::String(text)) = fields.get("content") {
-        fields.insert("content".into(), json!([{"type":content_type,"text":text}]));
+    if let Some(content) = fields.get_mut("content")
+        && let Value::String(text) = content
+    {
+        let text = std::mem::take(text);
+        *content = Value::Array(vec![text_part(content_type, text)]);
     }
     item
 }
@@ -304,7 +315,7 @@ pub(super) fn function_arguments(payload: &Value) -> Result<Value, AdapterError>
         }
         _ => {
             return Err(AdapterError::upstream_tool_arguments_json_invalid()
-                .with_parameter("output.run_officejs.args.object"))
+                .with_parameter("output.run_officejs.args.object"));
         }
     };
     if !arguments.is_object() {

@@ -1,13 +1,13 @@
 use super::super::{
-    now_ms, AuthenticatedKey, GatewayFailure, RESPONSES_LITE_METADATA_KEY, WEBSOCKET_PROTOCOLS,
+    AuthenticatedKey, GatewayFailure, RESPONSES_LITE_METADATA_KEY, WEBSOCKET_PROTOCOLS, now_ms,
 };
+use crate::GatewayRuntime;
 use crate::gateway::continuation;
 use crate::gateway::request::{
-    client_request_identity, codex_background_request_kind, is_managed_codex_client,
-    normalize_codex_reasoning_placeholder, RequestToolPolicy, ServiceTierPolicy,
+    RequestToolPolicy, ServiceTierPolicy, client_request_identity, codex_background_request_kind,
+    is_managed_codex_client, normalize_codex_reasoning_placeholder,
 };
 use crate::scheduler::rotation::SharedRequestBudget;
-use crate::GatewayRuntime;
 use axum::http::HeaderMap;
 use serde_json::Value;
 
@@ -106,18 +106,18 @@ impl super::ClientRequest {
         let request_id = crate::gateway::request::request_id();
         if let Some(kind) = background_kind {
             runtime.mark_request_origin(&request_id, kind);
-            if !runtime.codex_background_request_enabled(kind) {
-                if let Some(failure) = GatewayFailure::blocked_memory(kind) {
-                    runtime.blocked_codex_background_event(
-                        &request_id,
-                        &key.id,
-                        &requested_model,
-                        crate::WireApi::Responses,
-                        crate::UsageTransport::Websocket,
-                        kind,
-                    );
-                    return Err(failure);
-                }
+            if !runtime.codex_background_request_enabled(kind)
+                && let Some(failure) = GatewayFailure::blocked_memory(kind)
+            {
+                runtime.blocked_codex_background_event(
+                    &request_id,
+                    &key.id,
+                    &requested_model,
+                    crate::WireApi::Responses,
+                    crate::UsageTransport::Websocket,
+                    kind,
+                );
+                return Err(failure);
             }
         }
         let mut client_identity = client_request_identity(headers, &request_body);

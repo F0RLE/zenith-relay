@@ -144,7 +144,7 @@ fn empty_context_management_is_omitted_but_non_empty_policy_is_preserved() {
     let mut request = json!({
         "context_management": [{"type": "compaction", "compact_threshold": 1_000}]
     });
-    normalize_basis_points_request(request.as_object_mut().unwrap());
+    shape::normalize_empty_context_management(request.as_object_mut().unwrap());
     assert_eq!(
         request["context_management"],
         json!([{"type": "compaction", "compact_threshold": 1_000}])
@@ -177,9 +177,11 @@ fn codex_tool_schema_normalization_flattens_large_pure_unions() {
         request["tools"][0]["parameters"]["properties"]["kind"]["enum"],
         Value::Array(values)
     );
-    assert!(request["tools"][0]["parameters"]["properties"]["kind"]
-        .get("oneOf")
-        .is_none());
+    assert!(
+        request["tools"][0]["parameters"]["properties"]["kind"]
+            .get("oneOf")
+            .is_none()
+    );
 }
 
 #[test]
@@ -412,10 +414,14 @@ fn codex_tool_schema_normalization_treats_equivalent_numbers_as_duplicates() {
 
     normalize_account_request(request.as_object_mut().unwrap(), false);
 
-    assert!(request["tools"][0]["parameters"]["properties"]["kind"]
-        .get("enum")
-        .is_none());
-    assert!(request["tools"][0]["parameters"]["properties"]["kind"]
-        .get("oneOf")
-        .is_some());
+    assert!(
+        request["tools"][0]["parameters"]["properties"]["kind"]
+            .get("enum")
+            .is_none()
+    );
+    assert!(
+        request["tools"][0]["parameters"]["properties"]["kind"]
+            .get("oneOf")
+            .is_some()
+    );
 }

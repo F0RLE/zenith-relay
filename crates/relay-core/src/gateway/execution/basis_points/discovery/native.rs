@@ -140,12 +140,12 @@ pub(in crate::gateway::execution) fn prepare_dispatch(
             if let Some(id) = item["call_id"].as_str() {
                 call_ids.insert(id.to_string());
             }
-            if !loaded.contains(&name) {
-                if let Some(tool) = tools.iter().find(|tool| tool.key() == name) {
-                    input.push(additional(declarations(vec![tool], &settings)));
-                    historical.insert(name.clone(), tool.serialized_spec.to_string());
-                    loaded.insert(name);
-                }
+            if !loaded.contains(&name)
+                && let Some(tool) = tools.iter().find(|tool| tool.key() == name)
+            {
+                input.push(additional(declarations(vec![tool], &settings)));
+                historical.insert(name.clone(), tool.serialized_spec.to_string());
+                loaded.insert(name);
             }
         }
         input.push(item);

@@ -1,8 +1,9 @@
 use super::{
+    ResponseBodyError,
     agent_identity::is_agent_identity_task_invalid_response,
     bearer_authorization as shared_bearer_authorization, collect_response_body,
-    quota_subscription::{merge_subscription_metadata_at, CodexSubscriptionClient},
-    valid_access_token, ResponseBodyError,
+    quota_subscription::{CodexSubscriptionClient, merge_subscription_metadata_at},
+    valid_access_token,
 };
 use crate::error_codes;
 use crate::quota::{
@@ -10,10 +11,10 @@ use crate::quota::{
     QuotaRefreshResult, QuotaWindowKind, Subscription, SubscriptionInput,
 };
 use crate::scheduler::refresh::http::{HttpClass, ManagementHttpScope};
-use crate::{providers::chatgpt::CodexIdentityEnvelope, ProxyConfig};
+use crate::{ProxyConfig, providers::chatgpt::CodexIdentityEnvelope};
 use futures_util::future::BoxFuture;
 use reqwest::{
-    header::{HeaderValue, ACCEPT, AUTHORIZATION},
+    header::{ACCEPT, AUTHORIZATION, HeaderValue},
     redirect::Policy,
 };
 use std::{collections::BTreeSet, time::Duration};
@@ -110,7 +111,7 @@ impl CodexQuotaClient {
                 return QuotaRefreshOutcome::Failed {
                     failure,
                     subscription: previous_subscription.clone(),
-                }
+                };
             }
         };
         self.refresh_quota_authorized(
@@ -330,11 +331,11 @@ impl CodexQuotaClient {
                 }
                 Some(Err(_)) | None => subscription_input.observed_at_ms = now_ms,
             }
-        } else if let Some(input) = quota_refresh.quota.subscription.as_mut() {
-            if input.plan_type == previous_subscription.plan_type && input.active_until_ms.is_none()
-            {
-                input.observed_at_ms = previous_subscription.updated_at_ms.unwrap_or(now_ms);
-            }
+        } else if let Some(input) = quota_refresh.quota.subscription.as_mut()
+            && input.plan_type == previous_subscription.plan_type
+            && input.active_until_ms.is_none()
+        {
+            input.observed_at_ms = previous_subscription.updated_at_ms.unwrap_or(now_ms);
         }
         Ok(quota_refresh)
     }

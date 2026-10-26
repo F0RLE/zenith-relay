@@ -8,16 +8,18 @@ impl GatewayRuntime {
     }
 
     pub(crate) fn apply_request_timezone(&self, candidate_id: &str, body: &mut Value) {
-        let Some(account) = self.chatgpt_accounts.get(candidate_id) else {
-            return;
-        };
+        if let Some(timezone) = self.request_timezone(candidate_id) {
+            crate::request_timezone::rewrite_request_timezone(body, &timezone);
+        }
+    }
+
+    pub(crate) fn request_timezone(&self, candidate_id: &str) -> Option<String> {
+        let account = self.chatgpt_accounts.get(candidate_id)?;
         let proxy_timezone = crate::poison::read(&account.proxy_timezone);
-        if let Some(timezone) = proxy_timezone
+        proxy_timezone
             .as_ref()
             .and_then(|evidence| evidence.current(crate::unix_time_ms()))
-        {
-            crate::request_timezone::rewrite_request_timezone(body, timezone);
-        }
+            .map(str::to_owned)
     }
 
     /// Proxy checks update future account requests without rebuilding the
@@ -276,12 +278,12 @@ impl GatewayRuntime {
     ) -> Result<()> {
         let overrides = normalize_model_service_tier_overrides(overrides)
             .map_err(|message| Error::Validation(message.to_string()))?;
-        *crate::poison::mutex(&self.model_service_tier_overrides) = overrides;
+        *crate::poison::mutex(&self.model_state.service_tier_overrides) = overrides;
         Ok(())
     }
 
     pub(crate) fn model_effective_service_tier(&self, model: &str) -> DefaultServiceTier {
-        let requested = crate::poison::mutex(&self.model_service_tier_overrides)
+        let requested = crate::poison::mutex(&self.model_state.service_tier_overrides)
             .get(&crate::model_id_key(model))
             .copied()
             .unwrap_or_else(|| self.default_service_tier());
@@ -289,7 +291,7 @@ impl GatewayRuntime {
     }
 
     pub fn set_model_display_order(&self, models: Vec<String>) {
-        *crate::poison::mutex(&self.model_display_order) = crate::normalize_model_ids(models);
+        *crate::poison::mutex(&self.model_state.display_order) = crate::normalize_model_ids(models);
     }
 
     /// A host replaces this runtime's routing graph without waiting for

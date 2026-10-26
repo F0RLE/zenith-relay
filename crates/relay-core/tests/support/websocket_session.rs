@@ -315,9 +315,11 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
     assert_eq!(events.len(), 2);
     assert!(events.iter().all(|event| event.success));
     assert!(events.iter().all(|event| event.input_tokens == Some(11)));
-    assert!(events
-        .iter()
-        .all(|event| event.cached_input_tokens == Some(7)));
+    assert!(
+        events
+            .iter()
+            .all(|event| event.cached_input_tokens == Some(7))
+    );
     assert!(events.iter().all(|event| event.output_tokens == Some(5)));
     assert!(events.iter().all(|event| event.reasoning_tokens == Some(2)));
     assert!(events.iter().all(|event| event.total_tokens == Some(16)));

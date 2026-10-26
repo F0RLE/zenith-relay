@@ -1,9 +1,9 @@
 use super::{
-    preserved_stream_error, rewrite_bridge_failure, PreservedUpstreamError, UpstreamStream,
+    PreservedUpstreamError, UpstreamStream, preserved_stream_error, rewrite_bridge_failure,
 };
 use crate::{AdapterStreamBridge, TranslatedResponse};
 use axum::body::Bytes;
-use futures_util::{stream, Stream, StreamExt};
+use futures_util::{Stream, StreamExt, stream};
 use std::collections::VecDeque;
 use std::time::Duration;
 use tokio::time::Instant;
@@ -80,10 +80,10 @@ pub(super) fn bridge_adapter_stream(
                     || stream_state.bridge.pop_output(),
                     preserved_error.as_ref(),
                 );
-                if let Some(response) = stream_state.bridge.take_completed() {
-                    if let Some(on_completed) = stream_state.on_completed.take() {
-                        on_completed(response);
-                    }
+                if let Some(response) = stream_state.bridge.take_completed()
+                    && let Some(on_completed) = stream_state.on_completed.take()
+                {
+                    on_completed(response);
                 }
                 if stream_state.bridge.is_terminal() {
                     stream_state.finished = true;

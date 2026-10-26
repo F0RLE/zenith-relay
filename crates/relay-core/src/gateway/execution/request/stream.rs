@@ -1,7 +1,7 @@
 use super::prelude::*;
 use super::recovery::{
-    adapter_error_response, mark_adapter_failure, recover_stale_tool_history,
-    replay_native_tool_continuation, try_repair_legacy_responses_call_ids, LegacyCallIdRepair,
+    LegacyCallIdRepair, adapter_error_response, mark_adapter_failure, recover_stale_tool_history,
+    replay_native_tool_continuation, try_repair_legacy_responses_call_ids,
 };
 use crate::gateway::streaming::UpstreamStream;
 use crate::runtime::ExecutorRoute;
@@ -33,7 +33,7 @@ pub(super) struct OpenStreamInput<'a> {
     pub(super) route: ExecutorRoute,
     pub(super) lease: CandidateLease,
     pub(super) adapter_request: PreparedAdapterRequest,
-    pub(super) basis_points_request: Option<Value>,
+    pub(super) basis_points_request: Option<super::super::basis_points::PreparedClientRequest>,
     pub(super) request: Value,
     pub(super) request_id: String,
     pub(super) key: &'a AuthenticatedKey,
@@ -336,7 +336,7 @@ fn respond_opened_stream(
     headers: reqwest::header::HeaderMap,
     first: Bytes,
     remaining: UpstreamStream,
-    basis_points_request: Option<Value>,
+    basis_points_request: Option<super::super::basis_points::PreparedClientRequest>,
     discovery: Option<super::super::basis_points::discovery::execution::StreamingDiscovery>,
 ) -> OpenedStream {
     let account_route = execution.route.account_id.is_some();

@@ -24,10 +24,10 @@ pub(in crate::gateway) fn classify_upstream_error(
     match serde_json::from_slice::<Value>(response_body) {
         Ok(error_payload) => classify_upstream_error_value(status, &error_payload),
         Err(_) => {
-            if status == StatusCode::FORBIDDEN {
-                if let Some(error_payload) = scoped::error_before_sse(response_body) {
-                    return classify_upstream_error_value(status, &error_payload);
-                }
+            if status == StatusCode::FORBIDDEN
+                && let Some(error_payload) = scoped::error_before_sse(response_body)
+            {
+                return classify_upstream_error_value(status, &error_payload);
             }
             classify_upstream_error_text(status, &normalized_error_text(response_body))
         }
@@ -139,13 +139,12 @@ pub(in crate::gateway) fn classify_upstream_error_value(
             | error_codes::UPSTREAM_FORBIDDEN
             | error_codes::UPSTREAM_ERROR
             | error_codes::UPSTREAM_EDGE_CHALLENGE
-    ) {
-        if let Some(category) = scoped::forbidden_category(status, error_payload) {
-            return UpstreamErrorClassification {
-                category,
-                message: upstream_failure_message(category),
-            };
-        }
+    ) && let Some(category) = scoped::forbidden_category(status, error_payload)
+    {
+        return UpstreamErrorClassification {
+            category,
+            message: upstream_failure_message(category),
+        };
     }
     classification
 }

@@ -1,14 +1,14 @@
-use super::catalog::{client_tools, requires_tool_call, selected_tools, ClientTool};
+use super::catalog::{ClientTool, requires_tool_call, selected_tools};
 use super::codec::{
     as_input_items, basis_points_metadata, basis_points_reasoning_effort,
     encode_function_arguments, text_message,
 };
 use super::history::{separate_tool_images, translate_input_items_with_catalog};
 use super::response::has_encrypted_agent_message;
-use super::schema::{matches as schema_matches, parameter_schema, PROMPT_SCHEMA_NOTATION};
-use super::{is_transport_tool, FUNCTION_RELAY_ENCODING, TRANSPORT_TOOL, TRANSPORT_TOOL_ALIAS};
+use super::schema::{PROMPT_SCHEMA_NOTATION, matches as schema_matches, parameter_schema};
+use super::{FUNCTION_RELAY_ENCODING, TRANSPORT_TOOL, TRANSPORT_TOOL_ALIAS, is_transport_tool};
 use crate::protocol::AdapterError;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 pub(super) fn tool_instructions(tools: &[ClientTool], request: &Value) -> String {
     if tools.is_empty() {
@@ -78,8 +78,11 @@ pub(super) fn historical_catalog(tools: &[ClientTool], request: &Value) -> Strin
     } else {
         PROMPT_SCHEMA_NOTATION
     };
-    format!("Client tool declaration update (later declarations and current policy override it):\n{notation}{}{}",
-        tool_relay_examples(&ordered), super::presentation::describe_catalog(&ordered, request))
+    format!(
+        "Client tool declaration update (later declarations and current policy override it):\n{notation}{}{}",
+        tool_relay_examples(&ordered),
+        super::presentation::describe_catalog(&ordered, request)
+    )
 }
 
 fn current_catalog(tools: &[ClientTool], request: &Value) -> String {
@@ -93,8 +96,11 @@ fn current_catalog(tools: &[ClientTool], request: &Value) -> String {
     } else {
         PROMPT_SCHEMA_NOTATION
     };
-    format!("Current client tool catalog (authoritative for this request, subject to Client tool_choice):{}\n{notation}{}",
-        tool_relay_examples(&ordered), super::presentation::describe_catalog(&ordered, request))
+    format!(
+        "Current client tool catalog (authoritative for this request, subject to Client tool_choice):{}\n{notation}{}",
+        tool_relay_examples(&ordered),
+        super::presentation::describe_catalog(&ordered, request)
+    )
 }
 
 pub(super) fn describe_tools(tools: &[&ClientTool], full_json: bool) -> String {
@@ -231,6 +237,20 @@ pub(in crate::gateway::execution) fn prepare_request_with_timing(
     schema_validation_ms: &mut Option<u64>,
     diagnostics_enabled: bool,
 ) -> Result<Value, AdapterError> {
+    prepare_request_with_catalog(
+        request,
+        schema_validation_ms,
+        diagnostics_enabled,
+        &mut super::catalog::RequestCatalog::default(),
+    )
+}
+
+pub(in crate::gateway::execution) fn prepare_request_with_catalog(
+    request: &Value,
+    schema_validation_ms: &mut Option<u64>,
+    diagnostics_enabled: bool,
+    catalog: &mut super::catalog::RequestCatalog,
+) -> Result<Value, AdapterError> {
     *schema_validation_ms = None;
     let request_object = request
         .as_object()
@@ -255,12 +275,12 @@ pub(in crate::gateway::execution) fn prepare_request_with_timing(
     if structured.is_none() {
         validate_text_format(request_object.get("text"))?;
     }
-    let all_tools = client_tools(request)?;
+    let all_tools = catalog.tools(request)?;
     super::presentation::requested_mode(request)?;
     if all_tools.iter().any(|tool| is_transport_tool(&tool.key())) {
         return Err(AdapterError::invalid_request().with_parameter("tools"));
     }
-    let callable = selected_tools(request, &all_tools);
+    let callable = selected_tools(request, all_tools);
     for tool in &callable {
         if tool.kind == "function" {
             tool.validate_parameter_schema()?;
@@ -316,23 +336,23 @@ pub(in crate::gateway::execution) fn prepare_request_with_timing(
     let metadata = basis_points_metadata(request_object, &input_items);
     let mut input_items = separate_tool_images(translate_input_items_with_catalog(
         input_items,
-        &all_tools,
+        all_tools,
         request,
     )?);
     let mut prologue = Vec::new();
-    if let Some(instructions) = request_object.get("instructions").and_then(Value::as_str) {
-        if !instructions.trim().is_empty() {
-            prologue.push(text_message(
-                "developer",
-                "input_text",
-                instructions.to_string(),
-            ));
-        }
+    if let Some(instructions) = request_object.get("instructions").and_then(Value::as_str)
+        && !instructions.trim().is_empty()
+    {
+        prologue.push(text_message(
+            "developer",
+            "input_text",
+            instructions.to_string(),
+        ));
     }
     prologue.push(text_message(
         "developer",
         "input_text",
-        tool_instructions(&all_tools, request),
+        tool_instructions(all_tools, request),
     ));
     if let Some(structured) = structured {
         prologue.push(text_message(
@@ -350,10 +370,10 @@ pub(in crate::gateway::execution) fn prepare_request_with_timing(
         input_items.push(text_message(
             "developer",
             "input_text",
-            current_catalog(&all_tools, request),
+            current_catalog(all_tools, request),
         ));
     }
-    if let Some(contracts) = super::presentation::loaded_contracts(&all_tools, &callable, request) {
+    if let Some(contracts) = super::presentation::loaded_contracts(all_tools, &callable, request) {
         // Newly needed contracts belong after history, never in the stable
         // index prefix. Loading one tool must not rewrite that prefix.
         input_items.push(text_message("developer", "input_text", contracts));

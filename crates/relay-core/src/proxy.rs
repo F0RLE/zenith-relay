@@ -69,10 +69,11 @@ fn normalize_proxy_authority(authority: &str) -> String {
     {
         return authority.to_string();
     }
-    if let Some((endpoint, credentials)) = authority.split_once('@') {
-        if is_proxy_endpoint(endpoint) && has_proxy_credentials(credentials) {
-            return format!("{credentials}@{endpoint}");
-        }
+    if let Some((endpoint, credentials)) = authority.split_once('@')
+        && is_proxy_endpoint(endpoint)
+        && has_proxy_credentials(credentials)
+    {
+        return format!("{credentials}@{endpoint}");
     }
 
     let mut leading = authority.splitn(3, ':');
@@ -117,13 +118,13 @@ fn has_proxy_credentials(credentials: &str) -> bool {
 mod tests {
     use super::*;
     use axum::{
-        http::{header::PROXY_AUTHORIZATION, HeaderMap, StatusCode},
-        routing::any,
         Router,
+        http::{HeaderMap, StatusCode, header::PROXY_AUTHORIZATION},
+        routing::any,
     };
     use std::sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     };
 
     #[test]

@@ -4,7 +4,7 @@
 use super::*;
 use crate::gateway::errors::{AttemptFailure, RateLimitBodyHint};
 use crate::gateway::execution::basis_points::discovery::execution::{
-    dispatch_continuation, record_lookup, StreamingDiscovery,
+    StreamingDiscovery, dispatch_continuation, record_lookup,
 };
 use crate::gateway::response::{completed_upstream_response, emit_usage, populate_tokens};
 use crate::gateway::streaming::completion::StreamCompletionSettlement;
@@ -112,20 +112,20 @@ impl DiscoveryStream {
     fn emit(&mut self, mut event: Value) {
         event["sequence_number"] = json!(self.sequence);
         self.sequence += 1;
-        if let Some(index) = event.get_mut("output_index") {
-            if let Some(local) = index.as_u64() {
-                *index = json!(local + self.offset as u64);
-            }
+        if let Some(index) = event.get_mut("output_index")
+            && let Some(local) = index.as_u64()
+        {
+            *index = json!(local + self.offset as u64);
         }
-        if let Some(response) = event.get_mut("response") {
-            if let Some(id) = &self.response_id {
-                response["id"] = json!(id);
-            }
+        if let Some(response) = event.get_mut("response")
+            && let Some(id) = &self.response_id
+        {
+            response["id"] = json!(id);
         }
-        if event.get("response_id").is_some() {
-            if let Some(id) = &self.response_id {
-                event["response_id"] = json!(id);
-            }
+        if event.get("response_id").is_some()
+            && let Some(id) = &self.response_id
+        {
+            event["response_id"] = json!(id);
         }
         self.output.push_back(Bytes::from(format!(
             "event: {}\ndata: {event}\n\n",
@@ -221,16 +221,16 @@ impl DiscoveryStream {
         {
             self.blocked = true;
         }
-        if !self.blocked {
-            if let Some(index) = event["output_index"].as_u64() {
-                let index =
-                    usize::try_from(index).map_err(|_| AdapterError::upstream_stream_invalid())?;
-                if index >= MAX_TOOLS {
-                    return Err(AdapterError::upstream_stream_invalid());
-                }
-                self.seen.insert(index);
-                self.emit(event);
+        if !self.blocked
+            && let Some(index) = event["output_index"].as_u64()
+        {
+            let index =
+                usize::try_from(index).map_err(|_| AdapterError::upstream_stream_invalid())?;
+            if index >= MAX_TOOLS {
+                return Err(AdapterError::upstream_stream_invalid());
             }
+            self.seen.insert(index);
+            self.emit(event);
         }
         Ok(())
     }
@@ -264,10 +264,10 @@ impl DiscoveryStream {
         let mut event = self.event.clone();
         event.attempt = u16::from(self.discovery.budget.dispatches());
         event.latency_ms = self.started.elapsed().as_millis() as u64;
-        if !self.sse {
-            if let Some(capture) = &self.settlement.upstream_usage {
-                crate::poison::mutex(capture).finish_json_generation(&self.raw);
-            }
+        if !self.sse
+            && let Some(capture) = &self.settlement.upstream_usage
+        {
+            crate::poison::mutex(capture).finish_json_generation(&self.raw);
         }
         let expected = self
             .settlement

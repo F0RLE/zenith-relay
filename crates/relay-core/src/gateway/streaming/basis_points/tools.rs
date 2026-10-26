@@ -1,4 +1,4 @@
-use super::{Value, MAX_TOOLS};
+use super::{MAX_TOOLS, Value};
 use std::collections::HashMap;
 
 #[derive(Default)]
@@ -15,7 +15,7 @@ impl NativeTools {
             if let Some(call_id) = call_id {
                 match recorded {
                     Some(before) if before.as_str() != call_id => {
-                        return Err("stream.tool.identity")
+                        return Err("stream.tool.identity");
                     }
                     Some(_) => {}
                     None => *recorded = Some(call_id.to_owned()),
@@ -80,12 +80,11 @@ impl NativeTools {
                 Some("function_call" | "custom_tool_call")
             )
         }) {
-            if let Some(id) = item["id"].as_str() {
-                if let Some(recorded) = self.calls.remove(id).flatten() {
-                    if item["call_id"].as_str() != Some(recorded.as_str()) {
-                        return Err("stream.tool.call_id");
-                    }
-                }
+            if let Some(id) = item["id"].as_str()
+                && let Some(recorded) = self.calls.remove(id).flatten()
+                && item["call_id"].as_str() != Some(recorded.as_str())
+            {
+                return Err("stream.tool.call_id");
             }
         }
         if !self.calls.is_empty() || items.len() > MAX_TOOLS {

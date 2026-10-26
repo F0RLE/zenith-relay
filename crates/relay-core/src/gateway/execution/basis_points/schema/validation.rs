@@ -31,8 +31,8 @@ pub(in crate::gateway::execution::basis_points) fn release_expired_cache_entries
     }));
 }
 
-pub(in crate::gateway::execution::basis_points) fn cache_memory_diagnostics(
-) -> CacheMemoryDiagnostics {
+pub(in crate::gateway::execution::basis_points) fn cache_memory_diagnostics()
+-> CacheMemoryDiagnostics {
     describe_cache(
         &CACHE,
         "schema_validators",
@@ -97,10 +97,10 @@ pub(in crate::gateway::execution::basis_points) fn validator(
     let key = serialized
         .as_ref()
         .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes)));
-    if let Some(key) = &key {
-        if let Some(validator) = crate::poison::mutex(cache).get(key, Instant::now()) {
-            return Ok(validator);
-        }
+    if let Some(key) = &key
+        && let Some(validator) = crate::poison::mutex(cache).get(key, Instant::now())
+    {
+        return Ok(validator);
     }
     // Compile outside the lock so a slow schema cannot stall unrelated cache hits.
     // Offline compilation preserves local $defs without enabling file or network references.

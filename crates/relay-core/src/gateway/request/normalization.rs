@@ -1,4 +1,4 @@
-use crate::{runtime::DefaultServiceTier, GatewayRuntime, WireApi};
+use crate::{GatewayRuntime, WireApi, runtime::DefaultServiceTier};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
@@ -218,9 +218,7 @@ pub(in crate::gateway) fn normalize_compact_account_request(
     normalize_account_request_common(request_fields, responses_lite);
 }
 
-pub(in crate::gateway) use shape::{
-    normalize_basis_points_request, responses_lite_parallel_tool_calls_valid,
-};
+pub(in crate::gateway) use shape::responses_lite_parallel_tool_calls_valid;
 
 #[cfg(test)]
 mod tests;

@@ -1,7 +1,7 @@
 use super::decimal::{usd_per_request_to_micro_usd, usd_per_token_to_micro_usd_per_million};
 use super::{
-    CatalogEntry, ImageModelPrice, LongContextRates, PricingError, TokenPrice, TokenRateSet,
-    MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
+    CatalogEntry, ImageModelPrice, LongContextRates, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
+    PricingError, TokenPrice, TokenRateSet,
 };
 use serde_json::Value;
 
@@ -29,14 +29,15 @@ pub(super) fn parse_entry(
     if token.is_none() && image.is_none() && request_micro_usd.is_none() {
         return Ok(None);
     }
-    if let Some(request_micro_usd) = request_micro_usd {
-        if token.is_none() && image.is_none() {
-            return Ok(Some(CatalogEntry::request_priced(
-                model_id.to_string(),
-                provider,
-                request_micro_usd,
-            )));
-        }
+    if let Some(request_micro_usd) = request_micro_usd
+        && token.is_none()
+        && image.is_none()
+    {
+        return Ok(Some(CatalogEntry::request_priced(
+            model_id.to_string(),
+            provider,
+            request_micro_usd,
+        )));
     }
     Ok(Some(CatalogEntry {
         model_id: model_id.to_string(),
@@ -490,11 +491,13 @@ mod tests {
             json!({ "input_cost_per_token": 0, "output_cost_per_token": 0, "cost_per_request": 0.005 }),
             json!({ "input_cost_per_token": 0, "output_cost_per_token": 0, "output_cost_per_image": 0.04 }),
         ] {
-            assert!(parse_entry("request-or-image", &price)
-                .unwrap()
-                .unwrap()
-                .token
-                .is_none());
+            assert!(
+                parse_entry("request-or-image", &price)
+                    .unwrap()
+                    .unwrap()
+                    .token
+                    .is_none()
+            );
         }
         let free = parse_entry(
             "free-token-model",

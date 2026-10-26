@@ -485,15 +485,14 @@ fn classify_variant(family: &FamilyRule, variant: String) -> (usize, String, Str
     if family.classes.is_empty() {
         return (0, "base".into(), variant);
     }
-    if variant.is_empty() || variant_rank(&family.variants, &variant) < family.variants.len() {
-        if let Some((rank, class)) = family
+    if (variant.is_empty() || variant_rank(&family.variants, &variant) < family.variants.len())
+        && let Some((rank, class)) = family
             .classes
             .iter()
             .enumerate()
             .find(|(_, class)| class.aliases.is_empty())
-        {
-            return (rank, class.id.clone(), variant);
-        }
+    {
+        return (rank, class.id.clone(), variant);
     }
     (family.classes.len(), variant, String::new())
 }

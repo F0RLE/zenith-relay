@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 const MIN_WEEKLY_WINDOW_MINUTES: u32 = 6 * 24 * 60;
 const MAX_WEEKLY_WINDOW_MINUTES: u32 = 8 * 24 * 60;
 
-/// Display-only weekly forecast, calibrated against one shared workload.
+/// Display-only weekly forecast using the median of observed subscription
+/// samples, not a selected workload or the midpoint of diagnostic bounds.
 /// The ledger's subscription window can come from another linked connection;
 /// an SIWC application ceiling is never substituted for the subscription.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -25,12 +26,14 @@ pub struct QuotaWindowUsage {
 pub struct WeeklyValueCalibration {
     pub profile_id: String,
     pub workload: String,
-    pub cache_band: u8,
-    pub output_band: u8,
-    pub median_micro_usd: u64,
+    pub cache_band: Option<u8>,
+    pub output_band: Option<u8>,
+    pub median_micro_usd: Option<u64>,
     pub low_micro_usd: u64,
     pub high_micro_usd: u64,
     pub account_count: usize,
+    pub profile_count: usize,
+    pub pricing_coverage_basis_points: u16,
     pub observed_at_ms: u64,
     pub valid_until_ms: u64,
 }
@@ -84,6 +87,23 @@ mod quota_projection_tests {
             api_equivalent_projection_window(&quota).map(|window| window.kind),
             Some(QuotaWindowKind::Secondary)
         );
+    }
+
+    #[test]
+    fn five_hour_reset_does_not_change_the_weekly_projection_window() {
+        let mut quota = QuotaSnapshot {
+            primary: Some(window(QuotaWindowKind::Primary, 300)),
+            secondary: Some(window(QuotaWindowKind::Secondary, 10_080)),
+            ..Default::default()
+        };
+        let before = api_equivalent_projection_window(&quota).cloned();
+        let burst = quota.primary.as_mut().unwrap();
+        burst.window_start_ms = Some(2_000);
+        burst.reset_at_ms = Some(18_002_000);
+        burst.available_basis_points = Some(10_000);
+        burst.explicitly_full = Some(true);
+        burst.observed_at_ms = 2_000;
+        assert_eq!(api_equivalent_projection_window(&quota), before.as_ref());
     }
 
     #[test]

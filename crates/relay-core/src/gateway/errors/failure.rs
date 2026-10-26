@@ -129,6 +129,13 @@ impl AttemptFailure {
             AuthorizedRequestError::ProgressTimeout => {
                 Self::stream(error_codes::STREAM_IDLE_TIMEOUT)
             }
+            AuthorizedRequestError::SendStartTimeout => Self {
+                execution: ExecutionObservation::unknown(),
+                status: StatusCode::GATEWAY_TIMEOUT,
+                category: error_codes::HTTP_SEND_START_TIMEOUT,
+                message: "HTTP/3 request transmission did not start within the connection deadline; execution may have started, so the request was not repeated",
+                cooldown_hint: Default::default(),
+            },
             AuthorizedRequestError::HeadersTimeout => Self {
                 execution: ExecutionObservation::unknown(),
                 status: StatusCode::GATEWAY_TIMEOUT,
