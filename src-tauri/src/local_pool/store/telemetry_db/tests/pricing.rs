@@ -417,8 +417,11 @@ fn account_purchase_cost_migration_preserves_direct_values_and_removes_legacy_ec
         .unwrap()
         .execute_batch(
             "DROP VIEW usage_sends;
-                 DROP INDEX request_logs_filter_options;
-                 DROP INDEX request_attempts_filter_options;
+                 DROP INDEX request_logs_usage_reads;
+                 DROP INDEX request_attempts_usage_reads;
+                 DROP INDEX request_logs_account_usage_reads;
+                 DROP INDEX request_attempts_account_usage_reads;
+                 CREATE INDEX request_logs_account_created_idx ON request_logs(account_id, created_at);
                  ALTER TABLE request_logs DROP COLUMN image_usage_json;
                  DROP INDEX request_logs_unaggregated;
                  ALTER TABLE request_logs DROP COLUMN cache_write_ttl;

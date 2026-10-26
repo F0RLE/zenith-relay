@@ -46,8 +46,8 @@ pub use routing::{
     QuotaRefreshStatus,
 };
 pub use usage::{
-    assign_bucket_equivalents, merge_model_equivalents, UsageBucket, UsageGroup, UsagePage,
-    UsageQuery, UsageRange, UsageSummary, UsageTokenBreakdown, UsageTotals, UsageWorkload,
+    merge_model_equivalents, UsageBucket, UsageGroup, UsagePage, UsageQuery, UsageRange,
+    UsageSummary, UsageTokenBreakdown, UsageTotals, UsageWorkload,
 };
 
 use serde::{ser::SerializeStruct, Deserialize, Deserializer, Serialize, Serializer};

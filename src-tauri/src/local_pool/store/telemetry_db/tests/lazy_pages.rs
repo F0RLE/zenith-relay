@@ -159,7 +159,7 @@ fn selected_send_pages_preserve_order_filters_prices_and_legacy_rows() {
         .lock()
         .unwrap()
         .execute(
-            "DELETE FROM request_attempts WHERE request_id = 'lazy-1'",
+            "DELETE FROM request_attempts WHERE request_id IN ('lazy-1', 'lazy-25', 'lazy-32')",
             [],
         )
         .unwrap();
@@ -199,8 +199,36 @@ fn selected_send_pages_preserve_order_filters_prices_and_legacy_rows() {
             ..Default::default()
         },
     ] {
+        let (where_sql, mut parameters) = usage_filter(&query);
+        let (page, size) = query.normalized_page();
+        parameters.push(SqlValue::Integer(i64::from(size)));
+        parameters.push(SqlValue::Integer(i64::from(page - 1) * i64::from(size)));
+        let reference = {
+            let connection = database.connection.lock().unwrap();
+            let reference = connection
+                .prepare(&format!(
+                    "SELECT request_id, attempt FROM usage_sends{where_sql}
+                 ORDER BY created_at DESC, ABS(id) DESC LIMIT ? OFFSET ?",
+                ))
+                .unwrap()
+                .query_map(params_from_iter(parameters.iter()), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, u16>(1)?))
+                })
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap();
+            reference
+        };
         let expected = database.usage_page(&query).unwrap();
         let actual = sends(&database, &query).unwrap();
+        assert_eq!(
+            actual
+                .events
+                .iter()
+                .map(|event| (event.request_id.clone(), event.attempt))
+                .collect::<Vec<_>>(),
+            reference,
+        );
         assert_eq!(
             actual.has_more,
             Some(query.normalized_page().0 < expected.total_pages)

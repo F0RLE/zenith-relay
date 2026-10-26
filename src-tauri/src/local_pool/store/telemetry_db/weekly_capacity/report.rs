@@ -14,6 +14,7 @@ pub(crate) struct WeeklyCapacityQuery {
 pub(crate) struct WeeklyCapacityReport {
     pub generated_at_ms: u64,
     pub summaries: Vec<WeeklyCapacitySummary>,
+    pub models: Vec<WeeklyCapacityModel>,
     pub groups: Vec<WeeklyCapacityGroup>,
     pub events: Vec<WeeklyCapacityEvent>,
 }
@@ -54,6 +55,14 @@ pub(crate) struct WeeklyCapacitySummary {
     pub points: Vec<WeeklyCapacityPoint>,
     pub current: Option<WeeklyCapacityPoint>,
     pub stale: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WeeklyCapacityModel {
+    pub model: String,
+    #[serde(flatten)]
+    pub summary: WeeklyCapacitySummary,
 }
 
 #[derive(Serialize)]
@@ -172,6 +181,7 @@ fn build_report(
 ) -> WeeklyCapacityReport {
     let mut groups = BTreeMap::<String, Vec<&Measurement>>::new();
     let mut plans = BTreeMap::<(String, String), Vec<&Measurement>>::new();
+    let mut models = BTreeMap::<(String, String, String), Vec<&Measurement>>::new();
     let mut events =
         BTreeMap::<(u64, String, CapacityEventKind), std::collections::BTreeSet<&str>>::new();
     let mut latest_event = HashMap::<&str, u64>::new();
@@ -200,6 +210,16 @@ fn build_report(
                     .entry((value.plan.clone(), value.pricing_revision.clone()))
                     .or_default()
                     .push(value);
+                if let Some(model) = workload.single_model() {
+                    models
+                        .entry((
+                            value.plan.clone(),
+                            model.to_owned(),
+                            value.pricing_revision.clone(),
+                        ))
+                        .or_default()
+                        .push(value);
+                }
             }
         }
     }
@@ -239,6 +259,18 @@ fn build_report(
         .collect::<Vec<_>>();
     summaries.sort_by_key(|(latest, _)| std::cmp::Reverse(*latest));
     summaries.truncate(32);
+    // Combine raw single-model observations, not already-aggregated workload
+    // medians. Mixed-model intervals remain in the all-model plan summary.
+    let mut models = models
+        .into_iter()
+        .filter_map(|((_, model, _), values)| {
+            let latest = values.iter().map(|value| value.at_ms).max()?;
+            let summary = summarize_measurements(&values, &latest_event, from, to, bucket, now)?;
+            Some((latest, WeeklyCapacityModel { model, summary }))
+        })
+        .collect::<Vec<_>>();
+    models.sort_by_key(|(latest, _)| std::cmp::Reverse(*latest));
+    models.truncate(32);
     // Bound renderer work; prefer groups with the newest actual measurements.
     result.sort_by_key(|group| {
         std::cmp::Reverse(group.points.last().map_or(0, |point| point.observed_at_ms))
@@ -247,6 +279,7 @@ fn build_report(
     WeeklyCapacityReport {
         generated_at_ms: now,
         summaries: summaries.into_iter().map(|(_, summary)| summary).collect(),
+        models: models.into_iter().map(|(_, model)| model).collect(),
         groups: result,
         events: events
             .into_iter()
@@ -336,6 +369,7 @@ mod tests {
             workload: Some(workload::Workload {
                 key: "model-default".into(),
                 label: "model".into(),
+                models: vec!["model".into()],
                 cache_band: 75,
                 output_band: 10,
             }),
@@ -389,6 +423,11 @@ mod tests {
         let json = serde_json::to_value(report).unwrap();
         assert_eq!(json["summaries"][0]["pricingRevision"], "v1");
         assert_eq!(json["summaries"][0]["current"]["medianMicroUsd"], 250);
+        assert_eq!(json["models"][0]["model"], "model");
+        assert_eq!(json["models"][0]["plan"], "plus");
+        assert_eq!(json["models"][0]["current"]["medianMicroUsd"], 250);
+        assert_eq!(json["models"][0]["current"]["accountCount"], 4);
+        assert!(json["models"][0].get("summary").is_none());
     }
 
     #[test]
@@ -405,6 +444,16 @@ mod tests {
         let point = report.summaries[0].current.as_ref().unwrap();
         assert_eq!(point.account_count, 33);
         assert_eq!(point.median_micro_usd, 17);
+        assert_eq!(report.models.len(), 1);
+        assert_eq!(
+            report.models[0]
+                .summary
+                .current
+                .as_ref()
+                .unwrap()
+                .account_count,
+            33
+        );
     }
 
     #[test]
@@ -429,6 +478,7 @@ mod tests {
             .iter()
             .all(|group| group.current.as_ref().unwrap().account_count == 1));
         assert_eq!(report.summaries.len(), 3);
+        assert_eq!(report.models.len(), 3);
         let plus = report
             .summaries
             .iter()
@@ -441,6 +491,58 @@ mod tests {
             .iter()
             .filter(|summary| summary.plan != "plus" || summary.pricing_revision != "v1")
             .all(|summary| summary.current.as_ref().unwrap().account_count == 1));
+    }
+
+    #[test]
+    fn model_choices_do_not_attribute_mixed_intervals_to_one_model() {
+        let single = measurement("a", 100, NOW - 2_000);
+        let mut mixed = measurement("b", 9_000, NOW - 1_000);
+        let workload = mixed.workload.as_mut().unwrap();
+        workload.key = "mixed".into();
+        workload.label = "model · standard · short · high + other · standard · short · high".into();
+        workload.models = vec!["model".into(), "other".into()];
+        let mut other = measurement("c", 300, NOW);
+        let workload = other.workload.as_mut().unwrap();
+        workload.key = "other".into();
+        workload.label = "other · standard · short · high".into();
+        workload.models = vec!["other".into()];
+        let report = build_report(vec![single, mixed, other], NOW - HOUR_MS, NOW, HOUR_MS, NOW);
+        assert_eq!(
+            report.summaries[0].current.as_ref().unwrap().account_count,
+            3
+        );
+        assert_eq!(report.models.len(), 2);
+        assert_eq!(report.models[0].model, "other");
+        for model in &report.models {
+            let current = model.summary.current.as_ref().unwrap();
+            assert_eq!(current.account_count, 1);
+            assert_eq!(
+                current.median_micro_usd,
+                if model.model == "model" { 100 } else { 300 }
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_workloads_keep_single_model_history_without_inventing_mixed_splits() {
+        for (label, expected) in [
+            ("model · standard · short · high", Some("model")),
+            (
+                "model · standard · short · high + model · priority · long · low",
+                Some("model"),
+            ),
+            (
+                "model · standard · short · high + other · priority · long · low",
+                None,
+            ),
+            ("", None),
+        ] {
+            let workload: workload::Workload = serde_json::from_value(serde_json::json!({
+                "key":"legacy", "label":label, "cache_band":75, "output_band":10
+            }))
+            .unwrap();
+            assert_eq!(workload.single_model(), expected);
+        }
     }
 
     #[test]

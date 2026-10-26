@@ -103,9 +103,22 @@ fn account_purge_invalidates_cached_filter_choices() {
 }
 
 #[test]
-fn filter_choices_use_covering_indexes_for_all_time_and_period_reads() {
+fn filters_and_totals_use_covering_indexes_for_all_time_and_period_reads() {
     let database = TelemetryDb::open(Path::new(":memory:")).unwrap();
     let connection = database.connection.lock().unwrap();
+    let explain = |sql: &str, parameters: &[SqlValue]| {
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        let rows = statement
+            .query_map(params_from_iter(parameters.iter()), |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        rows.join("\n")
+    };
     for query in [
         UsageQuery::default(),
         UsageQuery {
@@ -119,30 +132,46 @@ fn filter_choices_use_covering_indexes_for_all_time_and_period_reads() {
             "wire_api, transport, error_category, requested_model, resolved_model, account_id, source_id",
             &where_sql,
         );
-        let mut statement = connection
-            .prepare(&format!(
-                "EXPLAIN QUERY PLAN SELECT DISTINCT CASE WHEN wire_api = 'chatcompletions'
+        let filter_parameters = parameters
+            .iter()
+            .chain(parameters.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let plan = explain(
+            &format!(
+                "SELECT DISTINCT CASE WHEN wire_api = 'chatcompletions'
              THEN 'chat_completions' ELSE wire_api END, transport, error_category,
              requested_model, resolved_model, COALESCE(account_id, source_id, '') FROM ({history})"
-            ))
-            .unwrap();
-        let plan = statement
-            .query_map(
-                params_from_iter(parameters.iter().chain(parameters.iter())),
-                |row| row.get::<_, String>(3),
-            )
-            .unwrap()
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .unwrap()
-            .join("\n");
+            ),
+            &filter_parameters,
+        );
         assert!(
-            plan.contains("COVERING INDEX request_attempts_filter_options"),
+            plan.contains("COVERING INDEX request_attempts_usage_reads"),
             "{plan}"
         );
         assert!(
-            plan.contains("COVERING INDEX request_logs_filter_options"),
+            plan.contains("COVERING INDEX request_logs_usage_reads"),
             "{plan}"
         );
+        for (table, columns) in [
+            (
+                "request_logs",
+                zenith_relay_core::usage_total_columns_sql!(logical),
+            ),
+            (
+                "request_attempts",
+                zenith_relay_core::usage_total_columns_sql!(physical),
+            ),
+        ] {
+            let plan = explain(
+                &format!("SELECT {columns} FROM {table}{where_sql}"),
+                &parameters,
+            );
+            assert!(
+                plan.contains(&format!("COVERING INDEX {table}_usage_reads")),
+                "{plan}"
+            );
+        }
     }
 }
 
@@ -161,8 +190,8 @@ fn filter_read_migration_upgrades_existing_history_without_rewriting_it() {
         .lock()
         .unwrap()
         .execute_batch(
-            "DROP INDEX request_attempts_filter_options;
-         DROP INDEX request_logs_filter_options;
+            "DROP INDEX request_attempts_usage_reads;
+         DROP INDEX request_logs_usage_reads;
          DROP TABLE app_state_items;
          DROP TABLE weekly_capacity_anchors;
          DROP TABLE weekly_capacity_history;

@@ -67,13 +67,13 @@ fn measure_usage_filter_choices() {
     let connection = database.connection.lock().unwrap();
     connection
         .execute_batch(
-            "DROP INDEX request_attempts_filter_options; DROP INDEX request_logs_filter_options;",
+            "DROP INDEX request_attempts_usage_reads; DROP INDEX request_logs_usage_reads;",
         )
         .unwrap();
     let mut reference = None;
     for phase in ["scan", "covering_index", "cached"] {
         if phase == "covering_index" {
-            connection.execute_batch(MIGRATION_039).unwrap();
+            connection.execute_batch(MIGRATION_043).unwrap();
             database.usage_filter_options_cache.lock().unwrap().take();
         }
         let started = Instant::now();
@@ -99,6 +99,77 @@ fn measure_usage_filter_choices() {
         2
     );
     drop(connection);
+    drop(database);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "synthetic account-window reads and per-account cache invalidation; no live data"]
+fn measure_quota_window_reads() {
+    let root = std::env::temp_dir().join(format!("relay-quota-timing-{}", uuid::Uuid::new_v4()));
+    let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+    populate_report_history(&database);
+    {
+        let connection = database.connection.lock().unwrap();
+        for table in ["request_logs", "request_attempts"] {
+            connection
+                .execute_batch(&format!(
+                    "UPDATE {table} SET account_id = source_id, candidate_id = source_id,
+                 source_id = 'codex', requested_model = 'gpt-5.4', resolved_model = 'gpt-5.4',
+                 cached_input_tokens = 0;",
+                ))
+                .unwrap();
+        }
+    }
+    let now = zenith_relay_core::unix_time_ms();
+    let windows = (0..MEMBERS)
+        .map(|member| (format!("report-source-{member}"), 0, now + 60_000))
+        .collect::<Vec<_>>();
+    let catalog = test_pricing_catalog();
+    let context = test_pricing_context(&BTreeMap::new(), &BTreeMap::new());
+    let mut previous = None;
+    for phase in ["cold", "cached", "one_account_changed"] {
+        if phase == "one_account_changed" {
+            let mut event = aggregate_test_event("quota-new-send", 1, 100, 0, None, 10);
+            event.account_id = Some(windows[0].0.clone());
+            event.source_id = "codex".into();
+            event.requested_model = Some("gpt-5.4".into());
+            event.resolved_model = event.requested_model.clone();
+            event.cached_input_tokens = Some(0);
+            database.record(&event).unwrap();
+        }
+        let started = Instant::now();
+        let result = database
+            .account_api_equivalents_with_pricing(&windows, &catalog, &context)
+            .unwrap();
+        println!("quota_window_reads phase={phase} retained={} accounts={} sql_reads={} elapsed_ms={:.2}",
+            ROWS_PER_MEMBER * MEMBERS, result.len(),
+            database.quota_window_reads.load(std::sync::atomic::Ordering::Relaxed),
+            started.elapsed().as_secs_f64() * 1000.0);
+        assert_eq!(result.len(), MEMBERS as usize);
+        if let Some(previous) = previous.as_ref() {
+            if phase == "cached" {
+                assert_eq!(&result, previous);
+            } else {
+                for (id, value) in &result {
+                    if id != &windows[0].0 {
+                        assert_eq!(value, &previous[id]);
+                    }
+                }
+            }
+        }
+        for (id, value) in &result {
+            let extra = u64::from(phase == "one_account_changed" && id == &windows[0].0);
+            assert_eq!(value.priced_tokens, (ROWS_PER_MEMBER + extra) * 110);
+        }
+        assert_eq!(
+            database
+                .quota_window_reads
+                .load(std::sync::atomic::Ordering::Relaxed),
+            MEMBERS + u64::from(phase == "one_account_changed")
+        );
+        previous = Some(result);
+    }
     drop(database);
     std::fs::remove_dir_all(root).unwrap();
 }

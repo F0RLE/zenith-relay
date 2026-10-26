@@ -296,12 +296,33 @@ pub const API_EQUIVALENT_AGGREGATE_SQL: &str = concat!(
       COUNT(output_tokens), COUNT(total_tokens)"
 );
 
-/// Usage totals for Desktop telemetry.
+/// Usage totals for Desktop telemetry. Logical/physical projections retain the
+/// full column layout while computing only their contributing measurements.
 #[macro_export]
 macro_rules! usage_total_columns_sql {
     () => {
         concat!(
-            "COUNT(*), \
+            $crate::usage_total_columns_sql!(@timing), ", ",
+            $crate::usage_total_columns_sql!(@tokens), ", ",
+            $crate::usage_total_columns_sql!(@speed)
+        )
+    };
+    (logical) => {
+        concat!(
+            $crate::usage_total_columns_sql!(@timing),
+            ", 0, 0, 0, 0, 0, 0, 0, 0, ",
+            $crate::usage_total_columns_sql!(@speed)
+        )
+    };
+    (physical) => {
+        concat!(
+            "COUNT(*), 0, 0, 0, 0, 0, 0, 0, ",
+            $crate::usage_total_columns_sql!(@tokens),
+            ", 0, 0"
+        )
+    };
+    (@timing) => {
+        "COUNT(*), \
     COALESCE(SUM(CASE WHEN success != 0 THEN 1 ELSE 0 END), 0), \
     COALESCE(SUM(latency_ms), 0), COALESCE(SUM(ttft_ms), 0), COUNT(ttft_ms), \
     COALESCE(SUM(CASE WHEN success != 0 AND generation_ms > 0 \
@@ -315,13 +336,18 @@ macro_rules! usage_total_columns_sql {
     COALESCE(SUM(CASE WHEN success != 0 AND generation_ms > 0 \
         AND MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) > 0 \
         AND MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) <= generation_ms \
-        THEN MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) ELSE 0 END), 0), \
-    COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0), \
+        THEN MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) ELSE 0 END), 0)"
+    };
+    (@tokens) => {
+        "COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0), \
     COUNT(cached_input_tokens), COALESCE(SUM(cache_write_input_tokens), 0), \
     COUNT(cache_write_input_tokens), COALESCE(SUM(reasoning_tokens), 0), \
     COALESCE(SUM(output_tokens), 0), \
-    COALESCE(SUM(total_tokens), 0)",
-            ", COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 AND ",
+    COALESCE(SUM(total_tokens), 0)"
+    };
+    (@speed) => {
+        concat!(
+            "COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 AND ",
             "COALESCE(output_tokens, 0) <= latency_ms",
             " THEN MAX(COALESCE(output_tokens, 0), 0) ELSE 0 END), 0), COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 AND ",
             "COALESCE(output_tokens, 0) <= latency_ms",

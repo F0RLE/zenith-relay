@@ -51,8 +51,11 @@ fn unknown_tier_migration_reclassifies_retained_events_and_preserves_archives() 
             "DROP VIEW usage_sends;
          ALTER TABLE request_logs DROP COLUMN image_usage_json;
          ALTER TABLE request_attempts DROP COLUMN image_usage_json;
-         DROP INDEX request_attempts_created_at;
-         DROP INDEX request_attempts_account_created;
+         DROP INDEX request_attempts_usage_reads;
+         DROP INDEX request_logs_usage_reads;
+         DROP INDEX request_attempts_account_usage_reads;
+         DROP INDEX request_logs_account_usage_reads;
+         CREATE INDEX request_logs_account_created_idx ON request_logs(account_id, created_at);
          UPDATE usage_candidate_rollups SET price_class = 'standard',
             input_tokens = input_tokens + 700, input_samples = input_samples + 1,
             output_tokens = output_tokens + 7, output_samples = output_samples + 1,

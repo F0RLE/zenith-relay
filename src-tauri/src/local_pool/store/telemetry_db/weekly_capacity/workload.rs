@@ -8,8 +8,30 @@ use zenith_relay_core::{
 pub(super) struct Workload {
     pub key: String,
     pub label: String,
+    #[serde(default)]
+    pub models: Vec<String>,
     pub cache_band: u8,
     pub output_band: u8,
+}
+
+impl Workload {
+    pub(super) fn single_model(&self) -> Option<&str> {
+        match self.models.as_slice() {
+            [model] => (!model.trim().is_empty()).then_some(model.as_str()),
+            [] => {
+                // Older stored observations only have the joined profile label.
+                // Accept it only when every profile names the same model.
+                let mut names = self.label.split(" + ").map(|profile| {
+                    profile
+                        .split_once(" · ")
+                        .map_or(profile, |(model, _)| model)
+                });
+                let model = names.next().filter(|model| !model.trim().is_empty())?;
+                names.all(|name| name == model).then_some(model)
+            }
+            _ => None,
+        }
+    }
 }
 
 pub(super) fn measure(
@@ -33,6 +55,7 @@ pub(super) fn measure(
     let resolver = CatalogPriceResolver::new(catalog, pricing);
     let mut statement = connection.prepare(&sql).map_err(db_error)?;
     let mut profiles = BTreeMap::<String, u64>::new();
+    let mut models = std::collections::BTreeSet::new();
     let (mut cost, mut input, mut cached, mut output) = (0_u64, 0_u64, 0_u64, 0_u64);
     for account in accounts {
         let rows = statement
@@ -75,6 +98,7 @@ pub(super) fn measure(
             input = input.saturating_add(row_input);
             cached = cached.saturating_add(usage.cached_input_tokens.unwrap_or_default());
             output = output.saturating_add(row_output);
+            models.insert(model.clone());
             // Keep joint model/tier/context/reasoning proportions, not just a
             // model name. Coarse token-mix bands reduce false policy-change signals.
             let profile = profiles
@@ -107,6 +131,7 @@ pub(super) fn measure(
         Workload {
             key,
             label,
+            models: models.into_iter().collect(),
             cache_band,
             output_band,
         },

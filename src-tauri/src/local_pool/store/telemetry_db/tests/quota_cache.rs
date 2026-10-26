@@ -63,6 +63,34 @@ fn account_event(request: &str, account: &str, tokens: u64) -> UsageEvent {
 }
 
 #[test]
+fn quota_reads_use_the_shared_reader_with_the_existing_memory_budget() {
+    use std::time::{Duration, Instant};
+
+    let fixture = Fixture::new();
+    let writer = fixture.database.lock_connection().unwrap();
+    let (acquired_reader, accounts) = std::thread::scope(|scope| {
+        let task = scope.spawn(|| fixture.read());
+        let reader = fixture.database.report_connection.as_ref().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while reader.try_lock().is_ok() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let acquired_reader = reader.try_lock().is_err();
+        drop(writer);
+        let result = task.join().unwrap();
+        (acquired_reader, result.len())
+    });
+    let memory_budget = fixture.database.memory_cache_budget();
+    fixture.cleanup();
+    assert!(
+        acquired_reader,
+        "quota reads bypassed the shared read snapshot"
+    );
+    assert_eq!(accounts, 2);
+    assert_eq!(memory_budget, Some(32 * 1024 * 1024));
+}
+
+#[test]
 fn quota_cache_preserves_other_accounts_and_source_only_writes() {
     let fixture = Fixture::new();
     let first = fixture.read();

@@ -146,20 +146,7 @@ pub fn merge_model_equivalents(
     (equivalents, sources)
 }
 
-/// Writes merged estimates onto matching buckets. A bucket without a row keeps the default.
-pub fn assign_bucket_equivalents(
-    buckets: &mut [UsageBucket],
-    rows: impl IntoIterator<Item = (u64, ApiEquivalentSummary)>,
-) {
-    let mut equivalents = HashMap::<u64, ApiEquivalentSummary>::new();
-    for (start_ms, estimate) in rows {
-        equivalents.entry(start_ms).or_default().merge(estimate);
-    }
-    for bucket in buckets {
-        bucket.totals.api_equivalent = equivalents.remove(&bucket.start_ms).unwrap_or_default();
-    }
-}
-
+/// Usage totals for one time bucket.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsagePage {
@@ -314,10 +301,7 @@ impl UsageQuery {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        assign_bucket_equivalents, merge_model_equivalents, UsageBucket, UsageQuery, UsageRange,
-        UsageTotals,
-    };
+    use super::{merge_model_equivalents, UsageQuery, UsageRange, UsageTotals};
     use crate::{ApiEquivalentSummary, PriceSource};
 
     #[test]
@@ -437,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn equivalent_rows_merge_by_model_and_bucket() {
+    fn equivalent_rows_merge_by_model() {
         let (models, sources) = merge_model_equivalents([
             ("gpt".to_string(), summary(2, 3), PriceSource::Provider),
             ("gpt".to_string(), summary(4, 0), PriceSource::Manual),
@@ -452,23 +436,6 @@ mod tests {
                 PriceSource::Manual,
                 PriceSource::Unpriced
             ]
-        );
-
-        let mut buckets = vec![
-            UsageBucket {
-                start_ms: 10,
-                totals: UsageTotals::default(),
-            },
-            UsageBucket {
-                start_ms: 20,
-                totals: UsageTotals::default(),
-            },
-        ];
-        assign_bucket_equivalents(&mut buckets, [(10, summary(5, 1)), (10, summary(1, 2))]);
-        assert_eq!(buckets[0].totals.api_equivalent, summary(6, 3));
-        assert_eq!(
-            buckets[1].totals.api_equivalent,
-            ApiEquivalentSummary::default()
         );
     }
 

@@ -104,9 +104,8 @@ impl TelemetryDb {
 
     /// Compute quota-window API equivalents without constructing a complete
     /// usage page for every account. The caller supplies exact account ids and
-    /// already-normalized window bounds. Raw aggregates are read in one short
-    /// database-lock scope, then pricing is resolved after the lock is released
-    /// so request recording is not blocked by catalog lookups.
+    /// already-normalized window bounds. Raw aggregates share one read snapshot;
+    /// pricing runs after releasing it. Request recording keeps its writer.
     pub fn account_api_equivalents_with_pricing(
         &self,
         windows: &[(String, u64, u64)],
@@ -147,7 +146,7 @@ impl TelemetryDb {
             return Ok(equivalents);
         }
         let aggregates = {
-            let connection = self.lock_connection()?;
+            let connection = self.lock_report_connection()?;
             missing
                 .iter()
                 .map(|(account_id, (from_ms, to_ms))| {
@@ -378,6 +377,31 @@ pub(super) fn usage_send_page(
     offset: u64,
     has_more: Option<&mut bool>,
 ) -> Result<Vec<UsageLog>> {
+    use rusqlite::OptionalExtension;
+
+    let limit = page_size + u32::from(has_more.is_some());
+    let mut cutoff_parameters = parameters.to_vec();
+    cutoff_parameters.push(SqlValue::Integer(sql_u64(
+        offset.saturating_add(u64::from(limit.saturating_sub(1))),
+    )));
+    let cutoff = connection
+        .prepare_cached(&format!(
+            "SELECT created_at, ABS(id) FROM request_attempts{where_sql}
+             ORDER BY created_at DESC, ABS(id) DESC LIMIT 1 OFFSET ?"
+        ))
+        .map_err(db_error)?
+        .query_row(params_from_iter(cutoff_parameters.iter()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .optional()
+        .map_err(db_error)?;
+    // A complete attempt prefix bounds every legacy send that can enter this
+    // page. Keep ties; older keys already rank after the whole selected prefix.
+    let legacy_bound = if cutoff.is_some() {
+        " AND (created_at, ABS(id)) >= (?, ?)"
+    } else {
+        ""
+    };
     let conjunction = if where_sql.is_empty() {
         " WHERE "
     } else {
@@ -389,7 +413,7 @@ pub(super) fn usage_send_page(
          FROM request_attempts{where_sql}
          UNION ALL
          SELECT rowid AS storage_id, 0 AS is_attempt, created_at, ABS(id) AS sort_id
-         FROM request_logs{where_sql}{conjunction}{legacy}
+         FROM request_logs{where_sql}{conjunction}{legacy}{legacy_bound}
          ORDER BY created_at DESC, sort_id DESC LIMIT ? OFFSET ?"
     );
     let mut statement = connection.prepare(&sql).map_err(db_error)?;
@@ -398,9 +422,11 @@ pub(super) fn usage_send_page(
         .chain(parameters.iter())
         .cloned()
         .collect();
-    page_parameters.push(SqlValue::Integer(i64::from(
-        page_size + u32::from(has_more.is_some()),
-    )));
+    if let Some((created_at, sort_id)) = cutoff {
+        page_parameters.push(SqlValue::Text(created_at));
+        page_parameters.push(SqlValue::Integer(sort_id));
+    }
+    page_parameters.push(SqlValue::Integer(i64::from(limit)));
     page_parameters.push(SqlValue::Integer(zenith_relay_core::usage::sql_u64(offset)));
     let mut keys = statement
         .query_map(params_from_iter(page_parameters.iter()), |row| {

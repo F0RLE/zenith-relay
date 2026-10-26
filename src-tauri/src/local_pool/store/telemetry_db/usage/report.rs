@@ -33,7 +33,7 @@ impl Projection {
     }
 }
 
-fn priced_totals(requests: UsageTotals, sends: UsageTotals) -> UsageTotals {
+pub(super) fn priced_totals(requests: UsageTotals, sends: UsageTotals) -> UsageTotals {
     let price = sends.api_equivalent;
     UsageTotals {
         api_equivalent: price,
@@ -77,7 +77,7 @@ pub(in crate::local_pool::store::telemetry_db) fn scoped_report_summary(
     let mut statement = connection
         .prepare(&format!(
         "SELECT COALESCE(resolved_model, requested_model, ''), COALESCE(account_id, source_id, ''),
-         {USAGE_TOTAL_COLUMNS} FROM request_logs{where_sql} GROUP BY 1, 2"
+         {USAGE_REQUEST_COLUMNS} FROM request_logs{where_sql} GROUP BY 1, 2"
     ))
         .map_err(db_error)?;
     let mut rows = statement
@@ -98,14 +98,14 @@ pub(in crate::local_pool::store::telemetry_db) fn scoped_report_summary(
 
     let projection = send_projection(&format!(
         "account_id, source_id, requested_model, resolved_model, applied_service_tier, cache_write_ttl,
-         {USAGE_TOTAL_INPUT_COLUMNS}"
+         {USAGE_CONSUMPTION_INPUT_COLUMNS}"
     ), where_sql);
     let mut statement = connection
         .prepare(&format!(
             "SELECT CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
          COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model, ''),
          {price_class}, {context_band}, {USAGE_PRICING_AGGREGATE_COLUMNS},
-         0 AS totals_start, {USAGE_TOTAL_COLUMNS}
+         0 AS totals_start, {USAGE_CONSUMPTION_COLUMNS}
          FROM ({projection}) GROUP BY 1, 2, 3, 4, 5",
             price_class = zenith_relay_core::usage::USAGE_PRICE_CLASS_SQL,
             context_band = zenith_relay_core::usage::USAGE_CONTEXT_BAND_SQL,

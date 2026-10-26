@@ -208,15 +208,139 @@ fn first_entry_uses_narrow_count_and_unaggregated_indexes() {
     let sends = super::super::usage::send_projection("1", "");
     let plan = explain(&format!("SELECT COUNT(*) FROM ({sends})"));
     assert!(
-        plan.contains("COVERING INDEX request_logs_send_history"),
+        plan.contains("COVERING INDEX request_logs_usage_reads"),
         "{plan}"
     );
+    let plan = explain(&format!(
+        "SELECT rowid AS storage_id, 1 AS is_attempt, created_at, ABS(id) AS sort_id
+         FROM request_attempts UNION ALL
+         SELECT rowid, 0, created_at, ABS(id) FROM request_logs WHERE {}
+         ORDER BY created_at DESC, sort_id DESC LIMIT 51",
+        super::super::usage::LEGACY_SEND_PREDICATE,
+    ));
+    assert!(
+        plan.contains("COVERING INDEX request_attempts_usage_reads"),
+        "{plan}"
+    );
+    assert!(
+        plan.contains("COVERING INDEX request_logs_usage_reads"),
+        "{plan}"
+    );
+    assert!(!plan.contains("TEMP B-TREE"), "{plan}");
     let plan = explain("SELECT COUNT(*) FROM usage_sends WHERE usage_aggregate_recorded = 0");
     assert!(plan.contains("request_logs_unaggregated"), "{plan}");
     assert!(plan.contains("request_attempts_unaggregated"), "{plan}");
     drop(connection);
     drop(database);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn quota_windows_use_covering_account_indexes() {
+    let root = std::env::temp_dir().join(format!("relay-quota-plan-{}", uuid::Uuid::new_v4()));
+    let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+    let connection = database.connection.lock().unwrap();
+    let parameters = [
+        SqlValue::Text("account-plan-test".into()),
+        SqlValue::Integer(0),
+        SqlValue::Integer(i64::MAX),
+    ];
+    let plan = connection
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            super::super::usage::account_pricing_sql()
+        ))
+        .unwrap()
+        .query_map(
+            params_from_iter(parameters.iter().chain(parameters.iter())),
+            |row| row.get::<_, String>(3),
+        )
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap()
+        .join("\n");
+    for table in ["request_logs", "request_attempts"] {
+        assert!(
+            plan.contains(&format!(
+                "SEARCH {table} USING COVERING INDEX {table}_account_usage_reads"
+            )),
+            "{plan}"
+        );
+    }
+    drop(connection);
+    drop(database);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn usage_read_migration_preserves_history_and_consolidates_indexes() {
+    let index_count = |connection: &Connection| {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+    for version in [41, 43] {
+        let root =
+            std::env::temp_dir().join(format!("relay-page-upgrade-{}", uuid::Uuid::new_v4()));
+        let path = root.join("usage.sqlite");
+        let database = TelemetryDb::open(&path).unwrap();
+        for index in 0..3 {
+            let mut event = aggregate_test_event(&format!("upgrade-{index}"), 1, 100, 0, None, 10);
+            if index < 2 {
+                event.account_id = Some("upgrade-account".into());
+            }
+            database.record(&event).unwrap();
+        }
+        let indexes_before = {
+            let connection = database.connection.lock().unwrap();
+            connection.execute_batch(
+                "DROP INDEX request_attempts_account_usage_reads; DROP INDEX request_logs_account_usage_reads;
+                 CREATE INDEX request_attempts_account_created ON request_attempts(account_id, created_at);
+                 CREATE INDEX request_logs_account_created_idx ON request_logs(account_id, created_at);
+                 DELETE FROM request_attempts WHERE request_id = 'upgrade-1';",
+            ).unwrap();
+            if version == 41 {
+                connection.execute_batch(
+                    "DROP INDEX request_attempts_usage_reads; DROP INDEX request_logs_usage_reads;
+                     CREATE INDEX request_attempts_created_at ON request_attempts(created_at);
+                     CREATE INDEX request_logs_send_history ON request_logs(created_at, request_id, attempt);",
+                ).unwrap();
+                connection.execute_batch(MIGRATION_039).unwrap();
+            }
+            connection
+                .pragma_update(None, "user_version", version)
+                .unwrap();
+            index_count(&connection)
+        };
+        let before = database.usage_page(&UsageQuery::default()).unwrap();
+        let expected = serde_json::to_value((&before.events, &before.totals)).unwrap();
+        drop(database);
+        for _ in 0..2 {
+            let database = TelemetryDb::open(&path).unwrap();
+            let after = database.usage_page(&UsageQuery::default()).unwrap();
+            assert_eq!(
+                serde_json::to_value((&after.events, &after.totals)).unwrap(),
+                expected
+            );
+            assert_eq!(after.total, 3);
+            let connection = database.connection.lock().unwrap();
+            assert_eq!(
+                connection
+                    .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                    .unwrap(),
+                LOCAL_DATABASE_SCHEMA_VERSION
+            );
+            assert_eq!(
+                index_count(&connection),
+                indexes_before - if version == 41 { 2 } else { 0 }
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[test]

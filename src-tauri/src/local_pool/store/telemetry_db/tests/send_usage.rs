@@ -358,8 +358,11 @@ fn migration_backfills_retained_sends_once_and_retention_preserves_their_rollups
          DROP VIEW usage_sends;
          ALTER TABLE request_logs DROP COLUMN image_usage_json;
          ALTER TABLE request_attempts DROP COLUMN image_usage_json;
-         DROP INDEX request_attempts_created_at;
-         DROP INDEX request_attempts_account_created;
+         DROP INDEX request_attempts_usage_reads;
+         DROP INDEX request_logs_usage_reads;
+         DROP INDEX request_attempts_account_usage_reads;
+         DROP INDEX request_logs_account_usage_reads;
+         CREATE INDEX request_logs_account_created_idx ON request_logs(account_id, created_at);
          DROP TABLE app_state_items;
          DROP TABLE weekly_capacity_anchors;
          DROP TABLE weekly_capacity_history;
