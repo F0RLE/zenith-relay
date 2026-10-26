@@ -19,8 +19,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  check:
-    name: Check
+  check-runtime:
+    name: Check runtime
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: "-Dwarnings"
@@ -60,9 +60,6 @@ jobs:
           sudo sed -i -E 's|https?://azure[.]archive[.]ubuntu[.]com/ubuntu/?|https://archive.ubuntu.com/ubuntu/|g; s|mirror[+]file:/etc/apt/apt-mirrors[.]txt|https://archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources
           sudo apt-get update
           sudo apt-get install -y dbus-x11 gnome-keyring libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev xdg-utils
-      - run: bunx --no-install playwright install chromium
-        timeout-minutes: 10
-        working-directory: src
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --workspace --all-targets --locked -- -D warnings
       - name: Agent guardrails
@@ -86,8 +83,54 @@ jobs:
             bun run verify
           '
         working-directory: src
-      - run: bun run test:e2e
+
+  check-ui:
+    name: Check UI (${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    defaults:
+      run:
         working-directory: src
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+      - run: bun install --frozen-lockfile
+      - name: Use canonical Ubuntu archive
+        run: sudo sed -i -E 's|https?://azure[.]archive[.]ubuntu[.]com/ubuntu/?|https://archive.ubuntu.com/ubuntu/|g; s|mirror[+]file:/etc/apt/apt-mirrors[.]txt|https://archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources
+      - name: Install test browser
+        run: bunx --no-install playwright install --with-deps chromium
+        timeout-minutes: 10
+      - name: Run browser tests
+        run: bun run test:e2e --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+      - name: Retain failed browser traces
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-failure-${{ matrix.shard }}
+          path: src/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  check:
+    name: Check
+    needs: [check-runtime, check-ui]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require runtime and every browser shard
+        shell: pwsh
+        env:
+          RUNTIME_RESULT: ${{ needs.check-runtime.result }}
+          UI_RESULT: ${{ needs.check-ui.result }}
+        run: |
+          if ($env:RUNTIME_RESULT -ne 'success' -or $env:UI_RESULT -ne 'success') {
+            exit 1
+          }
 
   check-windows:
     name: Check Windows
@@ -127,7 +170,6 @@ jobs:
 
   build:
     name: ${{ matrix.name }}
-    needs: [check, check-windows, check-web]
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
     runs-on: ${{ matrix.os }}
     env:
@@ -307,7 +349,7 @@ jobs:
 
   publish-release:
     name: Publish verified release
-    needs: build
+    needs: [check, check-windows, check-web, build]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

@@ -17,7 +17,7 @@ function needs(job) {
 
 test("Rust caches use the nested Cargo workspaces and their own target directories", () => {
   const cases = [
-    ["build.yml", "check", ["src-tauri", "crates/relay-core"]],
+    ["build.yml", "check-runtime", ["src-tauri", "crates/relay-core"]],
     ["build.yml", "check-windows", ["src-tauri"]],
     ["build.yml", "build", ["src-tauri"]],
   ];
@@ -38,7 +38,7 @@ describe("desktop CI", () => {
   const build = workflow("build.yml");
 
   test("documentation checks use locked dependencies and cannot be skipped silently", () => {
-    const steps = build.jobs.check.steps;
+    const steps = build.jobs["check-runtime"].steps;
     const install = steps.findIndex((step) => step.run === "bun install --frozen-lockfile"
       && step["working-directory"] === "src");
     const scripts = steps.findIndex((step) => step.run === "bun test ./scripts/check ./scripts/lib ./scripts/maintenance ./scripts/build");
@@ -68,10 +68,11 @@ describe("desktop CI", () => {
     expect(build.jobs["check-windows"]["runs-on"]).toBe("windows-latest");
     expect(build.jobs["check-windows"].steps.at(-1).run)
       .toContain("cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1");
-    expect(needs(build.jobs.build)).toEqual(["check", "check-windows", "check-web"]);
+    expect(build.jobs.build.needs).toBeUndefined();
+    expect(needs(build.jobs["publish-release"])).toEqual(["check", "check-windows", "check-web", "build"]);
   });
 
-  test("web preview is checked independently and must pass before packaging", () => {
+  test("web preview is checked independently and must pass before publication", () => {
     const web = build.jobs["check-web"];
     expect(web).toBeDefined();
     expect(web.defaults.run["working-directory"]).toBe("web");
@@ -90,7 +91,44 @@ describe("desktop CI", () => {
     }
     expect(web.steps.some((step) => step.run?.startsWith("bunx --no-install playwright install")
       && step.run.includes("chromium"))).toBe(true);
-    expect(needs(build.jobs.build)).toContain("check-web");
+    expect(needs(build.jobs["publish-release"])).toContain("check-web");
+  });
+
+  test("browser shards run independently without cancelling the remaining coverage", () => {
+    const ui = build.jobs["check-ui"];
+    expect(ui.needs).toBeUndefined();
+    expect(ui.if).toBeUndefined();
+    expect(ui["continue-on-error"]).toBeUndefined();
+    expect(ui.strategy["fail-fast"]).toBe(false);
+    expect(ui.strategy.matrix.shard).toEqual([1, 2, 3, 4]);
+    expect(ui.defaults.run["working-directory"]).toBe("src");
+    const run = ui.steps.find((step) => step.name === "Run browser tests");
+    expect(run.run).toBe("bun run test:e2e --shard=${{ matrix.shard }}/${{ strategy.job-total }}");
+    expect(run.if).toBeUndefined();
+    expect(run["continue-on-error"]).toBeUndefined();
+    expect(build.jobs["check-runtime"].steps.some((step) => step.run === "bun run test:e2e")).toBe(false);
+  });
+
+  test("the existing Check status fails closed on failed, skipped or cancelled dependencies", () => {
+    const gate = build.jobs.check;
+    expect(gate.name).toBe("Check");
+    expect(needs(gate)).toEqual(["check-runtime", "check-ui"]);
+    expect(gate.if).toBe("always()");
+    expect(gate["continue-on-error"]).toBeUndefined();
+    expect(gate.steps).toHaveLength(1);
+    const step = gate.steps[0];
+    expect(step.shell).toBe("pwsh");
+    expect(step.env).toEqual({
+      RUNTIME_RESULT: "${{ needs.check-runtime.result }}",
+      UI_RESULT: "${{ needs.check-ui.result }}",
+    });
+    expect(step.run.trim()).toBe([
+      "if ($env:RUNTIME_RESULT -ne 'success' -or $env:UI_RESULT -ne 'success') {",
+      "  exit 1",
+      "}",
+    ].join("\n"));
+    expect(step.if).toBeUndefined();
+    expect(step["continue-on-error"]).toBeUndefined();
   });
 
   test("installers are built only for a manual run or a pushed version tag", () => {
@@ -100,7 +138,7 @@ describe("desktop CI", () => {
   });
 
   test("Linux checks use the canonical archive for direct and mirror-list APT sources", () => {
-    for (const jobName of ["check", "check-web"]) {
+    for (const jobName of ["check-runtime", "check-ui", "check-web"]) {
       const steps = build.jobs[jobName].steps;
       const mirrorIndex = steps.findIndex((step) => step.run?.includes("sudo sed -i -E"));
       expect(mirrorIndex, jobName).toBeGreaterThan(-1);
@@ -118,14 +156,16 @@ describe("desktop CI", () => {
         expect(rewritten).toBe("URIs: https://archive.ubuntu.com/ubuntu/");
       }
       expect(steps[mirrorIndex]["continue-on-error"]).toBeUndefined();
-      const browser = steps.findIndex((step) => step.run?.startsWith("bunx --no-install playwright install"));
-      expect(browser).toBeGreaterThan(mirrorIndex);
-      expect(steps[browser]["timeout-minutes"]).toBe(10);
+      if (jobName !== "check-runtime") {
+        const browser = steps.findIndex((step) => step.run?.startsWith("bunx --no-install playwright install"));
+        expect(browser).toBeGreaterThan(mirrorIndex);
+        expect(steps[browser]["timeout-minutes"]).toBe(10);
+      }
     }
   });
 
   test("pool admission contention runs alongside the ordinary core suite", () => {
-    const steps = build.jobs.check.steps;
+    const steps = build.jobs["check-runtime"].steps;
     const core = steps.findIndex((step) => step.run === "cargo test --manifest-path crates/relay-core/Cargo.toml --locked");
     const load = steps.findIndex((step) => step.name === "Bounded pool admission under contention");
     expect(core).toBeGreaterThan(-1);
