@@ -298,7 +298,7 @@ test("provider-reported credits keep an exhausted account in the pool", async ({
   await expect(poolCredits.locator("dd")).toHaveText("222.8");
 });
 
-test("pool hides the account calculation control when it has only API sources", async ({ page }) => {
+test("pool retains monetary controls after its last account is removed", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 1, sourceCount: 1 });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
@@ -306,7 +306,12 @@ test("pool hides the account calculation control when it has only API sources", 
   await page.getByRole("button", { name: "Remove from pool: Personal Plus" }).click({ button: "right" });
   await expect(page.locator('.pool-member-card[data-member-kind="account"]')).toHaveCount(0);
 
-  await expect(page.getByRole("button", { name: /account calculation/i })).toHaveCount(0);
+  await expect(page.locator('.pool-member-card[data-member-kind="source"]')).toHaveCount(1);
+  await page.getByRole("button", { name: "Hide account calculation", exact: true }).click();
+  await expect(page.locator(".pool-economics")).toHaveCount(0);
+  await page.getByRole("button", { name: "Show account calculation", exact: true }).click();
+  await expect(page.locator(".pool-economics")).toBeVisible();
+  await expect(page.locator('.pool-member-card[data-member-kind="account"]')).toHaveCount(0);
 });
 
 test("quota cards name provider windows and make remaining percentages explicit", async ({ page }) => {

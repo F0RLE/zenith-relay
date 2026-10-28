@@ -36,14 +36,20 @@ async function textContrast(locator: Locator) {
   }));
 }
 
-for (const locale of ["en", "ru"] as const) {
+const scenarios = (["system", "fallback"] as const).flatMap((font) =>
+  (["en", "ru"] as const).map((locale) => ({ font, locale })));
+
+for (const { font, locale } of scenarios) {
   for (const theme of ["light", "dark"] as const) {
-    test(`chart labels and account captions stay readable: ${locale} ${theme}`, async ({ page }, testInfo) => {
+    test(`chart labels and account captions stay readable: ${locale} ${theme} ${font}`, async ({ page }, testInfo) => {
       await installTauriMock(page, {
         mode: "local", locale, theme, populated: true, accountCount: 4,
         quotaAvailable: true, supplementalQuota: true, subscriptionExpiresInMs: 28 * 86_400_000,
       });
       await page.goto("/");
+      if (font === "fallback") {
+        await page.addStyleTag({ content: ".app { font-family: Verdana, sans-serif !important; }" });
+      }
       await expect(page.locator(".overview-analytics")).toHaveClass(/has-data/);
       await expect(page.locator(".overview-analytics")).toHaveAttribute("aria-busy", "false");
       const labels = page.locator([

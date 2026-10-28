@@ -206,7 +206,8 @@ for (const [width, height] of [[1160, 760], [840, 560], [740, 760], [640, 720], 
           await expect(input).toHaveValue("12.75");
           await expectPriceInputsFit(dialog);
           await expect(input).toHaveCSS("text-align", "right");
-          await expect(input).toHaveCSS("outline-style", "none");
+          await expect(input).toHaveCSS("outline-style", "solid");
+          await expect(input).toHaveCSS("outline-width", "2px");
           await expect(input).toHaveCSS("border-width", "0px");
           await expect(input).toHaveCSS("box-shadow", "none");
           await expect(dialog.locator(".source-price-input").first()).toHaveCSS("box-shadow", "none");

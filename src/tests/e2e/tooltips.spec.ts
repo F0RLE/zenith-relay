@@ -140,18 +140,23 @@ test("main pages and model rules contain no browser tooltip attributes", async (
   }
 });
 
-test("shared navigation keeps keyboard focus without restoring a focus ring", async ({ page }) => {
+test("shared navigation distinguishes visible keyboard focus from pointer focus", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, theme: "dark" });
   await page.goto("/");
   await expect(page.locator("#splash-screen")).toHaveCount(0);
 
   const usage = page.getByRole("button", { name: "Usage", exact: true });
+  await page.keyboard.press("Tab");
   await usage.focus();
   await expect(usage).toBeFocused();
   const focusStyle = await usage.evaluate((element) => {
     const style = getComputedStyle(element);
-    return { outlineStyle: style.outlineStyle, boxShadow: style.boxShadow };
+    return { outlineStyle: style.outlineStyle, outlineWidth: style.outlineWidth, boxShadow: style.boxShadow };
   });
-  expect(focusStyle.outlineStyle).toBe("none");
+  expect(focusStyle.outlineStyle).toBe("solid");
+  expect(focusStyle.outlineWidth).toBe("2px");
   expect(focusStyle.boxShadow).toBe("none");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await usage.click();
+  await expect(usage).toHaveCSS("outline-style", "none");
 });

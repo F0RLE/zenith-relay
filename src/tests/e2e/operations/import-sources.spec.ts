@@ -587,8 +587,8 @@ test("empty local Sources opens the compact source picker", async ({ page }) => 
   await key.focus();
   expect(await key.evaluate((input) => {
     const field = input.closest<HTMLElement>(".secret-field")!;
-    return { inputOutline: getComputedStyle(input).outlineStyle, fieldOutline: getComputedStyle(field).outlineStyle, fieldShadow: getComputedStyle(field).boxShadow };
-  })).toEqual({ inputOutline: "none", fieldOutline: "none", fieldShadow: "none" });
+    return { inputOutline: getComputedStyle(input).outlineStyle, inputOutlineWidth: getComputedStyle(input).outlineWidth, fieldOutline: getComputedStyle(field).outlineStyle, fieldShadow: getComputedStyle(field).boxShadow };
+  })).toEqual({ inputOutline: "solid", inputOutlineWidth: "2px", fieldOutline: "none", fieldShadow: "none" });
 
   await dialog.getByRole("radio", { name: /Zenith API/ }).click();
   await dialog.getByRole("textbox", { name: "Upstream API key", exact: true }).fill("test-source-key");

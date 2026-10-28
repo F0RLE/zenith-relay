@@ -631,7 +631,7 @@
 
 @container usage (min-width: 581px) {
   .usage-request-table :is(th, td)[data-column="status"] { padding-inline: 8px; }
-  .usage-request-table th[data-column="tokens"] { padding-inline: 4px; }
+  .usage-request-table th:is([data-column="tokens"], [data-column="request"]) { padding-inline: 4px; }
   .usage-request-connection,
   .usage-request-table .usage-model-value code {
     max-width: 100%;

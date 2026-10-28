@@ -26,10 +26,11 @@ for (const scenario of [
   { width: 2301, locale: "ru", theme: "dark" },
   { width: 1660, locale: "ru", theme: "dark" },
   { width: 1160, locale: "ru", theme: "dark" },
+  { width: 1160, locale: "ru", theme: "dark", fallbackFont: true },
   { width: 840, locale: "en", theme: "light" },
   { width: 390, locale: "ru", theme: "dark" },
 ] as const) {
-  test(`request table centers equal-width columns: ${scenario.width} ${scenario.locale}`, async ({ page }) => {
+  test(`request table centers equal-width columns: ${scenario.width} ${scenario.locale}${"fallbackFont" in scenario ? " fallback font" : ""}`, async ({ page }) => {
     const accountLabel = "long.synthetic.member.0123456789@example.test";
     await page.setViewportSize({ width: scenario.width, height: 900 });
     await installTauriMock(page, {
@@ -39,6 +40,9 @@ for (const scenario of [
       usageRepeatedRequests: true,
     });
     await page.goto("/");
+    if ("fallbackFont" in scenario) {
+      await page.addStyleTag({ content: ".app { font-family: Verdana, sans-serif !important; }" });
+    }
     await page.getByRole("button", { name: scenario.locale === "ru" ? "Использование" : "Usage", exact: true }).click();
     const table = page.locator(".usage-request-table");
     const row = table.locator("tbody tr").first();

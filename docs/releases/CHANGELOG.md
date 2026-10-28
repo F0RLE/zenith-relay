@@ -13,6 +13,9 @@ recoverable account deletion. Changes below are grouped by area.
 
 ### Changed
 
+- Account value captions wrap without clipping in narrow cards, and request-table
+  headings fit with wider system fonts. Keyboard focus remains visible while
+  pointer navigation keeps the compact appearance.
 - Automatic routing retains a warm primary cache owner until another eligible
   member has at least ten percentage points more fresh quota, reducing switches
   caused by small quota differences. Independent work and warm alternatives keep
@@ -714,6 +717,9 @@ recoverable account deletion. Changes below are grouped by area.
 
 ### Изменения
 
+- Подписи стоимости в узких карточках переносятся без обрезания, а заголовки
+  таблицы запросов помещаются с более широкими системными шрифтами. Фокус
+  клавиатуры остаётся заметным; навигация мышью сохраняет компактный вид.
 - Автоматическая ротация сохраняет тёплого основного владельца кеша, пока другой
   допустимый участник не опередит его по свежей квоте минимум на 10 п.п.
   Независимые запросы и запасные тёплые участники сохраняют порог 5 п.п.; лимиты

@@ -871,6 +871,7 @@
 .account-value-strip > div {
   min-width: 0;
   display: grid;
+  grid-template-rows: 1fr auto;
   align-content: center;
   justify-items: center;
   gap: 1px;
@@ -885,12 +886,17 @@
 .account-value-strip dt,
 .account-value-strip dd {
   max-width: 100%;
+}
+
+.account-value-strip dd {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .account-value-strip dt {
+  align-self: end;
+  overflow-wrap: anywhere;
   color: var(--relay-muted);
   font-size: 11px;
   line-height: 13px;
