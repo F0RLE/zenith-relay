@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
-import { lstatSync, readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
+import { readCheckedText } from "../lib/checked-file.mjs";
 
 process.chdir(git(["rev-parse", "--show-toplevel"]).trim());
 
@@ -104,10 +104,12 @@ for (const args of diffs) {
 
 const untracked = git(["ls-files", "--others", "--exclude-standard", "-z", "--", ...paths]);
 for (const path of untracked.split("\0")) {
-  if (!path.endsWith(".rs") || testPath.test(path) || !lstatSync(path).isFile()) {
+  if (!path.endsWith(".rs") || testPath.test(path)) {
     continue;
   }
-  for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
+  const text = readCheckedText(path);
+  if (text === null) continue;
+  for (const line of text.split(/\r?\n/)) {
     checkAddedLine(path, `+${line}`);
   }
 }

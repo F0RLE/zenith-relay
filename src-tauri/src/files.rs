@@ -1,14 +1,42 @@
-use std::{fs, path::Path};
+use std::{fs, io::Write, path::Path};
 
+#[cfg(test)]
+mod tests;
+#[cfg(test)]
+pub(crate) use tests::fail_next_atomic_write;
+
+/// Replace a caller-authorized file using exclusive, owner-private staging.
 pub fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("Некорректный путь: {}", path.display()))?;
     fs::create_dir_all(parent)
         .map_err(|err| format!("Не удалось создать {}: {err}", parent.display()))?;
-    let temporary_path = path.with_extension("tmp");
-    fs::write(&temporary_path, content)
+    // Each writer owns its staging file; never truncate a predictable sibling
+    // (or the destination itself when its extension already is .tmp).
+    let temporary_path = parent.join(format!(".relay-write-{}.tmp", uuid::Uuid::new_v4()));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    // An open failure must not remove a file that this writer did not create.
+    let mut file = options
+        .open(&temporary_path)
         .map_err(|err| format!("Не удалось записать {}: {err}", temporary_path.display()))?;
+    let written = (|| {
+        #[cfg(test)]
+        tests::check_injected_write_failure(path)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()
+    })();
+    drop(file);
+    written.map_err(|err| {
+        let _ = fs::remove_file(&temporary_path);
+        format!("Не удалось записать {}: {err}", temporary_path.display())
+    })?;
     fs::rename(&temporary_path, path).map_err(|err| {
         let _ = fs::remove_file(&temporary_path);
         format!("Не удалось заменить {}: {err}", path.display())

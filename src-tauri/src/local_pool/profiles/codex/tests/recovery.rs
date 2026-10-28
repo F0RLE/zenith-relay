@@ -919,24 +919,24 @@ fn failed_reattach_restores_previous_backup_metadata() {
     .unwrap();
     let managed_config = fs::read(home.join(CONFIG_FILE)).unwrap();
     let managed_auth = fs::read(home.join(AUTH_FILE)).unwrap();
-    fs::create_dir(home.join("config.tmp")).unwrap();
+    // Fail the actual write, not a particular temporary filename. Atomic
+    // staging must be free to use an exclusive, unpredictable sibling.
+    crate::files::fail_next_atomic_write(home.join(CONFIG_FILE));
 
-    assert!(
-        attach_with(
-            &home,
-            &backups,
-            "http://127.0.0.1:14999/v1",
-            "zlr_new_key",
-            &secrets,
-        )
-        .is_err()
-    );
+    let error = attach_with(
+        &home,
+        &backups,
+        "http://127.0.0.1:14999/v1",
+        "zlr_new_key",
+        &secrets,
+    )
+    .unwrap_err();
+    assert!(error.message.contains("injected atomic write failure"));
     assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), managed_config);
     assert_eq!(fs::read(home.join(AUTH_FILE)).unwrap(), managed_auth);
     let pending: Value =
         serde_json::from_str(&fs::read_to_string(backup_path(&backups)).unwrap()).unwrap();
     assert_eq!(pending["restorePending"], true);
-    fs::remove_dir_all(home.join("config.tmp")).unwrap();
     restore_with(&home, &backups, &secrets).unwrap();
     assert_eq!(
         fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),

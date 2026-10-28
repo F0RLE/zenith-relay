@@ -2,8 +2,6 @@ use super::{MAX_EXPORT_TEXT, UsageExportRow};
 use crate::files::atomic_write;
 use crate::local_pool::error::{CommandError, ErrorCode, LocalPoolError};
 use serde::Serialize;
-#[cfg(unix)]
-use std::fs;
 use tauri::AppHandle;
 use tauri_plugin_dialog::DialogExt;
 use zenith_relay_core::accounts::AccountExportDocument;
@@ -67,11 +65,6 @@ pub(crate) fn write_account_export(
         LocalPoolError::new(ErrorCode::InvalidState, "selected export path is invalid")
     })?;
     atomic_write(&path, &document.content).map_err(super::io_error)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(super::io_error)?;
-    }
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 
