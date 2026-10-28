@@ -168,9 +168,7 @@ fn account_backup_fifo_paths_do_not_block_direct_or_transactional_reads() {
         process::{Command, Stdio},
         time::{Duration, Instant},
     };
-    const CHILD_ROOT: &str = "ZENITH_RELAY_ACCOUNT_BACKUP_FIFO_TEST_ROOT";
-    if let Some(root) = std::env::var_os(CHILD_ROOT) {
-        let root = PathBuf::from(root);
+    if let Some(root) = fifo_child_root() {
         let home = root.join("profile");
         let backups = root.join("backups");
         fs::create_dir(&home).unwrap();
@@ -207,7 +205,7 @@ fn account_backup_fifo_paths_do_not_block_direct_or_transactional_reads() {
             "--nocapture",
             "--test-threads=1",
         ])
-        .env(CHILD_ROOT, &root)
+        .env(FIFO_TEST_ROOT_ENV, &root)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -234,4 +232,27 @@ fn account_backup_fifo_paths_do_not_block_direct_or_transactional_reads() {
         status.success() && completed,
         "the isolated FIFO checks must execute and pass"
     );
+}
+
+#[cfg(unix)]
+const FIFO_TEST_ROOT_ENV: &str = "ZENITH_RELAY_ACCOUNT_BACKUP_FIFO_TEST_ROOT";
+
+#[cfg(unix)]
+fn fifo_child_root() -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = PathBuf::from(std::env::var_os(FIFO_TEST_ROOT_ENV)?);
+    // This is a parent-to-current_exe test channel, not an application path
+    // selector. Only accept the private fixture reserved by this test's parent.
+    let temporary_directory = std::env::temp_dir();
+    assert_eq!(root.parent(), Some(temporary_directory.as_path()));
+    let name = root.file_name().and_then(|name| name.to_str()).unwrap();
+    let nonce = name
+        .strip_prefix("zenith-relay-profile-backup-fifo-")
+        .expect("the parent must pass this test's reserved fixture");
+    assert!(nonce.len() == 32 && nonce.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    let metadata = fs::symlink_metadata(&root).unwrap();
+    assert!(metadata.is_dir() && !metadata.file_type().is_symlink());
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+    Some(root)
 }
