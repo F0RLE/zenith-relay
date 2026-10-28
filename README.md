@@ -69,10 +69,12 @@ These authorizations stay independent. In local account cards, the **Codex**,
 **SIWC** or **Excel / BPS** badge next to the plan selects one route. **Account
 connections** can explicitly group matching authorizations without duplicate pool
 members or combined quota. **Codex** supports direct account switching and linked
-SIWC quota display, not pool membership.
+SIWC quota display, and explicit image-only pool membership. Text access through
+Codex requires separate consent in Settings; see the
+[experimental-access warning](docs/help/en/README.md#connect-an-application-through-the-pool).
 **ChatGPT (SIWC)** is pool-only and requires plan-use permission in the browser.
 **Excel / Basis Points** is pool-only and requires a non-Free account; Free BPS
-imports and requests are rejected. Codex accounts remain available outside the pool.
+imports and requests are rejected. Direct Codex account switching remains available.
 All three support [Zenith export/import](docs/help/en/README.md#import-export-and-account-state).
 SIWC supports only Zenith and requires a fresh sign-in after import; existing SIWC
 connections are not overwritten. Exported files contain secrets: store them like passwords.
@@ -121,3 +123,11 @@ The same command is available as `bun run start` from `src`. It prepares locked
 frontend and Rust dependencies, then starts the desktop app. Install Bun,
 rustup, and the platform's native desktop libraries first. Use
 `bun run setup:browsers` only when Playwright browsers are needed.
+
+Run `bun run verify --quick` from the repository root for scripts, documentation,
+and both frontend packages. `bun run verify` adds native Rust checks, browser
+tests, and dependency audits. See the [verification guide](CONTRIBUTING.md#verification)
+for prerequisites and targeted checks.
+
+Report suspected vulnerabilities through the
+[private security-reporting process](.github/SECURITY.md).

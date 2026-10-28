@@ -3,16 +3,16 @@ name: Build
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, "release/**"]
     tags:
       - "v*"
   pull_request:
-    branches: [main]
+    branches: [main, "release/**"]
 
 permissions:
   contents: read
 
-# Pull requests and main run checks only. Installers are built for a manual
+# Pull requests, main and release branches run checks only. Installers are built for a manual
 # run or a pushed v* tag. Only that tag push publishes.
 concurrency:
   group: build-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
@@ -25,10 +25,10 @@ jobs:
     env:
       RUSTFLAGS: "-Dwarnings --cfg reqwest_unstable"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.4
       - run: bun install --frozen-lockfile
@@ -37,23 +37,26 @@ jobs:
         run: bun test ./scripts/check ./scripts/lib ./scripts/maintenance ./scripts/build
       - name: Check documentation links
         run: bun ./scripts/check/check-docs.mjs
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: |
             src-tauri -> target
             crates/relay-core -> target
-      - uses: taiki-e/install-action@cargo-audit
+      - uses: taiki-e/install-action@59a357c0513d39d45e24a79eb9489a3a28086290 # cargo-audit
+        with:
+          tool: cargo-audit
       - name: Prepare RustSec advisory database
         run: |
           RUSTSEC_ADVISORY_DB="$RUNNER_TEMP/rustsec-advisory-db"
           echo "RUSTSEC_ADVISORY_DB=$RUSTSEC_ADVISORY_DB" >> "$GITHUB_ENV"
           git init --quiet "$RUSTSEC_ADVISORY_DB"
           git -C "$RUSTSEC_ADVISORY_DB" remote add origin https://github.com/RustSec/advisory-db.git
-          git -C "$RUSTSEC_ADVISORY_DB" fetch --depth=1 origin b4af64d3dab58bfac9d4ab23d474264ed0bb6537
+          git -C "$RUSTSEC_ADVISORY_DB" fetch --depth=1 origin refs/heads/main
           git -C "$RUSTSEC_ADVISORY_DB" checkout --detach --quiet FETCH_HEAD
+          git -C "$RUSTSEC_ADVISORY_DB" show -s --format='RustSec snapshot: %H (%cI)' HEAD
       - name: Install Linux Tauri dependencies
         run: |
           sudo find /etc/apt/sources.list.d -type f \( -name '*microsoft*' -o -name '*azure*' \) -delete
@@ -80,7 +83,9 @@ jobs:
           dbus-run-session -- bash -euc '
             mkdir -p "$HOME/.local/share/keyrings"
             printf "\n" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
-            bun run verify
+            bun run test:unit
+            bun run build
+            bun ../scripts/build/cargo.mjs test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1
           '
         working-directory: src
 
@@ -95,8 +100,8 @@ jobs:
       run:
         working-directory: src
     steps:
-      - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.4
       - run: bun install --frozen-lockfile
@@ -109,7 +114,7 @@ jobs:
         run: bun run test:e2e --shard=${{ matrix.shard }}/${{ strategy.job-total }}
       - name: Retain failed browser traces
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: playwright-failure-${{ matrix.shard }}
           path: src/test-results/
@@ -118,17 +123,20 @@ jobs:
 
   check:
     name: Check
-    needs: [check-runtime, check-ui]
+    needs: [check-runtime, check-ui, check-windows, check-web]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Require runtime and every browser shard
+      - name: Require runtime, every browser shard, Windows and web
         shell: pwsh
         env:
           RUNTIME_RESULT: ${{ needs.check-runtime.result }}
           UI_RESULT: ${{ needs.check-ui.result }}
+          WINDOWS_RESULT: ${{ needs.check-windows.result }}
+          WEB_RESULT: ${{ needs.check-web.result }}
         run: |
-          if ($env:RUNTIME_RESULT -ne 'success' -or $env:UI_RESULT -ne 'success') {
+          $results = @($env:RUNTIME_RESULT, $env:UI_RESULT, $env:WINDOWS_RESULT, $env:WEB_RESULT)
+          if (@($results | Where-Object { $_ -ne 'success' }).Count -gt 0) {
             exit 1
           }
 
@@ -138,9 +146,9 @@ jobs:
     env:
       RUSTFLAGS: "-Dwarnings --cfg reqwest_unstable"
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.99.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: src-tauri -> target
       - name: Run Windows Rust tests
@@ -154,12 +162,13 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.4
       - run: bun install --frozen-lockfile
       - run: bun run test
+      - run: bun audit
       - run: bun run build
       - name: Use canonical Ubuntu archive
         run: sudo sed -i -E 's|https?://azure[.]archive[.]ubuntu[.]com/ubuntu/?|https://archive.ubuntu.com/ubuntu/|g; s|mirror[+]file:/etc/apt/apt-mirrors[.]txt|https://archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources
@@ -192,12 +201,12 @@ jobs:
             os: ubuntu-24.04-arm
 
     steps:
-      - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.4
-      - uses: dtolnay/rust-toolchain@1.99.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: src-tauri -> target
       - run: bun install --frozen-lockfile
@@ -220,7 +229,7 @@ jobs:
             printf "\n" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
             cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1
           '
-      - uses: tauri-apps/tauri-action@v1
+      - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -341,7 +350,7 @@ jobs:
           if (!(Test-Path "$portable.sig")) {
             throw "Portable updater signature was not created"
           }
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: zenith-relay-${{ matrix.name }}
           path: artifacts/*
@@ -355,8 +364,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: release-artifacts
       - name: Prepare release body
@@ -448,8 +457,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: release-artifacts
       - name: Prepare updater assets

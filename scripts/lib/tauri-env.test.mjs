@@ -4,7 +4,31 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { prependPath, usesDefaultWindowsReleaseOutput } from "./tauri-env.mjs";
+import { configureNinjaEnvironment, prependPath, repoRoot, usesDefaultWindowsReleaseOutput } from "./tauri-env.mjs";
+
+test("Ninja does not inherit Visual Studio generator arguments", () => {
+  const env = {
+    CMAKE_GENERATOR: "Visual Studio 17 2022", CMAKE_GENERATOR_PLATFORM: "x64",
+    CMAKE_GENERATOR_TOOLSET: "v143", CMAKE_GENERATOR_INSTANCE: "old-vs", KEEP: "unchanged",
+  };
+  configureNinjaEnvironment(env, "portable/ninja.exe");
+  expect(env).toEqual({ CMAKE_GENERATOR: "Ninja", CMAKE_MAKE_PROGRAM: "portable/ninja.exe", KEEP: "unchanged" });
+});
+
+test.skipIf(process.platform !== "win32")("Rust selection follows Relay's toolchain from outside the repository", () => {
+  const expected = spawnSync("rustc", ["--print", "sysroot"], {
+    cwd: repoRoot(), encoding: "utf8", shell: true, windowsHide: true,
+  });
+  expect(expected.status, expected.stderr).toBe(0);
+  const module = new URL("./tauri-env.mjs", import.meta.url).href;
+  const code = `import {withZenithRustEnv} from ${JSON.stringify(module)};
+    import {spawnSync} from 'node:child_process';
+    const r=spawnSync('rustc',['--print','sysroot'],{env:withZenithRustEnv(),encoding:'utf8',shell:true,windowsHide:true});
+    process.stdout.write(r.stdout ?? ''); process.stderr.write(r.stderr ?? ''); process.exit(r.status ?? 1);`;
+  const actual = spawnSync(process.execPath, ["-e", code], { cwd: tmpdir(), encoding: "utf8", windowsHide: true });
+  expect(actual.status, actual.stderr).toBe(0);
+  expect(actual.stdout.trim()).toBe(expected.stdout.trim());
+});
 
 test("only default Windows release output can receive the local production marker", () => {
   for (const args of [

@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "verify": "bun scripts/check/verify.mjs",
     "setup": "bun scripts/setup/setup-dev.mjs",
     "setup:browsers": "bun scripts/setup/setup-dev.mjs --with-browsers",
     "start": "bun scripts/setup/start-dev.mjs",

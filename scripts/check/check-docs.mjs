@@ -12,7 +12,7 @@ const parser = unified().use(remarkParse);
 const markdownFile = /\.(?:md|markdown)$/i;
 const requiredDocuments = [
   "README.md", "AGENTS.md", "CONTRIBUTING.md", "LICENSE",
-  "CONTRIBUTOR_LICENSE_AGREEMENT.md", ".github/PULL_REQUEST_TEMPLATE.md",
+  "CONTRIBUTOR_LICENSE_AGREEMENT.md", ".github/PULL_REQUEST_TEMPLATE.md", ".github/SECURITY.md",
   "docs/README.md", "docs/project/PLANNING.md", "docs/project/ROADMAP.md", "docs/project/BASIS_POINTS.md",
   "docs/hosted/HOSTED_RELAY_ARCHITECTURE.md", "docs/hosted/HOSTED_RELAY_ROADMAP.md",
   "docs/hosted/HOSTED_RELAY_WEB_DESIGN.md", "docs/help/en/README.md",

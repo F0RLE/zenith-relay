@@ -10,6 +10,7 @@ describe planned work; the independent web preview demonstrates its interface.
 | Product, download, first run | [Project README](../README.md) |
 | Desktop user steps and recovery | [English Help](help/en/README.md), [Russian Help](help/ru/README.md) |
 | Development, checks, cleanup, releases | [Contributor guide](../CONTRIBUTING.md) |
+| Private vulnerability reports | [Security reporting](../.github/SECURITY.md) |
 | Repository instructions and safety boundaries | [AGENTS.md](../AGENTS.md) |
 | Current architecture and implementation contracts | [Architecture](project/PLANNING.md) |
 | Excel / Basis Points executor contract | [BPS](project/BASIS_POINTS.md) |
@@ -37,11 +38,11 @@ zenith-relay/
 |-- README.md                    Product overview and first run
 |-- CONTRIBUTING.md              Development and release procedures
 |-- AGENTS.md                    Repository instructions
-|-- package.json                 Root setup, development and build commands
+|-- package.json                 Root setup, development, build and verification commands
 |-- rust-toolchain.toml          Pinned Rust toolchain
 |-- .agents/skills/              Task-specific repository guidance
 |-- .codex/environments/         Explicit local development actions
-|-- .github/                    CI and pull-request metadata
+|-- .github/                    CI, dependency updates, ownership and security reporting
 |-- catalog/                    Model reference data and export policy
 |-- crates/relay-core/           Shared Rust runtime and its tests
 |-- src/                        Desktop frontend package and locked dependencies

@@ -1,6 +1,6 @@
 version: 2
 updates:
-  - package-ecosystem: npm
+  - package-ecosystem: bun
     directory: /src
     schedule:
       interval: weekly
@@ -24,6 +24,21 @@ updates:
           - lucide-react
           - i18next
           - react-i18next
+  - package-ecosystem: bun
+    directory: /web
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:10"
+      timezone: Europe/Minsk
+    open-pull-requests-limit: 5
+    groups:
+      web-preview:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
   - package-ecosystem: cargo
     directory: /src-tauri
     schedule:

@@ -8,6 +8,9 @@ Navigation: [setup](#development-setup) · [checks](#verification) ·
 [documentation](#documentation-policy) · [release flow](#change-and-release-flow) ·
 [agent guidance](#agent-guidance) · [protocol references](#api-and-protocol-references).
 
+For suspected vulnerabilities, follow the
+[private security-reporting process](.github/SECURITY.md), not a public issue.
+
 ## License and contributor agreement
 
 Zenith Relay is **AGPL-3.0-only**. Keep the [LICENSE](LICENSE) text intact.
@@ -200,6 +203,28 @@ Playwright browsers are optional and kept out of the default setup:
 bun run setup:browsers
 ~~~
 
+### Build the desktop executable
+
+From the repository root or `src`:
+
+~~~sh
+bun run app:build --no-bundle
+~~~
+
+The wrapper selects the repository's pinned Rust toolchain and native compiler
+environment, then runs TypeScript, Vite, the frontend size gate and Cargo with
+`--locked`. The result is the optimized executable and its SHA-256 stamp;
+the running app stays untouched. Omit `--no-bundle` to build installers too.
+Keep Tauri options before `--` and extra Cargo arguments after it.
+
+Identical renderer filenames and bytes retain their previous timestamps, allowing
+Cargo to reuse its release output. Changed assets still trigger native work.
+Every build runs frontend validation; release LTO, codegen units and the ES2020
+WebView target stay unchanged. Gzip measures frontend size, not compiler speed.
+
+For the Windows workspace's build-and-restart shortcut, use the parent
+`CONTRIBUTING.md` section **Rebuild the local Relay desktop executable**.
+
 ## Documentation policy
 
 Use one owner per subject. The [documentation index](docs/README.md#find-the-right-document)
@@ -271,6 +296,65 @@ bun run screenshots
 Run the narrowest relevant checks while iterating. Before a commit that changes
 the frontend, desktop host, shared runtime, or web preview, run the corresponding
 commands below.
+
+### One verification command
+
+After [development setup](#development-setup), install the independent web
+preview's locked dependencies once, then run verification from the root:
+
+~~~powershell
+bun install --cwd web --frozen-lockfile
+bun run verify --quick
+bun run verify --base origin/main
+~~~
+
+`--quick` runs script tests, documentation checks, agent guardrails,
+duplicate-code checks, and unit tests plus production builds for both Desktop
+UI and the web preview. It deliberately skips native Rust, browser tests, and
+dependency audits; it is not a release gate.
+
+Without `--quick`, verification also runs formatting, Clippy and tests for both
+Rust packages, both browser suites, both Bun audits, and audits of both Cargo
+lockfiles. Commands run sequentially and stop on the first failure. Desktop Rust
+tests use one test thread. `bun run verify` from `src` calls the same root runner.
+
+Full verification needs the pinned Rust toolchain and native build libraries,
+locked dependencies in `src` and `web`, Playwright Chromium, `cargo-audit`, and
+network access for vulnerability databases. Run `bun run setup:browsers` to
+prepare the browser dependencies. Install the audit tool with
+`cargo install cargo-audit --locked` when it is missing. On Linux, Desktop Rust
+tests also need a running, unlocked Secret Service, normally provided by the
+desktop session; the [Build workflow](.github/workflows/build.yml) shows the
+headless setup used in CI.
+
+`--base` selects the existing Git reference used by guardrail and duplicate-code
+checks. Use the actual PR target and fetch it first; omit the option to use each
+check's normal local default. Verification does not package installers, publish
+a release, restart Desktop, or establish installed-app acceptance.
+
+### Required CI and dependency maintenance
+
+The Build workflow checks pull requests and pushes to `main` and `release/**`.
+Its `Check` status succeeds only when runtime checks, every Desktop browser
+shard, Windows Rust tests, and web-preview checks all succeed; a skipped or
+cancelled dependency is not a pass. The `main` ruleset requires `Check` and
+`Release context` on an up-to-date branch. CODEOWNERS identifies reviewers;
+it does not itself require an additional reviewer or grant a merge bypass.
+
+Third-party Actions are pinned to full commit IDs. Dependabot maintains those
+pins, both Cargo packages, and the actual Bun lockfiles in `src` and `web`.
+Runtime CI fetches the current RustSec database once, records its commit, and
+uses that same snapshot for both Cargo audits. Both frontend packages run
+`bun audit`. A new advisory can fail CI without a source change; investigate
+and remediate it rather than pinning an old database to obtain a passing check.
+
+Private vulnerability reporting and CodeQL default setup are repository settings,
+not local workflow files. Changes to checked-in workflows and maintenance rules
+take effect on GitHub only after they reach the relevant branch. Installer
+builds still require a manual run or version-tag push; publication remains
+restricted to version-tag pushes.
+
+### Focused checks
 
 Changes only to contributor documentation need content/link and diff checks.
 After the locked frontend dependencies are installed, run from the repository root:
@@ -385,8 +469,8 @@ so it keeps its Node interpreter instead of inheriting Bun's Windows browser
 transport and temporary-profile limitations. No package is downloaded by these
 scripts.
 
-<code>bun run verify</code> runs the unit tests, frontend build (including the
-TypeScript build), and desktop Rust tests. Packaging or updater changes also require:
+The root verification command includes these unit, build and browser checks
+alongside native tests. Packaging or updater changes also require:
 
 ~~~powershell
 bun run app:build
@@ -630,7 +714,7 @@ bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --
 
 ### Continuous integration
 
-Pull requests and pushes to <code>main</code> run checks only. They do not build
+Pull requests and pushes to <code>main</code> and <code>release/**</code> run checks only. They do not build
 installers or publish artifacts. Pushing a <code>v*</code> tag builds the desktop
 installers and, after those checks pass, publishes the GitHub Release and updater
 manifest. A manual Build run retains desktop installers as Actions artifacts
@@ -638,7 +722,8 @@ without publishing, even when started from a tag.
 
 Browser checks run in four independent Playwright shards, preserving the local
 file-level test ordering. The required <code>Check</code> status succeeds only
-when runtime checks and every browser shard pass. Installer builds run alongside
+when runtime checks, every browser shard, Windows Rust tests, and the web preview
+all pass. Installer builds run alongside
 checks; publication still requires all checks and all six platform builds.
 
 ### macOS distribution

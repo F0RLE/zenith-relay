@@ -81,6 +81,7 @@ describe("desktop CI", () => {
     for (const command of [
       "bun install --frozen-lockfile",
       "bun run test",
+      "bun audit",
       "bun run build",
       "bun run test:e2e",
     ]) {
@@ -112,7 +113,7 @@ describe("desktop CI", () => {
   test("the existing Check status fails closed on failed, skipped or cancelled dependencies", () => {
     const gate = build.jobs.check;
     expect(gate.name).toBe("Check");
-    expect(needs(gate)).toEqual(["check-runtime", "check-ui"]);
+    expect(needs(gate)).toEqual(["check-runtime", "check-ui", "check-windows", "check-web"]);
     expect(gate.if).toBe("always()");
     expect(gate["continue-on-error"]).toBeUndefined();
     expect(gate.steps).toHaveLength(1);
@@ -121,9 +122,12 @@ describe("desktop CI", () => {
     expect(step.env).toEqual({
       RUNTIME_RESULT: "${{ needs.check-runtime.result }}",
       UI_RESULT: "${{ needs.check-ui.result }}",
+      WINDOWS_RESULT: "${{ needs.check-windows.result }}",
+      WEB_RESULT: "${{ needs.check-web.result }}",
     });
     expect(step.run.trim()).toBe([
-      "if ($env:RUNTIME_RESULT -ne 'success' -or $env:UI_RESULT -ne 'success') {",
+      "$results = @($env:RUNTIME_RESULT, $env:UI_RESULT, $env:WINDOWS_RESULT, $env:WEB_RESULT)",
+      "if (@($results | Where-Object { $_ -ne 'success' }).Count -gt 0) {",
       "  exit 1",
       "}",
     ].join("\n"));
@@ -135,6 +139,42 @@ describe("desktop CI", () => {
     expect(build.jobs.build.if).toBe(
       "github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))",
     );
+  });
+
+  test("main and release branches receive checks without broadening publication", () => {
+    expect(build.on.push.branches).toEqual(["main", "release/**"]);
+    expect(build.on.pull_request.branches).toEqual(["main", "release/**"]);
+    expect(build.jobs["publish-release"].if).toBe(releasePush);
+  });
+
+  test("every third-party action is pinned to a full commit", () => {
+    for (const name of ["build.yml", "pr-metadata.yml"]) {
+      for (const job of Object.values(workflow(name).jobs)) {
+        for (const step of job.steps ?? []) {
+          if (step.uses && !step.uses.startsWith("./")) expect(step.uses).toMatch(/^[\w.-]+\/[\w./-]+@[a-f0-9]{40}$/);
+        }
+      }
+    }
+  });
+
+  test("RustSec is refreshed once and both lockfiles use that recorded snapshot", () => {
+    const steps = build.jobs["check-runtime"].steps;
+    const prepare = steps.findIndex((step) => step.name === "Prepare RustSec advisory database");
+    expect(steps[prepare].run).toContain("fetch --depth=1 origin refs/heads/main");
+    expect(steps[prepare].run).toContain("RustSec snapshot: %H (%cI)");
+    for (const file of ["crates/relay-core/Cargo.lock", "src-tauri/Cargo.lock"]) {
+      const audit = steps.findIndex((step) => step.run?.startsWith("cargo audit ") && step.run.includes(file));
+      expect(audit).toBeGreaterThan(prepare);
+      expect(steps[audit].run).toContain('--db "$RUSTSEC_ADVISORY_DB" --no-fetch');
+      expect(steps[audit]["continue-on-error"]).toBeUndefined();
+    }
+  });
+
+  test("Dependabot maintains the actual Bun lockfiles for Desktop and web", () => {
+    const config = Bun.YAML.parse(readFileSync(new URL("../../.github/dependabot.yml", import.meta.url), "utf8"));
+    expect(config.updates.filter((entry) => entry["package-ecosystem"] === "bun").map((entry) => entry.directory).sort()).toEqual(["/src", "/web"]);
+    expect(config.updates.some((entry) => entry["package-ecosystem"] === "npm")).toBe(false);
+    for (const directory of ["src", "web"]) expect(existsSync(new URL(`../../${directory}/bun.lock`, import.meta.url))).toBe(true);
   });
 
   test("Linux checks use the canonical archive for direct and mirror-list APT sources", () => {

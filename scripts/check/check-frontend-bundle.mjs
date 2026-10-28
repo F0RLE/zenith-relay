@@ -62,8 +62,14 @@ const measurements = {
   helpDocuments: helpDocuments.reduce((total, path) => total + gzipSize(path), 0),
 };
 
+const exceeded = [];
 for (const [name, value] of Object.entries(measurements)) {
   const limit = limits[name];
-  console.log(`${name}: ${(value / 1024).toFixed(1)} KiB gzip (limit ${(limit / 1024).toFixed(1)} KiB)`);
-  if (value > limit) throw new Error(`${name} exceeds its gzip limit`);
+  const difference = Math.abs(limit - value);
+  console.log(`${name}: ${(value / 1024).toFixed(1)} KiB gzip (limit ${(limit / 1024).toFixed(1)} KiB; ${difference} bytes ${value > limit ? "over" : "remaining"})`);
+  if (value > limit) exceeded.push(name);
+}
+if (exceeded.length) {
+  console.error(`[bundle] Gzip limits exceeded: ${exceeded.join(", ")}. Reduce the affected output before building the native app.`);
+  process.exitCode = 1;
 }

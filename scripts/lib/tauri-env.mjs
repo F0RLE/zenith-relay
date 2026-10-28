@@ -156,6 +156,8 @@ export function withZenithRustEnv(env = process.env) {
 
   if (process.platform === "win32") {
     const probe = spawnSync("rustc", ["--print", "sysroot"], {
+      // rustup resolves rust-toolchain.toml from cwd, not from this module.
+      cwd: repoRoot(),
       env: nextEnvironment,
       encoding: "utf8",
       shell: true,
@@ -258,8 +260,7 @@ export function withZenithRustEnv(env = process.env) {
     // builds on the configured MSVC/SDK environment instead of asking the
     // Visual Studio generator to discover a system SDK from the registry.
     if (portableToolchainConfigured && existsSync(ninjaExecutable)) {
-      nextEnvironment.CMAKE_GENERATOR = "Ninja";
-      nextEnvironment.CMAKE_MAKE_PROGRAM = ninjaExecutable;
+      configureNinjaEnvironment(nextEnvironment, ninjaExecutable);
     }
 
     // Keep MSBuild's temporary archive files inside Cargo's writable target tree.
@@ -273,6 +274,15 @@ export function withZenithRustEnv(env = process.env) {
   }
 
   return nextEnvironment;
+}
+
+export function configureNinjaEnvironment(env, executable) {
+  env.CMAKE_GENERATOR = "Ninja";
+  env.CMAKE_MAKE_PROGRAM = executable;
+  // These belong to Visual Studio generators and make Ninja configuration fail.
+  delete env.CMAKE_GENERATOR_PLATFORM;
+  delete env.CMAKE_GENERATOR_TOOLSET;
+  delete env.CMAKE_GENERATOR_INSTANCE;
 }
 
 export function tauriInvocation(args) {

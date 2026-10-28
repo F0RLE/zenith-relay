@@ -22,15 +22,18 @@ export function staticModuleGraph(
 export function startupChunks(): Plugin {
   const bootstrap = new Set<string>();
   const workspace = new Set<string>();
+  const connectionDetails = new Set<string>();
   let bootstrapEntry = "";
   let workspaceEntry = "";
   let sharedEntries: string[] = [];
+  let connectionDetailEntries: string[] = [];
   return {
     name: "relay-startup-chunks",
     apply: "build",
     config: () => ({ build: { rolldownOptions: { output: { codeSplitting: { groups: [
       { name: "bootstrap", test: (id: string) => bootstrap.has(id), priority: 30 },
       { name: "workspace", test: (id: string) => workspace.has(id), priority: 20 },
+      { name: "connection-details", test: (id: string) => connectionDetails.has(id), priority: 10 },
     ] } } } } }),
     configResolved(config) {
       const root = config.root.replaceAll("\\", "/");
@@ -46,10 +49,17 @@ export function startupChunks(): Plugin {
         `${root}/src/features/relay/pages/usage/usageFormatting.ts`,
         `${root}/src/features/relay/sourceUrl.ts`,
       ];
+      // Coalesce static dependencies already shared by both lazy pages;
+      // neither page nor its private dialogs move into startup.
+      connectionDetailEntries = [
+        `${root}/src/features/relay/pages/pool/PoolPage.tsx`,
+        `${root}/src/features/relay/pages/connections/ConnectionsPage.tsx`,
+      ];
     },
     buildStart() {
       bootstrap.clear();
       workspace.clear();
+      connectionDetails.clear();
     },
     buildEnd(error) {
       if (error) return;
@@ -61,6 +71,10 @@ export function startupChunks(): Plugin {
       for (const id of staticModuleGraph([workspaceEntry, ...sharedEntries], lookup)) {
         // Keep the native loader independent and preserve main's dynamic-entry facade.
         if (id !== workspaceEntry && !bootstrap.has(id)) workspace.add(id);
+      }
+      const [pool, connections] = connectionDetailEntries.map(entry => staticModuleGraph([entry], lookup));
+      for (const id of pool ?? []) {
+        if (connections?.has(id) && !bootstrap.has(id) && !workspace.has(id)) connectionDetails.add(id);
       }
     },
   };
