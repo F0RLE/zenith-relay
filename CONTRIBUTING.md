@@ -66,8 +66,9 @@ screenshots and support bundles. Credential exports require explicit user action
   Use the intended request key for a `/v1` pool profile, not a provider login
   credential. The retired personal-server runtime is not an integration target.
 - Preserve the distinction between quota monitoring and routing eligibility.
-  Native Free accounts can join the pool. Reject known Free plans only for
-  Excel / Basis Points imports and requests; do not hard-code quota windows.
+  Native Free accounts can join the pool. Do not reject Excel / Basis Points imports
+  or requests by plan name; execution requires fresh provider access evidence.
+  Do not hard-code quota windows.
 - Retry another candidate only after a proven pre-execution rejection or
   not-sent result, and before any response bytes reach the client. Preserve
   response ownership; saved history proves portability, not execution safety.
@@ -100,9 +101,10 @@ Compatible API names do not establish identical features. BPS/account transport
 behavior is observed, not specified by the public OpenAI API.
 
 Follow the [protocol skill](.agents/skills/relay-protocol-adapters/SKILL.md) and
-its complete conversation matrix. Third-party comparisons need an inspected
-revision, file paths, and retained license/attribution; they are not the spec
-or a replacement runtime. A passing first answer does not prove tool continuation.
+the matrix for the affected protocol pair and contract. Third-party comparisons
+need an inspected revision, file paths, and retained license/attribution; they are
+not the spec or a replacement runtime. A passing first answer does not prove tool
+continuation.
 
 ## Account connector references
 

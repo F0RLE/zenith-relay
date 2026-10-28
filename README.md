@@ -73,8 +73,9 @@ SIWC quota display, and explicit image-only pool membership. Text access through
 Codex requires separate consent in Settings; see the
 [experimental-access warning](docs/help/en/README.md#connect-an-application-through-the-pool).
 **ChatGPT (SIWC)** is pool-only and requires plan-use permission in the browser.
-**Excel / Basis Points** is pool-only and requires a non-Free account; Free BPS
-imports and requests are rejected. Direct Codex account switching remains available.
+**Excel / Basis Points** is pool-only. Free plans are not blocked by name;
+execution requires fresh provider access evidence. Direct Codex account switching
+remains available.
 All three support [Zenith export/import](docs/help/en/README.md#import-export-and-account-state).
 SIWC supports only Zenith and requires a fresh sign-in after import; existing SIWC
 connections are not overwritten. Exported files contain secrets: store them like passwords.

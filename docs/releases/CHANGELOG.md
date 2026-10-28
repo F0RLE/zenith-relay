@@ -317,7 +317,8 @@ recoverable account deletion. Changes below are grouped by area.
   ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
 - ChatGPT and Excel / Basis Points have separate sign-ins and issuing-client
   refresh. Native ChatGPT accounts can join the pool or launch ChatGPT directly;
-  BPS is pool-only, rejects known Free plans, and supports Zenith/Sub2API exports.
+  BPS is pool-only, does not reject Free plans by name, requires fresh provider
+  access evidence for execution, and supports Zenith/Sub2API exports.
   The old transport switch and manual callback entry are removed.
 - Excel model access refreshes before catalog publication and execution. Disabled,
   restricted, and policy-blocked models are omitted; provider order is preserved
@@ -1058,7 +1059,8 @@ recoverable account deletion. Changes below are grouped by area.
   ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
 - ChatGPT и Excel / Basis Points имеют отдельный вход и обновление через выдавший
   токен OAuth-клиент. Нативные аккаунты ChatGPT работают напрямую или через пул.
-  BPS работает только через пул, отклоняет известные Free-тарифы и поддерживает
+  BPS работает только через пул, не отклоняет Free-тарифы по названию и требует
+  свежего подтверждения доступа от провайдера для выполнения запросов. Поддерживается
   экспорт Zenith/Sub2API. Старый переключатель транспорта и ручной callback убраны.
 - Доступ к моделям Excel обновляется до публикации каталога и выполнения запроса.
   Отключённые, ограниченные и заблокированные правилами модели исключаются;
