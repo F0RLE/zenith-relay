@@ -1,14 +1,22 @@
 use super::*;
 
+fn reference_catalog_path() -> std::path::PathBuf {
+    // A same-user opt-in for this ignored, read-only public-catalog probe.
+    // This adapter accepts no application/request input and must never write.
+    let path = std::env::var_os("RELAY_MEMORY_CATALOG_FILE")
+        .expect("explicit public reference catalog path required");
+    let path = std::path::PathBuf::from(path);
+    assert!(path.is_file());
+    path
+}
+
 #[test]
 #[ignore = "read-only local reference catalog accounting; requires RELAY_MEMORY_CATALOG_FILE"]
 fn profile_local_catalog_payloads() {
-    let path = std::env::var_os("RELAY_MEMORY_CATALOG_FILE")
-        .expect("explicit public reference catalog path required");
-    assert!(std::path::Path::new(&path).is_file());
+    let path = reference_catalog_path();
     // open() only reads the reference cache; refresh/network and writes are
     // deliberately not invoked. Never read accounts, keys or conversations.
-    let loader = ModelMetadataCatalogLoader::open(std::path::PathBuf::from(path)).unwrap();
+    let loader = ModelMetadataCatalogLoader::open(path).unwrap();
     let catalog = loader.snapshot();
     assert!(!catalog.entries.is_empty());
     let mut shared = PayloadBytes::default();

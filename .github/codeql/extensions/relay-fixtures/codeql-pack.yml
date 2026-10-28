@@ -1,6 +1,8 @@
-# Only the cfg(test) wrappers around fixture_root::create are modeled.
-# That helper validates components, reserves a new directory without reuse,
-# and applies mode 0700 on Unix. Generic readers and temp_dir stay unmodeled.
+# Only exact cfg(test) trusted-path adapters are modeled: exclusively reserved
+# private fixtures, their validated parent-to-child test channel, and explicit
+# same-user paths for ignored read-only public-catalog probes. Generic readers,
+# environment functions, production inputs and similarly named helpers stay
+# unmodeled. The catalog selectors are trusted operator choices, not sanitizers.
 name: f0rle/zenith-relay-fixtures
 version: 0.0.1
 library: true

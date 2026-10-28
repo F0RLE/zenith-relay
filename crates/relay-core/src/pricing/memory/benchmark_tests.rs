@@ -3,13 +3,19 @@ use crate::{
     catalog_io, model_metadata::ModelMetadataCatalogLoader, pricing::PricingCatalogLoader,
 };
 
+fn reference_catalog_directory() -> std::path::PathBuf {
+    // Explicit same-user selection for the ignored read-only public-catalog
+    // probe, not a directory supplied by an application request or provider.
+    std::path::PathBuf::from(
+        std::env::var_os("RELAY_MEMORY_CATALOG_DIR")
+            .expect("explicit public catalog directory required"),
+    )
+}
+
 #[test]
 #[ignore = "read-only local public catalog probe; requires RELAY_MEMORY_CATALOG_DIR"]
 fn profile_local_catalog_load() {
-    let root = std::path::PathBuf::from(
-        std::env::var_os("RELAY_MEMORY_CATALOG_DIR")
-            .expect("explicit public catalog directory required"),
-    );
+    let root = reference_catalog_directory();
     let started = std::time::Instant::now();
     let pricing = PricingCatalogLoader::open(root.join("litellm-prices.json")).unwrap();
     let models = ModelMetadataCatalogLoader::open(root.join("models-dev.json")).unwrap();
