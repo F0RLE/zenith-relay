@@ -1,9 +1,11 @@
-use super::super::{ResponseBodyError, collect_response_body, valid_access_token};
+use super::super::{
+    ResponseBodyError, bearer_authorization, collect_response_body, valid_access_token,
+};
 use super::CodexSubscriptionMetadata;
 use crate::error_codes;
 use crate::quota::QuotaRefreshFailure;
 use crate::scheduler::refresh::http::{HttpClass, ManagementHttpScope};
-use crate::{is_http_endpoint, url_has_userinfo};
+use crate::sources::{is_http_endpoint, is_loopback_url, url_has_userinfo};
 use chrono::Local;
 use reqwest::{
     Client, StatusCode,
@@ -40,7 +42,10 @@ impl CodexSubscriptionClient {
         subscriptions_endpoint: Url,
     ) -> Result<Self, QuotaRefreshFailure> {
         for endpoint in [&accounts_check_endpoint, &subscriptions_endpoint] {
-            if !is_http_endpoint(endpoint) || url_has_userinfo(endpoint) {
+            if !is_http_endpoint(endpoint)
+                || url_has_userinfo(endpoint)
+                || (endpoint.scheme() == "http" && !is_loopback_url(endpoint))
+            {
                 return Err(super::failure(
                     error_codes::SUBSCRIPTION_CONFIGURATION,
                     false,
@@ -167,7 +172,7 @@ fn authorization_header(access_token: &str) -> Result<HeaderValue, QuotaRefreshF
             false,
         ));
     }
-    HeaderValue::from_str(&format!("Bearer {access_token}"))
+    bearer_authorization(access_token)
         .map_err(|_| super::failure(error_codes::SUBSCRIPTION_ACCESS_TOKEN_INVALID, false))
 }
 
@@ -187,9 +192,10 @@ fn validate_account_id(account_id: &str) -> Result<&str, QuotaRefreshFailure> {
 }
 
 fn subscription_headers(
-    authorization: HeaderValue,
+    mut authorization: HeaderValue,
     target_path: &str,
 ) -> Result<HeaderMap, QuotaRefreshFailure> {
+    authorization.set_sensitive(true);
     let mut headers = HeaderMap::new();
     headers.insert(AUTHORIZATION, authorization);
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
@@ -233,4 +239,46 @@ fn http_failure(status: StatusCode) -> QuotaRefreshFailure {
         _ => super::failure(error_codes::SUBSCRIPTION_HTTP_STATUS, false),
     }
     .with_http_status(status.as_u16())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subscription_authorization_redacts_debug_without_changing_wire_bytes() {
+        let token = "synthetic-subscription-secret";
+        let authorization = authorization_header(token).unwrap();
+        assert_eq!(authorization.to_str().unwrap(), format!("Bearer {token}"));
+        assert!(authorization.is_sensitive());
+        assert!(
+            !format!("{authorization:?}").contains(token),
+            "provider tokens must not appear in authorization Debug output"
+        );
+    }
+
+    #[test]
+    fn subscription_requests_redact_even_unmarked_external_authorization() {
+        let token = "synthetic-external-subscription-secret";
+        let authorization = HeaderValue::from_str(&format!("Bearer {token}")).unwrap();
+        assert!(!authorization.is_sensitive());
+        let headers = subscription_headers(authorization, "/backend-api/subscriptions").unwrap();
+        let request = Client::new()
+            .get(CODEX_SUBSCRIPTIONS_ENDPOINT)
+            .headers(headers)
+            .build()
+            .unwrap();
+        let authorization = &request.headers()[AUTHORIZATION];
+        assert_eq!(authorization.to_str().unwrap(), format!("Bearer {token}"));
+        assert!(authorization.is_sensitive());
+        assert!(!format!("{:?}", request.headers()).contains(token));
+        assert_eq!(
+            request.headers()["x-openai-target-path"],
+            "/backend-api/subscriptions"
+        );
+        assert_eq!(
+            request.headers()["x-openai-target-route"],
+            "/backend-api/subscriptions"
+        );
+    }
 }
