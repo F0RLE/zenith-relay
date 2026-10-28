@@ -48,7 +48,7 @@ tauri = { version = "2.12.5", features = ["image-ico", "image-png", "macos-proxy
 tauri-plugin-opener = "2.7.2"
 tauri-plugin-dialog = "2.8.3"
 tauri-plugin-process = "2.4.0"
-tauri-plugin-updater = "2.14.0"
+tauri-plugin-updater = "2.14.1"
 tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect"] }
 tower = { version = "0.5.3", features = ["util"] }
