@@ -165,8 +165,6 @@ fn restore_rechecks_account_backup_with_the_same_pre_read_bound() {
 #[test]
 fn account_backup_fifo_paths_do_not_block_direct_or_transactional_reads() {
     use std::{
-        ffi::CString,
-        os::unix::ffi::OsStrExt,
         process::{Command, Stdio},
         time::{Duration, Instant},
     };
@@ -179,17 +177,24 @@ fn account_backup_fifo_paths_do_not_block_direct_or_transactional_reads() {
         fs::create_dir(&backups).unwrap();
         fs::write(home.join(CONFIG_FILE), "model_provider = 'external'\n").unwrap();
         let path = account_backup_path(&backups, &canonical_profile_dir(&home).unwrap());
-        let fifo = CString::new(path.as_os_str().as_bytes()).unwrap();
         // The parent exclusively reserved the containing fixture before spawning.
-        // SAFETY: fifo is a live, NUL-terminated CString for the complete call.
-        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let create_fifo = |path: &Path| {
+            assert!(
+                Command::new("mkfifo")
+                    .args(["-m", "600"])
+                    .arg(path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        create_fifo(&path);
         assert_direct_reads_reject(&home, &backups);
         super::transactions::assert_unsafe_transaction_reads(&path);
         fs::remove_file(&path).unwrap();
         super::transactions::assert_switch_rollback_rejects_unsafe_backup(&home, &path, |path| {
             fs::remove_file(path).unwrap();
-            // SAFETY: fifo still owns its NUL-terminated path for this call.
-            assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+            create_fifo(path);
         });
         fs::write(root.join("completed"), b"checked").unwrap();
         return;
