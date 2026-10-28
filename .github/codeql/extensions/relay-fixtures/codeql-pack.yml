@@ -1,0 +1,10 @@
+# Only the cfg(test) wrappers around fixture_root::create are modeled.
+# That helper validates components, reserves a new directory without reuse,
+# and applies mode 0700 on Unix. Generic readers and temp_dir stay unmodeled.
+name: f0rle/zenith-relay-fixtures
+version: 0.0.1
+library: true
+extensionTargets:
+  codeql/rust-all: ^0.2.24
+dataExtensions:
+  - models/*.json

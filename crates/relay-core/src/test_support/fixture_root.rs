@@ -48,3 +48,30 @@ fn fixture_roots_are_reserved_and_never_reuse_existing_data() {
     }
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn fixture_roots_reject_unsafe_components_before_touching_the_filesystem() {
+    const NONCE: &str = "0123456789abcdef0123456789abcdef";
+    for label in [
+        "",
+        ".",
+        "..",
+        "../escape",
+        "nested/child",
+        "nested\\child",
+        "a b",
+        "тест",
+    ] {
+        assert!(std::panic::catch_unwind(|| create(label, NONCE)).is_err());
+    }
+    let long_label = "x".repeat(65);
+    assert!(std::panic::catch_unwind(|| create(&long_label, NONCE)).is_err());
+    for nonce in [
+        "",
+        "../escape",
+        "0123456789abcdef",
+        "0123456789abcdef0123456789abcdeg",
+    ] {
+        assert!(std::panic::catch_unwind(|| create("invalid-component", nonce)).is_err());
+    }
+}

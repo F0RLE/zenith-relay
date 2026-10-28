@@ -1,0 +1,14 @@
+{
+  "extensions": [
+    {
+      "addsTo": {
+        "pack": "codeql/rust-all",
+        "extensible": "barrierModel"
+      },
+      "data": [
+        ["zenith_relay_core::test_support::temp_root", "ReturnValue", "path-injection", "manual"],
+        ["zenith-relay::files::test_support::temp_root", "ReturnValue", "path-injection", "manual"]
+      ]
+    }
+  ]
+}
