@@ -1,6 +1,6 @@
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chacha20poly1305::{
-    ChaCha20Poly1305, Nonce,
+    ChaCha20Poly1305, Nonce, Tag,
     aead::{Aead, KeyInit},
 };
 use rand::Rng;
@@ -174,7 +174,9 @@ impl Vault {
     fn persist(&self, vault_data: &VaultData) -> Result<(), String> {
         let plaintext_json =
             serde_json::to_vec(vault_data).map_err(|_| "vault serialization failed")?;
-        if plaintext_json.len() as u64 > MAX_VAULT_BYTES {
+        let max_plaintext_bytes =
+            MAX_VAULT_BYTES - (MAGIC.len() + NONCE_BYTES + Tag::default().len()) as u64;
+        if plaintext_json.len() as u64 > max_plaintext_bytes {
             return Err("secret vault size limit is reached".to_string());
         }
         let cipher = ChaCha20Poly1305::new((&self.key).into());
@@ -199,12 +201,14 @@ impl Vault {
 }
 
 fn decrypt_file(path: &Path, key: &[u8; 32]) -> Result<VaultData, String> {
-    let metadata = fs::symlink_metadata(path).map_err(io_error)?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > MAX_VAULT_BYTES
-    {
-        return Err("secret vault file is unsafe".to_string());
-    }
-    let bytes = fs::read(path).map_err(io_error)?;
+    let bytes =
+        crate::files::read_regular_file_bounded(path, MAX_VAULT_BYTES).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::InvalidData {
+                "secret vault file is unsafe".to_string()
+            } else {
+                io_error(error)
+            }
+        })?;
     if bytes.len() <= MAGIC.len() + NONCE_BYTES || &bytes[..MAGIC.len()] != MAGIC {
         return Err("secret vault file header is invalid".to_string());
     }
@@ -302,8 +306,69 @@ mod tests {
     use super::*;
 
     #[test]
+    fn oversized_vault_is_rejected_without_replacing_the_file() {
+        let root = crate::files::test_temp_root("vault-size");
+        let path = root.join("secrets.enc");
+        fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_VAULT_BYTES + 1)
+            .unwrap();
+        let error = Vault::open(&root, [3; 32]).err().unwrap();
+        assert_eq!(error, "secret vault file is unsafe");
+        assert_eq!(fs::metadata(&path).unwrap().len(), MAX_VAULT_BYTES + 1);
+        assert!(!root.join("secrets.enc.bak").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn vault_rejects_envelope_overflow_without_overwriting_existing_secrets() {
+        let root = crate::files::test_temp_root("vault-envelope");
+        let vault = Vault::open(&root, [3; 32]).unwrap();
+        vault
+            .save("source:existing", "synthetic-existing-secret")
+            .unwrap();
+        let original = fs::read(root.join("secrets.enc")).unwrap();
+        let mut candidate = VaultData::default();
+        for index in 0..MAX_VAULT_BYTES as usize / MAX_SECRET_BYTES {
+            candidate
+                .secrets_by_ref
+                .insert(format!("source:size-{index}"), "x".repeat(MAX_SECRET_BYTES));
+        }
+        let encoded_len = serde_json::to_vec(&candidate).unwrap().len();
+        let trim = encoded_len - (MAX_VAULT_BYTES as usize - 1);
+        candidate
+            .secrets_by_ref
+            .get_mut("source:size-0")
+            .unwrap()
+            .truncate(MAX_SECRET_BYTES - trim);
+        validate_data(&candidate).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&candidate).unwrap().len() as u64,
+            MAX_VAULT_BYTES - 1
+        );
+
+        let result = vault.persist(&candidate);
+        let preserved = fs::read(root.join("secrets.enc")).unwrap() == original;
+        drop(vault);
+        let can_reopen = Vault::open(&root, [3; 32]).is_ok();
+        fs::remove_dir_all(root).unwrap();
+        assert!(
+            result.is_err(),
+            "an encrypted file beyond the read limit must never be published"
+        );
+        assert!(
+            preserved,
+            "failed writes must preserve the existing encrypted vault"
+        );
+        assert!(
+            can_reopen,
+            "a failed save must not make the existing vault unreadable"
+        );
+    }
+
+    #[test]
     fn agent_message_key_survives_reopen_backup_and_generic_secret_changes() {
-        let root = std::env::temp_dir().join(format!("relay-agent-key-{}", uuid::Uuid::new_v4()));
+        let root = crate::files::test_temp_root("agent-key");
         let vault = Vault::open(&root, [3; 32]).unwrap();
         vault
             .save("source:synthetic", "synthetic-provider-secret")
@@ -330,7 +395,7 @@ mod tests {
                 .unwrap(),
             key
         );
-        let other_root = root.with_extension("other-profile");
+        let other_root = crate::files::test_temp_root("agent-key-other");
         assert_ne!(
             Vault::open(&other_root, [3; 32])
                 .unwrap()
@@ -344,8 +409,7 @@ mod tests {
 
     #[test]
     fn competing_agent_message_key_initializers_return_one_durable_key() {
-        let root =
-            std::env::temp_dir().join(format!("relay-agent-key-race-{}", uuid::Uuid::new_v4()));
+        let root = crate::files::test_temp_root("agent-key-race");
         let vault = std::sync::Arc::new(Vault::open(&root, [3; 32]).unwrap());
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
         let threads = (0..8)
@@ -383,9 +447,7 @@ mod tests {
             serde_json::json!({"version":1,"key":"invalid"}),
             serde_json::json!({"version":2,"key":URL_SAFE_NO_PAD.encode([7;32])}),
         ] {
-            let root = std::env::temp_dir()
-                .join(format!("relay-agent-key-invalid-{}", uuid::Uuid::new_v4()));
-            fs::create_dir_all(&root).unwrap();
+            let root = crate::files::test_temp_root("relay-agent-key-invalid");
             let payload =
                 serde_json::to_vec(&serde_json::json!({"values":{},"agent_message_key":record}))
                     .unwrap();
@@ -404,8 +466,8 @@ mod tests {
 
     #[test]
     fn unavailable_agent_message_key_persistence_returns_no_volatile_key() {
-        let root =
-            std::env::temp_dir().join(format!("relay-agent-key-io-{}", uuid::Uuid::new_v4()));
+        let fixture = crate::files::test_temp_root("agent-key-io");
+        let root = fixture.join("vault");
         let vault = Vault::open(&root, [3; 32]).unwrap();
         fs::remove_dir(&root).unwrap();
         fs::write(&root, "synthetic-unavailable-directory").unwrap();
@@ -422,13 +484,12 @@ mod tests {
                 .unwrap(),
             key
         );
-        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(fixture).unwrap();
     }
 
     #[test]
     fn vault_encrypts_large_values_and_recovers_backup() {
-        let root =
-            std::env::temp_dir().join(format!("zenith-relay-vault-{}", uuid::Uuid::new_v4()));
+        let root = crate::files::test_temp_root("vault");
         let value = "synthetic-large-secret".repeat(8_192);
         let vault = Vault::open(&root, [3; 32]).unwrap();
         vault.save("import-session:test", &value).unwrap();

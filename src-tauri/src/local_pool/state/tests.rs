@@ -25,8 +25,7 @@ mod wake_cycles;
 
 #[test]
 fn queued_performance_sample_does_not_keep_storage_alive() {
-    let root =
-        std::env::temp_dir().join(format!("relay-queued-performance-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("queued-performance");
     let path = root.join("relay.sqlite");
     let database = Arc::new(TelemetryDb::open(&path).unwrap());
     performance_sample_job(&database, "full_snapshot_native", 4.0, Some("local"))();
@@ -85,7 +84,7 @@ fn key_record(id: &str) -> LocalGatewayKeyRecord {
 }
 
 fn temp_root(prefix: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("zenith-relay-{prefix}-{}", uuid::Uuid::new_v4()))
+    crate::files::test_temp_root(prefix)
 }
 
 fn account_record(id: &str) -> LocalAccountRecord {

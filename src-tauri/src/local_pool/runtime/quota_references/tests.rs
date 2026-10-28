@@ -243,7 +243,7 @@ async fn inactive_reference_refresh_updates_siwc_without_replacing_runtime() {
 
     for kind in [OAuthClientKind::Codex, OAuthClientKind::ExcelBps] {
         let id = uuid::Uuid::new_v4().simple().to_string();
-        let root = std::env::temp_dir().join(format!("zenith-relay-quota-reference-{id}"));
+        let root = crate::files::test_temp_root("quota-reference");
         let state = DesktopState::open(root.clone()).unwrap();
         let credentials = CredentialStore::from_backend(NativeSecretBackend);
         let (mut selected, selected_secret) =

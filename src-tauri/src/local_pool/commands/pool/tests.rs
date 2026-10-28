@@ -3,7 +3,6 @@ use super::presets::apply_source_preset_policy;
 use super::*;
 use crate::local_pool::models::ProviderSourceRecord;
 use std::collections::BTreeSet;
-use uuid::Uuid;
 use zenith_relay_core::protocol::{SourcePresetRule, complete_model_display_order};
 use zenith_relay_core::{SourceProtocolBinding, WireApi};
 
@@ -40,7 +39,7 @@ fn source(id: &str, in_pool: bool, wire_api: WireApi) -> ProviderSourceRecord {
 async fn check_routing_modes_with_inventory(stored_policy: bool) {
     use zenith_relay_core::PoolRoutingMode;
 
-    let root = std::env::temp_dir().join(format!("relay-routing-edit-{}", Uuid::new_v4()));
+    let root = crate::files::test_temp_root("routing-edit");
     let state = DesktopState::open(root.join("relay")).unwrap();
     let codex_home = root.join("codex");
     {

@@ -179,8 +179,7 @@ fn filters_and_totals_use_covering_indexes_for_all_time_and_period_reads() {
 
 #[test]
 fn filter_read_migration_upgrades_existing_history_without_rewriting_it() {
-    let root =
-        std::env::temp_dir().join(format!("relay-filter-migration-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-filter-migration");
     let path = root.join("usage.sqlite");
     let database = TelemetryDb::open(&path).unwrap();
     database

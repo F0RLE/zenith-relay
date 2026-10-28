@@ -23,9 +23,7 @@ struct Fixture(PathBuf);
 
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("relay-file-write-{}", uuid::Uuid::new_v4()));
-        fs::create_dir(&root).unwrap();
-        Self(root)
+        Self(crate::files::test_temp_root("file-write"))
     }
 }
 

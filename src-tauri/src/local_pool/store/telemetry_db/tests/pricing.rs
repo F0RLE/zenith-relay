@@ -2,10 +2,7 @@ use super::*;
 
 #[test]
 fn generic_cache_write_catalog_updates_reprice_history_without_a_ttl_migration() {
-    let root = std::env::temp_dir().join(format!(
-        "relay-generic-cache-price-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("relay-generic-cache-price");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     for (id, ttl) in [
         ("unspecified", None),
@@ -60,7 +57,7 @@ fn context_band_sql_matches_request_boundaries() {
 
 #[test]
 fn context_band_migration_reclassifies_retained_usage_and_preserves_archives() {
-    let root = std::env::temp_dir().join(format!("relay-context-bands-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-context-bands");
     let path = root.join("usage.sqlite");
     let database = TelemetryDb::open(&path).unwrap();
     for id in ["retained", "archived"] {
@@ -148,10 +145,7 @@ fn context_band_migration_reclassifies_retained_usage_and_preserves_archives() {
 
 #[test]
 fn api_equivalents_group_priced_and_unknown_usage_by_candidate() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-usage-equivalent-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-usage-equivalent");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let event = UsageEvent {
         request_id: "req_equivalent".into(),
@@ -229,10 +223,7 @@ fn api_equivalents_group_priced_and_unknown_usage_by_candidate() {
 }
 #[test]
 fn custom_price_revalues_existing_unknown_model_usage() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-usage-custom-price-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-usage-custom-price");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let event = private_model_source_event("req_custom_price", "source_1");
     database.record(&event).unwrap();
@@ -278,10 +269,7 @@ fn custom_price_revalues_existing_unknown_model_usage() {
 }
 #[test]
 fn source_prices_are_applied_before_same_model_usage_is_merged() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-usage-source-prices-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-usage-source-prices");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let mut event = private_model_source_event("req_source_cheap", "source_cheap");
     database.record(&event).unwrap();
@@ -379,10 +367,7 @@ fn usage_speed_rollup_ignores_buffered_outliers() {
 }
 #[test]
 fn account_purchase_cost_migration_preserves_direct_values_and_removes_legacy_economics() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-account-purchase-cost-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-account-purchase-cost");
     let path = root.join("usage.sqlite");
     let database = TelemetryDb::open(&path).unwrap();
     database

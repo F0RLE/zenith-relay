@@ -60,6 +60,15 @@ zenith-relay-core = { path = "../crates/relay-core" }
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2.5.4"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.191"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+junction = "2.1.0"
+
 [profile.release]
 strip = true
 lto = true

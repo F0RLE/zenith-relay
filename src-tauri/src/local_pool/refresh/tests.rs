@@ -43,10 +43,7 @@ pub(super) fn account() -> LocalAccountRecord {
 }
 
 pub(super) fn state() -> DesktopState {
-    DesktopState::open(
-        std::env::temp_dir().join(format!("relay-refresh-host-{}", uuid::Uuid::new_v4())),
-    )
-    .unwrap()
+    DesktopState::open(crate::files::test_temp_root("refresh-host")).unwrap()
 }
 
 pub(super) async fn cleanup(state: DesktopState) {

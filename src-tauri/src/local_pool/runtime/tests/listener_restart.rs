@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn runtime_restarts_after_pool_eviction_and_source_deletion() {
     let id = uuid::Uuid::new_v4().simple().to_string();
-    let root = std::env::temp_dir().join(format!("zenith-relay-empty-pool-{id}"));
+    let root = crate::files::test_temp_root("runtime-empty-pool");
     let source_secret_ref = format!("source:empty-pool-{id}");
     let state = DesktopState::open(root.clone()).unwrap();
     secret_store::save(&source_secret_ref, "upstream-secret").unwrap();
@@ -153,7 +153,7 @@ async fn runtime_restarts_after_pool_eviction_and_source_deletion() {
 #[tokio::test]
 async fn runtime_repairs_missing_enabled_gateway_key_secret() {
     let id = uuid::Uuid::new_v4().simple().to_string();
-    let root = std::env::temp_dir().join(format!("zenith-relay-key-repair-{id}"));
+    let root = crate::files::test_temp_root("runtime-key-repair");
     let source_secret_ref = format!("source:key-repair-{id}");
     let key_secret_ref = format!("key:key-repair-{id}");
     let state = DesktopState::open(root.clone()).unwrap();
@@ -229,7 +229,7 @@ async fn runtime_repairs_missing_enabled_gateway_key_secret() {
 #[tokio::test]
 async fn invalid_source_start_keeps_the_remaining_pool_route_available() {
     let id = uuid::Uuid::new_v4().simple().to_string();
-    let root = std::env::temp_dir().join(format!("zenith-relay-source-restart-{id}"));
+    let root = crate::files::test_temp_root("runtime-source-restart");
     let source_secret_ref = format!("source:source-restart-{id}");
     let invalid_secret_ref = format!("source:invalid-restart-{id}");
     let key_secret_ref = format!("key:source-restart-{id}");
@@ -316,7 +316,7 @@ async fn invalid_source_start_keeps_the_remaining_pool_route_available() {
 #[tokio::test]
 async fn occupied_new_port_restores_settings_and_previous_listener() {
     let id = uuid::Uuid::new_v4().simple().to_string();
-    let root = std::env::temp_dir().join(format!("zenith-relay-port-rollback-{id}"));
+    let root = crate::files::test_temp_root("runtime-port-rollback");
     let source_secret_ref = format!("source:port-rollback-{id}");
     let key_secret_ref = format!("key:port-rollback-{id}");
     let state = DesktopState::open(root.clone()).unwrap();

@@ -37,17 +37,19 @@ pub(in crate::local_pool::accounts::import_session) fn write_snapshot_new(
         ));
     }
     let temp = snapshot_temp_path(path);
+    // A failed exclusive open does not give this attempt ownership of an
+    // existing staging file. Only clean up after creating our own file.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .map_err(|_| {
+            ImportSessionError::new(
+                ImportSessionErrorCode::SnapshotIo,
+                "failed to create temporary import session snapshot",
+            )
+        })?;
     let write_result = (|| {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)
-            .map_err(|_| {
-                ImportSessionError::new(
-                    ImportSessionErrorCode::SnapshotIo,
-                    "failed to create temporary import session snapshot",
-                )
-            })?;
         file.write_all(&bytes).map_err(|_| {
             ImportSessionError::new(
                 ImportSessionErrorCode::SnapshotIo,

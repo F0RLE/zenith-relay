@@ -17,8 +17,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let root =
-            std::env::temp_dir().join(format!("relay-snapshot-worker-{}", uuid::Uuid::new_v4()));
+        let root = crate::files::test_temp_root("snapshot-worker");
         let state = DesktopState::open(root.clone()).unwrap();
         Self { root, state }
     }

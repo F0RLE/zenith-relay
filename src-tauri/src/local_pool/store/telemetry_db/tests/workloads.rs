@@ -3,7 +3,7 @@ use zenith_relay_core::protocol::UsageWorkload;
 
 #[test]
 fn workload_reports_partition_all_sends_without_hiding_background_consumption() {
-    let root = std::env::temp_dir().join(format!("relay-workloads-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-workloads");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     for (id, attempt, category, input, cached) in [
         ("dialog", 1, None, 1_000, Some(900)),

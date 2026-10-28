@@ -662,12 +662,7 @@ async fn wait_until(condition: impl Fn() -> bool) {
 }
 
 fn test_root(label: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-oauth-flow-{label}-{}",
-        Uuid::new_v4()
-    ));
-    fs::create_dir_all(&root).unwrap();
-    root
+    crate::files::test_temp_root(&format!("oauth-flow-{label}"))
 }
 
 fn remove_root(root: &Path) {

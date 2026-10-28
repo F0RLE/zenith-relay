@@ -66,10 +66,7 @@ async fn cleanup_import_test_state(
 
 #[tokio::test]
 async fn reimporting_identical_credentials_retires_preexisting_refresh_reads() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-import-refresh-fence-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-import-refresh-fence");
     let state = DesktopState::open(root.clone()).unwrap();
     let credential_store = CredentialStore::from_backend(NativeSecretBackend);
     let account_id = format!("account_{}", uuid::Uuid::new_v4().simple());
@@ -110,10 +107,7 @@ async fn reimporting_identical_credentials_retires_preexisting_refresh_reads() {
 
 #[tokio::test]
 async fn account_trash_prevents_reimport_from_replacing_retained_credentials() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-import-trash-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-import-trash");
     let state = DesktopState::open(root.clone()).unwrap();
     let credential_store = CredentialStore::from_backend(NativeSecretBackend);
     let account_id = format!("account_{}", uuid::Uuid::new_v4().simple());
@@ -171,10 +165,7 @@ async fn account_trash_prevents_reimport_from_replacing_retained_credentials() {
 
 #[tokio::test]
 async fn importing_an_account_outside_the_pool_keeps_the_running_gateway() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-import-no-pool-runtime-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-import-no-pool-runtime");
     let state = DesktopState::open(root.clone()).expect("state");
     let runtime = runtime_from_store(&state).await.expect("runtime");
     let address = state
@@ -202,10 +193,7 @@ async fn importing_an_account_outside_the_pool_keeps_the_running_gateway() {
 
 #[tokio::test]
 async fn importing_a_pool_account_restarts_the_gateway_without_losing_it() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-import-pool-runtime-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-import-pool-runtime");
     let state = DesktopState::open(root.clone()).expect("state");
     let runtime = runtime_from_store(&state).await.expect("runtime");
     let address = state.gateway.start(runtime, 0).await.expect("gateway");
@@ -243,10 +231,7 @@ async fn importing_a_pool_account_restarts_the_gateway_without_losing_it() {
 
 #[test]
 fn import_rollback_restores_only_its_own_durable_snapshot() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-import-rollback-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-import-rollback");
     let state = DesktopState::open(root.clone()).expect("state");
     let credential_store = CredentialStore::from_backend(NativeSecretBackend);
     let account_id = format!("account_{}", uuid::Uuid::new_v4().simple());
@@ -304,10 +289,7 @@ fn import_rollback_restores_only_its_own_durable_snapshot() {
 
 #[test]
 fn import_rollback_never_replaces_a_newer_credential_snapshot() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-import-stale-rollback-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-import-stale-rollback");
     let state = DesktopState::open(root.clone()).expect("state");
     let credential_store = CredentialStore::from_backend(NativeSecretBackend);
     let account_id = format!("account_{}", uuid::Uuid::new_v4().simple());
@@ -359,10 +341,7 @@ fn import_rollback_never_replaces_a_newer_credential_snapshot() {
 
 #[tokio::test]
 async fn stale_import_reconciliation_persists_the_authoritative_tokens() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-import-authority-reconcile-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-import-authority-reconcile");
     let state = DesktopState::open(root.clone()).expect("state");
     let credential_store = CredentialStore::from_backend(NativeSecretBackend);
     let account_id = format!("account_{}", uuid::Uuid::new_v4().simple());

@@ -7,9 +7,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let root =
-            std::env::temp_dir().join(format!("relay-launch-paths-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
+        let root = crate::files::test_temp_root("launch-paths");
         Self {
             store: PreferenceStore {
                 path: root.join("preferences/application-launch.json"),

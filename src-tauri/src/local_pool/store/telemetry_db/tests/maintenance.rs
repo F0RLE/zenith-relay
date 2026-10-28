@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn memory_diagnostics_report_a_budget_without_waiting_on_the_database() {
-    let root = std::env::temp_dir().join(format!("relay-memory-budget-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-memory-budget");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     assert_eq!(database.memory_cache_budget(), Some(32 * 1024 * 1024));
     let page_size: u32;
@@ -33,10 +33,7 @@ fn memory_diagnostics_report_a_budget_without_waiting_on_the_database() {
 
 #[test]
 fn telemetry_uses_wal_without_relaxing_durability() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-telemetry-pragmas-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-telemetry-pragmas");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let connection = database.connection.lock().unwrap();
     let journal_mode: String = connection
@@ -57,10 +54,7 @@ fn telemetry_uses_wal_without_relaxing_durability() {
 }
 #[test]
 fn deleting_account_data_removes_usage_rollups_and_affinity() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-account-delete-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-account-delete");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     // Unchanged state must not short-circuit the associated account purge.
     database
@@ -116,10 +110,7 @@ fn deleting_account_data_removes_usage_rollups_and_affinity() {
 }
 #[test]
 fn deleting_multiple_accounts_removes_all_usage_data_in_one_transaction() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-account-bulk-delete-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-account-bulk-delete");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     database
         .connection
@@ -175,10 +166,7 @@ fn deleting_multiple_accounts_removes_all_usage_data_in_one_transaction() {
 }
 #[test]
 fn invalid_state_batch_does_not_partially_save_or_purge_account_data() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-account-delete-rollback-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-account-delete-rollback");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     database
         .replace_state_json(&[("accounts", "[\"before\"]".to_string())])
@@ -228,10 +216,7 @@ fn invalid_state_batch_does_not_partially_save_or_purge_account_data() {
 }
 #[test]
 fn usage_schema_has_no_secret_or_body_columns() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-usage-schema-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-usage-schema");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let connection = database.connection.lock().unwrap();
     let mut statement = connection
@@ -256,10 +241,7 @@ fn usage_schema_has_no_secret_or_body_columns() {
 }
 #[test]
 fn newer_usage_schema_is_rejected_without_rewrite() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-usage-future-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-usage-future");
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join("usage.sqlite");
     let connection = Connection::open(&path).unwrap();
@@ -282,10 +264,7 @@ fn newer_usage_schema_is_rejected_without_rewrite() {
 }
 #[test]
 fn usage_retention_prunes_old_rows_on_open_and_periodically() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-usage-retention-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-usage-retention");
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join("usage.sqlite");
     drop(TelemetryDb::open(&path).unwrap());

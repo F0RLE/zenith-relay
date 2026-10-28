@@ -28,7 +28,7 @@ fn catalog() -> PricingCatalog {
 }
 
 pub(super) fn database() -> (std::path::PathBuf, TelemetryDb) {
-    let root = std::env::temp_dir().join(format!("relay-capacity-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("capacity");
     let database = TelemetryDb::open(&root.join("test.sqlite")).unwrap();
     (root, database)
 }

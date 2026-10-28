@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn codex_home_uses_an_existing_override_and_canonicalizes_it() {
-        let root = std::env::temp_dir().join(format!("zenith-codex-home-{}", uuid::Uuid::new_v4()));
+        let root = crate::files::test_temp_root("codex-home-existing");
         let nested = root.join("nested");
         fs::create_dir_all(&nested).unwrap();
         let resolved = resolve_codex_home_from(Some(nested.clone().into()), root.clone()).unwrap();
@@ -268,8 +268,7 @@ mod tests {
 
     #[test]
     fn codex_home_rejects_a_missing_or_file_override() {
-        let root = std::env::temp_dir().join(format!("zenith-codex-home-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
+        let root = crate::files::test_temp_root("codex-home-invalid");
         assert!(resolve_codex_home_from(Some(root.join("missing").into()), root.clone()).is_err());
         let file = root.join("file");
         fs::write(&file, "x").unwrap();
@@ -292,9 +291,7 @@ mod tests {
 
     #[test]
     fn opencode_config_prefers_the_file_open_code_loads_first() {
-        let root =
-            std::env::temp_dir().join(format!("zenith-opencode-config-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
+        let root = crate::files::test_temp_root("opencode-config");
         let json = root.join("opencode.json");
         let jsonc = root.join("opencode.jsonc");
         fs::write(&json, "{}").unwrap();

@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn history_purges_deleted_account_attempts_and_expires_with_the_final_row() {
-    let root = std::env::temp_dir().join(format!("relay-attempt-purge-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-attempt-purge");
     let path = root.join("usage.sqlite");
     let database = TelemetryDb::open(&path).unwrap();
     let mut event = aggregate_test_event("rerouted", 1, 20, 0, None, 8);
@@ -46,7 +46,7 @@ fn history_purges_deleted_account_attempts_and_expires_with_the_final_row() {
 
 #[test]
 fn sends_survive_reopen_without_inflating_logical_request_counts() {
-    let root = std::env::temp_dir().join(format!("relay-attempts-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-attempts");
     let path = root.join("usage.sqlite");
     let database = TelemetryDb::open(&path).unwrap();
     let mut event = aggregate_test_event("req", 1, 20, 0, None, 8);
@@ -120,7 +120,7 @@ fn sends_survive_reopen_without_inflating_logical_request_counts() {
 
 #[test]
 fn response_affinity_survives_reopen_and_expires() {
-    let root = std::env::temp_dir().join(format!("zenith-relay-affinity-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("zenith-relay-affinity");
     let path = root.join("usage.sqlite");
     let binding = ResponseAffinityBinding {
         key: "hashed-response".into(),
@@ -142,10 +142,7 @@ fn response_affinity_survives_reopen_and_expires() {
 }
 #[test]
 fn response_affinity_storage_matches_the_runtime_capacity() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-affinity-capacity-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-affinity-capacity");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     database
         .connection
@@ -180,8 +177,7 @@ fn response_affinity_storage_matches_the_runtime_capacity() {
 }
 #[test]
 fn usage_page_aggregates_the_full_filtered_range_not_only_the_page() {
-    let root =
-        std::env::temp_dir().join(format!("zenith-relay-usage-page-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("zenith-relay-usage-page");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let mut event = aggregate_test_event("req_page_1", 1, 20, 0, None, 8);
     event.local_key_id = "key_1".into();
@@ -277,10 +273,7 @@ fn usage_page_aggregates_the_full_filtered_range_not_only_the_page() {
 }
 #[test]
 fn cache_sessions_follow_the_latest_cache_touch_and_reported_window() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-cache-sessions-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-cache-sessions");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let mut start = aggregate_test_event("a-start", 1, 10, 0, None, 1);
     start.client_context_id = Some("client_aaaa".into());
@@ -438,8 +431,7 @@ fn cache_sessions_follow_the_latest_cache_touch_and_reported_window() {
 
 #[test]
 fn cache_sessions_isolate_routes_and_ignore_misses_and_future_policies() {
-    let root =
-        std::env::temp_dir().join(format!("zenith-relay-cache-scope-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("zenith-relay-cache-scope");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     for (id, account, source, model, read, write, ttl, time) in [
         (

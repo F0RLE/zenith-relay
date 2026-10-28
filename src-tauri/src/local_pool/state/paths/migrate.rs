@@ -248,20 +248,11 @@ fn io_error(error: std::io::Error) -> LocalPoolError {
 #[cfg(test)]
 mod tests {
     use super::migrate_storage_layout;
-    use std::{
-        fs,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::fs;
 
     #[test]
     fn migrates_legacy_recovery_directories_without_overwriting_conflicts() {
-        let root = std::env::temp_dir().join(format!(
-            "zenith-relay-layout-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let root = temp_root("legacy-recovery");
         let legacy = root.join("recovery").join("profiles");
         let current_layout = root.join("recovery").join("applications").join("chatgpt");
         fs::create_dir_all(&legacy).unwrap();
@@ -353,12 +344,6 @@ mod tests {
     }
 
     fn temp_root(label: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "zenith-relay-layout-{label}-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
+        crate::files::test_temp_root(&format!("layout-{label}"))
     }
 }

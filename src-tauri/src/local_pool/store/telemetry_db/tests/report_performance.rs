@@ -6,7 +6,7 @@ const MEMBERS: u64 = 8;
 #[test]
 #[ignore = "selected-page versus full-report timing on synthetic history"]
 fn measure_usage_selected_pages() {
-    let root = std::env::temp_dir().join(format!("relay-selected-pages-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-selected-pages");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     populate_report_history(&database);
     let catalog = test_pricing_catalog();
@@ -61,7 +61,7 @@ fn measure_usage_selected_pages() {
 #[test]
 #[ignore = "synthetic filter-history scan/index/cache comparison; no live data"]
 fn measure_usage_filter_choices() {
-    let root = std::env::temp_dir().join(format!("relay-filter-timing-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-filter-timing");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     populate_report_history(&database);
     let connection = database.connection.lock().unwrap();
@@ -184,7 +184,7 @@ fn populate_report_history(database: &TelemetryDb) {
 #[test]
 #[ignore = "large local report timing probe; synthetic history only, no live accounts"]
 fn measure_usage_large_reports() {
-    let root = std::env::temp_dir().join(format!("relay-report-timing-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-report-timing");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     populate_report_history(&database);
     let requests = UsageQuery {

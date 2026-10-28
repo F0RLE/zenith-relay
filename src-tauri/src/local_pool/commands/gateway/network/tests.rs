@@ -50,7 +50,7 @@ fn network_addresses_preserve_lan_alongside_vpn_and_ignore_unusable_interfaces()
 
 #[tokio::test]
 async fn network_access_is_opt_in_revision_checked_and_keeps_independent_keys() {
-    let root = std::env::temp_dir().join(format!("relay-network-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("network");
     let state = DesktopState::open(root.clone()).unwrap();
     assert!(!snapshot(&state).await.unwrap().enabled);
     let local = pool::ensure_system_gateway_key(&state).unwrap();
@@ -84,7 +84,7 @@ async fn network_access_is_opt_in_revision_checked_and_keeps_independent_keys() 
 
 #[tokio::test]
 async fn network_scope_restarts_same_pool_without_changing_local_address_or_key() {
-    let root = std::env::temp_dir().join(format!("relay-network-runtime-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("network-runtime");
     let state = DesktopState::open(root.clone()).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();

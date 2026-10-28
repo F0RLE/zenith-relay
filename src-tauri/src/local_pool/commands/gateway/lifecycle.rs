@@ -188,8 +188,7 @@ mod tests {
 
     #[tokio::test]
     async fn startup_waits_for_settings_transaction_before_reading_enabled_state() {
-        let root =
-            std::env::temp_dir().join(format!("relay-startup-lock-{}", uuid::Uuid::new_v4()));
+        let root = crate::files::test_temp_root("startup-lock");
         let state = DesktopState::open(root.clone()).unwrap();
         state.store().unwrap().set_gateway_enabled(false).unwrap();
         let mutation = state.setup_guard().await;
@@ -214,8 +213,7 @@ mod tests {
 
     #[tokio::test]
     async fn rotating_the_local_gateway_key_replaces_the_stored_secret() {
-        let temp_id = uuid::Uuid::new_v4().simple().to_string();
-        let root = std::env::temp_dir().join(format!("zenith-relay-key-rotation-{temp_id}"));
+        let root = crate::files::test_temp_root("key-rotation");
         let state = DesktopState::open(root.clone()).unwrap();
         let key = super::super::super::pool::ensure_system_gateway_key(&state).unwrap();
         let old_secret = super::super::super::pool::ensure_local_gateway_key_secret(&key).unwrap();
@@ -235,7 +233,7 @@ mod tests {
 
     #[tokio::test]
     async fn rotating_network_key_preserves_local_application_key() {
-        let root = std::env::temp_dir().join(format!("relay-network-key-{}", uuid::Uuid::new_v4()));
+        let root = crate::files::test_temp_root("network-key");
         let state = DesktopState::open(root.clone()).unwrap();
         let pool = super::super::super::pool::ensure_system_gateway_key(&state).unwrap();
         let local_secret =

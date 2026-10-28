@@ -4,7 +4,7 @@ use rusqlite::StatementStatus;
 
 #[test]
 fn cached_record_statements_reuse_without_retaining_bound_values() {
-    let root = std::env::temp_dir().join(format!("relay-write-cache-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-write-cache");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let event = aggregate_test_event("synthetic-cache", 1, 100, 0, None, 10);
     database.record(&event).unwrap();
@@ -46,7 +46,7 @@ fn cached_record_statements_reuse_without_retaining_bound_values() {
 
 #[test]
 fn attempt_lookup_uses_the_full_identity_instead_of_scanning_other_attempts() {
-    let root = std::env::temp_dir().join(format!("relay-attempt-index-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-attempt-index");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let mut connection = database.connection.lock().unwrap();
     connection

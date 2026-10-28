@@ -22,7 +22,7 @@ async fn codex_text_opt_in_rebuilds_live_routes_without_enrolling_or_removing_ac
     use crate::local_pool::commands::gateway::codex_text_models::apply_codex_text_models;
 
     let id = uuid::Uuid::new_v4().simple().to_string();
-    let root = std::env::temp_dir().join(format!("relay-codex-text-{id}"));
+    let root = crate::files::test_temp_root("runtime-codex-text");
     let account_id = format!("account_text_{id}");
     let now = current_time_ms();
     let credentials = StoredCodexCredentials::new(
@@ -165,7 +165,7 @@ async fn codex_text_opt_in_rebuilds_live_routes_without_enrolling_or_removing_ac
 #[tokio::test]
 async fn explicit_codex_image_membership_survives_restart_and_revokes_live_access() {
     let id = uuid::Uuid::new_v4().simple().to_string();
-    let root = std::env::temp_dir().join(format!("relay-image-membership-{id}"));
+    let root = crate::files::test_temp_root("runtime-image-membership");
     let account_id = format!("account_image_{id}");
     let now = current_time_ms();
     let credentials = StoredCodexCredentials::new(

@@ -77,10 +77,7 @@ fn verification_uses_only_normalized_before_and_after_windows() {
 
 #[tokio::test]
 async fn inactive_wake_permit_is_skipped_before_credentials_or_http() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-inactive-wake-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("inactive-wake");
     let state = DesktopState::open(root.clone()).unwrap();
     assert!(
         execute_wake_permit(&state, &wake_permit(full_window(Some(10_000), 100)))

@@ -338,11 +338,8 @@ mod tests {
 
     #[test]
     fn agent_message_key_requires_the_initialized_matching_vault_without_keyring_fallback() {
-        let root =
-            std::env::temp_dir().join(format!("relay-agent-key-scope-{}", uuid::Uuid::new_v4()));
-        let other = root.with_extension("other-profile");
-        fs::create_dir_all(&root).unwrap();
-        fs::create_dir_all(&other).unwrap();
+        let root = crate::files::test_temp_root("agent-key-scope");
+        let other = crate::files::test_temp_root("agent-key-other-profile");
         assert!(configured_agent_message_key(None, &root).is_err());
         let configured = ConfiguredVault {
             root: canonical_root(&root).unwrap(),

@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn retention_is_bounded_oldest_first_and_preserves_all_send_totals() {
-    let root = std::env::temp_dir().join(format!("relay-retention-batch-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-retention-batch");
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join("usage.sqlite");
     let database = TelemetryDb::open(&path).unwrap();
@@ -74,8 +74,7 @@ fn count(connection: &Connection, sql: &str) -> i64 {
 
 #[test]
 fn retention_failure_rolls_back_before_the_next_batch() {
-    let root =
-        std::env::temp_dir().join(format!("relay-retention-rollback-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-retention-rollback");
     std::fs::create_dir_all(&root).unwrap();
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     database

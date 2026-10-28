@@ -213,7 +213,7 @@ async fn model_catalog_hints_require_started_current_automatic_refresh() {
 
 #[tokio::test]
 async fn setup_guard_serializes_mutations() {
-    let root = std::env::temp_dir().join(format!("zenith-relay-lock-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("zenith-relay-lock");
     let state = Arc::new(DesktopState::open(root.clone()).unwrap());
     let first = state.setup_guard().await;
     let waiting_state = state.clone();

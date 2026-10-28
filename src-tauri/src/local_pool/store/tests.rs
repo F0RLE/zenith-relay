@@ -4,6 +4,7 @@ use std::fs;
 use std::path::Path;
 
 mod account_trash;
+mod fixture_ownership;
 mod refresh;
 mod retired_accounts;
 mod rotation_upgrade;
@@ -11,10 +12,6 @@ mod source_refresh;
 mod usage;
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
-use std::{
-    env,
-    sync::atomic::{AtomicU64, Ordering},
-};
 use zenith_relay_core::{
     WireApi,
     accounts::{
@@ -23,16 +20,8 @@ use zenith_relay_core::{
     quota::{QuotaSnapshot, Subscription},
 };
 
-static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
-
 fn temp_root() -> PathBuf {
-    let root = env::temp_dir().join(format!(
-        "zenith-relay-store-{}-{}",
-        std::process::id(),
-        NEXT_DIR.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = fs::remove_dir_all(&root);
-    root
+    crate::files::test_temp_root("store")
 }
 
 #[test]

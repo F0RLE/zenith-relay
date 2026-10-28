@@ -61,7 +61,7 @@ fn route_automatic_login_without_saved_password_falls_back_to_manual() {
     use super::window::automatic_login::LoginNotes;
     use crate::local_pool::{accounts::oauth::OAuthClientKind, state::DesktopState};
 
-    let root = std::env::temp_dir().join(format!("relay-route-login-{}", Uuid::new_v4()));
+    let root = crate::files::test_temp_root("route-login");
     let state = DesktopState::open(root.clone()).unwrap();
     let account_id = format!("account_{}", Uuid::new_v4().simple());
     let credentials = StoredCodexCredentials::new(
@@ -134,7 +134,7 @@ async fn targeted_completion_keeps_account_proxy_and_direct_overrides() {
         (Some("http://127.0.0.1:9".to_string()), false),
         (None, true),
     ] {
-        let root = std::env::temp_dir().join(format!("relay-oauth-proxy-{}", Uuid::new_v4()));
+        let root = crate::files::test_temp_root("oauth-proxy");
         let state = DesktopState::open(root.clone()).unwrap();
         let mut settings = state.store().unwrap().gateway().clone();
         settings.common_proxy_configured = true;

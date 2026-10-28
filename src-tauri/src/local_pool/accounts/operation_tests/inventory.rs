@@ -213,10 +213,7 @@ fn bulk_delete_preflights_every_account_before_mutation() {
 }
 #[test]
 fn failed_delete_restores_credentials_quota_and_profile_binding() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-delete-rollback-{}",
-        Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-delete-rollback");
     let profile = root.join("profile");
     std::fs::create_dir_all(&profile).unwrap();
     std::fs::write(profile.join("config.toml"), "model_provider = \"custom\"\n").unwrap();
@@ -319,10 +316,7 @@ fn failed_delete_restores_credentials_quota_and_profile_binding() {
 }
 #[test]
 fn registered_account_projection_preserves_newer_tokens_and_reauth_state() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-authority-projection-{}",
-        Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-authority-projection");
     let state = DesktopState::open(root.clone()).unwrap();
     let account_id = format!("account_{}", Uuid::new_v4().simple());
     let expected = TokenSet::new(
@@ -377,10 +371,7 @@ fn registered_account_projection_preserves_newer_tokens_and_reauth_state() {
 }
 #[test]
 fn refreshed_authority_reconciliation_keeps_a_real_client_login_warning() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-refresh-watchdog-{}",
-        Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-refresh-watchdog");
     let state = DesktopState::open(root.clone()).unwrap();
     let account_id = format!("account_{}", Uuid::new_v4().simple());
     let mut record = account_record(&account_id);

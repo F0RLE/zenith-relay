@@ -16,7 +16,7 @@ fn pre_dispatch_rejection(request_id: &str) -> UsageEvent {
 
 #[test]
 fn pre_dispatch_rejections_persist_without_provider_sends_or_consumption() {
-    let root = std::env::temp_dir().join(format!("relay-local-rejection-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-local-rejection");
     let path = root.join("usage.sqlite");
     let database = TelemetryDb::open(&path).unwrap();
     for (id, transport, detailed) in [
@@ -125,8 +125,7 @@ fn pre_dispatch_rejections_persist_without_provider_sends_or_consumption() {
 
 #[test]
 fn pre_dispatch_records_do_not_accept_provider_usage_or_overwrite_a_send() {
-    let root =
-        std::env::temp_dir().join(format!("relay-rejection-guards-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-rejection-guards");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let provider = aggregate_test_event("invalid-provider", 0, 10, 0, None, 1);
     assert!(database.record(&provider).is_err());
@@ -174,7 +173,7 @@ fn timed_routing(duration_ms: u64, projection_only: bool, outcome: &str) -> Rout
 
 #[test]
 fn request_finalization_preserves_physical_sends_consumption_and_full_duration() {
-    let root = std::env::temp_dir().join(format!("relay-final-usage-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-final-usage");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let mut event = aggregate_test_event("request-final", 1, 100, 0, None, 0);
     event.success = false;
@@ -235,7 +234,7 @@ fn assert_cache_matches_scan(database: &TelemetryDb) {
 
 #[test]
 fn successful_logical_timing_keeps_send_timings_and_cached_totals_consistent() {
-    let root = std::env::temp_dir().join(format!("relay-timed-usage-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-timed-usage");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let mut event = aggregate_test_event("timed-success", 1, 100, 0, None, 10);
     event.latency_ms = 6_000;
@@ -264,7 +263,7 @@ fn successful_logical_timing_keeps_send_timings_and_cached_totals_consistent() {
 
 #[test]
 fn every_send_contributes_once_but_only_final_outcome_counts_as_request() {
-    let root = std::env::temp_dir().join(format!("relay-send-usage-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-send-usage");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let mut first = aggregate_test_event("request", 1, 100, 5, Some("5m".into()), 10);
     first.success = false;
@@ -397,7 +396,7 @@ fn every_send_contributes_once_but_only_final_outcome_counts_as_request() {
 
 #[test]
 fn migration_backfills_retained_sends_once_and_retention_preserves_their_rollups() {
-    let root = std::env::temp_dir().join(format!("relay-send-migration-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-send-migration");
     let path = root.join("usage.sqlite");
     let database = TelemetryDb::open(&path).unwrap();
     database
@@ -476,7 +475,7 @@ fn migration_backfills_retained_sends_once_and_retention_preserves_their_rollups
 
 #[test]
 fn discovery_and_retries_keep_their_own_prices_members_and_quota_windows() {
-    let root = std::env::temp_dir().join(format!("relay-send-prices-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-send-prices");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let mut lookup = aggregate_test_event("request", 1, 100, 0, None, 10);
     lookup.success = false;

@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn startup_removes_codex_membership_without_deleting_login_or_quota() {
     let id = uuid::Uuid::new_v4().simple().to_string();
-    let root = std::env::temp_dir().join(format!("zenith-relay-codex-outside-pool-{id}"));
+    let root = crate::files::test_temp_root("runtime-codex-outside-pool");
     let account_id = format!("account_codex_{id}");
     let state = DesktopState::open(root.clone()).unwrap();
     let now_ms = current_time_ms();
@@ -73,7 +73,7 @@ async fn startup_removes_codex_membership_without_deleting_login_or_quota() {
 #[tokio::test]
 async fn startup_reconciles_quota_persisted_before_listener_creation() {
     let id = uuid::Uuid::new_v4().simple().to_string();
-    let root = std::env::temp_dir().join(format!("zenith-relay-startup-quota-{id}"));
+    let root = crate::files::test_temp_root("runtime-startup-quota");
     let account_id = format!("account_startup_{id}");
     let state = DesktopState::open(root.clone()).unwrap();
     let now_ms = current_time_ms();
@@ -175,7 +175,7 @@ async fn startup_reconciles_quota_persisted_before_listener_creation() {
 #[tokio::test]
 async fn persisted_reauth_disables_only_its_running_pool_account() {
     let id = uuid::Uuid::new_v4().simple().to_string();
-    let root = std::env::temp_dir().join(format!("zenith-relay-persisted-reauth-{id}"));
+    let root = crate::files::test_temp_root("runtime-persisted-reauth");
     let broken_account_id = format!("account-reauth-{id}");
     let healthy_account_id = format!("account-healthy-{id}");
     let now_ms = current_time_ms();

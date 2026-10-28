@@ -5,8 +5,7 @@ mod reasoning;
 
 #[test]
 fn diagnostic_report_keeps_attempts_and_unknowns_without_private_identifiers() {
-    let root = std::env::temp_dir().join(format!("relay-support-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&root).unwrap();
+    let root = crate::files::test_temp_root("relay-support");
     let db = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let mut event = aggregate_test_event("PRIVATE_REQUEST", 1, 0, 0, None, 0);
     event.source_id = "PRIVATE_SOURCE".into();
@@ -81,8 +80,7 @@ fn diagnostic_report_keeps_attempts_and_unknowns_without_private_identifiers() {
 
 #[test]
 fn native_backend_timing_survives_storage_and_export_without_raw_identifiers() {
-    let root = std::env::temp_dir().join(format!("relay-backend-timing-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&root).unwrap();
+    let root = crate::files::test_temp_root("relay-backend-timing");
     let db = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let mut event = aggregate_test_event("synthetic-timing", 1, 0, 0, None, 0);
     event.routing = Some(
@@ -132,8 +130,7 @@ fn native_backend_timing_survives_storage_and_export_without_raw_identifiers() {
 }
 
 fn diagnostic_rows() -> Vec<UsageLog> {
-    let root = std::env::temp_dir().join(format!("relay-diagnostic-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&root).unwrap();
+    let root = crate::files::test_temp_root("relay-diagnostic");
     let db = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let mut event = aggregate_test_event("synthetic_request", 1, 100, 10, None, 20);
     event.success = false;

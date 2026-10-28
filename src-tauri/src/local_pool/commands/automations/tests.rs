@@ -74,10 +74,7 @@ fn legacy_manual_input_creates_an_automatic_task() {
 
 #[test]
 fn explicit_model_must_be_available_for_every_selected_account() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-wake-model-{}",
-        Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("wake-model");
     let state = DesktopState::open(root.clone()).unwrap();
     state
         .store()
@@ -118,10 +115,7 @@ fn explicit_model_must_be_available_for_every_selected_account() {
 
 #[test]
 fn countdown_changes_request_a_shared_refresh_only_for_selected_pool_accounts() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-countdown-refresh-{}",
-        Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("countdown-refresh");
     let state = DesktopState::open(root.clone()).unwrap();
     let mut outside_pool = account("outside-pool", &["gpt-test"]);
     outside_pool.account.in_pool = false;

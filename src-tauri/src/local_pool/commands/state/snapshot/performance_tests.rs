@@ -21,7 +21,7 @@ pub(super) fn print_stages(stages: &[PerformanceSample<'_>]) {
 #[tokio::test]
 #[ignore = "synthetic full snapshot timing; no provider requests or real credentials"]
 async fn measure_full_snapshot_projection() {
-    let root = std::env::temp_dir().join(format!("relay-snapshot-timing-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("snapshot-timing");
     let state = DesktopState::open(root.clone()).unwrap();
     let sources = (0..3)
         .map(|index| {

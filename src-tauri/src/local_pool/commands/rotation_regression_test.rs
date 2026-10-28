@@ -220,7 +220,7 @@ async fn desktop_common_proxy_fence_targets_only_inheriting_accounts() {
 impl ReviewPool {
     async fn new() -> Self {
         let unique = uuid::Uuid::new_v4().simple().to_string();
-        let root = std::env::temp_dir().join(format!("relay-rotation-review-{unique}"));
+        let root = crate::files::test_temp_root("rotation-review");
         let state = DesktopState::open(root.clone()).unwrap();
         let ids = [format!("review-a-{unique}"), format!("review-b-{unique}")];
         let now = current_time_ms();

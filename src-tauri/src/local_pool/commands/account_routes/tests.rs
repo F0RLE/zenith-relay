@@ -430,10 +430,7 @@ fn selecting_a_route_preserves_quota_identity_and_one_pool_members_weight() {
 
 #[test]
 fn route_selection_is_atomic_restart_safe_and_rejects_duplicate_membership() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-account-routes-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("account-routes");
     let mut store = LocalPoolStore::open(root.clone()).unwrap();
     let mut accounts = records();
     accounts[0].account.in_pool = true;

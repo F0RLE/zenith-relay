@@ -4,11 +4,10 @@ use axum::{Json, Router, routing::get};
 use std::fs;
 use tokio::net::TcpListener;
 use url::Url;
-use uuid::Uuid;
 
 #[tokio::test]
 async fn siwc_import_round_trip_is_inactive_preserves_registration_and_never_probes_codex() {
-    let root = std::env::temp_dir().join(format!("relay-siwc-import-{}", Uuid::new_v4().simple()));
+    let root = crate::files::test_temp_root("relay-siwc-import");
     let mut state = DesktopState::open(root.clone()).unwrap();
     state.set_account_check_url_for_test(Url::parse("http://127.0.0.1:9/accounts/check").unwrap());
     let input = serde_json::json!({
@@ -116,10 +115,7 @@ async fn siwc_import_round_trip_is_inactive_preserves_registration_and_never_pro
 
 #[tokio::test]
 async fn authenticated_free_plan_keeps_bps_and_native_import_previews_selectable() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-import-free-bps-{}",
-        Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-import-free-bps");
     let mut state = DesktopState::open(root.clone()).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -178,10 +174,7 @@ async fn authenticated_free_plan_keeps_bps_and_native_import_previews_selectable
 
 #[tokio::test]
 async fn preparation_persists_only_credentials_for_selectable_rows() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-import-preview-{}",
-        Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-import-preview");
     let mut state = DesktopState::open(root.clone()).unwrap();
     let (endpoint, server) = spawn_account_check_server().await;
     state.set_account_check_url_for_test(endpoint);
@@ -227,10 +220,7 @@ async fn preparation_persists_only_credentials_for_selectable_rows() {
 
 #[tokio::test]
 async fn preparation_keeps_a_rejected_token_when_the_account_id_is_known() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-import-rejected-token-{}",
-        Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-import-rejected-token");
     let mut state = DesktopState::open(root.clone()).unwrap();
     let (endpoint, server) = spawn_rejected_account_check_server().await;
     state.set_account_check_url_for_test(endpoint);
@@ -262,10 +252,7 @@ async fn preparation_keeps_a_rejected_token_when_the_account_id_is_known() {
 
 #[tokio::test]
 async fn preparation_filters_duplicates_found_by_authenticated_identity() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-import-duplicate-preview-{}",
-        Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-import-duplicate-preview");
     let mut state = DesktopState::open(root.clone()).unwrap();
     let (endpoint, server) = spawn_duplicate_account_check_server().await;
     state.set_account_check_url_for_test(endpoint);

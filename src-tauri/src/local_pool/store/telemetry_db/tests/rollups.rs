@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn usage_survives_database_reopen() {
-    let root = std::env::temp_dir().join(format!("zenith-relay-usage-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("zenith-relay-usage");
     let path = root.join("usage.sqlite");
     let catalog = PricingCatalog::from_litellm_json(
         r#"{"storage-test":{
@@ -227,10 +227,7 @@ fn usage_survives_database_reopen() {
 }
 #[test]
 fn usage_aggregate_replaces_each_send_without_losing_earlier_usage() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-usage-aggregate-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-usage-aggregate");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     database
         .record(&aggregate_test_event(
@@ -352,10 +349,7 @@ fn usage_aggregate_replaces_each_send_without_losing_earlier_usage() {
 }
 #[test]
 fn usage_totals_cache_tracks_new_and_replaced_events() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-usage-totals-cache-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-usage-totals-cache");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let mut first = aggregate_test_event("cached-first", 1, 10, 0, None, 4);
     first.latency_ms = 100;
@@ -458,8 +452,7 @@ fn usage_totals_cache_tracks_new_and_replaced_events() {
 }
 #[test]
 fn usage_v26_migration_merges_current_logs_into_existing_rollups() {
-    let root =
-        std::env::temp_dir().join(format!("zenith-relay-usage-v26-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("zenith-relay-usage-v26");
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join("usage.sqlite");
     let connection = Connection::open(&path).unwrap();
@@ -553,10 +546,7 @@ fn usage_v26_migration_merges_current_logs_into_existing_rollups() {
 }
 #[test]
 fn usage_keeps_only_the_terminal_fallback_attempt() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-usage-attempts-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-usage-attempts");
     let path = root.join("usage.sqlite");
     let database = TelemetryDb::open(&path).unwrap();
     let mut event = failed_fallback_test_event("req_fallback");
@@ -605,10 +595,7 @@ fn usage_keeps_only_the_terminal_fallback_attempt() {
 }
 #[test]
 fn usage_keeps_only_the_last_failure_when_all_attempts_fail() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-usage-failed-attempts-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-usage-failed-attempts");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let mut event = failed_fallback_test_event("req_failed");
     event.upstream_error = Some(
@@ -655,7 +642,7 @@ fn usage_keeps_only_the_last_failure_when_all_attempts_fail() {
 }
 #[test]
 fn usage_v1_migrates_existing_rows_to_attempt_one() {
-    let root = std::env::temp_dir().join(format!("zenith-relay-usage-v1-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("zenith-relay-usage-v1");
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join("usage.sqlite");
     let connection = Connection::open(&path).unwrap();
@@ -688,8 +675,7 @@ fn usage_v1_migrates_existing_rows_to_attempt_one() {
 }
 #[test]
 fn usage_v14_migration_keeps_the_latest_attempt_per_request() {
-    let root =
-        std::env::temp_dir().join(format!("zenith-relay-usage-v14-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("zenith-relay-usage-v14");
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join("usage.sqlite");
     let connection = Connection::open(&path).unwrap();

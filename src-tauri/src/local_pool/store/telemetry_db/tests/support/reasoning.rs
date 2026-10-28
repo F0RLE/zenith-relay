@@ -18,8 +18,7 @@ fn event(id: &str, effort: Option<&str>, ttft: Option<u64>) -> UsageEvent {
 }
 
 fn database() -> (std::path::PathBuf, TelemetryDb) {
-    let root = std::env::temp_dir().join(format!("relay-reasoning-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&root).unwrap();
+    let root = crate::files::test_temp_root("relay-reasoning");
     let db = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     (root, db)
 }

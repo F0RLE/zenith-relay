@@ -33,7 +33,7 @@ fn observed_tier_sql_matches_rust_without_a_standard_fallback_for_new_names() {
 
 #[test]
 fn unknown_tier_migration_reclassifies_retained_events_and_preserves_archives() {
-    let root = std::env::temp_dir().join(format!("relay-unknown-tiers-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-unknown-tiers");
     let path = root.join("usage.sqlite");
     let database = TelemetryDb::open(&path).unwrap();
     let mut event = aggregate_test_event("unknown-tier", 1, 150_001, 0, None, 10);

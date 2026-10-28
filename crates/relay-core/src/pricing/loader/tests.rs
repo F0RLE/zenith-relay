@@ -1,17 +1,10 @@
 use super::*;
 use serde_json::json;
 use std::fs;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[tokio::test]
 async fn unchanged_and_failed_refreshes_share_data_without_changing_old_snapshots() {
-    let directory = std::env::temp_dir().join(format!(
-        "relay-pricing-shared-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let directory = crate::test_support::temp_root("pricing-shared");
     let store = PricingCacheStore::new(directory.join("catalog.json"));
     let envelope = PricingCacheEnvelope::new(json!({"openai/synthetic":{"litellm_provider":"openai","input_cost_per_token":0.000001,"output_cost_per_token":0.000002}}), "revision".into(), 1).unwrap();
     store.write(&envelope).unwrap();
@@ -101,14 +94,7 @@ async fn unchanged_and_failed_refreshes_share_data_without_changing_old_snapshot
 
 #[test]
 fn cache_store_round_trips_and_rejects_corrupt_data() {
-    let directory = std::env::temp_dir().join(format!(
-        "zenith-relay-pricing-test-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&directory).unwrap();
+    let directory = crate::test_support::temp_root("pricing-test");
     let store = PricingCacheStore::new(directory.join("litellm.json"));
     let envelope = PricingCacheEnvelope::new(
         json!({"gpt-test": {"input_cost_per_token": "0.000001", "output_cost_per_token": "0.000002"}}),
@@ -132,14 +118,7 @@ fn stale_detection_is_monotonic() {
 
 #[test]
 fn cache_store_skips_an_identical_envelope() {
-    let directory = std::env::temp_dir().join(format!(
-        "zenith-relay-pricing-unchanged-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&directory).unwrap();
+    let directory = crate::test_support::temp_root("pricing-unchanged");
     let store = PricingCacheStore::new(directory.join("litellm.json"));
     let envelope = PricingCacheEnvelope::new(
         json!({
@@ -181,14 +160,7 @@ fn explicit_stale_marker_forces_refresh_even_with_a_fresh_timestamp() {
 
 #[test]
 fn refresh_failure_persists_stale_marker_for_the_next_startup() {
-    let directory = std::env::temp_dir().join(format!(
-        "zenith-relay-pricing-stale-test-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&directory).unwrap();
+    let directory = crate::test_support::temp_root("pricing-stale-test");
     let path = directory.join("litellm.json");
     let store = PricingCacheStore::new(&path);
     let envelope = PricingCacheEnvelope::new(
@@ -263,14 +235,7 @@ fn retry_backoff_progresses_and_reset_allows_an_immediate_attempt() {
 
 #[test]
 fn retry_deadline_precedes_the_daily_schedule_and_is_not_jittered() {
-    let directory = std::env::temp_dir().join(format!(
-        "zenith-relay-pricing-retry-deadline-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&directory).unwrap();
+    let directory = crate::test_support::temp_root("pricing-retry-deadline");
     let loader = PricingCatalogLoader::open(directory.join("litellm.json")).unwrap();
     let now = 10_000;
 
@@ -290,14 +255,7 @@ fn retry_deadline_precedes_the_daily_schedule_and_is_not_jittered() {
 fn loader_with_fresh_test_cache(
     prefix: &str,
 ) -> (std::path::PathBuf, std::sync::Arc<PricingCatalogLoader>) {
-    let directory = std::env::temp_dir().join(format!(
-        "zenith-relay-pricing-{prefix}-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&directory).unwrap();
+    let directory = crate::test_support::temp_root(&format!("pricing-{prefix}"));
     let path = directory.join("litellm.json");
     let envelope = PricingCacheEnvelope::new(
         json!({
@@ -372,14 +330,7 @@ async fn failed_manual_refresh_wakes_waiters_after_retry_state_is_recorded() {
 
 #[test]
 fn startup_check_precedes_ttl_and_then_daily_schedule_controls_refresh() {
-    let directory = std::env::temp_dir().join(format!(
-        "zenith-relay-pricing-due-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&directory).unwrap();
+    let directory = crate::test_support::temp_root("pricing-due");
     let path = directory.join("litellm.json");
     let payload = json!({
         "gpt-test": {

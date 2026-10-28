@@ -50,7 +50,7 @@ fn stored_samples(database: &TelemetryDb) -> Vec<(String, f64, Option<String>)> 
 }
 
 fn with_database(test: impl FnOnce(&TelemetryDb)) {
-    let root = std::env::temp_dir().join(format!("relay-stage-samples-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-stage-samples");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     test(&database);
     drop(database);
@@ -66,8 +66,7 @@ async fn performance_sample_does_not_block_navigation_while_history_is_locked() 
         time::Duration,
     };
 
-    let root =
-        std::env::temp_dir().join(format!("relay-navigation-metric-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-navigation-metric");
     let database = Arc::new(TelemetryDb::open(&root.join("usage.sqlite")).unwrap());
     let (locked_tx, locked_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
@@ -102,7 +101,7 @@ async fn performance_sample_does_not_block_navigation_while_history_is_locked() 
 
 #[tokio::test]
 async fn performance_sample_worker_preserves_validation_and_storage_errors() {
-    let root = std::env::temp_dir().join(format!("relay-metric-errors-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-metric-errors");
     let database = std::sync::Arc::new(TelemetryDb::open(&root.join("usage.sqlite")).unwrap());
     for (name, duration_ms, context) in [
         ("unknown_metric", 1.0, None),
@@ -139,7 +138,7 @@ async fn performance_sample_worker_preserves_validation_and_storage_errors() {
 
 #[test]
 fn performance_sample_batch_matches_individual_writes_and_survives_reopen() {
-    let root = std::env::temp_dir().join(format!("relay-stage-reopen-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-stage-reopen");
     let batched = TelemetryDb::open(&root.join("batch.sqlite")).unwrap();
     let individual = TelemetryDb::open(&root.join("individual.sqlite")).unwrap();
     write_snapshot_stages(&batched);
@@ -343,7 +342,7 @@ fn performance_sample_batch_preserves_existing_retention_limit() {
 #[test]
 #[ignore = "observational SQLite timing probe; no latency threshold"]
 fn measure_snapshot_stage_writes() {
-    let root = std::env::temp_dir().join(format!("relay-stage-writes-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-stage-writes");
     for (mode, write) in [
         ("individual", write_individual_stages as fn(&TelemetryDb)),
         ("batch", write_snapshot_stages as fn(&TelemetryDb)),

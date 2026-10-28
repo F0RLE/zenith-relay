@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn narrow_send_pages_preserve_filters_order_and_legacy_fallback() {
-    let root = std::env::temp_dir().join(format!("relay-usage-pages-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-usage-pages");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     for index in 0..35 {
         let mut event = aggregate_test_event(&format!("page-{index}"), 1, 100, 0, None, 10);
@@ -192,7 +192,7 @@ fn assert_report_matches_full_view(
 
 #[test]
 fn first_entry_uses_narrow_count_and_unaggregated_indexes() {
-    let root = std::env::temp_dir().join(format!("relay-usage-plan-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-usage-plan");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let connection = database.connection.lock().unwrap();
     let explain = |sql: &str| {
@@ -237,7 +237,7 @@ fn first_entry_uses_narrow_count_and_unaggregated_indexes() {
 
 #[test]
 fn weekly_value_projections_use_indexed_ledger_history() {
-    let root = std::env::temp_dir().join(format!("relay-quota-plan-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-quota-plan");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let connection = database.connection.lock().unwrap();
     let parameters = [
@@ -286,8 +286,7 @@ fn usage_read_migration_preserves_history_and_consolidates_indexes() {
             .unwrap()
     };
     for version in [41, 43] {
-        let root =
-            std::env::temp_dir().join(format!("relay-page-upgrade-{}", uuid::Uuid::new_v4()));
+        let root = crate::files::test_temp_root("relay-page-upgrade");
         let path = root.join("usage.sqlite");
         let database = TelemetryDb::open(&path).unwrap();
         for index in 0..3 {
@@ -348,7 +347,7 @@ fn usage_read_migration_preserves_history_and_consolidates_indexes() {
 #[test]
 #[ignore = "local first-entry timing probe; no live accounts or provider requests"]
 fn measure_usage_first_entry() {
-    let root = std::env::temp_dir().join(format!("relay-usage-timing-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-usage-timing");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     database
         .record(&aggregate_test_event("timing-seed", 1, 100, 0, None, 10))

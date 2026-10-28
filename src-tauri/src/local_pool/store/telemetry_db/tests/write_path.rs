@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn unchanged_consumption_updates_history_without_rewriting_rollups() {
-    let root = std::env::temp_dir().join(format!("relay-noop-rollup-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-noop-rollup");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let mut event = aggregate_test_event("synthetic-noop", 1, 100, 0, None, 10);
     database.record(&event).unwrap();
@@ -22,7 +22,7 @@ fn unchanged_consumption_updates_history_without_rewriting_rollups() {
 
 #[test]
 fn failed_rollup_update_rolls_back_history_and_cached_totals() {
-    let root = std::env::temp_dir().join(format!("relay-rollup-rollback-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-rollup-rollback");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let mut event = aggregate_test_event("synthetic-rollback", 1, 100, 0, None, 10);
     database.record(&event).unwrap();
@@ -66,7 +66,7 @@ fn failed_rollup_update_rolls_back_history_and_cached_totals() {
 
 #[test]
 fn failed_history_clear_preserves_all_tables_and_cached_totals() {
-    let root = std::env::temp_dir().join(format!("relay-clear-rollback-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-clear-rollback");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     database
         .record(&aggregate_test_event(
@@ -143,7 +143,7 @@ fn failed_history_clear_preserves_all_tables_and_cached_totals() {
 
 #[test]
 fn unchanged_state_skips_updates_and_mixed_batches_keep_last_value() {
-    let root = std::env::temp_dir().join(format!("relay-state-writes-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-state-writes");
     let path = root.join("usage.sqlite");
     let database = TelemetryDb::open(&path).unwrap();
     let initial = [("stable", "{}".into()), ("changed", "0".into())];
@@ -185,7 +185,7 @@ fn unchanged_state_skips_updates_and_mixed_batches_keep_last_value() {
 
 #[test]
 fn failed_state_statement_rolls_back_batch_and_cached_statement_is_reusable() {
-    let root = std::env::temp_dir().join(format!("relay-state-rollback-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-state-rollback");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     database
         .replace_state_json(&[("first", "0".into())])
@@ -216,7 +216,7 @@ fn failed_state_statement_rolls_back_batch_and_cached_statement_is_reusable() {
 
 #[test]
 fn failed_purge_rolls_back_state_and_attempt_deletion() {
-    let root = std::env::temp_dir().join(format!("relay-purge-rollback-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-purge-rollback");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     database
         .replace_state_json(&[("accounts", "[1]".into())])
@@ -290,7 +290,7 @@ fn measure_usage_record_writes() {
     }
     let mut elapsed_ms = Vec::new();
     for _ in 0..3 {
-        let root = std::env::temp_dir().join(format!("relay-write-bench-{}", uuid::Uuid::new_v4()));
+        let root = crate::files::test_temp_root("relay-write-bench");
         let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
         let started = Instant::now();
         for event in &events {

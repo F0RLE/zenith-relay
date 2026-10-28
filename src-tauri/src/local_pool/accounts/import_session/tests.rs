@@ -309,6 +309,10 @@ fn corrupt_unsafe_and_traversal_snapshots_are_rejected() {
     let root = temp_root("unsafe");
     let secrets = MemorySecrets::default();
     let store = ImportSessionStore::new(root.clone(), secrets);
+    assert_eq!(
+        store.resume(FIXED_ID, &[]).unwrap_err().code,
+        ImportSessionErrorCode::SessionNotFound
+    );
     let started = store.start(&fixture(), None, &[]).unwrap();
     let path = snapshot_path(&root, &started.session_id).unwrap();
     fs::write(&path, b"{not-json").unwrap();
@@ -324,6 +328,20 @@ fn corrupt_unsafe_and_traversal_snapshots_are_rejected() {
 
     let started = store.start(&fixture(), None, &[]).unwrap();
     let path = snapshot_path(&root, &started.session_id).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(8 * 1024 * 1024 + 1)
+        .unwrap();
+    assert_eq!(
+        store.resume(&started.session_id, &[]).unwrap_err().code,
+        ImportSessionErrorCode::SnapshotUnsafe
+    );
+    store.cancel(&started.session_id).unwrap();
+
+    let started = store.start(&fixture(), None, &[]).unwrap();
+    let path = snapshot_path(&root, &started.session_id).unwrap();
     let mut snapshot: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     snapshot["preview"]["access_token"] = Value::String(ACCESS_TOKEN.to_string());
     fs::write(&path, serde_json::to_vec_pretty(&snapshot).unwrap()).unwrap();
@@ -333,6 +351,30 @@ fn corrupt_unsafe_and_traversal_snapshots_are_rejected() {
     );
     store.cancel(&started.session_id).unwrap();
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn snapshot_collision_preserves_unowned_staging_file() {
+    let root = temp_root("unowned-staging");
+    let secrets = MemorySecrets::default();
+    let store = ImportSessionStore::new(root.clone(), secrets.clone());
+    let path = snapshot_path(&root, FIXED_ID).unwrap();
+    let staging = snapshot_temp_path(&path);
+    fs::create_dir_all(staging.parent().unwrap()).unwrap();
+    fs::write(&staging, "unrelated staging content").unwrap();
+
+    let error = store
+        .start_with_id(FIXED_ID, &fixture(), None, &[])
+        .unwrap_err();
+    let preserved = fs::read_to_string(&staging).ok();
+    let rolled_back = !secrets.contains(&secret_ref(FIXED_ID));
+    let published = path.exists();
+    fs::remove_dir_all(root).unwrap();
+
+    assert_eq!(error.code, ImportSessionErrorCode::SnapshotIo);
+    assert_eq!(preserved.as_deref(), Some("unrelated staging content"));
+    assert!(rolled_back);
+    assert!(!published);
 }
 
 #[test]
@@ -407,10 +449,5 @@ fn fixture() -> String {
 }
 
 fn temp_root(label: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-import-session-{label}-{}",
-        Uuid::new_v4()
-    ));
-    fs::create_dir_all(&root).unwrap();
-    root
+    crate::files::test_temp_root(&format!("import-session-{label}"))
 }

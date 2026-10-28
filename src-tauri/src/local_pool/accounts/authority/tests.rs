@@ -945,8 +945,5 @@ async fn invalid_grant_after_new_authorization_reads_the_new_credentials() {
 }
 
 fn temp_root(label: &str) -> PathBuf {
-    let root =
-        std::env::temp_dir().join(format!("zenith-relay-authority-{label}-{}", Uuid::new_v4()));
-    fs::create_dir_all(&root).unwrap();
-    root
+    crate::files::test_temp_root(&format!("authority-{label}"))
 }

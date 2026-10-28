@@ -11,7 +11,7 @@ fn legacy_policy() -> PoolRoutingPolicy {
 
 #[test]
 fn version_two_rotation_upgrades_safely_on_reopen() {
-    let root = std::env::temp_dir().join(format!("rotation-v2-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("rotation-v2");
     let mut store = LocalPoolStore::open(root.clone()).unwrap();
     let mut gateway = store.gateway().clone();
     gateway.enabled = true;
@@ -46,8 +46,7 @@ fn version_two_rotation_upgrades_safely_on_reopen() {
 fn startup_upgrades_old_gateway_settings_automatically_and_preserves_controls() {
     for enabled in [true, false] {
         for explicit in [true, false] {
-            let root =
-                std::env::temp_dir().join(format!("rotation-upgrade-{}", uuid::Uuid::new_v4()));
+            let root = crate::files::test_temp_root("rotation-upgrade");
             let mut store = LocalPoolStore::open(root.clone()).unwrap();
             let mut gateway = store.gateway().clone();
             gateway.enabled = enabled;
@@ -104,8 +103,7 @@ fn startup_upgrades_old_gateway_settings_automatically_and_preserves_controls() 
 #[test]
 fn startup_cleans_old_scalars_from_saved_rotation_policy_without_changing_controls() {
     for enabled in [true, false] {
-        let root =
-            std::env::temp_dir().join(format!("rotation-scalar-cleanup-{}", uuid::Uuid::new_v4()));
+        let root = crate::files::test_temp_root("rotation-scalar-cleanup");
         let mut store = LocalPoolStore::open(root.clone()).unwrap();
         let mut gateway = store.gateway().clone();
         gateway.enabled = enabled;

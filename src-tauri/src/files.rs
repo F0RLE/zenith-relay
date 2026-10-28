@@ -1,7 +1,14 @@
 use std::{fs, io::Write, path::Path};
 
+mod reads;
+pub(crate) use reads::read_regular_file_bounded;
+
+#[cfg(test)]
+mod test_support;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) use test_support::temp_root as test_temp_root;
 #[cfg(test)]
 pub(crate) use tests::fail_next_atomic_write;
 

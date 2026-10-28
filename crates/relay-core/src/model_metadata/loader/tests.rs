@@ -10,24 +10,12 @@ use axum::{
     routing::get,
 };
 use serde_json::{Value, value::RawValue};
-use std::sync::{
-    Mutex,
-    atomic::{AtomicU64, Ordering},
-};
-
-static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+use std::sync::Mutex;
 
 struct CacheDir(PathBuf);
 impl CacheDir {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "relay-metadata-{}-{}-{}",
-            std::process::id(),
-            crate::unix_time_ms(),
-            NEXT_ID.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
+        Self(crate::test_support::temp_root("metadata"))
     }
     fn path(&self) -> PathBuf {
         self.0.join("models-dev.json")

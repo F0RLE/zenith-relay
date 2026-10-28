@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn bulk_quota_refresh_keeps_a_small_future_and_reports_every_failed_account() {
-    let root = std::env::temp_dir().join(format!("relay-quota-batch-{}", Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-quota-batch");
     let state = DesktopState::open(root.clone()).unwrap();
     let ids = (0..QUOTA_REFRESH_BATCH_SIZE + 2)
         .map(|_| format!("missing_{}", Uuid::new_v4().simple()))
@@ -385,10 +385,7 @@ async fn access_only_reauthentication_is_bound_to_the_rejected_snapshot() {
             Some("invalid_grant"),
         ),
     ] {
-        let root = std::env::temp_dir().join(format!(
-            "zenith-relay-access-only-race-{}",
-            Uuid::new_v4().simple()
-        ));
+        let root = crate::files::test_temp_root("zenith-relay-access-only-race");
         let state = DesktopState::open(root.clone()).unwrap();
         credentials.save(stored).unwrap();
         let mut account = records::new_account_record(

@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn image_usage_survives_failure_reopen_and_duplicate_observation() {
-    let root = std::env::temp_dir().join(format!("relay-image-usage-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-image-usage");
     let path = root.join("usage.sqlite");
     let database = TelemetryDb::open(&path).unwrap();
     let mut event = aggregate_test_event("image-request", 1, 10, 0, None, 5);
@@ -49,7 +49,7 @@ fn image_usage_survives_failure_reopen_and_duplicate_observation() {
 
 #[test]
 fn image_usage_migration_preserves_legacy_rows_and_send_view() {
-    let root = std::env::temp_dir().join(format!("relay-image-migration-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-image-migration");
     let path = root.join("usage.sqlite");
     let database = TelemetryDb::open(&path).unwrap();
     database

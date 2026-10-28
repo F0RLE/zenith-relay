@@ -66,11 +66,7 @@ fn large_import_preview_defers_quota_network_calls() {
 }
 #[test]
 fn selected_import_files_are_read_and_combined_only_in_rust() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-import-files-{}",
-        Uuid::new_v4().simple()
-    ));
-    std::fs::create_dir_all(&root).unwrap();
+    let root = crate::files::test_temp_root("zenith-relay-import-files");
     let paths = (1..=3)
         .map(|index| {
             let path = root.join(format!("account-{index}.json"));
@@ -96,31 +92,31 @@ fn selected_import_files_are_read_and_combined_only_in_rust() {
 }
 #[test]
 fn dropped_import_accepts_txt_tokens_and_rejects_other_extensions() {
-    let txt_path = std::env::temp_dir().join(format!(
-        "zenith-relay-import-{}.txt",
-        Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("import-dropped-files");
+    let metadata = std::fs::symlink_metadata(&root).unwrap();
+    assert!(metadata.is_dir() && !metadata.file_type().is_symlink());
+    assert!(std::fs::read_dir(&root).unwrap().next().is_none());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+    }
+    let txt_path = root.join("account.txt");
+    assert!(!txt_path.exists());
     std::fs::write(&txt_path, "at-synthetic-token").unwrap();
     assert_eq!(
         read_import_documents(vec![txt_path.clone()]).unwrap(),
         ["at-synthetic-token"]
     );
-    std::fs::remove_file(txt_path).unwrap();
-
-    let unsupported_path = std::env::temp_dir().join(format!(
-        "zenith-relay-import-{}.md",
-        Uuid::new_v4().simple()
-    ));
+    let unsupported_path = root.join("account.md");
+    assert!(!unsupported_path.exists());
     std::fs::write(&unsupported_path, "at-synthetic-token").unwrap();
     assert!(read_import_documents(vec![unsupported_path.clone()]).is_err());
-    std::fs::remove_file(unsupported_path).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
 }
 #[tokio::test]
 async fn batch_confirm_persists_every_selected_account_and_credential() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-batch-import-{}",
-        Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-batch-import");
     let mut state = DesktopState::open(root.clone()).unwrap();
     let (account_check_endpoint, account_check_server) =
         spawn_import_account_check_server_for_accounts(&[
@@ -223,10 +219,7 @@ async fn batch_confirm_persists_every_selected_account_and_credential() {
 }
 #[tokio::test]
 async fn access_only_reimport_preserves_existing_refresh_token() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-refresh-preserve-{}",
-        Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-refresh-preserve");
     let mut state = DesktopState::open(root.clone()).unwrap();
     let (account_check_endpoint, account_check_server) =
         spawn_import_account_check_server("provider-preserve").await;
@@ -314,10 +307,7 @@ async fn access_only_reimport_preserves_existing_refresh_token() {
 }
 #[tokio::test]
 async fn import_outside_pool_is_scheduled_for_quota_monitoring() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-import-retry-{}",
-        Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-import-retry");
     let mut state = DesktopState::open(root.clone()).unwrap();
     let (account_check_endpoint, account_check_server) =
         spawn_import_account_check_server("provider-retry").await;
@@ -369,10 +359,7 @@ async fn import_outside_pool_is_scheduled_for_quota_monitoring() {
 }
 #[tokio::test]
 async fn cockpit_api_keys_do_not_require_oauth_quota_preview() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-cockpit-source-import-{}",
-        Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-cockpit-source-import");
     let state = DesktopState::open(root.clone()).unwrap();
     let content = r#"[
             {"auth_mode":"apikey","OPENAI_API_KEY":"synthetic-key-one","api_base_url":"https://one.example.test/v1","api_provider_name":"One API"},
@@ -553,7 +540,7 @@ fn source_duplicate_identity_updates_the_existing_local_record() {
 #[tokio::test]
 async fn source_import_rebuilds_legacy_protocol_routes_automatically() {
     let id = Uuid::new_v4().simple().to_string();
-    let root = std::env::temp_dir().join(format!("zenith-relay-source-import-invalid-{id}"));
+    let root = crate::files::test_temp_root("zenith-relay-source-import-invalid");
     let secret_ref = format!("source:import-invalid-{id}");
     let state = DesktopState::open(root.clone()).unwrap();
     secret_store::save(&secret_ref, "sk-import-test").unwrap();

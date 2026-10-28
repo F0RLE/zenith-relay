@@ -21,8 +21,7 @@ fn facts(kind: OAuthClientKind) -> Option<AccountCredentialFacts> {
 
 #[test]
 fn collector_uses_shared_weekly_evidence_not_siwc_ceiling_without_ui_snapshot() {
-    let root =
-        std::env::temp_dir().join(format!("relay-capacity-collector-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("capacity-collector");
     let telemetry = TelemetryDb::open(&root.join("test.sqlite")).unwrap();
     let mut codex = super::super::tests::account_record();
     codex.account.id = "codex".into();

@@ -60,10 +60,7 @@ fn account() -> LocalAccountRecord {
 }
 
 fn with_store(test: impl FnOnce(&mut LocalPoolStore, &AccountRefreshScope)) {
-    let root = std::env::temp_dir().join(format!(
-        "relay-refresh-observation-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("relay-refresh-observation");
     let mut store = LocalPoolStore::open(root.clone()).unwrap();
     store.upsert_account(account()).unwrap();
     let (initial_account, fence) = store.account_refresh_scope("test-account").unwrap();
@@ -541,7 +538,7 @@ fn newer_passive_windows_do_not_starve_an_independent_ledger_refresh() {
 
 #[tokio::test]
 async fn scope_capture_waits_for_setup_transaction_and_late_errors_are_discarded() {
-    let root = std::env::temp_dir().join(format!("relay-refresh-scope-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-refresh-scope");
     let state = DesktopState::open(root.clone()).unwrap();
     state.store().unwrap().upsert_account(account()).unwrap();
     let scope = AccountRefreshScope::capture(&state, "test-account")

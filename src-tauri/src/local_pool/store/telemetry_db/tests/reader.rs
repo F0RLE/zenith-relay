@@ -6,7 +6,7 @@ use std::{
 
 #[test]
 fn report_snapshot_does_not_block_recording_and_keeps_one_revision() {
-    let root = std::env::temp_dir().join(format!("relay-reader-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-reader");
     let database = Arc::new(TelemetryDb::open(&root.join("usage.sqlite")).unwrap());
     database
         .record(&aggregate_test_event("before", 1, 10, 0, None, 1))
@@ -58,7 +58,7 @@ fn report_snapshot_does_not_block_recording_and_keeps_one_revision() {
 
 #[test]
 fn failed_report_releases_read_transaction() {
-    let root = std::env::temp_dir().join(format!("relay-reader-error-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-reader-error");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     {
         let read = database.lock_report_connection().unwrap();
@@ -84,7 +84,7 @@ fn failed_report_releases_read_transaction() {
 
 #[test]
 fn cold_report_does_not_publish_totals_after_a_concurrent_write() {
-    let root = std::env::temp_dir().join(format!("relay-reader-cold-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-reader-cold");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     database
         .record(&aggregate_test_event("before", 1, 10, 0, None, 1))

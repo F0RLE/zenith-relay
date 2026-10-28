@@ -5,7 +5,7 @@ use super::{
     SessionSnapshot,
 };
 use serde_json::Value;
-use std::{fs, path::Path};
+use std::path::Path;
 use zenith_relay_core::accounts::{ImportPreview, MAX_IMPORT_ITEMS, ParsedImport, parse_import};
 
 pub(in crate::local_pool::accounts::import_session) fn parse_stable(
@@ -75,40 +75,24 @@ pub(in crate::local_pool::accounts::import_session) fn read_snapshot(
     } else {
         snapshot_path(root, session_id)?
     };
-    let metadata = match fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(ImportSessionError::new(
-                ImportSessionErrorCode::SessionNotFound,
-                "import session was not found",
-            )
-            .for_session(session_id));
-        }
-        Err(_) => {
-            return Err(ImportSessionError::new(
-                ImportSessionErrorCode::SnapshotIo,
-                "failed to inspect import session snapshot",
-            )
-            .for_session(session_id));
-        }
-    };
-    if !metadata.file_type().is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.len() > MAX_SNAPSHOT_BYTES
-    {
-        return Err(ImportSessionError::new(
-            ImportSessionErrorCode::SnapshotUnsafe,
-            "import session snapshot is unsafe",
-        )
-        .for_session(session_id));
-    }
-    let bytes = fs::read(path).map_err(|_| {
-        ImportSessionError::new(
-            ImportSessionErrorCode::SnapshotIo,
-            "failed to read import session snapshot",
-        )
-        .for_session(session_id)
-    })?;
+    let bytes =
+        crate::files::read_regular_file_bounded(&path, MAX_SNAPSHOT_BYTES).map_err(|error| {
+            let (code, message) = match error.kind() {
+                std::io::ErrorKind::NotFound => (
+                    ImportSessionErrorCode::SessionNotFound,
+                    "import session was not found",
+                ),
+                std::io::ErrorKind::InvalidData => (
+                    ImportSessionErrorCode::SnapshotUnsafe,
+                    "import session snapshot is unsafe",
+                ),
+                _ => (
+                    ImportSessionErrorCode::SnapshotIo,
+                    "failed to read import session snapshot",
+                ),
+            };
+            ImportSessionError::new(code, message).for_session(session_id)
+        })?;
     let snapshot: SessionSnapshot = serde_json::from_slice(&bytes).map_err(|_| {
         ImportSessionError::new(
             ImportSessionErrorCode::SnapshotInvalid,

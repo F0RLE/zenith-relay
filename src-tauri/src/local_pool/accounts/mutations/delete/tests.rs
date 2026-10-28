@@ -15,10 +15,7 @@ fn revoked_provider_grant_cannot_be_reopened_by_local_rollback() {
 
 #[tokio::test]
 async fn incomplete_delete_rollback_closes_the_old_gateway() {
-    let root = std::env::temp_dir().join(format!(
-        "relay-delete-fail-closed-{}",
-        uuid::Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("relay-delete-fail-closed");
     let state = DesktopState::open(root.clone()).unwrap();
     let runtime = Arc::new(
         GatewayRuntime::new(
@@ -89,10 +86,7 @@ async fn delete_waits_for_the_same_credential_lock_as_refresh() {
     use futures_util::poll;
     use std::task::Poll;
 
-    let root = std::env::temp_dir().join(format!(
-        "relay-delete-credential-lock-{}",
-        uuid::Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("relay-delete-credential-lock");
     let state = DesktopState::open(root.clone()).unwrap();
     let locks =
         ProcessAccountLocks::with_config(state.transient_root(), ProcessLockConfig::default())

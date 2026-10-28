@@ -8,8 +8,7 @@ fn persisted_last_used_timestamp_maps_to_epoch_milliseconds() {
 
 #[test]
 fn profile_recovery_error_does_not_block_the_api_gateway_reserve_setup() {
-    let root =
-        std::env::temp_dir().join(format!("zenith-runtime-profile-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("runtime-profile");
     let profile = root.join("profile");
     let recovery = root.join("recovery");
     fs::create_dir_all(&profile).unwrap();
@@ -54,7 +53,7 @@ fn exhausted_account_stays_configured_while_the_scheduler_blocks_requests() {
 #[tokio::test]
 async fn runtime_creates_and_reuses_the_system_gateway_key() {
     let id = uuid::Uuid::new_v4().simple().to_string();
-    let root = std::env::temp_dir().join(format!("zenith-relay-system-key-{id}"));
+    let root = crate::files::test_temp_root("runtime-system-key");
     let source_secret_ref = format!("source:system-key-{id}");
     let state = DesktopState::open(root.clone()).unwrap();
     secret_store::save(&source_secret_ref, "upstream-secret").unwrap();
@@ -128,7 +127,7 @@ async fn runtime_creates_and_reuses_the_system_gateway_key() {
 #[tokio::test]
 async fn invalid_source_is_quarantined_without_blocking_other_routes() {
     let id = uuid::Uuid::new_v4().simple().to_string();
-    let root = std::env::temp_dir().join(format!("zenith-relay-source-quarantine-{id}"));
+    let root = crate::files::test_temp_root("runtime-source-quarantine");
     let valid_secret_ref = format!("source:valid-quarantine-{id}");
     let invalid_secret_ref = format!("source:invalid-quarantine-{id}");
     let state = DesktopState::open(root.clone()).unwrap();
