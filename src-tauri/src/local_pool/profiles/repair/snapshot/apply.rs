@@ -5,43 +5,52 @@ pub(in crate::local_pool::profiles::repair) fn create_backup(
     backup_id: &str,
     snapshot: &RepairSnapshot,
 ) -> Result<RepairManifest, String> {
-    let mut backup_entries = Vec::new();
-    for (index, rollout_file) in snapshot.rollout_files.iter().enumerate() {
-        let relative = PathBuf::from("rollouts").join(format!("{index}.jsonl"));
-        let target = directory.join(&relative);
-        fs::create_dir_all(target.parent().unwrap()).map_err(io_error)?;
-        fs::copy(&rollout_file.path, &target).map_err(io_error)?;
-        sync_file(&target)?;
-        backup_entries.push(BackupEntry {
-            original_path: rollout_file.path.clone(),
-            backup_path: path_string(&relative),
+    let rollout_entries = snapshot
+        .rollout_files
+        .iter()
+        .enumerate()
+        .map(|(index, file)| BackupEntry {
+            original_path: file.path.clone(),
+            backup_path: path_string(&PathBuf::from("rollouts").join(format!("{index}.jsonl"))),
             sqlite: false,
         });
-    }
-    for (index, database_snapshot) in snapshot.databases.iter().enumerate() {
-        let relative = PathBuf::from("databases").join(format!("{index}.sqlite"));
-        let target = directory.join(&relative);
-        fs::create_dir_all(target.parent().unwrap()).map_err(io_error)?;
-        Connection::open(&database_snapshot.path)
-            .map_err(db_error)?
-            .backup(rusqlite::MAIN_DB, &target, rusqlite::backup::NO_PROGRESS)
-            .map_err(db_error)?;
-        sync_file(&target)?;
-        backup_entries.push(BackupEntry {
-            original_path: database_snapshot.path.clone(),
-            backup_path: path_string(&relative),
+    let database_entries = snapshot
+        .databases
+        .iter()
+        .enumerate()
+        .map(|(index, database)| BackupEntry {
+            original_path: database.path.clone(),
+            backup_path: path_string(&PathBuf::from("databases").join(format!("{index}.sqlite"))),
             sqlite: true,
         });
-    }
     let manifest = RepairManifest {
         version: SNAPSHOT_VERSION,
         backup_id: backup_id.to_string(),
         profile_roots: snapshot.profile_roots.clone(),
-        entries: backup_entries,
+        entries: rollout_entries.chain(database_entries).collect(),
         created_at_ms: now_ms(),
     };
     let bytes = serde_json::to_vec_pretty(&manifest)
         .map_err(|_| "repair backup manifest serialization failed".to_string())?;
+    if bytes.len() as u64 > MAX_REPAIR_MANIFEST_BYTES {
+        return Err("repair backup manifest is too large".to_string());
+    }
+    // Reject unreadable recovery metadata before creating a partial backup that
+    // retention could mistake for a newer, usable recovery point.
+    fs::create_dir_all(directory).map_err(io_error)?;
+    for entry in &manifest.entries {
+        let target = directory.join(&entry.backup_path);
+        fs::create_dir_all(target.parent().unwrap()).map_err(io_error)?;
+        if entry.sqlite {
+            Connection::open(&entry.original_path)
+                .map_err(db_error)?
+                .backup(rusqlite::MAIN_DB, &target, rusqlite::backup::NO_PROGRESS)
+                .map_err(db_error)?;
+        } else {
+            fs::copy(&entry.original_path, &target).map_err(io_error)?;
+        }
+        sync_file(&target)?;
+    }
     let mut file = OpenOptions::new()
         .create_new(true)
         .write(true)

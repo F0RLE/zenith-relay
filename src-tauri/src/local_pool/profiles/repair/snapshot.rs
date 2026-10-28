@@ -33,6 +33,9 @@ pub(super) fn save_snapshot(state_root: &Path, snapshot: &RepairSnapshot) -> Res
     let path = snapshot_path(state_root, &snapshot.session_id)?;
     let bytes = serde_json::to_vec(snapshot)
         .map_err(|_| "repair preview serialization failed".to_string())?;
+    if bytes.len() as u64 > MAX_REPAIR_MANIFEST_BYTES {
+        return Err("repair preview is too large".to_string());
+    }
     let mut file = OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -43,10 +46,17 @@ pub(super) fn save_snapshot(state_root: &Path, snapshot: &RepairSnapshot) -> Res
 }
 
 pub(super) fn load_snapshot(state_root: &Path, session_id: &str) -> Result<RepairSnapshot, String> {
-    let bytes = fs::read(snapshot_path(state_root, session_id)?).map_err(io_error)?;
-    if bytes.len() > 2 * 1024 * 1024 {
-        return Err("repair preview is too large".to_string());
-    }
+    let bytes = crate::files::read_regular_file_bounded(
+        &snapshot_path(state_root, session_id)?,
+        MAX_REPAIR_MANIFEST_BYTES,
+    )
+    .map_err(|error| {
+        if error.kind() == std::io::ErrorKind::InvalidData {
+            "repair preview is unsafe or too large".to_string()
+        } else {
+            io_error(error)
+        }
+    })?;
     serde_json::from_slice(&bytes).map_err(|_| "repair preview is invalid".to_string())
 }
 

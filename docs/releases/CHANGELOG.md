@@ -482,6 +482,32 @@ recoverable account deletion. Changes below are grouped by area.
 
 ### Fixed
 
+- Encrypted credential vaults account for encryption overhead before saving, so
+  a size-limit rejection preserves the existing readable vault.
+- Vaults, profile snapshots, import snapshots and repair previews enforce byte
+  limits throughout reads and reject symbolic links. Oversized repair previews
+  are rejected before publishing rather than failing only when applied.
+- Failed import and catalog-cache writes preserve an existing staging file when
+  exclusive creation fails; import attempts still roll back their newly saved credentials.
+- Concurrent catalog saves use distinct staging filenames even when the clock
+  repeats. Failed replacement never moves an existing destination aside.
+- Codex account-backup inventory and token refresh use bounded, no-follow reads;
+  metadata must match its profile-specific filename. The 1 MiB limit also applies
+  before publishing metadata. History repair validates directory containment
+  before listing session folders, including Windows junctions.
+- Subscription checks reject non-loopback HTTP endpoints before sending credentials;
+  HTTPS and local loopback endpoints remain supported.
+- Subscription authorization headers stay redacted in Debug output, including
+  externally supplied headers, without changing the transmitted credentials.
+- Claude Desktop configuration reads enforce the byte limit throughout the read.
+  Metadata output limits are checked before stopping the client or changing profile
+  and recovery files, preserving existing data when serialization exceeds the limit.
+- History repair applies the same manifest size limit when saving and rolling back;
+  oversized manifests are rejected before creating backup directories or restoring
+  destination files, so a failed attempt cannot displace the existing recovery point.
+- History-repair retention counts only complete, validated recovery manifests and
+  files. Interrupted copies and unverified directories do not evict a working backup.
+
 - Windows client restarts no longer print garbled localized `taskkill` output.
   Restart timeouts retain exit or OS error codes in diagnostics; process targets
   and the existing force-stop fallback are unchanged.
@@ -1200,6 +1226,34 @@ recoverable account deletion. Changes below are grouped by area.
   сортировки; обычный ответ без инструментов в автоматическом режиме не вызывает предупреждение.
 
 ### Исправления
+
+- При сохранении зашифрованного хранилища учитывается размер служебных данных
+  шифрования: превышение лимита сохраняет прежнее читаемое хранилище.
+- При чтении хранилища, снимков профилей, снимков импорта и превью восстановления
+  лимит действует до конца, а символические ссылки отклоняются. Слишком большое
+  превью восстановления отклоняется до сохранения, а не только при применении.
+- Если импорт или обновление кэша каталога не смогли создать свой временный файл,
+  уже существующий файл сохраняется. Учётные данные неудавшейся попытки импорта откатываются.
+- Параллельные сохранения каталога используют разные имена временных файлов,
+  даже если часы возвращают одинаковое время. При ошибке замены существующий
+  файл или каталог не перемещается в сторону.
+- Список резервных копий аккаунтов Codex и обновление токенов читают файлы
+  с ограничением размера и без перехода по ссылкам; метаданные должны совпадать
+  с именем файла профиля. Лимит 1 МиБ проверяется и перед сохранением метаданных.
+  Восстановление истории проверяет границы профиля до перечисления папок сессий,
+  в том числе при использовании Windows junction.
+- Проверка подписки отклоняет удалённые HTTP-адреса до отправки учётных данных;
+  HTTPS и локальные loopback-адреса поддерживаются по-прежнему.
+- Заголовки авторизации проверки подписки скрыты в Debug-выводе, в том числе
+  при передаче готового заголовка. Отправляемые учётные данные не меняются.
+- При чтении конфигурации Claude Desktop лимит действует до конца чтения.
+  Размер сериализованных метаданных проверяется до остановки клиента и изменения
+  профиля или восстановления: превышение лимита сохраняет прежние файлы.
+- При сохранении и откате исправления истории действует один лимит манифеста;
+  слишком большой манифест отклоняется до создания каталога бэкапа или восстановления
+  файлов, чтобы неудачная попытка не вытесняла существующую точку восстановления.
+- Очистка бэкапов истории учитывает только полные проверенные манифесты и файлы.
+  Прерванное копирование и непроверенные каталоги не вытесняют рабочий бэкап.
 
 - При перезапуске клиентов в Windows больше не выводится искажённый текст
   `taskkill`. При таймауте коды завершения или ошибки ОС сохраняются в диагностике;

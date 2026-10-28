@@ -1,5 +1,32 @@
 use super::super::*;
 
+const MAX_ACCOUNT_BACKUP_BYTES: usize = 1024 * 1024;
+
+pub(in crate::local_pool::profiles::codex) fn account_backup_read_limit(
+    path: &Path,
+) -> Option<u64> {
+    let name = path.file_name()?.to_str()?;
+    let prefix = name.get(..ACCOUNT_BACKUP_PREFIX.len())?;
+    let extension = path.extension()?.to_str()?;
+    // Case aliases must not select the generic reader on Windows.
+    (prefix.eq_ignore_ascii_case(ACCOUNT_BACKUP_PREFIX) && extension.eq_ignore_ascii_case("json"))
+        .then_some(MAX_ACCOUNT_BACKUP_BYTES as u64)
+}
+
+pub(in crate::local_pool::profiles::codex) fn read_account_backup(
+    path: &Path,
+) -> Result<AccountProfileBackup> {
+    let bytes = crate::files::read_regular_file_bounded(path, MAX_ACCOUNT_BACKUP_BYTES as u64)
+        .map_err(|error| io_error_at(path, error))?;
+    let content = std::str::from_utf8(&bytes).map_err(|_| {
+        LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            "ChatGPT account profile backup is not UTF-8",
+        )
+    })?;
+    parse_account_backup(content, path)
+}
+
 pub(in crate::local_pool::profiles::codex) fn attach_account_config(document: &mut DocumentMut) {
     clear_account_routing_overrides(document);
 }
@@ -228,7 +255,13 @@ pub(in crate::local_pool::profiles::codex) fn account_backup_for_profile(
         return Ok(None);
     }
     let path = account_backup_path(backup_root, &canonical_profile_dir(codex_home)?);
-    Ok(path.exists().then_some(path))
+    // A dangling leaf link is an existing unsafe backup, not an absent one.
+    // Keep it on the strict reader's path rather than silently ignoring it.
+    match fs::symlink_metadata(&path) {
+        Ok(_) => Ok(Some(path)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io_error_at(&path, error)),
+    }
 }
 
 pub(in crate::local_pool::profiles::codex) fn ensure_single_profile_backup(
@@ -342,6 +375,9 @@ pub(in crate::local_pool::profiles::codex) fn parse_account_backup(
     content: &str,
     path: &Path,
 ) -> Result<AccountProfileBackup> {
+    if content.len() > MAX_ACCOUNT_BACKUP_BYTES {
+        return Err(account_backup_too_large());
+    }
     let backup: AccountProfileBackup = serde_json::from_str(content).map_err(|error| {
         LocalPoolError::new(
             ErrorCode::RecoveryRequired,
@@ -353,8 +389,11 @@ pub(in crate::local_pool::profiles::codex) fn parse_account_backup(
     })?;
     if backup.version != 1
         || backup.profile_dir.trim().is_empty()
+        || !Path::new(&backup.profile_dir).is_absolute()
         || backup.managed_account_id.trim().is_empty()
         || backup.managed_access_hash.len() != 64
+        || account_backup_path(Path::new(""), Path::new(&backup.profile_dir)).file_name()
+            != path.file_name()
     {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
@@ -367,7 +406,18 @@ pub(in crate::local_pool::profiles::codex) fn parse_account_backup(
 pub(in crate::local_pool::profiles::codex) fn serialize_account_backup(
     backup: &AccountProfileBackup,
 ) -> Result<String> {
-    super::serialize_pretty(backup)
+    let content = super::serialize_pretty(backup)?;
+    if content.len() > MAX_ACCOUNT_BACKUP_BYTES {
+        return Err(account_backup_too_large());
+    }
+    Ok(content)
+}
+
+fn account_backup_too_large() -> LocalPoolError {
+    LocalPoolError::new(
+        ErrorCode::RecoveryRequired,
+        "ChatGPT account profile backup exceeds 1 MiB",
+    )
 }
 
 pub(in crate::local_pool::profiles::codex) fn binding_from_backup(

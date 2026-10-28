@@ -2,13 +2,13 @@ use crate::local_pool::{
     error::{ErrorCode, LocalPoolError, Result},
     store::secret_store,
 };
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 const SNAPSHOT_DIR: &str = "snapshots";
+
+#[cfg(test)]
+mod tests;
 
 pub(super) fn snapshot_root(backup_root: &Path) -> PathBuf {
     backup_root.join(SNAPSHOT_DIR)
@@ -38,14 +38,16 @@ pub(super) fn payload_secret_ref(snapshot_id: &str) -> String {
 }
 
 pub(super) fn read_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
-    let metadata = fs::symlink_metadata(path).map_err(io_error)?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > max_bytes {
-        return Err(LocalPoolError::new(
-            ErrorCode::RecoveryRequired,
-            "ChatGPT snapshot metadata is invalid",
-        ));
-    }
-    fs::read(path).map_err(io_error)
+    crate::files::read_regular_file_bounded(path, max_bytes).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::InvalidData {
+            LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                "ChatGPT snapshot metadata is invalid",
+            )
+        } else {
+            io_error(error)
+        }
+    })
 }
 
 pub(super) fn invalid_data(_error: impl std::fmt::Display) -> LocalPoolError {

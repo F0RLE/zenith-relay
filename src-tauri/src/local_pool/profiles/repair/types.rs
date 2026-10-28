@@ -131,13 +131,6 @@ pub(super) struct RepairManifest {
     pub(super) created_at_ms: u64,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct BackupTimestamp {
-    #[serde(default)]
-    pub(super) created_at_ms: u64,
-}
-
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct BackupEntry {

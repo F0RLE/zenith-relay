@@ -1,6 +1,7 @@
 use super::*;
 use std::{collections::HashMap, path::PathBuf, sync::Mutex};
 
+mod binding_safety;
 mod bindings;
 mod context;
 mod memory_model;
@@ -172,10 +173,7 @@ impl SecretBackend for MutatingLoadSecrets {
 }
 
 fn profile_dirs(name: &str) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-profile-{name}-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root(&format!("profile-{name}"));
     let home = root.join("profile");
     let backups = root.join("backups");
     fs::create_dir_all(&home).unwrap();

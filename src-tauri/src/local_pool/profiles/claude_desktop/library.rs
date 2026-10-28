@@ -12,7 +12,9 @@ use std::{
 const PROFILE_ID: &str = "d8e70c16-32ea-47c8-923a-6c1a7cf195d4";
 const MAX_CONFIG_BYTES: u64 = 2 * 1024 * 1024;
 
+mod payloads;
 mod snapshot;
+use payloads::{attached_metadata, profile_is_current, restored_metadata, serialize};
 pub(super) use snapshot::create as create_snapshot;
 
 #[derive(Deserialize, Serialize)]
@@ -68,9 +70,9 @@ fn check_path(path: &Path) -> Result<()> {
 
 fn read(path: &Path) -> Result<Option<Vec<u8>>> {
     check_path(path)?;
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if !metadata.is_file() || metadata.len() > MAX_CONFIG_BYTES => Err(invalid()),
-        Ok(_) => fs::read(path).map(Some).map_err(io_error),
+    match crate::files::read_regular_file_bounded(path, MAX_CONFIG_BYTES) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => Err(invalid()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(io_error(error)),
     }
@@ -106,10 +108,6 @@ fn write(path: &Path, bytes: &[u8]) -> Result<()> {
         let _ = fs::remove_file(&temporary);
     }
     result
-}
-
-fn serialize(value: &impl Serialize) -> Result<Vec<u8>> {
-    serde_json::to_vec_pretty(value).map_err(io_error)
 }
 
 fn metadata(bytes: Option<&[u8]>) -> Result<Value> {
@@ -270,7 +268,16 @@ pub(super) fn check_attach(library: &Path, recovery_path: &Path, config: &Value)
     let meta = metadata(read(&library.join("_meta.json"))?.as_deref())?;
     let profile = read(&library.join(format!("{PROFILE_ID}.json")))?;
     let record = recovery(recovery_path, library)?;
-    validate_attach(&meta, profile.as_deref(), record.as_ref(), config)
+    validate_attach(&meta, profile.as_deref(), record.as_ref(), config)?;
+    let bytes = serialize(config)?;
+    let has_legacy = owns_entry(&meta, "zenith-relay")
+        && read(&library.join("zenith-relay.json"))?
+            .as_deref()
+            .is_some_and(|bytes| matches_gateway(bytes, config));
+    if record.is_some() && !has_legacy && profile_is_current(&meta, profile.as_deref(), &bytes) {
+        return Ok(());
+    }
+    attached_metadata(meta, true, has_legacy).map(|_| ())
 }
 
 pub(super) fn inspect(library: &Path, recovery_path: &Path) -> Result<LibraryStatus> {
@@ -325,7 +332,7 @@ pub(super) fn apply(
     let profile_path = library.join(format!("{PROFILE_ID}.json"));
     let original_meta = read(&meta_path)?;
     let original_profile = read(&profile_path)?;
-    let mut meta = metadata(original_meta.as_deref())?;
+    let meta = metadata(original_meta.as_deref())?;
     let existing = recovery(recovery_path, library)?;
     let created = existing.is_none();
     validate_attach(
@@ -348,12 +355,7 @@ pub(super) fn apply(
         .as_deref()
         .is_some_and(|bytes| matches_gateway(bytes, config));
     let bytes = serialize(config)?;
-    if !created
-        && !has_legacy
-        && original_profile.as_deref() == Some(bytes.as_slice())
-        && owns_entry(&meta, PROFILE_ID)
-        && meta["appliedId"] == PROFILE_ID
-    {
+    if !created && !has_legacy && profile_is_current(&meta, original_profile.as_deref(), &bytes) {
         return Ok(false);
     }
     let mut record = existing.unwrap_or_else(|| Recovery {
@@ -378,33 +380,18 @@ pub(super) fn apply(
     record.profile_hashes = original_profile.iter().map(|bytes| hash(bytes)).collect();
     record.profile_hashes.push(hash(&bytes));
     record.pending = false;
+    let metadata_bytes = attached_metadata(meta, select, has_legacy)?;
     write(recovery_path, &serialize(&record)?)?;
     if read(&meta_path)? != original_meta || read(&profile_path)? != original_profile {
         return Err(invalid());
     }
     write(&profile_path, &bytes)?;
-    if !owns_entry(&meta, PROFILE_ID) {
-        meta["entries"]
-            .as_array_mut()
-            .ok_or_else(invalid)?
-            .push(json!({"id": PROFILE_ID, "name": "Zenith Relay"}));
-    }
-    // Remove an orphaned legacy entry left by an older Relay version.
-    if has_legacy {
-        meta["entries"]
-            .as_array_mut()
-            .ok_or_else(invalid)?
-            .retain(|entry| !(entry["id"] == "zenith-relay" && entry["name"] == "Zenith Relay"));
-    }
-    if select {
-        meta["appliedId"] = json!(PROFILE_ID);
-    }
     if read(&meta_path)? != original_meta
         || read(&profile_path)?.as_deref() != Some(bytes.as_slice())
     {
         return Err(invalid());
     }
-    write(&meta_path, &serialize(&meta)?)?;
+    write(&meta_path, &metadata_bytes)?;
     // Delete the orphaned legacy profile file after meta is safely updated.
     if has_legacy && read(&legacy_path)? == legacy_profile {
         crate::files::remove_regular_file(&legacy_path).map_err(|()| io_error("remove"))?;
@@ -450,6 +437,9 @@ pub(super) fn check_restore(library: &Path, recovery_path: &Path) -> Result<bool
     let meta = metadata(read(&library.join("_meta.json"))?.as_deref())?;
     let profile = read(&library.join(format!("{PROFILE_ID}.json")))?;
     validate_restore(&record, &meta, profile.as_deref())?;
+    if !record.pending {
+        restored_metadata(meta, &record)?;
+    }
     Ok(!record.pending)
 }
 
@@ -461,7 +451,7 @@ pub(super) fn restore(library: &Path, recovery_path: &Path) -> Result<bool> {
     let profile_path = library.join(format!("{PROFILE_ID}.json"));
     let original_meta = read(&meta_path)?;
     let profile = read(&profile_path)?;
-    let mut meta = metadata(original_meta.as_deref())?;
+    let meta = metadata(original_meta.as_deref())?;
     validate_restore(&record, &meta, profile.as_deref())?;
     if record.pending {
         // An explicit snapshot before connection has not changed Claude at all.
@@ -469,23 +459,11 @@ pub(super) fn restore(library: &Path, recovery_path: &Path) -> Result<bool> {
         crate::files::remove_regular_file(recovery_path).map_err(|()| io_error("remove"))?;
         return Ok(true);
     }
-    if meta["appliedId"] == PROFILE_ID {
-        if let Some(previous) = &record.previous_applied_id {
-            meta["appliedId"] = json!(previous);
-        } else {
-            meta.as_object_mut()
-                .ok_or_else(invalid)?
-                .remove("appliedId");
-        }
-    }
-    meta["entries"]
-        .as_array_mut()
-        .ok_or_else(invalid)?
-        .retain(|entry| entry["id"] != PROFILE_ID);
+    let metadata_bytes = restored_metadata(meta, &record)?;
     if read(&meta_path)? != original_meta || read(&profile_path)? != profile {
         return Err(invalid());
     }
-    write(&meta_path, &serialize(&meta)?)?;
+    write(&meta_path, &metadata_bytes)?;
     crate::files::remove_regular_file(&profile_path).map_err(|()| io_error("remove"))?;
     crate::files::remove_regular_file(recovery_path).map_err(|()| io_error("remove"))?;
     Ok(true)

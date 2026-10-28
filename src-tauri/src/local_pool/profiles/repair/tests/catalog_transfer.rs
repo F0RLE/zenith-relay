@@ -210,11 +210,7 @@ fn changed_rollout_is_rejected_before_backup_or_write() {
 
 #[test]
 fn large_rollout_provider_repair_streams_the_payload() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-large-rollout-{}",
-        uuid::Uuid::new_v4().simple()
-    ));
-    fs::create_dir_all(&root).unwrap();
+    let root = crate::files::test_temp_root("large-rollout");
     let rollout = root.join("rollout-large.jsonl");
     let mut file = OpenOptions::new()
         .create_new(true)
@@ -245,13 +241,24 @@ fn missing_rollout_provider_still_requires_repair() {
     );
 }
 
+fn write_retention_manifest(directory: &std::path::Path, id: &str, created_at_ms: u64) {
+    let manifest = RepairManifest {
+        version: SNAPSHOT_VERSION,
+        backup_id: id.to_owned(),
+        profile_roots: Vec::new(),
+        entries: Vec::new(),
+        created_at_ms,
+    };
+    fs::write(
+        directory.join("manifest.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+}
+
 #[test]
 fn cleanup_keeps_latest_internal_backup_and_preserves_user_directories() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-repair-retention-{}",
-        uuid::Uuid::new_v4().simple()
-    ));
-    fs::create_dir_all(&root).unwrap();
+    let root = crate::files::test_temp_root("repair-retention");
     let ids = (1_u64..=4)
         .map(|index| format!("history_repair_{index:032x}"))
         .collect::<Vec<_>>();
@@ -265,14 +272,24 @@ fn cleanup_keeps_latest_internal_backup_and_preserves_user_directories() {
     for (index, id) in ids.iter().enumerate() {
         let directory = root.join(id);
         fs::create_dir_all(&directory).unwrap();
-        fs::write(
-            directory.join("manifest.json"),
-            format!("{{\"createdAtMs\":{}}}", created_at[index]),
-        )
-        .unwrap();
+        write_retention_manifest(&directory, id, created_at[index]);
     }
     let user_snapshot = root.join("snapshot_user_named");
     fs::create_dir_all(&user_snapshot).unwrap();
+    let incomplete = root.join(format!("history_repair_{:032x}", 5));
+    fs::create_dir_all(&incomplete).unwrap();
+    fs::write(
+        incomplete.join("sentinel.txt"),
+        b"synthetic-incomplete-data",
+    )
+    .unwrap();
+    let unverified = root.join(format!("history_repair_{:032x}", 6));
+    fs::create_dir_all(&unverified).unwrap();
+    fs::write(
+        unverified.join("manifest.json"),
+        format!("{{\"createdAtMs\":{}}}", now.saturating_add(1)),
+    )
+    .unwrap();
 
     assert_eq!(cleanup_history_repair_backups(&root).unwrap(), 3);
     assert!(!root.join(&ids[0]).exists());
@@ -280,10 +297,12 @@ fn cleanup_keeps_latest_internal_backup_and_preserves_user_directories() {
     assert!(!root.join(&ids[2]).exists());
     assert!(root.join(&ids[3]).exists());
     assert!(user_snapshot.exists());
+    assert!(incomplete.join("sentinel.txt").exists());
+    assert!(unverified.join("manifest.json").exists());
 
     let preserved = root.join(&ids[0]);
     fs::create_dir_all(&preserved).unwrap();
-    fs::write(preserved.join("manifest.json"), "{\"createdAtMs\":1}").unwrap();
+    write_retention_manifest(&preserved, &ids[0], 1);
     assert_eq!(
         cleanup_history_repair_backups_preserving(&root, Some(&ids[0])).unwrap(),
         1
@@ -292,15 +311,14 @@ fn cleanup_keeps_latest_internal_backup_and_preserves_user_directories() {
     assert!(!root.join(&ids[2]).exists());
     assert!(!root.join(&ids[3]).exists());
     assert!(user_snapshot.exists());
+    assert!(incomplete.join("sentinel.txt").exists());
+    assert!(unverified.join("manifest.json").exists());
     fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn discard_removes_only_a_valid_internal_backup() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-repair-discard-{}",
-        uuid::Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("repair-discard");
     let backup_id = format!("history_repair_{}", uuid::Uuid::new_v4().simple());
     let backup = root.join(&backup_id);
     let unrelated = root.join("keep");
@@ -316,10 +334,7 @@ fn discard_removes_only_a_valid_internal_backup() {
 
 #[test]
 fn cleanup_removes_only_expired_valid_repair_previews() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-repair-preview-retention-{}",
-        uuid::Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("repair-preview-retention");
     let directory = root.join("repair_previews");
     fs::create_dir_all(&directory).unwrap();
     let expired_id = format!("repair_{}", uuid::Uuid::new_v4().simple());

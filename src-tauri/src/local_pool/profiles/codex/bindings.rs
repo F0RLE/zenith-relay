@@ -29,9 +29,7 @@ pub fn profile_bindings(codex_home: &Path, backup_root: &Path) -> Result<Vec<Pro
     for binding in &mut bindings {
         let profile_dir = Path::new(&binding.profile_dir);
         let backup_path = account_backup_path(backup_root, profile_dir);
-        let backup_content =
-            fs::read_to_string(&backup_path).map_err(|error| io_error_at(&backup_path, error))?;
-        let backup = parse_account_backup(&backup_content, &backup_path)?;
+        let backup = read_account_backup(&backup_path)?;
         let config_path = profile_dir.join(CONFIG_FILE);
         let config_bytes = read_optional_bytes(&config_path)?;
         let document =
@@ -97,9 +95,7 @@ pub fn account_bindings(backup_root: &Path) -> Result<Vec<ProfileBinding>> {
             continue;
         }
         let backup_path = directory_entry.path();
-        let backup_text =
-            fs::read_to_string(&backup_path).map_err(|error| io_error_at(&backup_path, error))?;
-        let backup = parse_account_backup(&backup_text, &backup_path)?;
+        let backup = read_account_backup(&backup_path)?;
         bindings.push(binding_from_backup(&backup, false));
     }
     bindings.sort_by(|left, right| left.profile_dir.cmp(&right.profile_dir));

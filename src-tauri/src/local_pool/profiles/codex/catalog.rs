@@ -89,7 +89,7 @@ mod ultra_tests {
         let mut qualified = routed_codex_catalog_entry(None, "vendor/gpt-future", 1_001, None);
         qualified["supported_reasoning_levels"] = json!([{"effort": "xhigh"}, {"effort": "max"}]);
         let relay_catalog = json!({"models": [relay, qualified]});
-        let home = std::env::temp_dir().join(format!("relay-codex-ultra-{}", std::process::id()));
+        let home = crate::files::test_temp_root("codex-ultra");
         let managed = build_managed_model_catalog_with_bundled(
             &home,
             None,
@@ -126,6 +126,7 @@ mod ultra_tests {
                 .len(),
             2
         );
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
@@ -148,8 +149,7 @@ mod ultra_tests {
             {"effort": "high", "description": "high"},
             {"effort": "max", "description": "max"}
         ]);
-        let home =
-            std::env::temp_dir().join(format!("relay-codex-ultra-sol-{}", std::process::id()));
+        let home = crate::files::test_temp_root("codex-ultra-sol");
         let managed = build_managed_model_catalog_with_bundled(
             &home,
             None,
@@ -175,6 +175,7 @@ mod ultra_tests {
                 .iter()
                 .all(|level| level["effort"] != "ultra")
         );
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
@@ -184,14 +185,7 @@ mod ultra_tests {
         ]}]});
         assert!(official_codex_ultra_rows(&cli).is_empty());
 
-        let root = std::env::temp_dir().join(format!(
-            "relay-codex-bin-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let root = crate::files::test_temp_root("codex-bin");
         let older = root.join("older");
         let newer = root.join("newer");
         fs::create_dir_all(&older).unwrap();

@@ -2,6 +2,8 @@ use super::*;
 use std::fs;
 use std::path::PathBuf;
 
+mod budgets;
+
 struct Fixture {
     root: PathBuf,
     library: PathBuf,
@@ -14,10 +16,8 @@ impl Fixture {
     }
 
     fn new() -> Self {
-        // Resolve platform-owned temp aliases before creating the isolated fixture.
-        let root = fs::canonicalize(std::env::temp_dir())
-            .unwrap()
-            .join(format!("zenith-relay-claude-{}", uuid::Uuid::new_v4()));
+        // Preserve canonical paths for alias-sensitive library containment checks.
+        let root = fs::canonicalize(crate::files::test_temp_root("claude-library")).unwrap();
         let library = root.join("configLibrary");
         fs::create_dir_all(&library).unwrap();
         Self {

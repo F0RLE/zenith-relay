@@ -21,9 +21,7 @@ pub(crate) fn managed_account_token_update(
                 continue;
             }
             let backup_path = directory_entry.path();
-            let content = fs::read_to_string(&backup_path)
-                .map_err(|error| io_error_at(&backup_path, error))?;
-            let backup = parse_account_backup(&content, &backup_path)?;
+            let backup = read_account_backup(&backup_path)?;
             if backup.managed_account_id != account_id {
                 continue;
             }

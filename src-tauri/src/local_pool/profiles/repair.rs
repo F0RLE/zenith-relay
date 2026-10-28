@@ -34,9 +34,9 @@ const HISTORY_REPAIR_BACKUP_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 
 mod types;
 use types::{
-    BackupEntry, BackupTimestamp, DatabaseCatalogThreadSnapshot, DatabaseSnapshot,
-    DatabaseThreadSnapshot, RepairManifest, RepairSnapshot, RolloutCollection, RolloutSnapshot,
-    SessionMeta, SessionMetadata,
+    BackupEntry, DatabaseCatalogThreadSnapshot, DatabaseSnapshot, DatabaseThreadSnapshot,
+    RepairManifest, RepairSnapshot, RolloutCollection, RolloutSnapshot, SessionMeta,
+    SessionMetadata,
 };
 pub use types::{RepairPreview, RepairResult, RollbackResult, TargetProvider};
 
@@ -191,7 +191,6 @@ pub fn apply(
 
     let backup_id = format!("history_repair_{}", uuid::Uuid::new_v4().simple());
     let directory = backup_root.join(&backup_id);
-    fs::create_dir_all(&directory).map_err(io_error)?;
     let manifest = snapshot::create_backup(&directory, &backup_id, &snapshot)?;
     let apply_result = snapshot::apply_snapshot(&snapshot);
     if let Err(error) = apply_result {
@@ -247,9 +246,16 @@ pub fn rollback(backup_root: &Path, backup_id: &str) -> Result<RollbackResult, S
     validate_id(backup_id, "history_repair_")?;
     let directory = backup_root.join(backup_id);
     let manifest_path = directory.join("manifest.json");
-    let manifest: RepairManifest =
-        serde_json::from_slice(&fs::read(&manifest_path).map_err(io_error)?)
-            .map_err(|_| "repair backup manifest is invalid".to_string())?;
+    let bytes = crate::files::read_regular_file_bounded(&manifest_path, MAX_REPAIR_MANIFEST_BYTES)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::InvalidData {
+                "repair backup manifest is unsafe or too large".to_string()
+            } else {
+                io_error(error)
+            }
+        })?;
+    let manifest: RepairManifest = serde_json::from_slice(&bytes)
+        .map_err(|_| "repair backup manifest is invalid".to_string())?;
     if manifest.version != SNAPSHOT_VERSION || manifest.backup_id != backup_id {
         return Err("repair backup manifest is invalid".to_string());
     }

@@ -217,7 +217,7 @@ fn delete_with(
     let snapshot_record: SnapshotRecord =
         serde_json::from_str(content).map_err(io::invalid_data)?;
     validate_record(&snapshot_record, snapshot_id)?;
-    if fs::read(&path).map_err(io::io_error)? != bytes {
+    if io::read_bounded(&path, MAX_METADATA_BYTES)? != bytes {
         return Err(io::snapshot_changed());
     }
     fs::remove_file(&path).map_err(io::io_error)?;
@@ -257,8 +257,7 @@ mod tests {
 
     #[test]
     fn full_restore_replaces_the_profile_without_creating_an_extra_snapshot() {
-        let root =
-            std::env::temp_dir().join(format!("zenith-profile-snapshots-{}", Uuid::new_v4()));
+        let root = crate::files::test_temp_root("profile-snapshot-restore");
         let profile = root.join("profile");
         let backups = root.join("backups");
         fs::create_dir_all(&profile).unwrap();
@@ -290,8 +289,7 @@ mod tests {
 
     #[test]
     fn full_restore_does_not_save_the_current_profile() {
-        let root =
-            std::env::temp_dir().join(format!("zenith-profile-snapshots-{}", Uuid::new_v4()));
+        let root = crate::files::test_temp_root("profile-snapshot-no-save");
         let profile = root.join("profile");
         let backups = root.join("backups");
         fs::create_dir_all(&profile).unwrap();
@@ -313,10 +311,7 @@ mod tests {
 
     #[test]
     fn full_restore_recreates_a_deleted_profile_directory() {
-        let root = std::env::temp_dir().join(format!(
-            "zenith-profile-snapshot-deleted-{}",
-            Uuid::new_v4()
-        ));
+        let root = crate::files::test_temp_root("profile-snapshot-deleted");
         let profile = root.join("profile");
         let backups = root.join("backups");
         fs::create_dir_all(&profile).unwrap();
@@ -343,10 +338,7 @@ mod tests {
 
     #[test]
     fn snapshot_list_keeps_valid_entries_when_one_payload_is_missing() {
-        let root = std::env::temp_dir().join(format!(
-            "zenith-profile-snapshot-missing-{}",
-            Uuid::new_v4()
-        ));
+        let root = crate::files::test_temp_root("profile-snapshot-missing");
         let profile = root.join("profile");
         let backups = root.join("backups");
         fs::create_dir_all(&profile).unwrap();

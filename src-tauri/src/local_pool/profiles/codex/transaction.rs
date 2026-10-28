@@ -3,7 +3,14 @@ use super::{ErrorCode, LocalPoolError, Result, atomic_write};
 use std::{fs, path::Path};
 
 pub(super) fn read_optional_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
-    match fs::read(path) {
+    // Account backups own a reserved filename namespace. Initial snapshots,
+    // optimistic comparisons and both rollback paths must use the same bound;
+    // config/auth files retain their existing user-selected symlink behavior.
+    let read = match super::backup::account_backup_read_limit(path) {
+        Some(max_bytes) => crate::files::read_regular_file_bounded(path, max_bytes),
+        None => fs::read(path),
+    };
+    match read {
         Ok(content) => Ok(Some(content)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(io_error_at(path, error)),

@@ -36,7 +36,10 @@ pub(super) fn collect_rollouts(
     if depth > 8 {
         return Err("ChatGPT session directory is too deeply nested".to_string());
     }
-    for directory_entry in fs::read_dir(directory).map_err(io_error)? {
+    // Check directory aliases before enumeration, not only individual rollout
+    // files afterward. In particular, a top-level sessions junction may escape.
+    let directory = canonical_child(root, directory)?;
+    for directory_entry in fs::read_dir(&directory).map_err(io_error)? {
         let directory_entry = directory_entry.map_err(io_error)?;
         let metadata = fs::symlink_metadata(directory_entry.path()).map_err(io_error)?;
         if metadata.file_type().is_symlink() {

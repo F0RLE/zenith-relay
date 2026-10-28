@@ -63,9 +63,9 @@ use backup::{
     auth_snapshot_json, binding_from_backup, canonical_profile_dir, cleanup_account_attach_secrets,
     cleanup_created_backup_secret, credential_kind_locked, delete_backup_secrets, discard_backup,
     discard_managed_binding_locked, ensure_single_profile_backup, fill_missing_account_config,
-    parse_account_backup, parse_account_backup_snapshot, parse_backup_snapshot,
-    previous_auth_snapshot, restore_account_config, restore_secret_snapshot,
-    rollback_account_backup, rollback_backup, serialize_account_backup, serialize_backup,
+    parse_account_backup_snapshot, parse_backup_snapshot, previous_auth_snapshot,
+    read_account_backup, restore_account_config, restore_secret_snapshot, rollback_account_backup,
+    rollback_backup, serialize_account_backup, serialize_backup,
 };
 use bindings::managed_token;
 pub use bindings::{
