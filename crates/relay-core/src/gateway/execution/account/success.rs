@@ -126,6 +126,7 @@ pub(super) fn complete_account_response(
             &bytes,
             request,
             &mut bps_catalog,
+            Some(&runtime.agent_message_context(&key.id)),
         ) {
             Ok(bytes) => bytes,
             Err(error) => {

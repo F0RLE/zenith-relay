@@ -59,17 +59,86 @@ fn response_owner_probe_still_yields_when_the_member_is_excluded() {
 }
 
 #[test]
-fn response_owner_probe_still_yields_to_a_material_quota_lead() {
-    let mut scheduler = aliased_owner();
-    for (id, remaining) in [
-        ("a-cold", 9_000),
-        ("z-warm", 4_000),
-        ("z-warm::chat", 4_000),
-    ] {
-        let mut member = scheduler.candidate(id).unwrap().clone();
-        member.quota = CandidateQuota::Available(remaining);
-        member.quota_updated_at_ms = Some(100);
-        scheduler.upsert(member);
+fn response_owner_probe_uses_the_warm_quota_margin_without_moving_opaque_ownership() {
+    for (other, yields) in [(3_500, false), (3_999, false), (4_000, true), (9_000, true)] {
+        let mut scheduler = aliased_owner();
+        for (id, remaining) in [
+            ("a-cold", other),
+            ("z-warm", 3_000),
+            ("z-warm::chat", 3_000),
+        ] {
+            let mut member = scheduler.candidate(id).unwrap().clone();
+            member.quota = CandidateQuota::Available(remaining);
+            member.quota_updated_at_ms = Some(100);
+            scheduler.upsert(member);
+        }
+        assert_eq!(should_yield(&mut scheduler, &HashSet::new()), yields);
+        let exact = scheduler
+            .select(SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses, WireApi::ChatCompletions],
+                scope: &CandidateScope::default(),
+                tried: &HashSet::new(),
+                response_affinity_key: Some("response"),
+                prompt_affinity_key: None,
+                now_ms: 100,
+            })
+            .unwrap();
+        assert_eq!(exact.candidate_id, "z-warm::chat");
     }
-    assert!(should_yield(&mut scheduler, &HashSet::new()));
+}
+
+#[test]
+fn cache_affinity_diagnostics_follow_the_projected_owner_and_keep_legacy_rows_readable() {
+    let mut scheduler = aliased_owner();
+    assert!(scheduler.bind_prompt_affinity("cache:private", "z-warm::chat", 0));
+    let selected = scheduler
+        .select(SelectionRequest {
+            model: "gpt-5",
+            allowed_protocols: &[WireApi::Responses, WireApi::ChatCompletions],
+            scope: &CandidateScope::default(),
+            tried: &HashSet::new(),
+            response_affinity_key: None,
+            prompt_affinity_key: Some("cache:private"),
+            now_ms: 100,
+        })
+        .unwrap();
+    let diagnostics = selected.diagnostics.cache_affinity.as_ref().unwrap();
+    assert_eq!(
+        diagnostics.reason,
+        crate::scheduler::rotation::CacheAffinityReason::Retained
+    );
+    let mut encoded = serde_json::to_value(&selected.diagnostics).unwrap();
+    assert!(!encoded.to_string().contains("cache:private"));
+    encoded.as_object_mut().unwrap().remove("cacheAffinity");
+    let legacy: crate::RoutingDiagnostics = serde_json::from_value(encoded).unwrap();
+    assert!(legacy.cache_affinity.is_none());
+}
+
+#[test]
+fn cache_affinity_diagnostics_keep_owner_evidence_after_structural_exclusion() {
+    let mut scheduler = aliased_owner();
+    assert!(scheduler.bind_prompt_affinity("cache:private", "z-warm::chat", 0));
+    let selected = scheduler
+        .select(SelectionRequest {
+            model: "gpt-5",
+            allowed_protocols: &[WireApi::Responses, WireApi::ChatCompletions],
+            scope: &CandidateScope::default(),
+            tried: &HashSet::from(["z-warm".into(), "z-warm::chat".into()]),
+            response_affinity_key: None,
+            prompt_affinity_key: Some("cache:private"),
+            now_ms: 100,
+        })
+        .unwrap();
+    assert_eq!(selected.candidate_id, "a-cold");
+    let diagnostics = selected.diagnostics.cache_affinity.unwrap();
+    assert_eq!(
+        diagnostics.reason,
+        crate::scheduler::rotation::CacheAffinityReason::OwnerUnavailable
+    );
+    assert_eq!(
+        diagnostics.owner_block_reason,
+        Some(crate::scheduler::rotation::CandidateBlockReason::AlreadyTried)
+    );
+    assert!(diagnostics.preferred.is_some());
 }

@@ -20,6 +20,7 @@ mod listing;
 mod member_quota;
 mod native_protocol;
 mod policy;
+mod usage_observations;
 
 struct NeverRefresh;
 

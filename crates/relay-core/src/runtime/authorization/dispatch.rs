@@ -219,6 +219,7 @@ impl GatewayRuntime {
     ) -> AuthorizedResponse {
         self.observe_codex_quota_headers(
             candidate_id,
+            prepared.token_generation,
             response.status(),
             response.headers(),
             runtime_now_ms(),
@@ -264,6 +265,7 @@ impl GatewayRuntime {
         }
         // Audit only: the authorization owner is already repairing this 401.
         // Do not submit a second health/auth vote or reset cache-context state.
+        self.observe_request_usage(&mut event);
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.usage)(event)));
     }
 
@@ -473,7 +475,24 @@ impl GatewayRuntime {
         let send_started = payload_diagnostics
             .as_ref()
             .map(|_| std::time::Instant::now());
-        let send = crate::runtime::http3::execute(&client, authorized_request);
+        let pending_payload_diagnostics = payload_diagnostics.clone();
+        let send = async move {
+            if let Some((template, started)) = dispatch.usage_event {
+                let mut event = template.clone();
+                event.attempt =
+                    budget.map_or(event.attempt, |budget| u16::from(budget.dispatches()));
+                event.account_token_generation = prepared.token_generation;
+                if let Some(transport) = event
+                    .routing
+                    .as_mut()
+                    .and_then(|routing| routing.transport.as_mut())
+                {
+                    transport.request_payload = pending_payload_diagnostics;
+                }
+                self.track_dispatch_usage(event, started);
+            }
+            crate::runtime::http3::execute(&client, authorized_request).await
+        };
         let upstream_result = if let Some(deadline) = headers_deadline {
             // Selection and dispatch bookkeeping may have consumed the last
             // budget. Do not poll the send future after an already expired limit.

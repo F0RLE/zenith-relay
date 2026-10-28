@@ -148,9 +148,15 @@ pub(super) async fn handle_upstream_failure(
     {
         Ok(bytes) => bytes,
         Err(error)
-            if !basis_points && retryable_route_status(route, status, has_previous_response_id) =>
+            if !basis_points
+                && retryable_route_status(route, status, has_previous_response_id)
+                && crate::gateway::response::has_complete_rejection_body(&error.bytes)
+                && AttemptFailure::status_with_body(status, Some(&error.bytes))
+                    .execution
+                    .certainty
+                    == ExecutionCertainty::NotSent =>
         {
-            let failure = AttemptFailure::status_with_body(status, None);
+            let failure = AttemptFailure::status_with_body(status, Some(&error.bytes));
             populate_tokens(&mut event, &error.bytes);
             event.error_category = Some(failure.category.to_string());
             let failure_state =

@@ -214,12 +214,38 @@ impl PoolScheduler {
                 }
             }
         };
-        let diagnostics = self.diagnostics(
+        let mut diagnostics = self.diagnostics(
             &selected.candidate_id,
             reason,
             usize::try_from(selected.eligible_candidates).unwrap_or(usize::MAX),
             lane,
         )?;
+        if let Some(key) = request.prompt_affinity_key {
+            let preferred = rotation_request
+                .preferred
+                .as_deref()
+                .or_else(|| self.prompt_affinity.get(key, request.now_ms));
+            diagnostics.cache_affinity = self
+                .rotation
+                .cache_affinity_diagnostics(
+                    &rotation_request,
+                    preferred,
+                    &selected.candidate_id,
+                    request.now_ms,
+                )
+                .map(|mut evidence| {
+                    // Projection removes tried members from the allowed set;
+                    // preserve that known exclusion without changing admission.
+                    if evidence.owner_block_reason
+                        == Some(super::rotation::CandidateBlockReason::NotAllowed)
+                        && preferred.is_some_and(|id| request.tried.contains(id))
+                    {
+                        evidence.owner_block_reason =
+                            Some(super::rotation::CandidateBlockReason::AlreadyTried);
+                    }
+                    evidence
+                });
+        }
         Some(Selection {
             candidate_id: selected.candidate_id,
             response_affinity_hit: owner.is_some(),

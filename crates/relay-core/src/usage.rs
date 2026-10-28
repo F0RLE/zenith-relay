@@ -28,13 +28,14 @@ pub use cache_context::{
     CacheHistoryComparison, CacheHistoryDiagnostics, CacheInputKind, LeadingContextAlignment,
     ProviderCacheDiagnostics, ProviderCacheMissReason,
 };
-pub use context_size::RequestContextSize;
+pub use context_size::{ConversationSizeBreakdown, RequestContextSize};
 pub use event::{ErrorOrigin, UsageEvent, UsageTransport};
 pub use image::ImageUsage;
 pub(crate) use reasoning::ReasoningEffortDiagnostics;
 pub use reasoning::normalize_reasoning_effort;
 pub use tools::{
-    BasisPointsCatalogDiagnostics, TerminalOutputKind, ToolChoiceMode, ToolUseDiagnostics,
+    BasisPointsCatalogDiagnostics, BasisPointsCatalogSelectionReason, TerminalOutputKind,
+    ToolChoiceMode, ToolUseDiagnostics,
 };
 pub use transport::{
     CodexServerTiming, FullRequestReason, RequestContentEncoding, RequestPayloadDiagnostics,

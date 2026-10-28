@@ -3,7 +3,7 @@ use super::catalog::{ClientTool, client_tool_call_name, selected_tools};
 use super::prepare::describe_tools;
 use super::schema::{PROMPT_SCHEMA_NOTATION, parameter_schema};
 use crate::protocol::AdapterError;
-use crate::usage::BasisPointsCatalogDiagnostics;
+use crate::usage::{BasisPointsCatalogDiagnostics, BasisPointsCatalogSelectionReason};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -80,15 +80,14 @@ pub(super) fn loaded_names(tools: &[&ClientTool], request: &Value) -> BTreeSet<S
         .as_str()
         .is_some_and(|kind| matches!(kind, "function" | "custom" | "allowed_tools"));
     let mut ordered = tools.to_vec();
-    ordered.sort_by_cached_key(|tool| tool.key());
+    // The core tools must not lose their eager slots to alphabetically earlier
+    // optional declarations. Keep the same limits and explicit deferral below.
+    ordered.sort_by_cached_key(|tool| (!is_core_tool(tool), tool.key()));
     for tool in ordered {
         let deferred = tool.spec.get("defer_loading").and_then(Value::as_bool);
-        let core_tool = tool.namespace.is_none()
-            && matches!(
-                tool.name.as_str(),
-                "exec_command" | "apply_patch" | "write_stdin"
-            );
-        if deferred == Some(true) || !(deferred == Some(false) || core_tool || explicit_selection) {
+        if deferred == Some(true)
+            || !(deferred == Some(false) || is_core_tool(tool) || explicit_selection)
+        {
             continue;
         }
         let bytes = describe_tools(&[tool], false).len();
@@ -99,6 +98,14 @@ pub(super) fn loaded_names(tools: &[&ClientTool], request: &Value) -> BTreeSet<S
         }
     }
     loaded
+}
+
+fn is_core_tool(tool: &ClientTool) -> bool {
+    tool.namespace.is_none()
+        && matches!(
+            tool.name.as_str(),
+            "exec_command" | "apply_patch" | "write_stdin"
+        )
 }
 
 pub(super) fn describe_catalog(tools: &[&ClientTool], request: &Value) -> String {
@@ -114,6 +121,7 @@ pub(super) fn describe_catalog(tools: &[&ClientTool], request: &Value) -> String
          Before using any other tool whose full contract is not loaded in this conversation, load it \
          through native run_officejs with references=[\"{LOOKUP_TOOL}\"] and code containing JSON \
          {{\"names\":[\"exact.qualified.name\"]}} (up to 8 names), or {{\"query\":\"keywords\",\"limit\":5}}. \
+         Collect independent missing contracts into one names lookup instead of one lookup per tool; do not speculate about tools the current step does not need. \
          Query searches original names, descriptions, and schema text; use catalog-language keywords when names are unclear. \
          A lookup result's reused entries reference names and earlier lookup call_id values whose full contracts remain in this conversation; use those definitions instead of looking them up again. \
          This read-only lookup runs inside Relay, never in the client or Excel, and does not satisfy required client tool choice. \
@@ -198,6 +206,7 @@ pub(super) fn diagnostics(tools: &[ClientTool], request: &Value) -> BasisPointsC
             "compact"
         }
         .to_string(),
+        selection_reason: selection_reason(tools, request, discovery),
         full_schema_bytes: tools.iter().map(|tool| tool.schema_bytes(true)).sum(),
         rendered_schema_bytes: tools
             .iter()
@@ -210,3 +219,24 @@ pub(super) fn diagnostics(tools: &[ClientTool], request: &Value) -> BasisPointsC
         ..Default::default()
     }
 }
+
+fn selection_reason(
+    tools: &[ClientTool],
+    request: &Value,
+    discovery: bool,
+) -> Option<BasisPointsCatalogSelectionReason> {
+    use BasisPointsCatalogSelectionReason as Reason;
+    let mode = requested_mode(request).ok()?;
+    Some(match mode {
+        CatalogMode::Full => Reason::RequestedFull,
+        CatalogMode::Compact => Reason::RequestedCompact,
+        _ if tools.is_empty() => Reason::NoTools,
+        _ if tools.iter().any(|tool| tool.key() == LOOKUP_TOOL) => Reason::LookupToolPresent,
+        CatalogMode::Discovery => Reason::RequestedDiscovery,
+        CatalogMode::Auto if discovery => Reason::AutomaticDiscovery,
+        CatalogMode::Auto => Reason::BelowDiscoveryThreshold,
+    })
+}
+
+#[cfg(test)]
+mod tests;

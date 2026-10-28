@@ -86,7 +86,7 @@ impl Server {
             serde_json::json!({"vendor/model": {"reasoning": true}}),
             serde_json::json!({"vendor": {"models": {"model": {"id":"model", "reasoning":true, "reasoning_options":[{"type":"effort", "values":["low", "high"]}]}}}}),
             serde_json::json!({"data": [{"id":"vendor/model", "reasoning":{"supported_efforts":["high","low"]}}]}),
-            serde_json::json!({"model": {"supports_low_reasoning_effort":true}}),
+            serde_json::json!({"model": {"litellm_provider":"vendor", "supports_low_reasoning_effort":true}}),
         ];
         let state = Arc::new(Mutex::new(MockState {
             replies: payloads.map(|p| Reply {
@@ -140,6 +140,7 @@ async fn caches_validated_sources_and_reuses_model_trees_after_304() {
         loader.refresh(false).await.unwrap(),
         CatalogRefreshOutcome::Updated { .. }
     ));
+    // The complete same-provider enum survives LiteLLM's partial low-only flag.
     assert_eq!(
         loader.snapshot().reasoning_levels_for("vendor/model"),
         ["low", "high"]
@@ -233,7 +234,7 @@ async fn refresh_shares_unchanged_payloads_and_preserves_previous_snapshots() {
     loader.refresh(false).await.unwrap();
     let before = loader.state.read().unwrap().clone();
     let snapshot = loader.snapshot();
-    let prepared = PreparedCatalog::new(&before).unwrap();
+    let prepared = PreparedCatalog::new(&before, crate::unix_time_ms(), u64::MAX).unwrap();
     assert_eq!(
         snapshot.revision.as_deref(),
         Some(prepared.revision.as_str())
@@ -262,8 +263,20 @@ async fn refresh_shares_unchanged_payloads_and_preserves_previous_snapshots() {
     }
     assert!(!before[3].envelope.as_ref().unwrap().stale);
     assert!(after[3].envelope.as_ref().unwrap().stale);
-    assert_eq!(snapshot.reasoning_levels_for("model"), ["low", "high"]);
-    assert_eq!(loader.snapshot().reasoning_levels_for("model"), ["max"]);
+    assert_eq!(
+        snapshot.reasoning_levels_for("openrouter/vendor/model"),
+        ["low", "high"]
+    );
+    assert_eq!(
+        loader
+            .snapshot()
+            .reasoning_levels_for("openrouter/vendor/model"),
+        ["max"]
+    );
+    assert_eq!(
+        loader.snapshot().reasoning_levels_for("vendor/model"),
+        ["low", "high"]
+    );
     assert_eq!(*loader.snapshot(), *server.loader(&cache).snapshot());
 }
 
@@ -302,7 +315,9 @@ async fn malformed_compact_source_does_not_discard_other_cached_models() {
     let server = Server::start().await;
     let loader = server.loader(&cache);
     loader.refresh(false).await.unwrap();
-    let expected = loader.snapshot().reasoning_levels_for("vendor/model");
+    let expected = loader
+        .snapshot()
+        .reasoning_levels_for("openrouter/vendor/model");
     let mut bundle: Value = catalog_io::read_json(&cache.path(), MAX_CACHE_BYTES)
         .unwrap()
         .unwrap();
@@ -316,7 +331,9 @@ async fn malformed_compact_source_does_not_discard_other_cached_models() {
         CatalogStatus::Error
     );
     assert_eq!(
-        reopened.snapshot().reasoning_levels_for("vendor/model"),
+        reopened
+            .snapshot()
+            .reasoning_levels_for("openrouter/vendor/model"),
         expected
     );
     assert!(
@@ -385,6 +402,12 @@ async fn auxiliary_catalog_works_when_models_dev_never_loaded() {
             .reasoning_levels_for("vendor/model"),
         ["low", "high"]
     );
+    assert_eq!(
+        loader
+            .snapshot()
+            .reasoning_levels_for("openrouter/vendor/model"),
+        ["low", "high"]
+    );
     assert_eq!(loader.auxiliary_status("models_dev"), CatalogStatus::Error);
 }
 
@@ -418,7 +441,9 @@ async fn auxiliary_only_refresh_does_not_fetch_fresh_sources_or_change_primary_e
     );
     assert_eq!(loader.auxiliary_status("models_dev"), CatalogStatus::Stale);
     assert_eq!(
-        loader.snapshot().reasoning_levels_for("vendor/model"),
+        loader
+            .snapshot()
+            .reasoning_levels_for("openrouter/vendor/model"),
         ["max"]
     );
 }
@@ -436,7 +461,9 @@ async fn malformed_source_preserves_cache_and_backoff_recovers_independently() {
         Some(ModelMetadataError::InvalidCatalog)
     );
     assert_eq!(
-        loader.snapshot().reasoning_levels_for("model"),
+        loader
+            .snapshot()
+            .reasoning_levels_for("openrouter/vendor/model"),
         ["low", "high"]
     );
     loader.state.write().unwrap()[2].retry_at_ms = Some(1);
@@ -519,7 +546,7 @@ async fn corrupted_source_hash_does_not_discard_other_sources() {
     assert!(loader.snapshot().resolve("vendor/model").is_some());
     assert_eq!(
         loader.snapshot().reasoning_levels_for("vendor/model"),
-        ["low"]
+        ["low", "high"]
     );
     assert!(loader.snapshot().resolve("malicious").is_none());
 }

@@ -112,6 +112,7 @@ export type UsageMockOptions = {
   usageUpstreamResponseModel?: string;
   usageEndpointKind?: string;
   usageCacheContext?: CacheContextDiagnostics;
+  usageCacheAffinity?: RoutingDiagnostics["cacheAffinity"];
   activeModelCounts?: Array<{ model: string; requestCount: number }>;
   usageToolDiagnostics?: "forwarded_text_only" | "dropped_text_only";
   usageTotalPages?: number;
@@ -175,7 +176,10 @@ export type PoolMockOptions = {
   poolMembers?: boolean;
   mixedModels?: boolean;
   serverModelOrder?: string[];
-  modelMetadata?: Record<string, Pick<ModelSummary, "catalogProvider" | "catalogFamily" | "catalogName">>;
+  modelMetadata?: Record<string, Pick<ModelSummary,
+    "catalogProvider" | "catalogFamily" | "catalogName" | "catalogSourceModelId"
+    | "catalogReasoning" | "catalogReasoningMethod" | "catalogReasoningEffortLevels" | "catalogCapabilities"
+  >>;
   modelOrderError?: boolean;
   modelOrderDelayMs?: number;
   modelContextDelayMs?: number;

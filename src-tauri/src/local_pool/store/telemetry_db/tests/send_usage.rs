@@ -19,12 +19,42 @@ fn pre_dispatch_rejections_persist_without_provider_sends_or_consumption() {
     let root = std::env::temp_dir().join(format!("relay-local-rejection-{}", uuid::Uuid::new_v4()));
     let path = root.join("usage.sqlite");
     let database = TelemetryDb::open(&path).unwrap();
-    for (id, transport) in [
-        ("http-rejected", zenith_relay_core::UsageTransport::Http),
-        ("ws-rejected", zenith_relay_core::UsageTransport::Websocket),
+    for (id, transport, detailed) in [
+        (
+            "http-rejected",
+            zenith_relay_core::UsageTransport::Http,
+            false,
+        ),
+        (
+            "ws-rejected",
+            zenith_relay_core::UsageTransport::Websocket,
+            false,
+        ),
+        (
+            "http-detailed",
+            zenith_relay_core::UsageTransport::Http,
+            true,
+        ),
+        (
+            "ws-detailed",
+            zenith_relay_core::UsageTransport::Websocket,
+            true,
+        ),
     ] {
         let mut event = pre_dispatch_rejection(id);
         event.transport = transport;
+        if detailed {
+            event.upstream_error =
+                Some(zenith_relay_core::usage::UpstreamErrorDetails::from_value(
+                    Some(400),
+                    &serde_json::json!({"error": {
+                        "code": event.error_category,
+                        "type": "relay_adapter",
+                        "param": "previous_response_id",
+                        "message": "Continuation is not available on this route"
+                    }}),
+                ));
+        }
         database.record(&event).unwrap();
         database.record(&event).unwrap();
         assert_cache_matches_scan(&database);
@@ -43,7 +73,7 @@ fn pre_dispatch_rejections_persist_without_provider_sends_or_consumption() {
         assert!(diagnostics["attempts"].as_array().unwrap().is_empty());
     }
     let page = database.usage_page(&UsageQuery::default()).unwrap();
-    assert_eq!(page.totals.requests, 2);
+    assert_eq!(page.totals.requests, 4);
     assert_eq!(page.totals.successful_requests, 0);
     assert_eq!(page.totals.total_tokens, 0);
     assert_eq!(page.totals.cached_input_samples, 0);
@@ -62,7 +92,13 @@ fn pre_dispatch_rejections_persist_without_provider_sends_or_consumption() {
 
     let database = TelemetryDb::open(&path).unwrap();
     let rows = database.list(10).unwrap();
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 4);
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.upstream_error.is_some())
+            .count(),
+        2
+    );
     for row in rows {
         assert_eq!(row.attempt, 0);
         assert_eq!(row.error_origin, Some(ErrorOrigin::Relay));
@@ -73,6 +109,16 @@ fn pre_dispatch_rejections_persist_without_provider_sends_or_consumption() {
         assert!(row.candidate_id.is_none());
         assert!(row.input_tokens.is_none());
         assert!(row.output_tokens.is_none());
+        if let Some(details) = row.upstream_error {
+            assert_eq!(details.http_status, Some(400));
+            assert_eq!(details.error_type.as_deref(), Some("relay_adapter"));
+            assert_eq!(details.code.as_deref(), row.error_category.as_deref());
+            assert_eq!(details.parameter.as_deref(), Some("previous_response_id"));
+            assert_eq!(
+                details.message.as_deref(),
+                Some("Continuation is not available on this route")
+            );
+        }
     }
     assert_cache_matches_scan(&database);
 }
@@ -87,6 +133,18 @@ fn pre_dispatch_records_do_not_accept_provider_usage_or_overwrite_a_send() {
     let mut invalid_local = pre_dispatch_rejection("invalid-local");
     invalid_local.input_tokens = Some(10);
     assert!(database.record(&invalid_local).is_err());
+    for (status, code, kind) in [
+        (400, "adapter_continuation_mismatch", "provider_error"),
+        (502, "adapter_continuation_mismatch", "relay_adapter"),
+        (400, "upstream_invalid_request", "relay_adapter"),
+    ] {
+        let mut event = pre_dispatch_rejection("invalid-diagnostic");
+        event.upstream_error = Some(zenith_relay_core::usage::UpstreamErrorDetails::from_value(
+            Some(status),
+            &serde_json::json!({"error": {"code": code, "type": kind}}),
+        ));
+        assert!(database.record(&event).is_err());
+    }
 
     let rejection = pre_dispatch_rejection("request");
     database.record(&rejection).unwrap();

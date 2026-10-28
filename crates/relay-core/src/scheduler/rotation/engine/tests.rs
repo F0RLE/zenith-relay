@@ -1,5 +1,8 @@
 use super::*;
 
+mod cache_diagnostics;
+mod quota_affinity;
+
 fn candidate(id: &str, priority: i32, weight: u32) -> RotationCandidate {
     let mut candidate = RotationCandidate::new(id, "responses:gpt", "gpt-6");
     candidate.priority = priority;
@@ -306,7 +309,8 @@ fn cache_owner_rebalance_uses_fresh_quota_margins_not_completion_order() {
         (Some(8_000), Some(8_100), false),
         (Some(8_100), Some(8_000), false),
         (Some(8_499), Some(8_000), false),
-        (Some(8_500), Some(8_000), true),
+        (Some(8_500), Some(8_000), false),
+        (Some(8_999), Some(8_000), false),
         (Some(9_000), Some(8_000), true),
         (Some(9_000), None, true),
         (None, Some(8_000), false),

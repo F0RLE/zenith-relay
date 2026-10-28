@@ -1,13 +1,22 @@
 use super::*;
 use crate::local_pool::store::refresh::same_account_scope;
 
+fn is_later_usage(previous: Option<&str>, incoming: &str) -> bool {
+    let Ok(incoming) = chrono::DateTime::parse_from_rfc3339(incoming) else {
+        return false;
+    };
+    previous
+        .and_then(|previous| chrono::DateTime::parse_from_rfc3339(previous).ok())
+        .is_none_or(|previous| incoming > previous)
+}
+
 impl LocalPoolStore {
     fn touched_key(&self, key_id: &str, at: &str) -> Option<(usize, LocalGatewayKeyRecord)> {
         self.keys
             .iter()
             .enumerate()
             .find(|(_, key)| key.id == key_id)
-            .filter(|(_, key)| key.last_used_at.as_deref() != Some(at))
+            .filter(|(_, key)| is_later_usage(key.last_used_at.as_deref(), at))
             .map(|(index, key)| {
                 let mut key = key.clone();
                 key.last_used_at = Some(at.to_string());
@@ -21,7 +30,7 @@ impl LocalPoolStore {
             .iter()
             .enumerate()
             .find(|(_, source)| source.id == source_id)
-            .filter(|(_, source)| source.last_used_at.as_deref() != Some(at))
+            .filter(|(_, source)| is_later_usage(source.last_used_at.as_deref(), at))
             .map(|(index, source)| {
                 let mut source = source.clone();
                 source.last_used_at = Some(at.to_string());

@@ -83,7 +83,11 @@ fn observe_reservations(runtime: &Arc<GatewayRuntime>) -> Arc<AtomicUsize> {
 async fn incompatible_bps_preparation_does_not_restart_recovery_or_access_reads() {
     for persistent in [false, true] {
         let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
-        let runtime = Arc::new(runtime(&server).await);
+        let usage = Arc::new(Mutex::new(Vec::<crate::UsageEvent>::new()));
+        let captured = usage.clone();
+        let mut runtime = runtime(&server).await;
+        runtime.usage = Arc::new(move |event| crate::poison::mutex(&captured).push(event));
+        let runtime = Arc::new(runtime);
         runtime.set_route_recovery_enabled(persistent);
         let events = observe_reservations(&runtime);
         let (base, task) = super::recovery::gateway(runtime.clone()).await;
@@ -91,7 +95,7 @@ async fn incompatible_bps_preparation_does_not_restart_recovery_or_access_reads(
             .post(format!("{base}/v1/responses"))
             .bearer_auth("local-secret")
             .json(&json!({
-                "model":"gpt-test", "input":"Synthetic input",
+                "model":"gpt-test", "input":"private-preparation-sentinel",
                 "text":{"format":{"type":"json_object"}}
             }))
             .send()
@@ -107,6 +111,38 @@ async fn incompatible_bps_preparation_does_not_restart_recovery_or_access_reads(
         assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 0);
         assert_eq!(server.state.access_requests.load(Ordering::SeqCst), 1);
         assert!(!runtime.lock_scheduler().is_retired());
+        let usage = crate::poison::mutex(&usage);
+        assert_eq!(usage.len(), 1);
+        let event = &usage[0];
+        assert_eq!(event.attempt, 0);
+        assert_eq!(event.source_id, "relay");
+        assert!(event.candidate_id.is_none());
+        assert!(event.account_id.is_none());
+        assert!(event.total_tokens.is_none());
+        assert!(event.cooldown_scope.is_none());
+        let details = event.upstream_error.as_ref().unwrap();
+        assert_eq!(details.http_status, Some(400));
+        assert_eq!(
+            details.code.as_deref(),
+            Some("adapter_parameter_unsupported")
+        );
+        assert_eq!(details.error_type.as_deref(), Some("relay_adapter"));
+        assert_eq!(
+            details.parameter.as_deref(),
+            body["error"]["param"].as_str()
+        );
+        assert!(
+            details
+                .message
+                .as_ref()
+                .unwrap()
+                .contains(details.parameter.as_ref().unwrap())
+        );
+        assert!(
+            !serde_json::to_string(event)
+                .unwrap()
+                .contains("private-preparation-sentinel")
+        );
         task.abort();
     }
 }

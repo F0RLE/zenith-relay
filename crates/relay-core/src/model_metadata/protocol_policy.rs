@@ -80,6 +80,7 @@ pub(super) fn apply(metadata: &mut ModelMetadata) {
             source: "relay_protocol_policy".into(),
             revision: Some(policy().revision.clone()),
             conflicts: Vec::new(),
+            ..Default::default()
         },
     );
 }

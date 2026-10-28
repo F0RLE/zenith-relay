@@ -332,10 +332,12 @@ impl TelemetryDb {
     }
 
     pub fn clear(&self) -> Result<()> {
-        let connection = self.lock_connection()?;
-        connection
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction().map_err(db_error)?;
+        transaction
             .execute_batch("DELETE FROM request_logs; DELETE FROM request_attempts; DELETE FROM usage_candidate_rollups; DELETE FROM weekly_capacity_anchors; DELETE FROM weekly_capacity_history;")
             .map_err(db_error)?;
+        transaction.commit().map_err(db_error)?;
         self.clear_cached_usage_totals()?;
         self.capacity_seen.lock().map_err(lock_error)?.clear();
         self.capacity_revision.fetch_add(1, Ordering::Release);
@@ -372,7 +374,11 @@ fn is_local_pre_dispatch_rejection(event: &UsageEvent) -> bool {
         && event.output_tokens.is_none()
         && event.total_tokens.is_none()
         && event.image_usage.is_none()
-        && event.upstream_error.is_none()
+        && event.upstream_error.as_ref().is_none_or(|details| {
+            details.error_type.as_deref() == Some("relay_adapter")
+                && details.http_status == Some(event.http_status)
+                && details.code.as_deref() == event.error_category.as_deref()
+        })
         && event.quota_snapshot.is_none()
 }
 

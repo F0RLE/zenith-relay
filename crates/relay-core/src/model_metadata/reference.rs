@@ -1,9 +1,24 @@
 use super::order::normalize;
 use super::{MAX_RECORDS, validate_metadata_payload};
 use serde_json::{Map, Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const IDENTITY_PRIORITY: &str = "_relay_identity_priority";
+
+#[cfg(test)]
+mod scope_tests;
+
+/// A slash in an upstream ID does not make its hosting provider disappear.
+pub(super) fn provider_scoped_id(provider: &str, model: &str) -> String {
+    if model
+        .split_once('/')
+        .is_some_and(|(prefix, _)| prefix.eq_ignore_ascii_case(provider))
+    {
+        model.to_owned()
+    } else {
+        format!("{provider}/{model}")
+    }
+}
 
 pub(super) fn identity_priority(model_record: &Value) -> u64 {
     model_record
@@ -27,6 +42,7 @@ pub(super) fn merge_reference_records(
     // The primary validator supports several legacy shapes. Preserve that
     // traversal, but release its tree before merging the auxiliary sources.
     drop(primary);
+    let canonical_ids: BTreeSet<_> = merged_records.keys().cloned().collect();
     for (provider_name, provider_record) in details
         .as_mut()
         .and_then(Value::as_object_mut)
@@ -44,22 +60,24 @@ pub(super) fn merge_reference_records(
                 .and_then(Value::as_str)
                 .filter(|model_id| !model_id.trim().is_empty())
                 .unwrap_or(source_id);
-            let qualified_id = if model_id.contains('/') {
-                model_id.to_owned()
-            } else {
-                format!("{provider_name}/{model_id}")
-            };
+            let qualified_id = provider_scoped_id(provider_name, model_id);
+            let canonical_id = (normalize(&qualified_id) != normalize(model_id)
+                && canonical_ids.contains(&normalize(model_id)))
+            .then(|| model_id.to_owned());
             if !model_record.is_object() {
                 continue;
             }
             let needs_alias = model_id != source_id;
             let mut projected = model_record.take();
+            if let Some(canonical_id) = canonical_id {
+                projected
+                    .as_object_mut()
+                    .expect("validated catalog record")
+                    .entry("canonical_model_id")
+                    .or_insert_with(|| json!(canonical_id));
+            }
             if needs_alias {
-                let alias = if source_id.contains('/') {
-                    source_id.clone()
-                } else {
-                    format!("{provider_name}/{source_id}")
-                };
+                let alias = provider_scoped_id(provider_name, source_id);
                 let aliases = projected
                     .as_object_mut()
                     .expect("validated catalog record")
@@ -129,7 +147,11 @@ pub(super) fn merge_reference_records(
                     projected_record["modalities"][to] = modalities;
                 }
             }
-            insert(&mut merged_records, &route_model_id, projected_record, 1);
+            let scoped_id = provider_scoped_id("openrouter", &route_model_id);
+            if canonical_ids.contains(&normalize(&route_model_id)) {
+                projected_record["canonical_model_id"] = json!(route_model_id);
+            }
+            insert(&mut merged_records, &scoped_id, projected_record, 1);
         }
     }
     drop(openrouter);
@@ -148,11 +170,7 @@ pub(super) fn merge_reference_records(
         else {
             continue;
         };
-        let qualified_id = if model_id.contains('/') {
-            model_id.clone()
-        } else {
-            format!("{integration_provider}/{model_id}")
-        };
+        let qualified_id = provider_scoped_id(integration_provider, model_id);
         let mut projected_record = Map::new();
         for (from, to) in [
             ("supports_function_calling", "tool_call"),
@@ -249,7 +267,7 @@ fn insert(
             _ => "models_dev",
         });
     }
-    super::provenance::initialize(&mut metadata_record, priority);
+    super::provenance::initialize_for_model(&mut metadata_record, priority, model_id);
     if let Some(existing_record) = merged_records.get_mut(&normalized_model_id) {
         existing_record[IDENTITY_PRIORITY] =
             json!(identity_priority(existing_record).min(priority));
@@ -289,6 +307,31 @@ fn fill_missing(target: &mut Value, fallback: Value) {
             }
         }
     }
+}
+
+/// Fresh evidence wins within an exact provider/model scope. Last-known stale
+/// records remain available only for missing fields or missing identities.
+pub(super) fn fill_stale_gaps(mut fresh: Value, stale: Value) -> Value {
+    let Some(targets) = fresh.as_object_mut() else {
+        return stale;
+    };
+    if let Value::Object(records) = stale {
+        for (id, mut record) in records {
+            if let Some(target) = targets.get_mut(&id) {
+                target[IDENTITY_PRIORITY] =
+                    json!(identity_priority(target).min(identity_priority(&record)));
+                super::provenance::merge(target, &record);
+                record
+                    .as_object_mut()
+                    .expect("merged record")
+                    .remove(super::provenance::MARKER);
+                fill_missing(target, record);
+            } else if targets.len() < MAX_RECORDS {
+                targets.insert(id, record);
+            }
+        }
+    }
+    fresh
 }
 
 #[cfg(test)]
@@ -339,15 +382,18 @@ mod tests {
             detail_ptr
         );
         assert_eq!(
-            records["vendor/route"]["description"]
+            records["openrouter/vendor/route"]["description"]
                 .as_str()
                 .unwrap()
                 .as_ptr(),
             router_ptr
         );
-        assert_eq!(records["vendor/route"]["limit"]["context"], json!(4096));
         assert_eq!(
-            records["vendor/route"]["modalities"]["input"],
+            records["openrouter/vendor/route"]["limit"]["context"],
+            json!(4096)
+        );
+        assert_eq!(
+            records["openrouter/vendor/route"]["modalities"]["input"],
             json!(["text"])
         );
         assert_eq!(records["vendor/primary"]["tool_call"], json!(false));
@@ -376,7 +422,13 @@ mod tests {
         let capabilities = catalog.capabilities_for("gpt-synthetic");
         assert_eq!(capabilities.tool_call, Some(false));
         assert_eq!(capabilities.structured_output, Some(true));
-        assert_eq!(capabilities.input_modalities, ["text", "image"]);
+        assert_eq!(capabilities.input_modalities, ["text"]);
+        assert_eq!(
+            catalog
+                .capabilities_for("openrouter/openai/gpt-synthetic")
+                .input_modalities,
+            ["text", "image"]
+        );
         assert_eq!(capabilities.context_limit, Some(100));
         assert_eq!(capabilities.input_limit, Some(80));
         assert_eq!(capabilities.output_limit, Some(20));
@@ -427,7 +479,11 @@ mod tests {
         .unwrap();
         assert_eq!(catalog.resolve("future").unwrap().provider, "openai");
         assert_eq!(
-            catalog.resolve("future").unwrap().family.as_deref(),
+            catalog
+                .resolve("router/openai/future")
+                .unwrap()
+                .family
+                .as_deref(),
             Some("future-family")
         );
         assert_eq!(
@@ -440,7 +496,8 @@ mod tests {
             catalog.resolve("new-model").unwrap().name.as_deref(),
             Some("New")
         );
-        assert!(!records.contains_key("router/openai/future"));
+        assert_eq!(catalog.resolve("future").unwrap().family, None);
+        assert!(records.contains_key("router/openai/future"));
     }
 
     #[test]
@@ -455,7 +512,7 @@ mod tests {
             &serde_json::to_string(&records).unwrap(),
         )
         .unwrap();
-        assert_eq!(catalog.resolve("future").unwrap().provider, "vendor");
+        assert_eq!(catalog.resolve("future").unwrap().provider, "openrouter");
         assert_eq!(
             catalog.resolve("host/future").unwrap().name.as_deref(),
             Some("Hosted")
@@ -475,8 +532,9 @@ mod tests {
             &serde_json::to_string(&records).unwrap(),
         )
         .unwrap();
-        let model = catalog.capabilities_for("model");
+        let model = catalog.capabilities_for("openrouter/vendor/model");
         assert_eq!(model.input_modalities, ["text"]);
         assert_eq!(model.context_limit, Some(256));
+        assert_eq!(catalog.capabilities_for("vendor/model").context_limit, None);
     }
 }

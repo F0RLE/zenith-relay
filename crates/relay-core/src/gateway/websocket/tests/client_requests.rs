@@ -77,7 +77,20 @@ async fn final_websocket_continuation_rejection_is_recorded_without_dispatch() {
     assert!(event.routing.is_none());
     assert!(event.input_tokens.is_none());
     assert!(event.output_tokens.is_none());
-    assert!(event.upstream_error.is_none());
+    let details = event.upstream_error.as_ref().unwrap();
+    assert_eq!(details.http_status, Some(400));
+    assert_eq!(details.code.as_deref(), Some(failure.category));
+    assert_eq!(details.error_type.as_deref(), Some("relay_adapter"));
+    assert_eq!(
+        details.message.as_deref(),
+        Some("the continuation belongs to a different model or source route")
+    );
+    assert!(details.parameter.is_none());
+    assert!(
+        !serde_json::to_string(event)
+            .unwrap()
+            .contains("private-synthetic-context")
+    );
     assert!(event.cooldown_scope.is_none());
 }
 

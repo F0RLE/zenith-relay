@@ -211,7 +211,7 @@ fn slight_parallel_load_keeps_prompt_affinity_and_its_diagnostics() {
 #[test]
 fn successful_load_spillover_keeps_prompt_owner_inside_the_resource_band() {
     let mut scheduler = PoolScheduler::new();
-    for (id, remaining) in [("owner", 8_000), ("spillover", 8_100)] {
+    for (id, remaining) in [("owner", 8_000), ("spillover", 8_500)] {
         let mut member = oauth_candidate(id);
         member.quota = CandidateQuota::Available(remaining);
         member.quota_updated_at_ms = Some(100);

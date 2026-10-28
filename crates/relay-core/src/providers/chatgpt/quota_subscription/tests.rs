@@ -258,6 +258,8 @@ async fn subscription_retry_after_prevents_an_early_nested_retry() {
         .with_state(attempts.clone());
     let (client, server) = check_client(router).await;
     let failure = client.fetch("synthetic", "account", 0).await.unwrap_err();
+    assert_eq!(failure.code, crate::error_codes::SUBSCRIPTION_RATE_LIMITED);
+    assert_eq!(failure.http_status(), Some(429));
     assert_eq!(failure.retry_after_ms(), Some(3_600_000));
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
     server.abort();

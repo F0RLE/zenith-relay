@@ -73,6 +73,7 @@ async fn reasoning_checks_exact_capabilities_and_preserves_supported_native_exte
                     checked_at_ms: 1,
                     features: [(ProtocolFeature::Reasoning, reasoning_status)].into(),
                     reasoning_efforts: declared_effort.into_iter().map(str::to_owned).collect(),
+                    token_limits: Default::default(),
                     service_tiers: None,
                 }];
                 let runtime = GatewayRuntime::from_pool(

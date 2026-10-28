@@ -346,7 +346,53 @@ async fn quota_refresh_drops_an_expiry_from_a_different_subscription_plan() {
 }
 
 #[tokio::test]
-async fn failed_subscription_probe_keeps_metadata_and_advances_refresh_time() {
+async fn cleared_subscription_date_stays_absent_during_later_quota_polls() {
+    let router = Router::new()
+        .route(
+            "/backend-api/wham/usage",
+            get(successful_usage_without_plan),
+        )
+        .route(
+            "/backend-api/accounts/check/v4-2023-04-27",
+            get(subscription_account_check),
+        )
+        .route(
+            "/backend-api/subscriptions",
+            get(subscription_status_without_expiry),
+        );
+    let (usage_endpoint, server) = spawn(router).await;
+    let client = client_with_subscription(usage_endpoint);
+    let mut subscription = Subscription {
+        plan_type: Some("business".into()),
+        active_until_ms: Some(1_600_000_000_000),
+        status: SubscriptionStatus::Expired,
+        updated_at_ms: Some(99),
+    };
+    let now_ms = 1_700_000_000_000;
+    for (offset, refresh_subscription) in [(0, true), (1_000, false), (2_000, false)] {
+        let data = client
+            .refresh_data_with_subscription(
+                "access-secret",
+                "account-123",
+                now_ms + offset,
+                &subscription,
+                refresh_subscription,
+            )
+            .await
+            .unwrap();
+        let (_, observed) = data.quota.normalize(&QuotaSnapshot::default()).unwrap();
+        if let Some(observed) = observed {
+            subscription = observed;
+        }
+        assert_eq!(subscription.active_until_ms, None);
+        assert_eq!(subscription.status, SubscriptionStatus::Active);
+        assert_eq!(subscription.updated_at_ms, Some(now_ms));
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn failed_subscription_probe_preserves_metadata_and_refresh_time() {
     let router = Router::new()
         .route(
             "/backend-api/wham/usage",
@@ -377,7 +423,148 @@ async fn failed_subscription_probe_keeps_metadata_and_advances_refresh_time() {
     let subscription = subscription.unwrap();
     assert_eq!(subscription.plan_type, previous.plan_type);
     assert_eq!(subscription.active_until_ms, previous.active_until_ms);
+    assert_eq!(subscription.updated_at_ms, previous.updated_at_ms);
+    server.abort();
+}
+
+#[tokio::test]
+async fn quota_only_or_unsupported_subscription_read_keeps_expiry_freshness() {
+    let router = Router::new().route("/backend-api/wham/usage", get(successful_usage));
+    let (usage_endpoint, server) = spawn(router).await;
+    let client = client_with_subscription(usage_endpoint);
+    let previous = Subscription {
+        plan_type: Some("pro".into()),
+        active_until_ms: Some(1_800_000_000_000),
+        status: SubscriptionStatus::Active,
+        updated_at_ms: Some(1_700_000_000_000),
+    };
+    for refresh_subscription in [false, true] {
+        let now_ms = previous.updated_at_ms.unwrap() + 30 * 60 * 1_000;
+        let data = client
+            .refresh_data_with_subscription_authorization(
+                bearer_authorization("access-secret").unwrap(),
+                None,
+                "account-123",
+                now_ms,
+                &previous,
+                refresh_subscription,
+            )
+            .await
+            .unwrap();
+        let (_, subscription) = data.quota.normalize(&QuotaSnapshot::default()).unwrap();
+        let subscription = subscription.unwrap();
+        assert_eq!(subscription, previous);
+        assert!(crate::providers::chatgpt::subscription_refresh_due(
+            subscription.active_until_ms,
+            subscription.updated_at_ms,
+            now_ms,
+        ));
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn quota_plan_change_without_subscription_access_drops_unrelated_expiry() {
+    let router = Router::new().route("/backend-api/wham/usage", get(successful_usage));
+    let (usage_endpoint, server) = spawn(router).await;
+    let client = client_with_subscription(usage_endpoint);
+    let previous = Subscription {
+        plan_type: Some("plus".into()),
+        active_until_ms: Some(1_800_000_000_000),
+        status: SubscriptionStatus::Active,
+        updated_at_ms: Some(99),
+    };
+    let now_ms = 1_700_000_000_000;
+    let data = client
+        .refresh_data_with_subscription_authorization(
+            bearer_authorization("access-secret").unwrap(),
+            None,
+            "account-123",
+            now_ms,
+            &previous,
+            true,
+        )
+        .await
+        .unwrap();
+    let (_, subscription) = data.quota.normalize(&QuotaSnapshot::default()).unwrap();
+    let subscription = subscription.unwrap();
+    assert_eq!(subscription.plan_type.as_deref(), Some("pro"));
+    assert_eq!(subscription.active_until_ms, None);
     assert_eq!(subscription.updated_at_ms, Some(now_ms));
+    server.abort();
+}
+
+#[tokio::test]
+async fn missing_subscription_expiry_recovers_after_a_rate_limited_fallback() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let fallback_attempts = attempts.clone();
+    let router = Router::new()
+        .route(
+            "/backend-api/wham/usage",
+            get(successful_usage_without_plan),
+        )
+        .route(
+            "/backend-api/accounts/check/v4-2023-04-27",
+            get(subscription_account_check),
+        )
+        .route(
+            "/backend-api/subscriptions",
+            get(move || {
+                let attempts = fallback_attempts.clone();
+                async move {
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        (
+                            StatusCode::TOO_MANY_REQUESTS,
+                            [("retry-after", "60")],
+                            "private-body",
+                        )
+                            .into_response()
+                    } else {
+                        Json(json!({
+                            "subscription_plan": "business",
+                            "active_until": 1_800_000_000_000_u64,
+                        }))
+                        .into_response()
+                    }
+                }
+            }),
+        );
+    let (usage_endpoint, server) = spawn(router).await;
+    let client = client_with_subscription(usage_endpoint);
+    let previous = Subscription {
+        plan_type: Some("business".into()),
+        active_until_ms: None,
+        status: SubscriptionStatus::Active,
+        updated_at_ms: Some(99),
+    };
+    let now_ms = 1_700_000_000_000;
+    let data = client
+        .refresh_data_with_subscription("access-secret", "account-123", now_ms, &previous, true)
+        .await
+        .unwrap();
+    let (_, subscription) = data.quota.normalize(&QuotaSnapshot::default()).unwrap();
+    assert_eq!(subscription.as_ref(), Some(&previous));
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+    let data = client
+        .refresh_data_with_subscription(
+            "access-secret",
+            "account-123",
+            now_ms + 60_000,
+            &previous,
+            true,
+        )
+        .await
+        .unwrap();
+    let (_, subscription) = data.quota.normalize(&QuotaSnapshot::default()).unwrap();
+    let subscription = subscription.unwrap();
+    assert_eq!(subscription.active_until_ms, Some(1_800_000_000_000));
+    assert_eq!(subscription.updated_at_ms, Some(now_ms + 60_000));
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
     server.abort();
 }
 

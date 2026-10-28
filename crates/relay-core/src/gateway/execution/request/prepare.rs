@@ -210,7 +210,9 @@ pub(super) fn prepare_request_attempt(
             &mut preparation.schema_validation_ms,
             tool_policy.diagnostics.client_context.is_some(),
         ) {
-            Ok(original) => Some(original),
+            Ok(original) => {
+                Some(original.with_agent_messages(runtime.agent_message_context(&key.id)))
+            }
             Err(error) => return stop_for_adapter_error(error, request_id, last_adapter_error),
         }
     } else {

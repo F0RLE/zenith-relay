@@ -38,6 +38,7 @@ pub(super) struct PricedWorkload {
     pub cost: u64,
     pub workload: Workload,
     pub pricing_coverage_basis_points: u16,
+    pub usage_fingerprint: String,
 }
 
 pub(super) fn measure(
@@ -53,7 +54,7 @@ pub(super) fn measure(
          COALESCE(effective_reasoning_effort, ''), {columns}, COUNT(*)
          FROM usage_sends WHERE account_id = ?1
          AND created_at >= datetime(?2 / 1000, 'unixepoch') AND created_at <= datetime(?3 / 1000, 'unixepoch')
-         GROUP BY 1, 2, 3, 4",
+         GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4",
         class = zenith_relay_core::usage::USAGE_PRICE_CLASS_SQL,
         context = zenith_relay_core::usage::USAGE_CONTEXT_BAND_SQL,
         columns = zenith_relay_core::usage::API_EQUIVALENT_AGGREGATE_SQL,
@@ -62,6 +63,7 @@ pub(super) fn measure(
     let mut statement = connection.prepare(&sql).map_err(db_error)?;
     let mut profiles = BTreeMap::<String, u64>::new();
     let mut models = std::collections::BTreeSet::new();
+    let mut evidence = Sha256::new();
     let (mut cost, mut input, mut cached, mut output) = (0_u64, 0_u64, 0_u64, 0_u64);
     let (mut priced_tokens, mut unpriced_tokens) = (0_u64, 0_u64);
     for account in accounts {
@@ -82,15 +84,37 @@ pub(super) fn measure(
                 let complete = [12, 13, 15]
                     .into_iter()
                     .all(|index| row.get::<_, i64>(index).ok() == Some(rows));
-                Ok((model, class, context, effort, usage, complete))
+                Ok((model, class, context, effort, usage, complete, rows))
             })
             .map_err(db_error)?;
         for row in rows {
-            let (model, class, context, effort, usage, complete) = row.map_err(db_error)?;
+            let (model, class, context, effort, usage, complete, rows) = row.map_err(db_error)?;
             let value = resolver.estimate("account", account, Some(&model), usage);
             if !complete || model.is_empty() || usage.cached_input_tokens > usage.input_tokens {
                 return Ok(None);
             }
+            // Price-independent evidence detects removed or corrected sends on
+            // later repricing, even if the coarse workload mix stayed the same.
+            evidence.update(
+                serde_json::to_vec(&(
+                    account,
+                    &model,
+                    &class,
+                    &context,
+                    &effort,
+                    rows,
+                    [
+                        usage.input_tokens,
+                        usage.cached_input_tokens,
+                        usage.cache_write_5m_tokens,
+                        usage.cache_write_1h_tokens,
+                        usage.unknown_cache_write_tokens,
+                        usage.output_tokens,
+                        usage.total_tokens,
+                    ],
+                ))
+                .map_err(json_error)?,
+            );
             let row_input = usage.input_tokens.unwrap_or_default();
             let row_output = usage.output_tokens.unwrap_or_default();
             let tokens = row_input.saturating_add(row_output);
@@ -150,5 +174,6 @@ pub(super) fn measure(
             output_band,
         },
         pricing_coverage_basis_points,
+        usage_fingerprint: hex::encode(evidence.finalize()),
     }))
 }

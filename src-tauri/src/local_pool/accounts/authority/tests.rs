@@ -26,15 +26,21 @@ use zenith_relay_core::accounts::{
 use zenith_relay_core::providers::chatgpt::AgentIdentityCredential;
 use zenith_relay_core::unix_time_ms as now_ms;
 
+mod rotation_persistence;
+
 #[derive(Default)]
 struct MemorySecrets {
     values: Mutex<HashMap<String, String>>,
     fail_save: AtomicBool,
+    fail_primary_save: AtomicBool,
+    fail_load: AtomicBool,
 }
 
 impl SecretBackend for MemorySecrets {
     fn save(&self, secret_ref: &str, secret_value: &str) -> Result<(), SecretBackendError> {
-        if self.fail_save.load(Ordering::SeqCst) {
+        if self.fail_save.load(Ordering::SeqCst)
+            || (self.fail_primary_save.load(Ordering::SeqCst) && !secret_ref.ends_with("-rotation"))
+        {
             return Err(SecretBackendError);
         }
         self.values
@@ -45,6 +51,9 @@ impl SecretBackend for MemorySecrets {
     }
 
     fn load(&self, secret_ref: &str) -> Result<Option<String>, SecretBackendError> {
+        if self.fail_load.load(Ordering::SeqCst) {
+            return Err(SecretBackendError);
+        }
         Ok(self.values.lock().unwrap().get(secret_ref).cloned())
     }
 
@@ -204,7 +213,7 @@ async fn unresolved_siwc_checkpoint_stops_refresh_and_persists_recovery_state() 
     .with_siwc_registration(Some(registration))
     .unwrap();
     store.save(&initial).unwrap();
-    store.checkpoint_siwc_rotation(&initial, None).unwrap();
+    store.checkpoint_token_rotation(&initial, None).unwrap();
     let client = Arc::new(RefreshOnce {
         calls: AtomicUsize::new(0),
     });
@@ -251,7 +260,7 @@ async fn unresolved_siwc_checkpoint_stops_refresh_and_persists_recovery_state() 
             .matches_snapshot(&initial)
     );
     assert_eq!(
-        store.recover_siwc_rotation(&initial).unwrap_err().code,
+        store.recover_token_rotation(&initial).unwrap_err().code,
         super::super::credentials::CredentialErrorCode::RotationOutcomeUnknown
     );
     fs::remove_dir_all(root).unwrap();

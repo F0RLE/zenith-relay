@@ -76,7 +76,7 @@ fn equivalent_records_with_different_canonical_ids_remain_ambiguous() {
 }
 
 #[test]
-fn merges_openrouter_reasoning_levels_over_litellm_and_models_dev() {
+fn keeps_openrouter_reasoning_separate_from_first_party_levels() {
     let models = serde_json::json!({
         "openai/gpt-test": {"reasoning": true}
     });
@@ -94,8 +94,12 @@ fn merges_openrouter_reasoning_levels_over_litellm_and_models_dev() {
     });
     let merged = enrich_reasoning_metadata(&models, Some(&openrouter), Some(&litellm));
     assert_eq!(
-        merged["openai/gpt-test"]["reasoning_effort_levels"],
+        merged["openrouter/openai/gpt-test"]["reasoning_effort_levels"],
         serde_json::json!(["low", "high"])
+    );
+    assert_eq!(
+        merged["openai/gpt-test"]["reasoning_effort_levels"],
+        serde_json::json!(["low", "medium", "high"])
     );
 }
 
@@ -117,6 +121,154 @@ fn falls_back_to_litellm_when_openrouter_has_no_exact_levels() {
         merged["openai/gpt-test"]["reasoning_effort_levels"],
         serde_json::json!(["minimal", "high"])
     );
+}
+
+#[test]
+fn complete_scoped_effort_enum_wins_over_partial_litellm_flags() {
+    let models = serde_json::json!({"provider/synthetic": {"reasoning": true}});
+    let details = serde_json::json!({"provider": {"models": {"synthetic": {
+        "reasoning": true,
+        "reasoning_options": [{"type": "effort", "values": ["low", "medium", "high", "xhigh", "max"]}]
+    }}}});
+    let litellm = serde_json::json!({"synthetic": {
+        "litellm_provider": "provider",
+        "supports_reasoning": true,
+        "supports_xhigh_reasoning_effort": true,
+        "supports_max_reasoning_effort": true,
+        "supports_none_reasoning_effort": false
+    }});
+    let merged = reasoning::enrich_reasoning_metadata_with_models_dev_details(
+        models,
+        Some(details),
+        None,
+        Some(litellm),
+    );
+    let metadata = catalog(&merged.to_string());
+    assert_eq!(
+        metadata.reasoning_levels_for("provider/synthetic"),
+        ["low", "medium", "high", "xhigh", "max"]
+    );
+    assert_eq!(
+        merged["provider/synthetic"]["reasoning_source"],
+        "models_dev"
+    );
+}
+
+#[test]
+fn litellm_nested_effort_enum_survives_absent_or_partial_flags() {
+    let models = serde_json::json!({"provider/synthetic": {"reasoning": true}});
+    for extra_flag in [false, true] {
+        let mut litellm = serde_json::json!({"provider/synthetic": {
+            "reasoning": {"type": "effort", "values": ["low", "medium", "high"]}
+        }});
+        if extra_flag {
+            litellm["provider/synthetic"]["supports_high_reasoning_effort"] = true.into();
+        }
+        let merged = enrich_reasoning_metadata(&models, None, Some(&litellm));
+        assert_eq!(
+            catalog(&merged.to_string()).reasoning_levels_for("provider/synthetic"),
+            ["low", "medium", "high"]
+        );
+    }
+}
+
+#[test]
+fn direct_metadata_prefers_declared_effort_enums_over_flags() {
+    for declaration in [
+        serde_json::json!({"reasoning": {"type": "effort", "values": ["low", "medium", "high"]}}),
+        serde_json::json!({"reasoning": true, "reasoning_options": [{"type": "effort", "values": ["low", "medium", "high"]}]}),
+    ] {
+        let mut record = declaration;
+        record["supports_high_reasoning_effort"] = true.into();
+        let metadata = catalog(&serde_json::json!({"provider/synthetic": record}).to_string());
+        assert_eq!(
+            metadata.reasoning_levels_for("provider/synthetic"),
+            ["low", "medium", "high"]
+        );
+    }
+}
+
+#[test]
+fn primary_effort_enum_and_default_survive_partial_enrichment() {
+    let models = serde_json::json!({"provider/synthetic": {
+        "reasoning": true,
+        "reasoning_method": "adaptive",
+        "reasoning_effort_levels": ["low", "medium", "high"],
+        "default_reasoning_effort": "high"
+    }});
+    let litellm = serde_json::json!({"provider/synthetic": {
+        "supports_high_reasoning_effort": true
+    }});
+    let merged = enrich_reasoning_metadata(&models, None, Some(&litellm));
+    let capabilities = catalog(&merged.to_string()).capabilities_for("provider/synthetic");
+    assert_eq!(
+        capabilities.reasoning_effort_levels,
+        ["low", "medium", "high"]
+    );
+    assert_eq!(
+        capabilities.default_reasoning_effort.as_deref(),
+        Some("high")
+    );
+    assert_eq!(
+        capabilities.reasoning_method,
+        Some(ReasoningMethod::Adaptive)
+    );
+}
+
+#[test]
+fn scalar_effort_is_not_an_exhaustive_enum() {
+    let models = serde_json::json!({"provider/synthetic": {"reasoning": true}});
+    let details = serde_json::json!({"provider": {"models": {"synthetic": {
+        "reasoning_options": [{"type": "effort", "values": ["low", "medium", "high"]}]
+    }}}});
+    let litellm = serde_json::json!({"provider/synthetic": {
+        "reasoning": {"effort": "high"}
+    }});
+    let merged = reasoning::enrich_reasoning_metadata_with_models_dev_details(
+        models,
+        Some(details),
+        None,
+        Some(litellm),
+    );
+    assert_eq!(
+        catalog(&merged.to_string()).reasoning_levels_for("provider/synthetic"),
+        ["low", "medium", "high"]
+    );
+
+    let direct = serde_json::json!({"provider/synthetic": {
+        "reasoning": {"effort": "max"},
+        "reasoning_options": [{"type": "effort", "values": ["low", "medium", "high"]}]
+    }});
+    assert_eq!(
+        catalog(&direct.to_string()).reasoning_levels_for("provider/synthetic"),
+        ["low", "medium", "high"]
+    );
+}
+
+#[test]
+fn explicit_unsupported_reasoning_is_not_revived_by_effort_flags() {
+    for reasoning in [
+        serde_json::json!(false),
+        serde_json::json!({"supported": false}),
+    ] {
+        let models = serde_json::json!({"provider/synthetic": {
+            "reasoning": reasoning,
+            "reasoning_effort_levels": ["low", "medium", "high"],
+            "supports_high_reasoning_effort": true
+        }});
+        let merged = enrich_reasoning_metadata(&models, None, None);
+        let capabilities = catalog(&merged.to_string()).capabilities_for("provider/synthetic");
+        assert_eq!(capabilities.reasoning, Some(false));
+        assert!(capabilities.reasoning_effort_levels.is_empty());
+    }
+    let unsupported = serde_json::json!({"provider/synthetic": {
+        "reasoning": {"effort": ["low", "high"]},
+        "supports_reasoning": false,
+        "supports_high_reasoning_effort": true
+    }});
+    let capabilities = catalog(&unsupported.to_string()).capabilities_for("provider/synthetic");
+    assert_eq!(capabilities.reasoning, Some(false));
+    assert!(capabilities.reasoning_effort_levels.is_empty());
 }
 
 #[test]
@@ -145,7 +297,7 @@ fn parses_reasoning_method_and_filters_unrecognized_efforts() {
         false,
     )
     .unwrap();
-    let capabilities = catalog.capabilities_for("provider/model");
+    let capabilities = catalog.capabilities_for("openrouter/provider/model");
     assert_eq!(capabilities.reasoning_method, Some(ReasoningMethod::Effort));
     assert_eq!(capabilities.reasoning_effort_levels, ["low", "high"]);
     assert_eq!(capabilities.default_reasoning_effort, Some("high".into()));
@@ -292,8 +444,8 @@ fn recognizes_litellm_camel_case_effort_flags_without_openrouter() {
 #[test]
 fn matches_decimal_and_dashed_model_versions_before_litellm_fallback() {
     let models = serde_json::json!({
-        "anthropic/claude-fable-5-1": {"reasoning": true},
-        "anthropic/claude-opus-4-8": {"reasoning": true}
+        "openrouter/anthropic/claude-fable-5-1": {"reasoning": true},
+        "openrouter/anthropic/claude-opus-4-8": {"reasoning": true}
     });
     let openrouter = serde_json::json!({"data": [
         {

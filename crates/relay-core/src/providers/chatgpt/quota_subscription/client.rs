@@ -232,4 +232,5 @@ fn http_failure(status: StatusCode) -> QuotaRefreshFailure {
         _ if status.is_server_error() => super::failure(error_codes::SUBSCRIPTION_UPSTREAM, true),
         _ => super::failure(error_codes::SUBSCRIPTION_HTTP_STATUS, false),
     }
+    .with_http_status(status.as_u16())
 }

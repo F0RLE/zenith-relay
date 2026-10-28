@@ -63,9 +63,9 @@ fn siwc_rotation_recovers_after_restart_without_reusing_the_old_grant() {
         )
         .unwrap();
     store.save(&before).unwrap();
-    store.checkpoint_siwc_rotation(&before, None).unwrap();
+    store.checkpoint_token_rotation(&before, None).unwrap();
     assert_eq!(
-        store.recover_siwc_rotation(&before).unwrap_err().code,
+        store.recover_token_rotation(&before).unwrap_err().code,
         CredentialErrorCode::RotationOutcomeUnknown
     );
     assert!(
@@ -75,11 +75,11 @@ fn siwc_rotation_recovers_after_restart_without_reusing_the_old_grant() {
             .matches_snapshot(&before)
     );
     store
-        .checkpoint_siwc_rotation(&before, Some(&after))
+        .checkpoint_token_rotation(&before, Some(&after))
         .unwrap();
     drop(store);
     let restarted = CredentialStore::new(backend);
-    let recovered = restarted.recover_siwc_rotation(&before).unwrap().unwrap();
+    let recovered = restarted.recover_token_rotation(&before).unwrap().unwrap();
     assert!(recovered.matches_snapshot(&after));
     assert!(
         restarted
@@ -87,7 +87,7 @@ fn siwc_rotation_recovers_after_restart_without_reusing_the_old_grant() {
             .unwrap()
             .matches_snapshot(&after)
     );
-    assert!(restarted.recover_siwc_rotation(&after).unwrap().is_none());
+    assert!(restarted.recover_token_rotation(&after).unwrap().is_none());
     assert_eq!(recovered.siwc_registration(), before.siwc_registration());
 }
 
@@ -96,7 +96,7 @@ fn siwc_rotation_cannot_overwrite_a_newer_sign_in_or_survive_deletion() {
     let store = CredentialStore::from_backend(MemorySecrets::default());
     let before = siwc_fixture();
     store.save(&before).unwrap();
-    store.checkpoint_siwc_rotation(&before, None).unwrap();
+    store.checkpoint_token_rotation(&before, None).unwrap();
     let newer = before
         .with_token_set(
             &TokenSet::new(
@@ -111,17 +111,17 @@ fn siwc_rotation_cannot_overwrite_a_newer_sign_in_or_survive_deletion() {
         )
         .unwrap();
     store.save(&newer).unwrap();
-    assert!(store.recover_siwc_rotation(&newer).unwrap().is_none());
+    assert!(store.recover_token_rotation(&newer).unwrap().is_none());
     assert!(
         store
             .require("siwc_synthetic")
             .unwrap()
             .matches_snapshot(&newer)
     );
-    store.checkpoint_siwc_rotation(&newer, None).unwrap();
+    store.checkpoint_token_rotation(&newer, None).unwrap();
     store.delete("siwc_synthetic").unwrap();
     assert!(store.load("siwc_synthetic").unwrap().is_none());
-    assert!(store.recover_siwc_rotation(&newer).unwrap().is_none());
+    assert!(store.recover_token_rotation(&newer).unwrap().is_none());
 }
 
 #[test]
@@ -129,11 +129,11 @@ fn siwc_rotation_survives_proxy_changes_without_restoring_old_settings() {
     let store = CredentialStore::from_backend(MemorySecrets::default());
     let before = siwc_fixture();
     store.save(&before).unwrap();
-    store.checkpoint_siwc_rotation(&before, None).unwrap();
+    store.checkpoint_token_rotation(&before, None).unwrap();
     let changed = before.clone().with_proxy_url(Some(PROXY.into())).unwrap();
     store.save(&changed).unwrap();
-    assert!(store.recover_siwc_rotation(&changed).is_err());
-    assert!(store.recover_siwc_rotation(&changed).is_err());
+    assert!(store.recover_token_rotation(&changed).is_err());
+    assert!(store.recover_token_rotation(&changed).is_err());
     let rotated = before
         .with_token_set(
             &TokenSet::new(
@@ -148,9 +148,9 @@ fn siwc_rotation_survives_proxy_changes_without_restoring_old_settings() {
         )
         .unwrap();
     store
-        .checkpoint_siwc_rotation(&before, Some(&rotated))
+        .checkpoint_token_rotation(&before, Some(&rotated))
         .unwrap();
-    let recovered = store.recover_siwc_rotation(&changed).unwrap().unwrap();
+    let recovered = store.recover_token_rotation(&changed).unwrap().unwrap();
     assert_eq!(recovered.refresh_token(), Some("rotated-refresh"));
     assert_eq!(recovered.proxy_url(), Some(PROXY));
     assert_eq!(recovered.generation(), 2);
@@ -200,7 +200,7 @@ fn failed_primary_delete_retains_the_siwc_rotation_barrier() {
     let store = CredentialStore::new(backend.clone());
     let before = siwc_fixture();
     store.save(&before).unwrap();
-    store.checkpoint_siwc_rotation(&before, None).unwrap();
+    store.checkpoint_token_rotation(&before, None).unwrap();
     backend.1.store(true, std::sync::atomic::Ordering::SeqCst);
     assert!(store.delete(before.local_account_id()).is_err());
     assert!(
@@ -209,7 +209,7 @@ fn failed_primary_delete_retains_the_siwc_rotation_barrier() {
             .unwrap()
             .matches_snapshot(&before)
     );
-    assert!(store.recover_siwc_rotation(&before).is_err());
+    assert!(store.recover_token_rotation(&before).is_err());
     backend.1.store(false, std::sync::atomic::Ordering::SeqCst);
     store.delete(before.local_account_id()).unwrap();
     assert!(store.load(before.local_account_id()).unwrap().is_none());
@@ -237,17 +237,17 @@ fn siwc_rotation_storage_outage_does_not_become_a_reauthentication_error() {
         )
         .unwrap();
     store
-        .checkpoint_siwc_rotation(&before, Some(&after))
+        .checkpoint_token_rotation(&before, Some(&after))
         .unwrap();
     backend.2.store(true, Ordering::SeqCst);
     assert_eq!(
-        store.recover_siwc_rotation(&before).unwrap_err().code,
+        store.recover_token_rotation(&before).unwrap_err().code,
         CredentialErrorCode::SecretStoreUnavailable
     );
     backend.2.store(false, Ordering::SeqCst);
     assert!(
         store
-            .recover_siwc_rotation(&before)
+            .recover_token_rotation(&before)
             .unwrap()
             .unwrap()
             .matches_snapshot(&after)
@@ -269,7 +269,7 @@ fn siwc_rotation_invalid_checkpoint_is_distinct_and_never_prints_secrets() {
         "{\"before\":\"private-broken-secret\",\"after\":null}",
     ] {
         backend.save(&reference, invalid).unwrap();
-        let error = store.recover_siwc_rotation(&before).unwrap_err();
+        let error = store.recover_token_rotation(&before).unwrap_err();
         assert_eq!(error.code, CredentialErrorCode::RotationCheckpointInvalid);
         assert!(!error.to_string().contains("private-broken-secret"));
         assert_eq!(backend.load(&reference).unwrap().as_deref(), Some(invalid));
@@ -488,6 +488,32 @@ fn fixture() -> StoredCodexCredentials {
     .unwrap()
     .with_proxy_url(Some(PROXY.into()))
     .unwrap()
+}
+
+#[test]
+fn stored_access_only_tokens_keep_their_last_five_minutes() {
+    let mut wire: serde_json::Value =
+        serde_json::from_str(&fixture().to_secret_json().unwrap()).unwrap();
+    wire["refreshToken"] = serde_json::Value::Null;
+    wire["expiresAtMs"] = 300_000.into();
+    let credentials = StoredCodexCredentials::from_secret_json(&wire.to_string()).unwrap();
+    assert!(credentials.refresh_token().is_none());
+    assert!(credentials.is_access_usable(299_999, 300_000));
+    assert!(!credentials.is_access_usable(300_000, 300_000));
+    let refreshable = credentials
+        .with_token_set(
+            &TokenSet::new(
+                ACCESS,
+                Some(REFRESH.into()),
+                Some(ID_TOKEN.into()),
+                Some(300_000),
+                0,
+                8,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(!refreshable.is_access_usable(1, 300_000));
 }
 
 #[test]

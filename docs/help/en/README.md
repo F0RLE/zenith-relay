@@ -39,19 +39,15 @@ to work in. Relay does not install ChatGPT, Claude Desktop, or OpenCode.
 7. Select a model in the application and send a short request.
    Open **Usage → Requests** in Relay to see its result and selected member.
 
-Use **SIWC** or **Excel / BPS** for text; opt Codex into images with
-**Add to pool for images**. Experimental Codex text access is a separate opt-in
-under **Settings → Pool data → Text models through Codex sign-in**. Read the
-warning: the red confirmation button becomes available after 10 seconds.
-Cancelling changes nothing, reopening resets the countdown, and disabling
-needs no confirmation. The setting applies to existing and future explicitly
-added Codex pool members; it never adds accounts itself. Disabling preserves
-accounts and image access. Degraded-route blocking remains a separate setting.
-
-This is experimental Relay behavior, not official OpenAI API access. Errors,
-temporary restrictions, and reduced availability or response quality are
-possible. A requested model name is not independent proof of which model
-served the request; Relay cannot guarantee its actual identity.
+Use **SIWC** or **Excel / BPS** for text and **Add to pool for images** for Codex.
+Experimental Codex text access requires **Settings → Pool data → Text models
+through Codex sign-in**. Read the warning and wait 10 seconds to confirm.
+Cancellation leaves settings intact; reopening restarts the countdown.
+The setting covers existing and future manually added Codex members.
+Disabling needs no confirmation and preserves accounts/images; degraded-route
+blocking is separate. This experimental route is not official OpenAI API access:
+errors, restrictions and lower availability/quality are possible. Requested
+model names do not prove actual model identity; Relay cannot guarantee it.
 
 The client badge selects the route; **Connect**
 adds its separate sign-in/quota. Switching preserves sign-ins, **Notes** and
@@ -366,9 +362,10 @@ without closing your settings.
 
 #### Modes
 
-- **Automatic:** Relay balances load, fresh quota or credits, and request
-  shares. A quota advantage below five percentage points does not force a
-  switch; a lead of five points or more excludes the lower remainder.
+- **Automatic:** balances load, fresh quota/credits and request shares.
+  Quota-based switching needs a lead of at least 5 percentage points, or 10
+  for the primary prompt-cache connection while its quota is fresh and positive.
+  Availability and concurrency limits still apply.
 - **Round robin:** independent requests cycle through available members in
   saved order. **Use custom request shares** enables weighted distribution.
 - **Primary & reserve:** the first compatible available member handles requests;
@@ -444,6 +441,8 @@ Relay prefers the provider's price, then the reference catalog; a manual
 price is a fallback. Cache fields set read and write prices.
 **Purchase cost, USD** estimates lifetime payback. **Weekly remaining** uses shared
 workload calibration, not cash; linked routes count once. Hover for details.
+Catalog updates revalue recent measurements in the background without consuming
+quota. Missing or expired evidence shows `—`.
 **Drain** stops new assignments to a member.
 
 Use **Configuration preset** to save settings or import them with a preview
@@ -519,19 +518,17 @@ unsupported conversions fail. Realtime and audio/video conversion are unavailabl
 
 ### Applications
 
-In **Access → Applications**, select ChatGPT, Claude Desktop or OpenCode.
-Use the folder button or enter an absolute **Application path**, then **Save**.
-Select the desktop `.app` on macOS or `.exe` on Windows, not a shortcut, CLI,
-command with arguments, or configuration folder.
+In **Access → Applications**, select a client, choose its **Application path**
+with the folder button or enter an absolute path, then **Save**. Use the desktop
+`.app` on macOS or `.exe` on Windows; shortcuts, CLI commands, arguments and
+configuration folders are invalid. Clear and save to restore automatic discovery.
+Saving only stores the local path; it neither connects nor launches the client.
+Paths stay out of pool presets.
 
-Clear and **Save** to restore automatic detection. Saving never launches, closes
-or connects the application. If the file moves, update or clear the path.
-Paths remain local and are excluded from pool presets.
-
-Launch uses the saved path, then `OPENCODE_BIN` / `CLAUDE_DESKTOP_BIN`, then
-automatic discovery. Invalid overrides must be corrected or removed; they never
-fall back silently. OpenCode and Claude confirm a running desktop before success.
-A timeout preserves settings: check the installation and retry.
+Launch priority: saved path → `OPENCODE_BIN` / `CLAUDE_DESKTOP_BIN` → discovery.
+Fix or clear an invalid override; Relay never silently substitutes an installation.
+OpenCode/Claude require a running desktop process. A timeout preserves settings;
+check the installation and retry.
 
 #### ChatGPT
 
@@ -553,23 +550,18 @@ For **SIWC**, Relay compacts through a text summary on the same connection,
 without the tool catalog. Relay restores its checkpoint as a summary on the
 next turn; foreign encrypted checkpoints are not supported.
 
-**ChatGPT background tasks** allows automatic activity summaries and task titles.
-**Memory extraction** processes previous chats (`memories.extract_model`).
-**Memory summaries** combines the extracted information into long-term memory
-(`memories.consolidation_model`). Each row has its own model and permission switch.
-Select a local pool model, or **Application default** to remove that stage's
-override. Connect ChatGPT to the local pool first, then restart the application
-manually after changing a model. The main chat model stays unchanged.
+**ChatGPT background tasks** allows activity summaries and task titles.
+**Memory extraction** reads previous chats (`memories.extract_model`);
+**Memory summaries** consolidates them (`memories.consolidation_model`).
+Each stage has its own permission and pool model; **Application default** clears
+the override. Connect ChatGPT to the pool first, and restart it after changing
+a model. The main chat model stays unchanged.
 
-The switches immediately allow or block new, explicitly marked memory requests
-through Relay; they do not enable Codex's memory feature, delete saved memory,
-or stop work already in flight. Both stages are allowed by default and are
-independent of activity summaries/titles. Blocked work appears in usage as a
-local Relay restriction. Applying it requires the client to supply operation
-metadata. Existing memory can still be read. Context compaction for the
-main chat remains enabled. A smaller context window or missing capabilities can
-prevent memory work from completing; pool membership alone does not establish
-application-level compatibility.
+Both memory stages default to allowed, independently of summaries/titles.
+Their switches affect only new requests explicitly marked by the client;
+blocked work appears in Usage as a local restriction. They preserve saved
+memory, reads, in-flight work and chat compaction; enabling memory in Codex
+remains separate. A selected model still needs sufficient context and capabilities.
 
 **WebSocket for ChatGPT** controls ChatGPT → Relay; BPS and converted routes still
 use HTTP upstream. Changes ask to restart ChatGPT. Request details show
@@ -679,29 +671,23 @@ available. Interruptions retain observed usage without automatic regeneration.
 
 ## 6. Recovery
 
-This page restores installed client settings. It is available in **Computer**
-mode and does not restore quota, deleted Relay accounts, or conversations.
+In **Computer** mode, this page restores client settings—not quota, deleted
+Relay accounts or conversations.
 
-1. Select **ChatGPT** or **OpenCode**.
-2. Before making changes, enter a **Snapshot name** and select **Create snapshot**.
-3. To return to it, select the snapshot, choose **Restore**, and review
-   the confirmation. For ChatGPT, the saved configuration and sign-in replace
-   the current profile.
+1. Select the client's tab. Before changes, enter a **Snapshot name** and
+   select **Create snapshot**.
+2. To restore, select the snapshot, choose **Restore** and review the confirmation.
 
-ChatGPT supports several named snapshots. OpenCode stores one snapshot
-until restoration; restoring consumes it.
+**ChatGPT** keeps several named snapshots; restoration replaces its configuration
+and sign-in. Its automatic protected backup is separate and preserves newer
+manual sign-ins. Check the current profile if recovery reports a conflict.
 
-For Claude Desktop, select its tab. Before connecting, enter a **Snapshot name**
-and select **Create snapshot** to save one original recovery point. To return
-to it, choose **Restore** and confirm. This works with the local API stopped.
-Restoring an attached profile validates the files, closes Desktop and restores
-the selection without relaunching it. Consuming a snapshot made before connecting
-does not close Desktop or change its files. Unrelated profiles and newer manual
-selections are preserved.
+**OpenCode** keeps one snapshot, consumed on restoration.
 
-The automatic protected backup before switching ChatGPT is separate from
-named snapshots. Automatic recovery does not overwrite a newer manual sign-in.
-If Relay reports a conflict, check the current profile before trying again.
+**Claude Desktop** keeps one original recovery point. Restoration works with
+the API stopped. For an attached profile, Relay validates files, closes Desktop
+and restores the selection without relaunching. A pre-attachment snapshot leaves
+Desktop and its files untouched. Other profiles and newer manual selections survive.
 
 ## 7. Settings
 
@@ -709,17 +695,14 @@ If Relay reports a conflict, check the current profile before trying again.
 and working data folder. Language, theme, and operating mode save immediately.
 Fields with a separate save button, such as the API port, need that button.
 
-**Launch applications after connecting** is on by default. Turn it off to
-configure a pool connection without opening ChatGPT, Claude Desktop, or OpenCode. Your choice
-saves immediately and survives restarting Relay. An explicitly disabled setting
-from an earlier version stays disabled. **Launch application** on Overview and
-direct launch actions still open the selected application.
+**Launch applications after connecting** defaults to on. Turn it off to configure
+clients without opening them. The choice saves immediately, survives restarts
+and preserves a previously disabled value. Explicit launch actions still work.
 
-**Overview** opens the application without changing its connection, profile, keys
-or catalog, or closing a running client—even with the API stopped or pool empty.
-To attach Relay, use **Pool → Connect**. External profile changes do not block
-ordinary launch. New manual ChatGPT context settings survive catalog updates,
-reconnection and recovery.
+**Overview → Launch application** preserves the connection, profile, keys,
+catalog and running client—even with the API stopped, an empty pool or external
+profile changes. Use **Pool → Connect** to attach Relay. Manual ChatGPT context
+settings survive catalog updates, reconnection and recovery.
 
 **Updates.** Select **Check** beside the version or **Update available**.
 Read the changes and select **Update**.
@@ -841,6 +824,7 @@ such as 429, explains why. More retries do not replenish quota.
 | `adapter_compaction_unsupported` | This route cannot accept another provider's encrypted compaction checkpoint. | ChatGPT auto-compaction on any non-native model, including `/v1/responses/compact`, is handled by Relay. Use a native Responses route for a foreign checkpoint, or start a new task. |
 | `adapter_continuation_missing`, `adapter_continuation_mismatch` | Adapter continuation state is lost or belongs to another binding. | Restore the former source/adapter. Transfer complete history or start a new conversation when it is unavailable. |
 | `adapter_tool_unsupported`, `adapter_reasoning_unsupported` | The adapter cannot represent the tool or reasoning mode. | Choose a supported capability or native format. Allowing a mode in model rules does not add upstream support. |
+| `adapter_metadata_conflict` | Source and reference reasoning levels conflict. | Refresh both catalogs or use a compatible route. Relay never disables reasoning or lowers effort to bypass this conflict. |
 | `token_count_unsupported` | No native API count endpoint. | Use a Messages/Gemini API source, not account transports or cross-protocol estimates. |
 | `token_count_response_invalid` | Missing/invalid count or oversized response. | Check the provider endpoint. Failure never becomes zero or an estimate. |
 | `adapter_upstream_response_invalid`, `adapter_upstream_stream_invalid` | The provider response does not match a supported conversion. | Update Relay and check the source's API address and format. If reproducible, use a source with a native format and report the code and request ID. |

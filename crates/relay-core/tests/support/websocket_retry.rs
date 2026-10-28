@@ -1,6 +1,109 @@
 use super::*;
 
 #[tokio::test]
+async fn failed_live_websocket_response_with_generated_usage_is_not_repaired() {
+    assert_live_websocket_terminal_repair(
+        json!({"usage":{"input_tokens":5,"output_tokens":7}}),
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn failed_live_websocket_response_with_output_is_not_repaired() {
+    assert_live_websocket_terminal_repair(
+        json!({"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"already generated"}]}]}),
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn live_websocket_missing_response_without_generation_keeps_safe_repair() {
+    assert_live_websocket_terminal_repair(json!({}), true).await;
+}
+
+async fn assert_live_websocket_terminal_repair(evidence: Value, repair: bool) {
+    let mut failed_response = json!({
+        "id":"failed-live-response","status":"failed","output":[],
+        "error":{"code":"previous_response_not_found","message":"Account: Previous response not found"}
+    });
+    failed_response
+        .as_object_mut()
+        .unwrap()
+        .extend(evidence.as_object().unwrap().clone());
+    let initial = json!({"type":"response.completed","response":{
+        "id":"live-initial","status":"completed","model":MODEL,
+        "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"synthetic first response"}]}]
+    }});
+    let replayed = json!({"type":"response.completed","response":{
+        "id":"must-not-repeat-executed-turn","status":"completed","model":MODEL,"output":[]
+    }});
+    let (upstream, state) = spawn_websocket_upstream_with_behavior(WebSocketBehavior::Sequence(
+        Arc::new(Mutex::new(VecDeque::from([
+            vec![initial],
+            vec![json!({"type":"response.failed","response":failed_response})],
+            vec![replayed],
+        ]))),
+    ))
+    .await;
+    let authority = ready_authority("live-account", "synthetic-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account("live-account", "provider-live", &upstream, 10)],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    let mut socket = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap()
+        .into_websocket()
+        .await
+        .unwrap();
+    for previous in [None, Some("live-initial")] {
+        let mut request =
+            json!({"type":"response.create","model":MODEL,"input":"synthetic continuation"});
+        if let Some(previous) = previous {
+            request["previous_response_id"] = json!(previous);
+        }
+        socket
+            .send(ClientWsMessage::Text(request.to_string()))
+            .await
+            .unwrap();
+        let response = receive_websocket_json(&mut socket).await;
+        assert_eq!(
+            response["type"],
+            if previous.is_some() && !repair {
+                "response.failed"
+            } else {
+                "response.completed"
+            }
+        );
+    }
+    assert_eq!(
+        state.requests.lock().unwrap().len(),
+        if repair { 3 } else { 2 }
+    );
+    let events = events.lock().unwrap();
+    let attempts = usage_observations::physical_attempts(&events);
+    assert_eq!(attempts.len(), if repair { 3 } else { 2 });
+    if !repair {
+        assert!(!attempts[1].success);
+        if evidence.get("usage").is_some() {
+            assert_eq!(attempts[1].input_tokens, Some(5));
+            assert_eq!(attempts[1].output_tokens, Some(7));
+        }
+    }
+}
+
+#[tokio::test]
 async fn failed_initial_websocket_response_with_output_is_not_retried() {
     let failure = json!({
         "type": "response.failed",

@@ -252,6 +252,9 @@ impl SourceAdapter {
     ) -> bool {
         // Passthrough preserves native wire fields, not a capability claim.
         // Exact route evidence must also constrain the client model picker.
+        if capabilities.reasoning_effort_conflict {
+            return false;
+        }
         if capabilities.reasoning == Some(false) {
             return crate::catalog::canonical_reasoning_level(effort) == "none";
         }
@@ -265,12 +268,69 @@ impl SourceAdapter {
             .is_ok()
     }
 
+    /// Validate controls without cloning/re-encoding a native request. The same
+    /// check runs during admission and preparation; it never clips user values.
+    pub(crate) fn validate_model_controls(
+        self,
+        client: WireApi,
+        request: &Value,
+        capabilities: &crate::model_metadata::ModelCapabilities,
+    ) -> AdapterResult<()> {
+        let (effort, outputs): (&str, &[(&str, &str)]) = match client {
+            WireApi::Responses => (
+                "/reasoning/effort",
+                &[("/max_output_tokens", "max_output_tokens")],
+            ),
+            WireApi::ChatCompletions => (
+                "/reasoning_effort",
+                &[
+                    ("/max_completion_tokens", "max_completion_tokens"),
+                    ("/max_tokens", "max_tokens"),
+                ],
+            ),
+            WireApi::Messages => ("/output_config/effort", &[("/max_tokens", "max_tokens")]),
+            WireApi::Gemini => (
+                "/generationConfig/thinkingConfig/thinkingLevel",
+                &[(
+                    "/generationConfig/maxOutputTokens",
+                    "generationConfig.maxOutputTokens",
+                )],
+            ),
+            // Interactions has its own contract; do not guess an output field
+            // from generateContent or a similarly named API.
+            WireApi::GeminiInteractions => ("/generation_config/thinking_level", &[]),
+        };
+        if capabilities.reasoning_effort_conflict
+            && request
+                .pointer(effort)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty())
+        {
+            return Err(AdapterError::reasoning_metadata_conflict());
+        }
+        if let Some(maximum) = capabilities.output_limit.filter(|maximum| *maximum > 0) {
+            for &(path, parameter) in outputs {
+                if request
+                    .pointer(path)
+                    .and_then(Value::as_u64)
+                    .is_some_and(|tokens| tokens > maximum)
+                {
+                    return Err(AdapterError::output_limit_exceeded(parameter));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn prepare_with_capabilities(
         self,
         context: AdapterRequestContext<'_>,
         capabilities: Option<&crate::model_metadata::ModelCapabilities>,
     ) -> AdapterResult<PreparedAdapterRequest> {
         self.validate(context.client_wire_api, context.reasoning_mode)?;
+        if let Some(capabilities) = capabilities {
+            self.validate_model_controls(context.client_wire_api, context.request, capabilities)?;
+        }
         let rewritten = if !self.is_passthrough() && context.client_wire_api == WireApi::Responses {
             match super::super::compaction::prepare_bridged_compaction(context.request)? {
                 super::super::compaction::BridgedCompaction::Rewritten {
@@ -311,6 +371,12 @@ impl SourceAdapter {
             )
             .map(|request| PreparedAdapterRequest::Translated {
                 request: Box::new(request),
+            })
+            .and_then(|prepared| {
+                if let Some(capabilities) = capabilities {
+                    self.validate_model_controls(upstream, prepared.upstream_body(), capabilities)?;
+                }
+                Ok(prepared)
             });
         }
         match self {

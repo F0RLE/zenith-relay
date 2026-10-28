@@ -111,6 +111,46 @@ fn usage_items_survive_restart_without_rewriting_inventory_or_refresh_identity()
 }
 
 #[test]
+fn delayed_usage_preserves_latest_key_and_source_times_across_restart() {
+    let (root, mut store, connection) = seeded();
+    let source_id = store.sources()[0].id.clone();
+    let latest = "2026-10-25T00:00:03Z";
+    store.touch_usage("key", &source_id, latest).unwrap();
+    for older in ["2026-10-25T00:00:01Z", "2026-10-25T01:00:02+01:00"] {
+        store.touch_usage("key", &source_id, older).unwrap();
+        store
+            .persist_account_usage(
+                store.account("a").unwrap().clone(),
+                "key",
+                older,
+                store.automations().clone(),
+            )
+            .unwrap();
+        assert_eq!(store.keys()[0].last_used_at.as_deref(), Some(latest));
+        assert_eq!(store.sources()[0].last_used_at.as_deref(), Some(latest));
+    }
+    // Equal instants with different offsets must not churn durable state.
+    connection.execute_batch("CREATE TRIGGER reject_usage_rewrite BEFORE INSERT ON app_state_items BEGIN SELECT RAISE(ABORT, 'unexpected timestamp rewrite'); END;").unwrap();
+    store
+        .touch_usage("key", &source_id, "2026-10-25T01:00:03+01:00")
+        .unwrap();
+    connection
+        .execute_batch("DROP TRIGGER reject_usage_rewrite;")
+        .unwrap();
+    drop(store);
+    let mut reopened = LocalPoolStore::open(root.clone()).unwrap();
+    assert_eq!(reopened.keys()[0].last_used_at.as_deref(), Some(latest));
+    assert_eq!(reopened.sources()[0].last_used_at.as_deref(), Some(latest));
+    let next = "2026-10-25T00:00:04Z";
+    reopened.touch_usage("key", &source_id, next).unwrap();
+    assert_eq!(reopened.keys()[0].last_used_at.as_deref(), Some(next));
+    assert_eq!(reopened.sources()[0].last_used_at.as_deref(), Some(next));
+    drop(reopened);
+    drop(connection);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn failed_usage_item_commit_preserves_memory_and_all_persisted_items() {
     let (root, mut store, connection) = seeded();
     let original = store.account("a").unwrap().clone();

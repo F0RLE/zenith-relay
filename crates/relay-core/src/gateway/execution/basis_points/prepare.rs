@@ -31,6 +31,8 @@ pub(super) fn tool_instructions(tools: &[ClientTool], request: &Value) -> String
          For shell, filesystem, workspace, or repository access, invoke a suitable catalog tool rather than claiming access is unavailable. \
          Reduce model roundtrips by combining related read-only shell inspections in one declared shell-tool invocation when its contract and the task allow it. \
          Use the client's configured shell and preserve each command's output and failure; shell-native concurrency is appropriate only for independent reads. \
+         For broad inspections, return compact counts, timings and bounded excerpts instead of whole files; retain complete required instructions, errors and exact edit context. Reuse unchanged findings rather than reading them again. \
+         For asynchronous work, use returned job handles and bounded completion waits instead of repeated status-only model turns. Request screenshots for visual decisions or required fresh UI observations, not routine numeric checks. Never discard user images or conversation history to save time. \
          Do not batch across approval boundaries, dependent operations, edits, or shared mutable state, and never bypass tool restrictions. \
          For a single client tool, use one outer native {TRANSPORT_TOOL} call. \
          Independent client tools may use multiple outer calls in one response unless the client disables parallel calls. Prefer separate native calls for scripts, patches and framed function payloads, keeping each raw body in its single-tool call. \
@@ -42,6 +44,7 @@ pub(super) fn tool_instructions(tools: &[ClientTool], request: &Value) -> String
          Outside an explicit batch, set references to an array containing exactly one fully qualified client tool name from the catalog; references is the routing field, not a list of files or cells. \
          Outside a batch, put only that tool payload in code. \
          Parameters describes the tool's complete argument contract: pass one JSON object matching it. \
+         Supply plaintext for string arguments annotated encrypted:true; Relay seals them for the client. \
          Use the current tool's declared keys, not options borrowed from another tool or a historical call. \
          Transport fields belong to the outer envelope, not to the client arguments unless that tool declares them. \
          {FUNCTION_RELAY_ENCODING} \

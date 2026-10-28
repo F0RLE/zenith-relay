@@ -210,7 +210,71 @@ fn safe_identifier(identifier_text: &str) -> Option<String> {
 fn safe_parameter(value: &str) -> Option<String> {
     matches!(
         value,
-        "response.json"
+        "endpoint"
+            | "service_tier"
+            | "previous_response_id"
+            | "include"
+            | "input"
+            | "input.type"
+            | "input.name"
+            | "input.call_id"
+            | "input.arguments"
+            | "input.content"
+            | "input.output"
+            | "input.file_id"
+            | "input.async"
+            | "input.caller"
+            | "input.encrypted_content"
+            | "input.agent_message.encrypted_content"
+            | "input.run_officejs.batch"
+            | "input.run_officejs.batch.call_id"
+            | "text"
+            | "text.verbosity"
+            | "text.format"
+            | "text.format.name"
+            | "text.format.schema"
+            | "text.format.strict"
+            | "response_format"
+            | "reasoning"
+            | "reasoning.effort"
+            | "reasoning.summary"
+            | "max_tokens"
+            | "max_output_tokens"
+            | "max_completion_tokens"
+            | "temperature"
+            | "seed"
+            | "top_k"
+            | "tool_choice"
+            | "tool_choice.function"
+            | "tools"
+            | "tools.type"
+            | "tools.name"
+            | "tools.description"
+            | "tools.parameters"
+            | "tools.parameters.encrypted"
+            | "tools.allowed_callers"
+            | "tools.defer_loading"
+            | "tools.cache_control"
+            | "tools.external_web_access"
+            | "tools.filters.allowed_domains"
+            | "tools.user_location"
+            | "tools.web_search"
+            | "tool_reference"
+            | "tool_reference.tool_name"
+            | "tool_calls.async"
+            | "tool_calls.caller"
+            | "tool_calls.function.arguments"
+            | "tool_calls.function.name"
+            | "tool_calls.id"
+            | "tool_calls.namespace"
+            | "cache_control"
+            | "client_metadata"
+            | "metadata"
+            | "stream_options.include_usage"
+            | "output.function_call.arguments"
+            | "output.structured_output"
+            | "output.relay.catalog.budget"
+            | "response.json"
             | "response.serialization"
             | "response.status"
             | "response.output"
@@ -227,6 +291,11 @@ fn safe_parameter(value: &str) -> Option<String> {
             | "output.run_officejs.parallel_tool_calls"
             | "output.run_officejs.args"
             | "output.run_officejs.args.frame"
+            | "output.run_officejs.args.frame.header"
+            | "output.run_officejs.args.frame.separator"
+            | "output.run_officejs.args.frame.field"
+            | "output.run_officejs.args.frame.args"
+            | "output.run_officejs.args.frame.duplicate_field"
             | "output.run_officejs.args.schema"
             | "output.run_officejs.args.json"
             | "output.run_officejs.args.object"
@@ -295,7 +364,17 @@ pub(super) fn sanitize_message(raw_message: &str) -> (String, bool, bool) {
 mod tests {
     #[test]
     fn adapter_parameter_survives_storage_but_arbitrary_paths_are_redacted() {
-        for parameter in ["response.json", "output.run_officejs.args.json.syntax"] {
+        for parameter in [
+            "response.json",
+            "output.run_officejs.args.json.syntax",
+            "output.run_officejs.args.frame.header",
+            "output.run_officejs.args.frame.separator",
+            "service_tier",
+            "text.format",
+            "text.verbosity",
+            "tools.parameters.encrypted",
+            "previous_response_id",
+        ] {
             let details = super::UpstreamErrorDetails::from_value(
                 Some(502),
                 &serde_json::json!({

@@ -1,13 +1,29 @@
 use super::super::GatewayRuntime;
+use crate::accounts::AccountAuthState;
 use crate::error_codes;
 use crate::quota::QuotaSnapshot;
 use crate::{CandidateHealth, CandidateQuota, CandidateQuotaState, UsageEvent};
 use reqwest::{StatusCode, header::HeaderMap};
+use std::sync::atomic::Ordering;
 
 const PASSIVE_QUOTA_PERSIST_DEBOUNCE_MS: u64 = 5_000;
 
 impl GatewayRuntime {
     pub(crate) fn observe_codex_quota_headers(
+        &self,
+        candidate_id: &str,
+        token_generation: Option<u64>,
+        status: StatusCode,
+        headers: &HeaderMap,
+        observed_at_ms: u64,
+    ) -> bool {
+        self.with_current_account_observation(candidate_id, token_generation, |_| {
+            self.merge_codex_quota_headers(candidate_id, status, headers, observed_at_ms)
+        })
+        .unwrap_or(false)
+    }
+
+    fn merge_codex_quota_headers(
         &self,
         candidate_id: &str,
         status: StatusCode,
@@ -210,12 +226,64 @@ impl GatewayRuntime {
         Some(passive_quota_state.snapshot.clone())
     }
 
-    pub(crate) fn apply_usage_event(&self, event: &UsageEvent, observed_at_ms: u64) {
+    fn with_current_account_observation<T>(
+        &self,
+        candidate_id: &str,
+        token_generation: Option<u64>,
+        observe: impl FnOnce(Option<AccountAuthState>) -> T,
+    ) -> Option<T> {
+        if let Some(account) = self.chatgpt_accounts.get(candidate_id) {
+            if !account.active.load(Ordering::Acquire) {
+                return None;
+            }
+            if let Some(generation) = token_generation {
+                return account.token_authority.with_usage_observation(
+                    candidate_id,
+                    generation,
+                    |state| observe(Some(state)),
+                );
+            }
+        }
+        Some(observe(None))
+    }
+
+    pub(crate) fn apply_usage_event(
+        &self,
+        event: &UsageEvent,
+        observed_at_ms: u64,
+    ) -> Option<QuotaSnapshot> {
+        let candidate_id = event.candidate_id.as_deref()?;
+        self.with_current_account_observation(
+            candidate_id,
+            event.account_token_generation,
+            |auth_state| {
+                self.apply_current_usage_event(event, observed_at_ms, auth_state);
+                // Consuming a pending quota observation belongs to the same
+                // credential fence as the state update, not a later old event.
+                if event.quota_snapshot.is_none() {
+                    self.take_passive_quota_snapshot(candidate_id, observed_at_ms)
+                } else {
+                    None
+                }
+            },
+        )
+        .flatten()
+    }
+
+    fn apply_current_usage_event(
+        &self,
+        event: &UsageEvent,
+        observed_at_ms: u64,
+        auth_state: Option<AccountAuthState>,
+    ) {
         let Some(candidate_id) = event.candidate_id.as_deref() else {
             return;
         };
         if let Some(snapshot) = event.quota_snapshot.as_ref() {
             self.sync_account_quota_snapshot(candidate_id, snapshot, observed_at_ms);
+        }
+        if auth_state.is_some_and(|state| state.requires_fresh_login()) {
+            return;
         }
         if event.success {
             self.set_candidate_health(candidate_id, CandidateHealth::Healthy);
@@ -330,18 +398,17 @@ fn reconcile_passive_quota_snapshot(
         (None, Some(_)) => false,
         _ => incoming_at >= current_at,
     };
-    if incoming_wins {
-        let previous = passive_quota_state.snapshot.clone();
-        passive_quota_state.snapshot = incoming.clone();
-        passive_quota_state.dirty = passive_quota_state
-            .snapshot
-            .merge_provider_credits(&previous);
-        passive_quota_state.force_persist = false;
-        passive_quota_state.last_persist_hint_ms = incoming.updated_at_ms.unwrap_or(observed_at_ms);
-    } else if passive_quota_state
+    let changed = passive_quota_state
         .snapshot
-        .merge_provider_credits(incoming)
-    {
+        .merge_observation_with_preference(incoming, incoming_wins);
+    if incoming_wins {
+        passive_quota_state.dirty = passive_quota_state.snapshot != *incoming;
+        passive_quota_state.force_persist &= passive_quota_state.dirty;
+        if !passive_quota_state.dirty {
+            passive_quota_state.last_persist_hint_ms =
+                incoming.updated_at_ms.unwrap_or(observed_at_ms);
+        }
+    } else if changed {
         passive_quota_state.dirty = true;
     }
     passive_quota_state.snapshot.clone()

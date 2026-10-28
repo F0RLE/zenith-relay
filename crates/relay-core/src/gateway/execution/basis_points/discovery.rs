@@ -33,6 +33,19 @@ fn capture_catalog(tools: &[ClientTool], request: &Value, tool_use: &mut ToolUse
     }
 }
 
+pub(in crate::gateway::execution) fn capture_prepared_context(
+    original: &Value,
+    upstream: &Value,
+    tool_use: &mut ToolUseDiagnostics,
+) {
+    tool_use.capture_upstream_context(upstream);
+    if let Some(catalog) = tool_use.basis_points_catalog.as_mut() {
+        catalog.relay_tool_instruction_bytes =
+            super::prepare::prepared_tool_instructions(original, upstream)
+                .map(|text| crate::tool_policy::serialized_bytes(&text));
+    }
+}
+
 pub(in crate::gateway) struct DiscoverySession {
     model: String,
     tools: Vec<ClientTool>,

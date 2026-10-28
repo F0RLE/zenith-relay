@@ -64,6 +64,9 @@ pub(in crate::gateway) fn incompatible_routes(
             let capability = runtime
                 .model_capabilities(&route.source_model)
                 .for_route(route.route_capability.as_ref());
+            route
+                .adapter
+                .validate_model_controls(client, request, &capability)?;
             let selected = tier_policy.selected_tier();
             if !GatewayRuntime::route_supports_service_tier(&route, selected) {
                 return Err(AdapterError::parameter_unsupported_for("service_tier"));
@@ -196,6 +199,15 @@ pub(in crate::gateway) fn record_adapter_rejection(
     error: &AdapterError,
     latency_ms: u64,
 ) {
+    let http_status = if error.is_upstream_failure() {
+        502
+    } else {
+        400
+    };
+    let message = error
+        .parameter()
+        .map(|parameter| format!("{error} (parameter: {parameter})"))
+        .unwrap_or_else(|| error.to_string());
     let event = crate::UsageEvent {
         request_id: request.request_id.to_owned(),
         attempt: request.attempt,
@@ -215,11 +227,7 @@ pub(in crate::gateway) fn record_adapter_rejection(
         service_tier: request.service_tier,
         applied_service_tier: None,
         success: false,
-        http_status: if error.is_upstream_failure() {
-            502
-        } else {
-            400
-        },
+        http_status,
         error_category: Some(error.code().to_owned()),
         tool_use: Default::default(),
         cooldown_scope: None,
@@ -235,7 +243,15 @@ pub(in crate::gateway) fn record_adapter_rejection(
         reasoning_tokens: None,
         output_tokens: None,
         total_tokens: None,
-        upstream_error: None,
+        // Reuse the bounded, redacted error envelope for local diagnostics.
+        // Source remains Relay; no request values or provider attempt are added.
+        upstream_error: Some(crate::usage::UpstreamErrorDetails::from_value(
+            Some(http_status),
+            &serde_json::json!({"error": {
+                "code": error.code(), "type": "relay_adapter", "message": message,
+                "param": error.parameter()
+            }}),
+        )),
         quota_snapshot: None,
         image_usage: None,
     };
@@ -387,6 +403,7 @@ fn has_image(request_value: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
+    mod source_protocols;
     use super::*;
     use serde_json::json;
 

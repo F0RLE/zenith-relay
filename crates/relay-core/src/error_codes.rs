@@ -62,6 +62,7 @@ error_codes! {
     ADAPTER_INVALID_REQUEST => ("adapter_invalid_request", "adapter_invalid_request", None),
     ADAPTER_PARAMETER_UNSUPPORTED => ("adapter_parameter_unsupported", "adapter_parameter_unsupported", None),
     ADAPTER_REASONING_UNSUPPORTED => ("adapter_reasoning_unsupported", "adapter_reasoning_unsupported", None),
+    ADAPTER_METADATA_CONFLICT => ("adapter_metadata_conflict", "adapter_metadata_conflict", None),
     ADAPTER_TOOL_UNSUPPORTED => ("adapter_tool_unsupported", "adapter_tool_unsupported", None),
     ADAPTER_UPSTREAM_RESPONSE_INVALID => ("adapter_upstream_response_invalid", "adapter_upstream_response_invalid", None),
     ADAPTER_UPSTREAM_STREAM_INVALID => ("adapter_upstream_stream_invalid", "adapter_upstream_stream_invalid", None),

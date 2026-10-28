@@ -57,6 +57,7 @@ pub(crate) fn catalog_capabilities(
                     .and_then(Value::as_array)
             })
             .map(|_| crate::catalog::reference_service_tiers(model));
+        let token_limits = ModelTokenLimits::from_catalog(model);
         for &upstream_wire_api in advertised_protocols {
             let status = if endpoints.is_none() {
                 CapabilityStatus::Unknown
@@ -65,9 +66,9 @@ pub(crate) fn catalog_capabilities(
             } else {
                 CapabilityStatus::Unsupported
             };
-            // Participant catalogs identify endpoints, not model capabilities.
-            // Semantic fields come from the shared trusted model catalog.
-            if endpoints.is_none() && declared_service_tiers.is_none() {
+            // Endpoint-local numeric limits may restrict this route. Other
+            // semantic fields still come from the trusted reference catalog.
+            if endpoints.is_none() && declared_service_tiers.is_none() && token_limits.is_empty() {
                 continue;
             }
             capabilities.push(ModelEndpointCapability {
@@ -78,6 +79,7 @@ pub(crate) fn catalog_capabilities(
                 checked_at_ms,
                 features: BTreeMap::new(),
                 reasoning_efforts: Vec::new(),
+                token_limits,
                 service_tiers: declared_service_tiers.clone(),
             });
         }

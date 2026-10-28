@@ -121,8 +121,8 @@ pub struct UsageEvent {
     /// Transient credential provenance for desktop account-state handling.
     ///
     /// It is deliberately excluded from persisted/exported usage. The desktop
-    /// callback uses it only to make a delayed 401 a no-op when a newer OAuth
-    /// credential generation is already stored for the same account.
+    /// callback uses it to keep delayed success, quota and failure observations
+    /// from changing a different credential generation of the same account.
     #[serde(skip)]
     pub account_token_generation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -2,6 +2,8 @@
 
 use super::*;
 
+mod cache_affinity;
+
 impl RotationEngine {
     pub fn candidate_availability(
         &self,
@@ -103,7 +105,7 @@ impl RotationEngine {
         if best_quota.is_some_and(|best| {
             least_loaded
                 .iter()
-                .any(|candidate| !self.within_quota_band(&candidate.id, best, now_ms))
+                .any(|candidate| !self.within_quota_band(request, &candidate.id, best, now_ms))
         }) {
             return RotationSelectionReason::QuotaHeadroom;
         }
@@ -245,10 +247,27 @@ impl RotationEngine {
             .filter(|credits| *credits > 0)
     }
 
-    fn within_quota_band(&self, candidate_id: &str, best: u64, now_ms: u64) -> bool {
+    fn quota_switch_margin(&self, request: &RotationRequest, candidate_id: &str) -> u64 {
+        if self.mode == RotationMode::Automatic
+            && request.owner.is_none()
+            && request.preferred.as_deref() == Some(candidate_id)
+        {
+            CACHE_AFFINITY_QUOTA_SWITCH_MARGIN_BASIS_POINTS
+        } else {
+            QUOTA_SWITCH_MARGIN_BASIS_POINTS
+        }
+    }
+
+    fn within_quota_band(
+        &self,
+        request: &RotationRequest,
+        candidate_id: &str,
+        best: u64,
+        now_ms: u64,
+    ) -> bool {
         self.fresh_quota_remaining(candidate_id, now_ms)
             .is_some_and(|remaining| {
-                best.saturating_sub(remaining) < QUOTA_SWITCH_MARGIN_BASIS_POINTS
+                best.saturating_sub(remaining) < self.quota_switch_margin(request, candidate_id)
             })
     }
 
@@ -269,7 +288,8 @@ impl RotationEngine {
             self.fresh_quota_remaining(owner_id, now_ms),
         ) {
             (Some(remaining), Some(owner_remaining)) => {
-                remaining.saturating_sub(owner_remaining) >= QUOTA_SWITCH_MARGIN_BASIS_POINTS
+                remaining.saturating_sub(owner_remaining)
+                    >= CACHE_AFFINITY_QUOTA_SWITCH_MARGIN_BASIS_POINTS
             }
             (Some(_), None) => true,
             (None, Some(_)) => false,
@@ -328,8 +348,11 @@ impl RotationEngine {
         // relative to the least normalized load. Readiness already enforces
         // physical capacity; quota, credits and soft health still filter this
         // group below. Do not queue or relax limits just to preserve a cache.
-        let preferred_load = u64::from(preferred.in_flight.saturating_sub(1))
-            * u64::from(least_loaded.effective_capacity);
+        let preferred_load = u64::from(
+            preferred
+                .in_flight
+                .saturating_sub(CACHE_AFFINITY_EXTRA_REQUESTS),
+        ) * u64::from(least_loaded.effective_capacity);
         let baseline_load =
             u64::from(least_loaded.in_flight) * u64::from(preferred.effective_capacity);
         if preferred_load <= baseline_load
@@ -374,33 +397,43 @@ impl RotationEngine {
                 // Independent work uses the least-loaded physical members.
                 // A warm owner may stay within the bounded load margin;
                 // resource and health checks apply equally to that owner.
-                let mut candidates = self.cache_aware_load_group(ready, request);
-                let best_quota = candidates
-                    .iter()
-                    .filter_map(|candidate| self.fresh_quota_remaining(&candidate.id, now_ms))
-                    .max();
-                if let Some(best_quota) = best_quota {
-                    candidates.retain(|candidate| {
-                        self.within_quota_band(&candidate.id, best_quota, now_ms)
-                    });
-                } else if let Some(best_credits) = candidates
-                    .iter()
-                    .filter_map(|candidate| self.fresh_provider_credits(&candidate.id, now_ms))
-                    .max()
-                {
-                    candidates.retain(|candidate| {
-                        self.fresh_provider_credits(&candidate.id, now_ms)
-                            .is_some_and(|credits| {
-                                credits == best_credits
-                                    || (request.preferred.as_deref() == Some(candidate.id.as_str())
-                                        && best_credits.saturating_sub(credits)
-                                            < PROVIDER_CREDIT_SWITCH_MARGIN_MICRO_UNITS)
-                            })
-                    });
-                }
+                let candidates = self.cache_aware_load_group(ready, request);
+                let candidates = self.resource_group(candidates, request, now_ms);
                 self.soft_health_group(candidates)
             }
         }
+    }
+
+    fn resource_group(
+        &self,
+        mut candidates: Vec<ReadyCandidate>,
+        request: &RotationRequest,
+        now_ms: u64,
+    ) -> Vec<ReadyCandidate> {
+        let best_quota = candidates
+            .iter()
+            .filter_map(|candidate| self.fresh_quota_remaining(&candidate.id, now_ms))
+            .max();
+        if let Some(best_quota) = best_quota {
+            candidates.retain(|candidate| {
+                self.within_quota_band(request, &candidate.id, best_quota, now_ms)
+            });
+        } else if let Some(best_credits) = candidates
+            .iter()
+            .filter_map(|candidate| self.fresh_provider_credits(&candidate.id, now_ms))
+            .max()
+        {
+            candidates.retain(|candidate| {
+                self.fresh_provider_credits(&candidate.id, now_ms)
+                    .is_some_and(|credits| {
+                        credits == best_credits
+                            || (request.preferred.as_deref() == Some(candidate.id.as_str())
+                                && best_credits.saturating_sub(credits)
+                                    < PROVIDER_CREDIT_SWITCH_MARGIN_MICRO_UNITS)
+                    })
+            });
+        }
+        candidates
     }
 
     fn soft_health_group(&self, mut candidates: Vec<ReadyCandidate>) -> Vec<ReadyCandidate> {

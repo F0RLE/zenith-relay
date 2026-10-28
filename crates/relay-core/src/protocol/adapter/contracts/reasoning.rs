@@ -93,6 +93,12 @@ impl<'a> ReasoningPolicy<'a> {
         explicit_max_tokens: bool,
     ) -> AdapterResult<()> {
         let effort = crate::catalog::canonical_reasoning_level(effort);
+        if self
+            .capabilities
+            .is_some_and(|capabilities| capabilities.reasoning_effort_conflict)
+        {
+            return Err(AdapterError::reasoning_metadata_conflict());
+        }
         // A model without reasoning already satisfies an explicit disable.
         // Do not emit an unsupported upstream control for this no-op.
         if effort == "none"

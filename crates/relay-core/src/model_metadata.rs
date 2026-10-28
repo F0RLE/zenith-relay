@@ -41,6 +41,10 @@ const MAX_STRING_LENGTH: usize = 1_024;
 #[serde(rename_all = "camelCase")]
 pub struct ModelCapabilities {
     pub reasoning: Option<bool>,
+    /// Derived route/reference disagreement, not evidence that reasoning is
+    /// unsupported. Never accept this state from an external metadata payload.
+    #[serde(skip)]
+    pub reasoning_effort_conflict: bool,
     #[serde(default)]
     pub reasoning_source: Option<String>,
     #[serde(default)]
@@ -133,12 +137,16 @@ pub struct ModelMetadata {
     pub capabilities: ModelCapabilities,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MetadataFieldProvenance {
     #[serde(deserialize_with = "provenance::deserialize_source")]
     pub source: Cow<'static, str>,
     pub revision: Option<Arc<str>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<Arc<str>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_model_id: Option<Arc<str>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conflicts: Vec<MetadataFieldConflict>,
 }
@@ -149,6 +157,10 @@ pub struct MetadataFieldConflict {
     #[serde(deserialize_with = "provenance::deserialize_source")]
     pub source: Cow<'static, str>,
     pub revision: Option<Arc<str>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<Arc<str>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_model_id: Option<Arc<str>>,
     pub value: Value,
 }
 

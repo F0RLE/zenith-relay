@@ -80,6 +80,7 @@ pub async fn probe_source_generation_with_scope(
             checked_at_ms: crate::unix_time_ms(),
             features: BTreeMap::new(),
             reasoning_efforts: vec![],
+            token_limits: Default::default(),
             service_tiers: None,
         },
         revision: probe_input.expected_revision,

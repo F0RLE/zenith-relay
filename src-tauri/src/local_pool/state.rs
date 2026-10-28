@@ -4,6 +4,7 @@ mod catalog_warning;
 mod coordination;
 mod paths;
 mod snapshot;
+mod subscription;
 
 pub(crate) use adapters::DesktopOAuthEvents;
 use coordination::wake_coordinator;
@@ -82,7 +83,7 @@ pub struct DesktopStateOwner {
     pub(in crate::local_pool) client_catalog_refresh: catalog_refresh::CatalogRefreshQueue,
     background_session_active: watch::Sender<bool>,
     quota_account_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
-    subscription_refresh_lock: AsyncMutex<()>,
+    subscription_refresh_lock: AsyncMutex<subscription::SubscriptionRefreshState>,
     setup_lock: tokio::sync::Mutex<()>,
     runtime_snapshot_slots: Arc<Semaphore>,
     account_check_url: Url,
@@ -96,7 +97,15 @@ impl DesktopState {
         self.continuation_state.memory_diagnostics()
     }
 
+    #[cfg(test)]
     pub fn open(root: PathBuf) -> Result<Self> {
+        Self::open_with_continuation_state(root, RuntimeContinuationStores::default())
+    }
+
+    pub(super) fn open_with_continuation_state(
+        root: PathBuf,
+        continuation_state: RuntimeContinuationStores,
+    ) -> Result<Self> {
         let paths = StoragePaths::from_root(&root);
         let transient_root = paths.cache_root();
         let history_repair_root = paths.history_repair_backup_root();
@@ -188,7 +197,7 @@ impl DesktopState {
                 model_metadata,
                 store: Arc::new(Mutex::new(store)),
                 token_authority,
-                continuation_state: RuntimeContinuationStores::default(),
+                continuation_state,
                 refresh: RefreshService::with_cache_policy(
                     RefreshLimits::default(),
                     super::refresh::cache_observation,
@@ -206,7 +215,7 @@ impl DesktopState {
                 client_catalog_refresh: catalog_refresh::CatalogRefreshQueue::default(),
                 background_session_active,
                 quota_account_locks: Arc::new(Mutex::new(HashMap::new())),
-                subscription_refresh_lock: AsyncMutex::new(()),
+                subscription_refresh_lock: AsyncMutex::new(Default::default()),
                 setup_lock: tokio::sync::Mutex::new(()),
                 runtime_snapshot_slots: Arc::new(Semaphore::new(1)),
                 account_check_url: Url::parse(DEFAULT_CODEX_ACCOUNT_CHECK_ENDPOINT)
@@ -342,7 +351,9 @@ impl DesktopState {
         Ok(removed)
     }
 
-    pub(crate) async fn subscription_refresh_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+    pub(crate) async fn subscription_refresh_guard(
+        &self,
+    ) -> tokio::sync::MutexGuard<'_, subscription::SubscriptionRefreshState> {
         self.subscription_refresh_lock.lock().await
     }
 

@@ -22,6 +22,7 @@ impl SourceProtocolConfig {
                 && (capability.origin != CapabilityOrigin::Catalog
                     || (capability.features.is_empty()
                         && capability.reasoning_efforts.is_empty()
+                        && capability.token_limits.is_empty()
                         && capability.service_tiers.is_none()))
             {
                 continue;
@@ -64,6 +65,7 @@ impl SourceProtocolConfig {
                             CapabilityStatus::Declared,
                         )]),
                         reasoning_efforts: vec![],
+                        token_limits: ModelTokenLimits::default(),
                         service_tiers: None,
                     })
                     .or_else(|| observations.first().map(|capability| (*capability).clone()));
@@ -85,6 +87,10 @@ impl SourceProtocolConfig {
                         }
                         if observation.service_tiers.is_some() {
                             effective_capability.service_tiers = observation.service_tiers.clone();
+                        }
+                        if observation.origin == CapabilityOrigin::Catalog {
+                            effective_capability.token_limits =
+                                observation.token_limits.validated();
                         }
                     }
                 }
@@ -323,7 +329,7 @@ struct UpstreamProtocolHints {
     pinned: Option<WireApi>,
     /// Protocol preferred for the model's group in the reference catalog.
     model_preference: Option<WireApi>,
-    /// A validated manufacturer contract, independent of the client's API.
+    /// Manufacturer default, used only without exact source endpoint evidence.
     native: Option<WireApi>,
     /// Protocol implied by a known service host.
     host: Option<WireApi>,
@@ -339,14 +345,17 @@ fn supported_upstream_protocols(
     let is_unsupported =
         |protocol: &WireApi| unsupported_protocols.is_some_and(|set| set.contains(protocol));
     if let Some(protocol) = hints.pinned {
-        return (!is_unsupported(&protocol)
-            && hints.native.is_none_or(|native| native == protocol))
-        .then_some(protocol)
-        .into_iter()
-        .collect();
+        return (!is_unsupported(&protocol))
+            .then_some(protocol)
+            .into_iter()
+            .collect();
     }
+    let source_declared = available_capabilities
+        .iter()
+        .any(ModelEndpointCapability::explicitly_declares_endpoint);
     let mut declared = available_capabilities
         .iter()
+        .filter(|capability| !source_declared || capability.explicitly_declares_endpoint())
         .filter(|capability| !is_unsupported(&capability.upstream_wire_api))
         .map(|capability| capability.upstream_wire_api)
         .collect::<BTreeSet<_>>();
@@ -369,7 +378,9 @@ fn supported_upstream_protocols(
         }
     }
     let mut protocols = declared.into_iter().collect::<Vec<_>>();
-    protocols.retain(|protocol| hints.native.is_none_or(|native| native == *protocol));
+    if !source_declared {
+        protocols.retain(|protocol| hints.native.is_none_or(|native| native == *protocol));
+    }
     protocols.sort_by_key(|protocol| {
         (
             Some(*protocol) != hints.model_preference,

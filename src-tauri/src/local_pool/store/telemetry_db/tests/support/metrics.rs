@@ -3,13 +3,38 @@ use super::diagnostic_rows;
 use serde_json::{Value, json};
 
 #[test]
+fn diagnostic_report_preserves_cache_affinity_without_owner_identifiers() {
+    let mut row = diagnostic_rows().pop().unwrap();
+    let member = json!({"quotaRemainingBasisPoints":null,"providerCreditsMicroUnits":null,
+        "providerCreditsUnlimited":false,"inFlight":0,"effectiveCapacity":4});
+    let evidence = json!({"selection":"warm_alternative","reason":"owner_unavailable",
+        "ownerBlockReason":"capacity_busy","preferred":member,"selected":member,
+        "bestQuotaRemainingBasisPoints":null,"bestProviderCreditsMicroUnits":null,
+        "bestProviderCreditsUnlimited":false,"quotaSwitchMarginBasisPoints":500,
+        "providerCreditSwitchMarginMicroUnits":15000000,"loadAllowanceRequests":1,
+        "candidateId":"private-candidate","promptCacheKey":"private-key"});
+    row.routing.as_mut().unwrap().cache_affinity = Some(serde_json::from_value(evidence).unwrap());
+    let report = document(Some(&row), std::slice::from_ref(&row), false);
+    let affinity = &report["finalRequest"]["routing"]["cacheAffinity"];
+    assert_eq!(affinity["reason"], "owner_unavailable");
+    assert_eq!(affinity["ownerBlockReason"], "capacity_busy");
+    assert_eq!(affinity["quotaSwitchMarginBasisPoints"], 500);
+    assert!(affinity["preferred"]["quotaRemainingBasisPoints"].is_null());
+    assert!(!report.to_string().contains("private-candidate"));
+    assert!(!report.to_string().contains("private-key"));
+}
+
+#[test]
 fn diagnostic_report_separates_post_policy_catalog_from_prompt_embedded_contracts() {
     let mut row = diagnostic_rows().pop().unwrap();
     row.tool_use = Some(serde_json::from_value(json!({
         "clientToolCount": 312, "forwardedToolCount": 312, "forwardedSchemaBytes": 389861,
         "toolCallCount": 0, "textOutput": true, "policyMode": "pass_through",
-        "upstreamContext": {"bodyBytes": 8000, "instructionBytes": 6000, "conversationBytes": 1000, "toolCatalogBytes": 0},
+        "upstreamContext": {"bodyBytes": 8000, "instructionBytes": 6000, "conversationBytes": 1000, "toolCatalogBytes": 0,
+            "conversation": {"messageBytes":400,"toolCallBytes":200,"toolResultBytes":250,
+                "reasoningBytes":100,"attachmentBytes":40,"otherBytes":10,"itemCount":5,"attachmentCount":1}},
         "basisPointsCatalog": {"mode": "discovery", "fullSchemaBytes": 300000,
+            "selectionReason":"automatic_discovery", "relayToolInstructionBytes":5500,
             "renderedSchemaBytes": 2075, "catalogPromptBytes": 4500, "loadedToolCount": 4, "discoveryRounds": 1}
     })).unwrap());
     let report = document(Some(&row), std::slice::from_ref(&row), false);
@@ -21,6 +46,16 @@ fn diagnostic_report_separates_post_policy_catalog_from_prompt_embedded_contract
     assert_eq!(tools["upstreamContext"]["toolCatalogBytes"], 0);
     assert_eq!(tools["catalog"]["loadedToolCount"], 4);
     assert_eq!(tools["catalog"]["renderedSchemaBytes"], 2075);
+    assert_eq!(tools["catalog"]["selectionReason"], "automatic_discovery");
+    assert_eq!(tools["catalog"]["relayToolInstructionBytes"], 5500);
+    assert_eq!(
+        tools["upstreamContext"]["conversation"]["toolResultBytes"],
+        250
+    );
+    assert_eq!(
+        tools["upstreamContext"]["conversation"]["attachmentCount"],
+        1
+    );
     assert_eq!(
         tools["catalog"]["representation"],
         "prompt_text_not_native_tools_array"
@@ -79,6 +114,10 @@ fn diagnostic_report_explains_preparation_remainder_without_adding_nested_valida
         (
             json!({"bodyMs":139,"schemaValidationMs":22,"catalogMs":31,"serializationMs":40,"attachmentsMs":2175}),
             4,
+        ),
+        (
+            json!({"bodyMs":139,"schemaValidationMs":22,"catalogMs":21,"serializationMs":40,"attachmentsMs":2175,"contextAccountingMs":10}),
+            5,
         ),
     ] {
         let report = preparation_report(Some(2408), phases);

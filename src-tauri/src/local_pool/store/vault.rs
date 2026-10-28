@@ -1,3 +1,4 @@
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
     aead::{Aead, KeyInit},
@@ -22,6 +23,40 @@ const MAX_SECRET_REFS: usize = 8_192;
 struct VaultData {
     #[serde(rename = "values")]
     secrets_by_ref: BTreeMap<String, String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_agent_message_key"
+    )]
+    agent_message_key: Option<AgentMessageKeyRecord>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AgentMessageKeyRecord {
+    version: u8,
+    key: String,
+}
+
+fn deserialize_agent_message_key<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<AgentMessageKeyRecord>, D::Error> {
+    // Only an absent field is a legacy vault. A present null/incomplete record
+    // is corruption, never permission to silently replace an existing key.
+    AgentMessageKeyRecord::deserialize(deserializer).map(Some)
+}
+
+impl AgentMessageKeyRecord {
+    fn decode(&self) -> Result<[u8; 32], String> {
+        if self.version != 1 {
+            return Err("agent-message key record version is unsupported".into());
+        }
+        URL_SAFE_NO_PAD
+            .decode(&self.key)
+            .map_err(|_| "agent-message key record is invalid".to_string())?
+            .try_into()
+            .map_err(|_| "agent-message key record has an invalid length".to_string())
+    }
 }
 
 pub struct Vault {
@@ -32,6 +67,26 @@ pub struct Vault {
 }
 
 impl Vault {
+    /// Atomic within this vault's process-local writer. Desktop startup owns a
+    /// single configured vault behind its single-instance application boundary.
+    pub(in crate::local_pool) fn agent_message_key(&self) -> Result<[u8; 32], String> {
+        let mut data = self.lock()?;
+        if let Some(record) = data.agent_message_key.as_ref() {
+            return record.decode();
+        }
+        let mut key = [0; 32];
+        rand::rng().fill_bytes(&mut key);
+        data.agent_message_key = Some(AgentMessageKeyRecord {
+            version: 1,
+            key: URL_SAFE_NO_PAD.encode(key),
+        });
+        if let Err(error) = self.persist(&data) {
+            data.agent_message_key = None;
+            return Err(error);
+        }
+        Ok(key)
+    }
+
     pub fn has_persisted_data(root: &Path) -> bool {
         root.join("secrets.enc").exists() || root.join("secrets.enc.bak").exists()
     }
@@ -163,6 +218,9 @@ fn decrypt_file(path: &Path, key: &[u8; 32]) -> Result<VaultData, String> {
 }
 
 fn validate_data(vault_data: &VaultData) -> Result<(), String> {
+    if let Some(record) = vault_data.agent_message_key.as_ref() {
+        record.decode()?;
+    }
     if vault_data.secrets_by_ref.len() > MAX_SECRET_REFS {
         return Err("secret vault entry limit is exceeded".to_string());
     }
@@ -242,6 +300,130 @@ fn io_error(error: std::io::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_message_key_survives_reopen_backup_and_generic_secret_changes() {
+        let root = std::env::temp_dir().join(format!("relay-agent-key-{}", uuid::Uuid::new_v4()));
+        let vault = Vault::open(&root, [3; 32]).unwrap();
+        vault
+            .save("source:synthetic", "synthetic-provider-secret")
+            .unwrap();
+        assert!(vault.lock().unwrap().agent_message_key.is_none());
+        let key = vault.agent_message_key().unwrap();
+        let bytes = fs::read(root.join("secrets.enc")).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains(&URL_SAFE_NO_PAD.encode(key)));
+        vault
+            .save("account:synthetic", "synthetic-account-secret")
+            .unwrap();
+        vault.delete("source:synthetic").unwrap();
+        assert_eq!(vault.secret_refs().unwrap(), ["account:synthetic"]);
+        drop(vault);
+        let reopened = Vault::open(&root, [3; 32]).unwrap();
+        assert_eq!(reopened.agent_message_key().unwrap(), key);
+        reopened.delete("account:synthetic").unwrap();
+        drop(reopened);
+        fs::rename(root.join("secrets.enc"), root.join("secrets.enc.bak")).unwrap();
+        assert_eq!(
+            Vault::open(&root, [3; 32])
+                .unwrap()
+                .agent_message_key()
+                .unwrap(),
+            key
+        );
+        let other_root = root.with_extension("other-profile");
+        assert_ne!(
+            Vault::open(&other_root, [3; 32])
+                .unwrap()
+                .agent_message_key()
+                .unwrap(),
+            key
+        );
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(other_root).unwrap();
+    }
+
+    #[test]
+    fn competing_agent_message_key_initializers_return_one_durable_key() {
+        let root =
+            std::env::temp_dir().join(format!("relay-agent-key-race-{}", uuid::Uuid::new_v4()));
+        let vault = std::sync::Arc::new(Vault::open(&root, [3; 32]).unwrap());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let threads = (0..8)
+            .map(|_| {
+                let vault = vault.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    vault.agent_message_key().unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let keys = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>();
+        assert!(keys.iter().all(|key| key == &keys[0]));
+        drop(vault);
+        assert_eq!(
+            Vault::open(&root, [3; 32])
+                .unwrap()
+                .agent_message_key()
+                .unwrap(),
+            keys[0]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn initialized_agent_message_key_corruption_never_generates_a_replacement() {
+        for record in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({"version":1}),
+            serde_json::json!({"version":1,"key":"invalid"}),
+            serde_json::json!({"version":2,"key":URL_SAFE_NO_PAD.encode([7;32])}),
+        ] {
+            let root = std::env::temp_dir()
+                .join(format!("relay-agent-key-invalid-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(&root).unwrap();
+            let payload =
+                serde_json::to_vec(&serde_json::json!({"values":{},"agent_message_key":record}))
+                    .unwrap();
+            let cipher = ChaCha20Poly1305::new((&[3; 32]).into());
+            let nonce = Nonce::from([4; NONCE_BYTES]);
+            let ciphertext = cipher.encrypt(&nonce, payload.as_ref()).unwrap();
+            let mut bytes = MAGIC.to_vec();
+            bytes.extend_from_slice(nonce.as_slice());
+            bytes.extend_from_slice(&ciphertext);
+            fs::write(root.join("secrets.enc"), &bytes).unwrap();
+            assert!(Vault::open(&root, [3; 32]).is_err());
+            assert_eq!(fs::read(root.join("secrets.enc")).unwrap(), bytes);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn unavailable_agent_message_key_persistence_returns_no_volatile_key() {
+        let root =
+            std::env::temp_dir().join(format!("relay-agent-key-io-{}", uuid::Uuid::new_v4()));
+        let vault = Vault::open(&root, [3; 32]).unwrap();
+        fs::remove_dir(&root).unwrap();
+        fs::write(&root, "synthetic-unavailable-directory").unwrap();
+        assert!(vault.agent_message_key().is_err());
+        assert!(vault.lock().unwrap().agent_message_key.is_none());
+        fs::remove_file(&root).unwrap();
+        fs::create_dir(&root).unwrap();
+        let key = vault.agent_message_key().unwrap();
+        drop(vault);
+        assert_eq!(
+            Vault::open(&root, [3; 32])
+                .unwrap()
+                .agent_message_key()
+                .unwrap(),
+            key
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn vault_encrypts_large_values_and_recovers_backup() {

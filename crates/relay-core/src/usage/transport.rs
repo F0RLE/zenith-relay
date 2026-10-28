@@ -25,6 +25,9 @@ pub struct RequestPreparationDiagnostics {
     pub serialization_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachments_ms: Option<u64>,
+    /// Opt-in prepared-context accounting after attachment resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_accounting_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -437,6 +440,7 @@ mod tests {
             catalog_ms: Some(0),
             serialization_ms: Some(0),
             attachments_ms: Some(0),
+            context_accounting_ms: None,
         };
         route.observe_request_preparation(0, preparation.clone());
         route.observe_request_preparation(42, RequestPreparationDiagnostics::default());

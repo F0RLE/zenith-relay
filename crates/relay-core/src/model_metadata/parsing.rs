@@ -2,9 +2,7 @@ use super::{
     MAX_RECORDS, MAX_STRING_LENGTH, ModelCapabilities, ModelMetadata, ModelMetadataError,
     ReasoningMethod, order,
 };
-use crate::model_metadata::reasoning::{
-    normalize_external_levels, parse_effort_flags, parse_reasoning_object, parse_reasoning_options,
-};
+use crate::model_metadata::reasoning::parse_model_reasoning;
 use serde_json::Value;
 
 pub(super) fn parse_metadata(
@@ -28,34 +26,33 @@ pub(super) fn parse_metadata(
         .get("architecture")
         .and_then(Value::as_object);
     let limits = metadata_object.get("limit").and_then(Value::as_object);
-    let supported_parameters = string_array(metadata_object.get("supported_parameters"));
-    let reasoning_options = parse_reasoning_options(
-        metadata_object
-            .get("reasoning_options")
-            .or_else(|| metadata_object.get("reasoningOptions")),
-    );
-    let reasoning_method = metadata_object
-        .get("reasoning_method")
-        .and_then(Value::as_str)
-        .and_then(|method| match method {
-            "effort" => Some(ReasoningMethod::Effort),
-            "toggle" => Some(ReasoningMethod::Toggle),
-            "budget_tokens" => Some(ReasoningMethod::BudgetTokens),
-            "adaptive" => Some(ReasoningMethod::Adaptive),
-            "unknown" => Some(ReasoningMethod::Unknown),
-            _ => None,
-        })
-        .or_else(|| parse_reasoning_object(metadata_object.get("reasoning")).method)
-        .or_else(|| reasoning_options.method.clone())
+    let context_limit = limits
+        .and_then(|limits| limits.get("context"))
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
         .or_else(|| {
-            if supported_parameters.iter().any(|p| p == "reasoning_effort") {
-                Some(ReasoningMethod::Effort)
-            } else if supported_parameters.iter().any(|p| p == "reasoning") {
-                Some(ReasoningMethod::Unknown)
-            } else {
-                None
-            }
+            metadata_object
+                .get("context_length")
+                .and_then(Value::as_u64)
+                .filter(|value| *value > 0)
         });
+    let token_limit = |field| {
+        limits
+            .and_then(|limits| limits.get(field))
+            .and_then(Value::as_u64)
+            .filter(|value| *value > 0 && context_limit.is_none_or(|context| *value <= context))
+    };
+    let supported_parameters = string_array(metadata_object.get("supported_parameters"));
+    let reasoning = parse_model_reasoning(metadata_value);
+    let reasoning_method = reasoning.method.clone().or_else(|| {
+        if supported_parameters.iter().any(|p| p == "reasoning_effort") {
+            Some(ReasoningMethod::Effort)
+        } else if supported_parameters.iter().any(|p| p == "reasoning") {
+            Some(ReasoningMethod::Unknown)
+        } else {
+            None
+        }
+    });
     // `name` is descriptive only. Keep a record when the upstream catalog
     // omits it so family, dates, and capability metadata still apply.
     let model_name = string("name");
@@ -86,19 +83,6 @@ pub(super) fn parse_metadata(
                     .and_then(|architecture_object| architecture_object.get("output_modalities"))
             }),
     );
-    let mut reasoning_effort_levels = string_array(
-        metadata_object
-            .get("reasoning_effort_levels")
-            .or_else(|| metadata_object.get("reasoningEffortLevels")),
-    );
-    if reasoning_effort_levels.is_empty() {
-        reasoning_effort_levels = parse_effort_flags(metadata_object);
-    }
-    if reasoning_effort_levels.is_empty() {
-        reasoning_effort_levels = reasoning_options.levels.clone();
-    }
-    reasoning_effort_levels = normalize_external_levels(reasoning_effort_levels);
-
     Some(ModelMetadata {
         source_model_id: source_model_id.to_string(),
         provider: provider.to_string(),
@@ -130,25 +114,28 @@ pub(super) fn parse_metadata(
         status: string("status"),
         knowledge: string("knowledge").or_else(|| string("knowledge_cutoff")),
         capabilities: ModelCapabilities {
-            reasoning: direct_or_supported("reasoning", "reasoning")
-                .or(reasoning_options.supported),
+            reasoning: boolean("reasoning")
+                .or(reasoning.supported)
+                .or_else(|| direct_or_supported("reasoning", "reasoning")),
+            reasoning_effort_conflict: false,
             reasoning_source: string("reasoning_source"),
             reasoning_method,
             reasoning_budget_min_tokens: metadata_object
                 .get("reasoning_budget_min_tokens")
                 .and_then(Value::as_u64)
-                .or(reasoning_options.budget[0]),
+                .or(reasoning.budget[0]),
             reasoning_budget_max_tokens: metadata_object
                 .get("reasoning_budget_max_tokens")
                 .and_then(Value::as_u64)
-                .or(reasoning_options.budget[1]),
+                .or(reasoning.budget[1]),
             reasoning_budget_default_tokens: metadata_object
                 .get("reasoning_budget_default_tokens")
                 .and_then(Value::as_u64)
-                .or(reasoning_options.budget[2]),
-            reasoning_effort_levels,
+                .or(reasoning.budget[2]),
+            reasoning_effort_levels: reasoning.levels,
             default_reasoning_effort: string("default_reasoning_effort")
                 .or_else(|| string("defaultReasoningEffort"))
+                .or(reasoning.default)
                 .map(|level| crate::catalog::canonical_reasoning_level(&level)),
             tool_call: direct_or_supported("tool_call", "tools"),
             structured_output: direct_or_supported("structured_output", "structured_outputs")
@@ -178,20 +165,9 @@ pub(super) fn parse_metadata(
                 .collect(),
             input_modalities,
             output_modalities,
-            context_limit: limits
-                .and_then(|limit_object| limit_object.get("context"))
-                .and_then(Value::as_u64)
-                .or_else(|| {
-                    metadata_object
-                        .get("context_length")
-                        .and_then(Value::as_u64)
-                }),
-            input_limit: limits
-                .and_then(|limit_object| limit_object.get("input"))
-                .and_then(Value::as_u64),
-            output_limit: limits
-                .and_then(|limit_object| limit_object.get("output"))
-                .and_then(Value::as_u64),
+            context_limit,
+            input_limit: token_limit("input"),
+            output_limit: token_limit("output"),
         },
     })
 }

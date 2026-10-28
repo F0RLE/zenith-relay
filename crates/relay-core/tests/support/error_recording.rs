@@ -50,6 +50,14 @@ async fn adapter_preparation_rejections_are_recorded_without_a_provider_attempt(
         assert!(event.output_tokens.is_none());
         assert!(event.cooldown_scope.is_none());
         assert!(event.consecutive_failures.is_none());
+        let details = event.upstream_error.as_ref().unwrap();
+        assert_eq!(details.http_status, Some(400));
+        assert_eq!(
+            details.code.as_deref(),
+            Some("adapter_continuation_missing")
+        );
+        assert_eq!(details.error_type.as_deref(), Some("relay_adapter"));
+        assert!(details.message.as_ref().unwrap().contains("prior response"));
         assert!(
             !serde_json::to_string(event)
                 .unwrap()
@@ -109,6 +117,19 @@ async fn websocket_adapter_preparation_rejection_is_recorded_once() {
     );
     assert!(recorded[0].candidate_id.is_none());
     assert!(recorded[0].total_tokens.is_none());
+    let details = recorded[0].upstream_error.as_ref().unwrap();
+    assert_eq!(details.http_status, Some(400));
+    assert_eq!(
+        details.code.as_deref(),
+        Some("adapter_continuation_missing")
+    );
+    assert_eq!(details.error_type.as_deref(), Some("relay_adapter"));
+    assert!(details.message.as_ref().unwrap().contains("prior response"));
+    assert!(
+        !serde_json::to_string(&recorded[0])
+            .unwrap()
+            .contains("private-preparation-sentinel")
+    );
 }
 
 #[tokio::test]

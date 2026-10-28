@@ -4,9 +4,9 @@ use zenith_relay_core::{
     quota::QuotaWindowKind,
 };
 
-const NOW: u64 = 2_000_000_000_000;
+pub(super) const NOW: u64 = 2_000_000_000_000;
 
-fn window(at: u64, remaining: u16) -> QuotaWindow {
+pub(super) fn window(at: u64, remaining: u16) -> QuotaWindow {
     serde_json::from_value(serde_json::json!({
         "kind":"secondary", "windowStartMs":NOW - DAY_MS, "resetAtMs":NOW + 6 * DAY_MS,
         "availableBasisPoints":remaining, "windowMinutes":10080, "observedAtMs":at,
@@ -27,7 +27,7 @@ fn catalog() -> PricingCatalog {
     .unwrap()
 }
 
-fn database() -> (std::path::PathBuf, TelemetryDb) {
+pub(super) fn database() -> (std::path::PathBuf, TelemetryDb) {
     let root = std::env::temp_dir().join(format!("relay-capacity-{}", uuid::Uuid::new_v4()));
     let database = TelemetryDb::open(&root.join("test.sqlite")).unwrap();
     (root, database)
@@ -50,7 +50,7 @@ fn observe(database: &TelemetryDb, at: u64, remaining: u16, plan: &str, revision
         .unwrap();
 }
 
-fn usage(database: &TelemetryDb, id: &str, account: &str, at: u64, cached: Option<u64>) {
+pub(super) fn usage(database: &TelemetryDb, id: &str, account: &str, at: u64, cached: Option<u64>) {
     let mut event = super::super::tests::aggregate_test_event(id, 1, 100, 0, None, 20);
     event.account_id = Some(account.into());
     event.cached_input_tokens = cached;
@@ -250,7 +250,7 @@ fn weekly_capacity_rejects_small_incomplete_expired_or_reversed_observations() {
 }
 
 #[test]
-fn weekly_capacity_resets_and_plan_or_price_changes_are_events_not_capacity_increases() {
+fn weekly_capacity_resets_and_plan_changes_are_events_but_catalog_refreshes_are_not() {
     let (root, database) = database();
     observe(&database, NOW, 10_000, "plus", "v1");
     usage(&database, "known", "a", NOW + 30_000, Some(80));
@@ -268,7 +268,7 @@ fn weekly_capacity_resets_and_plan_or_price_changes_are_events_not_capacity_incr
         .collect::<Vec<_>>();
     assert!(kinds.contains(&"discontinuity"));
     assert!(kinds.contains(&"plan_changed"));
-    assert!(kinds.contains(&"pricing_changed"));
+    assert!(!kinds.contains(&"pricing_changed"));
     assert_eq!(value["groups"].as_array().unwrap().len(), 1);
     drop(database);
     std::fs::remove_dir_all(root).unwrap();
@@ -284,6 +284,7 @@ fn weekly_capacity_window_identity_does_not_confuse_burst_and_weekly_limits() {
         window: window(NOW, 9000),
         from_ms: NOW,
         remaining: 9000,
+        calibration: None,
     };
     let mut next = anchor.clone();
     next.window.observed_at_ms += 60_000;

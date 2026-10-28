@@ -5,6 +5,8 @@ pub(super) fn document(tools: &ToolUseDiagnostics) -> Value {
     let catalog = tools.basis_points_catalog.as_ref().map(|catalog| json!({
         "representation": "prompt_text_not_native_tools_array",
         "mode": (["full", "compact", "discovery"].contains(&catalog.mode.as_str()).then_some(catalog.mode.as_str())),
+        "selectionReason": catalog.selection_reason,
+        "relayToolInstructionBytes": catalog.relay_tool_instruction_bytes,
         "fullSchemaBytes": catalog.full_schema_bytes, "renderedSchemaBytes": catalog.rendered_schema_bytes,
         "catalogPromptBytes": catalog.catalog_prompt_bytes, "loadedToolCount": catalog.loaded_tool_count,
         "discoveryRounds": catalog.discovery_rounds, "discoveryLatencyMs": catalog.discovery_latency_ms,

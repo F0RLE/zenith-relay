@@ -87,7 +87,8 @@ impl ModelMetadataCatalogLoader {
         let (states, parsed) = cache::read_states(&path, now, max_age_ms);
         // Consume the already-validated trees instead of retaining all sources
         // alongside the merged records. The immutable raw envelopes stay intact.
-        let merged_catalog_payload = merge_payloads(parsed);
+        let merged_catalog_payload =
+            merge_payloads(parsed, source::stale_sources(&states, now, max_age_ms));
         let catalog = catalog_from_payload(
             &states,
             &merged_catalog_payload,
@@ -221,7 +222,15 @@ impl ModelMetadataCatalogLoader {
             }
         }
         let previous = self.snapshot();
+        let stale = source::stale_sources(&updated_states, now, self.max_age_ms);
+        let freshness_unchanged = SOURCES.iter().enumerate().all(|(index, source)| {
+            previous
+                .sources
+                .get(*source)
+                .is_some_and(|status| status.stale == stale[index])
+        });
         let unchanged = previous.revision.is_some()
+            && freshness_unchanged
             && cached_states
                 .iter()
                 .zip(&updated_states)
@@ -250,7 +259,7 @@ impl ModelMetadataCatalogLoader {
             }
             return Ok(CatalogRefreshOutcome::NotModified { revision });
         }
-        let prepared = match PreparedCatalog::new(&updated_states) {
+        let prepared = match PreparedCatalog::new(&updated_states, now, self.max_age_ms) {
             Ok(prepared) => prepared,
             Err(error) => {
                 // Do not leave sources stuck in Updating if building the
@@ -280,7 +289,10 @@ impl ModelMetadataCatalogLoader {
         }
         let previous_revision = self.snapshot().revision.clone();
         let revision = prepared.revision.clone();
-        self.publish(updated_states, Some(&prepared));
+        self.publish(
+            updated_states,
+            (previous_revision.as_ref() != Some(&revision)).then_some(&prepared),
+        );
         if successes == 0
             && let Some(error) = first_error
         {

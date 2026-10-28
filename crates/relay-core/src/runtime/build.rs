@@ -400,6 +400,7 @@ impl GatewayRuntime {
             model_metadata_catalog: options.model_metadata_catalog.clone(),
             passive_quotas: Mutex::new(account_parts.passive_quotas),
             adapter_continuation_store: continuation_state.adapters.clone(),
+            agent_message_cipher: continuation_state.agent_messages.clone(),
             native_responses_replay_store: continuation_state.native_responses.clone(),
             cache_context_store: super::cache_context::CacheContextStore::default(),
             codex_turn_state_store: CodexTurnStateStore::default(),

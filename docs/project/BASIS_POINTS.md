@@ -29,7 +29,41 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
   BPS-only models use their HTTP executor without a native Responses upgrade.
 - Compact messages, attribution, tool history, and inline attachments are
   normalized at this boundary. Collaboration context is lower-authority user
-  context; encrypted agent messages and remote image fetching are unsupported.
+  context; remote image fetching is unsupported.
+- Direct function string properties annotated `encrypted:true` are validated as
+  plaintext, then sealed in a Relay-owned authenticated carrier before release.
+  Nullable strings and omitted optional values retain their meaning. Nested,
+  composite, and reference-based encryption schemas fail before dispatch rather
+  than leaking plaintext. Each encrypted string is limited to 1 MiB of UTF-8.
+  HTTP and WebSocket ingress restore these carriers in `agent_message` content
+  and matching function-call history before admission; agent attribution stays
+  context, never developer authority. Existing volatile replay snapshots retain
+  canonical arguments so recovery does not resend client-only carriers.
+  JSON and SSE use the same sealed argument,
+  including terminal snapshots, with no premature executable output.
+  Carriers remain bound to the local gateway key ID. Desktop loads their
+  independent host key from a typed record in its existing encrypted secret
+  vault before constructing the runtime. The same protected data directory can
+  therefore resume saved carriers after graph replacement or process restart;
+  another local key or independently initialized profile cannot open them.
+  Key creation is atomic under the configured vault's writer mutex and must
+  persist before use. Desktop's single-instance boundary owns the single writer;
+  the mutex is not a multiprocess lock. A legacy vault without the record creates
+  it once; a present null, malformed or unsupported record, unavailable vault or
+  failed persistence stops startup rather than silently replacing the key.
+  Carrier keys are not account credentials or generic secret references, and
+  account cleanup cannot delete them. Messages and conversation replay stores
+  remain volatile; there is no persistent message cache. Standalone Core hosts
+  must explicitly supply their protected carrier key to survive restarts.
+  Previously minted v1 carriers whose old volatile key was already lost cannot
+  be decrypted by this change; neither a replacement agent nor a new key recovers
+  that missing key. Authentication failures return a specific unavailable-history
+  error with the original-profile/key or new-chat recovery options, not a generic
+  source-adapter failure; they never dispatch to a provider or retry another route.
+  Foreign provider ciphertext stays opaque and retains native-route behavior;
+  BPS still rejects it explicitly. The public
+  [Responses multi-agent guide](https://developers.openai.com/api/docs/guides/responses-multi-agent)
+  describes encrypted `agent_message` items, not BPS decryption support.
 - The observed Codex `codex_app.create_thread` handoff is lowered to labelled
   user context only when `call_id` is absent and its nonempty string output has
   complete `<codex_delegation>` delimiters. Original text and source ID remain
@@ -144,6 +178,20 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
 - Dispatch moves the prepared BPS body instead of retaining a duplicate history;
   catalog diagnostics share the session's parsed declarations. Wire bytes,
   discovery authority and cache-prefix ordering stay unchanged.
+- Paired context sizes describe the client request and the final prepared body,
+  after catalog preloads and inline-image replacement. Optional `conversation`
+  counters partition conversation bytes into messages, tool calls, tool results,
+  reasoning, attachments and other items. Nested typed blocks own their bytes;
+  wrappers stay in the parent category, and outer history delimiters remain
+  outside conversation bytes. Counts retain no content or identifiers; legacy
+  records have no invented breakdown. Classification is bounded and does not
+  inspect arbitrary tool arguments or decode provider ciphertext.
+- Catalog `selectionReason` distinguishes explicit full/compact/discovery,
+  automatic discovery, a below-threshold catalog, no tools, a lookup-tool
+  collision, and dispatch-budget fallback. Missing legacy reasons stay unknown.
+  `relayToolInstructionBytes` measures the known generated tool-instruction
+  text as JSON bytes: it is a subset of upstream instruction bytes, can include
+  the catalog, and does not claim to measure all Relay-generated history text.
 - `httpVersion` records the actual upstream HTTP response version when observed,
   independently of client WebSocket ingress. It does not prove connection reuse;
   failures before response headers leave it absent.
@@ -188,6 +236,9 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
   catalog time. Rounding and remaining dispatch setup can leave a gap to the
   total. The recorder retains only counters and does not change validation,
   caching, wire bodies, or upload/retry policy.
+  Optional `contextAccountingMs` measures prepared-context accounting after
+  attachments, separately from those phases; it is not all diagnostic overhead.
+  Support-export phase accounting includes it when observed.
   Schema-3 support exports expose this gap as
   `transport.preparationAccounting.unattributedMs`, computed from observed
   non-overlapping phases only. Initial schema validation is never added twice.
@@ -200,6 +251,15 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
   respect task/tool permissions, approval boundaries, dependencies, and shared
   state. This is guidance, not automatic command rewriting. Actual scheduling
   and approvals belong to the client; concurrent execution is not guaranteed.
+- Broad inspections request compact results while retaining required instructions,
+  errors and edit context. Related missing contracts share a catalog lookup;
+  asynchronous work uses job handles and bounded waits. Screenshots remain
+  available for visual decisions and required fresh observations; this does not
+  remove images/history or lower reasoning effort, validation, or safety.
+- Core shell/edit/wait contracts receive eager-loading priority over optional
+  declarations, avoiding discovery-only turns when an alphabetically earlier
+  catalog would fill the budget. The eight-tool/16 KiB limits, explicit deferral
+  and current tool-choice restrictions still apply; other tools remain discoverable.
 - For independent generated scripts, patches and function-string frames, guidance
   prefers separate native calls in one response, preserving raw bodies without
   another nested batch-JSON layer. This does not disable parallel calls or remove
@@ -423,8 +483,10 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
 - Both request and account dispatch keep the prepared JSON value through catalog
   preparation and image resolution, then encode it once for HTTP. Discovery
   retains that same resolved value, without reparsing the wire body or retaining
-  a redundant encoded copy of inline images. Text-only requests skip attachment
-  credential lookup. Final encoding remains part of `catalogMs`, not upload time;
+  a redundant encoded copy of inline images. Text-only and existing-file-reference
+  requests skip attachment credential lookup; references still pass validation and
+  normalization. Inline-image cache reuse always checks the current credential.
+  Final encoding is measured in `serializationMs`, not upload time;
   image validation, account/credential cache boundaries and cancellation are
   unchanged. Tools still wait for complete response validation before release.
 - Inline-image uploads share in-flight success or failure for the same endpoint,

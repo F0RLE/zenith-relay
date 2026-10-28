@@ -216,53 +216,59 @@ impl<S> UsageStream<S> {
         if self.native_gemini {
             return bytes.to_vec();
         }
-        self.sse_forward_pending.extend_from_slice(bytes);
+        let mut pending = std::mem::take(&mut self.sse_forward_pending);
+        let mut scan_from = pending.len().saturating_sub(1);
+        let direct = pending.is_empty();
+        // Complete network chunks need no intermediate copy. Compact a retained
+        // tail once per chunk, not once per event in a coalesced chunk.
+        let frames = if direct {
+            bytes
+        } else {
+            pending.extend_from_slice(bytes);
+            pending.as_slice()
+        };
         let mut forwarded = Vec::with_capacity(bytes.len());
+        let mut consumed = 0;
         loop {
-            match self.sse_forward_mode {
-                super::SseForwardMode::Passthrough | super::SseForwardMode::BufferedTerminal => {
-                    let Some(end) = crate::protocol::sse_event_end(&self.sse_forward_pending)
-                    else {
-                        if self.sse_forward_mode == super::SseForwardMode::Passthrough {
-                            forwarded.append(&mut self.sse_forward_pending);
-                        }
-                        break;
-                    };
-                    if self.forward_complete_sse_event(end, origin, &mut forwarded) {
-                        break;
-                    }
+            let remaining = &frames[consumed..];
+            if self.sse_forward_mode == super::SseForwardMode::Detect
+                && let Some(terminal) = classify_sse_prefix(remaining)
+            {
+                self.sse_forward_mode = if terminal {
+                    super::SseForwardMode::BufferedTerminal
+                } else {
+                    super::SseForwardMode::Passthrough
+                };
+            }
+            let Some(end) = crate::protocol::sse::event_end_from(remaining, scan_from) else {
+                if self.sse_forward_mode == super::SseForwardMode::BufferedTerminal
+                    || (self.sse_forward_mode == super::SseForwardMode::Detect
+                        && may_be_terminal_event_header_prefix(remaining))
+                {
+                    break;
                 }
-                super::SseForwardMode::Detect => {
-                    match classify_sse_prefix(&self.sse_forward_pending) {
-                        Some(true) => {
-                            self.sse_forward_mode = super::SseForwardMode::BufferedTerminal;
-                        }
-                        Some(false) => {
-                            self.sse_forward_mode = super::SseForwardMode::Passthrough;
-                        }
-                        None => {
-                            let end = crate::protocol::sse_event_end(&self.sse_forward_pending);
-                            let Some(end) = end else {
-                                if may_be_terminal_event_header_prefix(&self.sse_forward_pending) {
-                                    break;
-                                }
-                                // Preserve low-latency forwarding when an
-                                // ordinary data-only frame has not yet exposed
-                                // a terminal marker. Standard terminal SSE
-                                // events are held as soon as their `event:`
-                                // name identifies them.
-                                self.sse_forward_mode = super::SseForwardMode::Passthrough;
-                                forwarded.append(&mut self.sse_forward_pending);
-                                break;
-                            };
-                            if self.forward_complete_sse_event(end, origin, &mut forwarded) {
-                                break;
-                            }
-                        }
-                    }
-                }
+                // Ordinary partial text stays incremental; recognized terminal
+                // frames still wait for complete validation and error rewriting.
+                self.sse_forward_mode = super::SseForwardMode::Passthrough;
+                forwarded.extend_from_slice(remaining);
+                consumed = frames.len();
+                break;
+            };
+            let terminal =
+                self.forward_complete_sse_event(&remaining[..end], origin, &mut forwarded);
+            consumed += end;
+            scan_from = 0;
+            if terminal {
+                consumed = frames.len();
+                break;
             }
         }
+        if direct {
+            pending.extend_from_slice(&bytes[consumed..]);
+        } else {
+            pending.drain(..consumed);
+        }
+        self.sse_forward_pending = pending;
         forwarded
     }
 
@@ -270,11 +276,10 @@ impl<S> UsageStream<S> {
     /// discard trailing bytes; ordinary frames resume prefix detection.
     fn forward_complete_sse_event(
         &mut self,
-        end: usize,
+        frame: &[u8],
         origin: crate::ErrorOrigin,
         forwarded: &mut Vec<u8>,
     ) -> bool {
-        let frame = &self.sse_forward_pending[..end];
         let is_terminal = if fast_response_delta(frame).is_some() {
             forwarded.extend_from_slice(frame);
             false
@@ -284,11 +289,6 @@ impl<S> UsageStream<S> {
             event.outcome.is_some()
         };
         self.sse_forward_mode = super::SseForwardMode::Detect;
-        if is_terminal {
-            self.sse_forward_pending.clear();
-        } else {
-            self.sse_forward_pending.drain(..end);
-        }
         is_terminal
     }
 

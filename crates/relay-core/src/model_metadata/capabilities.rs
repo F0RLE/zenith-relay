@@ -180,22 +180,30 @@ impl ModelCapabilities {
 
     pub(crate) fn for_route(&self, route: Option<&crate::ModelEndpointCapability>) -> Self {
         let mut capabilities = self.clone().with_defaults();
-        let route_efforts = self.reasoning_effort_levels_for_route(route);
+        let route_efforts = if capabilities.reasoning_effort_conflict {
+            Vec::new()
+        } else {
+            self.reasoning_effort_levels_for_route(route)
+        };
         let conflicting_efforts = !capabilities.reasoning_effort_levels.is_empty()
             && route.is_some_and(|route| !route.reasoning_efforts.is_empty())
             && route_efforts.is_empty();
         capabilities.reasoning_effort_levels = route_efforts;
-        if conflicting_efforts
-            || self
-                .protocol_features_for_route(route)
-                .get(&crate::ProtocolFeature::Reasoning)
-                == Some(&crate::CapabilityStatus::Unsupported)
+        capabilities.reasoning_effort_conflict |= conflicting_efforts;
+        if self
+            .protocol_features_for_route(route)
+            .get(&crate::ProtocolFeature::Reasoning)
+            == Some(&crate::CapabilityStatus::Unsupported)
         {
             capabilities.reasoning = Some(false);
+            capabilities.reasoning_effort_conflict = false;
         }
         capabilities.default_reasoning_effort = capabilities
             .default_reasoning_effort
             .filter(|default| capabilities.reasoning_effort_levels.contains(default));
+        if let Some(route) = route {
+            route.token_limits.constrain(&mut capabilities);
+        }
         capabilities
     }
 
@@ -453,6 +461,7 @@ mod tests {
                 ),
             ]),
             reasoning_efforts: vec!["low".into(), "max".into()],
+            token_limits: Default::default(),
             service_tiers: None,
         };
         let features = reference.protocol_features_for_route(Some(&route));
@@ -483,6 +492,7 @@ mod tests {
                 crate::CapabilityStatus::Unsupported,
             )]),
             reasoning_efforts: Vec::new(),
+            token_limits: Default::default(),
             service_tiers: None,
         };
         let features = ModelCapabilities::default().protocol_features_for_route(Some(&route));
@@ -490,6 +500,38 @@ mod tests {
             features.get(&crate::ProtocolFeature::Images),
             Some(&crate::CapabilityStatus::Unsupported)
         );
+    }
+
+    #[test]
+    fn disjoint_route_efforts_are_a_conflict_not_disabled_reasoning() {
+        let reference = ModelCapabilities {
+            reasoning: Some(true),
+            reasoning_effort_levels: vec!["low".into()],
+            default_reasoning_effort: Some("low".into()),
+            ..Default::default()
+        };
+        let mut route: crate::ModelEndpointCapability = serde_json::from_value(json!({
+            "modelId":"synthetic-model", "upstreamWireApi":"responses",
+            "status":"declared", "origin":"catalog", "checkedAtMs":1,
+            "reasoningEfforts":["high"]
+        }))
+        .unwrap();
+        let effective = reference.for_route(Some(&route));
+        assert_eq!(effective.reasoning, Some(true));
+        assert!(effective.reasoning_effort_conflict);
+        assert!(effective.reasoning_effort_levels.is_empty());
+        assert_eq!(effective.default_reasoning_effort, None);
+        // Reprojection and default filling must not turn a conflict into unknown
+        // support or invent a fallback effort.
+        assert!(effective.for_route(Some(&route)).reasoning_effort_conflict);
+        assert_eq!(effective.clone().with_defaults(), effective);
+        route.features.insert(
+            crate::ProtocolFeature::Reasoning,
+            crate::CapabilityStatus::Unsupported,
+        );
+        let denied = reference.for_route(Some(&route));
+        assert_eq!(denied.reasoning, Some(false));
+        assert!(!denied.reasoning_effort_conflict);
     }
 
     #[test]
@@ -510,6 +552,7 @@ mod tests {
                 crate::CapabilityStatus::Declared,
             )]),
             reasoning_efforts: vec!["low".into(), "high".into()],
+            token_limits: Default::default(),
             service_tiers: None,
         };
         assert!(

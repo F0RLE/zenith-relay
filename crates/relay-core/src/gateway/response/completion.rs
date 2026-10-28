@@ -10,6 +10,47 @@ use futures_util::StreamExt;
 use serde_json::Value;
 use std::time::Instant;
 
+pub(in crate::gateway) fn has_generation_evidence_bytes(bytes: &[u8]) -> bool {
+    if let Ok(payload) = serde_json::from_slice::<Value>(bytes) {
+        return has_generation_evidence(&payload, None);
+    }
+    let mut offset = 0;
+    while let Some(end) = sse_event_end(&bytes[offset..]) {
+        let event = parse_sse_event(&bytes[offset..offset + end]);
+        if event.semantic_output
+            || event
+                .event_payload
+                .as_ref()
+                .is_some_and(super::has_generated_tokens)
+        {
+            return true;
+        }
+        offset += end;
+    }
+    false
+}
+
+/// An interrupted transport cannot prove rejection while its body is unparsed.
+pub(in crate::gateway) fn has_complete_rejection_body(bytes: &[u8]) -> bool {
+    if let Ok(payload) = serde_json::from_slice::<Value>(bytes) {
+        return payload.is_object();
+    }
+    let mut offset = 0;
+    while let Some(end) = sse_event_end(&bytes[offset..]) {
+        let event = parse_sse_event(&bytes[offset..offset + end]);
+        offset += end;
+        if event.has_data && !event.valid {
+            return false;
+        }
+        match event.outcome {
+            Some(TerminalOutcome::Failure) => return bytes[offset..].trim_ascii().is_empty(),
+            Some(_) => return false,
+            None => {}
+        }
+    }
+    false
+}
+
 #[derive(Default)]
 pub(in crate::gateway) struct BufferedResponseTiming {
     first_output_ms: Option<u64>,
@@ -188,9 +229,19 @@ pub(in crate::gateway) async fn collect_upstream_response_with_prewarm(
         }
         bytes
     } else {
-        crate::transport::collect(upstream)
+        crate::transport::collect_with_progress(upstream, None, |_| false)
             .await
-            .map_err(|_| Box::new(AttemptFailure::stream(error_codes::UPSTREAM_BODY).into()))?
+            .map_err(|error| {
+                Box::new(StreamBootstrapFailure {
+                    execution: if has_generation_evidence_bytes(&error.bytes) {
+                        crate::scheduler::rotation::ExecutionObservation::accepted()
+                    } else {
+                        crate::scheduler::rotation::ExecutionObservation::unknown()
+                    },
+                    partial_body: error.bytes,
+                    ..AttemptFailure::stream(error_codes::UPSTREAM_BODY).into()
+                })
+            })?
     };
     completed_upstream_response(&bytes, account_stream, expected_model).map_err(|mut failure| {
         failure.partial_body = bytes;

@@ -45,6 +45,29 @@ export type CacheHistoryDiagnostics = {
   } | null;
 };
 
+export type CacheAffinityMember = {
+  quotaRemainingBasisPoints: number | null;
+  providerCreditsMicroUnits: number | null;
+  providerCreditsUnlimited: boolean;
+  inFlight: number;
+  effectiveCapacity: number;
+};
+
+/** Local admission evidence, not a provider cache-hit or cache-miss verdict. */
+export type CacheAffinityDiagnostics = {
+  selection: "preferred" | "warm_alternative" | "other";
+  reason: "retained" | "no_binding" | "routing_policy" | "response_owner" | "owner_unavailable" | "recovery_probe" | "parallel_load" | "quota_headroom" | "provider_credits" | "health";
+  ownerBlockReason?: "already_tried" | "not_allowed" | "owner_mismatch" | "disabled" | "draining" | "route_unavailable" | "model_unavailable" | "operation_unavailable" | "auth_required" | "auth_blocked" | "quota_exhausted" | "rate_limited" | "circuit_open" | "recovery_busy" | "capacity_busy" | null;
+  preferred: CacheAffinityMember | null;
+  selected: CacheAffinityMember;
+  bestQuotaRemainingBasisPoints: number | null;
+  bestProviderCreditsMicroUnits: number | null;
+  bestProviderCreditsUnlimited: boolean;
+  quotaSwitchMarginBasisPoints: number;
+  providerCreditSwitchMarginMicroUnits: number;
+  loadAllowanceRequests: number;
+};
+
 export type RoutingDiagnostics = {
   reason: "response_affinity" | "prompt_cache_affinity" | "session_affinity" | "connection_affinity" | "only_eligible" | "routing_tier" | "source_role" | "parallel_load" | "source_load" | "pool_policy" | "quota_headroom" | "provider_credits" | "adaptive_balance" | "subscription_expiry" | "subscription_plan" | "weighted_rotation" | "fair_rotation" | "fallback_attempt" | "least_recently_used" | "manual_priority" | "manual_weight" | "stable_tie_break";
   eligibleCandidates: number;
@@ -83,6 +106,8 @@ export type RoutingDiagnostics = {
       catalogMs?: number | null;
       serializationMs?: number | null;
       attachmentsMs?: number | null;
+      /** Prepared-context accounting after attachments; not all diagnostic overhead. */
+      contextAccountingMs?: number | null;
     } | null;
     httpVersion?: string | null;
     upstreamResponseMs?: number | null;
@@ -99,6 +124,7 @@ export type RoutingDiagnostics = {
     } | null;
   } | null;
   cacheContext?: CacheContextDiagnostics | null;
+  cacheAffinity?: CacheAffinityDiagnostics | null;
   requestTiming?: {
     durationMs: number;
     ttftMs: number | null;
@@ -113,6 +139,17 @@ export type RequestContextSize = {
   instructionBytes: number;
   conversationBytes: number;
   toolCatalogBytes: number;
+  /** Disjoint categories sum to conversationBytes; absent in legacy observations. */
+  conversation?: {
+    messageBytes: number;
+    toolCallBytes: number;
+    toolResultBytes: number;
+    reasoningBytes: number;
+    attachmentBytes: number;
+    otherBytes: number;
+    itemCount: number;
+    attachmentCount: number;
+  };
 };
 
 export type ToolUseDiagnostics = {
@@ -125,6 +162,11 @@ export type ToolUseDiagnostics = {
   upstreamContext?: RequestContextSize;
   basisPointsCatalog?: {
     mode: "full" | "compact" | "discovery";
+    selectionReason?: "requested_full" | "requested_compact" | "requested_discovery"
+      | "automatic_discovery" | "below_discovery_threshold" | "no_tools"
+      | "lookup_tool_present" | "dispatch_budget";
+    /** Subset of upstream instructionBytes, not all generated text. */
+    relayToolInstructionBytes?: number;
     fullSchemaBytes: number;
     renderedSchemaBytes: number;
     catalogPromptBytes: number;

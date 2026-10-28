@@ -450,14 +450,17 @@ fn http_rejections_with_generated_usage_do_not_authorize_replay() {
         serde_json::json!({"usage":{"completion_tokens":7}}),
         serde_json::json!({"usageMetadata":{"thoughtsTokenCount":7}}),
     ] {
-        let failure = AttemptFailure::status_with_body(
-            StatusCode::TOO_MANY_REQUESTS,
-            Some(&serde_json::to_vec(&payload).unwrap()),
-        );
-        assert_eq!(
-            failure.execution.certainty,
-            crate::scheduler::rotation::ExecutionCertainty::Accepted
-        );
+        for body in [
+            serde_json::to_vec(&payload).unwrap(),
+            format!("data: {payload}\n\n").into_bytes(),
+        ] {
+            let failure =
+                AttemptFailure::status_with_body(StatusCode::TOO_MANY_REQUESTS, Some(&body));
+            assert_eq!(
+                failure.execution.certainty,
+                crate::scheduler::rotation::ExecutionCertainty::Accepted
+            );
+        }
     }
     let failure = AttemptFailure::status_with_body(
         StatusCode::TOO_MANY_REQUESTS,

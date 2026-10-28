@@ -1,6 +1,76 @@
 use super::*;
 
 #[tokio::test]
+async fn compact_repair_with_generated_usage_does_not_repeat_execution() {
+    assert_compact_repair_execution(true).await;
+}
+
+#[tokio::test]
+async fn compact_repair_without_generation_preserves_proven_rejection_retry() {
+    assert_compact_repair_execution(false).await;
+}
+
+async fn assert_compact_repair_execution(generated: bool) {
+    let mut rejection = json!({"error":{
+        "code":"invalid_encrypted_content", "param":"input[0].encrypted_content",
+        "message":"Encrypted content could not be verified"
+    }});
+    if generated {
+        rejection["usage"] = json!({"input_tokens":5,"output_tokens":7});
+    }
+    let (upstream, state) = spawn_upstream(vec![
+        Reply::Json(StatusCode::BAD_REQUEST, rejection),
+        compaction_reply("must-not-repeat-executed-compaction"),
+    ])
+    .await;
+    let authority = ready_authority("relay-account", "account-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account("relay-account", "provider-account", &upstream, 10)],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses/compact", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({"model":MODEL,"input":[
+            {"type":"reasoning","id":"rs_synthetic","encrypted_content":"synthetic-ciphertext","summary":[]},
+            {"role":"user","content":"synthetic continuation"}
+        ]}))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.text().await.unwrap();
+    assert_eq!(
+        status,
+        if generated {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::OK
+        },
+        "{body}"
+    );
+    assert_eq!(
+        state.requests.lock().unwrap().len(),
+        if generated { 1 } else { 2 }
+    );
+    let events = events.lock().unwrap();
+    let attempts = usage_observations::physical_attempts(&events);
+    assert_eq!(attempts.len(), if generated { 1 } else { 2 });
+    if generated {
+        assert!(!attempts[0].success);
+        assert_eq!(attempts[0].input_tokens, Some(5));
+        assert_eq!(attempts[0].output_tokens, Some(7));
+    } else {
+        assert!(attempts[1].success);
+    }
+}
+
+#[tokio::test]
 async fn targeted_encrypted_reasoning_repair_preserves_other_items() {
     for diagnostic in [
         json!({"param":"input[1].encrypted_content"}),

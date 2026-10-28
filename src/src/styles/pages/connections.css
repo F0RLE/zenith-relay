@@ -532,7 +532,7 @@
   border-radius: 0;
   background: transparent;
   color: var(--relay-secondary);
-  font-size: 10px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
   line-height: 16px;
   text-align: center;
@@ -661,7 +661,7 @@
 .account-card-quota .quota-meter-heading small {
   grid-area: reset;
   overflow: hidden;
-  font-size: 9px;
+  font-size: 11px;
   line-height: 16px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -748,7 +748,7 @@
 
 .compact-quota-layout .quota-meter-heading small {
   width: 100%;
-  font-size: 9px;
+  font-size: 11px;
   line-height: 12px;
   text-align: center;
 }
@@ -874,7 +874,7 @@
   align-content: center;
   justify-items: center;
   gap: 1px;
-  padding: 6px 5px;
+  padding: 6px 2px;
   text-align: center;
 }
 
@@ -892,7 +892,7 @@
 
 .account-value-strip dt {
   color: var(--relay-muted);
-  font-size: 9px;
+  font-size: 11px;
   line-height: 13px;
 }
 

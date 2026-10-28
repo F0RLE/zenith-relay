@@ -66,10 +66,27 @@ pub struct ModelEndpointCapability {
     pub features: BTreeMap<ProtocolFeature, CapabilityStatus>,
     #[serde(default)]
     pub reasoning_efforts: Vec<String>,
+    /// Numeric restrictions for this exact source/model endpoint only.
+    #[serde(default, skip_serializing_if = "ModelTokenLimits::is_empty")]
+    pub token_limits: ModelTokenLimits,
     /// An explicit route list may narrow reference modes. None leaves the
     /// model reference in charge; a present empty list permits Standard only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_tiers: Option<Vec<crate::DefaultServiceTier>>,
+}
+
+impl ModelEndpointCapability {
+    /// Exact source/model declarations and configured endpoints take priority
+    /// over manufacturer hints. Host profiles and probes do not establish this.
+    pub(crate) fn explicitly_declares_endpoint(&self) -> bool {
+        self.status.available()
+            && matches!(
+                self.origin,
+                CapabilityOrigin::Catalog
+                    | CapabilityOrigin::Manual
+                    | CapabilityOrigin::EndpointUrl
+            )
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -87,8 +104,10 @@ pub struct SourceProtocolConfig {
 
 mod catalog;
 mod config;
+mod limits;
 pub(crate) use catalog::catalog_capabilities;
 pub use config::SourceProtocolResolution;
+pub use limits::ModelTokenLimits;
 pub fn endpoint_url_protocol(base_url: &str) -> Option<WireApi> {
     let url = url::Url::parse(base_url).ok()?;
     let path = url.path().trim_end_matches('/');

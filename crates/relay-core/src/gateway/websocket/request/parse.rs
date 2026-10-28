@@ -97,6 +97,10 @@ impl super::ClientRequest {
             .ok_or_else(|| GatewayFailure::invalid_request("model must be a non-empty string"))?
             .to_string();
         normalize_codex_reasoning_placeholder(runtime, key, headers, &mut request_body);
+        runtime
+            .agent_message_context(&key.id)
+            .restore_request(&mut request_body)
+            .map_err(GatewayFailure::adapter)?;
         let mut service_tier_policy = if is_managed_codex_client(headers) {
             ServiceTierPolicy::pool_owned(&request_body)
         } else {

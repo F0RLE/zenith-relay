@@ -1,6 +1,35 @@
 use super::*;
 
 #[tokio::test]
+async fn usage_observation_keeps_the_current_slot_fenced_without_waiting_for_refresh() {
+    let authority = TokenAuthority::new(1).unwrap();
+    authority
+        .register_if_absent(
+            "account",
+            TokenSet::new("synthetic-access", None, None, None, 1, 2).unwrap(),
+            AccountAuthState::Active,
+        )
+        .unwrap();
+    let entry = { lock(&authority.slots).get("account").cloned().unwrap() };
+    let busy = entry.lock().await;
+    assert_eq!(authority.with_usage_observation("account", 2, |_| ()), None);
+    drop(busy);
+    assert_eq!(authority.with_usage_observation("account", 1, |_| ()), None);
+    assert_eq!(
+        authority.with_usage_observation("account", 2, |state| {
+            assert!(entry.try_lock().is_none());
+            assert!(entry.revision.try_write().is_err());
+            state
+        }),
+        Some(AccountAuthState::Active)
+    );
+    assert!(entry.try_lock().is_some());
+    assert!(entry.revision.try_write().is_ok());
+    assert!(authority.remove("account"));
+    assert_eq!(authority.with_usage_observation("account", 2, |_| ()), None);
+}
+
+#[tokio::test]
 async fn register_if_absent_never_overwrites_newer_tokens() {
     let authority = TokenAuthority::new(1).unwrap();
     let first = TokenSet::new("new-access", Some("new-refresh".into()), None, None, 2, 2).unwrap();

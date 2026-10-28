@@ -29,6 +29,12 @@ pub enum TerminalOutputKind {
 #[serde(rename_all = "camelCase")]
 pub struct BasisPointsCatalogDiagnostics {
     pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_reason: Option<BasisPointsCatalogSelectionReason>,
+    /// JSON-encoded text of the known Relay tool-instruction message. This is
+    /// a subset of upstream instruction_bytes, not all generated history text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_tool_instruction_bytes: Option<u64>,
     pub full_schema_bytes: u64,
     pub rendered_schema_bytes: u64,
     pub catalog_prompt_bytes: u64,
@@ -40,6 +46,20 @@ pub struct BasisPointsCatalogDiagnostics {
     pub discovery_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discovery_output_tokens: Option<u64>,
+}
+
+/// Observed local selection, not an inferred client preference or cache verdict.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BasisPointsCatalogSelectionReason {
+    RequestedFull,
+    RequestedCompact,
+    RequestedDiscovery,
+    AutomaticDiscovery,
+    BelowDiscoveryThreshold,
+    NoTools,
+    LookupToolPresent,
+    DispatchBudget,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

@@ -13,6 +13,8 @@ use serde_json::Value;
 pub(super) struct EventTerminal {
     pub(super) upstream_error: Option<crate::usage::UpstreamErrorDetails>,
     pub(super) outcome: Option<EventTerminalOutcome>,
+    // The current terminal is inspected for retry before its usage is ingested.
+    pub(super) generation_evidence: bool,
     /// Completed Responses object used to materialize a safe native replay.
     pub(super) response: Option<Value>,
     pub(super) status: Option<StatusCode>,
@@ -76,6 +78,10 @@ pub(super) fn event_terminal(event_payload: &Value) -> EventTerminal {
         upstream_error: (outcome == Some(EventTerminalOutcome::Failure))
             .then(|| crate::usage::UpstreamErrorDetails::from_value(None, event_payload)),
         outcome,
+        generation_evidence: crate::gateway::streaming::has_generation_evidence(
+            event_payload,
+            event_type,
+        ),
         response: event_payload.get("response").cloned(),
         status,
         error_category,

@@ -10,6 +10,7 @@ use zenith_relay_core::quota::QuotaWindow;
 
 mod projection;
 mod report;
+mod repricing;
 #[cfg(test)]
 mod tests;
 mod workload;
@@ -44,6 +45,16 @@ struct Anchor {
     window: QuotaWindow,
     from_ms: u64,
     remaining: u16,
+    /// Current-price projection, separate from the as-observed history.
+    /// Missing on legacy anchors; the background collector upgrades it once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    calibration: Option<Calibration>,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+struct Calibration {
+    sample: Option<Measurement>,
+    valid: bool,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -70,6 +81,8 @@ pub(super) struct Measurement {
     pricing_coverage_basis_points: u16,
     workload: Option<workload::Workload>,
     event: Option<CapacityEventKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    usage_fingerprint: Option<String>,
 }
 
 fn full_pricing_coverage() -> u16 {
@@ -177,9 +190,11 @@ impl TelemetryDb {
             window: window.clone(),
             from_ms: window.observed_at_ms,
             remaining,
+            calibration: Some(Calibration::default()),
         };
         let mut next = fresh.clone();
         let mut measurement = None;
+        let mut calibration_changed = false;
         if let Some(previous) = previous {
             if window.observed_at_ms < previous.window.observed_at_ms {
                 return Ok(());
@@ -189,6 +204,7 @@ impl TelemetryDb {
                 && previous.pricing_revision == revision
                 && previous.members == members
                 && previous.window == *window
+                && previous.calibration.is_some()
             {
                 drop(connection);
                 let connection = self.lock_connection()?;
@@ -212,8 +228,26 @@ impl TelemetryDb {
                     pricing_coverage_basis_points: 0,
                     workload: None,
                     event: Some(event),
+                    usage_fingerprint: None,
                 });
             } else {
+                // A catalog refresh changes valuation, not the observed quota
+                // interval. Reprice in this worker, never in a UI snapshot.
+                calibration_changed =
+                    previous.pricing_revision != revision || previous.calibration.is_none();
+                next.calibration = if calibration_changed {
+                    Some(repricing::refresh(
+                        &connection,
+                        ledger,
+                        &previous,
+                        &fresh,
+                        now_ms,
+                        catalog,
+                        pricing,
+                    )?)
+                } else {
+                    previous.calibration.clone()
+                };
                 let consumed = previous.remaining.saturating_sub(remaining);
                 if consumed >= MIN_CONSUMED && window.observed_at_ms - previous.from_ms >= 60_000 {
                     // Adjacent intervals must not count the same second twice. The
@@ -246,6 +280,7 @@ impl TelemetryDb {
                                 pricing_coverage_basis_points: priced.pricing_coverage_basis_points,
                                 workload: Some(priced.workload),
                                 event: None,
+                                usage_fingerprint: Some(priced.usage_fingerprint),
                             });
                         }
                     }
@@ -255,6 +290,12 @@ impl TelemetryDb {
                     next.remaining = previous.remaining;
                 }
             }
+        }
+        if let Some(sample) = &measurement {
+            next.calibration = Some(Calibration {
+                sample: sample.event.is_none().then(|| sample.clone()),
+                valid: sample.event.is_none(),
+            });
         }
         drop(connection);
         let mut connection = self.lock_connection()?;
@@ -269,7 +310,7 @@ impl TelemetryDb {
              ON CONFLICT(account_id) DO UPDATE SET observed_at_ms = excluded.observed_at_ms, payload_json = excluded.payload_json",
             params![ledger, sql_u64(window.observed_at_ms), serde_json::to_string(&next).map_err(json_error)?],
         ).map_err(db_error)?;
-        let changed = measurement.is_some();
+        let changed = measurement.is_some() || calibration_changed;
         if let Some(measurement) = measurement {
             transaction.execute(
                 "INSERT INTO weekly_capacity_history(account_id, observed_at_ms, payload_json) VALUES (?1, ?2, ?3)
@@ -315,9 +356,6 @@ fn discontinuity(previous: &Anchor, next: &Anchor) -> Option<CapacityEventKind> 
     if previous.plan != next.plan {
         return Some(CapacityEventKind::PlanChanged);
     }
-    if previous.pricing_revision != next.pricing_revision {
-        return Some(CapacityEventKind::PricingChanged);
-    }
     if previous.window.provider_cycle_id.is_some()
         && next.window.provider_cycle_id.is_some()
         && previous.window.provider_cycle_id != next.window.provider_cycle_id
@@ -348,7 +386,8 @@ fn discontinuity(previous: &Anchor, next: &Anchor) -> Option<CapacityEventKind> 
         return Some(CapacityEventKind::Discontinuity);
     }
     if previous.members != next.members
-        || next.window.observed_at_ms == previous.window.observed_at_ms
+        || (next.window.observed_at_ms == previous.window.observed_at_ms
+            && next.window != previous.window)
         || next.window.observed_at_ms.saturating_sub(previous.from_ms) > MAX_ANCHOR_AGE
     {
         return Some(CapacityEventKind::Discontinuity);

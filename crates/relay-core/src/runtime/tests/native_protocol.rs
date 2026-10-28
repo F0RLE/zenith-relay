@@ -147,6 +147,7 @@ fn explicit_native_exclusion_cannot_be_recreated_by_the_service_profile() {
             checked_at_ms: 1,
             features: BTreeMap::new(),
             reasoning_efforts: Vec::new(),
+            token_limits: Default::default(),
             service_tiers: None,
         });
     let runtime = native_runtime(configured);

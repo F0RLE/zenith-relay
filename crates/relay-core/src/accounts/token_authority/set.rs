@@ -79,6 +79,13 @@ impl TokenSet {
     }
 
     pub fn is_access_usable(&self, now_ms: u64, refresh_skew_ms: u64) -> bool {
+        // Early renewal needs a refresh grant. Access-only tokens retain their
+        // full lifetime, including in discovery ranking and request preparation.
+        let refresh_skew_ms = if self.refresh_token.is_some() {
+            refresh_skew_ms
+        } else {
+            0
+        };
         access_token_is_usable(self.expires_at_ms, now_ms, refresh_skew_ms)
     }
 }

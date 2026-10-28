@@ -198,6 +198,7 @@ fn direct_refresh_preserves_selection_and_uses_reference_capabilities() {
                 CapabilityStatus::Unsupported,
             )]),
             reasoning_efforts: vec!["none".into(), "high".into()],
+            token_limits: Default::default(),
             service_tiers: None,
         });
     let metadata = ModelMetadataCatalog::from_models_dev_json(r#"{

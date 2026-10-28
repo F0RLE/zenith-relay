@@ -65,6 +65,83 @@ fn failed_rollup_update_rolls_back_history_and_cached_totals() {
 }
 
 #[test]
+fn failed_history_clear_preserves_all_tables_and_cached_totals() {
+    let root = std::env::temp_dir().join(format!("relay-clear-rollback-{}", uuid::Uuid::new_v4()));
+    let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+    database
+        .record(&aggregate_test_event(
+            "synthetic-clear",
+            1,
+            100,
+            0,
+            None,
+            10,
+        ))
+        .unwrap();
+    let initial = database.usage_page(&UsageQuery::default()).unwrap().totals;
+    let revision = database.weekly_capacity_revision();
+    database
+        .connection
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "INSERT INTO weekly_capacity_anchors VALUES ('synthetic', 1, '{}');
+             INSERT INTO weekly_capacity_history VALUES ('synthetic', 1, '{}');
+             CREATE TEMP TRIGGER fail_clear BEFORE DELETE ON weekly_capacity_history
+             BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END;",
+        )
+        .unwrap();
+    let counts = || {
+        database
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM request_logs),
+                        (SELECT COUNT(*) FROM request_attempts),
+                        (SELECT COUNT(*) FROM usage_candidate_rollups),
+                        (SELECT COUNT(*) FROM weekly_capacity_anchors),
+                        (SELECT COUNT(*) FROM weekly_capacity_history)",
+                [],
+                |row| {
+                    Ok([
+                        row.get::<_, i64>(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ])
+                },
+            )
+            .unwrap()
+    };
+    let before = counts();
+    assert!(before.iter().all(|count| *count > 0));
+    assert!(database.clear().is_err());
+    assert_eq!(counts(), before);
+    assert_eq!(database.weekly_capacity_revision(), revision);
+    assert_eq!(
+        serde_json::to_value(database.usage_page(&UsageQuery::default()).unwrap().totals).unwrap(),
+        serde_json::to_value(initial).unwrap()
+    );
+    database
+        .connection
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_clear")
+        .unwrap();
+    database.clear().unwrap();
+    assert_eq!(counts(), [0; 5]);
+    assert_eq!(database.weekly_capacity_revision(), revision + 1);
+    assert_eq!(
+        database.usage_page(&UsageQuery::default()).unwrap().total,
+        0
+    );
+    drop(database);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn unchanged_state_skips_updates_and_mixed_batches_keep_last_value() {
     let root = std::env::temp_dir().join(format!("relay-state-writes-{}", uuid::Uuid::new_v4()));
     let path = root.join("usage.sqlite");

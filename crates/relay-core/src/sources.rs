@@ -13,7 +13,7 @@ pub use probe::{
 };
 
 pub use capabilities::{
-    CapabilityOrigin, CapabilityStatus, ModelEndpointCapability, ProtocolFeature,
+    CapabilityOrigin, CapabilityStatus, ModelEndpointCapability, ModelTokenLimits, ProtocolFeature,
     SourceProtocolConfig, SourceProtocolResolution, endpoint_url_protocol, service_protocol,
 };
 pub use connector::SourceConnector;

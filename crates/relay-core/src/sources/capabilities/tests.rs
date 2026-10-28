@@ -276,6 +276,7 @@ fn failed_generation_probe_does_not_remove_catalog_models() {
         checked_at_ms: 2,
         features: BTreeMap::from([(ProtocolFeature::Text, CapabilityStatus::Unsupported)]),
         reasoning_efforts: vec![],
+        token_limits: Default::default(),
         service_tiers: None,
     });
     let resolved = config
@@ -319,6 +320,7 @@ fn successful_generation_probe_does_not_override_catalog_routes() {
         checked_at_ms: 2,
         features: BTreeMap::from([(ProtocolFeature::Text, CapabilityStatus::Confirmed)]),
         reasoning_efforts: vec![],
+        token_limits: Default::default(),
         service_tiers: None,
     });
 
@@ -347,6 +349,7 @@ fn stored_participant_features_do_not_override_endpoint_identity() {
             checked_at_ms: 1,
             features: BTreeMap::from([(ProtocolFeature::Text, CapabilityStatus::Unsupported)]),
             reasoning_efforts: vec![],
+            token_limits: Default::default(),
             service_tiers: None,
         }],
         ..Default::default()
@@ -378,6 +381,7 @@ fn old_configuration_ignores_legacy_mode_and_checks_probe_revision() {
         checked_at_ms: 42,
         features: BTreeMap::new(),
         reasoning_efforts: vec![],
+        token_limits: Default::default(),
         service_tiers: None,
     };
     config.invalidate("https://example.test/v1");
@@ -428,6 +432,7 @@ fn known_multi_protocol_service_declares_its_generation_endpoints() {
         checked_at_ms: 42,
         features: BTreeMap::from([(ProtocolFeature::Text, CapabilityStatus::Confirmed)]),
         reasoning_efforts: vec![],
+        token_limits: Default::default(),
         service_tiers: None,
     });
 
@@ -570,7 +575,7 @@ fn without_a_reference_catalog_the_previous_resolution_is_unchanged() {
 }
 
 #[test]
-fn explicit_foreign_endpoint_cannot_override_the_native_model_contract() {
+fn explicit_source_endpoint_takes_priority_over_manufacturer_hint() {
     let url = "https://reseller.example.test/v1/chat/completions";
     let models = vec!["claude-test".to_string()];
     let routes = SourceProtocolConfig::automatic(url)
@@ -582,7 +587,11 @@ fn explicit_foreign_endpoint_cannot_override_the_native_model_contract() {
             Some(&reference_catalog()),
         )
         .unwrap();
-    assert!(routes.is_empty());
+    assert_eq!(
+        upstreams(&routes, "claude-test"),
+        BTreeSet::from([WireApi::ChatCompletions])
+    );
+    assert_eq!(routes.len(), WireApi::ALL.len());
 }
 
 #[test]
@@ -598,6 +607,7 @@ fn unsupported_native_protocol_does_not_fall_through_to_a_foreign_contract() {
         checked_at_ms: 1,
         features: BTreeMap::new(),
         reasoning_efforts: Vec::new(),
+        token_limits: Default::default(),
         service_tiers: None,
     });
     let routes = config
@@ -629,6 +639,7 @@ fn responses_preference_yields_to_declared_source_evidence() {
         checked_at_ms: 1,
         features: BTreeMap::new(),
         reasoning_efforts: Vec::new(),
+        token_limits: Default::default(),
         service_tiers: None,
     });
     let routes = config
@@ -653,6 +664,7 @@ fn rejected_legacy_native_protocol_does_not_enable_a_foreign_fallback() {
             checked_at_ms: 1,
             features: BTreeMap::new(),
             reasoning_efforts: Vec::new(),
+            token_limits: Default::default(),
             service_tiers: None,
         }],
         ..SourceProtocolConfig::automatic(url)
@@ -691,6 +703,7 @@ fn rejected_endpoints_are_not_recreated_by_hints_or_fallback() {
                 checked_at_ms: 1,
                 features: BTreeMap::new(),
                 reasoning_efforts: Vec::new(),
+                token_limits: Default::default(),
                 service_tiers: None,
             })
             .collect(),

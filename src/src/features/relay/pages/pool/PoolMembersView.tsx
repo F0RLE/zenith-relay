@@ -187,7 +187,6 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     .filter((member): member is Extract<Member, { kind: "source" }> => member.kind === "source" && member.secretAvailable)
     .map((member) => member.id);
   const refreshableMemberCount = quotaAccountCount + refreshableSourceIds.length;
-  const hasAccountMembers = members.some((member) => member.kind === "account");
   const refreshQuotas = async () => {
     await perform("pool-quota-refresh", async () => {
       if (quotaAccountCount) await refreshAllAccountQuotas(mode);
@@ -236,7 +235,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
             </div>
           ) : null}
         </div>
-        <PoolEconomicsStrip members={poolMembers} />
+        {accountValueVisible ? <PoolEconomicsStrip members={poolMembers} /> : null}
       </div>
       <div className="pool-member-toolbar" data-selection={selectedMembers.length > 0}>
         <div className="pool-selection-context">
@@ -295,7 +294,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
             />
           </div>
           <div className="pool-control-group" data-toolbar-group="refresh">
-            {hasAccountMembers ? (
+            {members.length > 0 ? (
               <IconButton
                 className="account-calculation-toggle"
                 label={t(accountValueVisible ? "pool.hideCalculation" : "pool.showCalculation")}

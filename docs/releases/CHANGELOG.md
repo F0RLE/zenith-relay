@@ -13,6 +13,22 @@ recoverable account deletion. Changes below are grouped by area.
 
 ### Changed
 
+- Automatic routing retains a warm primary cache owner until another eligible
+  member has at least ten percentage points more fresh quota, reducing switches
+  caused by small quota differences. Independent work and warm alternatives keep
+  the five-point band; admission limits, health and credit policy are unchanged.
+- Request technical details now explain prompt-cache affinity decisions with
+  fresh quota, physical load and applicable switch thresholds, without recording
+  account identifiers or cache keys.
+- Shared Pool/Connections code uses one lazy chunk, and the independent startup
+  watchdog is minified at build time. Existing frontend size budgets remain unchanged.
+- BPS keeps core shell/edit/wait tools ahead of optional catalog preloads within
+  the existing limits and permissions. Guidance groups independent reads and
+  catalog lookups, favors compact results and bounded waits, and avoids
+  unnecessary screenshots without removing history or reducing reasoning.
+- Unreadable encrypted agent history now reports a continuation error with
+  profile/key recovery guidance instead of a generic adapter failure. Lost
+  legacy keys cannot be recovered by rebuilding or restarting Relay.
 - BPS preparation reuses owned text buffers for message normalization, generated
   instructions and visible reasoning, removing redundant copies without changing
   request bytes, conversation identity or validation.
@@ -44,8 +60,6 @@ recoverable account deletion. Changes below are grouped by area.
   route-scoped HTTP preference instead of repeating the two-second delay on
   every request. A single timeout still permits immediate native recovery;
   continuation ownership, account health, and generation retry rules are unchanged.
-  A synthetic five-request loopback run fell from 10.19 s to 4.16 s;
-  this measures stalled handshakes, not provider generation speed.
 
 - BPS preparation moves the request history and reuses parsed tool declarations
   instead of copying them again. Diagnostics separate JSON serialization from
@@ -89,39 +103,21 @@ recoverable account deletion. Changes below are grouped by area.
   account routes, expire stale forecasts and avoid extra provider requests;
   subscription cost, routing and billing remain unchanged.
 
-- Native Responses replay shares immutable history on cache lookup and compares
-  string prefixes without temporary JSON copies. Memory limits, expiry, ownership
-  checks and outgoing conversation history remain unchanged.
-- Shared SSE parsing uses vectorized CR/LF search for native and converted
-  streams. Event bytes, ordering, terminal checks and per-event limits stay intact.
-- Large HTTP JSON requests and compressed bodies are parsed in bounded workers.
-  On a synthetic 1.72 MB debug probe, median longest async-worker occupation fell
-  from 58–59 ms to below 0.05 ms. Small uncompressed requests stay inline.
-- Native WebSocket model checks and forwarding reuse decoded frames. Original
-  text/binary bytes, usage, terminal errors and continuation ownership are preserved.
-  A synthetic debug probe reduced text/tool delta decoding time by about 49%.
-- Converted streams validate growing text and tool arguments without cloning
-  their previous emitted snapshots. Text, reasoning, refusal and function-argument
-  deltas extend retained buffers. Prefix, numeric-normalization, tool-identity
-  and completion checks remain unchanged.
-- Function-argument normalization skips quoted text with vectorized delimiter
-  search. Escaped strings, numeric precision and incomplete-number handling
-  retain their existing behavior.
-- Pool and Connections reuse linked-account indexes and timestamp formatters
-  when rendering cards. Pool availability shares visible-model normalization
-  across members within each check. Quota freshness and routing decisions remain live.
-- Account, sign-in and request-cache countdowns pause in hidden windows and catch up on return.
-  Date formatters are reused across cards and ticks, including after a language change.
-- Usage shares two covering read indexes across request pages, filters and
-  reports. Summary queries separate logical timings from send consumption;
-  database upgrades preserve history.
-- Weekly card forecasts read indexed persisted measurements instead of
-  aggregating request history on each account-quota refresh.
-- Usage charts aggregate send consumption and pricing together. Six alternating
-  comparisons on the same synthetic 100,000-send database reduced histogram
-  calculation medians from 863 to 609 ms, or from 284 to 178 ms with a member
-  filter. Counts, retry attribution and per-bucket price rounding are preserved;
-  the separate bucket-pricing pass and its unused helper are removed.
+#### Performance
+
+- Responses continuation, SSE/WebSocket parsing and converted text/tool streams
+  reuse buffers and decoded data. Large JSON/compressed requests use bounded
+  workers; small uncompressed requests stay inline. History, frame bytes, usage,
+  ownership, expiry, numeric precision and completion checks are preserved.
+- Pool and Connections share account indexes, catalog normalization and date
+  formatters. Hidden-window countdowns pause and catch up on return; language
+  changes, quota freshness and routing still apply immediately.
+- Usage pages, filters and reports use shared read indexes; weekly forecasts
+  read persisted measurements. Charts calculate consumption and pricing together,
+  preserving history, timing attribution, retry counts and price rounding.
+
+#### Connections and account cards
+
 - Request timezone now follows the assigned proxy automatically, without account
   pickers, global switches, manual bindings or a default New York fallback.
   Shared background jobs discover exits independently of the UI, refresh before
@@ -718,6 +714,24 @@ recoverable account deletion. Changes below are grouped by area.
 
 ### Изменения
 
+- Автоматическая ротация сохраняет тёплого основного владельца кеша, пока другой
+  допустимый участник не опередит его по свежей квоте минимум на 10 п.п.
+  Независимые запросы и запасные тёплые участники сохраняют порог 5 п.п.; лимиты
+  допуска, проверки состояния и правила кредитов не меняются.
+- Технические детали запроса объясняют выбор владельца кеша промпта: свежую
+  квоту, текущую нагрузку и пороги переключения. Идентификаторы аккаунтов
+  и ключи кеша не записываются.
+- Общий код Пула и Подключений собран в один отложенно загружаемый модуль;
+  независимый контроль запуска минифицируется при сборке. Лимиты размера
+  интерфейса не меняются.
+- BPS ставит основные инструменты shell/edit/wait перед необязательной
+  предзагрузкой каталога в пределах прежних лимитов и разрешений. Инструкции
+  объединяют независимые чтения и обращения к каталогу, используют компактные
+  результаты и ограниченные ожидания, избегают лишних снимков экрана без
+  удаления истории и снижения уровня размышления.
+- Нечитаемая зашифрованная история агента сообщает об ошибке продолжения
+  с подсказкой по восстановлению профиля и ключа вместо общей ошибки адаптера.
+  Пересборка или перезапуск Relay не восстанавливают потерянные старые ключи.
 - Подготовка BPS повторно использует буферы текста при нормализации сообщений,
   добавлении инструкций и обработке видимого reasoning: без лишних копий,
   изменения байтов запроса, идентичности диалога или проверок.
@@ -749,8 +763,6 @@ recoverable account deletion. Changes below are grouped by area.
   временно использует HTTP без повторной двухсекундной задержки на каждом
   запросе. Одиночный таймаут не мешает следующей попытке WebSocket;
   владение продолжениями, состояние аккаунта и правила повторов генерации сохранены.
-  Пять запросов в синтетическом loopback-тесте ускорились с 10,19 до 4,16 с:
-  измеряется устранение зависших подключений, а не скорость генерации провайдера.
 
 - Подготовка BPS использует историю запроса и разобранный каталог без повторного
   копирования. Диагностика отдельно измеряет сериализацию JSON и подготовку
@@ -794,42 +806,22 @@ recoverable account deletion. Changes below are grouped by area.
   запросов к провайдеру, не дублирует связанные аккаунты и убирает устаревшие
   оценки. Стоимость подписки, маршрутизация и биллинг не изменены.
 
-- Кэш продолжений Responses использует общую неизменяемую историю вместо
-  копирования при каждом чтении; строковые префиксы сравниваются без временного JSON.
-  Лимиты памяти, срок хранения, проверка владельца и отправляемая история сохранены.
-- Общий SSE-парсер использует векторный поиск CR/LF для нативных и преобразованных
-  потоков. Байты и порядок событий, проверки завершения и лимиты сохранены.
-- Крупные HTTP-запросы JSON и сжатые тела разбираются в ограниченном пуле рабочих
-  потоков. В синтетическом debug-замере на 1,72 МБ медиана самой долгой блокировки
-  асинхронного потока снизилась с 58–59 мс до менее 0,05 мс.
-  Небольшие несжатые запросы обрабатываются без переключения потока.
-- Проверка модели и пересылка в нативном WebSocket используют общий результат разбора.
-  Исходные текстовые и бинарные кадры, расход, ошибки и владелец продолжения сохранены.
-  В синтетическом debug-замере время разбора текстовых и инструментальных дельт
-  сократилось примерно на 49%.
-- Преобразованные потоки проверяют растущий текст и аргументы инструментов без
-  копирования предыдущего отправленного состояния. Текст, рассуждения, отказы
-  и аргументы функций дополняют существующие буферы. Проверки префикса,
-  нормализация чисел, идентичность инструментов и завершение сохранены.
-- Нормализация аргументов функций пропускает текст в кавычках с векторным поиском
-  разделителей. Обработка экранирования, точных чисел и незавершённых числовых
-  значений сохранена.
-- Пул и Подключения повторно используют индексы связанных аккаунтов и форматтеры
-  времени при отрисовке карточек. Проверка доступности пула нормализует каталог
-  моделей один раз для всех участников. Актуальность квот и маршруты проверяются заново.
-- Отсчёты квот, подписок, входа и кэша запроса приостанавливаются в скрытом окне и обновляются
-  при возвращении. Форматтеры дат общие для карточек и повторных тиков;
-  смена языка учитывается сразу.
-- В Использовании список, фильтры и статистика используют два общих индекса.
-  Расчёт отдельно обрабатывает тайминги запросов и расход отправок.
-  Обновление локальной базы сохраняет историю.
-- Прогноз недели в карточках читает сохранённые замеры по индексам вместо
-  повторного подсчёта истории запросов при обновлении квот аккаунтов.
-- Графики использования считают расход и стоимость отправок за один проход.
-  В шести чередующихся сравнениях на одной синтетической базе из 100 000 отправок
-  медиана расчёта графика снизилась с 863 до 609 мс, с фильтром участника — с 284
-  до 178 мс. Счётчики, учёт повторов и округление стоимости сохранены;
-  отдельный проход расчёта цены и неиспользуемая вспомогательная функция удалены.
+#### Производительность
+
+- Продолжения Responses, разбор SSE/WebSocket и преобразование текста/инструментов
+  используют общие буферы и разобранные данные. Крупные JSON/сжатые запросы идут
+  в ограниченный пул потоков, небольшие несжатые — обрабатываются сразу.
+  История, байты кадров, расход, владение, сроки, точность чисел и проверки
+  завершения сохранены.
+- Пул и Подключения используют общие индексы аккаунтов, нормализацию каталога
+  и форматтеры дат. Счётчики скрытого окна обновляются при возврате; смена языка,
+  актуальность квот и маршрутизация учитываются сразу.
+- Список, фильтры и статистика Использования используют общие индексы; прогноз
+  недели читает сохранённые замеры. Графики считают расход и стоимость вместе,
+  сохраняя историю, учёт времени, повторы и округление цен.
+
+#### Подключения и карточки аккаунтов
+
 - Часовой пояс автоматически следует назначенному прокси: удалены выбор города,
   глобальные переключатели, ручные привязки и запасной Нью-Йорк. Общие фоновые
   задачи определяют выход без открытия UI, обновляют пояс до истечения 15 минут

@@ -108,6 +108,7 @@ fn observation(row: &UsageLog, salt: &str) -> Value {
             "reason": routing.reason, "eligibleCandidates": routing.eligible_candidates,
             "inFlightBefore": routing.in_flight_before, "attemptOutcome": routing.attempt_outcome,
             "transport": routing.transport.as_ref().map(transport::document), "cacheContext": routing.cache_context,
+            "cacheAffinity": routing.cache_affinity,
         })
     });
     json!({

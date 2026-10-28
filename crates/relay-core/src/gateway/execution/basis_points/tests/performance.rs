@@ -1,6 +1,8 @@
 use super::super::catalog::client_tools;
 use super::*;
 
+mod preparation;
+
 fn dispatch_runtime() -> crate::GatewayRuntime {
     crate::GatewayRuntime::from_pool(
         vec![crate::RuntimeSource::unrestricted(crate::ProviderSource {
@@ -263,6 +265,46 @@ fn bps_tool_history_preserves_exact_wire_bytes() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn small_dispatch_budget_is_distinct_from_requested_compact_mode() {
+    use super::super::discovery::{capture_prepared_context, execution};
+    use crate::scheduler::rotation::SharedRequestBudget;
+    use crate::usage::{BasisPointsCatalogSelectionReason, RequestContextSize, ToolUseDiagnostics};
+
+    let runtime = dispatch_runtime();
+    let mut original = request_with_tool();
+    original["relay_bps_tool_catalog"] = json!("discovery");
+    let prepared = prepare_request(&original).unwrap();
+    let mut diagnostics = ToolUseDiagnostics {
+        client_context: Some(RequestContextSize::capture(&original)),
+        ..Default::default()
+    };
+    let (body, session) = execution::prepare_dispatch(
+        &original,
+        prepared,
+        &SharedRequestBudget::for_incoming_request(1),
+        &mut diagnostics,
+        &runtime,
+        "synthetic-key",
+        None,
+    )
+    .unwrap();
+    assert!(session.is_none());
+    let before = serde_json::to_vec(&body).unwrap();
+    capture_prepared_context(&original, &body, &mut diagnostics);
+    assert_eq!(serde_json::to_vec(&body).unwrap(), before);
+    let catalog = diagnostics.basis_points_catalog.unwrap();
+    assert_eq!(catalog.mode, "compact");
+    assert_eq!(
+        catalog.selection_reason,
+        Some(BasisPointsCatalogSelectionReason::DispatchBudget)
+    );
+    let context = diagnostics.upstream_context.unwrap();
+    assert_eq!(context.body_bytes, before.len() as u64);
+    assert!(catalog.relay_tool_instruction_bytes.unwrap() > 0);
+    assert!(catalog.relay_tool_instruction_bytes.unwrap() < context.instruction_bytes);
 }
 
 #[test]

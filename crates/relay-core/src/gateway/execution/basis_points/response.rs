@@ -240,6 +240,7 @@ pub(in crate::gateway) fn translate_response(
         upstream_response_body,
         request_body,
         &mut super::catalog::RequestCatalog::default(),
+        None,
     )
 }
 
@@ -247,6 +248,7 @@ pub(in crate::gateway::execution) fn translate_response_bytes_with_catalog(
     upstream_response_body: &[u8],
     request_body: &Value,
     catalog: &mut super::catalog::RequestCatalog,
+    agent_messages: Option<&crate::protocol::agent_messages::AgentMessageContext>,
 ) -> Result<Vec<u8>, AdapterError> {
     let upstream_response: Value =
         serde_json::from_slice(upstream_response_body).map_err(|error| {
@@ -264,7 +266,8 @@ pub(in crate::gateway::execution) fn translate_response_bytes_with_catalog(
                     upstream_response_body.len(),
                 )
         })?;
-    let translated = translate_response_with_catalog(upstream_response, request_body, catalog)?;
+    let translated =
+        translate_response_with_catalog(upstream_response, request_body, catalog, agent_messages)?;
     serde_json::to_vec(&translated).map_err(|_| {
         AdapterError::upstream_response_invalid().with_parameter("response.serialization")
     })
@@ -281,6 +284,7 @@ pub(in crate::gateway) fn translate_response_value(
         upstream_response,
         request_body,
         &mut super::catalog::RequestCatalog::default(),
+        None,
     )
 }
 
@@ -288,6 +292,7 @@ pub(in crate::gateway) fn translate_response_with_catalog(
     mut upstream_response: Value,
     request_body: &Value,
     catalog: &mut super::catalog::RequestCatalog,
+    agent_messages: Option<&crate::protocol::agent_messages::AgentMessageContext>,
 ) -> Result<Value, AdapterError> {
     if !matches!(
         upstream_response.get("status").and_then(Value::as_str),
@@ -449,6 +454,9 @@ pub(in crate::gateway) fn translate_response_with_catalog(
         .get("metadata")
         .cloned()
         .unwrap_or_else(|| json!({}));
+    // Seal only after the entire executable batch and original plaintext
+    // arguments pass validation. SSE reuses this one translated terminal.
+    super::agent_messages::seal_output(&mut upstream_response, all_tools, agent_messages)?;
     Ok(upstream_response)
 }
 

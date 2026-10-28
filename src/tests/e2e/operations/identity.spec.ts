@@ -251,8 +251,10 @@ test("weekly calibrated account value remains controlled by the dollar toggle", 
   const poolValue = page.locator('.pool-member-card[data-member-kind="account"] .account-value-strip');
   await expect(page.getByRole("button", { name: "Show account calculation" })).toHaveAttribute("aria-pressed", "false");
   await expect(poolValue).toHaveCount(0);
+  await expect(page.locator(".pool-economics")).toHaveCount(0);
   await page.getByRole("button", { name: "Show account calculation" }).click();
   await expect(poolValue.first()).toBeVisible();
+  await expect(page.locator(".pool-economics")).toBeVisible();
   await expect(page.locator(".account-provider-quota-strip")).toHaveCount(0);
 
   await page.getByRole("button", { name: "Settings", exact: true }).click();

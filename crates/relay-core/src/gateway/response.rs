@@ -4,7 +4,7 @@ mod usage;
 
 pub(in crate::gateway) use completion::{
     BufferedResponseTiming, collect_basis_points_response, collect_upstream_response_with_prewarm,
-    stop_basis_points_event,
+    has_complete_rejection_body, has_generation_evidence_bytes, stop_basis_points_event,
 };
 pub(super) use completion::{
     collect_upstream_response, completed_upstream_response, validate_upstream_response,

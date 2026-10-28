@@ -85,22 +85,70 @@ impl QuotaSnapshot {
         {
             return false;
         }
+        self.copy_provider_credits(incoming);
+        true
+    }
+
+    fn copy_provider_credits(&mut self, incoming: &Self) {
         self.available_credits_micro_units = incoming.available_credits_micro_units;
         self.provider_credits_available = incoming.provider_credits_available;
         self.provider_credits_unlimited = incoming.provider_credits_unlimited;
-        self.provider_credits_observed_at_ms = Some(incoming_at_ms);
-        true
+        self.provider_credits_observed_at_ms = incoming.provider_credits_observed_at_ms;
     }
 
     /// Queued usage may carry newer windows with an older ledger. Reconcile
     /// each resource by its own clock instead of rolling the ledger back.
     pub fn merge_observation(&mut self, incoming: &Self) {
-        if incoming.updated_at_ms.unwrap_or_default() >= self.updated_at_ms.unwrap_or_default() {
-            let previous = std::mem::replace(self, incoming.clone());
-            self.merge_provider_credits(&previous);
+        self.merge_observation_with_preference(
+            incoming,
+            incoming.updated_at_ms.unwrap_or_default() >= self.updated_at_ms.unwrap_or_default(),
+        );
+    }
+
+    /// Snapshot metadata and missing windows follow the caller's ordering policy.
+    /// Present windows and complete ledgers retain their independent clocks;
+    /// conflicting observations at the same resource timestamp keep current data.
+    pub(crate) fn merge_observation_with_preference(
+        &mut self,
+        incoming: &Self,
+        incoming_wins: bool,
+    ) -> bool {
+        let mut merged = if incoming_wins {
+            incoming.clone()
         } else {
-            self.merge_provider_credits(incoming);
+            self.clone()
+        };
+        for (current, incoming, target) in [
+            (&self.primary, &incoming.primary, &mut merged.primary),
+            (&self.secondary, &incoming.secondary, &mut merged.secondary),
+        ] {
+            if let (Some(current), Some(incoming)) = (current, incoming) {
+                *target = Some(merge_window_observation(current, incoming, incoming_wins));
+            }
         }
+        for target in &mut merged.supplemental {
+            let current = self
+                .supplemental
+                .iter()
+                .find(|window| window.id == target.id);
+            let incoming = incoming
+                .supplemental
+                .iter()
+                .find(|window| window.id == target.id);
+            if let (Some(current), Some(incoming)) = (current, incoming) {
+                target.window =
+                    merge_window_observation(&current.window, &incoming.window, incoming_wins);
+            }
+        }
+        // Start with current ledger evidence, including equal-clock conflicts.
+        // Legacy undated values still follow the preferred snapshot.
+        if self.provider_credits_observed_at_ms.is_some() {
+            merged.copy_provider_credits(self);
+        }
+        merged.merge_provider_credits(incoming);
+        let changed = merged != *self;
+        *self = merged;
+        changed
     }
 
     pub fn window(&self, kind: QuotaWindowKind) -> Option<&QuotaWindow> {
@@ -127,9 +175,10 @@ impl QuotaSnapshot {
         let Some(primary) = self.primary.as_mut() else {
             return false;
         };
-        if primary
-            .available_basis_points
-            .is_none_or(|available| available == 0)
+        if observed_at_ms < primary.observed_at_ms
+            || primary
+                .available_basis_points
+                .is_none_or(|available| available == 0)
         {
             return false;
         }
@@ -139,6 +188,27 @@ impl QuotaSnapshot {
         self.updated_at_ms = Some(self.updated_at_ms.unwrap_or_default().max(observed_at_ms));
         true
     }
+}
+
+fn merge_window_observation(
+    current: &QuotaWindow,
+    incoming: &QuotaWindow,
+    incoming_wins: bool,
+) -> QuotaWindow {
+    if incoming.observed_at_ms > current.observed_at_ms {
+        return incoming.clone();
+    }
+    let mut merged = current.clone();
+    // Timer-only headers intentionally retain the remainder's observation clock.
+    // Let newer metadata refine that timer without replacing conflicting quota.
+    if incoming_wins
+        && incoming.observed_at_ms == current.observed_at_ms
+        && incoming.available_basis_points == current.available_basis_points
+    {
+        merged.reset_at_ms = incoming.reset_at_ms;
+        merged.window_minutes = incoming.window_minutes;
+    }
+    merged
 }
 
 #[cfg(test)]
@@ -213,6 +283,168 @@ mod tests {
         assert_eq!(quota.updated_at_ms, Some(4_000));
         assert_eq!(quota.provider_credits_observed_at_ms, Some(3_000));
         assert_eq!(quota.available_credits_micro_units, Some(700));
+    }
+
+    #[test]
+    fn queued_windows_merge_by_their_own_clocks_not_the_snapshot_clock() {
+        let mut quota = QuotaSnapshot {
+            primary: Some(open_window(QuotaWindowKind::Primary, 0)),
+            secondary: Some(open_window(QuotaWindowKind::Secondary, 7000)),
+            updated_at_ms: Some(3000),
+            ..Default::default()
+        };
+        quota.primary.as_mut().unwrap().observed_at_ms = 3000;
+        let mut incoming = QuotaSnapshot {
+            primary: Some(open_window(QuotaWindowKind::Primary, 9000)),
+            secondary: Some(open_window(QuotaWindowKind::Secondary, 6000)),
+            updated_at_ms: Some(4000),
+            ..Default::default()
+        };
+        incoming.secondary.as_mut().unwrap().observed_at_ms = 4000;
+        quota.merge_observation(&incoming);
+        assert_eq!(
+            quota.primary.as_ref().unwrap().available_basis_points,
+            Some(0)
+        );
+        assert_eq!(quota.primary.as_ref().unwrap().observed_at_ms, 3000);
+        assert_eq!(
+            quota.secondary.as_ref().unwrap().available_basis_points,
+            Some(6000)
+        );
+
+        incoming.primary.as_mut().unwrap().observed_at_ms = 3500;
+        incoming.secondary.as_mut().unwrap().observed_at_ms = 1000;
+        incoming.secondary.as_mut().unwrap().available_basis_points = Some(9000);
+        incoming.updated_at_ms = Some(3500);
+        quota.merge_observation(&incoming);
+        assert_eq!(
+            quota.primary.as_ref().unwrap().available_basis_points,
+            Some(9000)
+        );
+        assert_eq!(
+            quota.secondary.as_ref().unwrap().available_basis_points,
+            Some(6000)
+        );
+        assert_eq!(quota.updated_at_ms, Some(4000));
+    }
+
+    #[test]
+    fn a_new_snapshot_clock_does_not_overwrite_equal_clock_ledger_evidence() {
+        let mut quota = QuotaSnapshot {
+            available_credits_micro_units: Some(0),
+            provider_credits_available: false,
+            provider_credits_observed_at_ms: Some(3000),
+            updated_at_ms: Some(3000),
+            ..Default::default()
+        };
+        quota.merge_observation(&QuotaSnapshot {
+            available_credits_micro_units: Some(1000),
+            provider_credits_available: true,
+            provider_credits_observed_at_ms: Some(3000),
+            updated_at_ms: Some(4000),
+            ..Default::default()
+        });
+        assert_eq!(quota.available_credits_micro_units, Some(0));
+        assert!(!quota.provider_credits_available);
+        assert_eq!(quota.updated_at_ms, Some(4000));
+    }
+
+    #[test]
+    fn delayed_exhaustion_cannot_zero_a_newer_primary_window() {
+        let mut quota = QuotaSnapshot {
+            primary: Some(open_window(QuotaWindowKind::Primary, 9000)),
+            updated_at_ms: Some(3000),
+            ..Default::default()
+        };
+        quota.primary.as_mut().unwrap().observed_at_ms = 3000;
+        let before = quota.clone();
+        assert!(!quota.note_reported_window_exhaustion(2000));
+        assert_eq!(quota, before);
+        assert!(quota.note_reported_window_exhaustion(4000));
+        assert_eq!(
+            quota.primary.as_ref().unwrap().available_basis_points,
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn equal_clock_windows_preserve_current_evidence() {
+        let mut quota = QuotaSnapshot {
+            primary: Some(open_window(QuotaWindowKind::Primary, 0)),
+            supplemental: vec![SupplementalQuotaWindow {
+                id: "extra".into(),
+                label: "Extra".into(),
+                service_tier: None,
+                window: open_window(QuotaWindowKind::Secondary, 500),
+            }],
+            updated_at_ms: Some(1_000),
+            ..Default::default()
+        };
+        let mut incoming = quota.clone();
+        incoming.primary.as_mut().unwrap().available_basis_points = Some(9_000);
+        incoming.supplemental[0].window.available_basis_points = Some(9_000);
+        incoming.updated_at_ms = Some(2_000);
+        quota.merge_observation(&incoming);
+        assert_eq!(
+            quota.primary.as_ref().unwrap().available_basis_points,
+            Some(0)
+        );
+        assert_eq!(
+            quota.supplemental[0].window.available_basis_points,
+            Some(500)
+        );
+        incoming.supplemental[0].window.observed_at_ms = 2_000;
+        quota.merge_observation(&incoming);
+        assert_eq!(
+            quota.supplemental[0].window.available_basis_points,
+            Some(9_000)
+        );
+    }
+
+    #[test]
+    fn removed_windows_are_not_restored_from_an_older_snapshot() {
+        let mut quota = QuotaSnapshot {
+            primary: Some(open_window(QuotaWindowKind::Primary, 900)),
+            secondary: Some(open_window(QuotaWindowKind::Secondary, 500)),
+            updated_at_ms: Some(1_000),
+            ..Default::default()
+        };
+        let older = quota.clone();
+        quota.merge_observation(&QuotaSnapshot {
+            updated_at_ms: Some(2_000),
+            ..Default::default()
+        });
+        assert!(quota.primary.is_none());
+        assert!(quota.secondary.is_none());
+        quota.merge_observation(&older);
+        assert!(quota.primary.is_none());
+        assert!(quota.secondary.is_none());
+        assert_eq!(quota.updated_at_ms, Some(2_000));
+    }
+
+    #[test]
+    fn newer_reset_metadata_keeps_the_carried_remainder_clock() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-codex-primary-used-percent", "20".parse().unwrap());
+        headers.insert(
+            "x-codex-primary-reset-after-seconds",
+            "600".parse().unwrap(),
+        );
+        let mut quota = crate::providers::chatgpt::merge_codex_quota_headers(
+            &QuotaSnapshot::default(),
+            &headers,
+            1_000,
+        )
+        .unwrap();
+        headers.remove("x-codex-primary-used-percent");
+        let timer =
+            crate::providers::chatgpt::merge_codex_quota_headers(&quota, &headers, 2_000).unwrap();
+        quota.merge_observation(&timer);
+        let primary = quota.primary.as_ref().unwrap();
+        assert_eq!(primary.available_basis_points, Some(8_000));
+        assert_eq!(primary.observed_at_ms, 1_000);
+        assert_eq!(primary.reset_at_ms, Some(602_000));
+        assert_eq!(quota.updated_at_ms, Some(2_000));
     }
 
     #[test]

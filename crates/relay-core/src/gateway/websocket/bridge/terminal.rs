@@ -1,6 +1,28 @@
 use super::super::upstream::first_message_terminal;
 use super::super::*;
-use super::BridgeState;
+use super::{BridgeState, InFlight};
+
+fn has_output_evidence(in_flight: &InFlight) -> bool {
+    in_flight.client_visible_output
+        || in_flight.event.ttft_ms.is_some()
+        || in_flight.event.output_tokens.is_some()
+        || in_flight.event.tool_use.tool_call_count > 0
+        || in_flight.event.tool_use.text_output
+}
+
+fn failed_terminal_before_generation(
+    state: &BridgeState,
+    message: &UpstreamMessage,
+) -> Option<EventTerminal> {
+    if has_output_evidence(state.in_flight.as_ref()?) {
+        return None;
+    }
+    let terminal = first_message_terminal(message)?;
+    if terminal.outcome != Some(EventTerminalOutcome::Failure) || terminal.generation_evidence {
+        return None;
+    }
+    Some(terminal)
+}
 
 pub(super) fn retryable_disconnect_request(
     runtime: &GatewayRuntime,
@@ -11,12 +33,7 @@ pub(super) fn retryable_disconnect_request(
         // A disconnect after response.create has no pre-execution proof.
         return None;
     }
-    if in_flight.client_visible_output
-        || in_flight.event.ttft_ms.is_some()
-        || in_flight.event.output_tokens.is_some()
-        || in_flight.event.tool_use.tool_call_count > 0
-        || in_flight.event.tool_use.text_output
-    {
+    if has_output_evidence(in_flight) {
         return None;
     }
     if in_flight.request.has_previous_response_id() {
@@ -63,18 +80,7 @@ pub(super) fn retryable_terminal_request(
     message: &UpstreamMessage,
 ) -> Option<ClientRequest> {
     let in_flight = state.in_flight.as_ref()?;
-    if in_flight.client_visible_output
-        || in_flight.event.ttft_ms.is_some()
-        || in_flight.event.output_tokens.is_some()
-        || in_flight.event.tool_use.tool_call_count > 0
-        || in_flight.event.tool_use.text_output
-    {
-        return None;
-    }
-    let terminal = first_message_terminal(message)?;
-    if terminal.outcome != Some(EventTerminalOutcome::Failure) {
-        return None;
-    }
+    let terminal = failed_terminal_before_generation(state, message)?;
     let (status, category) = resolved_terminal_failure(&terminal);
     let status = super::super::super::errors::canonical_upstream_status(status, category);
     if in_flight.request.has_previous_response_id() {
@@ -95,13 +101,7 @@ pub(super) fn repairable_terminal_request(
     state: &mut BridgeState,
     message: &UpstreamMessage,
 ) -> Option<ClientRequest> {
-    if state.in_flight.as_ref()?.client_visible_output {
-        return None;
-    }
-    let terminal = first_message_terminal(message)?;
-    if terminal.outcome != Some(EventTerminalOutcome::Failure) {
-        return None;
-    }
+    let terminal = failed_terminal_before_generation(state, message)?;
     if terminal.error_category == Some(error_codes::UPSTREAM_TURN_RATE_LIMITED) {
         return None;
     }
@@ -172,6 +172,7 @@ pub(super) fn finish_terminal(
     }
     runtime.observe_codex_quota_headers(
         &in_flight.route.candidate_id,
+        in_flight.route.account_token_generation,
         match outcome {
             EventTerminalOutcome::Success => terminal.status.unwrap_or(StatusCode::OK),
             EventTerminalOutcome::Incomplete => StatusCode::OK,
@@ -213,6 +214,8 @@ pub(super) fn finish_terminal(
             );
             if in_flight.client_visible_output {
                 failure.execution = crate::scheduler::rotation::ExecutionObservation::committed();
+            } else if terminal.generation_evidence {
+                failure.execution = crate::scheduler::rotation::ExecutionObservation::accepted();
             }
             super::super::super::errors::settle_attempt_failure(
                 runtime,

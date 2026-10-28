@@ -39,6 +39,7 @@ fn sample(current: &CapacityObservation<'_>, cost: u64, profile: &str) -> Measur
         micro_usd: Some(cost),
         pricing_coverage_basis_points: 10_000,
         event: None,
+        usage_fingerprint: None,
         workload: Some(workload::Workload {
             key: profile.into(),
             label: format!("model-{profile}"),
@@ -58,6 +59,7 @@ fn anchor(current: &CapacityObservation<'_>) -> Anchor {
         window: current.window.clone(),
         from_ms: NOW,
         remaining: 8400,
+        calibration: None,
     }
 }
 

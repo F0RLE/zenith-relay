@@ -145,8 +145,8 @@ pub use scheduler::{
 };
 pub use sources::{
     CacheWriteTtl, CapabilityOrigin, CapabilityStatus, LocalGatewayKey,
-    MAX_SOURCE_RECOVERY_DELAY_SECONDS, ModelEndpointCapability, ProtocolFeature, ProviderSource,
-    SourceBalanceKind, SourceCatalogEvidence, SourceCatalogRecord, SourceConnector,
+    MAX_SOURCE_RECOVERY_DELAY_SECONDS, ModelEndpointCapability, ModelTokenLimits, ProtocolFeature,
+    ProviderSource, SourceBalanceKind, SourceCatalogEvidence, SourceCatalogRecord, SourceConnector,
     SourceDiscovery, SourceProbeInput, SourceProbeResult, SourceProtocolBinding,
     SourceProtocolBindingKey, SourceProtocolConfig, SourceProtocolResolution, SourceProviderStats,
     SourceRead, SourceStatsAmount, SourceStatsCurrency, SourceStatsProvider, SourceStatsStatus,

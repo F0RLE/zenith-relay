@@ -114,11 +114,15 @@ impl ModelMetadataCatalog {
                 provenance.label(field);
                 provenance.label(&origin.source);
                 provenance.revision(&origin.revision);
+                provenance.revision(&origin.provider);
+                provenance.revision(&origin.source_model_id);
                 provenance.bytes +=
                     origin.conflicts.capacity() * size_of::<MetadataFieldConflict>();
                 for conflict in &origin.conflicts {
                     provenance.label(&conflict.source);
                     provenance.revision(&conflict.revision);
+                    provenance.revision(&conflict.provider);
+                    provenance.revision(&conflict.source_model_id);
                     provenance.json(&conflict.value);
                 }
             }
@@ -210,6 +214,7 @@ mod tests {
                     source: "synthetic".into(),
                     revision: None,
                     conflicts: vec![],
+                    ..Default::default()
                 },
             );
         }

@@ -10,6 +10,7 @@ pub(super) fn document(transport: &TransportDiagnostics) -> Value {
             preparation.catalog_ms,
             preparation.serialization_ms,
             preparation.attachments_ms,
+            preparation.context_accounting_ms,
         ]
     });
     let observed = phases.iter().flatten().flatten().count();

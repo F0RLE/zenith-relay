@@ -1,6 +1,9 @@
 use super::*;
 use serde_json::json;
 
+mod composition;
+mod performance;
+
 #[test]
 fn all_protocols_separate_instructions_history_and_tools_without_mutation() {
     let requests = [

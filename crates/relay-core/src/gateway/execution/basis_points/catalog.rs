@@ -27,6 +27,7 @@ impl RequestCatalog {
 pub(in crate::gateway) struct PreparedClientRequest {
     body: Value,
     catalog: RequestCatalog,
+    agent_messages: Option<crate::protocol::agent_messages::AgentMessageContext>,
 }
 
 impl PreparedClientRequest {
@@ -42,17 +43,34 @@ impl PreparedClientRequest {
             diagnostics_enabled,
             &mut catalog,
         )?;
-        Ok((Self { body, catalog }, upstream))
+        Ok((
+            Self {
+                body,
+                catalog,
+                agent_messages: None,
+            },
+            upstream,
+        ))
+    }
+
+    pub(in crate::gateway) fn with_agent_messages(
+        mut self,
+        context: crate::protocol::agent_messages::AgentMessageContext,
+    ) -> Self {
+        self.agent_messages = Some(context);
+        self
     }
 
     pub(in crate::gateway) fn translate_value(
         &self,
         response: Value,
     ) -> Result<Value, AdapterError> {
+        let mut catalog = self.catalog.clone();
         super::response::translate_response_with_catalog(
             response,
             &self.body,
-            &mut self.catalog.clone(),
+            &mut catalog,
+            self.agent_messages.as_ref(),
         )
     }
 
@@ -70,6 +88,7 @@ impl PreparedClientRequest {
             response,
             &self.body,
             &mut self.catalog.clone(),
+            self.agent_messages.as_ref(),
         )
     }
 }
@@ -88,6 +107,7 @@ impl From<Value> for PreparedClientRequest {
         Self {
             body,
             catalog: RequestCatalog::default(),
+            agent_messages: None,
         }
     }
 }
@@ -121,6 +141,7 @@ impl ClientTool {
             return Ok(());
         }
         if let Some(schema) = super::schema::parameter_schema(self) {
+            super::agent_messages::validate_schema(schema)?;
             super::schema::validator(schema)
                 .map_err(|error| super::schema::validation_error(&error, true))?;
         }

@@ -80,6 +80,36 @@ pub(super) fn initialize(record: &mut Value, priority: u64) {
     record[MARKER] = Value::Object(origins);
 }
 
+pub(super) fn initialize_for_model(record: &mut Value, priority: u64, model_id: &str) {
+    initialize(record, priority);
+    for origin in record[MARKER]
+        .as_object_mut()
+        .expect("field origins")
+        .values_mut()
+    {
+        attach_scope(origin, model_id, priority != 0);
+    }
+}
+
+fn attach_scope(origin: &mut Value, model_id: &str, hosted: bool) {
+    expand_origin(origin);
+    origin["sourceModelId"] = json!(model_id);
+    if hosted && let Some((provider, _)) = model_id.split_once('/') {
+        origin["provider"] = json!(provider);
+    }
+}
+
+fn conflict_from(origin: &Value, value: Value) -> Value {
+    let mut conflict =
+        json!({"source":origin_source(origin), "revision":origin.get("revision"), "value":value});
+    for key in ["provider", "sourceModelId"] {
+        if let Some(value) = origin.get(key) {
+            conflict[key] = value.clone();
+        }
+    }
+    conflict
+}
+
 /// Preserve the winner (including explicit false) and record disagreements.
 /// The caller fills only missing values after this function.
 pub(super) fn merge(target: &mut Value, fallback: &Value) {
@@ -111,9 +141,7 @@ pub(super) fn merge(target: &mut Value, fallback: &Value) {
                 *winner = origin.clone();
             }
             expand_origin(winner);
-            let conflict = json!({
-                "source": origin_source(origin), "revision": null, "value": incoming
-            });
+            let conflict = conflict_from(origin, incoming.clone());
             if let Some(conflicts) = winner.get_mut("conflicts").and_then(Value::as_array_mut)
                 && !conflicts.contains(&conflict)
                 && conflicts.len() < 4
@@ -148,9 +176,7 @@ pub(super) fn set_field(
     if let (Some(previous), Some(origin)) = (previous, old_origin.as_ref())
         && previous != value
     {
-        let conflict = json!({
-            "source": origin_source(origin), "revision": origin["revision"], "value": previous
-        });
+        let conflict = conflict_from(origin, previous);
         if !conflicts.contains(&conflict) {
             conflicts.insert(0, conflict);
         }
@@ -162,6 +188,21 @@ pub(super) fn set_field(
         json!({"source": source, "revision": null, "conflicts": conflicts})
     };
     record.insert(field.into(), value);
+}
+
+pub(super) fn set_scoped_field(
+    record: &mut serde_json::Map<String, Value>,
+    field: &str,
+    value: Value,
+    source: &str,
+    model_id: &str,
+) {
+    set_field(record, field, value, source);
+    attach_scope(
+        &mut record[MARKER][format!("/{field}")],
+        model_id,
+        source != "models_dev",
+    );
 }
 
 pub(super) fn remove_field(record: &mut serde_json::Map<String, Value>, field: &str) {
@@ -284,6 +325,7 @@ pub(super) fn normalized(record: &Value) -> BTreeMap<Cow<'static, str>, Metadata
                         source: source(super::reference::identity_priority(record)).into(),
                         revision: None,
                         conflicts: Vec::new(),
+                        ..Default::default()
                     });
             };
             let raw = origins.get(*path)?;
@@ -292,6 +334,7 @@ pub(super) fn normalized(record: &Value) -> BTreeMap<Cow<'static, str>, Metadata
                     source: retained_source(source.into()),
                     revision: None,
                     conflicts: Vec::new(),
+                    ..Default::default()
                 })
             } else {
                 MetadataFieldProvenance::deserialize(raw).ok()

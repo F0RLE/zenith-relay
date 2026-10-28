@@ -271,14 +271,24 @@ Display classification and sort keys are shared within one immutable metadata
 snapshot, while each member merges its own saved anchors independently. This
 presentation cache never supplies route or quota evidence.
 Reference-metadata caches persist validated source envelopes, not the derived
-merged JSON tree. Unchanged source revisions update health/timestamps while
-sharing immutable models and indexes; failed refreshes retain the prior data.
-Compact temporary field-origin markers preserve normalized public provenance
-and conflicts, including compatibility with legacy object markers.
+merged JSON tree. Unchanged source revisions and freshness classes share immutable
+models and indexes; failed refreshes retain the prior data. Within the exact same
+provider/model scope, fresh sources win and stale sources only fill missing fields.
+Freshness changes recompute winners even after a 304 response; unchanged merged
+content still shares its immutable trees. Provider-specific models.dev, OpenRouter
+and LiteLLM records retain their hosting namespace, even for qualified upstream
+IDs. They never fill another host's or a canonical model's fields. Exact canonical
+links are presentation metadata, not permission to import hosted limits or enums.
+Field provenance and conflicts retain source revision, provider and scoped record
+ID, with compatibility for legacy markers. Nonpositive limits and input/output
+limits exceeding the known context remain unknown rather than being invented.
 Quota-equivalent projections reuse individual account windows across unrelated
 usage writes. Corrections invalidate both previous and incoming account owners;
 window/price changes, retention, history clearing and account purges remain
 invalidation boundaries. Revision checks under the cache lock fence late reads.
+History clearing deletes request logs, attempts, rollups and weekly-capacity
+state in one SQLite transaction. A failed database deletion rolls back the whole
+set; cache invalidation follows a successful commit.
 Usage filter choices read covering indexes.
 Usage opens with the selected sends page (50 by default) and its period summary,
 without a separate statistics toggle. Diagnostic payloads from neighboring pages
@@ -408,6 +418,10 @@ not dispatch, quota, continuation, or provider-cache policy.
 
 - Credential access belongs to the Desktop credential store and protected vault.
   Database, recovery, export, cache, and log areas are separate.
+- Desktop's Relay-owned agent-carrier key persists as a typed protected-vault
+  record, not as account credentials or message history. Startup restores it
+  before runtime admission; corruption fails closed. The exact lifecycle and
+  limit for previously lost volatile keys stay in [BPS](BASIS_POINTS.md).
 - Snapshots, usage, and diagnostics are redacted. Account exports are explicit
   credential-bearing documents, not support bundles.
 - Provider credentials and inference request keys are different credentials.
@@ -769,12 +783,61 @@ service tiers, and native-protocol policy. Declared, confirmed, unsupported, and
 unknown evidence stay distinct. Missing limits/capabilities remain unknown;
 participant metadata does not become universal model truth.
 
-Known model identities use the native upstream selected by
-`model_metadata/protocol_policy.rs` and `catalog/protocol-policy.json`:
+Within the same provider/model scope, a declared effort enum takes precedence
+over individual positive effort flags. Nested reasoning and option enums survive
+source enrichment and cache reloads; a scalar effort is not a complete enum.
+Partial flags remain a fallback when no enum is published. Primary explicit
+enums, supported defaults, unsupported evidence, route restrictions and operator
+policy are preserved; levels are neither hardcoded by model name nor borrowed
+from another host.
+
+Model Rules exposes read-only reasoning diagnostics even when a non-image
+model has no effort selector. The existing snapshot supplies the reference
+source/model, support flag, control method, reference/runtime levels and pool
+policy projection. Unknown evidence, explicit unsupported evidence, non-effort
+controls and an empty policy remain distinct. A reference/runtime discrepancy
+does not invent a cause or establish provider acceptance. Opening diagnostics
+does not probe, refresh discovery or modify model settings; an open dialog
+follows updated snapshots. Missing fields remain distinct from empty lists.
+
+Validated source `/models` token limits are endpoint-local restrictions, not
+canonical model metadata. `contextWindow`/`context_window`/`context_length`,
+`maxInputTokens`/`max_input_tokens`/`inputTokenLimit`, and
+`maxOutputTokens`/`max_output_tokens`/`outputTokenLimit` accept positive integers;
+conflicting aliases and inconsistent limits stay unknown. Gemini's separate
+[input/output limits](https://ai.google.dev/api/models#Model) do not imply a
+combined context window; OpenRouter's
+[context field](https://openrouter.ai/docs/guides/overview/models) is distinct
+from a generation default. These restrictions may narrow a known reference
+maximum or fill an unknown one, never enlarge it or grant an endpoint/feature.
+Fresh complete discovery replaces old restrictions; address/key invalidation
+also removes them. Admission and adapter preparation reject excessive explicit
+output limits without clipping requests. API Codex cards use the most restrictive
+known limits among the key's available routes; native account cards retain their
+own context policy. Input token counts are not guessed from character counts.
+
+Disjoint nonempty source/reference reasoning effort lists are a metadata conflict,
+not evidence that reasoning is disabled. No effort is advertised or substituted;
+explicit effort controls (including `none`) fail with `adapter_metadata_conflict`
+before execution, while an otherwise compatible request without an effort keeps
+provider defaults. Explicit unsupported evidence still denies reasoning. This
+stage does not ingest participant reasoning/tool capability flags.
+
+Explicit endpoint configuration and the source's per-model endpoint catalog
+take priority over manufacturer defaults. When the source declares the client's
+protocol, use native forwarding before conversion, without a preliminary failed
+conversion or generation probe. Hosted tools and their options stay native;
+declaring a protocol does not independently establish hosted-tool availability.
+Exact negative evidence and an endpoint pin remain authoritative. Missing native
+support uses an available declared upstream through the shared adapter; it does
+not silently remove requested features or emulate search as a client function.
+Only without exact source evidence do known identities use the manufacturer
+default from `model_metadata/protocol_policy.rs` and `catalog/protocol-policy.json`:
 OpenAI Responses, Anthropic Messages, Google Gemini, and xAI/Z.ai Chat Completions.
-An incompatible endpoint or pin leaves no route; the client's protocol does not
-override that requirement. Unknown identities use their exact endpoint evidence
-and configured preferences/fallback. Several protocol bindings still share one
+Service profiles and model names cannot recreate an explicitly rejected endpoint.
+Unknown identities use their exact endpoint evidence and configured
+preferences/fallback. Existing continuation ownership cannot change protocol
+because source declarations or preferences change. Several bindings share one
 physical member, quota, and capacity.
 
 Display identity never rewrites route IDs. Exact qualified IDs precede a unique
@@ -798,6 +861,19 @@ drops accounting. The last owner drains and joins the writer; an uncertain faile
 write is reported, never replayed. Failure to start the worker retains synchronous
 persistence. Runtime quota application and revision guards keep their owners.
 Observation time is captured before enqueue; queue wait never makes quota data newer.
+Delayed callbacks cannot move account, source or key last-used times backwards;
+timestamp strings are compared as instants, not lexicographically.
+Account observations with a known older credential generation remain telemetry-only:
+success, quota and failure results cannot modify the newer account or complete
+its natural-use wake state. Successful access-token use does not clear a persisted
+terminal refresh-grant or rotation-recovery sign-in requirement.
+The same generation fence protects runtime health and HTTP/WebSocket quota
+observations. Observation commits hold the existing authority slot and revision
+guard; a busy refresh skips state changes without waiting for provider I/O or
+dropping usage telemetry. Terminal sign-in requirements cannot become a healthy
+runtime candidate because an in-flight request completes. Pending passive quota
+is consumed for persistence under that same fence, so an obsolete completion
+cannot take a newer login's unsaved observation.
 
 Successful native Codex Responses HTTP/WS handshakes may supply `X-Models-Etag`.
 A first or changed version schedules the existing fenced account-model refresh;
@@ -816,12 +892,26 @@ origins do not participate.
   retain supplied access-token expiry and authenticated subscription dates;
   an ID token's expiry does not describe the access token. Missing dates stay
   unknown. Passive quota updates cannot discard an independent subscription read.
+  Quota-only polls and failed metadata reads do not advance subscription freshness.
+  Desktop reads subscription metadata once after authorization recovery, preserves
+  the last known date on failure, and records redacted diagnostics without treating
+  an optional metadata failure as a quota or account-access rejection.
+  Failed subscription reads pause for at least one minute when transient, or
+  30 minutes otherwise, preserving a longer Retry-After. This pauses only
+  subscription reads for the current registration, including manual retries,
+  not quota polling or a replacement login/configuration. Polls never re-import
+  a subscription date from old token claims after the provider has cleared it.
 - Model, balance, quota, and usage refreshes are independent resource-scoped
   jobs. Readers join in-flight work. Manual refresh does not cancel shared work.
   Configuration/credential/delete revisions fence late results.
 - Passive window headers do not refresh credit-ledger evidence. A reset time
   without a remainder does not refresh that remainder. Traffic cannot postpone
   a required full poll indefinitely; stale credit-only admission expires.
+  Queued and persisted snapshots reconcile present windows and complete credit
+  ledgers by their own observation times; equal-clock conflicts keep current
+  evidence. A newer authoritative snapshot can still remove absent windows.
+  Preserved unsaved observations retain their persistence hints, and a delayed
+  exhaustion report cannot zero a more recently observed primary remainder.
 - The last positive 1% schedules a quota verification after one minute, or at
   an earlier reported reset, through the same shared refresh job. Fresh headers
   do not postpone it. Zero remains exhausted; provider Retry-After, backoff,
@@ -870,7 +960,14 @@ origins do not participate.
   cannot overwrite a newer login, delete replacement credentials, restore a
   deleted account, or change operator disable/drain/membership choices.
   Access-only expiry applies to the rejected token snapshot and preserves an
-  existing terminal sign-in reason.
+  existing terminal sign-in reason. The five-minute renewal window applies only
+  when a refresh grant exists; access-only tokens retain their actual lifetime.
+  Native OAuth rotations use the credential store's existing protected checkpoint
+  mechanism. A known successful rotation survives storage failures in the shared
+  authority's pending-persistence state; retries save that result rather than
+  exchanging the old grant. A completed checkpoint can recover it after restart.
+  If storage never accepted the rotated pair and the process exits, the retained
+  pre-exchange barrier requires sign-in instead of reusing the consumed grant.
 - Account trash retains credentials and usage but excludes the registration
   from routing, monitoring, exports, and presets. Restore returns it disabled
   and outside the pool with a new revision. Permanent deletion is explicit.
@@ -944,7 +1041,10 @@ margin does not add a wait, bypass shared physical capacity, or change member
 limits. Fresh positive quota takes precedence within the group, including the
 explicit linked-connection ranking reference for SIWC with unknown quota; candidates
 less than five percentage points below the best fresh quota remain in the same
-selection band. At a lead of five points or more the lower remainder yields.
+selection band. Only the primary warm preferred member has a ten-point quota
+margin: it yields at a lead of ten points or more. Independent work and warm
+alternatives retain the five-point band. The wider primary margin does not
+bypass quota freshness, positive remaining quota, availability, load or health.
 Fresh provider credits are the fallback. Soft health/first-output latency and request weights
 resolve remaining choices. Wallet prices do not rank members. Missing latency
 does not exclude a member. Soft affinity can yield to a better eligible member;
@@ -975,6 +1075,16 @@ the corresponding hints. They contain only candidate IDs and expiry times, not
 prompts or provider state, and are not restored from durable storage. Success is
 a reuse hint, not proof that the provider retained a cache; usage counters remain
 the provider-reported values, including genuine zero-cache sends after a switch.
+
+Requests with a prompt-affinity key also retain bounded `cacheAffinity` admission
+evidence in routing diagnostics and the existing technical details/support report.
+It distinguishes the preferred member, a previously used alternative, and another
+selection, and records the actual availability/load/resource/health exclusion stage.
+Fresh quota and credit observations, physical in-flight/capacity counts and the
+applicable switch margins are captured before reservation. Missing or stale evidence
+stays null. Candidate IDs, cache keys, prompts and credentials are not included.
+This is a read-only explanation of the existing policy, not provider cache-miss
+diagnostics; old rows without the optional field remain supported.
 
 Automatic response-owner yield probes the same cache-aware admission policy with
 the current physical owner preferred within the bounded load margin. Load,
@@ -1280,6 +1390,8 @@ completion and client disconnection retain their existing owners. Legacy rows
 without request timing are not backfilled from inferred timestamps. BPS adapter
 errors preserve allowlisted validation parameters and bounded JSON coordinates;
 request bodies and tool argument values are never included.
+Local adapter rejections retain the same safe error details in HTTP and WebSocket
+history, with Relay origin and no invented provider attempt, usage or cooldown.
 Client cancellation has its own non-successful UI outcome. Historical synthetic
 HTTP 502 cancellation rows receive the same label.
 A logical cancellation does not inherit the previous attempt's provider error;
@@ -2036,12 +2148,26 @@ scaled by the same remaining weekly fraction for comparable cards. Five-hour
 quota observations and resets are not inputs to the weekly calibration.
 
 Current inventory, membership and quota evidence fence persisted samples before
-the collector catches up. Missing identity, unknown plan, reset, changed prices,
+the collector catches up. Missing identity, unknown plan, reset, unvalidated prices,
 quota corrections, expired or future observations cannot supply calibration.
 Linked SIWC routes use the Codex/BPS subscription window, not an app ceiling;
 credits-only SIWC routes are excluded. Snapshot projection performs bounded,
 indexed anchor/latest-measurement reads, not request-history aggregation. Anchors
 and history survive restart; there is no per-account cumulative fallback.
+Catalog revisions trigger background revaluation, not a new quota baseline or
+a requirement to consume another 5%. The collector prices the retained paired
+interval using only its actual model/tier/context usage, then persists a separate
+current-price calibration in the anchor. Unrelated catalog/metadata edits do not
+discard that evidence. Real tariff changes update the estimate only when usage
+is still complete and price coverage remains at least 80%; otherwise it is unknown.
+New measurements retain a price-independent usage fingerprint, so repricing
+rejects removed or corrected usage even when the coarse workload mix is unchanged.
+Legacy anchors recover from retained intervals within 72 hours (raw sends are
+retained for 30 days), skipping only compatible legacy pricing-change events in
+a bounded lookup, never structural discontinuities. Original observation/reset
+times and expiry remain unchanged. Historical chart rows retain their as-observed
+prices; this revaluation neither rewrites history nor adds fictitious consumption.
+Snapshot projection reads the persisted calibration and never reprices raw sends.
 Cards show one approximate weekly remaining value or `—`; tooltips identify
 workload/profile count, sample count and pricing coverage.
 Forecasts expire at target reset, stale quota or the calibration's next expiry
@@ -2065,8 +2191,9 @@ mix (10% token-weight bands), with cache-input bands of 25% and output-share ban
 of 10%. Each ledger contributes one latest vote per bucket; charts show median
 and empirical P10–P90 spread, not a confidence interval. Current estimates prefer
 measurements wholly within 24 hours, fall back only through 72 hours and expire
-at reset. Cycle changes, changed plans/prices and unexplained quota increases
-break calibration; only positive cycle evidence is labeled a reset. External
+at reset. Cycle changes, changed plans and unexplained quota increases break
+calibration; price revisions separate historical valuations but do not break the
+paired quota interval. Only positive cycle evidence is labeled a reset. External
 usage, observation lag and coarse quota readings can bias the estimate, so a
 change is not proof of a provider policy change.
 

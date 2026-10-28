@@ -143,6 +143,7 @@ pub struct GatewayRuntime {
     model_metadata_catalog: Option<ModelMetadataCatalogHandle>,
     passive_quotas: Mutex<BTreeMap<String, PassiveQuotaState>>,
     adapter_continuation_store: Arc<Mutex<crate::AdapterContinuationStore>>,
+    agent_message_cipher: Arc<crate::protocol::agent_messages::AgentMessageCipher>,
     native_responses_replay_store: Arc<Mutex<NativeResponsesReplayStore>>,
     cache_context_store: cache_context::CacheContextStore,
     codex_turn_state_store: CodexTurnStateStore,

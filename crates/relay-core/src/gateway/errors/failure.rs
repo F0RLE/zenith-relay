@@ -211,10 +211,8 @@ impl AttemptFailure {
         let classification = classify_upstream_error(status, response_body);
         Self {
             execution: if response_body
-                .and_then(|body| serde_json::from_slice::<Value>(body).ok())
-                .is_some_and(|payload| {
-                    crate::gateway::streaming::has_generation_evidence(&payload, None)
-                }) {
+                .is_some_and(crate::gateway::response::has_generation_evidence_bytes)
+            {
                 ExecutionObservation::accepted()
             } else {
                 rejection_execution(status, classification.category)

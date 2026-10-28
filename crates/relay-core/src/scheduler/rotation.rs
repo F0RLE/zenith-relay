@@ -20,9 +20,11 @@ pub(crate) const HEALTH_FAILURE_SWITCH_MARGIN_MILLI: u32 = 200;
 pub(crate) const HEALTH_LATENCY_SWITCH_MARGIN_MILLI: u32 = 250;
 
 mod budget;
+mod cache_affinity;
 mod engine;
 mod types;
 
 pub use budget::*;
+pub use cache_affinity::*;
 pub use engine::RotationEngine;
 pub use types::*;

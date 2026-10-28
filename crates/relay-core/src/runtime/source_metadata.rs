@@ -117,6 +117,28 @@ impl GatewayRuntime {
         reasoning_policy_levels(&configured, model).map(ToOwned::to_owned)
     }
 
+    /// Most restrictive known limits among this key's routes. This projection
+    /// is for a shared API picker, never an owning account's native model card.
+    pub(crate) fn client_token_limits(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+        client: WireApi,
+    ) -> crate::ModelTokenLimits {
+        let mut limits = crate::ModelTokenLimits::default();
+        for route in self.configured_executor_routes(key, model, &[client], false) {
+            let capabilities = self
+                .model_capabilities(&route.source_model)
+                .for_route(route.route_capability.as_ref());
+            let minimum =
+                |left: Option<u64>, right: Option<u64>| left.into_iter().chain(right).min();
+            limits.context = minimum(limits.context, capabilities.context_limit);
+            limits.input = minimum(limits.input, capabilities.input_limit);
+            limits.output = minimum(limits.output, capabilities.output_limit);
+        }
+        limits
+    }
+
     pub(crate) fn client_reasoning_levels(
         &self,
         key: &AuthenticatedKey,

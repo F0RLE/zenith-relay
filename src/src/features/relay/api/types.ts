@@ -120,6 +120,8 @@ export type {
 } from "./types/runtime";
 
 export type {
+  CacheAffinityDiagnostics,
+  CacheAffinityMember,
   CacheContextDiagnostics,
   CacheContextSection,
   CacheHistoryDiagnostics,

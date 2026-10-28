@@ -22,6 +22,9 @@ use axum::http::{Request, Response, StatusCode};
 use serde_json::Value;
 use std::sync::Arc;
 
+#[cfg(test)]
+mod tests;
+
 /// WebSocket -> HTTP fallback carries the same identity and physical
 /// dispatch counter; a transport change is not a new client request.
 #[derive(Clone)]
@@ -121,6 +124,13 @@ async fn execute_client_request_inner(
             message,
             error_codes::INVALID_REQUEST,
         );
+    }
+    if client_wire_api == WireApi::Responses
+        && let Err(error) = runtime
+            .agent_message_context(&key.id)
+            .restore_request(&mut request_json)
+    {
+        return super::request::adapter_error_response(error, None);
     }
     runtime.refresh_basis_points_access(&key).await;
     let mut tool_policy = parts

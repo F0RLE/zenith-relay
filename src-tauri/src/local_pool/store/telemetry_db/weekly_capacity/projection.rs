@@ -35,12 +35,22 @@ impl TelemetryDb {
                 )
                 .optional()
                 .map_err(db_error)?;
-            let Some((anchor, Some(measurement))) = row else {
+            let Some((anchor, measurement)) = row else {
                 continue;
             };
             let anchor: Anchor = serde_json::from_str(&anchor).map_err(json_error)?;
-            let measurement: Measurement =
-                serde_json::from_str(&measurement).map_err(json_error)?;
+            let measurement = match &anchor.calibration {
+                Some(calibration) if calibration.valid => calibration.sample.clone(),
+                Some(_) => None,
+                None => measurement
+                    .as_deref()
+                    .map(serde_json::from_str::<Measurement>)
+                    .transpose()
+                    .map_err(json_error)?,
+            };
+            let Some(measurement) = measurement else {
+                continue;
+            };
             if compatible_sample(&anchor, &measurement, observation) {
                 samples.insert(observation.ledger, (observation, measurement));
             }
@@ -82,6 +92,7 @@ fn compatible_sample(
         window: current.window.clone(),
         from_ms: current.window.observed_at_ms,
         remaining: current.window.available_basis_points.unwrap_or_default(),
+        calibration: None,
     };
     let unchanged = anchor.plan == next.plan
         && anchor.pricing_revision == next.pricing_revision
@@ -89,14 +100,25 @@ fn compatible_sample(
         && anchor.window == next.window;
     // Current inventory fences persisted samples even before the background
     // collector records a reset, plan change, unlink, or corrected observation.
-    if current.window.observed_at_ms < anchor.window.observed_at_ms
+    if anchor.pricing_revision != next.pricing_revision
+        || current.window.observed_at_ms < anchor.window.observed_at_ms
         || (!unchanged && discontinuity(anchor, &next).is_some())
     {
         return false;
     }
+    sample.at_ms <= anchor.window.observed_at_ms
+        && compatible_measurement(sample, &next, current.ledger, current.now_ms)
+}
+
+pub(super) fn compatible_measurement(
+    sample: &Measurement,
+    next: &Anchor,
+    ledger: &str,
+    now_ms: u64,
+) -> bool {
     sample.event.is_none()
-        && sample.ledger == current.ledger
-        && sample.account_ids == current.account_ids
+        && sample.ledger == ledger
+        && sample.account_ids == next.account_ids
         && sample.plan == next.plan
         && sample.pricing_revision == next.pricing_revision
         && sample.workload.is_some()
@@ -106,20 +128,20 @@ fn compatible_sample(
             .micro_usd
             .is_some_and(|cost| (1..=9_007_199_254_740_991).contains(&cost))
         && sample.from_ms < sample.at_ms
-        && sample.from_ms >= current.now_ms.saturating_sub(MAX_ANCHOR_AGE)
+        && sample.from_ms >= now_ms.saturating_sub(MAX_ANCHOR_AGE)
         && sample.from_ms
-            >= current
+            >= next
                 .window
                 .window_start_ms
                 .unwrap_or_default()
                 .saturating_sub(120_000)
-        && sample.at_ms <= anchor.window.observed_at_ms
-        && sample.at_ms <= current.now_ms
-        && current.now_ms - sample.at_ms < MAX_ANCHOR_AGE
-        && sample.reset_at_ms > current.now_ms
+        && sample.at_ms <= next.window.observed_at_ms
+        && sample.at_ms <= now_ms
+        && now_ms - sample.at_ms < MAX_ANCHOR_AGE
+        && sample.reset_at_ms > now_ms
         && sample
             .reset_at_ms
-            .abs_diff(current.window.reset_at_ms.unwrap_or_default())
+            .abs_diff(next.window.reset_at_ms.unwrap_or_default())
             <= 120_000
 }
 

@@ -338,6 +338,11 @@ impl StoredCodexCredentials {
     }
 
     pub fn is_access_usable(&self, now_ms: u64, refresh_skew_ms: u64) -> bool {
+        let refresh_skew_ms = if self.refresh_token.is_some() {
+            refresh_skew_ms
+        } else {
+            0
+        };
         access_token_is_usable(self.expires_at_ms, now_ms, refresh_skew_ms)
     }
 }
@@ -507,10 +512,15 @@ impl StoredCodexCredentials {
     }
 
     pub(in crate::local_pool::accounts) fn matches_siwc_grant(&self, other: &Self) -> bool {
-        self.siwc.is_some()
-            && self.siwc == other.siwc
+        self.siwc.is_some() && self.matches_refresh_grant(other)
+    }
+
+    pub(in crate::local_pool::accounts) fn matches_refresh_grant(&self, other: &Self) -> bool {
+        self.siwc == other.siwc
             && self.local_account_id == other.local_account_id
             && self.oauth_client_kind == other.oauth_client_kind
+            && self.provider_account_id == other.provider_account_id
+            && self.provider_user_id == other.provider_user_id
             && self.generation == other.generation
             && self.issued_at_ms == other.issued_at_ms
             && self.access_token == other.access_token

@@ -370,6 +370,7 @@ mod tests {
             micro_usd: Some(cost),
             pricing_coverage_basis_points: 10_000,
             event: None,
+            usage_fingerprint: None,
             workload: Some(workload::Workload {
                 key: "model-default".into(),
                 label: "model".into(),

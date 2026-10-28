@@ -104,6 +104,9 @@ pub struct RoutingDiagnostics {
     pub transport: Option<crate::usage::TransportDiagnostics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_context: Option<crate::usage::CacheContextDiagnostics>,
+    /// Admission evidence only, not a provider cache-hit or cache-miss verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_affinity: Option<super::super::rotation::CacheAffinityDiagnostics>,
     /// The executor's actual disposition, never inferred from HTTP status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt_outcome: Option<AttemptOutcome>,
@@ -402,6 +405,7 @@ impl PoolScheduler {
             upstream_response_model: None,
             transport: None,
             cache_context: None,
+            cache_affinity: None,
             attempt_outcome: None,
             request_timing: None,
         })

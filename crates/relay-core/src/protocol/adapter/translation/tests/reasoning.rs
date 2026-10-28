@@ -1,6 +1,53 @@
 use super::*;
 
 #[test]
+fn conflicting_effort_metadata_never_disables_or_guesses_reasoning() {
+    let capabilities = crate::model_metadata::ModelCapabilities {
+        reasoning: Some(true),
+        reasoning_effort_conflict: true,
+        ..Default::default()
+    };
+    for upstream in [
+        WireApi::Responses,
+        WireApi::ChatCompletions,
+        WireApi::Messages,
+        WireApi::Gemini,
+    ] {
+        let adapter = SourceAdapter::between(WireApi::Responses, upstream).unwrap();
+        for effort in ["none", "low", "high"] {
+            assert!(!adapter.supports_reasoning_effort_for_model(
+                MessagesReasoningMode::Adaptive,
+                effort,
+                &capabilities
+            ));
+            if adapter.is_passthrough() {
+                continue; // Native requests are checked by gateway admission.
+            }
+            let request = json!({"input":"Synthetic", "max_output_tokens":64,
+                "reasoning":{"effort":effort}});
+            let error = adapter
+                .prepare_request_with_capabilities(
+                    AdapterRequestContext {
+                        client_wire_api: WireApi::Responses,
+                        request: &request,
+                        model: "synthetic-model",
+                        stream: false,
+                        reasoning_mode: MessagesReasoningMode::Adaptive,
+                        cache_write_ttl: CacheWriteTtl::Provider,
+                        previous: None,
+                        response_scope: "synthetic-source",
+                        response_id_seed: "synthetic-request",
+                    },
+                    &capabilities,
+                )
+                .unwrap_err();
+            assert_eq!(error.code(), "adapter_metadata_conflict");
+            assert_eq!(error.parameter(), Some("reasoning.effort"));
+        }
+    }
+}
+
+#[test]
 fn explicit_disabled_reasoning_does_not_require_model_reasoning_support() {
     let capabilities = crate::model_metadata::ModelCapabilities {
         reasoning: Some(false),

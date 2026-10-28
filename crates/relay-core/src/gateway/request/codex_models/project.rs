@@ -93,7 +93,12 @@ pub(super) fn build_codex_models_response_from_manifests(
         // upstream id would make prefixed keys look like API-only routes.
         let native_account_ids = runtime.codex_model_native_responses_account_ids(key, &display_id);
         let has_native_account_route = !native_account_ids.is_empty();
-        let capabilities = runtime.model_capabilities(&upstream_id);
+        let mut capabilities = runtime.model_capabilities(&upstream_id);
+        if !has_native_account_route {
+            runtime
+                .client_token_limits(key, &upstream_id, WireApi::Responses)
+                .constrain(&mut capabilities);
+        }
         let native_entries = upstream_by_model
             .get(&normalized)
             .into_iter()
@@ -225,6 +230,7 @@ pub(super) fn build_codex_models_response_from_manifests(
             &upstream_id,
             has_native_account_route,
             native_catalog_model.is_some(),
+            &capabilities,
         );
         models.push(catalog_model);
     }

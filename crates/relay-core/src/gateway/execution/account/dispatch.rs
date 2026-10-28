@@ -139,7 +139,6 @@ pub(super) async fn dispatch_account_attempt(
             };
         upstream_body = body;
         discovery_session = session;
-        tool_use.capture_upstream_context(&upstream_body);
     }
     if basis_points_route {
         preparation.catalog_ms = catalog_started.map(|start| start.elapsed().as_millis() as u64);
@@ -172,6 +171,14 @@ pub(super) async fn dispatch_account_attempt(
         }
         preparation.attachments_ms =
             attachments_started.map(|start| start.elapsed().as_millis() as u64);
+        let context_started = preparation_started.map(|_| Instant::now());
+        super::super::basis_points::discovery::capture_prepared_context(
+            original_request,
+            &upstream_body,
+            &mut tool_use,
+        );
+        preparation.context_accounting_ms =
+            context_started.map(|start| start.elapsed().as_millis() as u64);
         let encoding_started = preparation_started.map(|_| Instant::now());
         let encoded = serde_json::to_vec(&upstream_body).expect("prepared JSON is serializable");
         preparation.serialization_ms =

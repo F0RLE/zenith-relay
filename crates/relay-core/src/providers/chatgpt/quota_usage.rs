@@ -300,6 +300,7 @@ impl CodexQuotaClient {
         quota_refresh
             .quota
             .preserve_subscription_metadata(previous_subscription);
+        let mut subscription_refreshed = false;
         if refresh_subscription {
             let metadata = match subscription_authorization {
                 Some(authorization) => Some(
@@ -319,22 +320,23 @@ impl CodexQuotaClient {
                         forbidden: false,
                         observed_at_ms: now_ms,
                     });
-            match metadata {
-                Some(Ok(metadata)) => {
-                    merge_subscription_metadata_at(
-                        &mut subscription_input.plan_type,
-                        &mut subscription_input.active_until_ms,
-                        metadata,
-                        Some(now_ms),
-                    );
-                    subscription_input.observed_at_ms = now_ms;
-                }
-                Some(Err(_)) | None => subscription_input.observed_at_ms = now_ms,
+            if let Some(Ok(metadata)) = metadata {
+                merge_subscription_metadata_at(
+                    &mut subscription_input.plan_type,
+                    &mut subscription_input.active_until_ms,
+                    metadata,
+                    Some(now_ms),
+                );
+                subscription_input.observed_at_ms = now_ms;
+                subscription_refreshed = true;
             }
-        } else if let Some(input) = quota_refresh.quota.subscription.as_mut()
+        }
+        if !subscription_refreshed
+            && let Some(input) = quota_refresh.quota.subscription.as_mut()
             && input.plan_type == previous_subscription.plan_type
-            && input.active_until_ms.is_none()
         {
+            // A quota-only observation (or a failed/unsupported subscription
+            // read) must not postpone the next independent metadata refresh.
             input.observed_at_ms = previous_subscription.updated_at_ms.unwrap_or(now_ms);
         }
         Ok(quota_refresh)

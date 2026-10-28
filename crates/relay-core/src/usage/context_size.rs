@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod conversation;
+pub use conversation::ConversationSizeBreakdown;
+
 /// Prepared JSON sizes, not token estimates. No content, names, hashes, or
 /// identifiers are retained. Provider-injected context is not observable here.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -10,6 +13,10 @@ pub struct RequestContextSize {
     pub instruction_bytes: u64,
     pub conversation_bytes: u64,
     pub tool_catalog_bytes: u64,
+    /// Disjoint serialized-byte categories within conversation_bytes. Legacy
+    /// observations remain unknown rather than becoming measured zeroes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<ConversationSizeBreakdown>,
 }
 
 impl RequestContextSize {
@@ -22,6 +29,7 @@ impl RequestContextSize {
 
         let mut size = Self {
             tool_catalog_bytes,
+            conversation: Some(ConversationSizeBreakdown::default()),
             ..Self::default()
         };
         let Some(fields) = request.as_object() else {
@@ -58,7 +66,11 @@ impl RequestContextSize {
     fn capture_conversation(&mut self, value: &Value) -> u64 {
         let bytes = crate::tool_policy::serialized_bytes;
         let Some(items) = value.as_array() else {
-            let value_bytes = bytes(value);
+            let value_bytes = if value.is_null() {
+                bytes(value)
+            } else {
+                self.conversation.as_mut().unwrap().capture(value)
+            };
             if !value.is_null() {
                 self.conversation_bytes = self.conversation_bytes.saturating_add(value_bytes);
             }
@@ -66,14 +78,20 @@ impl RequestContextSize {
         };
         let mut array_bytes = 2 + items.len().saturating_sub(1) as u64;
         for item in items {
-            let item_bytes = bytes(item);
-            array_bytes = array_bytes.saturating_add(item_bytes);
-            if matches!(
+            let instruction = matches!(
                 item.get("role").and_then(Value::as_str),
                 Some("system" | "developer")
-            ) {
+            );
+            let catalog = item.get("type").and_then(Value::as_str) == Some("additional_tools");
+            let item_bytes = if instruction || catalog {
+                bytes(item)
+            } else {
+                self.conversation.as_mut().unwrap().capture(item)
+            };
+            array_bytes = array_bytes.saturating_add(item_bytes);
+            if instruction {
                 self.instruction_bytes = self.instruction_bytes.saturating_add(item_bytes);
-            } else if item.get("type").and_then(Value::as_str) != Some("additional_tools") {
+            } else if !catalog {
                 self.conversation_bytes = self.conversation_bytes.saturating_add(item_bytes);
             }
         }

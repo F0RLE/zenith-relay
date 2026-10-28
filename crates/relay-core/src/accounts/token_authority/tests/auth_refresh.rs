@@ -471,6 +471,35 @@ impl TokenRefreshAdapter for MustNotRefresh {
 }
 
 #[tokio::test]
+async fn access_only_token_remains_usable_until_its_actual_expiry() {
+    let authority = TokenAuthority::new(1).unwrap();
+    let tokens = TokenSet::access_only("access", Some(300_000), 0).unwrap();
+    authority
+        .register(
+            "account",
+            tokens.clone(),
+            AccountAuthState::DegradedAccessOnly,
+        )
+        .await
+        .unwrap();
+
+    for now_ms in [0, 1, 299_999] {
+        let prepared = authority
+            .prepare("account", now_ms, 300_000, &MustNotRefresh)
+            .await
+            .unwrap();
+        assert_eq!(prepared.status, PrepareStatus::Ready);
+        assert_eq!(prepared.tokens, tokens);
+    }
+    assert!(matches!(
+        authority
+            .prepare("account", 300_000, 300_000, &MustNotRefresh)
+            .await,
+        Err(TokenAuthorityError::AccessTokenExpired)
+    ));
+}
+
+#[tokio::test]
 async fn expired_access_only_token_never_attempts_refresh() {
     let authority = TokenAuthority::new(1).unwrap();
     authority

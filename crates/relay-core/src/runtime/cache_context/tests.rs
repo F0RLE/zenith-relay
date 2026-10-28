@@ -51,6 +51,7 @@ fn event(
             upstream_response_model: None,
             transport: None,
             cache_context: Some(diagnostics),
+            cache_affinity: None,
             attempt_outcome: None,
             request_timing: None,
         }),

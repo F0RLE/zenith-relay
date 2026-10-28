@@ -105,6 +105,29 @@ pub fn save(secret_ref: &str, secret_value: &str) -> Result<()> {
     Ok(())
 }
 
+pub(in crate::local_pool) fn agent_message_key(vault_root: &Path) -> Result<[u8; 32]> {
+    configured_agent_message_key(VAULT.get(), vault_root)
+}
+
+fn configured_agent_message_key(
+    configured: Option<&ConfiguredVault>,
+    vault_root: &Path,
+) -> Result<[u8; 32]> {
+    let configured = configured.ok_or_else(|| {
+        LocalPoolError::new(
+            ErrorCode::SecretStoreUnavailable,
+            "agent-message key requires the initialized protected vault",
+        )
+    })?;
+    if configured.root != canonical_root(vault_root)? {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "agent-message key belongs to another data directory",
+        ));
+    }
+    configured.vault.agent_message_key().map_err(vault_error)
+}
+
 pub fn load(secret_ref: &str) -> Result<Option<String>> {
     validate_secret_ref(secret_ref)?;
     let Some(configured) = VAULT.get() else {
@@ -312,6 +335,29 @@ fn validate_secret_ref(secret_ref: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_message_key_requires_the_initialized_matching_vault_without_keyring_fallback() {
+        let root =
+            std::env::temp_dir().join(format!("relay-agent-key-scope-{}", uuid::Uuid::new_v4()));
+        let other = root.with_extension("other-profile");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        assert!(configured_agent_message_key(None, &root).is_err());
+        let configured = ConfiguredVault {
+            root: canonical_root(&root).unwrap(),
+            vault: Vault::open(&root, [3; 32]).unwrap(),
+        };
+        assert!(configured_agent_message_key(Some(&configured), &other).is_err());
+        assert!(!root.join("secrets.enc").exists());
+        let key = configured_agent_message_key(Some(&configured), &root).unwrap();
+        assert_eq!(
+            configured_agent_message_key(Some(&configured), &root).unwrap(),
+            key
+        );
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(other).unwrap();
+    }
 
     #[test]
     fn secret_refs_cannot_escape_the_storage_namespace() {

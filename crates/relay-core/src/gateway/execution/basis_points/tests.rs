@@ -18,6 +18,7 @@ fn cache_maintenance_does_not_initialize_or_wait_on_busy_caches() {
 }
 use serde_json::{Value, json};
 
+mod agent_messages;
 mod catalog_prefix;
 mod history_messages;
 mod performance;

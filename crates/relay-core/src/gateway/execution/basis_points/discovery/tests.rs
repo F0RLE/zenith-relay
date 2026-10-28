@@ -197,6 +197,51 @@ fn eager_catalog_has_byte_and_count_limits_and_respects_explicit_deferral() {
 }
 
 #[test]
+fn core_tools_keep_eager_slots_in_a_crowded_catalog() {
+    let mut request = request();
+    let core = ["exec_command", "apply_patch", "write_stdin"];
+    request["tools"] = json!(core.map(|name| json!({
+        "type":"function", "name":name, "parameters":{"type":"object"}
+    })));
+    request["tools"]
+        .as_array_mut()
+        .unwrap()
+        .extend((0..16).map(|n| {
+            json!({
+                "type":"function", "name":format!("a_optional_{n:02}"),
+                "defer_loading":false, "parameters":{"type":"object"}
+            })
+        }));
+    let before = request.clone();
+    let session = DiscoverySession::new(&request, true).unwrap().unwrap();
+    assert_eq!(session.loaded.len(), 8);
+    for name in core {
+        assert!(
+            session.loaded.contains(name),
+            "core contract must be ready: {name}"
+        );
+    }
+    assert_eq!(request, before);
+    let expected = session.loaded;
+    request["tools"].as_array_mut().unwrap().reverse();
+    assert_eq!(
+        DiscoverySession::new(&request, true)
+            .unwrap()
+            .unwrap()
+            .loaded,
+        expected
+    );
+    request["tool_choice"] = json!({"type":"function", "name":"a_optional_15"});
+    assert_eq!(
+        DiscoverySession::new(&request, true)
+            .unwrap()
+            .unwrap()
+            .loaded,
+        BTreeSet::from(["a_optional_15".to_string()])
+    );
+}
+
+#[test]
 fn remembered_names_use_current_schemas_and_never_restore_removed_or_disallowed_tools() {
     let mut request = request();
     request["tools"][0]["tools"][1]["parameters"]["properties"]["text"]["minLength"] = json!(7);

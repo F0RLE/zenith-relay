@@ -285,6 +285,13 @@ fn turn_tool_controls_preserve_the_prepared_history_prefix() {
             .contains("related read-only shell inspections in one declared shell-tool invocation")
     );
     assert!(instructions.contains("preserve each command's output and failure"));
+    assert!(instructions.contains("compact counts, timings and bounded excerpts"));
+    assert!(
+        instructions
+            .contains("retain complete required instructions, errors and exact edit context")
+    );
+    assert!(instructions.contains("required fresh UI observations"));
+    assert!(instructions.contains("Never discard user images or conversation history"));
     assert!(instructions.contains("Do not batch across approval boundaries"));
     for choice in ["auto", "required"] {
         for parallel in [false, true] {

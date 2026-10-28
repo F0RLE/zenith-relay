@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { CopyButton } from "../../components/Ui";
 import { CacheContextDetails } from "./CacheContextDetails";
+import { CacheAffinityDetails } from "./CacheAffinityDetails";
 import { RequestDisclosure } from "./RequestDisclosure";
 import { RequestSection } from "./RequestSection";
 import type { UsageRow } from "./usageData";
@@ -85,6 +86,7 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
       {debugEnabled && routing ? <RequestSection title={t("usage.requestSections.route")} className={`request-route-section${!payload ? " request-technical-wide" : ""}`}>
         <dl className="request-details-list request-technical-fields">
           <div className="request-route-reason"><dt>{t("usage.routingReason")}</dt><dd>{t(`usage.routingReasons.${routing.reason}`)}</dd></div>
+          <CacheAffinityDetails diagnostics={routing.cacheAffinity} />
           {transport ? <>
             {field("usage.transportPath", `${formatTransport(row.transport, t)} → ${formatTransport(transport.upstream, t)}`)}
             {field("usage.transportMode", t(`usage.transportModes.${transport.mode}`))}

@@ -1,5 +1,6 @@
 mod account_trash;
 mod adapter;
+pub(crate) mod agent_messages;
 pub(crate) mod completion;
 pub(crate) mod interactions;
 mod management;
@@ -17,8 +18,8 @@ pub use adapter::{
 };
 pub(crate) use adapter::{
     BridgedCompaction, candidate_incomplete_reason, ensure_compaction_trigger, gemini_incomplete,
-    is_compaction_checkpoint_type, merge_usage, prepare_bridged_compaction, prompt_blocked,
-    remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
+    is_compaction_checkpoint_type, merge_usage, portable_history_key, prepare_bridged_compaction,
+    prompt_blocked, remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
     repair_custom_tool_item_ids, wrap_compaction_response_bytes,
 };
 #[cfg(test)]

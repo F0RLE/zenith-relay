@@ -11,6 +11,7 @@
 //! `attachments` uploads user images, and `response` turns the native tool
 //! relay back into the client protocol.
 
+mod agent_messages;
 mod attachments;
 mod batch;
 mod catalog;

@@ -339,6 +339,37 @@
   gap: 8px;
 }
 
+.model-reasoning-diagnostics {
+  min-width: 0;
+  border-top: 1px solid var(--relay-border);
+  padding-top: 12px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.model-reasoning-diagnostics summary {
+  color: var(--relay-secondary);
+  cursor: pointer;
+}
+
+.model-reasoning-diagnostics summary:focus-visible {
+  outline: 2px solid var(--relay-accent);
+  outline-offset: 3px;
+}
+
+.model-reasoning-diagnostics p { color: var(--relay-secondary); }
+
+.model-reasoning-diagnostics dl {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px 12px;
+  margin-bottom: 0;
+}
+
+.model-reasoning-diagnostics dt { color: var(--relay-secondary); }
+.model-reasoning-diagnostics dd { margin: 0; color: var(--relay-text); }
+.model-reasoning-diagnostics :is(dt, dd) { min-width: 0; overflow-wrap: anywhere; }
+
 .model-reasoning-options button {
   min-width: 0;
   min-height: 44px;

@@ -42,6 +42,7 @@ fn usage_survives_database_reopen() {
             ),
             attempt_outcome: Some(zenith_relay_core::AttemptOutcome::Completed),
             request_timing: None,
+            cache_affinity: None,
             cache_context: Some(
                 serde_json::from_value(serde_json::json!({
                     "baseline": "completed_request", "scope": "client_session",

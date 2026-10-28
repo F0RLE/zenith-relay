@@ -48,48 +48,14 @@ async fn read_account_quota(
         Duration::from_secs(state.store()?.gateway().quota_request_timeout_seconds);
     let account_before_refresh = &scope.initial_account;
     let mut subscription = account_before_refresh.account.subscription.clone();
-    if subscription.active_until_ms.is_none()
-        && let Some(active_until_ms) = prepared.tokens.as_ref().and_then(|tokens| {
-            imported_identity(tokens.id_token(), Some(tokens.access_token()))
-                .subscription_active_until_ms
-        })
-    {
-        subscription = zenith_relay_core::quota::Subscription::normalize(
-            zenith_relay_core::quota::SubscriptionInput {
-                plan_type: subscription.plan_type.clone(),
-                active_until_ms: Some(active_until_ms),
-                forbidden: false,
-                observed_at_ms: now_ms,
-            },
-        );
-    }
-    let refresh_subscription = force_subscription_refresh
-        || subscription_refresh_due(
-            subscription.active_until_ms,
-            subscription.updated_at_ms,
-            now_ms,
-        );
-    if refresh_subscription {
-        let _subscription_guard = state.subscription_refresh_guard().await;
-        scope.validate(state)?;
-        if let Some(metadata) = subscription::request_subscription_metadata(
-            &prepared,
-            request_timeout,
-            now_ms,
-            &http_scope,
-        )
-        .await
-        {
-            subscription::apply_subscription_metadata(&mut subscription, metadata, now_ms);
-        }
-    }
+    // Import/login owns token hints. A later poll must not resurrect a date
+    // cleared by the provider, or promote an old JWT claim to fresh evidence.
     scope.validate(state)?;
     let mut refreshed = subscription::request_account_quota_metadata(
         &prepared,
         request_timeout,
         now_ms,
         &subscription,
-        refresh_subscription,
         &http_scope,
     )
     .await?;
@@ -116,7 +82,6 @@ async fn read_account_quota(
                     request_timeout,
                     current_time_ms(),
                     &subscription,
-                    refresh_subscription,
                     &http_scope,
                 )
                 .await?;
@@ -159,7 +124,6 @@ async fn read_account_quota(
                 request_timeout,
                 current_time_ms(),
                 &subscription,
-                refresh_subscription,
                 &http_scope,
             )
             .await?;
@@ -167,11 +131,56 @@ async fn read_account_quota(
         }
     }
 
-    let _mutation = state.setup_guard().await;
-    let quota = refreshed.unwrap_or_else(|_| QuotaRefreshOutcome::Failed {
+    let mut quota = refreshed.unwrap_or_else(|_| QuotaRefreshOutcome::Failed {
         failure: QuotaRefreshFailure::new(error_codes::QUOTA_TIMEOUT, true),
         subscription: subscription.clone(),
     });
+    if let QuotaRefreshOutcome::Updated(result) = &quota
+        && let Some(input) = &result.quota.subscription
+    {
+        subscription = Subscription::normalize(input.clone());
+    }
+    // The independent read has one owner and runs after authorization recovery.
+    // Quota-only replies must neither duplicate it nor postpone its next poll.
+    let observed_at_ms = current_time_ms();
+    if force_subscription_refresh
+        || subscription_refresh_due(
+            subscription.active_until_ms,
+            subscription.updated_at_ms,
+            observed_at_ms,
+        )
+    {
+        let mut subscription_guard = state.subscription_refresh_guard().await;
+        scope.validate(state)?;
+        let identity = scope.fence.identity();
+        // Manual refresh also respects the metadata endpoint's floor, without
+        // delaying independent quota reads or auth recovery for this account.
+        if subscription_guard.can_refresh(&identity, state.refresh.now_ms()) {
+            let observed_at_ms = current_time_ms();
+            let metadata = subscription::request_subscription_metadata(
+                &prepared,
+                request_timeout,
+                observed_at_ms,
+                &http_scope,
+            )
+            .await;
+            scope.validate(state)?;
+            match metadata {
+                Ok(Some(metadata)) => subscription::apply_subscription_read(
+                    &mut quota,
+                    &mut subscription,
+                    metadata,
+                    observed_at_ms,
+                ),
+                Ok(None) => {}
+                Err(failure) => {
+                    subscription::record_subscription_failure(account_id, &prepared, &failure);
+                    subscription_guard.record_failure(&identity, state.refresh.now_ms(), &failure);
+                }
+            }
+        }
+    }
+    let _mutation = state.setup_guard().await;
     let applied = {
         let mut store = state.store()?;
         apply_quota_read(&mut store, scope, quota, subscription, None)?

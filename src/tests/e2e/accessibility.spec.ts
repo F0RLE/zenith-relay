@@ -14,7 +14,8 @@ for (const theme of ["light", "dark"] as const) {
     await expect(signIn).toBeFocused();
     await expect.poll(() => signIn.evaluate((element) => getComputedStyle(element).backgroundColor))
       .not.toBe(background);
-    expect(await signIn.evaluate((element) => getComputedStyle(element).outlineStyle)).toBe("none");
+    expect(await signIn.evaluate((element) => getComputedStyle(element).outlineStyle)).toBe("solid");
+    expect(await signIn.evaluate((element) => getComputedStyle(element).outlineWidth)).toBe("2px");
 
     const tabs = page.locator(".relay-tabs");
     const inactiveTab = tabs.getByRole("tab", { name: "Sources", exact: true });
@@ -24,6 +25,26 @@ for (const theme of ["light", "dark"] as const) {
     await expect.poll(() => inactiveTab.evaluate((element) => getComputedStyle(element).backgroundColor))
       .not.toBe(tabBackground);
     await expect(inactiveTab).toHaveAttribute("aria-selected", "false");
+
+    await page.getByRole("button", { name: "Access", exact: true }).click();
+    const networkSwitch = page.getByRole("checkbox", { name: "Allow local network access", exact: true });
+    await expect(networkSwitch).toBeEnabled();
+    await page.keyboard.press("Tab");
+    await networkSwitch.focus();
+    await expect(networkSwitch).toHaveCSS("outline-style", "solid");
+    await expect(networkSwitch).toHaveCSS("outline-width", "2px");
+    await expect(networkSwitch).toHaveCSS("outline-offset", "3px");
+    await expect(networkSwitch).not.toBeChecked();
+
+    const port = page.locator("#gateway-api-port");
+    await port.focus();
+    await expect(port).toHaveCSS("outline-style", "solid");
+    await expect(port).toHaveCSS("outline-width", "2px");
+
+    const modePicker = page.locator(".mode-picker-trigger");
+    await modePicker.click();
+    await expect(modePicker).toHaveCSS("outline-style", "none");
+    await page.keyboard.press("Escape");
   });
 }
 

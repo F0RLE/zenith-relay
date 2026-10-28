@@ -2,9 +2,11 @@ use super::*;
 use sha2::{Digest, Sha256};
 
 /// Host-owned volatile conversation state. Clone the handles when replacing a
-/// routing graph, not the conversations. A new host/process starts empty.
+/// routing graph, not the conversations. A new host/process starts with empty
+/// conversations; durable hosts may restore their protected agent-carrier key.
 #[derive(Clone)]
 pub struct RuntimeContinuationStores {
+    pub(in crate::runtime) agent_messages: Arc<crate::protocol::agent_messages::AgentMessageCipher>,
     pub(in crate::runtime) adapters: Arc<Mutex<crate::AdapterContinuationStore>>,
     pub(in crate::runtime) native_responses: Arc<Mutex<crate::NativeResponsesReplayStore>>,
     pub(in crate::runtime) routes: Arc<Mutex<crate::scheduler::AffinityCache>>,
@@ -13,6 +15,7 @@ pub struct RuntimeContinuationStores {
 impl Default for RuntimeContinuationStores {
     fn default() -> Self {
         Self {
+            agent_messages: Arc::default(),
             adapters: Arc::new(Mutex::new(crate::AdapterContinuationStore::default())),
             native_responses: Arc::new(Mutex::new(crate::NativeResponsesReplayStore::default())),
             routes: Arc::new(Mutex::new(crate::scheduler::AffinityCache::new(
@@ -20,6 +23,18 @@ impl Default for RuntimeContinuationStores {
                 crate::RESPONSE_AFFINITY_TTL_MS,
             ))),
         }
+    }
+}
+
+impl GatewayRuntime {
+    pub(crate) fn agent_message_context(
+        &self,
+        local_key_id: &str,
+    ) -> crate::protocol::agent_messages::AgentMessageContext {
+        crate::protocol::agent_messages::AgentMessageContext::new(
+            self.agent_message_cipher.clone(),
+            local_key_id,
+        )
     }
 }
 
@@ -32,6 +47,17 @@ impl fmt::Debug for RuntimeContinuationStores {
 }
 
 impl RuntimeContinuationStores {
+    /// Restore the host's durable, independently generated agent-carrier key.
+    /// The host owns protected persistence; no messages or provider keys belong here.
+    pub fn with_agent_message_key(key: [u8; 32]) -> Self {
+        Self {
+            agent_messages: Arc::new(
+                crate::protocol::agent_messages::AgentMessageCipher::from_key(key),
+            ),
+            ..Self::default()
+        }
+    }
+
     /// Read already-accounted byte counts without cloning or serializing history.
     /// A busy store stays unavailable and is never pruned by a measurement.
     pub fn memory_diagnostics(&self) -> Vec<crate::gateway::CacheMemoryDiagnostics> {

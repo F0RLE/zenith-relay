@@ -89,17 +89,13 @@ pub(in crate::gateway::execution) async fn attach_input_images(
         return Ok(());
     }
     let endpoint = attachment_url(responses_url).map_err(|_| upload_failed())?;
-    let credential_fingerprint = runtime
-        .basis_points_credential_fingerprint(candidate_id)
-        .await;
-    let scope = credential_fingerprint
-        .as_ref()
-        .map(|credential| AttachmentScope {
-            endpoint: &endpoint,
-            candidate_id,
-            credential,
-        });
-    let jobs = stage_input_images_with_cache(request_fields, scope.as_ref())?;
+    let (jobs, credential_fingerprint) = stage_input_images_with_credentials(
+        request_fields,
+        &endpoint,
+        candidate_id,
+        runtime.basis_points_credential_fingerprint(candidate_id),
+    )
+    .await?;
     let credential_fingerprint = credential_fingerprint.unwrap_or_default();
     resolve_input_images(request_fields, jobs, |image| {
         let endpoint = &endpoint;
@@ -171,6 +167,31 @@ where
 #[cfg(test)]
 fn stage_input_images(request_fields: &Value) -> Result<Vec<LocatedJob>, AttachmentFailure> {
     stage_input_images_with_cache(request_fields, None)
+}
+
+async fn stage_input_images_with_credentials(
+    request_fields: &Value,
+    endpoint: &str,
+    candidate_id: &str,
+    credential: impl std::future::Future<Output = Option<[u8; 32]>>,
+) -> Result<(Vec<LocatedJob>, Option<[u8; 32]>), AttachmentFailure> {
+    // Existing file IDs are still validated and normalized, but do not use
+    // the upload cache or require a credential lookup. Inline cache hits must
+    // still check the current credential so rotation never reuses an old ID.
+    let needs_credential = input_image_parts(request_fields)
+        .any(|(_, _, fields)| fields.get("image_url").is_some_and(|url| !url.is_null()));
+    let credential = if needs_credential {
+        credential.await
+    } else {
+        None
+    };
+    let scope = credential.as_ref().map(|credential| AttachmentScope {
+        endpoint,
+        candidate_id,
+        credential,
+    });
+    let jobs = stage_input_images_with_cache(request_fields, scope.as_ref())?;
+    Ok((jobs, credential))
 }
 
 fn stage_input_images_with_cache(

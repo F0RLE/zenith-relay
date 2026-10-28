@@ -642,6 +642,7 @@ async fn claude_desktop_prefers_exact_effort_without_crossing_key_scope() {
             checked_at_ms: 1,
             features: [(ProtocolFeature::Reasoning, CapabilityStatus::Declared)].into(),
             reasoning_efforts: levels.into_iter().map(str::to_string).collect(),
+            token_limits: Default::default(),
             service_tiers: None,
         }];
     }

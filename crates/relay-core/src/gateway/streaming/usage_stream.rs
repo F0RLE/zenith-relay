@@ -5,6 +5,9 @@ use crate::protocol::completion::{
 
 mod ingest;
 
+#[cfg(test)]
+mod forwarding_tests;
+
 pub(super) struct UsageStream<S> {
     pub(super) inner: Pin<Box<S>>,
     pub(super) runtime: Option<Arc<GatewayRuntime>>,

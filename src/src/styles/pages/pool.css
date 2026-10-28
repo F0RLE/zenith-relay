@@ -45,6 +45,10 @@
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.pool-summary-band:not(:has(.pool-economics)) {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .pool-summary-band .relay-status-summary > [data-summary="provider-credits"] {
   grid-column: auto;
 }

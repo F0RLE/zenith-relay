@@ -73,6 +73,7 @@ fn client_reasoning_projection_respects_source_scope_and_adapter_limits() {
             checked_at_ms: 1,
             features: BTreeMap::new(),
             reasoning_efforts: vec!["low".into(), "xhigh".into()],
+            token_limits: Default::default(),
             service_tiers: None,
         }];
         configured
@@ -318,7 +319,7 @@ async fn source_capability_failure_does_not_permanently_hide_a_declared_model() 
         .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
         .unwrap();
     let now_ms = current_time_ms();
-    runtime.apply_usage_event(
+    let _ = runtime.apply_usage_event(
         &UsageEvent {
             request_id: "request".into(),
             attempt: 1,

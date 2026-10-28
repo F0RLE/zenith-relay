@@ -32,6 +32,8 @@ mod claude_desktop_routes;
 mod cooldown_budget;
 #[path = "support/model_visibility.rs"]
 mod model_visibility;
+#[path = "support/physical_attempt_safety.rs"]
+mod physical_attempt_safety;
 #[path = "support/pre_output_fallback.rs"]
 mod pre_output_fallback;
 #[path = "support/protocol_routes.rs"]

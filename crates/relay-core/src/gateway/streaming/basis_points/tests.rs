@@ -1,6 +1,7 @@
 use super::*;
 use crate::protocol::take_sse_event;
 
+mod agent_messages;
 mod batch;
 mod messages_bridge;
 mod throughput;

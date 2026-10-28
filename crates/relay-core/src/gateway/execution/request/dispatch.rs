@@ -107,7 +107,6 @@ pub(super) async fn dispatch_request_attempt(
                     ));
                 }
             };
-        tool_use.capture_upstream_context(&body);
         discovery_body = Some(body);
         discovery_session = session;
     }
@@ -122,7 +121,6 @@ pub(super) async fn dispatch_request_attempt(
                 if let Some(observation) = route.cache_context_observation.clone() {
                     runtime.observe_cache_context(&observation, &mut route, &mut body);
                 }
-                tool_use.capture_upstream_context(&body);
                 discovery_body = Some(body);
                 discovery_session = session;
             }
@@ -168,6 +166,16 @@ pub(super) async fn dispatch_request_attempt(
             preparation.attachments_ms =
                 attachments_started.map(|start| start.elapsed().as_millis() as u64);
         }
+        let context_started = preparation_started.map(|_| Instant::now());
+        if let Some(original) = basis_points_request {
+            super::super::basis_points::discovery::capture_prepared_context(
+                original, body, tool_use,
+            );
+        } else {
+            tool_use.capture_upstream_context(body);
+        }
+        preparation.context_accounting_ms =
+            context_started.map(|start| start.elapsed().as_millis() as u64);
         let encoding_started = preparation_started.map(|_| Instant::now());
         let encoded = serde_json::to_vec(body).expect("prepared JSON is serializable");
         preparation.serialization_ms =

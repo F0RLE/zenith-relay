@@ -78,6 +78,12 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         wait_for_candidate_availability,
         request_origin,
     } = context;
+    if let Err(error) = runtime
+        .agent_message_context(&key.id)
+        .restore_request(&mut request)
+    {
+        return adapter_error_response(error, None);
+    }
     let mut service_tier_policy = ServiceTierPolicy::pool_owned(&request);
     service_tier_policy.capture_pool_default(
         &runtime,

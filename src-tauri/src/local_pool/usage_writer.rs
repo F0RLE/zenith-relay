@@ -244,6 +244,13 @@ fn persist_usage_observation(
         };
 
         let mut account = store.account(account_id).cloned().ok_or(())?;
+        // Every dispatched result is bound to its credential generation, not
+        // just 401s. Keep late success, quota and failure data in telemetry but
+        // never apply it to a replacement login or complete its wake cycles.
+        let ignore_account_observation = ignore_account_observation
+            || event
+                .account_token_generation
+                .is_some_and(|generation| generation != account.account.token_generation);
         let visible_state = (
             account.account.quota.clone(),
             account.account.auth_state,

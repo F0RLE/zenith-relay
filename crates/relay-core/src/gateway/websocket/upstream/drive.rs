@@ -167,7 +167,13 @@ pub(super) async fn drive_selected_candidate(
     route.account_token_generation = prepared.token_generation;
     let status = upgrade.status();
     let response_headers = upgrade.headers().clone();
-    runtime.observe_codex_quota_headers(&route.candidate_id, status, &response_headers, now_ms());
+    runtime.observe_codex_quota_headers(
+        &route.candidate_id,
+        prepared.token_generation,
+        status,
+        &response_headers,
+        now_ms(),
+    );
     if status == StatusCode::SWITCHING_PROTOCOLS {
         runtime.observe_codex_models_etag(
             &route.candidate_id,

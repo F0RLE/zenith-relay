@@ -116,6 +116,48 @@ fn delayed_unauthorized_does_not_expire_a_newer_oauth_login() {
     std::fs::remove_dir_all(root).unwrap();
 }
 #[test]
+fn delayed_results_cannot_change_a_newer_account_generation() {
+    let root = temp_root("usage-delayed-results");
+    let account_id = "synthetic-delayed-account";
+    let state = DesktopState::open(root.clone()).unwrap();
+    for status in [200, 403, 429] {
+        let mut current = account_record(account_id);
+        current.account.token_generation = 2;
+        if status == 200 {
+            current.account.health = AccountHealthState::Blocked;
+            current.account.last_error_code = Some("deactivated_workspace".into());
+        }
+        state
+            .store()
+            .unwrap()
+            .upsert_account(current.clone())
+            .unwrap();
+        let mut event = if status == 200 {
+            account_success_event(account_id)
+        } else {
+            account_status_event(account_id, status, None, None, 1)
+        };
+        if status == 403 {
+            event.error_category = Some("deactivated_workspace".into());
+        }
+        let mut old_quota = current.account.quota.clone();
+        old_quota.primary.as_mut().unwrap().available_basis_points = Some(0);
+        old_quota.primary.as_mut().unwrap().observed_at_ms = 3_000;
+        old_quota.updated_at_ms = Some(3_000);
+        event.quota_snapshot = Some(old_quota);
+        (state.usage_callback())(event);
+        assert_eq!(
+            state.store().unwrap().account(account_id),
+            Some(&current),
+            "status {status} from an older credential generation must be telemetry-only"
+        );
+    }
+    assert_eq!(state.telemetry.list(10).unwrap().len(), 3);
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn generic_forbidden_account_stays_available_until_an_actual_success() {
     let root = temp_root("usage-403");
     let account_id = "account-forbidden";

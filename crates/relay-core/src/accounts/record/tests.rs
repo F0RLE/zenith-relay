@@ -377,6 +377,60 @@ fn account_usage_reducer_ignores_request_errors_and_restores_success() {
 }
 
 #[test]
+fn delayed_success_does_not_move_last_used_backwards() {
+    let observation = AccountUsageObservation {
+        success: true,
+        http_status: 200,
+        error_category: None,
+        affects_account: false,
+    };
+    let mut state = usage_state();
+    for observed_at_ms in [3_000, 2_000, 3_000, 4_000] {
+        let previous = state.last_used_at_ms;
+        let updated = reduce_account_usage(state, observation, observed_at_ms, None, None);
+        assert_eq!(
+            updated.state.last_used_at_ms,
+            Some(previous.unwrap_or_default().max(observed_at_ms))
+        );
+        state = updated.state;
+    }
+    assert_eq!(state.last_used_at_ms, Some(4_000));
+}
+
+#[test]
+fn successful_inference_does_not_validate_a_rejected_refresh_grant() {
+    for reason in [
+        ReauthReason::InvalidGrant,
+        ReauthReason::ExpiredRefreshToken,
+        ReauthReason::InvalidatedRefreshToken,
+        ReauthReason::AccessTokenExpired,
+        ReauthReason::TokenRotationRecoveryRequired,
+    ] {
+        let mut state = usage_state();
+        state.auth_state = AccountAuthState::RequiresReauth(reason);
+        state.health = AccountHealthState::Unhealthy;
+        state.last_error_code = Some("auth_terminal_failure".into());
+        let mut expected = state.clone();
+        expected.last_used_at_ms = Some(20);
+        let update = reduce_account_usage(
+            state,
+            AccountUsageObservation {
+                success: true,
+                http_status: 200,
+                error_category: None,
+                affects_account: true,
+            },
+            20,
+            None,
+            Some(AccountAuthState::Active),
+        );
+        assert_eq!(update.state, expected, "terminal reason {reason:?}");
+        assert!(!update.reset_runtime_failures);
+        assert!(!update.refresh_quota);
+    }
+}
+
+#[test]
 fn account_usage_reducer_distinguishes_refreshable_and_access_only_401() {
     let observation = AccountUsageObservation {
         success: false,

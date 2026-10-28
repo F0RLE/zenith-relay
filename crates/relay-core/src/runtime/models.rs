@@ -90,6 +90,7 @@ impl GatewayRuntime {
         model: &str,
         native: bool,
         native_card: bool,
+        capabilities: &crate::model_metadata::ModelCapabilities,
     ) {
         let selected = crate::poison::mutex(&self.model_state.context_policies)
             .get(&crate::model_id_key(model))
@@ -101,7 +102,6 @@ impl GatewayRuntime {
         if native && !native_card && !selected.is_custom() {
             return;
         }
-        let capabilities = self.model_capabilities(model);
         if !crate::catalog::context_policy::model_supports_text_context(
             model,
             None,

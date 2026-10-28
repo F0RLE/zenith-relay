@@ -282,6 +282,21 @@ impl GatewayRuntime {
                 return Err(AdapterError::continuation_missing());
             }
         }
+        if route.adapter.is_passthrough()
+            && route.client_wire_api == WireApi::Responses
+            && previous.is_none()
+            && request.get("input").is_some_and(Value::is_array)
+            && let Ok(Some(history_key)) = crate::protocol::portable_history_key(
+                route.client_wire_api,
+                request,
+                &route.source_model,
+            )
+        {
+            // A newly advertised native endpoint cannot take over the full
+            // history of a locally retained converted turn. Unrecognized native
+            // history remains the native endpoint's contract, not a conversion.
+            self.validate_adapter_history_route(route, &history_key, now_ms)?;
+        }
         let paired_tool_results = paired_tool_result_ids(request, route.client_wire_api);
         let mut restored_pairs: Option<HashSet<String>> = None;
         for call_id in tool_result_ids(request, route.client_wire_api) {

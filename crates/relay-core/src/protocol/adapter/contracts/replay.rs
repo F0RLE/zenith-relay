@@ -35,6 +35,21 @@ impl NativeResponsesReplayState {
         &self.history.model
     }
 
+    /// Normalize the newly constructed snapshot before it is shared. All
+    /// replay paths then see canonical arguments, not client-only carriers.
+    pub(crate) fn restore_agent_messages(
+        &mut self,
+        context: &crate::protocol::agent_messages::AgentMessageContext,
+    ) -> AdapterResult<()> {
+        let history =
+            Arc::get_mut(&mut self.history).ok_or_else(AdapterError::continuation_mismatch)?;
+        context.restore_input(&mut history.initial_input)?;
+        for item in &mut history.completed_output {
+            context.restore_input(item)?;
+        }
+        Ok(())
+    }
+
     /// Retention hint only: the next snapshot already contains this complete
     /// native turn. Keep older response IDs usable until a store limit needs
     /// room, but prefer evicting them over unrelated conversations' heads.

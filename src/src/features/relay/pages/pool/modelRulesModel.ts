@@ -20,6 +20,8 @@ export function modelSignature(models: ModelSummary[]) {
     model.codexVisible,
     model.codexDisplayName,
     model.catalogProvider,
+    model.catalogSourceModelId,
+    JSON.stringify(model.catalogCapabilities),
     model.catalogFamily,
     model.catalogName,
     model.catalogReleaseDate,
@@ -88,9 +90,7 @@ export function completeModelDisplayOrder(
 }
 
 export function supportedReasoningLevels(model: Pick<ModelSummary, "reasoningSupportedLevels" | "reasoningLevels" | "reasoningManualFallback">) {
-  const levels = model.reasoningSupportedLevels?.length
-    ? model.reasoningSupportedLevels
-    : model.reasoningLevels ?? [];
+  const levels = model.reasoningSupportedLevels ?? model.reasoningLevels ?? [];
   const seen = new Set<string>();
   return levels
     .map((level) => normalizeReasoningEffort(level))
@@ -100,8 +100,7 @@ export function supportedReasoningLevels(model: Pick<ModelSummary, "reasoningSup
 /** Image generation has no effort selector. Other models show one only when levels exist. */
 export function modelShowsReasoningControl(model: Pick<ModelSummary, "id" | "catalogFamily" | "catalogOutputModalities" | "reasoningLevels" | "reasoningSupportedLevels" | "reasoningManualFallback">) {
   if (isImageGenerationModel(model)) return false;
-  return (model.reasoningSupportedLevels?.length ?? 0) > 0
-    || (model.reasoningLevels?.length ?? 0) > 0
+  return supportedReasoningLevels(model).length > 0
     || model.reasoningManualFallback === true;
 }
 

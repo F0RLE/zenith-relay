@@ -139,6 +139,154 @@ fn hot_runtime_replacement_preserves_continuations_and_late_completions() {
 }
 
 #[test]
+fn agent_message_saved_history_can_resume_after_host_restart() {
+    // The Desktop supplies the same key after reopening its protected vault.
+    let protected_key = [19; 32];
+    let options = || GatewayRuntimeOptions {
+        continuation_state: Some(RuntimeContinuationStores::with_agent_message_key(
+            protected_key,
+        )),
+        ..Default::default()
+    };
+    let first = bridge_runtime(options(), "synthetic-secret", "https://example.test/v1");
+    let sealed = first
+        .agent_message_context("key-1")
+        .seal_argument(
+            "collaboration.send_message",
+            "message",
+            "synthetic saved assignment",
+        )
+        .unwrap();
+    drop(first);
+    let restarted = bridge_runtime(options(), "synthetic-secret", "https://example.test/v1");
+    let mut request = serde_json::json!({"input":[{
+        "type":"agent_message","author":"/root","recipient":"/root/worker",
+        "encrypted_content":sealed
+    }]});
+    let original = request.clone();
+    restarted
+        .agent_message_context("key-1")
+        .restore_request(&mut request)
+        .unwrap();
+    assert_eq!(request["input"][0]["role"], "user");
+    assert_eq!(
+        request["input"][0]["content"][1]["text"],
+        "synthetic saved assignment"
+    );
+    assert!(
+        restarted
+            .agent_message_context("key-2")
+            .restore_request(&mut original.clone())
+            .is_err()
+    );
+    let other_profile = bridge_runtime(
+        GatewayRuntimeOptions {
+            continuation_state: Some(RuntimeContinuationStores::with_agent_message_key([20; 32])),
+            ..Default::default()
+        },
+        "synthetic-secret",
+        "https://example.test/v1",
+    );
+    assert!(
+        other_profile
+            .agent_message_context("key-1")
+            .restore_request(&mut original.clone())
+            .is_err()
+    );
+    let mut foreign = serde_json::json!({"input":[{"type":"agent_message","encrypted_content":"foreign-provider-ciphertext"}]});
+    let unchanged = foreign.clone();
+    restarted
+        .agent_message_context("key-1")
+        .restore_request(&mut foreign)
+        .unwrap();
+    assert_eq!(foreign, unchanged);
+}
+
+#[test]
+fn agent_messages_survive_graph_replacement_but_not_another_key_or_host() {
+    let options = GatewayRuntimeOptions {
+        continuation_state: Some(RuntimeContinuationStores::default()),
+        ..Default::default()
+    };
+    let old = bridge_runtime(
+        options.clone(),
+        "synthetic-secret",
+        "https://example.test/v1",
+    );
+    let next = bridge_runtime(options, "synthetic-secret", "https://example.test/v1");
+    old.retire_for_replacement();
+    // A late completion on the retired graph must work in its replacement.
+    let sealed = old
+        .agent_message_context("key-1")
+        .seal_argument("collaboration.spawn_agent", "message", "synthetic task")
+        .unwrap();
+    let request =
+        serde_json::json!({"input":[{"type":"agent_message","encrypted_content":sealed}]});
+    let mut restored = request.clone();
+    next.agent_message_context("key-1")
+        .restore_request(&mut restored)
+        .unwrap();
+    assert_eq!(restored["input"][0]["content"][1]["text"], "synthetic task");
+    assert!(
+        next.agent_message_context("key-2")
+            .restore_request(&mut request.clone())
+            .is_err()
+    );
+    let restarted = bridge_runtime(
+        Default::default(),
+        "synthetic-secret",
+        "https://example.test/v1",
+    );
+    assert!(
+        restarted
+            .agent_message_context("key-1")
+            .restore_request(&mut request.clone())
+            .is_err()
+    );
+}
+
+#[test]
+fn agent_messages_native_replay_restores_stored_arguments_without_mutating_client_output() {
+    use serde_json::{Value, json};
+    let runtime = bridge_runtime(
+        Default::default(),
+        "synthetic-secret",
+        "https://example.test/v1",
+    );
+    let sealed = runtime
+        .agent_message_context("key-1")
+        .seal_argument("delegate", "message", "synthetic task")
+        .unwrap();
+    let response = json!({"id":"resp_synthetic_agent","status":"completed","output":[{
+        "type":"function_call","id":"fc_synthetic","call_id":"call_synthetic","name":"delegate",
+        "arguments":json!({"message":sealed}).to_string()
+    }]});
+    runtime.capture_native_responses_replay(
+        "key-1",
+        "source-1",
+        &json!({"model":"gpt-test","input":"delegate a task"}),
+        "gpt-test",
+        &response,
+        10,
+    );
+    let replay = runtime
+        .load_native_responses_replay("key-1", "resp_synthetic_agent", "source-1", 11)
+        .unwrap();
+    let next = replay
+        .replay_request(
+            &json!({"input":[{"type":"function_call_output","call_id":"call_synthetic","output":"started"}]}),
+            "gpt-test",
+            false,
+        )
+        .unwrap();
+    let arguments: Value =
+        serde_json::from_str(next["input"][1]["arguments"].as_str().unwrap()).unwrap();
+    assert_eq!(arguments["message"], "synthetic task");
+    assert!(!next.to_string().contains("zenith-relay-agent-v1:"));
+    assert!(response.to_string().contains("zenith-relay-agent-v1:"));
+}
+
+#[test]
 fn hot_runtime_replacement_preserves_bounded_native_replay() {
     let options = GatewayRuntimeOptions {
         continuation_state: Some(RuntimeContinuationStores::default()),

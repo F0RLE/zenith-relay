@@ -37,4 +37,5 @@ pub use messages::{
 pub use store::{AdapterContinuationStore, NativeResponsesReplayStore};
 pub use stream::AdapterStreamBridge;
 pub(crate) use stream::merge_usage;
+pub(crate) use translation::continuation_key as portable_history_key;
 pub use translation::{TranslationRequest, TranslationStream};

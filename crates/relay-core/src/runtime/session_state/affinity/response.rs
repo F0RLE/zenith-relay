@@ -142,11 +142,17 @@ impl GatewayRuntime {
         // A full request is already materialized. Borrow it instead of cloning
         // the complete history and tool catalog before copying replay input.
         let materialized_request = materialized_request.as_ref().unwrap_or(request);
-        let Some((response_id, state)) =
+        let Some((response_id, mut state)) =
             NativeResponsesReplayState::from_response(materialized_request, model, upstream)
         else {
             return;
         };
+        if state
+            .restore_agent_messages(&self.agent_message_context(local_key_id))
+            .is_err()
+        {
+            return;
+        }
         crate::poison::mutex(&self.native_responses_replay_store).insert(
             local_key_id,
             &response_id,

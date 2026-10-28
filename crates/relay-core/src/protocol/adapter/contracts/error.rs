@@ -185,6 +185,14 @@ impl AdapterError {
         }
     }
 
+    pub(crate) const fn agent_message_unavailable() -> Self {
+        Self {
+            message: "encrypted agent history could not be authenticated with this Relay profile and local key; use the original profile and key, or start a new chat if the old key was lost; rebuilding Relay cannot recover a lost key",
+            parameter: Some("input.agent_message.encrypted_content"),
+            ..Self::continuation_missing()
+        }
+    }
+
     pub(crate) const fn continuation_mismatch() -> Self {
         Self {
             code: error_codes::ADAPTER_CONTINUATION_MISMATCH,
@@ -218,6 +226,23 @@ impl AdapterError {
             message: "the selected source adapter does not expose reasoning for this binding",
             parameter: None,
             diagnostic: None,
+        }
+    }
+
+    pub(crate) const fn reasoning_metadata_conflict() -> Self {
+        Self {
+            code: error_codes::ADAPTER_METADATA_CONFLICT,
+            message: "the source route and model reference declare incompatible reasoning effort levels",
+            parameter: Some("reasoning.effort"),
+            diagnostic: None,
+        }
+    }
+
+    pub(crate) const fn output_limit_exceeded(parameter: &'static str) -> Self {
+        Self {
+            message: "the requested output token limit exceeds the selected route's declared maximum",
+            parameter: Some(parameter),
+            ..Self::invalid_request()
         }
     }
 

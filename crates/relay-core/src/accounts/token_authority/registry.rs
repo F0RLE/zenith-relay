@@ -194,6 +194,29 @@ impl TokenAuthority {
         Some(slot_state.tokens.clone())
     }
 
+    /// Apply a synchronous observation only to the still-current credential.
+    /// A busy refresh/replacement is not evidence that an old result belongs
+    /// to its eventual winner. Never wait for it or expose credential material.
+    pub(crate) fn with_usage_observation<T>(
+        &self,
+        account_id: &str,
+        generation: u64,
+        observe: impl FnOnce(AccountAuthState) -> T,
+    ) -> Option<T> {
+        let entry = lock(&self.slots).get(account_id.trim()).cloned()?;
+        let slot = entry.try_lock()?;
+        if slot.tokens.generation() != generation {
+            return None;
+        }
+        let registered = self.current_slots(account_id, &entry).ok()?;
+        let revision = entry.snapshot();
+        let _revision_guard = revision.guard()?;
+        drop(registered);
+        // The slot lock prevents token/auth changes; the existing revision
+        // guard also fences removal, which does not acquire the async slot.
+        Some(observe(slot.auth_state))
+    }
+
     pub async fn invalidate_access_and_persist(
         &self,
         account_id: &str,

@@ -181,6 +181,7 @@ fn apply_catalog_replaces_models_and_only_a_resolved_url() {
         checked_at_ms: 10,
         features: BTreeMap::new(),
         reasoning_efforts: Vec::new(),
+        token_limits: Default::default(),
         service_tiers: None,
     };
     let probe = ModelEndpointCapability {
@@ -191,6 +192,7 @@ fn apply_catalog_replaces_models_and_only_a_resolved_url() {
         checked_at_ms: 1,
         features: BTreeMap::new(),
         reasoning_efforts: Vec::new(),
+        token_limits: Default::default(),
         service_tiers: None,
     };
     let mut base_url = "https://kept.example/v1".to_string();

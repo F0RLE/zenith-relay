@@ -224,6 +224,11 @@ fn repair_classified_account_failure(
     account_failure_input: &mut AccountStatusFailureInput<'_>,
     classified: &mut ClassifiedAccountFailure,
 ) -> Option<AccountStatusFailure> {
+    if classified.failure.execution.certainty
+        != crate::scheduler::rotation::ExecutionCertainty::NotSent
+    {
+        return None;
+    }
     {
         let request_body = &mut *account_failure_input.request;
         let tried = &mut *account_failure_input.tried;
@@ -339,12 +344,15 @@ fn settle_account_failure(
     } = account_failure_input;
     let failure = classified.failure;
     let mut event = classified.event;
-    let affinity_miss = recoverable_response_affinity_miss(
-        status,
-        has_previous_response_id,
-        response_affinity_hit,
-        previous_response_not_found(&bytes),
-    );
+    let not_sent =
+        failure.execution.certainty == crate::scheduler::rotation::ExecutionCertainty::NotSent;
+    let affinity_miss = not_sent
+        && recoverable_response_affinity_miss(
+            status,
+            has_previous_response_id,
+            response_affinity_hit,
+            previous_response_not_found(&bytes),
+        );
     if affinity_miss {
         event.error_category = Some(error_codes::RESPONSE_AFFINITY_MISS.to_string());
         if reset_materialized_continuation_for_owner_retry(
@@ -375,8 +383,10 @@ fn settle_account_failure(
     if classified.cache_write_rejected {
         runtime.invalidate_prompt_affinity(prompt_affinity_key.as_deref(), &route.candidate_id);
     }
-    if (classified.cache_write_rejected && !route_forbids_fallback(route, status, failure.category))
-        || retryable_route_failure(route, status, failure.category, has_previous_response_id)
+    if not_sent
+        && ((classified.cache_write_rejected
+            && !route_forbids_fallback(route, status, failure.category))
+            || retryable_route_failure(route, status, failure.category, has_previous_response_id))
     {
         if response_affinity_hit && !*requires_affinity_owner {
             *response_affinity_key = None;

@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
 use std::{collections::BTreeMap, sync::Arc};
 
+#[cfg(test)]
+mod freshness_tests;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SourceEnvelope {
@@ -170,7 +173,11 @@ pub(super) struct PreparedCatalog {
     pub(super) payload: Value,
 }
 impl PreparedCatalog {
-    pub(super) fn new(states: &[SourceState; 4]) -> Result<Self, ModelMetadataError> {
+    pub(super) fn new(
+        states: &[SourceState; 4],
+        now: u64,
+        max_age: u64,
+    ) -> Result<Self, ModelMetadataError> {
         let mut parsed: [Option<Value>; 4] = std::array::from_fn(|_| None);
         for (slot, state) in parsed.iter_mut().zip(states) {
             *slot = state
@@ -179,7 +186,7 @@ impl PreparedCatalog {
                 .map(SourceEnvelope::parse_source_payload)
                 .transpose()?;
         }
-        let payload = merge_payloads(parsed);
+        let payload = merge_payloads(parsed, stale_sources(states, now, max_age));
         Ok(Self {
             revision: metadata_payload_hash(&payload)?,
             payload,
@@ -187,7 +194,29 @@ impl PreparedCatalog {
     }
 }
 
-pub(super) fn merge_payloads(parsed: [Option<Value>; 4]) -> Value {
+pub(super) fn stale_sources(states: &[SourceState; 4], now: u64, max_age: u64) -> [bool; 4] {
+    states.each_ref().map(|state| {
+        state.envelope.as_ref().is_none_or(|envelope| {
+            envelope.stale || now.saturating_sub(envelope.fetched_at_ms) >= max_age
+        })
+    })
+}
+
+pub(super) fn merge_payloads(mut parsed: [Option<Value>; 4], stale: [bool; 4]) -> Value {
+    let mut old = std::array::from_fn(|_| None);
+    for index in 0..4 {
+        if stale[index] {
+            old[index] = parsed[index].take();
+        }
+    }
+    let fresh = merge_source_payloads(parsed);
+    if old.iter().all(Option::is_none) {
+        return fresh;
+    }
+    super::super::reference::fill_stale_gaps(fresh, merge_source_payloads(old))
+}
+
+fn merge_source_payloads(parsed: [Option<Value>; 4]) -> Value {
     let [models_dev, details, openrouter, litellm] = parsed;
     enrich_reasoning_metadata_with_models_dev_details(
         models_dev.unwrap_or_else(|| serde_json::json!({})),

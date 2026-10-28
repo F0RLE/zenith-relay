@@ -31,9 +31,12 @@ pub fn initialize(app: &tauri::AppHandle) -> error::Result<DesktopState> {
     let vault_started = Instant::now();
     let storage_paths = crate::storage_paths::StoragePaths::from_root(&relay_root);
     store::secret_store::initialize(&storage_paths.vault_root(), &storage_paths.migration_root())?;
+    let continuation_state = zenith_relay_core::RuntimeContinuationStores::with_agent_message_key(
+        store::secret_store::agent_message_key(&storage_paths.vault_root())?,
+    );
     let vault_ms = vault_started.elapsed().as_secs_f64() * 1_000.0;
     let secrets_ready = started.elapsed();
-    let desktop_state = DesktopState::open(relay_root)?;
+    let desktop_state = DesktopState::open_with_continuation_state(relay_root, continuation_state)?;
     store::gateway_keys::retire_user_gateway_keys(&desktop_state)?;
     let state_ready = started.elapsed();
     desktop_state.set_app_handle(app.clone());

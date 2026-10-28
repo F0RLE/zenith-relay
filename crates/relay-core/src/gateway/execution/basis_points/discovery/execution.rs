@@ -79,6 +79,10 @@ pub(in crate::gateway::execution) fn prepare_dispatch_with_catalog(
         fallback[super::super::presentation::OPTION] = serde_json::json!("compact");
         fallback["model"] = upstream["model"].clone();
         capture(&fallback, tool_use);
+        if let Some(catalog) = tool_use.basis_points_catalog.as_mut() {
+            catalog.selection_reason =
+                Some(crate::usage::BasisPointsCatalogSelectionReason::DispatchBudget);
+        }
         return super::super::prepare_request(&fallback).map(|body| (body, None));
     }
     let model = original["model"].as_str().unwrap_or_default();

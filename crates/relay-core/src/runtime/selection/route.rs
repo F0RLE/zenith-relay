@@ -76,6 +76,9 @@ impl GatewayRuntime {
                                 .upstream_protocol(route.client_wire_api)
                                 .wire_api()
                                 == native
+                                || route.route_capability.as_ref().is_some_and(|capability| {
+                                    capability.explicitly_declares_endpoint()
+                                })
                         })
                 })
                 .collect::<Vec<_>>();
@@ -88,11 +91,11 @@ impl GatewayRuntime {
                     allowed_protocols
                         .iter()
                         .position(|protocol| *protocol == route.client_wire_api),
+                    !route.adapter.is_passthrough(),
                     preferences
                         .iter()
                         .position(|protocol| *protocol == upstream)
                         .unwrap_or(usize::MAX),
-                    !route.adapter.is_passthrough(),
                     upstream,
                 )
             });

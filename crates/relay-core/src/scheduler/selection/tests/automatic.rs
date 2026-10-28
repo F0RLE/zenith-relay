@@ -287,13 +287,19 @@ fn automatic_switches_only_for_a_material_quota_lead() {
         "account"
     );
 
-    let api_a = scheduler.candidates.get_mut("api-a").unwrap();
-    api_a.quota = CandidateQuota::Available(3_700);
-    api_a.quota_updated_at_ms = Some(100);
-    assert_eq!(
-        rotation::dispatch(&mut scheduler, 100, Some("session:quota")),
-        "api-a"
-    );
+    for (remaining, expected) in [(3_700, "account"), (4_199, "account"), (4_200, "api-a")] {
+        let api_a = scheduler.candidates.get_mut("api-a").unwrap();
+        api_a.quota = CandidateQuota::Available(remaining);
+        api_a.quota_updated_at_ms = Some(100);
+        assert_eq!(
+            rotation::dispatch(&mut scheduler, 100, Some("session:quota")),
+            expected
+        );
+        assert_eq!(
+            scheduler.bind_prompt_affinity_sticky("session:quota", "api-a", 100),
+            expected == "api-a"
+        );
+    }
 }
 
 #[test]

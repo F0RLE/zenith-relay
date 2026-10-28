@@ -13,6 +13,7 @@ fn cooldowns_share_one_upstream_across_client_bindings() {
             checked_at_ms: 1,
             features: BTreeMap::new(),
             reasoning_efforts: Vec::new(),
+            token_limits: Default::default(),
             service_tiers: None,
         },
         ModelEndpointCapability {
@@ -23,6 +24,7 @@ fn cooldowns_share_one_upstream_across_client_bindings() {
             checked_at_ms: 1,
             features: BTreeMap::new(),
             reasoning_efforts: Vec::new(),
+            token_limits: Default::default(),
             service_tiers: None,
         },
     ];
@@ -238,6 +240,7 @@ async fn source_activity_reports_its_physical_member_on_admission_and_release() 
         checked_at_ms: 1,
         features: BTreeMap::new(),
         reasoning_efforts: Vec::new(),
+        token_limits: Default::default(),
         service_tiers: None,
     }];
     let runtime = GatewayRuntime::from_pool(
@@ -360,6 +363,7 @@ fn passive_quota_exhaustion_and_recovery_are_persisted_without_waiting_for_the_d
 
     assert!(runtime.observe_codex_quota_headers(
         "account-1",
+        None,
         reqwest::StatusCode::OK,
         &exhausted_headers,
         1_000,
@@ -385,6 +389,7 @@ fn passive_quota_exhaustion_and_recovery_are_persisted_without_waiting_for_the_d
 
     assert!(runtime.observe_codex_quota_headers(
         "account-1",
+        None,
         reqwest::StatusCode::OK,
         &recovered_headers,
         3_000,
@@ -433,6 +438,7 @@ fn refreshed_quota_snapshot_replaces_passive_state_before_header_merges() {
     );
     assert!(runtime.observe_codex_quota_headers(
         "account-1",
+        None,
         reqwest::StatusCode::OK,
         &headers,
         3_000,
@@ -479,6 +485,7 @@ fn passive_windows_keep_admission_and_visible_headroom_in_sync() {
         }
         assert!(runtime.observe_codex_quota_headers(
             "account-1",
+            None,
             reqwest::StatusCode::OK,
             &headers,
             observed,
@@ -525,6 +532,7 @@ fn fresh_window_headers_do_not_revive_an_expired_credit_ledger() {
     );
     assert!(runtime.observe_codex_quota_headers(
         "account-1",
+        None,
         reqwest::StatusCode::OK,
         &headers,
         now_ms,
@@ -546,6 +554,7 @@ fn complete_ledger_refresh_can_follow_newer_passive_windows_without_replacing_th
     );
     assert!(runtime.observe_codex_quota_headers(
         "account-1",
+        None,
         reqwest::StatusCode::OK,
         &headers,
         3_000
@@ -581,9 +590,92 @@ fn complete_ledger_refresh_can_follow_newer_passive_windows_without_replacing_th
     );
 }
 #[test]
+fn newer_secondary_refresh_preserves_and_persists_live_primary_exhaustion() {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("x-codex-primary-used-percent", "10".parse().unwrap());
+    let initial = crate::providers::chatgpt::merge_codex_quota_headers(
+        &QuotaSnapshot::default(),
+        &headers,
+        1_000,
+    )
+    .unwrap();
+    let runtime = quota_runtime(initial.clone());
+    headers.insert("x-codex-primary-used-percent", "100".parse().unwrap());
+    assert!(runtime.observe_codex_quota_headers(
+        "account-1",
+        None,
+        reqwest::StatusCode::OK,
+        &headers,
+        3_000,
+    ));
+    headers.clear();
+    headers.insert("x-codex-secondary-used-percent", "40".parse().unwrap());
+    let persisted_refresh =
+        crate::providers::chatgpt::merge_codex_quota_headers(&initial, &headers, 4_000).unwrap();
+    runtime.sync_account_quota_snapshot("account-1", &persisted_refresh, 4_000);
+    assert_eq!(
+        runtime
+            .lock_scheduler()
+            .candidate("account-1")
+            .unwrap()
+            .quota,
+        CandidateQuota::Exhausted
+    );
+    let merged = runtime
+        .take_passive_quota_snapshot("account-1", 4_000)
+        .expect("unsaved exhaustion must keep its immediate persistence hint");
+    assert_eq!(
+        merged.primary.as_ref().unwrap().available_basis_points,
+        Some(0)
+    );
+    assert_eq!(merged.primary.as_ref().unwrap().observed_at_ms, 3_000);
+    assert_eq!(
+        merged.secondary.as_ref().unwrap().available_basis_points,
+        Some(6_000)
+    );
+    assert_eq!(merged.updated_at_ms, Some(4_000));
+    assert!(
+        runtime
+            .take_passive_quota_snapshot("account-1", 4_001)
+            .is_none()
+    );
+}
+
+#[test]
+fn same_clock_refresh_cannot_replace_dirty_passive_quota() {
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("x-codex-primary-used-percent", "100".parse().unwrap());
+    assert!(runtime.observe_codex_quota_headers(
+        "account-1",
+        None,
+        reqwest::StatusCode::OK,
+        &headers,
+        3_000,
+    ));
+    headers.insert("x-codex-primary-used-percent", "10".parse().unwrap());
+    let conflicting = crate::providers::chatgpt::merge_codex_quota_headers(
+        &QuotaSnapshot::default(),
+        &headers,
+        3_000,
+    )
+    .unwrap();
+    runtime.sync_account_quota_snapshot("account-1", &conflicting, 3_001);
+    let merged = runtime
+        .take_passive_quota_snapshot("account-1", 3_001)
+        .unwrap();
+    assert!(merged.limit_reached);
+    assert_eq!(
+        merged.primary.as_ref().unwrap().available_basis_points,
+        Some(0)
+    );
+    assert_eq!(merged.updated_at_ms, Some(3_000));
+}
+
+#[test]
 fn quota_429_does_not_turn_a_slot_into_permanent_exhaustion() {
     let runtime = quota_runtime(QuotaSnapshot::default());
-    runtime.apply_usage_event(
+    let _ = runtime.apply_usage_event(
         &UsageEvent {
             request_id: "request".into(),
             attempt: 1,
@@ -657,7 +749,7 @@ fn reported_quota_exhaustion_zeroes_an_open_primary_window_without_inventing_a_l
         updated_at_ms: Some(observed_at_ms),
         ..QuotaSnapshot::default()
     });
-    runtime.apply_usage_event(
+    let persisted = runtime.apply_usage_event(
         &UsageEvent {
             request_id: "request".into(),
             attempt: 1,
@@ -700,9 +792,7 @@ fn reported_quota_exhaustion_zeroes_an_open_primary_window_without_inventing_a_l
         observed_at_ms,
     );
 
-    let persisted = runtime
-        .take_passive_quota_snapshot("account-1", observed_at_ms)
-        .expect("reported primary exhaustion should persist immediately");
+    let persisted = persisted.expect("reported primary exhaustion should persist immediately");
     assert_eq!(
         persisted.primary.as_ref().unwrap().available_basis_points,
         Some(0)

@@ -5,7 +5,9 @@ pub(crate) fn event_end(bytes: &[u8]) -> Option<usize> {
     event_end_from(bytes, 0)
 }
 
-fn event_end_from(bytes: &[u8], mut offset: usize) -> Option<usize> {
+/// Resume an incomplete event scan, revisiting the previous tail's last byte
+/// for split CRLF. The prefix before `offset` must have no complete event.
+pub(crate) fn event_end_from(bytes: &[u8], mut offset: usize) -> Option<usize> {
     while let Some((length, end)) = line_end(&bytes[offset..]) {
         let position = offset + length;
         offset += end;

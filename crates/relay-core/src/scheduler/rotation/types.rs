@@ -27,8 +27,12 @@ pub enum QuotaState {
 /// member based on provider-reported credits.
 pub(crate) const PROVIDER_CREDIT_SWITCH_MARGIN_MICRO_UNITS: u64 = 15_000_000;
 
-/// Five percentage points separate a material quota lead from normal jitter.
+/// Ordinary candidates remain in the same band below a five-point quota lead.
 pub(crate) const QUOTA_SWITCH_MARGIN_BASIS_POINTS: u64 = 500;
+/// A warm preferred member yields at ten points; other candidates keep the
+/// ordinary band. This does not relax freshness, load, health or admission.
+pub(crate) const CACHE_AFFINITY_QUOTA_SWITCH_MARGIN_BASIS_POINTS: u64 = 1_000;
+pub(crate) const CACHE_AFFINITY_EXTRA_REQUESTS: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RateState {
@@ -259,7 +263,8 @@ pub struct CircuitSnapshot {
     pub epoch: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CandidateBlockReason {
     AlreadyTried,
     NotAllowed,

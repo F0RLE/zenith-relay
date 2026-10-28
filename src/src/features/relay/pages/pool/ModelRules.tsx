@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { BrainCircuit, ChevronDown, ChevronRight, GripVertical } from "lucide-react";
+import { BrainCircuit, ChevronDown, ChevronRight, GripVertical, Info } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { DefaultServiceTier, ModelSummary } from "../../api/types";
@@ -13,6 +13,7 @@ import {
 import {
   clearPendingModelEnabled,
   completeModelDisplayOrder,
+  isImageGenerationModel,
   modelSignature,
   modelSpeedTiers,
   modelShowsContextControl,
@@ -29,6 +30,7 @@ import { PoolSpeedControl } from "./PoolSpeedControl";
 import { PoolContextControl, type ModelContextPolicy } from "./PoolContextControl";
 import { sameModelContextPolicy } from "./modelContextPolicy";
 import { usePointerDragListeners } from "../../hooks/usePointerDragListeners";
+import { ModelReasoningDiagnostics } from "./ModelReasoningDiagnostics";
 
 type ModelDragState = {
   kind: "group" | "model";
@@ -41,11 +43,12 @@ type ModelDragState = {
 export function ModelRulesView() {
   const { t } = useTranslation();
   const { runtime, perform } = useRelayState();
-  const [reasoningModel, setReasoningModel] = useState<ModelSummary | null>(null);
+  const [reasoningModelId, setReasoningModelId] = useState<string | null>(null);
   // Model Rules configures the complete pool inventory. Route health and
   // cooldowns are runtime state; they must not make a member's model vanish
   // from the policy editor while the relay can still recover or adapt it.
   const models = useMemo(() => runtime ? currentPoolModelSummaries(runtime) : [], [runtime]);
+  const reasoningModel = models.find((model) => model.id === reasoningModelId);
   const [orderedModels, setOrderedModels] = useState<ModelSummary[]>(models);
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const [pendingEnabled, setPendingEnabled] = useState<Record<string, boolean>>({});
@@ -312,11 +315,12 @@ export function ModelRulesView() {
                       saving={pendingContext[model.id] !== undefined && !sameModelContextPolicy(pendingContext[model.id], model.contextPolicy ?? { mode: "short" })}
                       onChange={(nextPolicy) => setModelContext(model, nextPolicy)}
                     /></div> : null}
-                    {hasReasoningModes ? <IconButton
-                      data-model-reasoning-edit={model.id}
-                      label={t(canEditReasoning ? "models.editReasoning" : "models.viewReasoning", { model: model.id })}
-                      icon={<BrainCircuit aria-hidden />}
-                      onClick={() => setReasoningModel(model)}
+                    {!isImageGenerationModel(model) ? <IconButton
+                      data-model-reasoning-edit={hasReasoningModes ? model.id : undefined}
+                      data-model-reasoning-diagnostics={model.id}
+                      label={t(hasReasoningModes ? (canEditReasoning ? "models.editReasoning" : "models.viewReasoning") : "models.reasoningDiagnostics.open", { model: model.id })}
+                      icon={hasReasoningModes ? <BrainCircuit aria-hidden /> : <Info aria-hidden />}
+                      onClick={() => setReasoningModelId(model.id)}
                     /> : null}
                     <ToggleSwitch
                       data-model-toggle={model.id}
@@ -333,7 +337,7 @@ export function ModelRulesView() {
         </table>
       </div>
     </section>
-    {reasoningModel ? <ModelReasoningDialog key={reasoningModel.id} model={reasoningModel} onClose={() => setReasoningModel(null)} /> : null}
+    {reasoningModel ? <ModelReasoningDialog key={reasoningModel.id} model={reasoningModel} onClose={() => setReasoningModelId(null)} /> : null}
   </>;
 }
 
@@ -474,6 +478,12 @@ function ModelReasoningDialog({ model, onClose }: { model: ModelSummary; onClose
     allowedLevelsRef.current = updatedLevels;
     setAllowedLevels(updatedLevels);
   };
+  const snapshotSelection = JSON.stringify([supportedLevels, model.reasoningAllowedLevels, model.reasoningLevels]);
+  useEffect(() => {
+    // Follow metadata refreshes without replacing an in-flight optimistic edit.
+    if (mutationLock.current || queuedLevels.current) return;
+    updateAllowedLevels(normalizeToSupported(initialReasoningLevels(model.reasoningAllowedLevels, model.reasoningLevels ?? [])));
+  }, [snapshotSelection]);
   const runSerialized = async (operationId: string, work: () => Promise<unknown>, successKey?: string) => {
     if (mutationLock.current) return false;
     mutationLock.current = true;
@@ -512,7 +522,7 @@ function ModelReasoningDialog({ model, onClose }: { model: ModelSummary; onClose
   return <Dialog className="model-reasoning-dialog" title={t("models.reasoningTitle")} onClose={onClose}>
     <div className="model-reasoning-form">
       <code className="model-reasoning-model" data-relay-tooltip={model.id}>{model.id}</code>
-      <div className="model-reasoning-options" role="group" aria-label={t("models.reasoningTitle")}>
+      {supportedLevels.length > 0 ? <div className="model-reasoning-options" role="group" aria-label={t("models.reasoningTitle")}>
         {supportedLevels.map((level) => <button
           key={level}
           type="button"
@@ -522,7 +532,8 @@ function ModelReasoningDialog({ model, onClose }: { model: ModelSummary; onClose
           disabled={!editable}
           onClick={() => toggleAllowedLevel(level)}
         ><span>{label(level)}</span></button>)}
-      </div>
+      </div> : null}
+      <ModelReasoningDiagnostics model={model} />
     </div>
   </Dialog>;
 }

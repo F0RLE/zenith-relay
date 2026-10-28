@@ -268,6 +268,7 @@ async fn spawn_mixed_responses_gateway(
                         checked_at_ms: 1,
                         features: Default::default(),
                         reasoning_efforts: Vec::new(),
+                        token_limits: Default::default(),
                         service_tiers: None,
                     },
                     ModelEndpointCapability {
@@ -278,6 +279,7 @@ async fn spawn_mixed_responses_gateway(
                         checked_at_ms: 1,
                         features: Default::default(),
                         reasoning_efforts: Vec::new(),
+                        token_limits: Default::default(),
                         service_tiers: None,
                     },
                 ],
