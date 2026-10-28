@@ -283,6 +283,40 @@ describe("agent guardrails", () => {
         expect(clean.status, clean.stderr).toBe(0);
         expect(index()).toBe(previousIndex);
       }
+      const nonCode = [
+        '// panic!("comment"); todo!(); unimplemented!(); dbg!(); println!(); mem::forget(());',
+        '/* nested /* panic!("comment"); */ println!("comment"); */',
+        'const NOTICE: &str = "panic!(); todo!(); unimplemented!(); dbg!(); print!(); eprint!(); println!(); eprintln!(); mem::forget(());";',
+        String.raw`const ESCAPED: &str = "escaped \" panic!(message)";`,
+        'const MULTILINE: &str = "message',
+        'panic!(message); todo!(); mem::forget(());',
+        '";',
+        'const RAW: &str = r##"raw message',
+        'panic!("message"); "# is not the closing delimiter',
+        'unimplemented!(); eprintln!("message");',
+        '"##;',
+        'const BYTES: &[u8] = br#"panic!(); println!();"#;',
+      ].join("\n") + "\n";
+      writeFileSync(untracked, nonCode);
+      const acceptedText = run(root);
+      expect(acceptedText.status, acceptedText.stderr).toBe(0);
+      expect(index()).toBe(previousIndex);
+      for (const [code, rule] of [
+        ['fn failed() { let fixture = Some(1).unwrap(); panic!("real"); }', "panic"],
+        ['fn failed() { let value = Some(1).expect("fixture"); panic!("real"); }', "panic"],
+        [String.raw`fn failed() { let quote = '"'; panic!("real"); }`, "panic"],
+        ['fn failed() { let text = r#"panic!(text)"#; /* comment */ panic!("real"); }', "panic"],
+        ['fn failed() { let fixture = Some(1).unwrap(); todo!(); }', "todo/unimplemented"],
+        ['fn failed() { let fixture = Some(1).unwrap(); dbg!(1); }', "debug/print"],
+        ['fn failed() { let fixture = Some(1).unwrap(); mem::forget(()); }', "mem::forget"],
+      ]) {
+        writeFileSync(untracked, nonCode + code + "\n");
+        const rejected = run(root);
+        expect(rejected.status, rejected.stderr).toBe(1);
+        expect(rejected.stderr).toContain(`[${rule}] crates/new module.rs`);
+        expect(index()).toBe(previousIndex);
+      }
+      writeFileSync(untracked, "fn safe() {}\n");
       writeFileSync(source, patch + 'fn failed() { panic!("synthetic"); }\n');
       expect(spawnSync("git", ["add", "crates"], { cwd: root, env, windowsHide: true }).status).toBe(0);
       for (const cwd of directories) {
@@ -291,6 +325,40 @@ describe("agent guardrails", () => {
         expect(rejected.stderr).toContain("[panic] crates/source.rs");
         expect(rejected.stderr).not.toContain("ENOBUFS");
       }
+      const existing = [
+        'fn existing() { panic!("unchanged baseline"); }',
+        "/* unchanged opening comment",
+        "padding\n".repeat(8),
+        "comment placeholder",
+        "*/",
+        'const RAW: &str = r##"unchanged opening raw string',
+        "padding\n".repeat(8),
+        "raw placeholder",
+        '"##;',
+      ].join("\n") + "\n";
+      writeFileSync(source, existing);
+      for (const args of [["add", "crates"], ["commit", "--quiet", "-m", "synthetic lexical context"]]) {
+        const result = spawnSync("git", args, { cwd: root, env, encoding: "utf8", windowsHide: true });
+        expect(result.status, result.stderr).toBe(0);
+      }
+      const baselineIndex = index();
+      const changed = existing
+        .replace("comment placeholder", 'panic!("comment text");')
+        .replace("raw placeholder", 'panic!("raw string text");');
+      writeFileSync(source, changed);
+      const acceptedContext = run(root);
+      expect(acceptedContext.status, acceptedContext.stderr).toBe(0);
+      expect(index()).toBe(baselineIndex);
+      expect(spawnSync("git", ["add", "crates"], { cwd: root, env, windowsHide: true }).status).toBe(0);
+      const stagedContextIndex = index();
+      const acceptedStagedContext = run(root);
+      expect(acceptedStagedContext.status, acceptedStagedContext.stderr).toBe(0);
+      expect(index()).toBe(stagedContextIndex);
+      writeFileSync(source, changed + 'fn failed() { panic!("new code"); }\n');
+      const rejectedContext = run(root);
+      expect(rejectedContext.status, rejectedContext.stderr).toBe(1);
+      expect(rejectedContext.stderr).toContain("[panic] crates/source.rs");
+      expect(index()).toBe(stagedContextIndex);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

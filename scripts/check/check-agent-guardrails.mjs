@@ -35,30 +35,98 @@ function hasCommit(ref) {
 
 const requestedBase = process.argv.slice(2).find((arg) => arg && !arg.startsWith("-"));
 const diffs = [];
+// Lex unchanged context too: an added line may be inside an existing Rust
+// comment or string. Only added lines are checked against the guard rules.
+const fullContext = "--unified=2147483647";
 
 if (requestedBase) {
   if (!hasCommit(requestedBase)) {
     throw new Error(`Guardrail check requires a valid base ref, got '${requestedBase}'.`);
   }
-  diffs.push(["diff", "--unified=0", `${requestedBase}...HEAD`, "--", ...paths]);
+  diffs.push(["diff", fullContext, `${requestedBase}...HEAD`, "--", ...paths]);
 } else if (process.env.GITHUB_BASE_REF) {
   git(["fetch", "--no-tags", "--quiet", "origin", process.env.GITHUB_BASE_REF]);
-  diffs.push(["diff", "--unified=0", `origin/${process.env.GITHUB_BASE_REF}...HEAD`, "--", ...paths]);
+  diffs.push(["diff", fullContext, `origin/${process.env.GITHUB_BASE_REF}...HEAD`, "--", ...paths]);
 } else if (hasCommit("HEAD^")) {
-  diffs.push(["diff", "--unified=0", "HEAD^", "HEAD", "--", ...paths]);
+  diffs.push(["diff", fullContext, "HEAD^", "HEAD", "--", ...paths]);
 }
 
-diffs.push(["diff", "--unified=0", "--", ...paths]);
-diffs.push(["diff", "--cached", "--unified=0", "--", ...paths]);
+diffs.push(["diff", fullContext, "--", ...paths]);
+diffs.push(["diff", "--cached", fullContext, "--", ...paths]);
 
 const violations = [];
 
-function checkAddedLine(path, line) {
-  if (testPath.test(path) || (line.includes("fixture") && /\.(unwrap|expect)\s*\(/i.test(line))) {
+function rustCodeLines() {
+  let blockDepth = 0;
+  let quoted = false;
+  let rawEnd = "";
+  return (line) => {
+    let code = "";
+    for (let index = 0; index < line.length;) {
+      if (rawEnd) {
+        const end = line.indexOf(rawEnd, index);
+        if (end < 0) break;
+        code += " ";
+        index = end + rawEnd.length;
+        rawEnd = "";
+      } else if (blockDepth > 0) {
+        if (line.startsWith("/*", index)) {
+          blockDepth += 1;
+          index += 2;
+        } else if (line.startsWith("*/", index)) {
+          blockDepth -= 1;
+          index += 2;
+        } else {
+          index += 1;
+        }
+        code += " ";
+      } else if (quoted) {
+        if (line[index] === "\\") index += 2;
+        else {
+          if (line[index] === '"') quoted = false;
+          index += 1;
+        }
+        code += " ";
+      } else if (line.startsWith("//", index)) {
+        break;
+      } else if (line.startsWith("/*", index)) {
+        blockDepth = 1;
+        index += 2;
+        code += " ";
+      } else {
+        const raw = /[rbc]/.test(line[index])
+          ? /^(?:b|c)?r(#{0,255})"/.exec(line.slice(index))
+          : null;
+        const character = line[index] === "'"
+          ? /^'(?:\\(?:u\{[\da-fA-F_]+\}|x[\da-fA-F]{2}|[^\r\n])|[^'\\\r\n])'/u.exec(line.slice(index))
+          : null;
+        if (raw) {
+          rawEnd = `"${raw[1]}`;
+          index += raw[0].length;
+          code += " ";
+        } else if (character) {
+          index += character[0].length;
+          code += " ";
+        } else if (line[index] === '"') {
+          quoted = true;
+          index += 1;
+          code += " ";
+        } else {
+          code += line[index];
+          index += 1;
+        }
+      }
+    }
+    return code;
+  };
+}
+
+function checkAddedLine(path, line, code) {
+  if (testPath.test(path)) {
     return;
   }
   for (const rule of rules) {
-    if (rule.pattern.test(line) && violations.length < 40) {
+    if (rule.pattern.test(code) && violations.length < 40) {
       violations.push(`[${rule.name}] ${path}: ${line}`);
     }
   }
@@ -77,17 +145,24 @@ for (const args of diffs) {
   });
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
   let currentPath = "";
+  let codeLine = rustCodeLines();
+  let inHunk = false;
   try {
     lines.on("line", (line) => {
       const header = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
       if (header) {
         currentPath = header[2];
+        codeLine = rustCodeLines();
+        inHunk = false;
         return;
       }
-      if (!line.startsWith("+") || line.startsWith("+++")) {
+      if (line.startsWith("@@ ")) {
+        inHunk = true;
         return;
       }
-      checkAddedLine(currentPath, line);
+      if (!inHunk || (line[0] !== "+" && line[0] !== " ")) return;
+      const code = codeLine(line.slice(1));
+      if (line[0] === "+") checkAddedLine(currentPath, line, code);
     });
     const result = await finished;
     if (result.error || result.code !== 0) {
@@ -109,8 +184,9 @@ for (const path of untracked.split("\0")) {
   }
   const text = readCheckedText(path);
   if (text === null) continue;
+  const codeLine = rustCodeLines();
   for (const line of text.split(/\r?\n/)) {
-    checkAddedLine(path, `+${line}`);
+    checkAddedLine(path, `+${line}`, codeLine(line));
   }
 }
 
