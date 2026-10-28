@@ -2,6 +2,8 @@ import { expect, test, type Locator } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
 
 async function expectEvenColumns(table: Locator) {
+  await expect(table).toBeVisible();
+  await expect(table.locator("tbody tr").first()).toBeVisible();
   const columns = await table.locator("thead th").evaluateAll((elements) => elements
     .map((element) => ({ id: element.getAttribute("data-column"), bounds: element.getBoundingClientRect() }))
     .filter(({ bounds }) => bounds.width > 0)
